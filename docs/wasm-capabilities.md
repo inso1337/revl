@@ -34,15 +34,20 @@ per element, exported through the module's `memory` so a host can read results.
 | `Unit` (void op) | no slot | yes (absent) |
 | `Float` | native `f64` value; in an 8-byte slot its IEEE-754 bit pattern (`i64.reinterpret_f64`) | yes, by value |
 | `Map[K, V]` | **stays out**: a persistent map needs a richer value model than the canonical ABI (see "Why Map stays out") | no |
+| `Float` | **no value representation** — only the template-interpolation subset (`$f64_to_str`) that renders integer-valued finites and **traps** on the exponent form / non-integers (docs/strings.md) | no |
+| `Map[K, V]` | **no representation** (a persistent map needs a richer value model) | no |
 | function types | **no representation** (wasm MVP: no closures/function references) — arrows called where they are bound still lower, inlined at the call site | no |
 
 The gate is `_check_type` in `backends/wasm/emit.py`: it accepts
 `Int`/`Int32`/`Float`/`Bool`/`Str`/`Bytes`/`List`/record/variant/`Opt`/`Result`
+`Int`/`Int32`/`Bool`/`Str`/`Bytes`/`List`/record/variant/`Opt`/`Result`
 (recursively, for payloads and elements) and refuses everything else by name:
 
 ```
 type 'Map[Str, Int]' is not lowerable — this tier supports
 Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values
+type 'Float' is not lowerable — this tier supports
+Int/Bool/Str/Bytes/List/record/variant/Opt/Result values
 ```
 
 A **`let`/`var` binding** of a `Float` is an f64 local, so
@@ -52,6 +57,7 @@ it back as the same f64, so a Float survives every position the value model
 has. Arithmetic and comparison are the native `f64.*` instructions
 (docs/arithmetic.md), `/` is true division over Ints too, and `%` is an exact
 `$f64_mod` (C fmod).
+(`Map[Str, Int]` gets the same message with the type named.)
 
 ### Limitation: rendering a non-integer Float traps at run time
 
@@ -77,6 +83,14 @@ A persistent map therefore needs a new value model (key equality, hashing and
 structural sharing), not just another slot encoding. Components that need one
 should use a hosted backend (or express the state through coeffects on this
 tier). `Map.new`/`Pool.open` host builtins stay refused with it.
+A **`let`/`var` binding** of a `Float` is refused with the same wording, by
+`_declare_local`. Every local on this tier is an `i32` except an `Int`, so
+`let x: Float = 0.5` used to set an `f64` into an `i32` local and produce a
+module that does not validate (`type mismatch: expected i32, found f64`) —
+a diagnostic from wasmtime at load, not from the emitter, and the only Float
+position that emitted anything at all rather than saying no. Interpolating a
+Float *expression* that is never bound (`` `${3.0}` ``, `` `${1.0 + 2.0}` ``)
+still lowers, within the `$f64_to_str` fence below.
 
 ## String and collection builtins
 
@@ -87,6 +101,8 @@ ABI model. The substrate's rule: **`length`, `push`, `concat`, `slice`,
 arithmetic/rendering builtins) lower; `repeat`, the `Map` operations,
 `List.indexOf` over a List of records/lists/Float and the four ASCII
 classifiers (`is_digit`, `is_alpha`, `is_alnum`, `is_space`) do not.**
+`List.indexOf` and the four ASCII classifiers (`is_digit`, `is_alpha`,
+`is_alnum`, `is_space`) do not.**
 
 | builtin | on | wasm? | notes / exact refusal |
 |---|---|---|---|
@@ -97,16 +113,19 @@ classifiers (`is_digit`, `is_alpha`, `is_alnum`, `is_space`) do not.**
 | `charAt(i)` | Str, Bytes | ✅ | Str: the whole scalar at a code-point index; Bytes: the single byte |
 | `charCodeAt(i)` | Str, Bytes | ✅ | Str decodes the UTF-8 scalar; Bytes reads the raw byte |
 | `to_str()` | Int, Float | ✅ | `$int_to_str` (renders `Int.MIN` correctly); Float uses `$f64_to_str`, the same renderer as `${…}` (integer-valued finites and NaN/Infinity; the exponent/non-integer fence in docs/strings.md applies) |
+| `to_str()` | Int | ✅ | `$int_to_str` (renders `Int.MIN` correctly) |
 | `to_int()` / `to_int32()` | Int32 / Int | ✅ | checked width conversions |
 | `div_trunc` / `div_floor` / `div_euclid` / `mod` | Int | ✅ | named integer ops, same result every tier |
 | `checked_div_trunc` / `_floor` / `_euclid` / `checked_mod` | Int | ✅ | total forms: zero divisor → `Err(...)`, no trap |
 | `indexOf(v)` | Str | ✅ | `$str_index_of`: byte substring scan, returns the **code-point index** of the match (or `-1`), matching py/ts |
 | `indexOf(v)` | List[Str], List[Int], List[Int32], List[Bool] | ✅ | `$list_index_of_str` (byte equality, `$str_eq`) / `$list_index_of_slot` (the slot's i64 pattern); the first matching index, or `-1`. Pulled in on demand like the other reader helpers |
 | `indexOf(v)` | List of any other element | ❌ | `indexOf is not lowerable on this tier yet for List — the element comparison has no representation here for 'List[...]' (only List[Str]/List[Int]/List[Int32]/List[Bool] have one); use a hosted backend` |
+| `indexOf(v)` | List | ❌ | `indexOf is not lowerable on this tier yet for List — the element comparison has no representation here; use a hosted backend` |
 | `split(sep)` | Str | ✅ | `$str_split` → `List[Str]`: JS-shape (trailing empties kept, `""` → per-code-point pieces) |
 | `join(sep)` | List[Str] | ✅ | `$str_join`: elements joined by `sep` over the bump heap; `[]` → `""` |
 | `repeat(n)` | Str | ❌ | `unsupported builtin method 'repeat'` |
 | `set` / `lookup` / `has` / `size` / `keys` / `remove` | Map | ❌ | `` `set` is not lowerable on this tier yet — the Map value type has no representation here; use a hosted backend`` |
+
 The harness's *reader* artifacts now cross to the substrate: the durable pipe
 **reader** and the agent's toolbox (`Str.split`), and the web router's
 `route_request` (`Str.indexOf`), lower to `$str_split`/`$str_index_of` over the
@@ -116,6 +135,8 @@ only on demand (like `$f64_to_str`), so a component that never splits/joins/
 searches keeps a byte-identical helper preamble. What still does **not** run on
 the substrate is `repeat`, the `Map` operations, `List.indexOf` over a List of
 records, lists or Floats (a List of Str/Int/Int32/Bool is fine) and the four
+the substrate is `repeat`, the `Map` operations, `List.indexOf` (the
+per-element comparison the harness's wire protocol never reaches) and the four
 ASCII classifiers `is_digit` / `is_alpha` / `is_alnum` / `is_space`
 (`unsupported builtin method 'is_digit'`); those are emitted as compile-time
 refusals, so a wasm target never silently degrades.
@@ -143,6 +164,11 @@ A service operation's declared param/return type crosses at the width of its
 type: a scalar (`Int` i64, `Bool` i32, `Float` f64) is a **value**, a compound
 type an **`i32` pointer**. Which memory that pointer names decides what is
 lowerable:
+type: a scalar is an `i64`/`i32` **value**, a compound type an **`i32` pointer
+into the calling module's memory** (the module exports `memory`, so a host —
+or the cordis-wasm runtime — can read the result). This is the *same* canonical
+ABI the value model uses, and it applies to v1/v2 components as much as v3:
+the boundary is `_boundary_wty`, and its gate is `_check_type`. In practice:
 
 - **A provider's export** (`provide:<key>.<op>`): **Int, Int32, Float, Bool,
   Str, Bytes, List, record, variant, Opt, Result** params and returns,
@@ -167,6 +193,10 @@ lowerable:
   one. Compound values stay allowed here.
 - **Map and function types**: refused everywhere with the named
   `_check_type` diagnostic above.
+- **Int, Bool, Str, Bytes, List, record, variant, Opt, Result** params and
+  returns: supported (compound ones by pointer).
+- **Float, Map, function types**: refused with the named `_check_type`
+  diagnostic above.
 - **Unit** (void op): no slot.
 - A value whose wasm width disagrees with the declared type (a `List` returned
   from an `Int`-declared op) is refused rather than silently re-typed:
@@ -180,15 +210,23 @@ lowerable:
 > composition's own modules, which issue #1601 narrowed back to scalars.
 > Carrying a compound value between instances needs the runtime to copy it
 > from one memory into the other, which cordis-wasm does not do.
+> **History / why the FR-11 premise is stale.** The original substrate README
+> said "non-Int component services" were refused ("the component tier carries
+> scalars only"). The v3 value-model wave (docs/strings.md) widened the
+> boundary: the linear-memory representation means a Str/List/record-returning
+> service now lowers on the component tier too. The remaining hard refusals on
+> this boundary are exactly `Float`/`Map`/function types.
 
 ### Instance accessors (`spawn` handles) and the config channel
 
 Cross-*instance* provision reads are narrower: a rich (pointer) value would
 cross as a pointer into memory the *spawner does not own*, so only scalars
 (Int, Bool, Float) cross the instance-accessor boundary:
+cross the instance-accessor boundary:
 
 ```
 s.k.op param 0 is Str — only scalar (Int/Bool/Float) values cross the
+s.k.op param 0 is Str — only scalar (Int/Bool) values cross the
 instance-accessor boundary on this tier; a Str/record/List would cross as a
 pointer into the instance's own memory (use a hosted backend)
 ```
@@ -210,6 +248,7 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 | host builtins (`Map.new()`, `Pool.open(...)`) | `` host builtin 'Map' is not available on the cordis-wasm tier — express state through coeffects instead `` |
 | method-time effects (`effect … undo …` in a method body) | the accumulator is fixed at activation (state machine) |
 | method-time compensation (`compensate` spelled at an `emit` site in a method body) | the accumulator is fixed at activation (state machine) — but an extern's DECLARED `compensate` DOES register, per call, into a runtime method accumulator (#1979/item 564), see below |
+| method-time compensation (`undo` after an `emit`) | same |
 | `await` outside `Job.run(name)` | `` `await` on this tier supports only `Job.run(name)` `` — the runtime's async host op (A1) |
 | `match`/variants | ✅ now supported (tagged-union cells); the old "no tagged unions in core Wasm" README row is stale |
 | non-scalar config *fields* | scalar-only, same reason as the boundary |
@@ -288,6 +327,11 @@ qualifications are specific to this tier and do not lift with this slice:
   method entries (the newer ones) replaying ahead of the activation chain, and
   a site-spelled method clause still refused because the tier cannot see how
   many times the site ran.
+- **Over ACTIVATION-REGISTERED entries only.** The accumulator is fixed at
+  activation (the state-machine row above: method-time effects and
+  method-time compensation are both still hard `EmitError`s). The contract's
+  "mixed-entry LIFO in both phases" therefore reads, on wasm, over the
+  entries a component's top-level body registers — never a provide-method's.
 - **Epoch/fuel is a wasmtime CAPABILITY the first-party driver wires, not a
   property of the compiled module.** The compiled WAT needs no special code
   for this — a Phase-2 `compensate` expression is an ordinary `call`, and
@@ -377,6 +421,9 @@ non-witnessed method effect, a method `let-effect`, a compensation SITE-SPELLED
 in a method body, and a provide method that is a UI transaction unit stay the
 hard `EmitError`s they were. Cross-tier design lives in the shared
 docs/design/243-witnessed-externs.md
+Only the witnessed position is lifted. A non-witnessed method effect, a method
+`let-effect`, and method-time compensation all stay the hard `EmitError`s they
+were. Cross-tier design lives in the shared docs/design/243-witnessed-externs.md
 (item 318) and docs/design/teardown-contract.md; this section is the wasm-tier
 realization, proven by `backends/wasm/test_provide_method_witnessed.py`.
 
@@ -470,6 +517,7 @@ What still **skips, per test, with a reason** (never a false pass):
 |---|---|
 | `load C with { … }` | a `config` block does not lower — no instantiation-config channel |
 | `call`/`assert` crossing a non-scalar boundary (`Str`/`List`/record/variant/`Opt`/`Result`) | those cross as linear-memory pointers the host cannot marshal at the coeffect seam; the lifecycle driver evaluates Int/Bool (Float, while scalar, is not marshalled by that interpreter yet) |
+| `call`/`assert` crossing a non-scalar boundary (`Str`/`List`/record/variant/`Opt`/`Result`/`Float`) | those cross as linear-memory pointers the host cannot marshal at the coeffect seam; only Int (i64) / Bool (i32) move across it |
 | an `advance` step | timers (`every`/`after`, item 57) are not yet lowerable (docs/time-coeffect.md) |
 | any component that does not lower (`Map`/`Pool`, method-time effects, …) | the whole mesh cannot boot, so its lifecycle tests skip with the emit reason |
 
@@ -486,10 +534,13 @@ A harness-shaped component that must also run on the substrate:
 1. **Most string work lowers** — `length`/`push`/`concat`/`slice`/`charAt`/
    `charCodeAt`, plus the reader trio `split`/`join`/`Str.indexOf`. Only
    `repeat` and `List.indexOf` over records/lists/Floats still need expressing with the others (or moving
+   `repeat` and `List.indexOf` still need expressing with the others (or moving
    into a `fn` that stays on hosted tiers).
 2. **Return Str/List/record/Opt/Result from services is fine** (linear-memory
    boundary), and `Float` is a native f64 value everywhere; avoid `Map` values
    anywhere, and avoid function-typed service params/returns.
+   boundary); avoid `Float` and `Map` values anywhere, and avoid function-typed
+   service params/returns.
 3. **No config** on components that must boot on wasm (pass values through the
    composition instead), no host builtins, no method-time effects.
 4. **Do not use `spawn` instance accessors with rich payloads** — scalars only.

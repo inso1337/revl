@@ -106,15 +106,20 @@ def load_variant_prompt(variant: str) -> str:
         return (BENCH / "prompts" / "raw-ts.md").read_text(encoding="utf-8")
     if variant == MCP_VARIANT:
         return (BENCH / "prompts" / "mcp.md").read_text(encoding="utf-8")
+        return (BENCH / "prompts" / "raw-ts.md").read_text()
     if variant == "v1":
         return (BENCH / "prompts" / "v1.md").read_text(encoding="utf-8")
+        return (BENCH / "prompts" / "v1.md").read_text()
     if variant == "v2":
         return (BENCH / "prompts" / "v2.md").read_text(encoding="utf-8")
+        return (BENCH / "prompts" / "v2.md").read_text()
     if variant == "v2host":
         return (
             (BENCH / "prompts" / "v2.md").read_text(encoding="utf-8")
+            (BENCH / "prompts" / "v2.md").read_text()
             + "\n\n"
             + (BENCH / "prompts" / "v2host.md").read_text(encoding="utf-8")
+            + (BENCH / "prompts" / "v2host.md").read_text()
         )
     raise SystemExit(f"unknown variant {variant!r}")
 
@@ -152,6 +157,7 @@ def compile_check(code: str, name: str):
     lazy import inside the compiler resolved to the new one, so
     `except RevlError` stopped catching the compiler's own refusals."""
     global _GRADED_BY
+    reported rather than crashing the run."""
     src = str(COMPILER_ROOT / "src")
     saved_path = list(sys.path)
     saved = {m: mod for m, mod in sys.modules.items() if _is_revl(m)}
@@ -159,6 +165,7 @@ def compile_check(code: str, name: str):
         sys.path.remove(src)
     sys.path.insert(0, src)
     for mod in saved:
+    for mod in [m for m in list(sys.modules) if m == "revl" or m.startswith("revl.")]:
         del sys.modules[mod]
     try:
         try:
@@ -179,7 +186,19 @@ def compile_check(code: str, name: str):
             del sys.modules[mod]
         sys.modules.update(saved)
         sys.path[:] = saved_path
+        from revl import RevlError, compile_source
+    except Exception as exc:  # compiler tree mid-edit
+        return False, f"[compiler import failed] {exc}"
+    try:
+        compile_source(code, name)
+        return True, None
+    except RevlError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        return False, f"[compiler crash] {type(exc).__name__}: {exc}"
 
+
+# --- runners ---------------------------------------------------------------
 
 def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
               timeout: int, inline_system: bool):
@@ -440,10 +459,12 @@ def run_one_probed(spec: dict, system: str, run_dir: Path, args,
                       args.raw_ts_cycles),
     }[variant]
     task = reminder.format(brief=spec["brief"], services=spec["services"])
+    task = RAW_TS_REMINDER.format(brief=spec["brief"], services=spec["services"])
     t0 = time.time()
     try:
         if args.runner == "mock":
             reply = mock(spec)
+            reply = run_mock_raw_ts(spec)
         elif args.runner == "local":
             reply = run_local(system, task, args.model, args.base_url,
                               args.timeout, args.max_tokens)
@@ -453,19 +474,26 @@ def run_one_probed(spec: dict, system: str, run_dir: Path, args,
     except Exception as exc:
         print(f"  !! {spec['id']}/{variant}: runner error: {exc}", file=sys.stderr)
         return {"spec": spec["id"], "variant": variant, "summary": True,
+        print(f"  !! {spec['id']}/{RAW_TS_VARIANT}: runner error: {exc}", file=sys.stderr)
+        return {"spec": spec["id"], "variant": RAW_TS_VARIANT, "summary": True,
                 "status": "error", "leaked": True, "leaked_categories": [],
                 "error": f"[runner error] {exc}", "duration_s": round(time.time() - t0, 2)}
     dur = round(time.time() - t0, 2)
     code = extract_code(reply["text"])
     adir = run_dir / spec["id"] / variant
+    adir = run_dir / spec["id"] / RAW_TS_VARIANT
     adir.mkdir(parents=True, exist_ok=True)
     (adir / "attempt-1.ts").write_text(code, encoding="utf-8")
     rec = probe(code, cycles, f"{run_dir.name}__{spec['id']}")
+    (adir / "attempt-1.ts").write_text(code)
+    rec = probe_source(code, cycles=args.raw_ts_cycles, name=f"{run_dir.name}__{spec['id']}")
     flag = {"clean": "clean", "leaked": "LEAK", "error": "error"}[rec["status"]]
     extra = (" — " + ", ".join(rec["leaked_categories"])) if rec["leaked_categories"] \
         else (f" — {rec['error']}" if rec.get("error") else "")
     print(f"  {spec['id']}/{variant}: {flag}{extra}")
     return {"spec": spec["id"], "variant": variant, "summary": True,
+    print(f"  {spec['id']}/{RAW_TS_VARIANT}: {flag}{extra}")
+    return {"spec": spec["id"], "variant": RAW_TS_VARIANT, "summary": True,
             "model": reply.get("model"), "duration_s": dur,
             "cost": reply.get("cost"), "cost_total": reply.get("cost") or 0.0,
             "tokens_in": reply.get("tokens_in"),
@@ -534,6 +562,8 @@ def main():
     ap.add_argument("--raw-ts-cycles", type=int, default=DEFAULT_CYCLES,
                     help="load/unload cycles for the probe-scored hosts, raw-ts "
                          f"and mcp (default {DEFAULT_CYCLES})")
+                    help="mount/unmount cycles for the raw-ts residue probe "
+                         f"(default {DEFAULT_CYCLES}); only used by the raw-ts variant")
     args = ap.parse_args()
 
     if args.runner == "local" and args.model is None:
@@ -546,6 +576,7 @@ def main():
             raise SystemExit(f"no src/revl under {COMPILER_ROOT}")
 
     all_specs = json.loads((BENCH / "specs.json").read_text(encoding="utf-8"))["specs"]
+    all_specs = json.loads((BENCH / "specs.json").read_text())["specs"]
     if args.specs == "all":
         specs = all_specs
     elif args.specs.isdigit():
@@ -600,12 +631,16 @@ def main():
             # compile-rate. The revl compile-rate path below is left untouched.
             if variant in PROBED_VARIANTS:
                 raw = run_one_probed(spec, system, run_dir, args, variant)
+            if variant == RAW_TS_VARIANT:
+                raw = run_one_raw_ts(spec, system, run_dir, args)
                 rows.append(raw)
                 if variant == RAW_TS_VARIANT:
                     raw_rows.append(raw)
                 results_path.write_text(
                     "\n".join(json.dumps(r) for r in rows) + "\n",
                     encoding="utf-8")
+                raw_rows.append(raw)
+                results_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
                 continue
 
             task = OUTPUT_REMINDER.format(brief=spec["brief"], services=spec["services"])
@@ -659,6 +694,7 @@ def main():
                 adir.mkdir(parents=True, exist_ok=True)
                 (adir / f"attempt-{attempt}.rvl").write_text(
                     code, encoding="utf-8")
+                (adir / f"attempt-{attempt}.rvl").write_text(code)
                 ok, error = compile_check(code, f"{spec['id']}.rvl")
                 rows.append({"spec": spec["id"], "variant": variant,
                              "model": model_seen, "attempt": attempt, "ok": ok,
@@ -699,6 +735,7 @@ def main():
             results_path.write_text(
                 "\n".join(json.dumps(r) for r in rows) + "\n",
                 encoding="utf-8")
+            results_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     write_summary(run_dir, rows, raw_rows, args)
     print(f"\nresults: {results_path}\nsummary: {run_dir / 'summary.md'}")
@@ -712,6 +749,8 @@ def scoring_compiler() -> str:
     if path is None:
         mod = sys.modules.get("revl")
         path = getattr(mod, "__file__", None) if mod else None
+    mod = sys.modules.get("revl")
+    path = getattr(mod, "__file__", None) if mod else None
     if not path:
         return "revl was never imported"
     parent = Path(path).parent
@@ -730,6 +769,7 @@ def scoring_compiler() -> str:
 def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
     finals = [r for r in rows if r.get("summary")
               and r["variant"] not in PROBED_VARIANTS]
+    finals = [r for r in rows if r.get("summary") and r["variant"] != RAW_TS_VARIANT]
     lines = ["# syntax-2.0 acceptance benchmark — run summary", "",
              f"runner: `{args.runner}`" + (f" · model: `{args.model}`" if args.model else ""),
              f"max iterations: {args.max_iters}",
@@ -741,6 +781,7 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
              f"scored by: `{scoring_compiler()}`", ""]
     revl_variants = [v for v in args.variants.split(",")
                      if v not in PROBED_VARIANTS]
+    revl_variants = [v for v in args.variants.split(",") if v != RAW_TS_VARIANT]
     if revl_variants:
         lines += ["## revl variants — compile-gated (residue refused at compile)", "",
                   "| variant | specs | first-pass compile | green ≤ max iters | "
@@ -748,6 +789,8 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
                   "mean tokens_in to green | "
                   "mean output tokens-to-green | cost |",
                   "|---|---|---|---|---:|---:|---:|---:|---:|"]
+                  "| variant | specs | first-pass compile | green ≤ max iters | mean iters-to-green | mean tokens-to-green | cost |",
+                  "|---|---|---|---|---|---|---|"]
     for variant in revl_variants:
         vs = [r for r in finals if r["variant"] == variant]
         if not vs:
@@ -801,6 +844,7 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
                 f"{turns if turns is not None else '—'} | "
                 f"{tokens_in if tokens_in is not None else '—'} | {per_turn} |"
             )
+                     f"| {len(green)}/{n} | {mean_iters} | {mean_toks} | ${cost:.2f} |")
     unsolved = [(r["spec"], r["variant"]) for r in finals if not r["green_at"]]
     if unsolved:
         lines += ["", "Unsolved: " + ", ".join(f"{s}/{v}" for s, v in unsolved)]
@@ -821,6 +865,7 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
 
     (run_dir / "summary.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8")
+    (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

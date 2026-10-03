@@ -8,6 +8,7 @@ the same roadmap item); that type is now implemented on all six tiers
 (docs/arithmetic.md, "Sized integers: `Int32`"), while this document remains
 the design for the unbuilt unbounded type, and it defers to its sibling on
 shared questions.
+the same roadmap item) and defers to it on shared questions.
 
 ## Motivation
 
@@ -65,6 +66,13 @@ in flight.
   chain: `Integer → Float` is explicit and lossy above 2^53 (an f64 cannot
   distinguish), and `Float → Integer` is explicit and checked (refusing
   non-integral values) rather than truncating silently.
+  widening is implicit, exactly as `Int32 → Int` is proposed in
+  docs/int32-proposal.md). Narrowing — `Integer → Int`, `Int → Int32` — is
+  explicit (`as Int`, refusing out-of-range values at runtime like any
+  other bound). `Float` sits outside the chain: `Integer → Float` is
+  explicit and lossy above 2^53 (an f64 cannot distinguish), and
+  `Float → Integer` is explicit and checked (refusing non-integral values)
+  rather than truncating silently.
 * `_NUMERIC` and `_BUILTIN_TYPE_NAMES` in `src/revl/typecheck.py` gain
   `"Integer"`. The single-uppercase generic heuristic is untouched.
 
@@ -94,6 +102,7 @@ boundaries*:
 ## IR: additive annotations, no version bump
 
 Same pattern as `operands` and the shipped `Int32` annotations:
+Same pattern as `operands` and the proposed `Int32` annotations:
 
 * literals, params, fields and returns carry their declared type as they
   already do (`ty`) — `"Integer"` is just a new spelling;
@@ -126,6 +135,9 @@ Notes the table compresses:
   so the common case pays no allocation. This mirrors the Int32
   implementation's release-mode checked helpers: the default path must not be
   the slow path.
+  so the common case pays no allocation. This mirrors what the Int32
+  proposal says about release-mode checked helpers: the default path must
+  not be the slow path.
 * **go/java**: stdlib-only (`math/big.Int`, `BigInteger`). No inline
   small-value trick exists in either standard library; every operation
   allocates. Acceptable — Go and Java programs reaching for unbounded

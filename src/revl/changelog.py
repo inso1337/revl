@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from .audit_diff import (
     audit_report, diff_backends, diff_capability_scopes, diff_cardinality,
     diff_inverses, diff_reach, diff_recovery, diff_registers)
+    diff_reach, diff_recovery, diff_registers)
 from .composition_diff import diff as composition_diff
 
 # --------------------------------------------------------------------------
@@ -260,46 +261,63 @@ def _classify_structural(delta: dict) -> list[ChangelogLine]:
 
     for prov in delta["providers"]["changed"]:
         key, where = _realm_key(prov), _realm_text(prov)
+        key = prov["key"]
         if prov["from_service"] != prov["to_service"]:
             lines.append(ChangelogLine(
                 fact=f"provider.changed:{key}", category="breaking", lede=False,
                 text=(f"provider of key {prov['key']}{where} changed from "
                       f"{prov['from']} to {prov['to']} (service "
                       f"{prov['from_service']} -> {prov['to_service']})")))
+                text=(f"provider of key {key} changed from {prov['from']} to "
+                      f"{prov['to']} (service {prov['from_service']} -> "
+                      f"{prov['to_service']})")))
         else:
             lines.append(ChangelogLine(
                 fact=f"provider.swapped:{key}", category="internal",
                 text=(f"provider of key {prov['key']}{where} swapped from "
                       f"{prov['from']} to {prov['to']} (same service "
                       f"{prov['to_service']})")))
+                text=(f"provider of key {key} swapped from {prov['from']} to "
+                      f"{prov['to']} (same service {prov['to_service']})")))
     for prov in delta["providers"]["added"]:
         svc = prov.get("service")
         via = f" by {svc}" if svc else ""
         lines.append(ChangelogLine(
             fact=f"provider.added:{_realm_key(prov)}", category="added",
             text=f"key {prov['key']}{_realm_text(prov)} is now provided{via}"))
+            fact=f"provider.added:{prov['key']}", category="added",
+            text=f"key {prov['key']} is now provided{via}"))
     for prov in delta["providers"]["removed"]:
         lines.append(ChangelogLine(
             fact=f"provider.removed:{_realm_key(prov)}", category="breaking",
             text=f"key {prov['key']}{_realm_text(prov)} is no longer provided"))
+            fact=f"provider.removed:{prov['key']}", category="breaking",
+            text=f"key {prov['key']} is no longer provided"))
 
     for edge in delta["requires"]["added"]:
         lines.append(ChangelogLine(
             fact=f"require.added:{edge['component']}:{_realm_key(edge)}",
+            fact=f"require.added:{edge['component']}:{edge['key']}",
             category="added",
             text=f"{edge['component']} now requires {edge['key']}{_realm_text(edge)}"))
+            text=f"{edge['component']} now requires {edge['key']}"))
     for edge in delta["requires"]["removed"]:
         lines.append(ChangelogLine(
             fact=f"require.removed:{edge['component']}:{_realm_key(edge)}",
+            fact=f"require.removed:{edge['component']}:{edge['key']}",
             category="internal",
             text=(f"{edge['component']} no longer requires "
                   f"{edge['key']}{_realm_text(edge)}")))
+            text=f"{edge['component']} no longer requires {edge['key']}"))
     for edge in delta["requires"]["broken"]:
         lines.append(ChangelogLine(
             fact=f"require.broken:{edge['component']}:{_realm_key(edge)}",
+            fact=f"require.broken:{edge['component']}:{edge['key']}",
             category="breaking",
             text=(f"{edge['component']} requires {edge['key']}{_realm_text(edge)} "
                   f"- no provider (broken dependency)")))
+            text=(f"{edge['component']} requires {edge['key']} - no provider "
+                  f"(broken dependency)")))
     return lines
 
 

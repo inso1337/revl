@@ -20,6 +20,10 @@ The second is `revl mcp proxy` (issue #1463), which **has landed** — it is in
 revl 2.0.0 (`src/revl/mcp/proxy.py`; PRs #1535 and #1557, issue closed
 2026-10-05), and this example uses it. Both routes are AGPL-3.0-only; see
 [Licensing](#licensing).
+`revl mcp serve` in the Workspace as the task's only MCP server, so every
+outside effect the agent causes goes through revl's gate and lands in revl's
+write-ahead log, and `revl recover` can say afterwards what is still out in the
+world.
 
 It needs no change to AX. It is written against **google/ax commit
 `9edb7b1b0ca55f71670da02674b5cd6adeb49b7e`** (`v0.3.1-7-g9edb7b1`, 2026-09-27).
@@ -32,6 +36,7 @@ small and separate from revl's core: nothing under `src/` knows about AX.
 | `Dockerfile` | the task image: AX's default runner image plus revl and its cordis-py runtime |
 | `validate.sh` | decodes and validates `ax.yaml` with AX's own Go code at the pinned commit |
 | `../../tests/test_examples_ax.py` | runs both routes exactly as the manifest launches them, and checks what `revl recover` reports |
+| `../../tests/test_examples_ax.py` | runs the gate exactly as the manifest launches it, and checks what `revl recover` reports |
 
 ## How it fits together
 
@@ -53,6 +58,7 @@ AX task sandbox (one Agent Substrate actor, gVisor)
    `mcp.servers` from `$AX_METADATA_URL/metadata/v1alpha1/ax/workspaces` and
    starts `revl-gate` (`revl mcp serve`) and/or `revl-proxy` (`revl mcp proxy`),
    both over stdio.
+   starts `revl-gate`, which is `revl mcp serve` over stdio.
 3. The agent sends revl source that composes the operator's `Tickets` service,
    loads it with `record: true`, and calls it. The call is an `emission` with no
    inverse, so it is an approval class (c) crossing: revl returns a ticket, and
@@ -127,6 +133,8 @@ Read from AX's source at the pinned commit:
 - **Classified calls.** Every operation's effect class comes from the compiler,
   not from the tool author's say-so. Under the approval gate an emission with
   no inverse needs an approval before it fires.
+  not from the tool author's say-so. Under `--approval-policy auto` an emission
+  with no inverse needs an approval before it fires.
 - **A durable record.** With `record: true` the session keeps a JSON Lines WAL,
   fsynced per record, under `REVL_WAL_DIR`, set to `/workspace/app/.revl/wal`.
   Each outside crossing is recorded with its target and arguments.
@@ -259,6 +267,12 @@ embedding revl passes its own `World` adapter to
 `revl.recovery.recover(path, world=...)`. For route one's bare emission there is
 nothing to execute: the verdict tells an operator exactly what to reconcile by
 hand.
+call your ticket system, and it does not change the WAL (the test checks both).
+Its "ran" and "re-attempted" lines describe that model. To have recovery
+execute reconstructible inverses against the real system, a host passes its own
+`World` adapter to `revl.recovery.recover(path, world=...)`. For a bare
+emission like the one here there is nothing to execute: the verdict tells an
+operator exactly what to reconcile by hand.
 
 ## What is not covered
 
@@ -279,6 +293,11 @@ hand.
   second operator identity, which means serving with `--http` and an operator
   profile that grants `approve` only to a human, and a channel for that human
   into the sandbox. This example does not set those up.
+- **The approval is advisory here.** With no `--operator-profile`, the calling
+  identity may answer its own class (c) tickets, and the server says so on
+  stderr at startup. Making it a gate needs an operator profile that grants
+  `approve` only to a human, and a channel for that human into the sandbox,
+  which this example does not set up.
 - **Crash revert.** When Substrate reverts a crashed actor to its last snapshot,
   the WAL goes back with it, and so the record of crossings after the snapshot
   is lost. A WAL that must survive this has to live outside the actor.
@@ -299,6 +318,15 @@ hand.
   its name suggests is gated as an emission but not analysed. Write a provider
   and use `revl mcp serve` when you want the compiler's verdict rather than a
   gate around an unknown.
+- **Undo.** The example's one outside effect has no inverse, so recovery can
+  only name it. A reversible effect would be declared with a checked inverse in
+  the operator's provider (see `docs/crash-recovery.md`); this example does not
+  demonstrate that.
+- **MCP servers you already run.** Putting revl in front of an existing MCP
+  server without writing `.rvl` is `revl mcp proxy` (issue #1463), which is not
+  released yet. `ax.yaml` has a commented slot for it. Today the route is
+  `revl mcp import` on that server's tool list, reviewed and passed as
+  `--provider`.
 
 ## Running it
 
@@ -307,6 +335,7 @@ been run in a cluster: neither is installed, `kubectl config current-context` is
 unset, and no working Docker daemon is reachable (`docker info` fails). The
 manifest was validated against AX's own schema code instead, and both MCP
 servers were driven locally, outside a cluster. A run needs:
+been run in a cluster. A run needs:
 
 1. A Kubernetes cluster with [Agent Substrate](https://github.com/agent-substrate/substrate)
    installed (its control API at `api.ate-system.svc.cluster.local:443`, and a
@@ -339,6 +368,8 @@ What can be checked without a cluster:
 ```bash
 sh examples/ax/validate.sh                # AX's schema, needs Go >= 1.21 and network
 python -m pytest tests/test_examples_ax.py   # revl's side
+sh examples/ax/validate.sh                      # AX's schema, needs Go and network
+python -m pytest tests/test_examples_ax.py      # revl's side; the last two need cordis-py
 ```
 
 `validate.sh` fetches AX at the pinned commit and runs its `ValidateTask` and
@@ -356,6 +387,7 @@ is the authority; in short:
 | part | license | what it covers here |
 |---|---|---|
 | the compiler, the MCP admission gate, the CLI (`src/revl/`) and the rest of the tooling | **AGPL-3.0-only** | `revl mcp serve`, `revl mcp proxy` and `revl recover`, which this example runs inside the task image. `src/revl/mcp/proxy.py` is under `src/revl/` |
+| the compiler, the MCP admission gate, the CLI (`src/revl/`) and the rest of the tooling | **AGPL-3.0-only** | `revl mcp serve` and `revl recover`, which this example runs inside the task image |
 | the stdlib, the runtime shims under `backends/` (except the emitters), `examples/` | **MIT** | this directory's files, and the runtime code a compiled revl program carries |
 | cordis-py | its own license | a separate project that revl does not relicense |
 
@@ -370,6 +402,13 @@ So, for an adopter:
   Corresponding Source of that version. An unmodified revl is already published;
   a modified one, including a modified gate or proxy, must be offered in source
   to the users who interact with it.
+- Running `revl mcp serve` in a cluster puts an AGPL-3.0-only program behind an
+  interface other parties use. Section 13 of the AGPL applies to it: "if you
+  modify the Program, your modified version must prominently offer all users
+  interacting with it remotely through a computer network" the Corresponding
+  Source of that version. An unmodified revl is already published; a modified
+  one, including a modified gate, must be offered in source to the users who
+  interact with it.
 - The image `Dockerfile` builds contains revl. Pushing it where others can pull
   it is conveying AGPL-3.0-only object code, with the source obligations that
   come with that.
@@ -402,3 +441,4 @@ This section describes the repository's licensing; it is not legal advice.
 | **partly assumed:** the `Dockerfile` builds | not built. The same install (a revl wheel, the cordis-py fork at its pin, `watchdog`) in a clean Python 3.12 venv passes `tests/test_examples_ax.py`; the base image and the git URLs were not exercised |
 | **assumed:** gVisor, snapshot and egress behaviour as Substrate documents it | read from Substrate's API, not run |
 | **assumed:** an agent's MCP client starts `revl-gate` and `revl-proxy` from `command` and `args` as normal stdio servers | how MCP clients generally treat a command server; AX ships no client. The proxy's stdio behaviour is the part exercised by `tests/test_examples_ax.py`; what is assumed is only that a client launches it this way |
+| **assumed:** an agent's MCP client starts `revl-gate` from `command` and `args` as a normal stdio server | how MCP clients generally treat a command server; AX ships no client |

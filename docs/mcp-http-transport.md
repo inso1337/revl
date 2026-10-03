@@ -93,6 +93,7 @@ mid-write can still parse, and one cut off just before a `may not` line would
 widen a grant, so an unsettled profile is never used. While the content is
 settling, every request is answered `503` with the same fixed text as a broken
 profile (below); the path and the reason stay in the server's log.
+settling, every request is answered `503` ("the operator profile is changing").
 The previous profile is not used in that window either: the edit in progress may
 be a revocation, and serving the old grants would delay it. So adding `operator
 bob revoked`, removing an operator, or narrowing a grant is refused, then applied,
@@ -111,6 +112,7 @@ is answered `503` with a fixed text, until the file is fixed. The caller is told
 no more than that. The path, the parser error and the rejected line (often a
 `key sha256:` credential line being edited) are written to the server's standard
 error log, so a caller without a credential learns nothing about the file.
+is answered `503` naming the problem, until the file is fixed.
 
 **E-Stop is never fenced by a profile edit.** While the profile is settling or
 broken, `revl_estop` is still accepted, from a caller authorized for it under the
@@ -152,6 +154,9 @@ Everything that already reads the session's operator therefore sees the caller:
   same call `revl_approve` needs `proposer` to say which (issue #3216).
   `revl_approve` is authorized against the approver's own grants. Give `approve` only to the
   human's operator and the agent cannot answer its own tickets. At start, the server warns about any operator that may both `call`
+  call, and `revl_approve` is authorized against the approver's own grants. Give
+  `approve` only to the human's operator and the agent cannot answer its own
+  tickets. At start, the server warns about any operator that may both `call`
   and `approve`;
 - **quorum votes** (item 471): each vote is the caller's own. A cast whose
   `asToken` names another operator is refused before dispatch, even with that

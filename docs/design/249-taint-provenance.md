@@ -263,10 +263,12 @@ For a value `v` with taint `t(v)`, a set of origin labels:
   along the call graph, via inferred per-callable signatures (below). The
   call in an `emit` step's `compensate` slot is checked like the forward
   call: same sinks, same crossing rules, same reach edges (issue #3180);
+  along the call graph, via inferred per-callable signatures (below);
 - **boundary returns**: an `Untrusted[T]`-declared return mints its origin
   (landed); Slice D adds derived minting. The qualifier is read wherever it
   sits in a container, so `Result[Untrusted[T], E]` and `Opt[Secret[T]]` mint
   as the bare spelling does, on the whole returned value (issue #3192);
+  (landed); Slice D adds derived minting;
 - **declassifiers** are the only edges where taint decreases (landed rule,
   hardened in C).
 

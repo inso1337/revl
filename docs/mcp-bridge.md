@@ -143,8 +143,10 @@ revl mcp import server-tools.json --service Tools --key tools --backend ts
 service Tools {
   // Search the corpus
   fn query(q: Str, limit: Opt[Int]) -> Untrusted[Str]
+  fn query(q: Str, limit: Opt[Int]) -> Str
   // imported without a verifiable read-only claim
   emission fn write(path: Str, body: Str) -> Untrusted[Str]
+  emission fn write(path: Str, body: Str) -> Str
 }
 ```
 
@@ -172,6 +174,7 @@ block it prints (recipe: [guide-ai-agents.md](guide-ai-agents.md#wiring-revl-mcp
 | `revl_audit` | what can this composition touch? |
 | `revl_tools` | project its provided services to MCP tools (§1) |
 | `revl_grammar` | the language surface, prompt-sized; with `prompt`, the complete grammar to pin into an authoring prompt; with `format`, a derived grammar for constrained decoding |
+| `revl_grammar` | the language surface, prompt-sized; with `format`, a derived grammar for constrained decoding |
 | `revl_resolve` | is there already a component to **import** for this need? ([below](#import-before-you-regenerate--revl_resolve)) |
 
 Rejections come back structured, so the agent reacts to a *code*, not prose:
@@ -261,6 +264,9 @@ own text of that file, which is the file on disk inside the sanctioned roots:
 
 Inline `source` and `modules` that stand in for no file are unchanged: all of
 it is the agent's.
+`.rvl` **files** inside a sanctioned root are not agent-authored — no MCP verb
+writes to disk — so they compile unprofiled, the way an embedder's own sources
+do.
 
 The realm half is the one that reads as decoration and is not. A realm is an
 authority ADDRESS: the item-246/251 approval policy scopes standing approvals
@@ -280,6 +286,8 @@ trusted`.
 |---|---|
 | `--author-trust untrusted` (default) | the agent may compose granted services; it may neither author nor reach host code, nor place a component into a named realm (it may write a `realm(?NAME)` placeholder the operator binds with `--bind-realm`) |
 | `--author-trust trusted` | the agent MAY author host code, and name its own realms. Every class-(c) ticket then carries `unreviewedHostCode` and says the declared capabilities are not a bound on what those bodies do. Load, restore, inline and server-side swap, edit/change, repair, rollback and undo tickets identify the candidate's authored bodies; call and act tickets identify the live generation's authored bodies. Operator provider bodies are excluded from compile-attributed tickets; a plan-artifact apply attributes the bodies it installs from the resulting IR, because the artifact carries no compile report. A ticket that would replace a running composition also carries `runningHostCode` (what runs now) and `newHostCode` (the candidate's bodies the running composition does not already run byte for byte). Every such entry names the extern, its classification, its backends and a sha256 `digests` map of the verbatim body per backend, so a replaced body reads as a changed entry. A host-module ref (`= @py ref <symbol> from "<path>"`) is listed like a body, with its pinned sha256 as the digest and its `path` and `symbol` under `refs`, so a ref whose pin moved reads as a changed entry too (issue #3347) |
+| `--author-trust untrusted` (default) | the agent may compose granted services; it may neither author nor reach host code, nor place a component into a named realm |
+| `--author-trust trusted` | the agent MAY author host code, and name its own realms. Every class-(c) ticket then carries `unreviewedHostCode` and says the declared capabilities are not a bound on what those bodies do. On a ticket raised by a load, swap or edit, `unreviewedHostCode` is the host code of the composition the yes admits. A ticket that would replace a running composition also carries `runningHostCode` (what runs now) and `newHostCode` (the candidate's bodies the running composition does not already run byte for byte) |
 | `--provider MODULE.rvl` | operator-written host code the untrusted agent may compose the SERVICES of — item 334's granted-providers map. Reaching its externs directly is still refused |
 | `--grant SERVICE` | turn on the item-329 reach allowlist. With no grants the allowlist is off: there is no honest default for which of a running system's services an agent may reach |
 | `--root DIR` | a directory the agent's path arguments may name. Defaults to the directory the server was started in |
@@ -643,6 +651,7 @@ gap. A revl-served tool is the only kind whose hint is *compiler-derived*:
   advertises — the hint is a proof that the body mutates *nothing*, so an
   operation declared `witnessed[C]` (a reversible write, docs/capabilities.md
   §3) reports `readOnlyHint: false` beside `destructiveHint: false`;
+  advertises;
 - a `destructiveHint: true` tool names, in its `x-revl.effects`, the exact
   emissions and capabilities the operation crosses — a declared inverse or
   `compensate` where one exists;

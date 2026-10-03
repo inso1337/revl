@@ -719,4 +719,7 @@ __all__ = [
     "WAL_RECORD_EFFECT", "CounterfactualError", "RecordedCrossing",
     "candidate_hash", "probe", "probe_row", "recorded_crossings", "render",
     "render_probe", "replay_under",
+    "BOUNDS", "REACH_VIOLATION_KINDS", "WAL_KIND_EMISSION", "WAL_RECORD_EFFECT",
+    "CounterfactualError", "RecordedCrossing", "recorded_crossings",
+    "render", "replay_under",
 ]

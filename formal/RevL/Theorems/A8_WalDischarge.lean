@@ -106,6 +106,9 @@ windows are named as open in `formal/STATUS.md`'s A8 row. Durability
 itself is also a floor rather than a theorem: `WAFrom` orders the fence
 append before the apply, and that `fsync` reaches the platter is a host
 obligation.
+into one step, so this model cannot express it. Durability itself is also
+a floor rather than a theorem: `WAFrom` orders the fence append before
+the apply, and that `fsync` reaches the platter is a host obligation.
 -/
 
 namespace RevL.A8

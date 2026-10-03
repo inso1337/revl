@@ -25,6 +25,7 @@ component TenantAApp requires kv: Kv {
   intercept kv with { quota: 5, paths: ["a", "b"] }
 
   effect kv.set("who", "alice") undo kv.unset("who")
+  effect kv.set("who", "alice") undo kv.set("who", "")
 }
 ```
 

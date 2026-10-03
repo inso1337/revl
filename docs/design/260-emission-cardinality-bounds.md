@@ -321,6 +321,7 @@ is NOT in scope and reports `unbounded` (clause (4)):
    no longer direct, and counting it as zero would drop the crossing.
 
 When (1)-(5) hold, the recursion is LINEAR (clause (4)), so the max iteration
+When (1)-(4) hold, the recursion is LINEAR (clause (4)), so the max iteration
 count is `ceil((N0 - c) / k)` (with a LITERAL `N0`), and the per-activation
 per-capability ceiling is:
 

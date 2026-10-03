@@ -79,6 +79,11 @@ WHAT IS STILL NOT IMPLEMENTED (the rest of the design note's prerequisites)
     not described. Rows still come from an enumeration the caller supplies (the
     erase report's crossings, an operator's inventory, or the program's own
     declared derivations), and `covered` is read off the declaration.
+  * The derivative RELATION is declared, not inferred. A policy says which
+    CLASSES of derivative it covers; nothing here proves that a particular
+    boundary crossing wrote a summary of a particular `Retained` value. Rows
+    come from the caller's enumeration (the erase report's crossings, or an
+    operator's inventory), and `covered` is read off the declaration.
   * The residence is CHECKED against the replica rows a caller supplies, not
     against a placement fact the compiler derives. A replica whose residence
     differs from the declared one is reported as `residence-mismatch`; nothing
@@ -149,8 +154,10 @@ def policy_of_origin(origin) -> Optional[str]:
     A declared-derivation origin reads its policy up to `DERIVATION_MARK`, so
     every caller that only cares WHICH policy a value is held under is
     indifferent to how the value was made."""
+    """The policy name behind a retention origin, or None for any other origin."""
     if isinstance(origin, str) and origin.startswith(ORIGIN_PREFIX):
         return origin[len(ORIGIN_PREFIX):].split(DERIVATION_MARK, 1)[0]
+        return origin[len(ORIGIN_PREFIX):]
     return None
 
 
@@ -170,6 +177,8 @@ def derivation_of_origin(origin):
     if not kind or not callee or not source:
         return None
     return kind, callee, source
+def is_retention_origin(origin) -> bool:
+    return policy_of_origin(origin) is not None
 
 
 # ----------------------------------------------------------- persistence sinks
@@ -210,8 +219,10 @@ def persistence_sink_of(capabilities) -> Optional[str]:
     crossing's cone under the same scope, they do not change the scope. So
     `db(calls=3)` still declares the `db` sink, and the retention guarantee
     cannot be switched off by spelling one more parameter (#3194)."""
+    head, because a crossing declares one resource scope."""
     for cap in capabilities or ():
         head = str(cap).split("(", 1)[0].split(".", 1)[0]
+        head = str(cap).split(".", 1)[0]
         if head in PERSISTENCE_SINK_SCOPES:
             return head
     return None
@@ -1010,6 +1021,7 @@ def declared_policies(paths, *, sources=None) -> dict:
     out: dict = {}
     where: dict = {}
     queue = [_load_root(loader, path) for path in paths]
+    queue = [_load_root(loader, str(path)) for path in paths]
     seen: set = set()
     while queue:
         module = queue.pop(0)

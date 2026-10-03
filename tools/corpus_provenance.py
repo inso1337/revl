@@ -234,6 +234,7 @@ def _documents(dirs, skip) -> list[str]:
             if skip & set(path.parts):
                 continue
             out.append(path.relative_to(ROOT).as_posix())
+            out.append(str(path.relative_to(ROOT)))
     return out
 
 

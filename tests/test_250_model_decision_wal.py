@@ -368,11 +368,13 @@ def test_compare_lists_each_sides_decisions_and_still_says_what_it_cannot(tmp_pa
     # the honest half is unchanged in shape and now precise in wording; since
     # envelope 3.0 a per-entry replay plan names which entries had opaque
     # reasoning spans and how many, and still never what they contained
+    # the honest half is unchanged in shape and now precise in wording
     assert [e["axis"] for e in doc["notComparable"]] == \
         ["decisionCause", "counterfactual"]
     assert "opaque" in doc["notComparable"][0]["why"]
     assert "per-entry replay plan" in doc["notComparable"][0]["why"]
     assert "never what the span contained" in doc["notComparable"][0]["why"]
+    assert "no prompt/response digest" in doc["notComparable"][0]["why"]
     text = branch_mod.render(doc)
     assert "1 model decision(s)" in text
     assert "model openai:gpt-4o-2024-08-06" in text

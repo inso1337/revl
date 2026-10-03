@@ -215,6 +215,9 @@ human's identity holds `approve`
 ([operator-capabilities.md](operator-capabilities.md)). `revl mcp serve` closes
 this hole differently since issue #1706: it refuses an approval from the
 identity that raised the ticket.
+proxy prints the same startup warning `revl mcp serve --approval-policy auto`
+prints. Bind a profile in which only the human's identity holds `approve`
+([operator-capabilities.md](operator-capabilities.md)).
 
 ## Read-only honesty
 
@@ -313,6 +316,7 @@ The client gets no verb that loads, swaps or edits code.
 forwarded to the upstream unchanged, except that a pinned proxy whose held
 attestation no longer verifies (an expired record) refuses them exactly as it
 refuses `tools/list` and `tools/call`. Upstream notifications are relayed to the
+forwarded to the upstream unchanged. Upstream notifications are relayed to the
 client, except `notifications/tools/list_changed`, which the proxy acts on: it
 lists the tools again, reclassifies them, and sends its own
 `notifications/tools/list_changed`. Over HTTP, which caller receives each

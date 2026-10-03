@@ -28,6 +28,7 @@ Checked here:
   * byte-compat: `json_try_parse(valid).value` equals `json_parse(valid)`;
   * the emitter IMPORTS `Ok`/`Err` (issue #1932: the shared runtime owns the
     built-in Result cases) for a program that only CALLS a
+  * the emitter defines `Ok`/`Err` for a program that only CALLS a
     Result-returning extern, with no surface `match`/`adt` naming them;
   * `parse_engine_output` — the harness's per-engine final-answer extraction
     (revl-harness src/components/engine_run.rvl) — rewritten as a PURE revl fn
@@ -250,8 +251,10 @@ def test_ts_ok_err_channels_match_py(pair_ir):
 
 
 # --------------------------------------- the Ok/Err import (issue #1932)
+# ------------------------------------------------- the Ok/Err emit gate
 
 def test_result_returning_extern_imports_ok_err_cases():
+def test_result_returning_extern_emits_ok_err_classes():
     """A program that only CALLS a Result-returning extern — with no surface
     `match` or `adt` naming Ok/Err — still has the built-in Result cases in
     scope, so the extern body's `Ok(..)`/`Err(..)` resolve. Regression for the
@@ -260,6 +263,9 @@ def test_result_returning_extern_imports_ok_err_cases():
     Since issue #1932 the names are IMPORTED from the shared runtime instead of
     being re-declared per module, so one class object serves every emitted
     module and a `Result` can cross a module boundary."""
+    `match` or `adt` naming Ok/Err — still gets the built-in Result classes
+    emitted, so the extern body's `Ok(..)`/`Err(..)` resolve. Regression for the
+    `_uses_builtin_result` gate extension (item 362)."""
     ir = _compile(
         'use "stdlib/json.rvl" { json_try_parse }\n'
         "fn passthrough(s: Str) -> Result[Any, Str] { return json_try_parse(s) }\n")
@@ -270,6 +276,8 @@ def test_result_returning_extern_imports_ok_err_cases():
     assert {"Ok", "Err"} <= names, imports[0]
     assert "class Ok:" not in py
     assert "class Err:" not in py
+    assert "class Ok:" in py
+    assert "class Err:" in py
 
 
 # ----------------------------------------- the payoff: parse_engine_output

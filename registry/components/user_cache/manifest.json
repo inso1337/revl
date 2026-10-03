@@ -5,6 +5,7 @@
       "capabilities": {
         "db.execute": [
           "db"
+          "*"
         ]
       },
       "compensated": 0,

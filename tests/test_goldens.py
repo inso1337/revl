@@ -87,6 +87,7 @@ def test_wasm_functions_golden_from_v3_source():
     ir = compile_source(source.read_text(encoding="utf-8"))
     wat = emitter.emit(ir)["functions"]
     golden = (ROOT / "backends" / "wasm" / "golden" / "functions.wat").read_text(encoding="utf-8")
+    golden = (ROOT / "backends" / "wasm" / "golden" / "functions.wat").read_text()
     assert wat == golden, _STALE.format(f="backends/wasm/golden/functions.wat", t="wasm")
 
 

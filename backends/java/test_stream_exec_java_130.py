@@ -34,6 +34,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from revl import compile_files, compile_source  # noqa: E402
+from revl import compile_files  # noqa: E402
 
 import javac_gate  # noqa: E402
 
@@ -139,6 +140,7 @@ def test_merge_opens_inside_the_subscriptions_acquisition():
     # one bracket per subscribing component (Consumer, Parked, Fanin, Iterate,
     # Chain) and NO extra bracket for the derived merge or for any link of the
     # Slice 2 combinator chain: each is owned by the subscription.
+    # Slice 2 combinator chain — each is owned by the subscription.
     assert src.count("() -> sub.close()") == 5
     fanin = src[src.index("class FaninPlugin"):src.index("class IteratePlugin")]
     assert fanin.count("fx.track(") == 3, (
@@ -239,6 +241,7 @@ def test_java_stream_scenario_builds_and_runs(tmp_path):
         loop without entering it.
     """
     _run_scenario(tmp_path, _emit_java_with_replay(), HARNESS,
+    _run_scenario(tmp_path, _emit_java(FIXTURE), HARNESS,
                   "RunStream130", "STREAM_130_OK")
 
 

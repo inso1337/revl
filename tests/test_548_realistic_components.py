@@ -288,6 +288,7 @@ FIVE_TIERS = ["python", "typescript", "go", "java", "rust"]
 IN_MEMORY = [
     ("grader", GRADER, ALL_TIERS),
     ("stats", STATS, ALL_TIERS),         # wasm Float landed (#3295)
+    ("stats", STATS, FIVE_TIERS),        # wasm: no Float value
     ("csv", CSV, ALL_TIERS),             # wasm method-body `for` landed (item 458)
     ("lexer", LEXER, ALL_TIERS),    # go carries it since issue #1321
     ("money", MONEY, ALL_TIERS),    # go carries it since issue #1321
@@ -358,6 +359,7 @@ def test_normalizer_emits_on_all_tiers(tmp_path):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("name,source,reason", [
+    ("stats", STATS, "type 'Float' is not lowerable"),
     ("config", CONFIG, "scalar values have no methods"),
 ])
 def test_wasm_remainder_is_a_clear_refusal(name, source, reason):

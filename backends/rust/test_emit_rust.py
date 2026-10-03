@@ -30,6 +30,7 @@ _TAIL = ("If the change is intended: python3 tools/regen_goldens.py {t}, then re
 
 def _ir(name: str = "user_cache") -> dict:
     return json.loads((ROOT / "examples" / f"{name}.ir.json").read_text(encoding="utf-8"))
+    return json.loads((ROOT / "examples" / f"{name}.ir.json").read_text())
 
 
 def test_user_cache_emits_rust_structure():
@@ -223,6 +224,7 @@ def test_v2_realms_emit_isolate_and_intercept():
     src = emit.emit(ir)
     assert "fn _revl_realm" in src
     assert 'isolate_with("kv", _revl_realm("tenant_a", "kv"))' in src
+    assert 'isolate_with("kv", _revl_realm("tenant_a"))' in src
     assert 'require_with("kv", TenantAAppKvIntercept1' in src
     assert "ctx: Arc<cordis::Context>" in src
     assert "self.ctx.effect" in src
@@ -235,6 +237,9 @@ def test_realm_lowering_is_a_deterministic_collision_free_registry():
     registry tags each distinct `(realm, key)` pair into the reserved top-bit
     region of the u64 scope space, which the counter (starts at 1, +1 per
     isolate) cannot reach, and gives every distinct pair a distinct index."""
+    registry tags each distinct label into the reserved top-bit region of the
+    u64 scope space, which the counter (starts at 1, +1 per isolate) cannot
+    reach, and gives every distinct label a distinct index."""
     ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
     src = emit.emit(ir)
 
@@ -247,6 +252,9 @@ def test_realm_lowering_is_a_deterministic_collision_free_registry():
     # Each distinct (realm, key) pair => a distinct index in a compile-time match.
     assert '("tenant_a", "kv") => 0,' in src
     assert '("tenant_b", "kv") => 1,' in src
+    # Each distinct label => a distinct index in a compile-time match.
+    assert '"tenant_a" => 0,' in src
+    assert '"tenant_b" => 1,' in src
     assert "cordis::Isolation::from_raw(REVL_REALM_TAG | index)" in src
 
     # Byte-for-byte stable build-to-build: the same source lowers identically.
@@ -257,6 +265,9 @@ def test_realm_registry_maps_equal_labels_together_and_distinct_apart():
     """Determinism at the semantic level: equal `(realm, key)` pairs collapse to
     one index (same realm), distinct pairs get distinct indices (distinct
     realms), regardless of how many components mention each realm string."""
+    """Determinism at the semantic level: equal label strings collapse to one
+    index (same realm), distinct labels get distinct indices (distinct
+    realms), regardless of how many components mention each label."""
     ir = compile_source(
         """
         service Kv { fn get(k: Str) -> Opt[Str] }
@@ -284,6 +295,12 @@ def test_realm_registry_maps_equal_labels_together_and_distinct_apart():
     # Equal pairs share one call value; the distinct pair differs.
     assert src.count('_revl_realm("a", "kv")') == 2
     assert src.count('_revl_realm("b", "kv")') == 1
+    # for it, so both lower to the identical Isolation (same realm).
+    assert src.count('"a" => 0,') == 1
+    assert '"b" => 1,' in src
+    # Equal labels share one call value; the distinct label differs.
+    assert src.count('_revl_realm("a")') == 2
+    assert src.count('_revl_realm("b")') == 1
 
 
 def test_v3_types_functions_match_emit():
@@ -541,9 +558,12 @@ def test_reused_uninferred_string_clones_each_move_but_not_copies():
     # every by-value use of the reused `c` is cloned: the two `tag` calls and
     # the `if`-expression else-branch tail. Its last read, the record field in
     # the `return`, moves (issue #2905).
+    # every by-value use of the un-inferred `c` is cloned: the two `tag` calls,
+    # the `if`-expression else-branch tail, and the record field.
     assert body.count("tag(c.clone())") == 2, body
     assert 'else { c.clone() }' in body, body
     assert "return Tok { kind: kind, text: c };" in body, body
+    assert "text: c.clone()" in body, body
     # the Copy `Int` param reused across two moves is never cloned.
     assert "i.clone()" not in body, body
 
@@ -771,6 +791,7 @@ def test_router_emits_per_realm_routing_struct():
     assert "struct RevlRouterRouterWorker" in src
     assert "impl Worker for RevlRouterRouterWorker" in src
     assert 'isolate_with(self.key.as_str(), _revl_realm(realm.as_str(), self.key.as_str()))' in src
+    assert 'isolate_with(self.key.as_str(), _revl_realm(realm.as_str()))' in src
     assert 'get::<Box<dyn Worker>>(self.key.as_str())' in src
     # the routed key is bound as the router, not a single-realm require, and is
     # not in the Router's Inject gate (it has no single-realm provider)
@@ -2166,6 +2187,9 @@ component SessionLedger provides sessions: SessionStore {
       let prev = store.get(id)
       effect store.insert(id, (prev ?? []).push(msg))
       undo   match prev { Some(v) => store.insert(id, v), None => store.remove(id) }
+      let prev = store.get(id) ?? []
+      effect store.insert(id, prev.push(msg))
+      undo   store.insert(id, prev)
     }
   }
 }
@@ -2242,6 +2266,7 @@ def test_ledger_shape_carries_the_map_value_type():
     # pinned, so neither half can silently become a `remove`-only teardown.
     assert "Some(v) => store_undo.insert(id_undo, v)," in src
     assert "None => store_undo.remove(&id_undo)," in src
+    assert "store_undo.insert(id_undo, prev);" in src
     # the historical hardcoding is gone
     assert "HashMap<String, String>" not in src
 
@@ -2468,9 +2493,11 @@ def test_user_ctx_field_and_local_emit_consistently():
     ))
     assert "    ctx_: Ctx," in src                       # struct field decl
     assert "return Ck { ctx_: x, msg:" in src           # construction (moves, #2905)
+    assert "return Ck { ctx_: x.clone(), msg:" in src    # construction
     assert "return ck.ctx_;" in src                      # field access
     assert "let ctx_ = mk_ctx();" in src                 # local binding decl
     assert "return Ck { ctx_: ctx_, msg:" in src        # local used as field value
+    assert "Ck { ctx_: ctx_.clone()" in src              # local used as field value
     assert "pub struct Ctx {" in src                     # type name untouched
 
 

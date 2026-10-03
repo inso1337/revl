@@ -367,6 +367,7 @@ def test_provider_placement_boots_standalone(tmp_path, capfd):
     port = _free_port()
     conf = tomllib.loads(
         (ROOT / "examples" / "placement" / "gate_provider_network.toml").read_text(encoding="utf-8"))
+        (ROOT / "examples" / "placement" / "gate_provider_network.toml").read_text())
     conf["processes"]["gate"]["address"]["port"] = port
     tls = conf["processes"]["gate"]["tls"]
     tls["cert"] = minted["gate"]["cert"]

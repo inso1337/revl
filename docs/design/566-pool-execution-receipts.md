@@ -52,6 +52,7 @@ distinction that decides whether the evidence is worth anything.
 | | signed by | over | saying |
 |---|---|---|---|
 | execution receipt | the PEER | pool, peer, task, grant, policy digest, artifact digest, result digest, outcome, budget claim, issue time | "I ran this and produced that, under this authority" |
+| execution receipt | the PEER | pool, peer, task, artifact digest, result digest, issue time | "I ran this and produced that" |
 | attestation | an ATTESTING AUTHORITY named in the charter | the DIGEST of the receipt | "I checked that result and it is admissible" |
 
 The attestor signs the receipt's digest rather than a copy of its body. There
@@ -137,6 +138,7 @@ different claims.
 ## Non-vacuity
 
 Thirteen receipts, each of which WOULD have promoted a peer under the old gate,
+Twelve receipts, each of which WOULD have promoted a peer under the old gate,
 because the old gate never looked at a receipt. Each is refused here on a named
 link, and an honest control differing only in being well formed goes through
 the same function and is counted.
@@ -144,6 +146,8 @@ the same function and is counted.
 ```
 forged receipts in the corpus            13
 counted as evidence by the new check      0 / 13
+forged receipts in the corpus            12
+counted as evidence by the new check      0 / 12
 distinct refusal links exercised         >= 8
 honest control, counted                   1 / 1
 two honest receipts + one forgery         2, and the member stays put
@@ -160,6 +164,7 @@ not a receipt.
 ## Refusals are links, not guarantee codes
 
 Sixteen lowercase links, following `peer_pool` and `revl.deploy`. Nothing enters
+Twelve lowercase links, following `peer_pool` and `revl.deploy`. Nothing enters
 `revl.diagnostics.GUARANTEES`: a receipt refusal is a decision about a
 deployment, not a verdict about a program, and there is no program to write
 under `examples/rejections/` for "this receipt was already counted". An AST

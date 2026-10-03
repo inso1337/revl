@@ -89,6 +89,7 @@
 // One line: the self-host program grammar reads a `use` by its first line.
 use "./lower.rvl" { admit_src, admit_ambient, lower_to_ir, lower_to_ir_refs, parse_prog, parse_refusal }
 use "./lexer.rvl" { Token, lex_src }
+use "./lower.rvl" { admit_src, admit_ambient, lower_to_ir }
 use "./emit_py.rvl" { emit_py_src }
 use "./emit_rust.rvl" { emit_rust_src }
 use "./emit_ts.rvl" { emit_ts_src }
@@ -2699,6 +2700,7 @@ fn tc_carried_admission(source: Str, path: Str, verdict: Str,
 // `ul_link_externs`) rather than different source. Issue #2308: so are the
 // types an imported service carries (`ul_link_types`).
 pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
+pub fn compile_to(source: Str, tier: Str) -> Str {
   if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
   let verdict = admit_src(source)
   let unlexed = rl_lex_refusal(source)
@@ -2760,6 +2762,9 @@ pub fn compile_to(source: Str, tier: Str) -> Str {
   // No document path -> no module set to resolve against -> the pre-#2093
   // behavior, byte for byte.
   return compile_to_at(source, tier, "")
+  if (verdict != "") { return "REFUSED|".concat(verdict) }
+  // FULLY NATIVE from here: native IR producer → parse → native emitter.
+  return emit_ir(json_parse(lower_to_ir(source)), tier)
 }
 
 // ============================================================ manifest parameter
@@ -2821,6 +2826,7 @@ pub fn compile_to_into(source: Str, tier: Str, manifest: Str) -> Str {
   let dropped = dropped_shape_refusal(out, tier)
   if (dropped != "") { return "REFUSED|".concat(dropped) }
   return out
+  return emit_ir(json_parse(lower_to_ir(source)), tier)
 }
 
 // ============================================================ component wrap

@@ -147,6 +147,10 @@ class AdmissionProfile:
     # component NAMES, so the glob half is no discriminator at all; the realm is
     # the only one left, and a source that picks its own realm picks which of the
     # operator's standing approvals cover its class-(c) crossings.
+    # `isolate` map). An untrusted author writes its own component NAMES, so the
+    # glob half is no discriminator at all; the realm is the only one left, and a
+    # source that picks its own realm picks which of the operator's standing
+    # approvals cover its class-(c) crossings.
     #
     # Off (inert) on a bare `AdmissionProfile()`, so a trusted-author compile is
     # byte-identical; ON in `untrusted_author`, and therefore at EVERY door that
@@ -185,6 +189,7 @@ class AdmissionProfile:
     @staticmethod
     def untrusted_author(granted, realm_bindings=(),
                          requires=None) -> "AdmissionProfile":
+    def untrusted_author(granted) -> "AdmissionProfile":
         """THE profile for source whose AUTHOR is not trusted: no new host code,
         reach bounded to an explicit granted service set, no self-minted
         declassifier (item 249 Slice C), derived taint sinks/sources so the
@@ -206,9 +211,11 @@ class AdmissionProfile:
                                 realm_bindings=tuple(realm_bindings or ()),
                                 granted_requires=(None if requires is None
                                                   else frozenset(requires)))
+                                no_realm_placement=True)
 
     @staticmethod
     def self_extension(granted, realm_bindings=()) -> "AdmissionProfile":
+    def self_extension(granted) -> "AdmissionProfile":
         """The profile a SELF-EXTENDING proposal is admitted under (item 334,
         slice 2) — `Gate.propose`'s door, named for the reader who arrives from
         the proposal loop.
@@ -226,6 +233,7 @@ class AdmissionProfile:
         is all an exfiltration needs. Kept as a distinct name because `propose`'s
         refusal is load-bearing enough to be greppable."""
         return AdmissionProfile.untrusted_author(granted, realm_bindings)
+        return AdmissionProfile.untrusted_author(granted)
 
     @property
     def active(self) -> bool:
@@ -435,6 +443,9 @@ def check_no_realm_placement(root_programs: list[Program],
     crossing component's `isolate` map and `routes` realm sets
     (`approval.component_realm` -> `policy.component_realms` -> the component
     IR's `isolate` and `routes` fields). An
+    matches the realm half against `ticket["realm"]`, which is read straight off
+    the crossing component's `isolate` map (`approval.component_realm` ->
+    `policy.component_realms` -> the component IR's `isolate` field). An
     untrusted author chooses its own component NAMES, so the glob half
     discriminates nothing against it; the realm is the only half left. A source
     that writes `isolate <key> in realm("billing")` therefore selects which of
@@ -479,6 +490,7 @@ def check_no_realm_placement(root_programs: list[Program],
         spelling = (f'`isolate {stmt.key} in realms('
                     + ", ".join(r if r.startswith("?") else f'"{r}"' for r in named)
                     + ')`') if plural else \
+                    + ", ".join(f'"{r}"' for r in named) + ')`') if plural else \
                    f'`isolate {stmt.key} in realm("{stmt.realm}")`'
         raise RevlError(
             program.filename, stmt.line,
@@ -502,6 +514,7 @@ def check_no_realm_placement(root_programs: list[Program],
                  for r in (list(s.realms) if isinstance(s, RouteStmt)
                            else [s.realm])
                  if not r.startswith("?")]),
+                           else [s.realm])]),
         )
 
 
@@ -1160,6 +1173,7 @@ def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
         for key, service in requires.items():
             if service in granted and (granted_requires is None
                                        or (name, key) in granted_requires):
+            if service in granted:
                 continue
             if _own_binding(name, key, service):
                 continue
@@ -1187,6 +1201,8 @@ def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
                 f"admission refused: component `{name}` reaches "
                 f"service `{service}` {_reach_clause(document, service, key)}, "
                 f"which is not in the granted set",
+                f"service `{service}` (via `requires {key}`), which is not in the "
+                f"granted set",
                 hint=f"the untrusted-author profile grants [{allowed}] and "
                      f"nothing else; an admitted turn may only reach a granted "
                      f"service or one its OWN components provide under the very "

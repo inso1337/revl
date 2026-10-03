@@ -341,6 +341,9 @@ def _scanned_files(root: pathlib.Path) -> tuple[tuple[str, bytes], ...]:
     """`(path relative to root, bytes)` for every file `scan` parses, in the
     order it parses them."""
     files = []
+def scan(root: pathlib.Path = REPO_ROOT) -> list[Site]:
+    """Every vocabulary site under the scanned roots, in a stable order."""
+    found: list[Site] = []
     for base in SCAN_ROOTS:
         for path in sorted((root / base).rglob("*.py")):
             files.append((path.relative_to(root).as_posix(), path.read_bytes()))
@@ -361,6 +364,8 @@ def scan(root: pathlib.Path = REPO_ROOT) -> list[Site]:
     found: list[Site] = []
     for rel, data in files:
         found.extend(sites_in_source(_text(data), rel))
+            rel = path.relative_to(root).as_posix()
+            found.extend(sites_in_source(path.read_text(encoding="utf-8"), rel))
     found.sort(key=lambda s: (s.module, s.name))
     _SCAN_CACHE[where] = (files, tuple(found))
     return found
@@ -483,6 +488,9 @@ def scan_claims(sites: list[Site], root: pathlib.Path = REPO_ROOT) -> list[Claim
     found: list[Claim] = []
     for module, data in inputs[1]:
         found.extend(claims_in_source(_text(data), module, by_module[module],
+    for module in sorted(by_module):
+        source = (root / module).read_text(encoding="utf-8")
+        found.extend(claims_in_source(source, module, by_module[module],
                                       modules, by_stem))
     found.sort(key=lambda c: c.site)
     _CLAIM_CACHE[str(root)] = (inputs, tuple(found))
@@ -1236,6 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
         observed_near_misses = near_misses(sites, claims)
         problems = check(sites, entries, err)
         problems += check_claims(claims, observed_near_misses,
+        problems += check_claims(claims, near_misses(sites, claims),
                                  claim_entries, claim_err, sites)
         if problems:
             print(f"{len(problems)} problem(s) -- issue #1285, closed "
@@ -1249,6 +1258,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         _print_check_summary(sites, claims, len(observed_near_misses),
                              len(problems))
+        print(f"{len(sites)} vocabulary sites, "
+              f"{len(classes(sites))} mirror classes, all recorded and in "
+              f"step; {len(claims)} claims, "
+              f"{len(near_misses(sites, claims))} recorded near miss(es)")
         return 0
 
     print(report(sites, entries, claims, claim_entries))

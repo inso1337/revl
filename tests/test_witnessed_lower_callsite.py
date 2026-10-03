@@ -163,6 +163,7 @@ def test_acquire_bracket_keeps_its_site_spelled_undo():
         # spells that inverse, so the bracket records `declared` — the
         # declared-extern branch, not the `_method_effect_inverse` fallthrough.
         {"step": "let-effect", "bind": "h", "inverse": "declared",
+        {"step": "let-effect", "bind": "h",
          "acquire": {"kind": "fn", "name": "stash_acq", "args": []},
          "undo": {"kind": "fn", "name": "unstash", "args": [{"kind": "name", "id": "h"}]}},
     ]
@@ -276,6 +277,7 @@ def test_emitted_body_matches_slice2a_shape_from_source():
             "_revl_wit1.value, scope={'caps': ['fs']}, "
             "call={'receiver': None, 'method': 'unstash', "
             "'args': (lambda result: [result])(_revl_wit1.value)})") in body
+            "_revl_wit1.value, scope={'caps': ['fs']})") in body
     assert "yield lambda:" not in body
 
 
@@ -321,9 +323,11 @@ def test_witnessed_reverts_on_abort_from_source(target):
     report = session.load(_ir("StashAbort"))
     assert report["components"] == [{"name": "StashAbort", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "StashAbort", "state": "FAILED"}]
 
     assert os.path.exists(target), "abort did not replay the inverse — mutation stuck"
     assert open(target, encoding="utf-8").read() == "the deliverable"
+    assert open(target).read() == "the deliverable"
     # residue-free: the backup the mutation created was cleaned up by the revert
     assert not os.path.exists(bak), "abort left rollback residue (A8 violation)"
 
@@ -344,3 +348,4 @@ def test_acquire_bracket_reverts_on_clean_unload_from_source(target):
     assert os.path.exists(target), "acquire bracket failed to revert on clean unload"
     assert not os.path.exists(bak)
     assert open(target, encoding="utf-8").read() == "the deliverable"
+    assert open(target).read() == "the deliverable"

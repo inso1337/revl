@@ -64,6 +64,7 @@ _COMMENT_LINE_BREAK_RE = re.compile(r"[\r\n\u0085\u2028\u2029]")
 # property KEY, a namespace the scaffolding never occupies — except a
 # `config field`, whose key is written by two helpers and so stays refused
 # (see `_raw_field`).
+# Names the emitted scaffolding uses; user bindings may not shadow them.
 EMITTER_RESERVED = {"ctx", "config", "rawConfig", "host", "Context"}
 
 # JS/TS reserved words (enough to reject anything the IR should never contain).
@@ -204,11 +205,14 @@ def _split_ts_types(inner: str) -> list[str]:
     """Split a type argument list on commas outside `[...]`, `(...)` and `{...}`.
 
     The brace clause keeps a structural record parameter type whole (issue #2297)."""
+    """Split a type argument list on commas outside `[...]` / `(...)`."""
     parts, depth, start = [], 0, 0
     for i, ch in enumerate(inner):
         if ch in "[({":
+        if ch in "[(":
             depth += 1
         elif ch in "])}":
+        elif ch in "])":
             depth -= 1
         elif ch == "," and depth == 0:
             parts.append(inner[start:i].strip())
@@ -432,6 +436,7 @@ def _check_host_keys(ir: dict) -> None:
 
 
 def _mangle(name: str, extra: frozenset = frozenset()) -> str:
+def _mangle(name: str) -> str:
     """Rename a syntactically-valid identifier that collides with a *JS/TS*
     reserved word, so a valid revl identifier that happens to be a JS keyword
     (`class`, `function`, `new`, …) emits and RUNS instead of crashing at emit
@@ -486,9 +491,13 @@ def _mangle(name: str, extra: frozenset = frozenset()) -> str:
     the caller must pass it at ONE position of a name's life, never both: the
     ladder re-escapes the root it strips, so an already-escaped name handed
     back in would be escaped twice."""
+    does not name a JS keyword changes its emitted output. This is TARGET
+    keywords only; the host roots stay routed through `host.<name>` in
+    `_v3_var` and the emitter scaffolding stays rejected below."""
     root = name
     while root:
         if root in JS_RESERVED or root in extra:
+        if root in JS_RESERVED:
             return name + "_"
         if not root.endswith("_"):
             break
@@ -695,6 +704,7 @@ def _mangle_local(name: str, extra: frozenset) -> str:
 
 
 def _ident(name: object, role: str, extra: frozenset = frozenset()) -> str:
+def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
     if role in _MODULE_NAME_ROLES:
@@ -724,6 +734,7 @@ def _ident(name: object, role: str, extra: frozenset = frozenset()) -> str:
             f"{role} identifier collides with emitter scaffolding: {name!r}"
         )
     return _mangle(name, extra)
+    return _mangle(name)
 
 
 def _method_ident(name: object) -> str:
@@ -749,6 +760,8 @@ def _method_ident(name: object) -> str:
     scaffolding names refused for a `config field` only — a method name is a
     property key, so `host`/`ctx` are legal members (`{ host(x) { .. } }` and
     `s.host(x)` both resolve) and only `config field` still refuses."""
+    Validation is `_raw_field`'s: the identifier shape and the emitter
+    scaffolding names."""
     return _raw_field(name, "method")
 
 
@@ -869,9 +882,13 @@ def _raw_field(name: object, role: str) -> str:
 
     `_method_ident` shares this validation: a method name is a property name
     too, and a JS reserved word is quoted by `_prop_key` rather than renamed."""
+    Same validation as `_ident` (shape, emitter scaffolding) minus the
+    `_mangle` rename, which a field name must not get: the emitted key has to
+    stay the raw revl field name so it matches the runtime key (item 279)."""
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
     if role == "config field" and name in EMITTER_RESERVED:
+    if name in EMITTER_RESERVED:
         raise EmitError(
             f"{role} identifier collides with emitter scaffolding: {name!r}"
         )
@@ -965,6 +982,7 @@ class _Scope:
         self.req_keys: dict = {
             _key_binding(key): _host_key(key) for key in requires_raw
         }
+        self.requires: dict = component.get("requires") or {}
         self.config_fields = {f["name"] for f in component.get("config") or []}
         self.locals: set[str] = set()
         # item 167: routed requires (item 162's `routes` IR) — read through a
@@ -1044,8 +1062,11 @@ def _fn_call(node: dict, ctx: "_Ctx") -> str:
     """
     raw_name = node.get("name")
     if raw_name not in ctx.function_names and raw_name not in ctx.extern_names:
+    name = _ident(node.get("name"), "function")
+    if name not in ctx.function_names and name not in ctx.extern_names:
         raise EmitError(
             f"call to unknown function {raw_name!r} — no `fn` or `extern` of "
+            f"call to unknown function {name!r} — no `fn` or `extern` of "
             f"that name is declared in this document"
         )
     name = _ident(raw_name, "function")
@@ -1332,6 +1353,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             )
         if kind == "name":
             name = _ident(node.get("id"), "local")
+            name = _ident(node.get("id"), "name")
             if name not in scope.locals:
                 raise EmitError(
                     f"reference to unbound name {name!r} in component "
@@ -1370,9 +1392,12 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             route = scope.route_of.get(name)
             if route is not None:
                 return f"_revl_route_{_ident(_host_key(route), 'requirement')}"
+            if name in scope.routes:
+                return f"_revl_route_{_ident(name, 'requirement')}"
             # Committed-view access: resolved through the fiber's snapshot, so
             # it stays readable during this component's own teardown (R3).
             return (f"ctx.{_ident(_host_key(scope.req_keys.get(name, name)), 'requirement')}")
+            return f"ctx.{_ident(name, 'requirement')}"
         if kind == "host":
             fn = node.get("fn")
             if not isinstance(fn, str) or not all(IDENT_RE.match(p) for p in fn.split(".")):
@@ -1386,6 +1411,11 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             count = _replay_count(node)
             if count is not None:
                 return f"host.{fn}({{ replay: {count} }})"
+            # item 130 §4.5: a provider-side `replay(…)` declaration this tier
+            # does not lower. Refused rather than dropped — a declared backlog
+            # nothing holds is exactly the vacuous durability claim §4.5 keeps
+            # off the wire.
+            _refuse_unlowered_replay(node)
             args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
             return f"host.{fn}({args})"
         # kind == "format"
@@ -1469,6 +1499,8 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             # 65-bit value here. Inside a function body the range test is
             # written inline (issue #2904, `_inline_i64`).
             return _bounded_i64(f"{left} {op} {right}", ctx)
+            # 65-bit value here.
+            return f"revlI64({left} {op} {right})"
         if op in ("+", "-", "*") and operands == "Int32":
             # Int32 is a `number`; the double result holds the exact i32 product
             # up to 2^53, so `revlI32` only has to re-impose the 32-bit bound
@@ -1493,6 +1525,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
                 # BigInt negation is unbounded; re-impose the i64 bound so
                 # negating Int.MIN traps like every other tier (arithmetic.md)
                 return _bounded_i64(f"-{operand}", ctx)
+                return f"revlI64(-{operand})"
             if node.get("operands") == "Int32":
                 # `0 - Int32.MIN` overflows i32; re-impose the 32-bit bound.
                 return f"revlI32(-{operand})"
@@ -1611,9 +1644,11 @@ def _expr(node: object, ctx: "_Ctx") -> str:
                 arrow_scope.locals.add(_ident(p, "arrow parameter"))
             body_ctx = ctx.with_scope(arrow_scope, in_async=is_async, in_arrow=True,
                                       i64_tmp=False)
+            body_ctx = ctx.with_scope(arrow_scope, in_async=is_async, in_arrow=True)
         else:
             body_ctx = ctx.with_scope(ctx.component_scope, in_async=is_async,
                                       in_arrow=True, i64_tmp=False)
+                                      in_arrow=True)
         body = _expr(node["body"], body_ctx)
         # Mutable `var` captures are snapshotted by value at arrow-creation
         # time (docs/expressible-iteration.md Semantics), the py tier's
@@ -1755,6 +1790,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         # teardown path even while a `next` is parked (the cancellation-first
         # fix, §9 Part A). `ctx` lets the subscription observe owner withdrawal.
         replay = _replay_count(node)
+        _refuse_unlowered_replay(node)
         stream = _stream_head(node.get("stream") or {}, ctx)
         policy = node.get("policy") or "error"
         # Slice 2: the derived combinator chain, the declared buffer capacity and
@@ -1791,6 +1827,8 @@ def _expr(node: object, ctx: "_Ctx") -> str:
 
 def _replay_count(node: dict) -> Optional[int]:
     """The item-130 §4.5 last-n `replay(<n>)` a node carries, or None.
+def _refuse_unlowered_replay(node: dict) -> None:
+    """Refuse an item-130 §4.5 `replay(…)` on the ts tier.
 
     ts mirrors the py reference for the whole reactive surface, and that now
     includes the last-n backlog: the provider holds the last n items in memory
@@ -1801,6 +1839,9 @@ def _replay_count(node: dict) -> Optional[int]:
 
     The durable `replay(from: "<name>")` cursor is where the two tiers part.
     What makes it worth anything is §4.9: the cursor turns a crashed
+    ts mirrors the py reference for the whole reactive surface, so this is the
+    one place the two deliberately part. Replay is a DURABILITY claim, and what
+    makes it worth anything is the §4.9 half: a durable cursor turns a crashed
     subscription from residue into a re-issuable descriptor, and that recovery
     surface is the WAL's, which lives on the py reference tier. A ts
     subscription that resumed an in-memory position and called it durable would
@@ -1810,6 +1851,9 @@ def _replay_count(node: dict) -> Optional[int]:
     if not replay:
         return None
     if "cursor" in replay:
+    subscription that delivered a backlog and called it durable would be a claim
+    nothing backs, so the surface is refused by name rather than half-lowered."""
+    if node.get("replay"):
         raise EmitError(
             "a durable stream `replay(from: …)` cursor is not lowered on the "
             "cordis-ts tier; a durable cursor is what makes a crashed "
@@ -1875,6 +1919,11 @@ def _balanced(text: str) -> bool:
             if depth < 0:
                 return False
     return depth == 0
+            "a stream `replay(…)` is not lowered on the cordis-ts tier; replay "
+            "is a durability claim — the provider holds the backlog, and a "
+            "durable cursor is what makes a crashed subscription reconstructible "
+            "rather than residue — and that recovery surface is the py reference "
+            "tier's (item 130 §4.5, §4.9) — try `--backend py`")
 
 
 def _method_body(steps: list, ctx: "_Ctx", indent: str,
@@ -1954,6 +2003,7 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
                 lines.append(f"{indent}  {bind} = {acquire}")
             else:
                 lines.append(f"{indent}  {_asi_safe(acquire)}")
+                lines.append(f"{indent}  {acquire}")
             inverse = _pinned_arrow(step, "undo", f"() => {undo}")
             # issue #2009: the inverse runs with the journal re-armed, so a key
             # only the undo writes is judged too (py `Frame._guard`, 3690).
@@ -1982,6 +2032,9 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             # clause, else the extern's own declared one (item 254, issues
             # #1592 and #1902).
             lines.append(f"{indent}{_asi_safe(_statement(_expr(step['expr'], _emit_ctx(step, ctx))))}")
+            # then register: the site-spelled clause, then the extern's own
+            # declared one (item 254, issue #1592).
+            lines.append(f"{indent}{_expr(step['expr'], _emit_ctx(step, ctx))}")
             for comp_node in _emit_compensations(step, ctx):
                 _register_compensation(
                     comp_node, ctx, lines, indent, frame_var,
@@ -2040,6 +2093,7 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
 def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
                   frame_var: Optional[str] = None,
                   component_name: Optional[str] = None) -> list[str]:
+                  frame_var: Optional[str] = None) -> list[str]:
     scope = ctx.component_scope
     service_name = step.get("service")
     service = services.get(service_name)
@@ -2123,6 +2177,7 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
         lines.extend(_method_body(method.get("body") or [],
                                   method_ctx,
                                   body_indent, method_is_async,
+                                  indent + "  ", method_is_async,
                                   frame_var, provide_name=service_name,
                                   method_name=name))
         if body_indent != indent + "  ":
@@ -2321,8 +2376,13 @@ def _emit_compensations(step: dict, ctx: "_Ctx") -> list:
     #1902). A site-spelled `compensate` clause REPLACES the extern's own
     declared one; the declared one is the default only when the site spells
     none. The rule the py reference and `fault._owed_compensations` keep."""
+    """The compensation expressions an `emit` step registers, in order: the
+    site-spelled `compensate` clause, then the extern's own declared one. The
+    same order the py reference registers them in."""
+    out = []
     if step.get("compensate") is not None:
         return [step["compensate"]]
+        out.append(step["compensate"])
     ext = _compensated_extern(step.get("expr"), ctx)
     if ext is not None:
         if ctx.comp_frame is not None and ext.get("name") in ctx.ui_externs:
@@ -2331,6 +2391,8 @@ def _emit_compensations(step: dict, ctx: "_Ctx") -> list:
             return []
         return [_as_fn_call(ext["compensate"])]
     return []
+        out.append(_as_fn_call(ext["compensate"]))
+    return out
 
 
 def _as_fn_call(node: Any) -> Any:
@@ -2803,6 +2865,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             tracked = _handoff_resource(component, step)
             if tracked is not None and frame_var is not None:
                 lines.append(f"{indent}{frame_var}.track({bind_name})")
+                    lines.append(f"{indent}{acquire}")
             undo = _expr(step["undo"], ctx)
             acquire_node = step.get("acquire") or {}
             b_key = step.get("bind") or _acquire_method_name(acquire_node)
@@ -2830,6 +2893,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             lines.append(f"{indent}{_await_statement(step['expr'], ectx)}")
         else:
             lines.append(f"{indent}{_asi_safe(_expr(step['expr'], ectx))}")
+            lines.append(f"{indent}{_expr(step['expr'], ectx)}")
         # item 247: a compensation entry: audit-facing, best-effort,
         # ABORT-ONLY, Phase 2 (never on a clean unload). Both the site-spelled
         # clause and the extern's own declared one (item 254, issue #1592)
@@ -2870,6 +2934,8 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         lines.append(f"{indent}yield ctx.provide({_string(_host_key(name))}, {{")
         lines.extend(_provide_impl(step, ctx, services, indent + "  ", frame_var,
                                    component.get("name")))
+        lines.append(f"{indent}yield ctx.provide({_string(name)}, {{")
+        lines.extend(_provide_impl(step, ctx, services, indent + "  ", frame_var))
         lines.append(f"{indent}}} satisfies {_ident(step['service'], 'service')})")
     elif kind == "if":
         # An activation guard (A8). Branches hold ordinary body steps, so a
@@ -2914,6 +2980,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             lines.append(f"{indent}const {fn} = () => {{")
             for emission in emissions:
                 lines.append(f"{indent}  {_asi_safe(_expr(emission['expr'], _emit_ctx(emission, ctx)))}")
+                lines.append(f"{indent}  {_expr(emission['expr'], _emit_ctx(emission, ctx))}")
                 for comp_node in _emit_compensations(emission, ctx):
                     _register_compensation(
                         comp_node, ctx, lines, indent + "  ", frame_var,
@@ -2957,6 +3024,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             else:
                 # a sync emission in a mixed body still fires inline
                 lines.append(f"{indent}  {_asi_safe(rendered)}")
+                lines.append(f"{indent}  {rendered}")
                 for comp_node in _emit_compensations(emission, ctx):
                     _register_compensation(
                         comp_node, ctx, lines, indent + "  ", frame_var,
@@ -3134,11 +3202,15 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         # G2 check below.
         _ident(_host_key(local), "requirement")
         _reject_service_key(_host_key(local), "requirement", name)
+        _ident(local, "requirement")
+        _reject_service_key(local, "requirement", name)
         if service not in services:
             raise EmitError(f"requirement {local!r} names unknown service {service!r}")
     for key, service in provides.items():
         _ident(_host_key(key), "provision key")
         _reject_service_key(_host_key(key), "provision", name)
+        _ident(key, "provision key")
+        _reject_service_key(key, "provision", name)
         if service not in services:
             raise EmitError(f"provision {key!r} names unknown service {service!r}")
     for key in isolate:
@@ -3165,12 +3237,16 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         # wiring identity, the JSON key is the runtime's host spelling
         # (issue #1914).
         inject = {_host_key(key): intercept.get(key) for key in inject_keys}
+        # required-but-not-intercepted key.
+        inject = {key: intercept.get(key) for key in inject_keys}
         lines.append(f"  inject: {_json(inject)},")
     else:
         inject = ", ".join(_string(_host_key(k)) for k in inject_keys)
+        inject = ", ".join(_string(k) for k in inject_keys)
         lines.append(f"  inject: [{inject}],")
     if provides:
         keys = ", ".join(_string(_host_key(k)) for k in provides)
+        keys = ", ".join(_string(k) for k in provides)
         lines.append(f"  provide: [{keys}],")
     handoff = component.get("handoff")
     if isinstance(handoff, dict) and handoff.get("key"):
@@ -3266,6 +3342,7 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     frame_var = ("$revl_frame"
                  if (needs_frame or _has_bracket(component) or declares_handoff)
                  else None)
+    frame_var = "$revl_frame" if (needs_frame or _has_bracket(component)) else None
     if frame_var is not None:
         lines.append(f"    const {frame_var} = new Frame(ctx, {_string(name)})")
 
@@ -3279,6 +3356,8 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         lines.append(
             f"    const _revl_route_{_ident(_host_key(key), 'requirement')} = "
             f"revlRouter(ctx, {_string(_host_key(key))}, {realms}, {strategy})"
+            f"    const _revl_route_{_ident(key, 'requirement')} = "
+            f"revlRouter(ctx, {_string(key)}, {realms}, {strategy})"
         )
 
     # One generator per body: cordis runs disposers of a single effect
@@ -3394,6 +3473,8 @@ _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 # Slice 5) and the §4.5 last-n `replay(<n>)` backlog all lower here. The durable
 # `replay(from: …)` cursor is still the py reference tier's, refused by name in
 # `_replay_count`.
+# Slice 5) all lower here. Only the durable-replay surface is still the py
+# reference tier's — a frontend refusal that never reaches the emitter.
 _UNIMPLEMENTED_HOST_ROOTS: dict = {
 }
 
@@ -3419,8 +3500,10 @@ def _split_v3_types(inner: str) -> list[str]:
     current: list[str] = []
     for ch in inner:
         if ch in "[({":
+        if ch in "[(":
             depth += 1
         elif ch in "])}":
+        elif ch in "])":
             depth -= 1
         if ch == "," and depth == 0:
             parts.append("".join(current).strip())
@@ -3460,6 +3543,7 @@ def _ts_v3_type(type_name: object) -> str:
             return f"{_ts_v3_type(args[0])} | undefined"
         if base == "List":
             return _ts_v3_list_type(_ts_v3_type(args[0]))
+            return f"{_ts_v3_type(args[0])}[]"
         if base == "Map":
             return f"Map<{_ts_v3_type(args[0])}, {_ts_v3_type(args[1])}>"
         if base == "Result":
@@ -3631,6 +3715,7 @@ class _Ctx:
     def with_scope(self, scope, in_async=None, async_locals=None,
                    in_arrow=None, empty_list_types=None,
                    i64_tmp=None) -> "_Ctx":
+                   in_arrow=None, empty_list_types=None) -> "_Ctx":
         view = _Ctx.__new__(_Ctx)
         view.types = self.types
         view.function_names = self.function_names
@@ -3677,10 +3762,12 @@ def _v3_var(node: dict, ctx: "_Ctx") -> str:
     # a keyword-named local/function/case is renamed at its *use* the same way
     # `_ident` renamed it at its declaration; the host roots take the
     # `host.<name>` branch (their names are never keywords) (item 165)
+    mangled = _ident(name, "name")
     if name in ctx.function_names or name in ctx.extern_names or name in ctx.case_names:
         return _ident(name, "name")
     # anything else is a local: a `let`, a parameter, a binder (issue #3179)
     mangled = _ident(name, "local")
+        return mangled
     if name in _HOST_ROOTS:
         return f"host.{name}"
     if name == "None":
@@ -3821,10 +3908,13 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     # not text inside the closure body, so a user name can never be read
     # through the closure's own temporaries (a Map named `c` used to hit the
     # temporary `c` before its initialiser ran, issue #2900).
+    # once, receiver never mutates.
     if method == "set":
         return (f"(<K, V>(_m: Map<K, V>, _k: K, _v: V) => "
                 f"{{ const _c = new Map(_m); _c.set(_k, _v); return _c }})"
                 f"({target}, {args[0]}, {args[1]})")
+        return (f"(() => {{ const c = new Map({target}); "
+                f"c.set({args[0]}, {args[1]}); return c }})()")
     if method == "lookup":
         # Map.get answers undefined when absent: exactly the Opt None case.
         return f"{target}.get({args[0]})"
@@ -3851,6 +3941,8 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return (f"(<K, V>(_m: Map<K, V>, _k: K) => "
                 f"{{ const _c = new Map(_m); _c.delete(_k); return _c }})"
                 f"({target}, {args[0]})")
+        return (f"(() => {{ const c = new Map({target}); "
+                f"c.delete({args[0]}); return c }})()")
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): Int is a
     # bigint on this tier, and BigInt.prototype.toString is exact decimal.
     if method == "to_str":
@@ -4414,6 +4506,7 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             out.append(f"{'  ' * indent}{keyword} [{parts}] = {value}")
     elif step == "expr":
         out.append(f"{'  ' * indent}{_asi_safe(_expr(node['expr'], ctx))}")
+        out.append(f"{'  ' * indent}{_expr(node['expr'], ctx)}")
     elif step == "assert":
         # `expect(x).toBeTruthy()` and a bare `throw` both discard the operand
         # values the emitter already has. An in-file `test` almost always
@@ -4520,6 +4613,7 @@ _REVL_I64_HELPER = """const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
   if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
+  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
   return v
 }"""
 
@@ -4671,6 +4765,8 @@ def _uses_int_arith(node) -> bool:
     """Does anything in this IR call a named integer division or modulo?
     The total division (`checked_*`) forms count too: they route through the
     same helpers' tier (and need `revlI64` for the one overflowing quotient)."""
+    The total (`checked_*`) forms count too: they route through the same
+    helpers' tier (and need `revlI64` for the one overflowing quotient)."""
     if isinstance(node, dict):
         if node.get("method") in _TS_INT_ARITH or node.get("method") in _TS_CHECKED_DIV:
             return True
@@ -4865,6 +4961,7 @@ def _revl_helpers(ir: dict) -> list[str]:
     if _uses_assert(ir):
         out.extend([_REVL_SHOW_HELPER, ""])
     if _uses_bounded_int(ir) or _uses_int_arith(ir) or _uses_checked_arith(ir):
+    if _uses_bounded_int(ir) or _uses_int_arith(ir):
         out.extend([_REVL_I64_HELPER, ""])
     # issue #2147: the result-side coercion of a verbatim `@ts` body declared
     # `Int`. Gated by the same predicate the wrapper itself uses.
@@ -5198,6 +5295,22 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
 # and their arrays for the module's lifetime, and an array is never handed to a
 # mutating caller (`slice` copies). `revlIndexOf` deliberately stays on its own
 # `Array.from`: its argument is a fresh substring per call.
+# `revlCps` is the decode, and it is MEMOISED (item 435(c)). Every helper below
+# measures or indexes a string's code points, and `Array.from` builds that
+# decomposition in O(n); done per call, the idiomatic index scan
+# `while (i < s.length()) { ... s.charAt(i) ... }` materialises 2n^2 + n code
+# points and throws all but n of them away, which put 94.8% of that program's
+# self-samples inside these helpers. Memoising collapses the count to exactly
+# n and touches no lowering. TWO slots, not one: a pairwise scan over two
+# strings (comparing them, merging them) is common enough that a single slot
+# thrashes, and a thrashing cache is the pre-memo cost. The miss path IS the
+# pre-memo code, so the cache never costs more than the compare that missed;
+# `===` on strings checks the pointer first, so the hot case — the same string
+# handed back every iteration — is one pointer compare. The array is never
+# handed out to a mutating caller (`slice` copies), and the cache retains at
+# most two strings for the module's lifetime, which is the price of linearity.
+# `revlIndexOf` deliberately stays on its own `Array.from`: its argument is a
+# fresh substring per call, so caching it would evict the scan's entry.
 #
 # `revlCharAt`/`revlCharCodeAt` THROW for an index outside `0 <= i < length()`
 # (docs/stdlib-2.0.md §Str.codepoint_at). `revlCharAt` used to hand back `""`,
@@ -5212,6 +5325,17 @@ function revlCpsDecode(s: string): string | string[] {
   for (let i = 0; i < s.length; i++) {
     const u = s.charCodeAt(i)
     if (u >= 0xD800 && u <= 0xDFFF) return Array.from(s)
+_REVL_STR_HELPER = """let revlCpsK0: string | undefined
+let revlCpsV0: string[] = []
+let revlCpsK1: string | undefined
+let revlCpsV1: string[] = []
+function revlCps(s: string): string[] {
+  if (s === revlCpsK0) return revlCpsV0
+  if (s === revlCpsK1) {
+    const k = revlCpsK1, v = revlCpsV1
+    revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+    revlCpsK0 = k; revlCpsV0 = v
+    return v
   }
   return s
 }
@@ -5228,6 +5352,9 @@ function revlCps(s: string): string | string[] {
   if (k === revlCpsN) k--
   for (; k > 0; k--) { revlCpsK[k] = revlCpsK[k - 1]; revlCpsV[k] = revlCpsV[k - 1]; revlCpsF[k] = revlCpsF[k - 1] }
   revlCpsK[0] = s; revlCpsV[0] = v; revlCpsF[0] = f
+  const v = Array.from(s)
+  revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+  revlCpsK0 = s; revlCpsV0 = v
   return v
 }
 function revlLen(x: string | ArrayLike<unknown>): bigint {
@@ -5242,6 +5369,9 @@ function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unkn
   if (typeof x !== "string") return (x as Uint8Array | unknown[]).slice(i, j)
   const v = revlCps(x)
   return typeof v === "string" ? v.slice(i, j) : v.slice(i, j).join("")
+  return typeof x === "string"
+    ? revlCps(x).slice(i, j).join("")
+    : (x as string | Uint8Array | unknown[]).slice(i, j)
 }
 function revlCharAt(s: string, i: bigint): string {
   const c = revlCps(s)[Number(i)]
@@ -5435,9 +5565,11 @@ def _emit_ts_types(types: dict) -> list[str]:
                 payload = case.get("payload")
                 if payload is None:
                     lines.append(f"export function {fname}(): {name} {{")
+                    lines.append(f"export function {cname}(): {name} {{")
                     lines.append(f"  return {{ kind: {_string(cname)} }}")
                 else:
                     lines.append(f"export function {fname}(value: {_ts_v3_type(payload)}): {name} {{")
+                    lines.append(f"export function {cname}(value: {_ts_v3_type(payload)}): {name} {{")
                     lines.append(f"  return {{ kind: {_string(cname)}, value }}")
                 lines.append("}")
                 lines.append("")
@@ -5458,6 +5590,7 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
                 f"by its source name, so the emitter cannot rename it: give it "
                 f"another name (issue #3127)")
         name = _ident(raw_name, "function name")
+        name = _ident(fn.get("name"), "function name")
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter name')}: {_ts_v3_type(p.get('type'))}"
             for p in fn.get("params") or []
@@ -5484,11 +5617,13 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
             fn_ctx = ctx.with_scope(ctx.component_scope, in_async=True,
                                     async_locals=async_locals,
                                     empty_list_types=empty_lists, i64_tmp=True)
+                                    empty_list_types=empty_lists)
             lines.append(
                 f"export async function {name}({params}): Promise<{returns}> {{")
         else:
             fn_ctx = ctx.with_scope(ctx.component_scope,
                                     empty_list_types=empty_lists, i64_tmp=True)
+                                    empty_list_types=empty_lists)
             lines.append(f"export function {name}({params}): {returns} {{")
         if not fn.get("body"):
             lines.append("  // (empty body)")
@@ -5497,6 +5632,7 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
             for stmt in fn["body"]:
                 _v3_stmt(stmt, fn_ctx, body, 2, test_mode=False)
             lines.extend(_declare_i64_tmp(body))
+                _v3_stmt(stmt, fn_ctx, lines, 2, test_mode=False)
         lines.append("}")
         lines.append("")
     return lines
@@ -5912,6 +6048,7 @@ def _ui_crossing_wrapper(ext: dict, name: str, impl: str, params: str,
 
 
 def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[str]:
+def _emit_ts_externs(externs: list) -> list[str]:
     lines: list[str] = []
     # item 378 Stage 5: emit the config seam once, before the externs, when any
     # extern carries a config schema (byte-identical when none do).
@@ -5983,10 +6120,13 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
                                               arg_list, returns))
         impl = f"_revl_secret_{name}" if secret_return else public
         export_kw = "" if secret_return or public != name else "export "
+        impl = f"_revl_secret_{name}" if secret_return else name
+        export_kw = "" if secret_return else "export "
         if ext.get("async"):
             if secret_return:
                 lines.append(
                     f"{'export ' if public == name else ''}async function {public}({params}): Promise<{returns}> {{")
+                    f"export async function {name}({params}): Promise<{returns}> {{")
                 lines.append(f"  return host.secretResult(await {impl}({arg_list}))")
                 lines.append("}")
                 lines.append("")
@@ -6000,6 +6140,8 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
             if body:
                 lines.extend(_ts_extern_body_lines(
                     body, coerce_int, True, f"extern `{ext.get('name')}`"))
+                for line in body.splitlines() or [""]:
+                    lines.append("  " + line)
             else:
                 lines.append("  // (empty @ts body)")
             lines.append("}")
@@ -6007,6 +6149,7 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
             continue
         if secret_return:
             lines.append(f"{'export ' if public == name else ''}function {public}({params}): {returns} {{")
+            lines.append(f"export function {name}({params}): {returns} {{")
             lines.append(f"  return host.secretResult({impl}({arg_list}))")
             lines.append("}")
             lines.append("")
@@ -6019,6 +6162,8 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
         if body:
             lines.extend(_ts_extern_body_lines(
                 body, coerce_int, False, f"extern `{ext.get('name')}`"))
+            for line in body.splitlines() or [""]:
+                lines.append("  " + line)
         else:
             lines.append("  // (empty @ts body)")
         lines.append("}")
@@ -6045,9 +6190,11 @@ def _emit_ts_tests(tests: list, types: dict, functions: list, externs: list) -> 
                 empty_list_types=_v3_empty_list_types(
                     test["body"], None, None), i64_tmp=True)
             body: list[str] = []
+                    test["body"], None, None))
             for stmt in test["body"]:
                 _v3_stmt(stmt, test_ctx, body, 2, test_mode=True)
             lines.extend(_declare_i64_tmp(body))
+                _v3_stmt(stmt, test_ctx, lines, 2, test_mode=True)
         lines.append("})")
         lines.append("")
     return lines
@@ -6101,6 +6248,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         # same sigil from `_runtime_imports`, so they are driver references too
         # and a user binding of one of those spellings cannot shadow them.
         body.append("  const $revl_root = new Context()")
+        body.append("  const root = new Context()")
         if any(s.get("step") == "advance" for s in test.get("body") or []):
             # item 102: the clock coeffect is a module-global; reset it so this
             # test's `advance` steps start from t=0 and see only its own timers,
@@ -6108,6 +6256,8 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
             body.append("  host.clockReset()")
         body.append("  const $revl_baseline = $revl_snapshotRuntime($revl_root)")
         body.append("  const $revl_fibers = new Map<string, any>()")
+        body.append("  const _revl_baseline = snapshotRuntime(root)")
+        body.append("  const _revl_fibers = new Map<string, any>()")
         for step in test.get("body") or []:
             kind = step.get("step")
             if kind == "load":
@@ -6124,12 +6274,17 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 body.append(f"    const $revl_f = $revl_plug($revl_root, {component}, {{{cfg_items}}})")
                 body.append("    await $revl_f")
                 body.append(f"    $revl_fibers.set({_string(component)}, await $revl_f)")
+                body.append(f"    const _f = plug(root, {component}, {{{cfg_items}}})")
+                body.append("    await _f")
+                body.append(f"    _revl_fibers.set({_string(component)}, await _f)")
                 body.append("    await _revl_settle()")
                 body.append("  }")
             elif kind == "unload":
                 component = step["component"]
                 body.append(f"  await (await $revl_fibers.get({_string(component)})).dispose()")
                 body.append("  $revl_fibers.delete(" + _string(component) + ")")
+                body.append(f"  await (await _revl_fibers.get({_string(component)})).dispose()")
+                body.append("  _revl_fibers.delete(" + _string(component) + ")")
                 body.append("  await _revl_settle()")
             elif kind == "call":
                 key = step["key"]
@@ -6143,6 +6298,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 await_ = "await " if method.get("async") else ""
                 call = (f"$revl_root.{_ident(_host_key(key), 'provision key')}."
                         f"{_method_ident(step['method'])}({args})")
+                call = f"root.{_ident(key, 'provision key')}.{_method_ident(step['method'])}({args})"
                 bind = step.get("bind")
                 if bind is not None:
                     body.append(f"  const {_ident(bind, 'lifecycle binding')} = {await_}{call}")
@@ -6197,6 +6353,8 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 # so clearing the map is the whole reset.
                 body.append("  await _revl_settle()")
             else:  # pragma: no cover — the lowerer's lifecycle steps are all above
+                body.append("  assertNoResidue(root, _revl_baseline)")
+            else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         # One `extend` per region rather than a statement per emitted line: a
         # lifecycle driver is a small number of regions, and the corpus reaches
@@ -6205,6 +6363,10 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         # test seen by the plain-test driver — is the statement the
         # mirrored-emitter ledger still carries, because `_emit_v3` splits the
         # two lists before either driver runs.
+        # One `extend` per region rather than a statement per emitted line:
+        # every statement here is unreachable by the self-host byte-agreement
+        # corpus (selfhost/emit_ts.rvl defers in-file test emission entirely),
+        # so each one is a line the mirrored-emitter ledger has to carry.
         lines.extend([
             f"it({_string(test.get('name'))}, async () => {{",
             "  // drives the composition on a real cordis context and",
@@ -6249,6 +6411,7 @@ def _context_augmentation(components: list) -> list[str]:
         return []
     return (["declare module 'cordis' {", "  interface Context {"]
             + [f"    {_host_key(key)}: {service}" for key, service in keys.items()]
+            + [f"    {key}: {service}" for key, service in keys.items()]
             + ["  }", "}", ""])
 
 
@@ -6368,6 +6531,7 @@ def _runtime_imports(ir: dict, runtime_import: str, doc_ctx: "_Ctx") -> str:
             # runtime's session-level reject seam (`frameForCtx` -> `Frame.abort`),
             # so an abort-free document imports exactly what it did before.
             names.append("frameForCtx as $revl_frameForCtx")
+        names += ["plug", "snapshotRuntime", "assertNoResidue"]
     return f"import {{ {', '.join(names)} }} from '{runtime_import}'"
 
 
@@ -6524,6 +6688,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         out.extend(_emit_ts_types(types))
     if externs:
         out.extend(_emit_ts_externs(externs, doc_ctx.ui_externs))
+        out.extend(_emit_ts_externs(externs))
     if functions:
         out.extend(_emit_ts_functions(functions, types, externs))
     if tests:
@@ -6713,6 +6878,7 @@ def _emit_temporal(ir: dict) -> str:
     module's machinery, so this module is registered as `sys.modules["emit"]`
     and its directory put on the path before the import, whatever name the
     caller loaded emit.py under (`revl_typescript_emit`, a per-test name,
+    caller loaded emit.py under (`revl_bundle_typescript_emit`, a per-test name,
     or `__main__`)."""
     import importlib
     import os
@@ -6726,6 +6892,7 @@ def _emit_temporal(ir: dict) -> str:
     # Point the canonical name `emit` at THIS module's namespace so the sink's
     # `from emit import ...` shares one `EmitError` class and one renderer set.
     # emit.py is loaded under several names (`revl_typescript_emit` for
+    # emit.py is loaded under several names (`revl_bundle_typescript_emit` for
     # the bundle, a per-test name, `__main__` for the standalone CLI) and is not
     # always registered in sys.modules under its own `__name__`, so bind a proxy
     # module whose namespace is this one — unless a real `emit` module already
@@ -6826,6 +6993,10 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
             return _emit_v3(ir, runtime_import=runtime_import)
     finally:
         _MODULE_NAMES.reset(token)
+    if version in (1, 2):
+        return _emit_v1(ir, runtime_import=runtime_import)
+    if version == 3:
+        return _emit_v3(ir, runtime_import=runtime_import)
     raise EmitError(f"unsupported ir_version: {version!r}")
 
 

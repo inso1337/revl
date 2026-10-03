@@ -31,6 +31,8 @@ const FRONTEND_KEYWORDS = new Set([
   'break', 'continue', 'else', 'false', 'for', 'if', 'in', 'null', 'return',
   'true', 'try', 'var', 'while', 'with', 'let', 'as', 'assert', 'async',
   'await', 'type', 'of',
+  'true', 'var', 'while', 'with', 'let', 'as', 'assert', 'async', 'await',
+  'type', 'of',
 ])
 
 function typescriptKeywords(): string[] {

@@ -45,6 +45,8 @@ silently dropped is a setting the operator believes is in force.
   a leading digit, so it is refused, again without echoing it. A key that
   happens to fit the form is not caught here, so no later message prints the
   variable's name when it is not set either.
+  environment variable name. A pasted key is not one (it has a `-`, or starts
+  with a digit), so it is refused, again without echoing it.
 * **A credential in the URL.** `https://user:key@host` and a query string
   (`?key=...`) are both refused: a URL is printed in errors and logs, and a key
   inside one would travel with it.
@@ -93,6 +95,7 @@ _COMMON_FIELDS = frozenset({
     "provider", "model", "base_url", "api_key_env", "max_tokens",
     "temperature", "timeout", "max_reply_bytes", "residence", "reaches",
     "structured_output",
+    "temperature", "timeout", "residence", "reaches", "structured_output",
 })
 _PROVIDER_FIELDS = {provider: wire.FIELDS for provider, wire in WIRES.items()}
 
@@ -137,6 +140,7 @@ class Binding:
     #: not in the repr: while the variable is unset, a pasted key that fits
     #: the name shape would print with it
     api_key_env: str | None = field(default=None, repr=False)
+    api_key_env: str | None = None
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.0
     timeout: float = DEFAULT_TIMEOUT
@@ -287,6 +291,7 @@ def _binding(role: str, entry, source: str) -> Binding:
     env = entry.get("api_key_env")
     if env is not None and (not isinstance(env, str)
                             or not _API_KEY_ENV_NAME.match(env)):
+                            or not _ENV_NAME.match(env)):
         # never echo the value: the commonest way to get here is pasting the
         # key itself where its variable's name goes
         raise _refuse(where, "`api_key_env` must be the NAME of an environment "
@@ -295,6 +300,9 @@ def _binding(role: str, entry, source: str) -> Binding:
                              "example `ANTHROPIC_API_KEY`); the value given "
                              "is not one, and it is not repeated here in case "
                              "it is the credential itself")
+                             "variable (letters, digits and `_`); the value "
+                             "given is not one, and it is not repeated here in "
+                             "case it is the credential itself")
     if provider in ("anthropic", "gemini") and env is None:
         raise _refuse(where, f"provider {provider} is a hosted API and needs "
                              f"`api_key_env`, the name of the environment "

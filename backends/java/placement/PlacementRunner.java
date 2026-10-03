@@ -345,6 +345,7 @@ public final class PlacementRunner {
                     log("swap", fiberLabels.get(i), "dispose NOT confirmed: "
                             + failure.getClass().getSimpleName());
                 }
+                try { fibers.get(i).dispose(); } catch (Throwable ignored) {}
             }
             if (stubRef != null) stubRef.close();
             if (!unconfirmed.isEmpty()) haltTeardownIncomplete(name, unconfirmed);
@@ -524,6 +525,7 @@ public final class PlacementRunner {
         String javaName = toJavaMethod.apply(name); // the contract name, as declared (#1512)
         for (Method m : iface.getMethods()) {
             if (m.getName().equals(javaName) && m.getParameterCount() == arity) return m;
+            if (m.getName().equals(name) && m.getParameterCount() == arity) return m;
         }
         throw new RuntimeException("no method " + name + "/" + arity + " on " + iface.getName());
     }
@@ -590,6 +592,7 @@ public final class PlacementRunner {
             // its value or `null`, never as its `toString()`
             if (args != null) for (Object a : args) callArgs.add(BridgeCodec.encode(a));
             Object value = client.call(key, toContractMethod.apply(method.getName()), callArgs);
+            Object value = client.call(key, method.getName(), callArgs);
             return BridgeCodec.decode(value, method.getGenericReturnType());
         }
 

@@ -312,6 +312,7 @@ class Tree:
         if rel not in self._text:
             try:
                 self._text[rel] = (self.root / rel).read_text(errors="ignore", encoding="utf-8")
+                self._text[rel] = (self.root / rel).read_text(errors="ignore")
             except OSError:
                 self._text[rel] = ""
         return self._text[rel]
@@ -588,6 +589,7 @@ def load_allowlist(path: Path) -> List[dict]:
     if not path.exists():
         return []
     entries = json.loads(path.read_text(encoding="utf-8"))["entries"]
+    entries = json.loads(path.read_text())["entries"]
     for entry in entries:
         missing = {"rule", "claim", "reason"} - set(entry)
         if missing:
@@ -615,6 +617,7 @@ def load_ratchet(path: Path) -> List[dict]:
     if not path.exists():
         return []
     doc = json.loads(path.read_text(encoding="utf-8"))
+    doc = json.loads(path.read_text())
     entries = doc["entries"]
     for entry in entries:
         missing = set(RATCHET_FIELDS) - set(entry)
@@ -697,6 +700,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         name = (path.name if path == args.roadmap
                 else "%s/%s" % (path.parent.name, path.name))
         return "%s:%d" % (name, local)
+    source = args.roadmap.read_text()
     ratchet = load_ratchet(args.ratchet)
     denominator, findings, unused = run(
         source, tree, rules, load_allowlist(args.allowlist) + ratchet
@@ -726,6 +730,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for claim, verdict in by_rule[rule]:
                 print("\n%s  [%s]\n  %s\n  %s"
                       % (where(claim.line), rule, claim.text.strip(), verdict))
+                print("\n%s:%d  [%s]\n  %s\n  %s"
+                      % (args.roadmap.name, claim.line, rule, claim.text.strip(), verdict))
         for entry in unused:
             print("\n%s entry matches nothing and MUST be removed: [%s] %s"
                   % (entry.get("origin", "allow-list"), entry["rule"],

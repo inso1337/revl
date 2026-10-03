@@ -73,6 +73,7 @@ and the parser- and statement-form fixtures (`t19_union_type`,
 
 Of that table, the return-path pair (`t8_missing_return`,
 `t9_return_path_incomplete`) has since LANDED (see T3b(returns) in section 5),
+`t9_return_path_incomplete`) has since LANDED — see T3b(returns) in section 5 —
 so "return paths and match" now stands at its match half alone.
 
 Why the census does not show this today: `tools/gate_reference_census.py`
@@ -224,6 +225,7 @@ the standalone refusal the harness's `cache_layer` candidate gets, and the
 crate's `TYPE_LAYER_GAP` list carried the `provides` twin).
 
 **That one has LANDED, ahead of T4**: see T4a in section 5, and T4b for
+**That one has LANDED, ahead of T4** — see T4a in section 5, and T4b for
 `a6`, the member half of the same resolve-a-name-against-a-declaration shape. It is the only
 obligation in this section that needs no expression algebra: the component
 header carries a name, and the decision is whether the program declares a
@@ -580,10 +582,12 @@ The phase this slice added is `_validate_declared_types` itself, ported far
 enough to be worth having: `declared_types_refusal` runs
 `check_type_wellformed` over every module `fn` and `extern` signature
 (parameters then return, fns before externs, the reference's own loop order),
+(parameters then return, fns before externs — the reference's own loop order),
 and `config_data_refusal` now asks the wellformed question per config field
 ahead of the is-data question, which is where `_check_config` asks it. It is a
 FAIL-FAST phase at the head of `collect_nonlink`, because the reference RAISES
 inside `_validate_declared_types` before its collect-all sink exists, so a
+inside `_validate_declared_types` before its collect-all sink exists — so a
 declared-type refusal beats an earlier-LINE link refusal and rides alone. That
 is checked and not assumed: three programs in `_MULTI_REFUSAL_PROGRAMS` pair it
 with a duplicate provider (on an earlier line and on a later one) and with a
@@ -626,6 +630,7 @@ they reach `admit_src` at T3a). ~500 lines.
 `checker.rvl`.** The obligation is expression typing, but the nine documents it
 owns are measured through `admit_src`, and T3a had already built the refusing
 expression walk there, so the slice extends that engine instead of starting a
+expression walk there — so the slice extends that engine instead of starting a
 second one. What it adds: a signature table for every module `fn` AND `extern`,
 built in a second pass over the token stream (the single-uppercase heuristic is
 switched off by a DECLARED type, and a `type` may be written after the `fn` that
@@ -709,6 +714,9 @@ An arrow's annotations are the one declared spelling this walk meets with no
 token span behind it: the reference rewrites them in `_subst_annotations`,
 the field walk that reaches a body annotation and a declaration site alike
 (issues #2514 and #2515). Without the same substitution `let f = (v: Count): Sku => "x"` holds
+token span behind it: the reference rewrites them in `_subst_body_annotations`,
+inside the body, rather than in the declaration sweep every other site goes
+through. Without the same substitution `let f = (v: Count): Sku => "x"` holds
 its body to `Sku` where the reference holds it to `Str`, and that is a FALSE
 REJECTION, the one direction this gate may not err in. It showed on
 `tests/fixtures/emit_py_corpus/type_aliases.rvl` in the census and on no unit
@@ -792,6 +800,7 @@ slice (`fb_scan` builds `FbStep` with `if`/`while`/`for` arms and bodies for the
 scope walk). So `fb_function` now runs `_check_returns_on_every_path` after
 `fb_walk`, per `fn` in declaration order, which is exactly where `_lower_fns`
 runs it after the body, ahead of the next declaration. Both sentences, both
+runs it — after the body, ahead of the next declaration. Both sentences, both
 anchors: the never-returns one at the declaration line, the falls-through one at
 `decl.body[-1].line`. `_definitely_returns` ports verbatim, `while (true)`
 divergence included with item 379's targeting-`break` rule, and an `if` with no
@@ -804,6 +813,8 @@ argument: a `return` it fails to see turns an admitting body into a refusal,
 which is the false-rejection direction this gate may not err in. So one "bail"
 anywhere in the tree (an `else if` chain, a destructuring binder, any statement
 `fb_one` cannot model) leaves the whole `fn` to the reference; `fb_scan` now
+anywhere in the tree — an `else if` chain, a destructuring binder, any statement
+`fb_one` cannot model — leaves the whole `fn` to the reference; `fb_scan` now
 records its cursor-stall truncation as a bail for the same reason, which is
 behaviour-preserving for `fb_walk` (both end a block clean). A declared return
 that mentions a transparent type alias is withheld too: `_resolve_type_aliases`
@@ -829,6 +840,7 @@ of the binding discipline, so on such a body it draws the return-path refusal
 instead. Both refusals are true and the program is refused either way, so this is
 a 419c-style naming divergence and never an admission the reference would not
 give, and it is strictly better than what it replaced, which was a no-objection.
+give — and it is strictly better than what it replaced, which was a no-objection.
 It shows only under the fuzz (three `tag-mismatch/G1->T1`, two `msg-mismatch/T1`,
 each from a mutant that both corrupts a name and loses its `return`), never on
 the baselined corpus, and it closes as the name-resolution and expression slices
@@ -837,6 +849,7 @@ pins it.
 
 What it does NOT buy: nothing about match exhaustiveness, unknown cases, alias
 cycles, duplicate declarations or declared-type wellformedness: the rest of T3b
+cycles, duplicate declarations or declared-type wellformedness — the rest of T3b
 is untouched, and the four `no builtin method` / `non-exhaustive match` families
 still need the tables T2b and T2d build. It also does not close the T3a
 statement channel: this rule is the one obligation of the fn loop that can be
@@ -849,6 +862,7 @@ it emits `"returns": "Count"` where the reference, having run
 `_resolve_type_aliases`, emits `"returns": "Int"`. No corpus document under
 `tests/fixtures/emit_py_corpus/` had ever declared one, so both differential
 oracles agreed trivially: the absence, not a divergence. That erasure is
+oracles agreed trivially — the absence, not a divergence. That erasure is
 §2.1 item 1 and belongs to T1's `types.rvl`; the alias case was dropped from
 `return_paths.rvl` rather than half-fixed here, and this paragraph is the record
 that it is known.
@@ -863,6 +877,7 @@ per-case rows the declaration scan already builds (`cases <Type>`, the names
 comma-joined), reading the declaration with `ir_type_decl`'s own decisions
 because that reader is already byte-exact against the reference's emitted
 `types` section: a transparent alias contributes nothing, a record body is a
+`types` section — a transparent alias contributes nothing, a record body is a
 record, a bare single-case right-hand side is the one-case nominal. The check
 then runs inside the expression walk's `Match` arm, where `_lower_pure_expr`
 runs it: after `_expr_static_type` (the NON-raising engine, so a scrutinee the
@@ -872,6 +887,7 @@ skipped outright when a `_` arm is present.
 
 The alias CYCLE is `_resolve_type_aliases`' `expand` recursion, ported at the
 head of `collect_nonlink`, ahead of `declared_types_refusal`, because the
+head of `collect_nonlink` — ahead of `declared_types_refusal`, because the
 reference runs `_resolve_type_aliases` before `_validate_declared_types` and it
 RAISES, so a program that trips it reaches nothing else. `alias_map` above
 computes the same fixed point for the PRODUCER side and bounds its rounds so a
@@ -883,6 +899,8 @@ Non-record destructuring is the one place this slice widened the fn-body reader.
 `fb_one` used to bail outright on a `let { … } =`, so the statement and the whole
 rest of its block went unjudged. It now reads the pattern (`{ a, b }`, names
 only, the grammar has no renaming form) and emits a `letpat` step that STILL
+rest of its block went unjudged. It now reads the pattern — `{ a, b }`, names
+only, the grammar has no renaming form — and emits a `letpat` step that STILL
 ends the block (`i: hi`), so every consumer that treated the old bail as
 undecidable still does (`rp_has_bail`, `csh_binders` name it explicitly). Only
 the two arms that spell "requires a record" are ported: a declared type whose
@@ -901,6 +919,7 @@ sweep (1356 programs) and the 400-draw fuzz at seed 7, run on the SAME corpus
 on both trees, fifteen and seventeen programs respectively left a false-admit
 bucket and none entered one, and `agree-admit` is unchanged on both (845 and
 509), which is the number that would move first if any of these rules
+509) — which is the number that would move first if any of these rules
 over-refused.
 
 Where each rule stays SILENT, and why the direction is the sound one. A
@@ -908,11 +927,15 @@ scrutinee whose type the annotation engine cannot answer, or whose type is not a
 declared variant this text spells out (a record, a builtin, `Opt[T]` or
 `Result[T, E]`) draws no exhaustiveness verdict. An applied user variant does
 resolve through its declared head, matching the reference after issue #2926. A
+declared variant this text spells out — a record, a builtin, `Opt[T]` and
+`Result[T, E]`, a parameterized ADT's applied form — draws no exhaustiveness
+verdict, which is what `types.get(type_name)` does on the reference side too. A
 variant with an empty case list records no row, because `tenv_get` cannot tell an
 empty value from an absent key. A duplicate type name keeps its FIRST row rather
 than letting the second win, so nothing here claims a surface the reference
 never built (it refuses `duplicate type` instead, which this slice does not
 port). Each remaining silence is a documented gap and does not refuse a program
+port). Each of those admits a program the reference may refuse; none refuses one
 the reference admits.
 
 What it does NOT carry, out of T3b's own list: `duplicate function` /
@@ -920,6 +943,7 @@ What it does NOT carry, out of T3b's own list: `duplicate function` /
 wellformed declared types at the SERVICE-method and TYPE-declaration sites (T1
 named those already), `_refuse_callable_shadowing` and verified totality (both
 landed earlier), and the parser strictness that refuses `fn f() -> { }`, which
+landed earlier), and the parser strictness that refuses `fn f() -> { }` — which
 is the last row of the crate oracle's `TYPE_LAYER_GAP` and a parser change, not
 a lowering one. No census document turns on any of them, so each is fail-open
 surface rather than a measured divergence.
@@ -940,11 +964,14 @@ before provides, which is the reference's own order: `Env.__init__` walks
 `comp.requires`, `_lower_component` the provisions), and refuses the first that
 resolves against neither the program's own service declarations nor, on the
 ambient path, the running composition's. The item-346 `!services` block, which
+resolves against neither the program's own service declarations nor — on the
+ambient path — the running composition's. The item-346 `!services` block, which
 until now the manifest fold parsed and discarded, is what supplies the second
 set; its `!services` HEADER is the exhaustiveness claim, and a wire that makes
 no claim decides nothing. What it buys, measured: `admit_src` and `admit_into`
 now give DIFFERENT answers about `bench/admission_latency.py::CANDIDATE`, so
 clause 1 of section 6's exit test is met: the rust gate refuses `cache_layer`
+clause 1 of section 6's exit test is met — the rust gate refuses `cache_layer`
 standalone with the reference's own sentence, and lifts that refusal against a
 manifest that declares `Store`. Four corpus documents (`demo/components/*`,
 `examples/ecosystem-consumer/candidates/leaky_tool.rvl`) moved from
@@ -958,6 +985,7 @@ same reason T4a was: it resolves a NAME against a held declaration rather than a
 term, so it needs nothing T1..T3 build. `selfhost/lower.rvl`'s `req_call` looks
 the operation up in the service the requirement resolves to and refuses an
 absent one with `` `db.execute` is not a method of service Database ``, at the
+absent one with `` `db.execute` is not a method of service Database `` — at the
 reference's own position, ahead of the arity count and ahead of the G4 emit-marker
 arm, so an operation nothing declares draws A6 and not G4 even under `emit`. It
 fires only where the declaration is HELD (`svc_decl_known`), which is the whole
@@ -973,6 +1001,7 @@ requirement-RESOLUTION slice the previous entry said was still open: the
 item-346 `:S` row grew an operation list (`:S,get,bump,put`), rendered by
 `revl.manifest.manifest_wire` off the IR's service table, and the fold keeps
 those in `Ctx.ambOps`, deliberately NOT merged into `Ctx.svcs`, because an entry
+those in `Ctx.ambOps` — deliberately NOT merged into `Ctx.svcs`, because an entry
 there carries the emission/async/capability flags the G4 and A1 arms judge and
 the wire carries operation NAMES only. The comma is the claim: `:S` is the wire
 every producer without an operation table renders and decides no member, `:S,` is
@@ -984,6 +1013,7 @@ What it buys, measured: `a6_method_not_in_service` moved from
 `false-admit/A6` to `agree-refuse/A6` (that census bucket is now EMPTY), and the
 rust gate's manifest arm now gives different answers about two candidates that
 differ only in the operation they call: `bench/inprocess_gate_harness.py::
+differ only in the operation they call — `bench/inprocess_gate_harness.py::
 _CALLS_MISSING_METHOD` is refused `A6` with the reference's own sentence where
 `al.CANDIDATE` is not. That is clause 3 of section 6's exit test for the
 `calls_missing_method` candidate, and the second of the three things T4a left
@@ -991,6 +1021,7 @@ open. What it does NOT buy: argument typing and arity on the same call (both nee
 the expression algebra, still T4), the §5 compatibility relation on a
 redeclaration (the block carries operation names, not signatures), and the
 `Admitted` arm, which is now the ONLY thing standing between the rust gate and
+`Admitted` arm — which is now the ONLY thing standing between the rust gate and
 clause 2, and is T6 in full.
 
 **An ordering divergence T4b uncovered, and did not cause.** The A6 refusal is
@@ -1005,6 +1036,8 @@ contributes no handoff verdict at all.
 
 It predates this slice (the same disagreement reproduces with the G1
 undeclared-access refusal, inline-anchored since long before this design), and no
+It predates this slice — the same disagreement reproduces with the G1
+undeclared-access refusal, inline-anchored since long before this design — and no
 corpus program had caught it because the whole-component AGGREGATE verdicts (the
 G4 emission reach) tie at the component line and are saved by `seq`. Both
 refusals are true, so it is a 419c naming divergence and never a false admission.
@@ -1031,6 +1064,7 @@ generator; `admit_src == admit_into(_, "{}")` pinned. ~400 lines plus the
 generator template.
 
 **T5 PARTIAL: the running SIGNATURE, and the oracle.** Read the shape
+**T5 PARTIAL — the running SIGNATURE, and the oracle.** Read the shape
 decision first, because it is not 4.5's. `admit_into` did not wait for this
 slice and did not take JSON: `selfhost/compile.rvl`'s
 `admit_into(source, manifest)` and `crates/revl-gate`'s
@@ -1073,6 +1107,7 @@ Withheld, deliberately, and each is the under-refusing direction:
 * ARITY. `store.get(key, key)` against a one-parameter running `get` is a
   reference refusal with no code, and the gate false-admits it standalone
   too; it is not a manifest question;
+  too — it is not a manifest question;
 * the provide method's RETURN against the service it implements
   (`wrong_return_on_running`), for the same reason: a standalone false-admit,
   T4's;
@@ -1083,9 +1118,11 @@ Withheld, deliberately, and each is the under-refusing direction:
 
 Oracle: `tests/test_selfhost_admit_into.py`, the differential against the
 public `revl.gate.admit_into` over (running, candidate) pairs (the harness's
+public `revl.gate.admit_into` over (running, candidate) pairs — the harness's
 `RUNNING`/`CANDIDATE`, `_REDECLARE_RUNNING`, `_CALLS_MISSING_METHOD`,
 `_INCOMPLETE_PROVIDE`, the hole draft, a same-name replacement, a per-realm
 conflict, the typed pair, plus the generator), asserting the asymmetric
+conflict, the typed pair, plus the generator — asserting the asymmetric
 property: every native refusal is a reference refusal with the same tag and
 sentence, and every native silence is named. `admit_ambient(src, "") ==
 admit_src(src)` is pinned over the whole corpus.
@@ -1328,6 +1365,8 @@ does not close.
   the api string does not move. A fourth arm would have been a fail-open change
   to the js and rust consumers, both of which narrow `admitted` to the literal
   `false`.
+* `NoObjection` removed at T6 with an api bump to `2.0.0` on both tiers,
+  versus kept as a never-returned arm under `1.1.0`.
 * The `TYPE` tag as an oracle-only vocabulary, versus giving the reference a
   `code` on every code-less type-layer refusal so `Verdict.code` agrees on
   py and rust without a classifier (preferred long-term; changes
@@ -1341,6 +1380,8 @@ does not close.
   crate closure and `serde_json` stays off the dependency list. A slice that
   wants the JSON document back has to argue against three landed slices, not
   against this bullet.
+* `admit_into` takes JSON through `stdlib/json.rvl` (adds `serde_json` to the
+  crate), versus a purpose-built line format the py side would render.
 * Ownership's `Admitted` trigger is `effect` in any component (coarse) until
   item 308 ports O1/B1.
 

@@ -314,6 +314,7 @@ def signed_bytes(domain: bytes, body: Mapping[str, Any]) -> bytes:
 def sign_record(domain: bytes, body: Mapping[str, Any],
                 identity: PeerIdentity, *,
                 network_exposed: bool = False) -> dict:
+                identity: PeerIdentity) -> dict:
     """Sign ``body`` under ``identity``, returning the record plus its
     signature.
 
@@ -334,6 +335,7 @@ def sign_record(domain: bytes, body: Mapping[str, Any],
     :class:`~revl.tee_quote.SigningBackendUnavailable`, naming the
     ``revl[crypto]`` extra, rather than sign in timing-variable pure Python.
     The check runs before anything is signed or derived."""
+    digest be pinned."""
     if not isinstance(identity, PeerIdentity):
         raise IdentityError("signing needs a PeerIdentity, not a raw key")
     if network_exposed:
@@ -347,6 +349,7 @@ def sign_record(domain: bytes, body: Mapping[str, Any],
         identity.curve, identity.private_key,
         signed_bytes(domain, record),
         network_exposed=network_exposed).hex()
+        signed_bytes(domain, record)).hex()
     return record
 
 
@@ -721,6 +724,7 @@ PUBLIC_KIND = "revl.peer-identity-public"
 
 def write_private_identity(path, identity: PeerIdentity, *,
                            exclusive: bool = False) -> None:
+def write_private_identity(path, identity: PeerIdentity) -> None:
     """Write a peer's own key pair, private half included, at mode 0600.
 
     The only function in this module that puts a private scalar on disk, and it
@@ -732,6 +736,7 @@ def write_private_identity(path, identity: PeerIdentity, *,
     at the path, is a ``FileExistsError`` and is left as it was, so a key is
     never overwritten and no file is reused with the permissions it had. The
     release signing key uses it; ``revl pool keygen`` keeps its overwrite."""
+    the moment two parties hold the same private half."""
     import os  # noqa: PLC0415
     from pathlib import Path  # noqa: PLC0415
 
@@ -744,6 +749,7 @@ def write_private_identity(path, identity: PeerIdentity, *,
                "private_key": format(identity.private_key, "064x")}
     flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
     handle = os.open(str(target), flags, 0o600)
+    handle = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(handle, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, indent=2, sort_keys=True)
         stream.write("\n")

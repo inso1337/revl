@@ -22,6 +22,11 @@ present BOTH scoped and bare. A wording change to the render then shows up as a
 diff on `EXPECTED_HOST_CODE` in this file, reviewed deliberately, rather than
 reaching a consumer silently. It does not freeze the format — it makes changing
 it visible.
+exercises all four G4 classifications — `pure`, `acquire`, `emission`,
+`witnessed` — with the two scopable classes (`emission`, `witnessed`) present
+BOTH scoped and bare. A wording change to the render then shows up as a diff on
+`EXPECTED_HOST_CODE` in this file, reviewed deliberately, rather than reaching a
+consumer silently. It does not freeze the format — it makes changing it visible.
 
 NON-VACUITY (issue #288 exit test — "prove it bites"): re-applying #257's change
 means rendering the ` [fs]` token differently on the witnessed/emission line.
@@ -48,6 +53,7 @@ from revl.__main__ import main  # noqa: E402
 # mutations name their inverses, as G4 requires. `local` (item 2146) takes no
 # inverse and no scope, and — unlike every other class — is only reachable from
 # a provide-METHOD body, so `Worker` provides a one-method service to reach it.
+# mutations name their inverses, as G4 requires.
 CORPUS = """\
 type Handle = { fd: Int }
 type W = { path: Str }
@@ -65,6 +71,7 @@ extern local fn record(p: Str) -> Unit = @py { return None }
 service Journal { fn append(n: Str) -> Unit }
 
 component Worker provides j: Journal {
+component Worker {
   let h = effect open_h() undo release_h(h)
   emit send(digest("m"))
   emit store("k")
@@ -120,6 +127,9 @@ def test_json_boundary_externs_are_the_supported_surface(tmp_path, capsys):
     # classifications), `inverse` (issue #2692's derived provenance class),
     # `capabilities` (the scoped token, present only when scoped), and
     # `backends` (the tier).
+    # the human line folds into text is a documented key here: `class` (all four
+    # classifications), `capabilities` (the scoped token, present only when
+    # scoped), and `backends` (the tier).
     doc = json.loads(_audit_stdout(tmp_path, capsys, "--json"))
     externs = doc["boundary"]["Worker"]["externs"]
     assert externs == [
@@ -139,15 +149,26 @@ def test_json_boundary_externs_are_the_supported_surface(tmp_path, capsys):
          "backends": ["py"]},
         {"name": "write", "class": "witnessed", "inverse": "declared",
          "backends": ["py"], "capabilities": ["fs"]},
+        {"name": "digest", "class": "pure", "backends": ["py"]},
+        {"name": "open_h", "class": "acquire", "backends": ["py"]},
+        {"name": "release_h", "class": "pure", "backends": ["py"]},
+        {"name": "send", "class": "emission", "backends": ["py"]},
+        {"name": "store", "class": "emission", "backends": ["py"],
+         "capabilities": ["db"]},
+        {"name": "touch", "class": "witnessed", "backends": ["py"]},
+        {"name": "write", "class": "witnessed", "backends": ["py"],
+         "capabilities": ["fs"]},
     ]
 
 
 def test_all_five_classifications_are_covered(tmp_path, capsys):
+def test_all_four_classifications_are_covered(tmp_path, capsys):
     # Guard the corpus itself: if a future edit drops a classification, this
     # fails rather than letting the golden certify less than it names.
     doc = json.loads(_audit_stdout(tmp_path, capsys, "--json"))
     classes = {e["class"] for e in doc["boundary"]["Worker"]["externs"]}
     assert {"pure", "acquire", "emission", "witnessed", "local"} <= classes
+    assert {"pure", "acquire", "emission", "witnessed"} <= classes
     # both scoped and bare present for the two scopable classes
     externs = {e["name"]: e for e in doc["boundary"]["Worker"]["externs"]}
     assert externs["store"]["capabilities"] == ["db"]   # emission, scoped

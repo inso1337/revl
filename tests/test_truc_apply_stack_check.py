@@ -71,6 +71,7 @@ def _pin(proj: Path, name: str) -> None:
         if row["name"] == name:
             row["sourceHash"] = digest
     lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+           "trucs": [{"name": "pg_database", "sourceHash": "a" * 64}]}
 
 
 def _project(tmp_path: Path, *, stack: str = "", lock: dict | None = _PINNED,
@@ -261,6 +262,7 @@ def test_stack_check_refuses_a_vendored_component_that_no_longer_matches_its_pin
     report = json.loads(_host.stack_check(str(proj)))
     assert report["code"] == 1
     assert "hash drift" in report["message"]
+    assert "PgDb" in assembly.read_text()
 
 
 def test_apply_refuses_an_unpinned_truc_and_leaves_build_untouched(tmp_path):
@@ -409,6 +411,7 @@ def test_cli_apply_admits_and_writes_the_assembly(tmp_path):
     assert "applied" in result.stdout
     assembly = proj / "build" / "assembly.json"
     assert assembly.exists() and "PgDb" in assembly.read_text(encoding="utf-8")
+    assert assembly.exists() and "PgDb" in assembly.read_text()
 
 
 @_cli

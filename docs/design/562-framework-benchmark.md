@@ -248,6 +248,7 @@ it answers a different question and the two do not belong in one column.
 The framework's cells were `not-run` at this pass. Naming a host is not running
 one. Pass three (§6.5) builds the harness and runs it; the row it produces
 covers a fraction of the task set and states its `n`.
+The framework's cells are still `not-run`. Naming a host is not running one.
 
 ### 6.2 The escape column measures the model first
 
@@ -522,6 +523,7 @@ model. The run above was taken once the endpoint served the pinned tag.
 - `bench/results/framework-bench/`: the committed artifacts, raw beside the
   summary. Since issue #1768 `report.{json,md}` there is a snapshot that does
   not freeze the refused column, which is recomputed on every build.
+  summary.
 - `tests/test_framework_bench.py`: the tests.
 
 Nothing is published outside this repository. Publication is a named remaining

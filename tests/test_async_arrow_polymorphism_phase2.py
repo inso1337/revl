@@ -49,6 +49,7 @@ def _functions(ir):
 # callee.
 _REPRO = (
     "extern pure fn sync_op(x: Str) -> Str\n"
+    "extern emission fn sync_op(x: Str) -> Str\n"
     '  = @py { return x + " (sync)" }\n'
     '  = @ts { return x + " (sync)" }\n'
     "fn loop(c: (Str) -> Async[Str], x: Str) -> Str {\n"
@@ -196,6 +197,7 @@ def test_genuinely_async_module_fn_keeps_the_async_loop():
     # monomorphized to the sync clone.
     src = (_ASYNC_EXTERN
            + "extern pure fn sop(x: Str) -> Str = @py { return x }\n"
+           + "extern emission fn sop(x: Str) -> Str = @py { return x }\n"
            + "  = @ts { return x }\n"
            + "fn loop(c: (Str) -> Async[Str], x: Str) -> Str { let r = c(x)\n return r }\n"
            + "fn caller(x: Str) -> Str {\n"

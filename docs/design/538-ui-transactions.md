@@ -365,6 +365,9 @@ measurement. All five have now landed; each entry carries its own evidence.
 Slice 3's run is now also PERFORMED, on the python reference tier only (see
 slice 3 below). What the five do not include is a DECLARED transaction unit,
 and the check-to-use race is issue #1371.
+What the five do NOT include is execution: revl computes a compensation run and
+performs no crossing, which is issue #1369's remainder, and the check-to-use
+race is issue #1371.
 
 **Slice 1: the classification and the two teardown refusals. LANDED.**
 `src/revl/ui_family.py` gains the five classes, the per-verb table, the
@@ -576,6 +579,10 @@ oracle, its control and its rules on this tier, plus a unit holding a
 witnessed inverse, a non-computer-use declared compensation and a
 site-spelled one. The go runtime has no E-Stop, so there is no halted run
 here.
+What did not land with it: revl performs nothing. It computes the run, and the
+compensating crossings are the substrate's (item 539), exactly as the
+actuations are. A compensation that is performed and FAILS has no word in
+section 2's five states, and none was invented for it.
 
 **Slice 4: `uncompensated` on the residue report. LANDED** (PR #1287 and
 #1296 for the states and the DOES NOT PROVE clauses, PR #1386 for the run the
@@ -657,6 +664,10 @@ Written down so a reader does not infer more than was measured.
   substrate's host body raises, and slice 5's binding says which read would
   have to raise for the transaction to learn about a given step. No other
   phase runs, and the substrate is item 539.
+- **No phase executes.** Slice 3 COMPUTES the LIFO run and slice 5 computes
+  which read carries which postcondition; neither performs a crossing, drives
+  a desktop, or evaluates a postcondition against a real screen. Section 3's
+  table is still a division of responsibility, and the substrate is item 539.
 - **A step with no bound postcondition starts no run.** A LIFO run is
   triggered by an unmet postcondition, so an actuation that has none is an
   actuation whose failure the transaction never learns about. The plan

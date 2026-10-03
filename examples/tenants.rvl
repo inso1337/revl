@@ -44,10 +44,12 @@ component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
   intercept kv with { quota: 5, tags: ["tenant_a"] }
   effect kv.set("who", "alice") undo kv.unset("who")
+  effect kv.set("who", "alice") undo kv.set("who", "")
 }
 
 component TenantBApp requires kv: Kv {
   isolate kv in realm("tenant_b")
   intercept kv with { quota: 9, tags: ["tenant_b"] }
   effect kv.set("who", "bob") undo kv.unset("who")
+  effect kv.set("who", "bob") undo kv.set("who", "")
 }

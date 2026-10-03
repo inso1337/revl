@@ -1,4 +1,5 @@
 node v25.6.1   cases: 7
+node v26.7.0   cases: 7
 all default numbers are COUNTS, not durations: they do not move with machine load
 
 ## async-arrow-value
@@ -46,6 +47,7 @@ all default numbers are COUNTS, not durations: they do not move with machine loa
 
 ## string-scan-helpers
   revlLen/revlCharAt/revlCharCodeAt/revlSlice share one memoised code-point decode (item 435(c)), so an index scan decodes its string once (and a string with no surrogate unit, like the ASCII input here, materialises no array at all) instead of 2n + 1 times, even though the while lowering still calls revlLen per iteration
+  revlLen/revlCharAt/revlCharCodeAt/revlSlice share one memoised code-point decode (item 435(c)), so an index scan materialises n code points, not 2n^2 + n, even though the while lowering still calls revlLen per iteration
   emitted     microtask turns         2   promise allocs         3 per run
   hand-memo   microtask turns         2   promise allocs         3 per run
   hand        microtask turns         2   promise allocs         3 per run
@@ -59,6 +61,11 @@ all default numbers are COUNTS, not durations: they do not move with machine loa
   800                 0          800          800
   1600                0         1600         1600
   emitted: no growth (0)
+  200               200          200          200
+  400               400          400          400
+  800               800          800          800
+  1600             1600         1600         1600
+  emitted: LINEAR in n (x2.0 per doubling of 200..1600)
 
 ## list-build element copies (exact counts, no timing)
   n         emitted         hand

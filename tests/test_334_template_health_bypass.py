@@ -90,6 +90,7 @@ def test_swap_rejects_a_successor_that_hides_its_declared_provider_in_a_template
 
         with pytest.raises(SessionError, match="did not resolve to a live provider"):
             session.swap(cand, agent_authored=False)
+            session.swap(cand)
 
         # gen N is intact and still answering — the revert guarantee held.
         assert session.state()["providedKeys"] == ["greeter"]
@@ -175,6 +176,7 @@ def test_a_legitimate_template_swap_still_succeeds():
         assert session.call("admin", "ver", [])["result"] == 1
 
         state = session.swap(compile_source(_instance_source(2), "mig.rvl"), agent_authored=False)
+        state = session.swap(compile_source(_instance_source(2), "mig.rvl"))
 
         assert state["providedKeys"] == ["admin"]
         assert session.call("admin", "ver", [])["result"] == 2
@@ -198,6 +200,7 @@ def test_a_successor_may_introduce_a_brand_new_template_provided_key():
 
         # gen N+1 adds a spawned Worker whose `store` is template-provided.
         state = session.swap(compile_source(_instance_source(1), "mig.rvl"), agent_authored=False)
+        state = session.swap(compile_source(_instance_source(1), "mig.rvl"))
 
         assert state["providedKeys"] == ["admin"]  # `store` is per-instance
         assert session.call("admin", "ver", [])["result"] == 1

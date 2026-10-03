@@ -62,13 +62,16 @@ def _compile(source: str | None, files: list[str] | None,
              manifest: dict | None = None,
              replacing: tuple[str, ...] = (),
              report: dict | None = None) -> dict:
+             replacing: tuple[str, ...] = ()) -> dict:
     """Dispatch to the same entry points the CLI and the MCP bridge use, so
     a plan is computed against the literal admission gate. `report` retains
     the compile's source map for the apply artifact's disclosure provenance."""
+    a plan is computed against the literal admission gate."""
     if source is not None:
         return compile_source(source, "<candidate>.rvl", manifest=manifest,
                               replacing=replacing, modules=modules,
                               report=report)
+                              replacing=replacing, modules=modules)
     if not files:
         raise ValueError("provide `source` or `files`")
     return compile_files(list(files), manifest=manifest, replacing=replacing,
@@ -100,6 +103,7 @@ def _candidate_host_bodies(ir: dict, report: dict, candidate_sources: set[str],
                    for extern in (ir.get("externs") or [])
                    if extern.get("name") in names and has_host_code(extern)),
         key=lambda entry: str(entry.get("extern")))
+                                  for p, t in (modules or {}).items()} or None)
 
 
 def _boundary_of(ir: dict) -> dict:
@@ -192,6 +196,8 @@ def _merge_resulting_ir(running_ir: dict | None, candidate_ir: dict,
         "services": {**(running_ir.get("services") or {}),
                      **(candidate_ir.get("services") or {})},
         "functions": list(functions.values()),
+        "functions": {**(running_ir.get("functions") or {}),
+                      **(candidate_ir.get("functions") or {})},
         "externs": list(externs.values()),
         "manifest": candidate_ir.get("manifest") or running_ir.get("manifest") or {},
         # issue #3484: the composition rows the components start from. A
@@ -206,6 +212,7 @@ def plan(source: str | None = None, files: list[str] | None = None,
          manifest: dict | None = None, modules: dict[str, str] | None = None,
          replacing: tuple[str, ...] = (), include_ir: bool = False,
          operator_sources: set[str] | None = None) -> dict:
+         replacing: tuple[str, ...] = (), include_ir: bool = False) -> dict:
     """What admitting this candidate would do to the running composition.
 
     `manifest` is a compiled IR document of what is running (or its
@@ -267,6 +274,7 @@ def plan(source: str | None = None, files: list[str] | None = None,
     try:
         candidate_ir = _compile(source, files, modules, manifest=running_ir,
                                 replacing=replacing, report=compile_report)
+                                replacing=replacing)
         basis, admissible = "admitted", True
     except RevlError as error:
         admissible = False

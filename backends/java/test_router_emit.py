@@ -34,6 +34,7 @@ import javac_gate  # noqa: E402
 from revl import compile_source  # noqa: E402
 
 SCENARIO = (BACKEND / "scenarios" / "router.rvl").read_text(encoding="utf-8")
+SCENARIO = (BACKEND / "scenarios" / "router.rvl").read_text()
 
 
 def _emit(source: str) -> str:

@@ -121,6 +121,7 @@ On a **verified** swap the exported value is threaded from old to new through
    spans realms starts cold for an agent-authored successor, with `reason:
    "multi-realm"`. An operator-written successor of such a frame still
    migrates.
+   *what it provides*.
 2. **Restore, after load.** `_restore_provider_state` re-seats each captured
    vector onto the successor's provider fiber through the resources'
    `__revl_restore__` protocol — **check the whole cohort, then apply**, so a
@@ -244,3 +245,7 @@ runs the reverse hand-off.
   start, the opt-out, the realm cases and the rollback, executed on cordis-ts)
   and `backends/typescript/test_handoff_ts.py` (the emitted declaration and
   tracking, inert emission, admission refusal and acceptance).
+  `_restore_provider_state`, and the extended `_abort_swap`);
+* tests — `tests/test_state_handoff.py` (grammar, lowering, the gate; no runtime)
+  and `tests/test_state_handoff_exec.py` (the warm start and the rollback, on
+  cordis-py).

@@ -18,6 +18,12 @@ gen-types  docs  import  export  sourcemap  serve  run  dev  recover
 act  estop  slo  branch  compare  replay  why  metrics  trace  profile
 pool  attest  dash  repair  bundle  emit  verify  deploy  deploy-admit
 federation-apply  truc
+layer  audit  goal  policy  simulate  diff  changelog  version  contract
+erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
+quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
+dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
+profile  pool  attest  dash  repair  bundle  emit  verify  deploy
+deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -182,6 +188,7 @@ codes of the design catalogue, plus `OTHER_CODES` for every remaining code the
 compiler, the gate, the session and the MCP faces emit. So a code a rejection
 can hand back has an answer, not just the catalogue ones (issue #2028). The
 exceptions are deliberate and are named below.
+the built-in guarantee/fix table (`src/revl/diagnostics.py`).
 
 - `CODE` - a diagnostic code, e.g. `G4` (case-insensitive), required.
 - `--json` - machine-readable output.
@@ -234,9 +241,13 @@ already; this command is for reading one by name.
   stands inside the example and carries the example component's own names, so
   it is refused if submitted (issue #2115); a hole's
   `fillable.producers[].write` carries the fills.
+  `match`, `timer`). With no name, the list.
+- `--json` - the entry as `{name, summary, rules, fill, example}`.
 
 Every idiom compiles, admits for an untrusted author, and, with its internal
 `fill` marker replaced by a hole, yields a fillSpec naming that same construct
+Every idiom compiles, admits for an untrusted author, and, with its `fill`
+replaced by a hole, yields a fillSpec naming that same construct
 (`tests/test_idioms_1701.py`). An unknown name exits 2.
 
 ```bash
@@ -250,6 +261,7 @@ revl idiom effect-undo --json
 Print the language surface, sized for a prompt, or a machine-readable grammar
 of revl source for a grammar-constrained decoder. No sources, except the
 `--tool` form below, which needs the files declaring the service.
+of revl source for a grammar-constrained decoder. No sources.
 
 - `--prompt` - the dense, complete, prompt-pinnable grammar (also shipped as
   `docs/syntax-2.0.prompt.txt`) instead of the short human summary.
@@ -317,6 +329,7 @@ from its `package.json`.
   the same `resolution` map as a top-level field, so an automation diffs one
   field rather than scraping the per-row detail strings. It also carries a
   `checkout` field, `null` for an installed revl.
+  field rather than scraping the per-row detail strings.
 - `--no-smoke` - skip the per-tier compile+boot smoke test (report only).
 - `--smoke-timeout SECONDS` - per-tier smoke-test timeout (default: 90).
 
@@ -369,6 +382,7 @@ refuses it until every `hole[T]` is filled ([holes.md](holes.md)).
   `<Service>Resource`). A type application like `Map[Str, Str]` names a host
   family whose `Unit`-returning operations a `Unit` method's fill spec lists
   (issue #1948).
+  `<Service>Resource`).
 - `--no-effect` - omit the acquire/undo effect block.
 - `-o`, `--out PATH` - write the `.rvl` skeleton here (default: stdout).
 - `--json` - print the skeleton, its obligations, and each hole's fill spec
@@ -430,6 +444,8 @@ revl composition base.rvl --admit
 
 Derive a Petri net from the composition IR - provisions as places, activations
 as transitions - and search it by bounded reachability for a dead state, a
+Derive a Petri net from the composition IR — provisions as places, activations
+as transitions — and search it by bounded reachability for a dead state, a
 marking from which some component can never activate. This is the REACHABILITY
 question G2/G3/G7 do not answer ([analyze-liveness.md](analyze-liveness.md), item
 438). Report-only: it names the deadlocked cycle, it does not refuse admission.
@@ -621,6 +637,11 @@ blast-radius summary bounded by that recorded action set. `swap` re-runs the
 recorded calls into ONE component against a changed version of it, and reports
 the first returned value that moved. Both are previews: neither admits, refuses
 or mutates, and neither gives live effect authority to the change.
+Simulate a change against a recorded run (roadmap item 468). `simulate` has
+one subcommand, `policy-diff`, which reads two boundary policies and one
+write-ahead log and computes the newly-allowed and newly-denied action sets the
+change would have made over the crossings that run actually recorded, plus a
+blast-radius summary bounded by that recorded action set.
 
 This is not `revl audit --diff`, which re-audits a generation and fails when it
 adds boundary crossings but keeps no policy on its path. It is also not
@@ -642,6 +663,8 @@ rest: the agent-sandbox allow-list, the taint-flow tier, the approval and
 declassify rules, the per-component and composition pair rules, the
 declaration-strength floors, the evidence bundle and the recovery surface all
 decide by facts a WAL does not carry. Every leg is named in
+declassify rules, the declaration-strength floors, the evidence bundle and the
+recovery surface all decide by facts a WAL does not carry. Every leg is named in
 the report and in `--json`, and a recorded pair whose surface moves on one of
 them is reported undecided with the leg named, never as unchanged, so a widening
 on a leg this diff cannot read is not reported clean.
@@ -784,6 +807,7 @@ component can perform and the capabilities each crosses.
 Also prints the **retention surface** (roadmap item 308 F10) when the
 composition has one: every declared position at which a resource handle leaves
 revl's sight - a resource-carrying parameter of a non-inverse extern, or of a
+revl's sight — a resource-carrying parameter of a non-inverse extern, or of a
 service method whose implementation may live host-side. This is report-only and
 refuses nothing: the ownership checks refuse a borrow that escapes through a
 revl position, but a host body that keeps the handle it was handed escapes
@@ -864,12 +888,16 @@ question.
   stable crossing weakens or widens: a weaker reach or `inverse` class, a
   wider capability scope, a new host backend body, a dropped or weakened
   recovery, a weakened register floor, or a raised emission ceiling
+  the new generation ADDS boundary crossings not in `PREV.json`
   ([audit-diff.md](audit-diff.md)).
 - `--accept CROSSING` - acknowledge one gated token (an added crossing, or a
   token such as `inverse:<name>`, `scope:<component>:<label>` or
   `backend:<extern>:<backend>`), so it no longer fails `--diff` (the token
   printed after `+`); repeatable.
 - `--accept-all` - acknowledge every gated token under `--diff`.
+- `--accept CROSSING` - acknowledge one added crossing so it no longer fails
+  `--diff` (the token printed after `+`); repeatable.
+- `--accept-all` - acknowledge every added crossing under `--diff`.
 - `--policy POLICY` - boundary-policy gate (roadmap item 33): evaluate a
   policy file over the audit graph and REFUSE admission (nonzero) if any
   component reaches a capability it may not ([boundary-policy.md](boundary-policy.md)).
@@ -943,6 +971,7 @@ itself is never written, only its visibility and the host-reported size.
   true` in the `--json` row. It is ordering evidence
   only: a clean row admits nothing and a refused admission does not fail the
   command, which exits 0 whenever the report is produced.
+  statically, so no live effect fires.
 - `--json` - machine-readable output.
 
 ```bash
@@ -1406,6 +1435,7 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 - `FILES` (required). A file under `.revl/export/` compiles under the
   authoring profile unless `--trust-exported` is given; see
   [Files under `.revl/export/`](#files-under-revlexport).
+- `FILES` (required).
 - `--backend {py, ts, rust, java, wasm, go}` - target runtime tier (default:
   `py`). All six boot live: `py` in-process, the rest each as a separate
   process over the bridge seam. A missing runtime is a skip with a reason and
@@ -1451,6 +1481,7 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 - `--allow-unsynced-wal` - explicitly permit WAL fsync failures. WAL durability
   is then not guaranteed, and a warning says so on stderr. Requires `--wal` and
   the single-process Python backend (exit 2 otherwise).
+  back with a checked verdict ([crash-recovery.md](crash-recovery.md)).
 - `--estop-latch FILE` - watch FILE for an operator E-Stop, so `revl estop
   --latch FILE` from another terminal halts this run immediately
   ([443-estop.md](design/443-estop.md)). Unarmed by default; an unarmed run
@@ -1496,6 +1527,7 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
     then fail to verify. A non-loopback address needs the `revl[crypto]` extra
     for constant-time signing and exits 2 naming it, before the ledger is
     touched, when it is missing (issue #1460).
+    then fail to verify.
   - `--dispatch-identity PATH` - the operator's PRIVATE identity file, which
     signs the task. The peer holds only its public half.
   - `--attest-identity PATH` - the private identity file that attests the
@@ -1631,15 +1663,19 @@ LIFO), ending in a checked verdict + residue proof
 - `--model-only` - accept a run against the in-memory model (see below).
 - `--json` - machine-readable output. The verdict carries `world`, and with
   `--composition` a `binding` object naming the providers it booted.
+- `--json` - machine-readable output. The verdict carries `world`.
 
 Without `--composition`, `revl recover` replays against an in-memory model
 (`DictWorld`). Every call it reports is marked `[modelled, not
+`revl recover` cannot bind the real outside world yet, so it replays against an
+in-memory model (`DictWorld`). Every call it reports is marked `[modelled, not
 performed]`, the verdict carries `"world": "model"` and `"worldCalls"`, and a
 model run never writes an at-most-once fence to the WAL. Exit status: `0`
 clean (with `--model-only` if the model stood in for any call), `1` honest
 residue, `3` clean in the model after the model stood in for at least one call,
 without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477)
 and, for `--composition`, [section 5c](crash-recovery.md#5c-recovering-against-the-real-world-issue-1477).
+without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477).
 
 ### `revl estop`
 
@@ -1653,6 +1689,7 @@ and pays for a full unwind; estop pays for a latch flip. The price is stated,
 not hidden: **nothing is unwound.** No inverse runs, no compensation runs,
 nothing is discharged; every registered entry is left stranded (still owed) and
 every acquired handle stays held. The instance is dead afterwards - there is no
+every acquired handle stays held. The instance is dead afterwards — there is no
 resume, and the way back is `revl recover --wal FILE`.
 
 - `--latch FILE` - the latch file the running process watches (`revl run
@@ -1665,6 +1702,7 @@ resume, and the way back is `revl recover --wal FILE`.
   An entry is outstanding until a `discharge` record (a commit) or an
   `aborted` record (a recover replayed it) settles it; `settled` counts the
   ones that were.
+  inventory is read from.
 - `--reason TEXT` - why the button was hit; carried into the halt record and
   every residue record it produces.
 - `--operator TOKEN` - the operator accountable for the halt. An E-Stop is an
@@ -1687,8 +1725,10 @@ which one each component got:
 
 - a process on a tier that HONORS the latch (today: `py`) refuses new crossings
   at its own seams from the instant the latch appears, prints its inventory -
+  at its own seams from the instant the latch appears, prints its inventory —
   the entries it stranded and the at-most-one crossing that was already
   dispatched - and dies where it stands, running no teardown;
+  dispatched — and dies where it stands, running no teardown;
 - a process on any other tier (`node`, `rust`, `go`, `java`, `wasm`) has no
   E-Stop seam, so the only halt available for it is a SIGKILL. It may have
   dispatched a crossing microseconds before it died and nothing recorded that,
@@ -1925,6 +1965,7 @@ machines. The verbs declare a pool, admit a peer that proves its identity and
 its artifact, read the roster, check that members are still there, run work on
 a member and read the delivery ledger, move a member up the ladder the charter
 declares, and withdraw a peer. See
+a member and read the delivery ledger, and withdraw a peer. See
 [design/550-private-peer-pool.md](design/550-private-peer-pool.md) for the trust
 progression and the failure direction of every step in it, and
 [design/567-pool-dispatch.md](design/567-pool-dispatch.md) for the task
@@ -1949,6 +1990,11 @@ exclusive lock on `pool.lock` in the directory for its read-modify-write,
 never while waiting on a peer, and every state file is replaced atomically, so
 no update is lost and `status` never reads half a file. The lock is advisory:
 it binds `revl` processes, not other programs editing the files.
+`join`, `withdraw`, `probe`, and `run --pool private`) holds an exclusive lock
+on `pool.lock` in the directory for its read-modify-write, never while waiting
+on a peer, and every state file is replaced atomically, so no update is lost
+and `status` never reads half a file. The lock is advisory: it binds `revl`
+processes, not other programs editing the files.
 
 A peer's identity is an asymmetric key pair by default (issue #1278): the peer
 draws it with `pool keygen`, the operator pins only the public half with `pool
@@ -2049,6 +2095,7 @@ for the key lifecycle and what the signature binds.
   - `--dir DIR`
   - `--json` - the charter, the roster with its event ledger, the identity
     directory, the violation census and the health record.
+    directory and the health record.
   - `--require-live SECONDS` - a health check: exit 1, naming the members on
     stderr, if any member's most recent contact was not a verified heartbeat
     or delivery within SECONDS. It withdraws nobody.
@@ -2113,6 +2160,8 @@ for the key lifecycle and what the signature binds.
   operator does not trust coherent. Every refusal names a link
   (`task-signature`, `charter-identity`, `artifact-digest`, `stale-task`,
   `replayed-task`, ...) and is answered on the connection rather than dropped. It also answers
+  (`task-signature`, `charter-identity`, `artifact-digest`, `replayed-task`,
+  ...) and is answered on the connection rather than dropped. It also answers
   `pool probe` with a signed heartbeat, after checking the probe against the
   same pinned operator key; a probe runs nothing.
   - `--charter PATH` - the charter this peer joined. A task must pin its
@@ -2136,6 +2185,7 @@ for the key lifecycle and what the signature binds.
     because the peer signs a receipt for every task a remote party sends and
     the pure-Python signer's timing leaks its key (issue #1460; see
     [tee-attestation-root.md](tee-attestation-root.md)).
+    work, which this is a caller of rather than a second copy of.
   - `--workdir DIR` - where artifacts are written and run (default: a fresh
     temporary directory removed on exit). The ids of the tasks this peer has run
     are also kept here, in `seen@tasks.jsonl`, written before each run, so a
@@ -2145,6 +2195,7 @@ for the key lifecycle and what the signature binds.
     `join_window_s` (300 seconds by default), in either direction, is refused
     on `stale-task` before it runs; a peer that cannot write the id down refuses
     on `peer-state`.
+    temporary directory removed on exit).
   - `--timeout SECONDS` - how long one artifact may run (default 300).
   - `--once` - serve one task and exit.
 - `ledger` - the delivery ledger: every task dispatched, its state
@@ -2358,6 +2409,7 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
   check L-Raise / no-residue / LIFO / siblings at each (py tier). With
   `--backend all`, sweep every runtime whose toolchain is present and assert
   they agree - residue-free on every tier; a toolchain-absent or
+  they agree — residue-free on every tier; a toolchain-absent or
   not-yet-capable tier loud-skips, never a false green. Set `REVL_SWEEP_CAP=N`
   to take a representative corpus on the heavy tiers (§10 of
   [fault-tests.md](fault-tests.md)).
@@ -2448,6 +2500,8 @@ No network access is performed.
 - `--digest NAME=DIGEST` - with `--anchor`: a digest the verifier holds; the
   anchor may not omit it or commit to a different value. Repeatable.
 - `--json` - machine-readable tier-by-tier report, or the anchor verdict.
+- `BUNDLE` - a bundle directory written by `revl bundle` (required).
+- `--json` - machine-readable tier-by-tier report.
 
 ```bash
 revl verify app.revlbundle
@@ -2477,6 +2531,8 @@ containing `/`, `\`, `:`, `..` or a NUL byte is refused, since it names a file i
 the deploy state directory. See [mcp-reference.md](mcp-reference.md#revl_deploy)
 for the full rule. Container launch
 orchestration is still to come.
+coordinated rollback (roadmap item 118). Every seam is a local process seam
+today; cross-machine control-plane pieces are deliberately deferred.
 
 - `MAP` - the deploy/placement map (TOML or JSON): `[processes.<p>]` with an
   optional `[processes.<p>.deploy]` table per process.
@@ -2514,6 +2570,8 @@ target is admitted only for `via = ssh` with both a `host` and a `known_hosts`
 any other machine target (including `via = peer`) is refused by name. An
 unknown `via` is refused rather than read as local, and a container target is
 refused unless it is proven seam-free.
+boundary is refused outright, an unknown `via` is refused rather than read as
+local, and a container target is refused unless it is proven seam-free.
 
 Without `--dry-run`, an admitted map is DEPLOYED: one participant per process
 is driven through the two-phase PREPARE/COMMIT protocol. A `via = local`
@@ -2525,14 +2583,21 @@ without one it is refused at the stage phase. The `--bundle` chain is verified
 in PREPARE before any boundary opens (`--dry-run` runs it too). For an ssh
 target the far host's `revl deploy-admit` runner also verifies the staged bytes
 against its own local trust store and returns a signed verdict. The coordinator holds only an ordered commit
+Without `--dry-run`, an admitted map is DEPLOYED over the process boundary
+(`via = local`): one participant per process is spawned and driven through the
+two-phase PREPARE/COMMIT protocol. The coordinator holds only an ordered commit
 ledger and, on any COMMIT failure, drives ABORT in reverse ledger order so each
 participant runs its own local LIFO unwind - a participant it cannot reach is
+participant runs its own local LIFO unwind — a participant it cannot reach is
 reported `unresolved`, never rolled back. The aggregate verdict is `applied`
 only when every participant applied, `aborted-clean` only when every committed
 participant rolled back clean, otherwise `aborted-with-residue`. Because
 admission supplies no seam set here, a container target is refused, so only
 process-boundary and pinned ssh targets reach the COMMIT path; container launch
 orchestration is still to come.
+admission supplies no seam set here, only a process-boundary target reaches the
+COMMIT path; the cross-machine / container launch orchestration and the
+host-side chain verify at admission are following slices.
 
 ```bash
 revl deploy deploy.toml --dry-run     # plan admission, stop before COMMIT
@@ -2587,6 +2652,8 @@ process and speaks to it over stdin/stdout (`deploy.StdioRunnerTransport`);
 across a machine boundary it
 is the same command behind `ssh <host>`, with the bundle staged onto the far
 host under a pinned SSH host key (`revl deploy`, `via = ssh`).
+is the same command behind `ssh <host>`, which is a following slice together
+with the bundle staging and pinned SSH host key.
 
 ```bash
 # usually spawned by a transport, not by hand; driven over stdin/stdout:
@@ -3015,6 +3082,7 @@ G7 teardown. See [import-a2a.md](import-a2a.md) §2.
 ### `revl export`
 
 The reverse of `revl import`. Three subcommands: `wit`, `client` and `openapi`.
+The reverse of `revl import`. Two subcommands.
 
 `revl export wit FILES` - generate the standard WIT interface for a revl
 service or composition ([wit-bridge.md](wit-bridge.md)).
@@ -3222,6 +3290,7 @@ that composes `stdlib/auth.rvl` for them is refused at compile time.
   `REVL_HTTP_BACKLOG` overrides the value (a non-positive or non-numeric value
   keeps 128, values above 65535 are clamped, and the kernel caps the queue at
   `somaxconn`).
+- `--port PORT` - `--http` bind port (default: `8080`).
 - `--tls-cert PEM`, `--tls-key PEM` - serve HTTPS.
 - `--allow-host NAME` - a Host value to answer besides the bind address
   (repeatable). A request with any other Host is refused (403), which stops DNS

@@ -446,8 +446,10 @@ def test_the_baseline_ratchet_did_not_absorb_the_false_alarm():
     # CARRIED with a measured witness rather than to quiet the run. #1805 is
     # the same shape: its head was carried in #1773's branch, which GitHub
     # recorded as a merge into that branch, and #1773 then squashed to main.
+    # CARRIED with a measured witness rather than to quiet the run.
     assert sorted(entries) == ["1236", "1296", "1305", "1308", "1309", "1318",
                                "1319", "1320", "1607", "1805"], sorted(entries)
+                               "1319", "1320", "1607"], sorted(entries)
 
 
 # --------------------------------------------------------------------------

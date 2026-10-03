@@ -118,10 +118,12 @@ Fields every provider accepts:
 | `model` | the provider's model name | required |
 | `base_url` | the endpoint | per provider |
 | `api_key_env` | the NAME of the environment variable holding the credential, in upper case (`[A-Z_][A-Z0-9_]*`, at most 64 characters) | none (required for `anthropic` and `gemini`) |
+| `api_key_env` | the NAME of the environment variable holding the credential | none (required for `anthropic` and `gemini`) |
 | `max_tokens` | output token cap | 1024 |
 | `temperature` | sampling temperature | 0 |
 | `timeout` | seconds for one request: the deadline for the whole call, and the limit on each connect step | 120 |
 | `max_reply_bytes` | the most bytes of a reply that are read; a larger reply is refused | 8388608 (8 MiB) |
+| `timeout` | seconds per request | 120 |
 | `residence` | `off_device` to narrow a loopback endpoint (see below) | derived from the endpoint |
 | `reaches` | capability tokens the endpoint's model can reach on its own | `[]` |
 | `structured_output` | how a `validated` operation's grammar is attached (see "Structured output") | per provider |
@@ -148,6 +150,8 @@ What the configuration check refuses, without repeating the value:
   characters, is one), so a message about an unset credential variable says
   "the variable named in `api_key_env`" for the role and never prints the
   name;
+- an `api_key_env` that is not an environment variable name (the usual cause is
+  pasting the key itself there);
 - a `base_url` with user info (`https://user:key@host`) or a query string
   (`?key=...`);
 - a credential sent over plain `http://` to a host that is not this machine.
@@ -196,6 +200,7 @@ passes; each connect step (name lookup, connect, the TLS handshake) is also
 limited to `timeout` on its own. A reply that is not usable (undecodable JSON,
 an integer of thousands of digits, nesting too deep, or a `message` of the
 wrong type) is a `ProviderError` naming the role, never a raw exception.
+the endpoint the prompt reaches.
 
 ## Residence of an endpoint
 
@@ -261,6 +266,7 @@ mode, whether it claims, and each gap below.
 ### The local grammar engine (optional)
 
 From a checkout of the repository, `pip install ".[constrain]"` installs [llguidance](https://github.com/guidance-ai/llguidance).
+`pip install "revl[constrain]"` installs [llguidance](https://github.com/guidance-ai/llguidance).
 It is never required. When it is installed:
 
 - every derived GBNF grammar a `gbnf` binding would claim is compiled by it

@@ -42,6 +42,16 @@ a required context, so even a FAILED `frontend` would not have blocked the merge
 non-required). Read REQUIRED_CHECKS as the partition `main` is intended to
 enforce, read ENFORCED_TODAY below as the last verified server-side reading, and
 update both when branch protection changes. The command is
+and rulesets are empty. So `frontend`, `frontend-cordis`, `conformance` and
+`formal` are marked required HERE and are NOT enforced by the server, and no
+unit test can tell the two apart without credentials. That gap is part of why
+PR #850 (`9bc752d5`) reached `main` with the root suite uncollected: its
+`frontend` job was skipped AND `frontend` is not a required context, so even a
+FAILED `frontend` would not have blocked the merge (`site-wheel-drift` and
+`frontend-arm64` did fail on it, and both are non-required). Read
+REQUIRED_CHECKS as the partition `main` is intended to enforce, read
+ENFORCED_TODAY below as the last verified server-side reading, and update both
+when branch protection changes. The command is
 `gh api repos/inso1337/revl/branches/main/protection`.
 
 Issue #1987 promotes `census-artifact` into the intended-required set: main kept
@@ -71,6 +81,12 @@ two sides are reconciled at the branch-protection settings, which are out of
 tree; whichever is stale, this test at least makes the job-name side of the
 contract explicit and drift-proof. It reads ci.yml as text, so it needs no
 PyYAML (not a declared dependency) and rides the frontend job's plain
+NOTE on the "13 required checks" figure in ci.yml's merge-queue comment: this
+partition marks 11 jobs intended-required (7 of them enforced) and 7
+non-required. The two are reconciled at the branch-protection settings, which
+are out of tree; whichever is stale, this test at least makes the job-name side
+of the contract explicit and drift-proof. It reads ci.yml as text, so it needs
+no PyYAML (not a declared dependency) and rides the frontend job's plain
 `pytest tests/ -q`, like tests/test_site_wheel_gate_runs_in_ci.py.
 """
 
@@ -157,6 +173,14 @@ NOT_REQUIRED_CHECKS = {
     # protection for that reason; promotion would be a separate change.
     "backend-python-signatures": "issue #3008 hashed-lock install and signature vectors; backend-python still runs the full backend suite, so this is a fast named check rather than a separate gate",
     "held-out": "item 537 held-out scoring; a scorer-touching diff is REFUSED by design, so it is advisory here and enforced in the promotion reward",
+    # Issue #1572: keeps `docs/census-artifact.{md,json}` current. It runs the
+    # census only when a pull request moves an input of the artifact, so on
+    # most pull requests it passes having checked nothing, and a check context
+    # that is green for "not applicable" is a poor thing to pin in branch
+    # protection. It fails loudly on the pull requests it does check, and it
+    # always runs on push to main, so a stale artifact is red where the merge
+    # lands. Not a merge gate until it has run for a while on real traffic.
+    "census-artifact": "issue #1572 census artifact currency; runs only when a PR moves an artifact input, always on push to main; advisory until it has a track record",
     # Container/privilege smoke that needs a Docker-capable runner; flaky as a
     # hard merge gate, run for signal not enforcement.
     "sandbox-container": "container smoke; not a hard merge gate",
@@ -184,6 +208,8 @@ NOT_REQUIRED_CHECKS = {
     # computes, on one interpreter, for every diff, and on a pull request it
     # can never report `skipping` (since issue #1817 it runs on pull requests
     # only; `frontend` covers every other event). Kept out of branch protection on purpose for now:
+    # computes, on one interpreter, for every diff, and has no `if:` so it can
+    # never report `skipping`. Kept out of branch protection on purpose for now:
     # it is coverage insurance rather than the gate itself, and a required
     # context must already exist on `main` before it can be required (requiring
     # it before this merges blocks every PR forever on a check no run reports).
@@ -198,10 +224,14 @@ NOT_REQUIRED_CHECKS = {
     # report on merge_group) or first widen this job's `if:` to include
     # `merge_group` — and then the name below is promotable as written. The
     # read-modify-write of the contexts list is:
+    # The follow-up, once this is on `main`, is a read-modify-write of the
+    # contexts list:
     #   gh api repos/inso1337/revl/branches/main/protection/required_status_checks
     #   gh api -X PATCH repos/inso1337/revl/branches/main/protection/required_status_checks \
     #     --input - <<< '{"strict":false,"contexts":[...ENFORCED_TODAY...,"frontend"]}'
     "root-suite-affected": "issue #854 unconditional root-suite coverage; PR-only by design, so it cannot report on a merge_group candidate; promotion is a branch-protection change, out of tree",
+    #     --input - <<< '{"strict":false,"contexts":[...ENFORCED_TODAY...,"root-suite-affected"]}'
+    "root-suite-affected": "issue #854 unconditional root-suite coverage; promotion is a branch-protection change, out of tree",
     # Gap G5 of docs/webapp-competitiveness-report.md (roadmap item 459): the
     # only job that installs the exemplary app's node tree and COMPILES the
     # frontend — a real `vite build` whose source map must name the originals,
@@ -314,6 +344,7 @@ def test_the_enforced_partition_is_not_read_as_the_enforced_reality():
     # forces the split to be re-read from the API rather than guessed.
     for job in ("frontend", "frontend-cordis", "conformance", "formal",
                 "census-artifact"):
+    for job in ("frontend", "frontend-cordis", "conformance", "formal"):
         assert job in ASPIRATIONAL, f"{job} moved without re-reading the API"
         assert job not in ENFORCED_TODAY, (
             f"{job} is not a required context on main as of 2026-09-10; if it was "

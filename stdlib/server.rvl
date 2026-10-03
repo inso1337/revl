@@ -68,4 +68,10 @@ service Server {
   emission[host.server.patch] fn patch(path: Str) -> Unit
   emission[host.server.delete] fn delete(path: Str) -> Unit
   emission[host.server.head] fn head(path: Str) -> Unit
+  emission fn get(path: Str) -> Unit
+  emission fn post(path: Str) -> Unit
+  emission fn put(path: Str) -> Unit
+  emission fn patch(path: Str) -> Unit
+  emission fn delete(path: Str) -> Unit
+  emission fn head(path: Str) -> Unit
 }

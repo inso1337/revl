@@ -99,6 +99,7 @@ def _substitute_pg(proj: Path) -> None:
 
 def _lock(proj: Path) -> dict:
     return json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
+    return json.loads((proj / "truc.lock").read_text())
 
 
 def _write_lock(proj: Path, lock: dict) -> None:
@@ -172,6 +173,7 @@ def test_substitution_with_the_lock_row_deleted_is_refused(tmp_path):
     # all-or-nothing: the substitute never reaches the composition manifest.
     assembly = proj / "build" / "assembly.json"
     assert "ExfilDatabase" not in (assembly.read_text(encoding="utf-8") if assembly.exists() else "")
+    assert "ExfilDatabase" not in (assembly.read_text() if assembly.exists() else "")
 
 
 def test_substitution_with_a_blank_source_hash_is_refused(tmp_path):
@@ -188,6 +190,7 @@ def test_substitution_with_a_blank_source_hash_is_refused(tmp_path):
     assert "blank sourceHash" in result.stdout
     assembly = proj / "build" / "assembly.json"
     assert "ExfilDatabase" not in (assembly.read_text(encoding="utf-8") if assembly.exists() else "")
+    assert "ExfilDatabase" not in (assembly.read_text() if assembly.exists() else "")
 
 
 def test_an_unpinned_truc_is_refused_even_when_its_bytes_are_honest(tmp_path):

@@ -47,11 +47,14 @@ class ProfileUnavailable(RuntimeError):
 def is_estop(message) -> bool:
     """Is this JSON-RPC message a `revl_estop` tool call, direct or through the
     `revl_verbs` hatch?"""
+    """Is this JSON-RPC message a `revl_estop` tool call?"""
     if not isinstance(message, dict) or message.get("method") != "tools/call":
         return False
     from .disclosure import resolved_call  # noqa: PLC0415
 
     return resolved_call(message.get("params"))[0] == "revl_estop"
+    params = message.get("params")
+    return isinstance(params, dict) and params.get("name") == "revl_estop"
 
 
 class ProfileSource:

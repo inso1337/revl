@@ -71,6 +71,7 @@ def build_model(ir: dict, *, live_state: dict | None = None,
                 accepted=None, accept_all: bool = False,
                 policy=None, mcp_scope=None,
                 rejected: bool = False, profile=None) -> dict:
+                policy=None, mcp_scope=None) -> dict:
     """The read-only cockpit model, assembled from the read surfaces.
 
     * ``ir`` — a compiled composition document (the dependency graph source).
@@ -111,6 +112,7 @@ def build_model(ir: dict, *, live_state: dict | None = None,
     decisions = _build_decisions(
         safe_ir, prev_audit=prev_audit, accepted=accepted,
         accept_all=accept_all, violations=violations, profile=profile)
+        accept_all=accept_all, policy=policy, mcp_scope=mcp_scope)
 
     mode = MODE_STATIC
     if live_state:
@@ -119,6 +121,7 @@ def build_model(ir: dict, *, live_state: dict | None = None,
         mode = MODE_RECORDED
 
     model = {
+    return {
         "ok": True,
         "readOnly": True,
         "mode": mode,
@@ -312,11 +315,14 @@ def _timeline_view(timeline) -> list | None:
 
 def _build_decisions(ir: dict, *, prev_audit, accepted, accept_all,
                      violations, profile=None) -> dict:
+                     policy, mcp_scope) -> dict:
     """The pending-decisions queue: boundary-widening acks (item 21) and
     policy exceptions (item 33), each with evidence attached."""
     widening = _widening_queue(ir, prev_audit, accepted, accept_all) \
         if prev_audit is not None else []
     exceptions = _policy_queue(violations, profile)
+    exceptions = _policy_queue(ir, policy, mcp_scope) \
+        if policy is not None else []
 
     pending = ([w for w in widening if not w["acknowledged"]]
                + [e for e in exceptions])
@@ -376,8 +382,13 @@ def _policy_violations(ir: dict, policy, mcp_scope, profile) -> list:
     so the decisions queue and the rejected section read the same result."""
     if policy is None:
         return []
+def _policy_queue(ir: dict, policy, mcp_scope) -> list:
+    """Item 33's policy exceptions as a decision list. Each violation is a row;
+    its evidence is the violation's own why-trace — the offending chain that
+    names which component reaches what it may not, and how."""
     from . import policy as policy_mod  # noqa: PLC0415
     from .audit_diff import audit_report  # noqa: PLC0415
+    from .why import render as render_why  # noqa: PLC0415
 
     audit = audit_report(ir)
     scope = set(mcp_scope or ())
@@ -402,6 +413,7 @@ def _policy_queue(violations: list, profile=None) -> list:
         return [{"kind": DECISION_POLICY,
                  "verdict": navigate_mod.collapsed()}]
 
+    violations = policy_mod.evaluate(policy, audit, mcp_components=mcp_components)
     rows = []
     for v in violations:
         rows.append({
@@ -612,6 +624,8 @@ def _render_trace(trace: dict, p: _Palette) -> list:
                     f"{event.get('transition')}")
         out.append(f"  {p.dim}seq {event.get('seq')}{p.reset}  "
                    f"{what}  "
+                   f"{hue}{event.get('component')}{p.reset} "
+                   f"{event.get('transition')}  "
                    f"{p.dim}because{p.reset} {event.get('note')}")
 
     steps = trace.get("timeline")
@@ -718,6 +732,7 @@ class Dashboard:
                  accepted=None, accept_all: bool = False,
                  policy=None, mcp_scope=None,
                  rejected: bool = False, profile=None) -> None:
+                 policy=None, mcp_scope=None) -> None:
         self._ir = ir
         self._session = session
         self._live_state = live_state
@@ -759,6 +774,7 @@ class Dashboard:
             accept_all=self._accept_all, policy=self._policy,
             mcp_scope=self._mcp_scope, rejected=self._rejected,
             profile=self._profile)
+            mcp_scope=self._mcp_scope)
 
     def render(self, *, color: bool = False) -> str:
         return render_model(self.snapshot(), color=color)

@@ -56,6 +56,7 @@ from revl.compiler import compile_files  # noqa: E402
 from revl.providers import (  # noqa: E402
     Adapter, CompletionRequest, ProviderConfigError, ProviderError,
     ProvisionRefused, Provisions, RoleProvision, bind_for_run, close_hosts,
+    ProvisionRefused, Provisions, bind_for_run, close_hosts,
     open_hosts, parse_config, provision_residue,
 )
 from revl.providers.provision import gpu_share  # noqa: E402
@@ -80,6 +81,7 @@ class FakeOllama:
     acknowledged and ignored); "blind_once" (the first `GET /api/ps` fails, so
     the provision's pre-load probe cannot be answered, and every later one
     answers normally).
+    acknowledged and ignored).
 
     A CPU load still holds a little GPU memory, as a real server does for its
     compute graph."""
@@ -686,6 +688,8 @@ def test_a_placement_loads_once_serves_and_unloads_once_with_no_residue(
     assert re.search(r"model role `small`: 2 consumer\(s\) \(llm, tagger\), "
                      r"1 load\(s\) on cpu0 in \d+\.\d\ds \(loaded cold\), "
                      r"1 unload\(s\) in \d+\.\d\ds, held \d+\.\ds", out), out
+    assert "model role `small`: 2 consumer(s) (llm, tagger), 1 load(s) on " \
+           "cpu0, 1 unload(s)" in out
     assert re.search(r"\[edge\] residue no residue \|.* models=unloaded", out)
     assert "[edge] DOWN" in out
     assert ollama.loaded == {}

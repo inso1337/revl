@@ -159,6 +159,7 @@ def _emitting_capabilities(fns: list, externs: list,
                            by_name: bool = False,
                            classes: tuple = ("emission", "witnessed"),
                            ) -> dict[str, set]:
+                           by_name: bool = False) -> dict[str, set]:
     """`_emitting_fns` refined from a boolean to a *set*: name -> the
     capabilities its call reaches (docs/capabilities.md).
 
@@ -193,6 +194,7 @@ def _emitting_capabilities(fns: list, externs: list,
     answered too — "does this reach an IRREVERSIBLE crossing" — and for that
     the seed is the `emission` class alone: the same monotone closure over a
     strictly smaller seed, so the result is a subset of the default one."""
+    derivation come from one traversal, so they cannot disagree."""
     # A witnessed extern crosses the same boundary as an emission (item 243): it
     # seeds the fixed point too, so an unregistered witnessed reach is never
     # mistaken for revertible. Its capability is the declared scope (`fs`), or
@@ -203,6 +205,7 @@ def _emitting_capabilities(fns: list, externs: list,
                       else set(ext.get("capabilities") or [ext["name"]]))
         for ext in externs
         if ext.get("class") in classes}
+        if ext.get("class") in ("emission", "witnessed")}
     calls: dict[str, set] = {}
     passed: dict[str, set] = {}  # first-class callable references per fn body
     for fn in fns:
@@ -376,11 +379,14 @@ def _capability_hint(service: str, method: str, declared, extra: list[str],
     class, which is the over-widening the issue measures."""
     widen_to = ("`emission fn" if modifier == "emission"
                 else f"`{modifier} fn")
+def _capability_hint(service: str, method: str, declared, extra: list[str]) -> str:
+    """The repair for a provider that exceeds its declared capability set."""
     nameable = [cap for cap in extra if cap != "*"]
     if not nameable:  # nothing to widen *to* — the boundary has no name
         return (f"only a named boundary can be granted — give the emission a "
                 f"capability (a required key or an `emission` extern) or declare "
                 f"{widen_to} {method}(...)` without a scope in service "
+                f"`emission fn {method}(...)` without a scope in service "
                 f"`{service}` (G4)")
     widened = list(declared) + [cap for cap in nameable if cap not in declared]
     label = ("emission" if modifier == "emission"
@@ -389,9 +395,12 @@ def _capability_hint(service: str, method: str, declared, extra: list[str],
     # `emission` crosses, a `witnessed` write is a step a commit settles.
     routed = "emission" if modifier == "emission" else "write"
     return (f"a capability-scoped {label} bounds *where* a provider may cross "
+    return (f"a capability-scoped emission bounds *where* a provider may cross "
             f"the boundary — widen the declaration to "
             f"`{modifier}[{', '.join(widened)}] fn {method}(...)` in service "
             f"`{service}`, or route this {routed} through a declared "
+            f"`emission[{', '.join(widened)}] fn {method}(...)` in service "
+            f"`{service}`, or route this emission through a declared "
             f"capability (G4)")
 
 
@@ -521,6 +530,7 @@ def _method_emissions(body: list, env: "Env",
                       steps_out: dict | None = None, *,
                       irreversible_only: bool = False,
                       scopes_out: dict | None = None) -> tuple[list[str], set]:
+                      steps_out: dict | None = None) -> tuple[list[str], set]:
     """What calling a provide-method irreversibly causes: `emit` steps and
     reachable emitting functions/externs. Teardown-position emissions count
     — calling the method schedules them.
@@ -553,6 +563,7 @@ def _method_emissions(body: list, env: "Env",
     (`wire` -> {`wire.take`, `wire.say`}), or to None when any crossing
     through that key cannot be named that way (an alias carry, an unknown
     verb). `_admit_required_scopes` reads it; the returned pair is unchanged."""
+    message, are byte-identical whether or not evidence is collected."""
     found: list[str] = []
     seen: set = set()
     caps: set = set()
@@ -579,6 +590,7 @@ def _method_emissions(body: list, env: "Env",
         """The terminal step for `local.method`, an `emission fn` on the
         service bound to `local` — or a `witnessed[...] fn`, whose crossing is
         reversible (issue #1912), so the detail says which class it is."""
+        service bound to `local`."""
         service = env.services.get(env.requires.get(local) or "")
         decl = service.methods.get(method) if service is not None else None
         evidence = getattr(env, "emission_evidence", None)
@@ -590,6 +602,7 @@ def _method_emissions(body: list, env: "Env",
                      and getattr(decl, "witnessed", None) is not None)
         kind = "witnessed" if witnessed else "emission"
         detail = kind if service is None else f"{kind} `{service.name}.{method}`"
+        detail = "emission" if service is None else f"emission `{service.name}.{method}`"
         # same seam as `_EmissionEvidence.capabilities_of`, for the service
         # side: whatever the operation declares it may reach, the trace shows
         capabilities = tuple(getattr(decl, "capabilities", ()) or ())
@@ -682,6 +695,7 @@ def _method_emissions(body: list, env: "Env",
     # var itself recorded it as a value, so a non-top `var` still contributes
     # its own name, at the same point of the walk as before.
     def walk(node, top: bool = True):
+    def walk(node):
         if isinstance(node, dict):
             crossing = resolved_crossings.get(id(node))
             if crossing is not None:
@@ -695,6 +709,7 @@ def _method_emissions(body: list, env: "Env",
                     unname(crossing[1])
             through_resolved = id(node.get("expr")) in resolved_crossings
             if node.get("step") == "emit" and not through_resolved:
+            if node.get("step") == "emit":
                 expr = node.get("expr") or {}
                 target = expr.get("target") or {}
                 if target.get("kind") == "req":
@@ -707,7 +722,11 @@ def _method_emissions(body: list, env: "Env",
                         caps.update(crossing_caps(target.get("name"),
                                                   expr.get("method")))
                         record_scope(target.get("name"), expr.get("method"))
+                    note(f"{target.get('name')}.{expr.get('method')}",
+                         service_emission_step(target.get("name"), expr.get("method")))
+                    caps.update(crossing_caps(target.get("name"), expr.get("method")))
                 else:
+                    note("a host emission")
                     # every host emission reaches a named `emission` extern
                     # (`_is_emission_call` admits nothing else); `*` is the
                     # unreachable-in-practice fallback, and it is deliberately
@@ -728,6 +747,8 @@ def _method_emissions(body: list, env: "Env",
                         note("a host emission")
                         if not reached & reaching:
                             caps.add("*")
+                    if not reached & env.emitting_fns:
+                        caps.add("*")
             # an emission may also appear in value position (`let r = emit …`)
             target = node.get("target")
             if node.get("kind") == "call" and isinstance(target, dict) \
@@ -747,6 +768,13 @@ def _method_emissions(body: list, env: "Env",
                         caps.update(crossing_caps(target.get("name"),
                                                   node.get("method")))
                         record_scope(target.get("name"), node.get("method"))
+                service = env.services.get(env.requires.get(target.get("name")) or "")
+                decl = (service.methods.get(node.get("method"))
+                        if service is not None else None)
+                if decl is not None and decl.emission:
+                    note(f"{target.get('name')}.{node.get('method')}",
+                         service_emission_step(target.get("name"), node.get("method")))
+                    caps.update(crossing_caps(target.get("name"), node.get("method")))
             calls: set = set()
             values: set = set()
             if top:
@@ -754,6 +782,8 @@ def _method_emissions(body: list, env: "Env",
             elif node.get("kind") == "var" and isinstance(node.get("name"), str):
                 values.add(node["name"])
             for name in sorted(calls & reaching):
+            _calls_in(node, calls, values=values)
+            for name in sorted(calls & env.emitting_fns):
                 evidence = getattr(env, "emission_evidence", None)
                 note(f"{name}()",
                      evidence.chain_steps(name) if evidence is not None else None)
@@ -764,6 +794,7 @@ def _method_emissions(body: list, env: "Env",
             # a stored binding), so the method reaches code no bound can
             # name — same verdict as calling it, one indirection later
             for name in sorted(values & reaching):
+            for name in sorted(values & env.emitting_fns):
                 evidence = getattr(env, "emission_evidence", None)
                 note(f"{name} (passed as a function value)",
                      evidence.chain_steps(name) if evidence is not None else None)
@@ -772,9 +803,11 @@ def _method_emissions(body: list, env: "Env",
                 caps.add("*")
             for value in node.values():
                 walk(value, False)
+                walk(value)
         elif isinstance(node, list):
             for value in node:
                 walk(value, top)
+                walk(value)
 
     walk(body)
     return found, caps

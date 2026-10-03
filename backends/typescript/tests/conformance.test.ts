@@ -168,6 +168,7 @@ describe('the emitted module type-checks', () => {
 function emitIr(ir: unknown) {
   // `-`, not `/dev/stdin`: the latter is unopenable on a GitHub runner.
   return spawnSync(pythonInterpreter(), ['emit.py', '-'], {
+  return spawnSync('python3', ['emit.py', '-'], {
     cwd: backend,
     encoding: 'utf-8',
     input: JSON.stringify(ir),

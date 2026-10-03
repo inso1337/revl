@@ -52,6 +52,7 @@ def _compile(arguments: dict) -> dict:
     # keyed by absolute path; the compiler reads them before the disk
     return compile_files(list(files), sources={
         os.path.abspath(p): t for p, t in (modules or {}).items()} or None)
+    return compile_files(list(files))
 
 
 def _run(arguments: dict, fn, *args, **kwargs) -> dict:
@@ -195,6 +196,7 @@ QUERY_TOOLS = [
             "`callSites` and `impacted` cover only the named methods, and "
             "`existingCallSites` keeps every existing site. Called with no "
             "`gains`/`loses` it reports "
+            "sites stop resolving. Called with no `gains`/`loses` it reports "
             "the current per-method provider and call-site map. EXACT for the "
             "compiled composition — this is the list the admission gate would "
             "flag, not a promise the edit is otherwise safe.",

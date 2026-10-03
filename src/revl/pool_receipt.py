@@ -29,6 +29,11 @@ and collapsing them would lose the distinction that matters.
    attributable to the peer by anyone holding its public key, so it is the
    peer's own non-repudiable statement "I ran this, under this authority, and
    produced that".
+1. The **execution receipt** is signed by the PEER, over what it ran and what
+   came out: the pool, itself, the task, the artifact digest it was admitted
+   with, and the digest of the result. Under asymmetric identity (issue #1278)
+   this is attributable to the peer by anyone holding its public key, so it is
+   the peer's own non-repudiable statement "I ran this and produced that".
 
 2. The **attestation** is signed by an ATTESTING AUTHORITY named in the
    charter, over the DIGEST of the peer's receipt. The attestor is saying "I
@@ -77,8 +82,6 @@ rather than dropped, so a delivered-twice attempt is visible in the ledger
 instead of being silently absorbed.
 
 The authority binding, and the version that carries it
-======================================================
-
 A receipt used to say who ran what and nothing about the authority the run
 happened under (issue #2720). Version :data:`RECEIPT_VERSION` adds
 ``task_digest``, ``grant``, ``policy_digest``, ``outcome`` and
@@ -89,6 +92,7 @@ record must have, so a 1.1 receipt that drops a member is malformed rather than
 read as 1.0. A 1.0 receipt still verifies as a statement about work, but
 :func:`count_evidence` requires the binding by default: authority is not
 evidence for authority.
+=======
 """
 
 from __future__ import annotations
@@ -121,6 +125,7 @@ RECEIPT_VERSION = "1.1"
 #: or budget claim. Kept as a named constant so the reader decides by VERSION
 #: and never by looking at which members happen to be present.
 RECEIPT_VERSION_V1 = "1.0"
+RECEIPT_VERSION = "1.0"
 
 ATTESTATION_KIND = "revl.pool-receipt-attestation"
 ATTESTATION_VERSION = "1.0"
@@ -269,6 +274,7 @@ def receipt_digest(record: Mapping[str, Any]) -> str:
     cannot be slid from one onto the other. Also the digest a bound receipt
     pins its task by (``task_digest``): the whole signed task, signature
     included, so the peer's echo names the exact record it answered."""
+    cannot be slid from one onto the other."""
     return hashlib.sha256(_canonical_bytes(dict(record))).hexdigest()
 
 
@@ -362,6 +368,7 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
                   policy_digest: Optional[str] = None,
                   outcome: str = COMPLETED,
                   budget_consumed: Optional[Mapping[str, Any]] = None) -> dict:
+                  bundle: Optional[Mapping[str, Any]] = None) -> dict:
     """The peer signs what it ran and what came out.
 
     ``identity.peer_id`` is the peer named in the receipt; it is not a separate
@@ -386,6 +393,7 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
 
     ``network_exposed`` is passed to :func:`revl.peer_identity.sign_record`
     (issue #1460)."""
+    ``artifact_digest``."""
     if not isinstance(identity, PeerIdentity):
         raise ReceiptError("issuing a receipt needs the peer's own PeerIdentity")
     for name, value in (("pool_id", pool_id), ("task_id", task_id),
@@ -416,6 +424,7 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
     body = {
         "kind": RECEIPT_KIND,
         "version": RECEIPT_VERSION if bound else RECEIPT_VERSION_V1,
+        "version": RECEIPT_VERSION,
         "pool_id": pool_id,
         "peer_id": identity.peer_id,
         "task_id": task_id,
@@ -432,18 +441,21 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
                           "files": [dict(e) for e in bundle.get("files", ())]}
     return peer_identity.sign_record(RECEIPT_DOMAIN, body, identity,
                                      network_exposed=network_exposed)
+    return peer_identity.sign_record(RECEIPT_DOMAIN, body, identity)
 
 
 def attest_receipt(record: Mapping[str, Any], *, identity: PeerIdentity,
                    verdict: str = ADMITTED,
                    at: Optional[datetime] = None,
                    network_exposed: bool = False) -> dict:
+                   at: Optional[datetime] = None) -> dict:
     """An attesting authority signs the digest of a peer's receipt.
 
     It signs the digest and not the body: there is then exactly one copy of
     what is being attested, so an attestation and the receipt it covers cannot
     drift apart. ``network_exposed`` is passed to
     :func:`revl.peer_identity.sign_record` (issue #1460)."""
+    drift apart."""
     if not isinstance(identity, PeerIdentity):
         raise ReceiptError("attesting needs the attestor's own PeerIdentity")
     if not isinstance(record, Mapping):
@@ -461,6 +473,7 @@ def attest_receipt(record: Mapping[str, Any], *, identity: PeerIdentity,
     }
     return peer_identity.sign_record(ATTESTATION_DOMAIN, body, identity,
                                      network_exposed=network_exposed)
+    return peer_identity.sign_record(ATTESTATION_DOMAIN, body, identity)
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +538,7 @@ def _shape_ok(record: Any, kind: str) -> str:
     version decides which members a receipt must carry: a 1.1 receipt without
     the authority binding is malformed, never quietly read as the 1.0 shape,
     because guessing is exactly how a missing field becomes a passing check."""
+    refusal path never indexes into something hostile and never raises."""
     if not isinstance(record, Mapping):
         return f"expected a {kind} record, got {type(record).__name__}"
     if record.get("kind") != kind:
@@ -599,6 +613,7 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
                   when: Optional[datetime] = None,
                   task: Optional[Mapping[str, Any]] = None,
                   require_bound: bool = False) -> ReceiptCheck:
+                  when: Optional[datetime] = None) -> ReceiptCheck:
     """Check one receipt and its attestation against one member's admission.
 
     Never raises. A hostile record gets a verdict, like
@@ -627,6 +642,7 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
     check passes, because it names no authority and cannot be evidence for a
     gate that requires one. The version field decides which branch runs; the
     presence or absence of members never does."""
+    issued no earlier than the admission that is being counted toward."""
     moment = when or _utc_now()
 
     shape = _shape_ok(record, RECEIPT_KIND)
@@ -697,6 +713,7 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
         return refuse(LINK_RECEIPT_SHAPE,
                       f"issued_at {record['issued_at']!r} is not a timestamp")
     if _predates_membership(issued, admitted):
+    if admitted is not None and issued < admitted:
         return refuse(LINK_STALE_RECEIPT,
                       f"the receipt was issued at {record['issued_at']} and "
                       f"this membership began at {admitted_at}; evidence does "
@@ -846,6 +863,7 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
                    directory: IdentityDirectory,
                    when: Optional[datetime] = None,
                    require_bound: bool = True) -> EvidenceCount:
+                   when: Optional[datetime] = None) -> EvidenceCount:
     """Count the distinct tasks this peer has a verified, attested receipt for.
 
     ``pairs`` is a sequence of ``(receipt, attestation)`` or
@@ -864,6 +882,10 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
     and then by its digest before counting, so which of two receipts for one
     task is the counted one does not depend on the order a caller happened to
     pass them in.
+    ``pairs`` is a sequence of ``(receipt, attestation)``. The fold is
+    deterministic: pairs are ordered by the receipt's ``issued_at`` and then by
+    its digest before counting, so which of two receipts for one task is the
+    counted one does not depend on the order a caller happened to pass them in.
 
     Deduplication is on ``task_id``. A peer can re-sign the same work with a
     new timestamp and get a new digest for nothing, so the digest is not the
@@ -879,8 +901,10 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
                 record, attestation, task = pair
             else:
                 record, attestation = pair
+            record, attestation = pair
         except (TypeError, ValueError):
             ordered.append(("", "", pair, None, None))
+            ordered.append(("", "", pair, None))
             continue
         key_time = record.get("issued_at", "") \
             if isinstance(record, Mapping) else ""
@@ -890,6 +914,7 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
         except (NotCanonicalizable, TypeError, ValueError):
             key_digest = ""
         ordered.append((str(key_time), key_digest, record, attestation, task))
+        ordered.append((str(key_time), key_digest, record, attestation))
     ordered.sort(key=lambda row: (row[0], row[1]))
 
     digests: list[str] = []
@@ -899,12 +924,14 @@ def count_evidence(pairs: Sequence[Any], *, pool_id: str, peer_id: str,
     seen_tasks: set[str] = set()
 
     for _, _, record, attestation, task in ordered:
+    for _, _, record, attestation in ordered:
         check = check_receipt(
             record, attestation, pool_id=pool_id, peer_id=peer_id,
             artifact_digest=artifact_digest, admitted_at=admitted_at,
             attest_key_ids=attest_key_ids, directory=directory, when=when,
             task=task if isinstance(task, Mapping) else None,
             require_bound=require_bound)
+            attest_key_ids=attest_key_ids, directory=directory, when=when)
         if not check.counts:
             rejected.append(check)
             continue

@@ -214,6 +214,7 @@ def test_real_selfhost_emitter_reports_the_reserved_word_at_its_own_line():
     if not emitter.exists():  # pragma: no cover - source checkout only
         pytest.skip("selfhost/emit_go.rvl not present")
     src = emitter.read_text(encoding="utf-8")
+    src = emitter.read_text()
     flagged = [t for t in lex(src, str(emitter))
                if getattr(t, "stray_backtick", None)]
     assert flagged, "emit_go.rvl no longer trips the heuristic; pick another emitter"

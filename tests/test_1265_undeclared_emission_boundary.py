@@ -315,11 +315,16 @@ def test_refusing_a_bare_emission_outright_is_not_an_available_arm():
     argument never rested on the majority: one recorded output a refusal
     would break is enough to close the arm, and the recorded share is still
     over two fifths, which is what the bound now pins."""
+    one, and most of it is in `bench/results`, which holds RECORDED MODEL
+    OUTPUTS. A recorded output is evidence about what a model wrote against the
+    language as it was: refusing to compile one destroys the thing it records.
+    """
     bare, declared = _emission_census()
     assert len(bare) > len(declared), (len(bare), len(declared))
     recorded = [b for b in bare if b.startswith("bench/results/")]
     assert recorded, "no recorded output spells a bare emission any more"
     assert len(recorded) * 5 > len(bare) * 2, (len(recorded), len(bare))
+    assert len(recorded) > len(bare) // 2, (len(recorded), len(bare))
 
 
 def test_the_formal_corpus_carries_the_undeclared_corner():

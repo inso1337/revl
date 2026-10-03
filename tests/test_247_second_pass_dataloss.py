@@ -261,6 +261,7 @@ def test_F2_probe3_preswap_mutation_reverts_on_abort(artifact):
     assert _mutated(artifact), "pre-swap witnessed mutation did not apply"
 
     session.swap(_stash_ir(), agent_authored=False)                        # withdraw gen1 -> escrow
+    session.swap(_stash_ir())                        # withdraw gen1 -> escrow
 
     # the escrow was carried onto the successor owner (the fix), not orphaned.
     assert session._owner._escrow, (
@@ -303,6 +304,7 @@ def test_F2_commit_confirm_discharges_the_preswap_wal_descriptor(
     session.load(_stash_ir(), record=True)
     session.call("ops", "stash", [artifact])
     session.swap(_stash_ir(), agent_authored=False)
+    session.swap(_stash_ir())
 
     escrow_seqs = sorted(e.seq for e in session._owner._escrow)
     assert escrow_seqs and all(s is not None for s in escrow_seqs), (
@@ -339,6 +341,7 @@ def test_F3_probe4_aborting_unload_reverts_escrowed_mutation(artifact):
     assert _mutated(artifact)
 
     session.swap(_stash_ir(), agent_authored=False)                          # withdraw -> escrow
+    session.swap(_stash_ir())                          # withdraw -> escrow
     _sole_registered_frame(session).abort()            # make the unload aborting
 
     report = session.unload()
@@ -406,6 +409,7 @@ def test_F5_probe5_overlapping_escrow_replays_lifo_without_a_wal(tmp_path):
     assert [e.seq for e in frame._deferred_transactional] == [None, None]
 
     session.swap(copy.deepcopy(_SETVAL_BASE), agent_authored=False)                  # escrow both
+    session.swap(copy.deepcopy(_SETVAL_BASE))                  # escrow both
     assert len(session._owner._escrow) == 2
 
     result = session.abort()
@@ -534,6 +538,7 @@ def test_F6_probe6_queued_send_survives_the_swap(sink):
     assert len(session._owner._queue) == 1
 
     session.swap(_queue_ir(), agent_authored=False)                        # withdraw gen1 -> queue
+    session.swap(_queue_ir())                        # withdraw gen1 -> queue
 
     assert len(session._owner._queue) == 1, (
         "the pre-swap deferral descriptor was orphaned by the swap — the "
@@ -561,6 +566,7 @@ def test_F6_the_carry_is_a_move_not_a_copy(sink):
 
     dead = session._owner
     session.swap(_queue_ir(), agent_authored=False)
+    session.swap(_queue_ir())
 
     assert session._owner is not dead
     assert session._owner._queue, "the successor owner did not carry the queue"
@@ -578,6 +584,7 @@ def test_F6_abort_after_a_swap_drops_the_queued_send(sink):
     session.load(_queue_ir())
     session.call("ops", "enqueue", [sink, "q0"])
     session.swap(_queue_ir(), agent_authored=False)
+    session.swap(_queue_ir())
 
     result = session.abort()
     assert result["aborted"]
@@ -598,6 +605,7 @@ def test_F6_probe6b_the_queue_and_the_escrow_survive_together(artifact, sink):
     assert _mutated(artifact)
 
     session.swap(_queue_ir(), agent_authored=False)
+    session.swap(_queue_ir())
 
     assert session._owner._escrow, "the witnessed escrow was orphaned (F2)"
     assert session._owner._queue, "the deferral queue was orphaned (F6)"
@@ -625,6 +633,7 @@ def test_F6_commit_records_the_carried_send_as_flushed(sink, tmp_path, monkeypat
     session.load(_queue_ir(), record=True)
     session.call("ops", "enqueue", [sink, "q0"])
     session.swap(_queue_ir(), agent_authored=False)
+    session.swap(_queue_ir())
 
     manifest = session.commit()
     confirm = session.commit_confirm(manifest["hash"])

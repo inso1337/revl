@@ -426,6 +426,7 @@ def _dispatch_ir() -> dict:
 
 def test_capability_fixed_point_keeps_concrete_names_alongside_the_dispatch_star():
     ir = _dispatch_ir()
+    ir = compile_source(_DISPATCH_SOURCE)
     caps = _emitting_capabilities(ir.get("functions") or [], ir.get("externs") or [])
     # `wrap` carries both: `*` marks that a first-class dispatch happens,
     # `ship` names the boundary the dispatched value reaches.
@@ -438,6 +439,7 @@ def test_capability_fixed_point_keeps_concrete_names_alongside_the_dispatch_star
 
 def test_the_audit_reports_the_boundary_behind_a_first_class_dispatch():
     ir = _dispatch_ir()
+    ir = compile_source(_DISPATCH_SOURCE)
     externs = _boundary(ir)["C"]["externs"]
     names = {e["name"] for e in externs}
     # before the fix only `*`-less name-only reaches appeared: ship vanished

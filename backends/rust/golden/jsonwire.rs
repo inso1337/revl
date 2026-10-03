@@ -25,6 +25,7 @@ fn json_try_parse(s: String) -> Result<Value, String> {
 
 fn roundtrip(s: String) -> String {
     return json_stringify(json_parse(s));
+    return json_stringify(json_parse(s.clone()));
 }
 
 #[test]

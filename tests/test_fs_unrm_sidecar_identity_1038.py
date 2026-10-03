@@ -136,12 +136,14 @@ def test_an_untampered_unrm_still_succeeds_silently(workspace):
     mod.unrm(witness)                          # no raise, no diagnostics
 
     assert open(target, encoding="utf-8").read() == "payload", "the parked file was not put back"
+    assert open(target).read() == "payload", "the parked file was not put back"
     assert not os.path.exists(sidecar), "the unrm left its sidecar behind"
     assert not any((workspace / ws.GARBAGE_DIRNAME).iterdir()), \
         "reversal is residue-free: the garbage directory is empty again"
 
     mod.unrm(witness)                          # still idempotent on replay
     assert open(target, encoding="utf-8").read() == "payload"
+    assert open(target).read() == "payload"
 
 
 def test_a_witness_that_carries_no_capture_still_unrms(workspace):
@@ -157,6 +159,7 @@ def test_a_witness_that_carries_no_capture_still_unrms(workspace):
     mod.unrm(legacy)
 
     assert open(target, encoding="utf-8").read() == "payload"
+    assert open(target).read() == "payload"
     assert not os.path.exists(sidecar)
 
 
@@ -201,6 +204,7 @@ def test_an_honest_rm_of_a_write_only_file_still_reverses(workspace):
     assert os.stat(target).st_mode & 0o777 == 0o200
     os.chmod(target, 0o600)
     assert open(target, encoding="utf-8").read() == "payload"
+    assert open(os.path.join(target, "leaf")).read() == "inside"
 
 
 def test_an_honest_rm_of_an_already_hardlinked_file_still_reverses(workspace):
@@ -219,6 +223,7 @@ def test_an_honest_rm_of_an_already_hardlinked_file_still_reverses(workspace):
     mod.unrm(witness)
 
     assert open(target, encoding="utf-8").read() == "two names"
+    assert open(target).read() == "two names"
 
 
 # ===========================================================================
@@ -234,6 +239,8 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
     (issue #2647), so the capture also carries the sha256 of the parked bytes,
     recorded at park for a readable regular file, and install compares it on
     both passes."""
+    length is unchanged. `(dev, ino)` alone cannot see this, which is why the
+    capture records the stamps as well."""
     mod = _fs_module()
     witness, target, sidecar = _removed(mod, workspace)
     before = os.stat(sidecar)
@@ -281,6 +288,7 @@ def test_a_same_tick_in_place_rewrite_is_refused(workspace):
     assert not os.path.exists(target), \
         "the rewritten sidecar was installed back over the original path anyway"
     assert open(sidecar, encoding="utf-8").read() == "POISON!", "the refused sidecar was consumed"
+    assert open(sidecar).read() == "POISON!", "the refused sidecar was consumed"
 
 
 def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
@@ -292,6 +300,7 @@ def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
     decoy.write_text("payload", encoding="utf-8")   # same BYTES as the parked
     os.replace(str(decoy), sidecar)
     assert open(sidecar, encoding="utf-8").read() == "payload"
+    assert open(sidecar).read() == "payload"
 
     with pytest.raises(ws.FsOpError) as ei:
         mod.unrm(witness)
@@ -550,6 +559,7 @@ def test_a_drifted_sidecar_aborts_as_restore_residue(workspace, monkeypatch):
         "Agent", [_effect("rm", "doomed.txt")], abort=True)))
     assert report["components"] == [{"name": "Agent", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
     frame = _sole_frame(session)
     [residue] = [r for r in frame.compensation_residue
@@ -576,8 +586,10 @@ def test_an_untampered_abort_reports_no_residue_at_all(workspace):
         "Agent", [_effect("rm", "doomed.txt")], abort=True)))
     assert report["components"] == [{"name": "Agent", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
     frame = _sole_frame(session)
     assert frame.compensation_residue == []
     assert (workspace / "doomed.txt").read_text(encoding="utf-8") == "payload"
+    assert (workspace / "doomed.txt").read_text() == "payload"
     assert not any((workspace / ws.GARBAGE_DIRNAME).iterdir())

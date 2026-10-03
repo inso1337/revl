@@ -188,8 +188,10 @@ def test_an_unknown_typed_argument_stays_admitted():
                   + "extern acquire fn tag_put(v: Str) -> SecretHandle"
                   ' undo note("t") = @py { return 1 }\n'
                   "component C {\n"
+    ir = _compile(_VAULT + "component C {\n"
                   "  let store = effect Map.new() undo store.drop()\n"
                   '  let s = effect tag_put("v") undo note(store.get("k"))\n'
+                  '  let s = effect secret_put("v") undo note(store.get("k"))\n'
                   "}\n")
     assert any(c["name"] == "C" for c in ir["components"])
 
@@ -366,3 +368,5 @@ def test_an_acquisition_with_no_declared_inverse_keeps_the_generic_wording():
     # issue #1859 a host acquisition's hint names its one inverse, the
     # family's release on the bound handle, instead of `undo <expr>`.
     assert "write `let <name> = effect Pool.open(...) undo <name>.close()`" in msg
+    # ... and the spelling it offers is no longer double-backticked.
+    assert "write `effect Pool.open(...) undo <expr>`" in msg

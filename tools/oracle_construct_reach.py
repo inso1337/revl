@@ -56,6 +56,8 @@ and which dispositions are stale; `--triage` says what each entry's disposition
 IS.  What this cannot check is whether a written reason is a GOOD reason: that
 stays a judgement, and the gate makes it a judgement someone has to write down
 instead of a number nobody owns.
+declare out of scope is the other half of roadmap item 533, and deliberately
+not done by this file: this one only makes sure the number cannot grow.
 
 The VACUITY check stays, and is not redundant with the ratchet.  The ratchet
 compares unreached SETS, so it says exactly nothing about an oracle whose
@@ -155,6 +157,7 @@ def _corpus_from_test(tier: str) -> list[Path]:
 def _lower_constructs() -> set[str]:
     """Extract the named IR dispatch values in the reference lowerer."""
     tree = ast.parse((ROOT / "src/revl/lower.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "src/revl/lower.py").read_text())
     found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Compare) or len(node.ops) != 1:
@@ -200,6 +203,7 @@ def _compile_corpus() -> list[Path]:
     real and holds this reading to it, which is where a shape change is caught.
     """
     tree = ast.parse((ROOT / "tests" / "test_selfhost_compile.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "tests" / "test_selfhost_compile.py").read_text())
     lists: dict[str, list[str]] = {}
     tables: dict[str, ast.AST] = {}
     for node in tree.body:
@@ -302,6 +306,7 @@ def _census_guarantees() -> set[str]:
     out-of-slice fallback and names no guarantee, so it is excluded.
     """
     tree = ast.parse((ROOT / "tests" / "test_selfhost_lower.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "tests" / "test_selfhost_lower.py").read_text())
     classify = next(
         (node for node in ast.walk(tree)
          if isinstance(node, ast.FunctionDef) and node.name == "_classify"),
@@ -456,6 +461,7 @@ def _ledger() -> dict[str, list[str]]:
     """The recorded unreached sets, minus the `_`-prefixed prose keys JSON has
     no comment syntax for."""
     raw = json.loads(LEDGER.read_text(encoding="utf-8"))
+    raw = json.loads(LEDGER.read_text())
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
@@ -607,6 +613,7 @@ def check(data: dict) -> list[str]:
 
 def write_ledger(data: dict) -> None:
     ledger = json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else {}
+    ledger = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
     prose = {k: v for k, v in ledger.items() if k.startswith("_")}
     prose.setdefault("_about", _ABOUT)
     recorded = {oracle: sorted(report["unreached"])
@@ -689,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--triage", action="store_true",
                         help="print every unreached entry with the written "
                              "disposition that disposes of it")
+                             "ledger entry, or a vacuous report")
     parser.add_argument("--write", action="store_true",
                         help="regenerate the unreached ledger from this tree")
     parser.add_argument("--json", type=Path, help="write the report as JSON")
@@ -701,6 +709,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.triage:
         triage_report(data)
     elif args.json:
+    if args.json:
         args.json.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     else:
         report(data)
@@ -715,6 +724,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"construct reach matches {LEDGER.relative_to(ROOT)}: "
               f"{sum(len(e['unreached']) for e in data.values())} named gaps, "
               f"none new, every one disposed.")
+              f"none new.")
     return 0
 
 

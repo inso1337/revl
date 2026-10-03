@@ -60,6 +60,7 @@ def _new_project(tmp_path: Path) -> Path:
 
 def _lock_names(proj: Path) -> list[str]:
     lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
+    lock = json.loads((proj / "truc.lock").read_text())
     return [r["name"] for r in lock["trucs"]]
 
 
@@ -75,9 +76,12 @@ def _hand_vendor(proj: Path, name: str) -> None:
     """
     shutil.copytree(REGISTRY / "components" / name, proj / "trucs" / name)
     with (proj / "truc.toml").open("a", encoding="utf-8") as handle:
+    with (proj / "truc.toml").open("a") as handle:
         handle.write(f'{name} = {{ registry = "local" }}\n')
     index = json.loads((REGISTRY / "index.json").read_text(encoding="utf-8"))
     lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
+    index = json.loads((REGISTRY / "index.json").read_text())
+    lock = json.loads((proj / "truc.lock").read_text())
     lock["trucs"].append({
         "name": name, "registry": "local",
         "sourceHash": index["components"][name]["sourceHash"]})
@@ -109,6 +113,7 @@ def test_rm_unvendors_and_updates_toml_and_lock(tmp_path):
     assert not (proj / "trucs" / "user_cache").exists()
     assert _lock_names(proj) == ["pg_database"]
     toml = (proj / "truc.toml").read_text(encoding="utf-8")
+    toml = (proj / "truc.toml").read_text()
     assert "user_cache" not in toml
     assert 'pg_database = { registry = "local" }' in toml
 
@@ -136,6 +141,7 @@ def test_rm_of_still_required_provider_is_refused(tmp_path):
     assert (proj / "trucs" / "pg_database" / "component.rvl").exists()
     assert set(_lock_names(proj)) == {"user_cache", "pg_database"}
     assert "pg_database" in (proj / "truc.toml").read_text(encoding="utf-8")
+    assert "pg_database" in (proj / "truc.toml").read_text()
 
 
 def test_rm_unknown_component_is_refused(tmp_path):
@@ -180,10 +186,12 @@ def test_assemble_check_does_not_clobber_an_existing_assembly(tmp_path):
     # a real assemble writes build/assembly.json...
     assert _truc(proj, "assemble").returncode == 0
     before = (proj / "build" / "assembly.json").read_text(encoding="utf-8")
+    before = (proj / "build" / "assembly.json").read_text()
 
     # ...and a later --check must not touch it (dry-run writes nothing)
     assert _truc(proj, "assemble", "--check").returncode == 0
     assert (proj / "build" / "assembly.json").read_text(encoding="utf-8") == before
+    assert (proj / "build" / "assembly.json").read_text() == before
 
 
 def test_assemble_check_flag_after_verb_is_a_distinct_verb(tmp_path):

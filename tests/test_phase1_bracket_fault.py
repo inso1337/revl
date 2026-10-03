@@ -73,14 +73,18 @@ _RAISING_INVERSE = ('type BH = { id: Int }\n'
                     '@py { raise RuntimeError("undo exploded") }\n'
                     'extern acquire fn open_b(tag: Str) -> BH undo close_b(result) = '
                     '@py { return {"id": 1} }\n')
+_BLOW = ('extern pure fn blow(x: Str) -> Int = '
+         '@py { raise RuntimeError("undo exploded") }\n')
 
 # the audit's synchronous reproducer: three brackets, the MIDDLE one's inverse
 # raises. LIFO disposal is C, B, A — so a broken chain starves A, the OLDEST
 # and most valuable acquisition.
 _SYNC = _RAISING_INVERSE + """
+_SYNC = _BLOW + """
 component C {
   let a = effect Pool.open("A", 1) undo a.close()
   let b = effect open_b("B") undo close_b(b)
+  let b = effect Pool.open("B", 1) undo blow("x")
   let c = effect Pool.open("C", 1) undo c.close()
 }
 """
@@ -99,10 +103,12 @@ component C {
 # `sub.close()` and still stands between the fault and both `src.close()` and
 # `a.close()`.
 _STREAM = _RAISING_INVERSE + """
+_STREAM = _BLOW + """
 component C {
   let a = effect Pool.open("A", 1) undo a.close()
   let src = effect Stream.source() undo src.close()
   let b = effect open_b("B") undo close_b(b)
+  let b = effect Pool.open("B", 1) undo blow("x")
   let sub = subscribe src undo sub.close()
   await sub.next()
 }
@@ -162,6 +168,7 @@ async def _drive(source: str, name: str, deliver: bool = False) -> _Run:
         root.logger.error = lambda *args, **kwargs: run.logged.append(args)
         run.probe = runtime.arm_fault_probe("C")
         seen = {id(f) for f in runtime._live_frames()}
+        seen = {id(f) for f in runtime._FRAME_BY_CTX.values()}
         try:
             fiber = root.plugin(module.C)
             await _flush()
@@ -175,6 +182,7 @@ async def _drive(source: str, name: str, deliver: bool = False) -> _Run:
         # it predates this fix — so these assertions are meaningful against the
         # OLD runtime too (there it stays empty, which is the bug).
         run.frame = next(f for f in runtime._live_frames()
+        run.frame = next(f for f in runtime._FRAME_BY_CTX.values()
                          if f.name == "C" and id(f) not in seen)
         await fiber.dispose()
         await _flush()
@@ -205,6 +213,7 @@ async def test_a_raising_bracket_inverse_does_not_skip_the_remaining_inverses():
     # (B is an extern acquire, so the host trace carries only the two pools.)
     assert _ops(run.events) == [
         "pool.open A", "pool.open C", "pool.close C", "pool.close A"]
+        "pool.open A", "pool.open B", "pool.open C", "pool.close C", "pool.close A"]
 
     # R4: the failure is recorded, not silent, and it NAMES the inverse.
     [record] = run.residue
@@ -212,6 +221,7 @@ async def test_a_raising_bracket_inverse_does_not_skip_the_remaining_inverses():
     assert record["state"] == "unresolved"
     assert record["component"] == "C"
     assert record["method"] == "close_b"
+    assert record["method"] == "blow"
     assert record["attemptedFlag"] is True
     assert record["attempted"] == {"phase": 1}
     assert record["outcome"] == "failed"
@@ -242,10 +252,12 @@ async def test_the_fault_test_judge_calls_the_reproducer_residue(tmp_path):
     outcome.residue = [{
         "kind": "bracket-fault", "state": "unresolved", "component": "C",
         "method": "close_b", "seq": None, "attemptedFlag": True,
+        "method": "blow", "seq": None, "attemptedFlag": True,
         "attempted": {"phase": 1}, "outcome": "failed",
         "error": {"type": "RuntimeError", "message": "undo exploded"}}]
     failures = fault_mod._judge({"assert": ["no-residue"], "step": 2}, outcome, None)
     assert any("bracket-fault" in line and "close_b" in line for line in failures)
+    assert any("bracket-fault" in line and "blow" in line for line in failures)
     assert any("bracket-fault" in note for note in fault_mod._notes(outcome))
 
 
@@ -271,6 +283,7 @@ async def test_a_raising_inverse_in_a_stream_body_does_not_strand_the_source_and
     [record] = run.residue
     assert record["kind"] == "bracket-fault"
     assert record["method"] == "close_b"
+    assert record["method"] == "blow"
     assert record["error"]["message"] == "undo exploded"
 
 
@@ -299,4 +312,5 @@ async def test_the_guard_is_runtime_side_so_the_emission_is_unchanged():
     body = emit.emit(compile_source(_SYNC, "phase1.rvl"))
     assert "yield lambda: a.close()" in body
     assert "yield lambda: close_b(b)" in body
+    assert "yield lambda: blow('x')" in body
     assert "yield lambda: c.close()" in body

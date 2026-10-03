@@ -135,11 +135,13 @@ def test_ship_official_with_evidence_publishes_a_discoverable_row(tmp_path):
     # the triple is written; gauntlet evidence is stamped (official policy).
     entry = reg / "components" / "greeter"
     assert (entry / "component.rvl").read_text(encoding="utf-8") == GREETER
+    assert (entry / "component.rvl").read_text() == GREETER
     assert (entry / "manifest.json").exists()
     assert (entry / "dossier.json").exists()
 
     # the published row is discoverable: description + tags + the surfaces.
     row = json.loads((reg / "index.json").read_text(encoding="utf-8"))["components"]["greeter"]
+    row = json.loads((reg / "index.json").read_text())["components"]["greeter"]
     assert row["description"].startswith("A greeting service")
     assert set(row["tags"]) == {"greeting", "hello"}
     assert row["provides"] == {"greet": "Greet"}
@@ -150,6 +152,7 @@ def test_ship_official_with_evidence_publishes_a_discoverable_row(tmp_path):
     # source instead of patching them into the generated index, so the registry
     # a publish leaves behind passes `verify` rather than reading stale forever.
     assert json.loads((entry / "meta.json").read_text(encoding="utf-8")) == {
+    assert json.loads((entry / "meta.json").read_text()) == {
         "description": row["description"], "tags": row["tags"]}
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
@@ -181,6 +184,7 @@ def test_ship_refuses_an_under_described_component(tmp_path):
     # registry untouched on refusal
     assert "greeter" not in _names(reg)
     assert json.loads((reg / "index.json").read_text(encoding="utf-8"))["components"] == {}
+    assert json.loads((reg / "index.json").read_text())["components"] == {}
 
 
 def test_ship_refuses_when_only_tags_are_missing(tmp_path):
@@ -206,6 +210,7 @@ def test_ship_official_without_evidence_is_refused_registry_untouched(tmp_path):
     assert "gauntlet evidence" in r.stdout and "none was supplied" in r.stdout
     assert "greeter" not in _names(reg)
     assert json.loads((reg / "index.json").read_text(encoding="utf-8"))["components"] == {}
+    assert json.loads((reg / "index.json").read_text())["components"] == {}
 
 
 def test_ship_official_with_stale_evidence_is_refused(tmp_path):
@@ -240,6 +245,7 @@ def test_same_component_ships_to_an_audit_registry_without_evidence(tmp_path):
     assert (entry / "component.rvl").exists()
     assert not (entry / "dossier.json").exists()   # audit policy stamps none
     row = json.loads((reg / "index.json").read_text(encoding="utf-8"))["components"]["greeter"]
+    row = json.loads((reg / "index.json").read_text())["components"]["greeter"]
     assert row["description"] and set(row["tags"]) == {"a", "b"}
 
 
@@ -295,6 +301,7 @@ def test_ship_refuses_an_update_to_a_name_published_without_a_version(tmp_path):
     assert "declares no version" in r.stdout
     # the original entry is unchanged (still the first source).
     assert (reg / "components" / "greeter" / "component.rvl").read_text(encoding="utf-8") == GREETER
+    assert (reg / "components" / "greeter" / "component.rvl").read_text() == GREETER
 
 
 def test_ship_refuses_an_update_that_does_not_declare_its_release(tmp_path):
@@ -311,6 +318,7 @@ def test_ship_refuses_an_update_that_does_not_declare_its_release(tmp_path):
     assert r.returncode == 1, r.stdout
     assert "an update must declare which release it is" in r.stdout
     assert (reg / "components" / "greeter" / "component.rvl").read_text(encoding="utf-8") == GREETER
+    assert (reg / "components" / "greeter" / "component.rvl").read_text() == GREETER
 
 
 def test_ship_publishes_a_new_release_and_attaches_its_changelog(tmp_path):
@@ -335,15 +343,21 @@ def test_ship_publishes_a_new_release_and_attaches_its_changelog(tmp_path):
     entry = reg / "components" / "greeter"
     assert entry.joinpath("component.rvl").read_text(encoding="utf-8") == GREETER_PLUS
     assert entry.joinpath("version").read_text(encoding="utf-8").strip() == "1.1.0"
+    assert entry.joinpath("component.rvl").read_text() == GREETER_PLUS
+    assert entry.joinpath("version").read_text().strip() == "1.1.0"
     # the release it replaced keeps its own bytes.
     assert entry.joinpath("releases", "1.0.0", "component.rvl").read_text(encoding="utf-8") == GREETER
     row = json.loads((reg / "index.json").read_text(encoding="utf-8"))["components"]["greeter"]
+    assert entry.joinpath("releases", "1.0.0", "component.rvl").read_text() == GREETER
+    row = json.loads((reg / "index.json").read_text())["components"]["greeter"]
     assert row["version"] == "1.1.0"
     assert row["releases"] == ["1.0.0", "1.1.0"]
     changelog = json.loads(
         entry.joinpath("releases", "1.1.0", "changelog.json").read_text(encoding="utf-8"))
+        entry.joinpath("releases", "1.1.0", "changelog.json").read_text())
     assert changelog["headline"]["bump"] == "minor"
     record = json.loads(entry.joinpath("releases", "1.1.0", "release.json").read_text(encoding="utf-8"))
+    record = json.loads(entry.joinpath("releases", "1.1.0", "release.json").read_text())
     assert record["bumpCheck"] == "verified"
     assert record["publisherContinuity"] == "verified"
 
@@ -368,6 +382,7 @@ def test_ship_refuses_a_release_that_under_bumps_the_computed_one(tmp_path):
     assert "contradicts the computed bump" in r.stdout
     assert "major bump" in r.stdout
     assert (reg / "components" / "greeter" / "component.rvl").read_text(encoding="utf-8") == GREETER
+    assert (reg / "components" / "greeter" / "component.rvl").read_text() == GREETER
 
 
 def test_ship_refuses_a_name_changing_publisher(tmp_path):
@@ -384,6 +399,7 @@ def test_ship_refuses_a_name_changing_publisher(tmp_path):
     assert r.returncode == 1, r.stdout
     assert "does not change hands silently" in r.stdout
     assert (reg / "components" / "greeter" / "component.rvl").read_text(encoding="utf-8") == GREETER
+    assert (reg / "components" / "greeter" / "component.rvl").read_text() == GREETER
 
 
 # ---------------------------------------------------------------- refusal: won't compile

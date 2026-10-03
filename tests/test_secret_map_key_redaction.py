@@ -235,6 +235,7 @@ def test_the_ts_tier_registers_a_maps_keys():
     that carries the rule is `backends/typescript/runtime.ts` itself.
     """
     runtime = (ROOT / "backends" / "typescript" / "runtime.ts").read_text(encoding="utf-8")
+    runtime = (ROOT / "backends" / "typescript" / "runtime.ts").read_text()
     assert "for (const key of value.keys()) rememberSecret(key, seen)" in runtime
     assert "for (const item of value.values()) rememberSecret(item, seen)" in runtime
 

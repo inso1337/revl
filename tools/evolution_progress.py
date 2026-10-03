@@ -193,6 +193,7 @@ if str(ROOT / "tools") not in sys.path:
 # serialises differently from the components it is scored beside is exactly the
 # translation layer the controller's own docstring says not to introduce.
 from evolution_reward import Verdict, measured_paths  # noqa: E402
+from evolution_reward import Verdict  # noqa: E402
 
 # ---------------------------------------------------------------- artifacts
 
@@ -329,6 +330,7 @@ class WorkingTreeView(TreeView):
         target = self.tree / path
         try:
             return target.read_text(encoding="utf-8")
+            return target.read_text()
         except OSError:
             return None
 
@@ -862,9 +864,17 @@ def changed_paths(tree: Path, base: str):
     precondition use, `evolution_reward.measured_paths`: a move is reported
     under both of its paths, and nothing the candidate's own git state says
     (index flags, exclude files, filters) can shrink the set (#3359).
+    `--no-renames` so a file moved out of an instrument directory is reported
+    under its OLD name too; with rename detection on, `--name-only` prints only
+    the destination and the move would look like an addition somewhere else.
     """
     ok, paths = measured_paths(tree, base)
     return frozenset(paths) if ok else None
+    diff = _git(tree, ["diff", "--no-renames", "--name-only", base])
+    untracked = _git(tree, ["ls-files", "--others", "--exclude-standard"])
+    if diff is None or untracked is None:
+        return None
+    return frozenset(line for line in (diff + untracked).splitlines() if line)
 
 
 def _table_blanked(source: str | None, keep):
@@ -1180,6 +1190,7 @@ def main(argv=None) -> int:
     if args.generation is not None:
         try:
             entries = json.loads(args.generation.read_text(encoding="utf-8"))
+            entries = json.loads(args.generation.read_text())
         except (OSError, ValueError) as exc:
             print(f"evolution_progress: cannot read {args.generation}: {exc}",
                   file=sys.stderr)

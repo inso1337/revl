@@ -258,6 +258,8 @@ _BASE = (
     "service Ops {\n"
     "  emission[fs] fn stash(p: Str)\n"
     "  emission[announce] fn shout(sink: Str, msg: Str)\n"
+    "  emission fn stash(p: Str)\n"
+    "  emission fn shout(sink: Str, msg: Str)\n"
     "}\n"
     "component Agent provides ops: Ops {\n"
     "  provide ops {\n"
@@ -270,6 +272,7 @@ _BASE = (
 _TURN_OK = (
     # the turn reaches `ops`, which is the boundary its body crosses.
     "service Turn { emission[ops] fn run(p: Str, sink: Str) }\n"
+    "service Turn { emission fn run(p: Str, sink: Str) }\n"
     "component TurnComp requires ops: Ops provides turn: Turn {\n"
     "  provide turn {\n"
     '    fn run(p, sink) { emit ops.stash(p); emit ops.shout(sink, "from-turn") }\n'
@@ -297,6 +300,7 @@ def _pristine(path):
 
 def _lines(sink):
     return Path(sink).read_text(encoding="utf-8").splitlines() if os.path.exists(sink) else []
+    return Path(sink).read_text().splitlines() if os.path.exists(sink) else []
 
 
 @needs_cordis

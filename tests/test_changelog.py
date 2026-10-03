@@ -435,16 +435,23 @@ def _resolvable_facts(before_ir: dict, after_ir: dict) -> set[str]:
     for prov in delta["providers"]["changed"]:
         facts.add(f"provider.changed:{key(prov)}")
         facts.add(f"provider.swapped:{key(prov)}")
+        facts.add(f"provider.changed:{prov['key']}")
+        facts.add(f"provider.swapped:{prov['key']}")
     for prov in delta["providers"]["added"]:
         facts.add(f"provider.added:{key(prov)}")
+        facts.add(f"provider.added:{prov['key']}")
     for prov in delta["providers"]["removed"]:
         facts.add(f"provider.removed:{key(prov)}")
+        facts.add(f"provider.removed:{prov['key']}")
     for edge in delta["requires"]["added"]:
         facts.add(f"require.added:{edge['component']}:{key(edge)}")
+        facts.add(f"require.added:{edge['component']}:{edge['key']}")
     for edge in delta["requires"]["removed"]:
         facts.add(f"require.removed:{edge['component']}:{key(edge)}")
+        facts.add(f"require.removed:{edge['component']}:{edge['key']}")
     for edge in delta["requires"]["broken"]:
         facts.add(f"require.broken:{edge['component']}:{key(edge)}")
+        facts.add(f"require.broken:{edge['component']}:{edge['key']}")
     try:
         vr = version.derive(before_ir, after_ir, None)
         for change in vr["changes"]:

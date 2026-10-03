@@ -128,6 +128,7 @@ def test_the_ledger_records_names_only():
     self-host coverage ledger's ungated totals does not exist here."""
     raw = json.loads(
         (ROOT / "tests" / "fixtures" / "oracle_construct_reach_ledger.json").read_text(encoding="utf-8"))
+        (ROOT / "tests" / "fixtures" / "oracle_construct_reach_ledger.json").read_text())
     for key, value in raw.items():
         if key.startswith("_"):
             continue
@@ -251,6 +252,7 @@ def test_a_guarantee_its_last_document_stops_drawing_fails_the_check(data, censu
     document = ROOT / report["reached"][tag][0]
 
     only = tool._census_reach(census, [(document, document.read_text(encoding="utf-8"))])
+    only = tool._census_reach(census, [(document, document.read_text())])
     assert set(only) == {tag}, (
         f"asked about {document.name} alone the reach answered {sorted(only)}: "
         f"it is not a function of the documents handed to it")

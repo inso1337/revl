@@ -78,6 +78,17 @@ def _language_version() -> str:
     from ._version import version  # noqa: PLC0415
 
     return version()
+    .language). Read from the installed distribution metadata, falling back to
+    the in-repo package version when running from a checkout with no install."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+        try:
+            return version("revl")
+        except PackageNotFoundError:
+            pass
+    except Exception:  # noqa: BLE001 — metadata is a convenience, never fatal
+        pass
+    return "2.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +363,12 @@ def compile_to(source: str, tier: str) -> "Emit":
 # name and the directory name are accepted.
 _TIER_DIRS = SPELLING_DIRS
 _KNOWN_TIERS = tuple(TIERS)
+_TIER_DIRS = {
+    "py": "python", "python": "python",
+    "ts": "typescript", "typescript": "typescript",
+    "rust": "rust", "java": "java", "wasm": "wasm", "go": "go",
+}
+_KNOWN_TIERS = ("py", "ts", "rust", "java", "wasm", "go")
 
 
 def _tier_dir(tier: str) -> str | None:
@@ -378,9 +395,13 @@ def _emit_for_tier(ir: dict, tier: str) -> str:
     The emitter modules live under `backends/<dir>/emit.py` and expose a
     module-level `emit(ir) -> str`; the module is the cached one every other
     loader shares, so what the gate emits is real reference emitter output.
+    module-level `emit(ir) -> str`; loaded the same way `tools/conformance.py`
+    loads them, so what the gate emits is real reference emitter output.
 
     A tier limit raised by the emitter leaves as `TierRefusal`; anything else it
     raises is a fault and propagates unchanged (issue #1406).
+    raises is a fault and propagates unchanged (issue #1406)."""
+    import importlib.util  # noqa: PLC0415
 
     The module is shared (issue #2204), so the gate now reuses the java and go
     emitter modules, which hold module-global render state, where it used to
@@ -392,11 +413,17 @@ def _emit_for_tier(ir: dict, tier: str) -> str:
     concurrently would still race on those module globals; a caller that
     compiles from several threads must serialise the emit."""
     from .placement import backend_emit_module  # noqa: PLC0415 - off the compile graph
+    from ._paths import backends_root  # noqa: PLC0415
     from .refusal import refusals  # noqa: PLC0415
     # issue #2204: the one cached loader, so this is the module bundle and the
     # tier runners hold (one `EmitError` per tier). It used to exec the emitter
     # afresh on every call, which also paid the module's import cost each time.
     module = backend_emit_module(_tier_dir(tier))
+    tier_dir = _tier_dir(tier)
+    path = backends_root() / tier_dir / "emit.py"
+    spec = importlib.util.spec_from_file_location(f"revl_gate_{tier_dir}_emit", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     try:
         return module.emit(ir)
     except refusals(module) as refusal:
@@ -660,6 +687,7 @@ def _ir_referenced_names(node, out: set) -> None:
     naming rule: the MCP session's `_reached_code_names` delegates here for a
     template's code identity, so the two cannot disagree about which names a
     subtree reaches."""
+    sound for a fail-closed refusal."""
     if isinstance(node, dict):
         if node.get("kind") in ("fn", "var") and isinstance(node.get("name"), str):
             out.add(node["name"])
@@ -740,6 +768,8 @@ def _forbidden_decider_grant(ir: dict, granted: list) -> str | None:
 # is refused loudly at construction, the honest spelling of today's
 # process-global admit-bridge bind (`admit_bridge._SESSION`; the runtime's
 # session owner is per context since #3380). Lifting this is owner-scoping work the arc does not
+# process-global admit-bridge/session-owner binds (`admit_bridge._SESSION`,
+# `runtime._SESSION_OWNER`). Lifting this is owner-scoping work the arc does not
 # need here (337's mesh runs one gate per tier process).
 #
 # The slot is a WEAK reference, not a strong one: a Gate dropped without
@@ -910,6 +940,7 @@ class Gate:
                 granted: list[str] | tuple[str, ...] = (),
                 *, providers: Mapping[str, str] | None = None,
                 realm_bindings: Mapping[str, str] | None = None) -> "ProposeResult":
+                *, providers: Mapping[str, str] | None = None) -> "ProposeResult":
         """Admit an AGENT-authored component under the untrusted-author profile
         AND hot-swap the running composition to it — the item-334 self-extending
         crossing. The one verb neither `admit` (additive, refuses replacement)
@@ -1028,6 +1059,7 @@ class Gate:
         # agent whose source this is, so it is the admission call that binds.
         bindings = tuple(sorted((realm_bindings or {}).items()))
         profile = AdmissionProfile.self_extension(granted, bindings)
+        profile = AdmissionProfile.self_extension(granted)
         try:
             compile_source(source, "<candidate>.rvl",
                            modules=dict(providers) if providers else None,
@@ -1046,6 +1078,7 @@ class Gate:
         #    hand it to the health-gated swap.
         try:
             ir = self._compile_candidate_composition(source, providers, bindings)
+            ir = self._compile_candidate_composition(source, providers)
         except RevlError as error:
             return ProposeResult(False, code=getattr(error, "code", None),
                                  message=str(error),
@@ -1092,9 +1125,15 @@ class Gate:
             # teardown (STATE_UNDISCLOSED) rather than migrating operator state by
             # candidate-written name alone. A plain `swap`'s "generational"
             # default (operator->operator) would carry both without that check.
+            # successor ONLY through a `handoff` declared and §5-typed on both
+            # sides; the undeclared/untyped item-10 instance channel refuses
+            # before teardown (STATE_UNDISCLOSED) rather than migrating operator
+            # state by candidate-written name. A plain `swap`'s "generational"
+            # default (operator->operator) would carry it silently.
             state = self._invoke_with_approval(
                 partial(self._session.swap, ir, migrate="declared",
                         agent_authored=True))
+                partial(self._session.swap, ir, migrate="declared"))
         except _session_error() as error:
             # A halt can engage BETWEEN the check above and here, in one thread,
             # with no concurrency: the swap runs the item-246 activation gate,
@@ -1145,6 +1184,11 @@ class Gate:
         # `Session.swap` reconciles two live layers the static swap never saw —
         # spawned template instances (`state["migration"]`, item 10) and a
         # provider that declared a `handoff` (`state["handoff"]`, item 53)
+        # swap): surface what the generational swap carried across as a first-
+        # class field, so the loop reads the reconciliation without digging into
+        # `state`. `Session.swap` reconciles two live layers the static swap
+        # never saw — spawned template instances (`state["migration"]`, item 10)
+        # and a provider that declared a `handoff` (`state["handoff"]`, item 53)
         # — capturing each before teardown and re-seating it onto the successor.
         # `None` for a stateless swap (nothing spawned, no hand-off), the
         # byte-identical case that needs no reconciliation.
@@ -1156,6 +1200,7 @@ class Gate:
         handoff = {label: entry for label, entry
                    in (state.get("handoff") or {}).items()
                    if entry.get("migrated")}
+        handoff = state.get("handoff")
         migration = None
         if templates or handoff:
             migration = {}
@@ -1169,6 +1214,8 @@ class Gate:
     def _compile_candidate_composition(self, source: str,
                                        providers: Mapping[str, str] | None,
                                        bindings: tuple = ()) -> dict:
+                                       providers: Mapping[str, str] | None
+                                       ) -> dict:
         """Compile the candidate as a COMPLETE self-contained composition for the
         swap transition: the agent `source` as the root, plus any trusted
         `providers` as co-roots. Compiled WITHOUT the untrusted profile — the
@@ -1186,6 +1233,7 @@ class Gate:
             # a fully self-contained pure-revl candidate: the source IS the whole
             # composition (it composes only providers it declares itself).
             return compile_source(source, "candidate.rvl", profile=bound)
+            return compile_source(source, "candidate.rvl")
         cand_abs = os.path.abspath("candidate.rvl")
         virtual = {cand_abs: source}
         paths = [cand_abs]
@@ -1194,6 +1242,7 @@ class Gate:
             virtual[abs_path] = text
             paths.append(abs_path)
         return compile_files(paths, sources=virtual, profile=bound)
+        return compile_files(paths, sources=virtual)
 
     def call(self, key: str, method: str, args: list | None = None) -> dict:
         """Invoke a provided operation on the running composition, gated by the

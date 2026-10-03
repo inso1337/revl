@@ -61,6 +61,8 @@ def _cap_covers(wide: str, narrow: str) -> bool:
     try:
         return cap_order.covers(cap_order.parse_stored_cap(wide),
                                 cap_order.parse_stored_cap(narrow))
+        return cap_order.covers(cap_order.parse_cap(wide),
+                                cap_order.parse_cap(narrow))
     except cap_order.CapError:
         return False
 
@@ -215,6 +217,7 @@ def _args_digest(args) -> str:
     text = json.dumps(listed, sort_keys=True, separators=(",", ":"),
                       default=_canonical_arg)
     return _sha(text)
+    return _sha(_canon(list(args or [])))
 
 
 class ApprovalRequired(Exception):
@@ -267,6 +270,11 @@ def two_step_payload(ticket: dict, *, how_to_approve: str) -> dict:
 # `record_approval_granted` then writes verbatim to a durable, cross-session,
 # plaintext log. Nothing told the author that naming a parameter `path` changes
 # where its values end up, and
+# (`argsDigest`), except for a parameter whose NAME happens to sit in
+# `cap_order._REGISTRY` (`path`, `host`, `table`), whose runtime VALUE is lifted
+# out and bound into the capability spelling — which `record_approval_granted`
+# then writes verbatim to a durable, cross-session, plaintext log. Nothing told
+# the author that naming a parameter `path` changes where its values end up, and
 # nothing told the operator that a yes persists this one. Same move item 425 F1
 # made with `unreviewedHostCode`: the ticket must not understate what a yes means.
 #
@@ -280,6 +288,7 @@ _CALLER_VALUE_PROVENANCE = (
     "merely hashed into `argsDigest`: because the parameter is named for a "
     "resource kind (`path`/`host`/`table`, or a dimension the capability "
     "declares for itself — issue #1938), its runtime value is lifted out and "
+    "resource kind (`path`/`host`/`table`), its runtime value is lifted out and "
     "bound into the capability spelling you are approving. ")
 _CALLER_VALUE_DURABILITY_BOUND = _CALLER_VALUE_PROVENANCE + (
     "This session runs `--approval-record-values bound`, so approving ALSO "
@@ -476,6 +485,9 @@ class ClassMap:
                 # `_classify_relaxed` only relaxes a target whose closure is (a)/(b).
                 c = "a" if name in registered else "c"
                 cls = worse(cls, c)
+                # a witnessed extern crosses the boundary but is revertible by a
+                # registered inverse (243): class (a), auto-approved silently.
+                cls = worse(cls, "a")
                 for cap in (self.index.externs.get(name) or {}).get(
                         "capabilities") or [name]:
                     caps.add(cap)
@@ -485,6 +497,7 @@ class ClassMap:
                     "kind": "extern", "component": comp, "scope": scope["kind"],
                     "name": name, "class": klass, "actionClass": c,
                     **({"registered": False} if c == "c" else {})})
+                    "name": name, "class": klass, "actionClass": "a"})
             # pure / acquire externs are not boundary crossings.
 
         # the `*` first-class-value widening (Fix 10): an emitting callable
@@ -822,6 +835,8 @@ class ClassMap:
         `discrete`/`path` dimension is scoped exactly like a core one; a
         declared `ceiling` is excluded here and translated at mint, the same as
         `calls`/`size`/`time`."""
+        `cap_order._REGISTRY` RESOURCE kind (host/path/table, never a ceiling).
+        These are the dimensions a crossing capability can be scoped on."""
         out: list = []
         declared = self._declared_dims(ext)
         for index, param in enumerate(ext.get("params") or []):
@@ -830,6 +845,8 @@ class ClassMap:
             name = param.get("name")
             if name is None or not cap_order.is_registered(name, declared) \
                     or cap_order.is_ceiling(name, declared):
+            if name is None or not cap_order.is_registered(name) \
+                    or cap_order.is_ceiling(name):
                 continue
             out.append((index, name, bool(param.get("secret"))))
         return out
@@ -1005,6 +1022,7 @@ class ClassMap:
             # audit is supposed to be about is dropped without a word.
             return cap_order.make_cap(token, pairs, declared).to_str(), \
                 refusal, from_caller
+            return cap_order.make_cap(token, pairs).to_str(), refusal, from_caller
         except cap_order.CapError:
             return None, refusal, False
 

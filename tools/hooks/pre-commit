@@ -62,6 +62,7 @@ step() {
             _passed=$(pytest_count passed "$out")
             echo "ok${_passed:+ ($_passed passed)}"
         fi
+        echo "ok"
     else
         echo "FAILED"
         echo "$out" | tail -25 | sed 's/^/      /'
@@ -166,10 +167,15 @@ echo "pre-commit:"
 # conservative superset that answers FULL for any core, unmapped, or structural
 # change; the hook then runs the core subset below and refuses the commit when
 # that runs no test, and `make pre-merge` still runs everything at land/CI.
+# conservative superset that fails SAFE to the full suite for any core, unmapped,
+# or structural change, and `make pre-merge` still runs everything at land/CI.
 #
 # If the selector is unavailable or says FULL, run the core subset below; and a
 # --timeout backstop (when pytest-timeout is present) means a single wedged
 # cross-tier test can never hang the commit.
+# Fail safe twice over: if the selector is unavailable or says FULL, run all of
+# `tests/` exactly as before; and a --timeout backstop (when pytest-timeout is
+# present) means a single wedged cross-tier test can never hang the commit.
 TIMEOUT_ARGS=""
 if "$PY" -P -m pytest --help 2>/dev/null | grep -q -- '--timeout'; then
     TIMEOUT_ARGS="--timeout=60 --timeout-method=thread"
@@ -288,11 +294,17 @@ else
         else
             echo "      \`make pre-merge\` runs the full suite before land."
         fi
+    if [ -z "$SEL" ] || [ -z "$SEL_FULL" ]; then
+        # selector unavailable (it crashed, parse error) -> previous behavior
+        step "frontend + emitted-code validation" "$PY" -P -m pytest tests/ $TIMEOUT_ARGS -q
+    elif [ "$SEL_FULL" = "1" ]; then
+        step "frontend + emitted-code validation (full)" "$PY" -P -m pytest tests/ $TIMEOUT_ARGS -q
     else
         SEL_PYTEST=$(printf '%s\n' "$SEL" | sed -n 's/^PYTEST //p')
         if [ -n "$SEL_PYTEST" ]; then
             n=$(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ')
             step "frontend (affected: $n node(s))" pytest_counted "$PY" -P -m pytest $SEL_PYTEST $TIMEOUT_ARGS -q
+            step "frontend (affected: $n node(s))" "$PY" -P -m pytest $SEL_PYTEST $TIMEOUT_ARGS -q
         else
             echo "  frontend                           no affected tests (docs/config-only change)"
         fi
@@ -345,3 +357,4 @@ if [ "$unverified" -ne 0 ]; then
 else
     echo "pre-commit: ok"
 fi
+echo "pre-commit: ok"

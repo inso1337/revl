@@ -63,6 +63,7 @@ The column is recomputed on every build and is not committed (issue #1768):
 `--write` leaves a local copy beside the report, which `.gitignore` keeps
 out of the tree, because a committed copy went stale on every pull request
 that moved one of the ledgers above.
+  python3 bench/refusal_inventory.py --write          # commit the artifact
 """
 
 from __future__ import annotations
@@ -126,6 +127,7 @@ def _module_assignment(path: Path, name: str):
         raise SourceUnavailable(f"{_rel(path)} is not present")
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = ast.parse(path.read_text())
     except SyntaxError as exc:
         raise SourceUnavailable(f"{_rel(path)} does not parse: {exc}") from exc
     for node in tree.body:
@@ -195,6 +197,7 @@ def unported_constructs() -> dict:
     if not BLIND_SPOTS.is_file():
         raise SourceUnavailable(f"{_rel(BLIND_SPOTS)} is not present")
     data = json.loads(BLIND_SPOTS.read_text(encoding="utf-8"))
+    data = json.loads(BLIND_SPOTS.read_text())
     tiers: dict[str, dict] = {}
     for tier, entry in sorted(data.items()):
         if not isinstance(entry, dict):
@@ -228,6 +231,7 @@ def unreached_constructs() -> dict:
     if not REACH_LEDGER.is_file():
         raise SourceUnavailable(f"{_rel(REACH_LEDGER)} is not present")
     data = json.loads(REACH_LEDGER.read_text(encoding="utf-8"))
+    data = json.loads(REACH_LEDGER.read_text())
     if not isinstance(data, dict):
         raise SourceUnavailable(
             f"{_rel(REACH_LEDGER)} is not a JSON object")
@@ -256,6 +260,7 @@ def gate_reference_divergence() -> dict:
     if not CENSUS_BASELINE.is_file():
         raise SourceUnavailable(f"{_rel(CENSUS_BASELINE)} is not present")
     data = json.loads(CENSUS_BASELINE.read_text(encoding="utf-8"))
+    data = json.loads(CENSUS_BASELINE.read_text())
     buckets = data.get("buckets")
     if not isinstance(buckets, dict):
         raise SourceUnavailable(

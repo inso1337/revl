@@ -36,6 +36,9 @@ Covered subset (what emits byte-identical):
     because it yields ``Float`` (issue #2201), the i64/i32 comparisons,
     ``&&``/``||`` as ``i32.and``/``i32.or``), un (``!`` as ``i32.eqz``, ``-`` as
     a checked subtract-from-zero).
+    and their ``$int32_*`` twins, ``%`` as ``i64.rem_s``, ``/`` as
+    ``i64.div_s``, the i64/i32 comparisons, ``&&``/``||`` as ``i32.and``/
+    ``i32.or``), un (``!`` as ``i32.eqz``, ``-`` as a checked subtract-from-zero).
 
 Deliberately OUT (excluded from the corpus, deferred to wasm Path B slice 2+):
 any value that touches linear memory (Str, List, records, tagged Opt/Result/user
@@ -46,6 +49,8 @@ port's scalar slice still names ``/`` as ``<<UNSUPPORTED-TRUE-DIVISION:Float>>``
 and carries no ``f64`` lowerings: a named port gap, not a reference refusal; a
 ``${aFloat}`` part also pulls in ``$f64_to_str``); every
 ``builtin``/``len`` node
+end to end (``/`` yields Float, refused at a scalar return/binding by name; a
+``${aFloat}`` part pulls in ``$f64_to_str``); every ``builtin``/``len`` node
 (``.to_int()`` widening is a ``builtin``, not a bare ``widen`` marker) and the
 ``for`` loop (a memory walk); components/services entirely; ``match``/``adt`` over
 tagged cells; arrow values; ``??``; field/index; ``@wasm`` externs; and in-file
@@ -97,6 +102,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files, compile_source  # noqa: E402
+from revl import compile_files  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 
@@ -239,6 +245,7 @@ def test_selfhosted_emitter_output_scaffold(emitted):
     assert "(global $__hp (mut i32) (i32.const 0))" in src
     assert "(func $int_add" in src          # the checked-arithmetic preamble
     assert '(func $fn.i64ops (export "i64ops")' in src
+    assert '(func $i64ops (export "i64ops")' in src
     assert "(call $int_add)" in src         # `a + b` lowered through the helper
     assert src.endswith(")\n")
 
@@ -246,6 +253,7 @@ def test_selfhosted_emitter_output_scaffold(emitted):
 @pytest.mark.parametrize("rel", [
     "widening.rvl", "folding.rvl", "variants.rvl", "scratch_names.rvl", "residuals.rvl",
     "shortcircuit.rvl", "helper_named_fns.rvl",
+    "shortcircuit.rvl",
 ])
 def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
     compiler = shutil.which("wat2wasm")
@@ -291,6 +299,7 @@ def test_fn_type_param_refused(emitted, reference):
     parameter, and a declared function type is not representable on this tier.
     The reference RAISES EmitError; a pure self-host emitter fn cannot `fail`, so
     it refuses within the subset with a loud `<<UNSUPPORTED-fn-type>>` marker instead of
+    it refuses within the subset with a loud `<<DEFER-fn-type>>` marker instead of
     silently emitting a mis-typed signature. Both refuse the same construct, so
     tests/fixtures/emit_*_corpus/transforms.rvl stays OUT of the byte-identity
     CORPUS above (the reference would raise there) and is checked only here."""
@@ -316,11 +325,13 @@ def test_an_untyped_empty_list_is_named(emitted, reference):
                                  "expected List type"):
             reference.emit(ir)
         assert "<<UNSUPPORTED-EMPTY-LIST-TYPE>>" in emitted["emit_wasm_src"](ir)
+    assert "<<DEFER-fn-type>>" in got
 
 
 @pytest.mark.parametrize("source, reference_token, port_token", [
     pytest.param("fn f(x: Opt[Int]) -> Int { return x ?? 0 }",
                  "i64.load", "<<UNSUPPORTED-coalesce>>", id="tagged-coalesce"),
+                 "i64.load", "<<DEFER-coalesce>>", id="tagged-coalesce"),
     pytest.param("fn f(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 } }",
                  "i64.load", "<<UNSUPPORTED-EXPR:match>>", id="tagged-match"),
     pytest.param('fn f(s: Str) -> Int { return s.indexOf("x") }',
@@ -356,6 +367,7 @@ def test_an_untyped_empty_list_is_named(emitted, reference):
     # actually produced. It now pins the marker.
     pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
                  "$fn.revl_test_probe", "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
+                 "$revl_test_probe", "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
 ])
 def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
                                          reference_token, port_token):
@@ -381,6 +393,7 @@ def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_pat
     ir = compile_files([str(path)])
     want, got = reference.emit(ir)["functions"], emitted["emit_wasm_src"](ir)
     assert "$fn.f" in want and "$fn.f" in got, (
+    assert "$f" in want and "$f" in got, (
         "the plant is only a proof while it is text BOTH sides emit"
     )
     with pytest.raises(AssertionError, match="text the REFERENCE also emits"):
@@ -400,6 +413,8 @@ def test_a_fn_named_memory_is_refused_by_name_on_both_sides(emitted, reference):
     with pytest.raises(reference.EmitError, match="fn `memory` would export wasm name 'memory'"):
         reference.emit(ir)
     assert emitted["emit_wasm_src"](ir) == "<<UNSUPPORTED-EXPORT:memory>>\n"
+        assert_boundary_witness(want, got, "$revl_test_probe", "$f")
+    assert_boundary_witness(want, got, "$revl_test_probe", None)
 
 
 STREAM_130 = ROOT / "backends" / "go" / "testdata" / "stream_130.rvl"
@@ -532,6 +547,7 @@ def test_true_division_lowers_on_the_reference_but_is_a_named_port_gap(
 
 
 @pytest.mark.parametrize("source, reason", [
+    ("fn f(x: Float) -> Float { return x }", "Float"),
     ("fn f(x: Map[Str, Int]) -> Map[Str, Int] { return x }", "Map"),
 ])
 def test_reference_abi_refusals(reference, tmp_path, source, reason):
@@ -565,6 +581,7 @@ def test_reference_refuses_a_bodyless_extern_by_name(reference, tmp_path, body, 
     reference EMITS and holds byte-identical against the port, while every input
     reaching this arm raises. That is why the arm is carried in
     tests/fixtures/selfhost_uncovered_lines/, and this test is what keeps it
+    tests/fixtures/selfhost_uncovered_lines.json, and this test is what keeps it
     honest in the meantime."""
     path = tmp_path / "bodyless.rvl"
     path.write_text("extern pure fn peek(p: Str) -> Str = @py { return p }\n" + body)

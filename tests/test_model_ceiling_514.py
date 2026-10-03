@@ -403,6 +403,7 @@ def test_an_admitted_program_is_byte_identical_to_one_with_no_route_block():
     issue #1193 slice 2 made its held set read every crossing in every
     position; the statement form `emit prompt(...)` always produced the row.
     The row is checked and removed, and the rest must be byte-identical."""
+    equal the same program with the roles and the block deleted."""
     import json
 
     with_route = compile_source(_CONTROL, "ceiling.rvl")

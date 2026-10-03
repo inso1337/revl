@@ -197,6 +197,7 @@ go/java are the additive follow-up.
 | go | `any` (type-switch discrimination) | **deferred** — add `@go` bodies |
 | java | a provider's JSON tree (Jackson/Gson) | **deferred** — needs a provider on the classpath |
 | wasm | — | **no dynamic `Value` representation**: the tier has no `Any` boxing (it carries Int/Int32/Float/Bool/Str/List/record values natively; Map is a stated limit), the same reason `json.rvl` cannot erase |
+| wasm | — | **no representation**: the substrate value model (Int/Bool/Str/List) holds no Float/Map/record, same limit as `json.rvl` |
 
 Adding a tier is purely additive: append its `@<backend>` body to each accessor
 in `stdlib/value.rvl` (the emitter refuses an extern with no body for its tier,

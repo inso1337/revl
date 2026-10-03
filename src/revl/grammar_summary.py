@@ -2,6 +2,7 @@
 
 `PROSE_GRAMMAR` is the short human-readable summary `revl_grammar` (the MCP
 tool) returns by default: one component, one function, and a one-line list
+tool) has always returned: one component, one function, and a one-line list
 of the guarantees that reject code. `PROMPT_GRAMMAR` is the roadmap item 346
 artifact: a dense, complete EBNF-style grammar covering every construct in
 docs/syntax-2.0.md (plus fault tests, docs/fault-tests.md) — meant to be
@@ -17,10 +18,15 @@ Neither payload defers to a path the wheel omits. `docs/` is not packaged
 agent to go read `docs/syntax-2.0.md` sends it somewhere an installed
 deployment does not have (issue #2167). Each view names the reachable surface
 that serves the other instead.
+Both live here, not in `mcp/server.py`, so `revl grammar --prompt` (a plain
+CLI command) does not have to import the MCP session machinery to print a
+string.
 
 `PROMPT_GRAMMAR` is mirrored byte-for-byte at `docs/syntax-2.0.prompt.txt`
 (the file `tests/test_grammar_prompt.py` guards against drift) — the file is
 the reviewable artifact, this constant is what ships in the wheel.
+the reviewable artifact, this constant is what ships in the wheel (`docs/`
+is not packaged, unlike `backends/`/`stdlib/`; see pyproject.toml).
 """
 
 from __future__ import annotations
@@ -29,6 +35,9 @@ from __future__ import annotations
 #: written (tests/test_served_examples_compile_1846.py), so no example an
 #: agent copies from `revl_grammar` can be a form the compiler refuses.
 PROSE_EXAMPLE = """\
+PROSE_GRAMMAR = """\
+revl 2.0 — surface summary (full spec: docs/syntax-2.0.md)
+
 service S { fn f(a: Str) -> Int          // checked operation
             emission fn g(a: Str) -> Int // crosses the boundary
             emission[db] fn p(a: Str)    // ... only through `db`
@@ -47,12 +56,15 @@ extern emission[net.send] fn post(m: Str) -> Int = @py { return len(api_key) }
 
 component C requires k: S provides j: T {
   config { url: Str = "db://local" }
+  config { field: Int = 3 }
   isolate k in realm("tenant")        // optional realm placement (prelude)
   let c = effect conn_open(config.url) undo conn_close(c)
+  let r = effect acquire() undo r.release()
   await Job.run("work")               // iteration boundary (divert point)
   emit k.g("x") compensate k.g("undo")
   fail "reason"                       // deliberate L-Raise
   provide j { fn m(a) = size(a) }
+  provide j { fn m(a) = pure_fn(a) }
 }
 
 fn size(a: Str) -> Int = a.length
@@ -82,6 +94,7 @@ keys a row may reach. Its forms, and every other declaration, are in
 
 PROMPT_GRAMMAR = """\
 revl 2.0 — complete grammar (pin this verbatim; prose summary: revl_grammar)
+revl 2.0 — complete grammar (pin this verbatim; full prose: docs/syntax-2.0.md)
 
 PRINCIPLE: same meaning -> same syntax (TypeScript, verbatim). Different
 meaning (effects, inverses, provisions, boundaries) -> distinct revl syntax.
@@ -93,6 +106,7 @@ decl      := ['pub'] (typedecl | fndecl | service | component | extern
                        | test | 'fault' test) | composition | layer | proptest
                        | secret | capdecl | event | retention | model_role
                        | model_council           -- "other declarations", below
+                       | test | 'fault' test) | composition
 
 --- types (own syntax; capitalized names; [] generics) ---
 typedecl  := 'type' IDENT ['[' IDENT (',' IDENT)* ']'] '=' (record | variant)
@@ -108,6 +122,7 @@ type      := 'Str'|'Int'|'Float'|'Bool'|'Bytes'|'Unit'
 fndecl    := ['verified'] [endorse] 'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type] [derives] ['ensures' expr] block
 endorse   := 'endorse' '[' IDENT (',' IDENT)* ']'     -- taint classes the body may declassify
 derives   := 'derives' IDENT 'of' IDENT
+fndecl    := ['verified'] 'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type] block
 block     := '{' stmt* '}'
 stmt      := let | var | assign(var-only) | 'if' '(' expr ')' block ['else' block]
              | 'for' '(' IDENT 'of' expr ')' block | 'while' '(' expr ')' block
@@ -126,6 +141,10 @@ expr      := literal | IDENT | expr '.' IDENT | expr '?.' IDENT | expr '??' expr
              | 'asset' STRING                 -- external file, resolved + jailed +
                                                  sha256-pinned at compile time
                                                  (docs/frontend-assets.md)
+             | 'hole' ['[' type ']'] [STRING]         -- typed obligation (docs/holes.md)
+             | 'asset' STRING                         -- external file, resolved + jailed +
+                                                         sha256-pinned at compile time
+                                                         (docs/frontend-assets.md)
 -- == and === are one operator (canonicalized to == in IR); same for != / !==.
 -- EXCLUDED (named in diagnostics): class, new, this, function, import, export,
 -- typeof, delete, try/catch, ++/--, compound-assign on non-var, async arrows
@@ -133,6 +152,7 @@ expr      := literal | IDENT | expr '.' IDENT | expr '?.' IDENT | expr '??' expr
 
 --- services (interfaces; upper-bound every provider, G4) ---
 service   := ['pub'] ['commutative'] 'service' IDENT '{' methodsig* '}'
+service   := ['pub'] 'service' IDENT '{' methodsig* '}'
 methodsig := ['emission' ['[' IDENT (',' IDENT)* ']']] ['async'] ['commutative']
              'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type]
 -- bare `emission` = any boundary; emission[a,b] = only through capabilities a,b.
@@ -140,6 +160,7 @@ methodsig := ['emission' ['[' IDENT (',' IDENT)* ']']] ['async'] ['commutative']
 
 --- components (stratum 3; unchanged core + 2.0 block forms) ---
 component := ['boot'] 'component' IDENT ['requires' bind (',' bind)*]
+component := 'component' IDENT ['requires' bind (',' bind)*]
              ['provides' bind (',' bind)*] '{' cbody* '}'
 bind      := IDENT ':' IDENT
 cbody     := config_block | acquire | 'await' expr | emit_stmt | fail_stmt
@@ -150,6 +171,7 @@ acquire   := 'let' IDENT '=' 'effect' (expr | '{' stmt* expr '}'
              ['undo' expr]                             -- G5: undo has no stmt position
 emit_stmt := 'emit' expr ['compensate' expr]            -- also legal in expr position
 fail_stmt := 'fail' STRING  -- deliberate L-Raise (A8)
+fail_stmt := 'fail' STRING                              -- deliberate L-Raise (A8)
 isolate   := 'isolate' IDENT 'in' 'realm(' STRING ')'
 intercept := 'intercept' IDENT 'with' record_literal
 provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))* '}'
@@ -158,9 +180,11 @@ provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))*
 
 --- compositions (a composition is a set of ROWS; docs/composition-rows.md) ---
 composition := 'composition' IDENT '{' (use | row | remote | host | seam | place | grant | stack | site | slo)* '}'  -- contextual kw
+composition := 'composition' IDENT '{' (use | row | remote | stack | site)* '}'  -- contextual kw
 row       := 'row' '@' IDENT 'from' STRING 'provides' ('nothing' | IDENT (',' IDENT)*)
              ['component' IDENT]            -- disambiguator; provenance, not identity
              ['config' '{' (IDENT ':' (literal|'['literal*']'))* '}'] -- checked
+             ['config' '{' (IDENT ':' literal)* '}']  -- checked against the header
              ['granted' '{' IDENT (',' IDENT)* '}']   -- reach allowlist, empty default
 place     := 'place' address 'on' 'process' STRING ['backend' IDENT]   -- which process runs the row
 grant     := 'grant' address 'with' '{' IDENT (',' IDENT)* '}'          -- the `requires` keys a row may reach
@@ -170,6 +194,8 @@ host      := 'host' '@' IDENT 'provides' IDENT ':' IDENT ['in' 'realm(' STRING '
 seam      := 'seam' '@' IDENT 'on' 'key(' STRING [',' 'realm:' STRING] ')' ('observe' | 'decide')
              'with' '@' IDENT ['through' IDENT ('.' IDENT)* (',' IDENT ('.' IDENT)*)*]  -- observer forwarder on an edge
 slo       := 'slo' '{' (IDENT ':' literal [('over' DURATION | 'min' INT | 'of' IDENT)*] ['on' 'breach' IDENT] ','?)+ '}'  -- one per composition; closed datum set
+stack     := 'stack' STRING          -- a level-1 peer layer; conflicts REFUSE
+site      := 'site' STRING           -- the level-2 layer; exactly one, resolves
 remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Service
              ['in' 'realm(' STRING ')']     -- two peers of one service = two realms
              'at' 'host(' STRING ')'        -- bare authority; userinfo REFUSED
@@ -185,20 +211,25 @@ remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Servic
 -- unchanged and remoteness is an ADMISSION fact, not a wiring fact. Every method
 -- must declare an emission bound (G4 at the client); no inverse is synthesized
 -- and a remote effect survives unwind. `remote`/`at`/`host`/`pinned`/`through`/
+-- and a remote effect survives unwind. `remote`/`at`/`host`/`through`/
 -- `on_failure`/`redirect` are CONTEXTUAL keywords: the lexer's KEYWORDS set is
 -- untouched. A redirect is REFUSED by default; the address is the promise. A
 -- pin is the FULL SHA-256 of the peer's TLS leaf SPKI.
+-- untouched. A redirect is REFUSED by default: the peer address is what the row
+-- promises, so a transport that followed `Location` elsewhere would make it false.
 
 --- layers (a patch over a row table; docs/composition-layers.md) ---
 layer     := ['site'] 'layer' IDENT 'for' IDENT '{' (touches | op)* '}'  -- contextual
 touches   := 'touches' address (',' address)*   -- enforced; a layer's reach, readable
 op        := 'add' row | 'remove' address | 'replace' address 'with' row
            | 'configure' address 'with' '{' (IDENT ':' (literal|'['literal*']'))* '}'
+           | 'configure' address 'with' '{' (IDENT ':' literal)* '}'
            | 'resolve' address 'to' label 'over' label     -- site layer only
            | place | grant                                 -- site layer only, as in a composition
 address   := 'key' '(' STRING [',' 'realm' ':' STRING] ')' | label
 label     := [(IDENT | '.') '::'] '@' IDENT
 -- Four row operations and no more; NO positional operation (load order is derived
+-- Four operations and no more; NO positional operation (load order is derived
 -- by Kahn over the wiring, not declared). `replace` is CLAIM-PRESERVING.
 -- `place` and `grant` write only in the base composition or the site layer: a
 -- stack layer may not choose its tier nor raise its own reach, and is REFUSED.
@@ -210,6 +241,7 @@ label     := [(IDENT | '.') '::'] '@' IDENT
 --- host blocks (extern; typed boundary, opaque verbatim body) ---
 extern    := 'extern' ('pure'|'acquire'|'emission') 'fn' IDENT '(' (IDENT ':' type)* ')'
              ['->' type] [derives] ['undo' expr] ['compensate' expr]
+             ['->' type] ['undo' expr] ['compensate' expr]
              ['config' '{' (IDENT ':' type ['=' literal])* '}']
              ('=' '@'('ts'|'py'|'rs'|'go'|'java'|'wasm') '{' <verbatim host code> '}')+
 -- classification is mandatory: pure (no effect), acquire (needs undo over the

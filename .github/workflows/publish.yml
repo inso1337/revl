@@ -32,6 +32,7 @@ jobs:
   # loudly before building rather than shipping a mislabeled release. The same
   # step classifies the version so the publish job below can refuse a
   # pre-release.
+  # loudly before building rather than shipping a mislabeled release.
   check-version:
     runs-on: ubuntu-latest
     outputs:

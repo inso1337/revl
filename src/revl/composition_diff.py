@@ -28,6 +28,7 @@ import json
 from .audit_diff import (audit_report, diff_backends, diff_capability_scopes,
                          diff_crossings)
 from .lower import SHARED_REALM
+from .audit_diff import audit_report, diff_crossings
 
 
 def load_composition(path: str) -> dict:
@@ -121,17 +122,24 @@ def facts(ir: dict) -> dict:
     alone, the second provider overwrote the first, and removing realm B's
     provider left B's consumers reading as satisfied while A still provided
     the key.
+        components   name -> {requires:{key:service}, provides:{key:service}}
+        providers    key  -> {service, component}     (the composition-wide DI wiring)
+        require_edges set of (component, key)
         audit        the `audit_diff.audit_report` — reused verbatim for the
                      authority (emission / reached-host) surface
     """
     comps = _components(ir)
     providers: dict[tuple[str, str], dict] = {}
     require_edges: set[tuple[str, str, str]] = set()
+    providers: dict[str, dict] = {}
+    require_edges: set[tuple[str, str]] = set()
     for name, rec in comps.items():
         for key, service in rec["provides"].items():
             providers[(key, _realm(rec, key))] = {"service": service, "component": name}
+            providers[key] = {"service": service, "component": name}
         for key in rec["requires"]:
             require_edges.add((name, key, _realm(rec, key)))
+            require_edges.add((name, key))
     return {
         "components": comps,
         "providers": providers,
@@ -173,12 +181,14 @@ def diff(before: dict, after: dict) -> dict:
     # authority surface: the reused drift relation. Issue #3182: besides the
     # crossing set, carry the reach weakening and the scope and backend
     # buckets, the drift a crossing that STAYS can carry.
+    # authority surface — the reused drift relation
     cross = diff_crossings(bf["audit"], af["audit"])
     scopes = diff_capability_scopes(bf["audit"], af["audit"])
     backends = diff_backends(bf["audit"], af["audit"])
     reachers = _extern_reachers(bf["audit"], af["audit"])
 
     # providers (the DI wiring), keyed by (DI key, realm)
+    # providers (composition-wide DI wiring), keyed by DI key
     prov_added, prov_removed, prov_changed = [], [], []
     for key, realm in sorted(set(af["providers"]) - set(bf["providers"])):
         prov_added.append(_record(key, realm, **af["providers"][(key, realm)]))
@@ -186,6 +196,12 @@ def diff(before: dict, after: dict) -> dict:
         prov_removed.append(_record(key, realm, **bf["providers"][(key, realm)]))
     for key, realm in sorted(set(bf["providers"]) & set(af["providers"])):
         b, a = bf["providers"][(key, realm)], af["providers"][(key, realm)]
+    for key in sorted(set(af["providers"]) - set(bf["providers"])):
+        prov_added.append({"key": key, **af["providers"][key]})
+    for key in sorted(set(bf["providers"]) - set(af["providers"])):
+        prov_removed.append({"key": key, **bf["providers"][key]})
+    for key in sorted(set(bf["providers"]) & set(af["providers"])):
+        b, a = bf["providers"][key], af["providers"][key]
         # a provider *swap* is a change of the concrete providing component
         # (the DI wiring), or of the service interface it satisfies
         if (b["component"], b["service"]) != (a["component"], a["service"]):
@@ -193,6 +209,10 @@ def diff(before: dict, after: dict) -> dict:
                 key, realm,
                 **{"from": b["component"], "to": a["component"],
                    "from_service": b["service"], "to_service": a["service"]}))
+            prov_changed.append({
+                "key": key,
+                "from": b["component"], "to": a["component"],
+                "from_service": b["service"], "to_service": a["service"]})
 
     # require edges (the depends-on graph)
     req_added = sorted(af["require_edges"] - bf["require_edges"])
@@ -202,8 +222,13 @@ def diff(before: dict, after: dict) -> dict:
     # that generation; a NEWLY broken edge (satisfiable before, dangling now) is
     # the dependency the change quietly severed.
     def _broken(f: dict) -> set[tuple[str, str, str]]:
+    # a require edge is *broken* when the key has no provider in that
+    # generation; a NEWLY broken edge (satisfiable before, dangling now) is the
+    # dependency the change quietly severed.
+    def _broken(f: dict) -> set[tuple[str, str]]:
         provided = set(f["providers"])
         return {(c, k, r) for (c, k, r) in f["require_edges"] if (k, r) not in provided}
+        return {(c, k) for (c, k) in f["require_edges"] if k not in provided}
 
     broken_after = _broken(af)
     newly_broken = sorted(broken_after - _broken(bf))
@@ -220,6 +245,7 @@ def diff(before: dict, after: dict) -> dict:
             name in reachers.get(extern, ())
             for extern in _moved_externs(cross, backends))
         req_moved = any(c == name for (c, _k, _r) in req_added + req_removed)
+        req_moved = any(c == name for (c, _k) in req_added + req_removed)
         prov_moved = (
             any(p["component"] == name for p in prov_added + prov_removed)
             or any(p["from"] == name or p["to"] == name
@@ -235,6 +261,9 @@ def diff(before: dict, after: dict) -> dict:
             "added": [_edge(c, k, r) for (c, k, r) in req_added],
             "removed": [_edge(c, k, r) for (c, k, r) in req_removed],
             "broken": [_edge(c, k, r) for (c, k, r) in newly_broken],
+            "added": [{"component": c, "key": k} for (c, k) in req_added],
+            "removed": [{"component": c, "key": k} for (c, k) in req_removed],
+            "broken": [{"component": c, "key": k} for (c, k) in newly_broken],
         },
         "crossings": {"added": cross["added"], "removed": cross["removed"],
                       "reach_weakened": cross["reach_weakened"],
@@ -242,6 +271,7 @@ def diff(before: dict, after: dict) -> dict:
                       "scope_tightened": scopes["scope_tightened"],
                       "backends_added": backends["backends_added"],
                       "backends_removed": backends["backends_removed"]},
+        "crossings": {"added": cross["added"], "removed": cross["removed"]},
     }
     delta["guarantees"] = _guarantees(delta, bf, af)
     delta["changed"] = _nonempty(delta)
@@ -282,6 +312,7 @@ def _nonempty(delta: dict) -> bool:
                 or p["added"] or p["removed"] or p["changed"]
                 or r["added"] or r["removed"]
                 or any(delta["crossings"].values()))
+                or delta["crossings"]["added"] or delta["crossings"]["removed"])
 
 
 def _guarantees(delta: dict, bf: dict, af: dict) -> list[str]:
@@ -342,20 +373,24 @@ def _guarantees(delta: dict, bf: dict, af: dict) -> list[str]:
     for p in delta["providers"]["changed"]:
         if p["from"] != p["to"]:
             out.append(f"provider of key `{p['key']}`{_in_realm(p)} changed from "
+            out.append(f"provider of key `{p['key']}` changed from "
                        f"`{p['from']}` to `{p['to']}`")
         else:
             out.append(f"provider of key `{p['key']}`{_in_realm(p)} (`{p['from']}`) now "
+            out.append(f"provider of key `{p['key']}` (`{p['from']}`) now "
                        f"satisfies service `{p['to_service']}` "
                        f"(was `{p['from_service']}`)")
     for p in delta["providers"]["added"]:
         svc = p.get("service")
         via = f" by `{svc}`" if svc else ""
         out.append(f"key `{p['key']}`{_in_realm(p)} is now provided{via} "
+        out.append(f"key `{p['key']}` is now provided{via} "
                    f"(component `{p['component']}`)")
     for p in delta["providers"]["removed"]:
         svc = p.get("service")
         was = f" (was `{svc}`)" if svc else ""
         out.append(f"key `{p['key']}`{_in_realm(p)} is no longer provided{was}")
+        out.append(f"key `{p['key']}` is no longer provided{was}")
 
     for e in delta["requires"]["added"]:
         if e["component"] in added_c:
@@ -367,6 +402,7 @@ def _guarantees(delta: dict, bf: dict, af: dict) -> list[str]:
         out.append(f"`{e['component']}` no longer requires `{e['key']}`")
     for e in delta["requires"]["broken"]:
         out.append(f"`{e['component']}` requires `{e['key']}`{_in_realm(e)} — "
+        out.append(f"`{e['component']}` requires `{e['key']}` — "
                    f"no provider in the composition (broken dependency)")
 
     return out

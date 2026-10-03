@@ -170,6 +170,7 @@ def test_same_key_routed_provide_body_is_refused_by_g2():
     "by G2 (#449); it awaits the B3 through-set rule (#110). The day the body "
     "stops being discarded, drop this marker.",
     strict=True,
+    strict=False,
 )
 def test_same_key_routed_wrapper_carries_a_routes_entry():
     """The no-re-key shape compiles and admits, and the seam carries a `routes`
@@ -222,6 +223,7 @@ def test_distinct_key_wrapper_observes_every_call():
     "Mirrors the xfail on test_same_key_routed_wrapper_carries_a_routes_entry "
     "added in #684. The day the body stops being discarded, drop this marker.",
     strict=True,
+    strict=False,
 )
 def test_routed_wrapper_provide_body_is_never_executed():
     """The trap, pinned as an executed fact. The same-key seam carries a

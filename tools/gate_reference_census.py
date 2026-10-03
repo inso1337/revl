@@ -232,6 +232,7 @@ def build_selfhost_admit():
 def build_selfhost_namespace():
     """`selfhost/lower.rvl` emitted to python and executed: its namespace, so a
     caller can reach `admit_src` and `admit_all` from one build.
+    """`selfhost/lower.rvl`'s `admit_src`, emitted to python and executed.
 
     The `_exec_emitted` shape every `tests/test_selfhost_*.py` uses: the
     component in the file makes the emitted module import the cordis-py
@@ -259,6 +260,7 @@ def build_selfhost_namespace():
         else:
             del sys.modules["runtime"]
     return namespace
+    return namespace["admit_src"]
 
 
 def build_frontier_scan():
@@ -278,10 +280,12 @@ def build_frontier_scan():
                               max_bytes=generator.MAX_SOURCE_BYTES,
                               max_level_items=generator.MAX_LEVEL_ITEMS,
                               capability_roots=tables["capability_roots"])
+                              max_level_items=generator.MAX_LEVEL_ITEMS)
 
 
 def make_frontier_scan(keywords, builtins, max_bytes: int = 262144,
                        max_level_items: int = 1024, capability_roots=()):
+                       max_level_items: int = 1024):
     """The scan itself, over the given tables. Split out so a test can drive it
     with the rust's own table values.
 
@@ -290,6 +294,7 @@ def make_frontier_scan(keywords, builtins, max_bytes: int = 262144,
     self-host gate does not run, declined where its root is followed by `.`.
     The mirror lacked it, which no census program noticed until the corpus
     gained a computer-use document (issue #1369)."""
+    with the rust's own table values."""
     excluded_keywords = set(keywords)
     excluded_builtins = set(builtins)
     excluded_roots = set(capability_roots)
@@ -415,6 +420,7 @@ def make_admission_certify(tables):
     exactly as it does in the rust when `running` is `None`."""
     from revl.compiler import component_name_fold
 
+    the wave-through the surface exists to prevent."""
     scalars = frozenset(tables["scalars"])
     reserved = frozenset(tables["reserved"])
     keywords = frozenset(tables["keywords"])
@@ -426,6 +432,8 @@ def make_admission_certify(tables):
         itself" is enforced at the bottom rather than argued at the top. `.` is
         in the alphabet only because a provide-method body reaches a required
         service through one."""
+        return None, which is how "carries no term the type layer decides" is
+        enforced at the bottom rather than argued at the top."""
         out = []
         i, n = 0, len(source)
         while i < n:
@@ -450,6 +458,7 @@ def make_admission_certify(tables):
                 i += 2
                 continue
             if ch in "{}(),:=.":
+            if ch in "{}(),:=":
                 out.append(ch)
                 i += 1
                 continue
@@ -744,6 +753,61 @@ def make_admission_certify(tables):
             return False
         parsed = parse(toks)
         if parsed is None:
+        n = len(toks)
+        aliases = [toks[i + 1] for i, tok in enumerate(toks)
+                   if tok == "type" and i + 1 < n]
+        known = scalars | set(aliases)
+        services: list[str] = []
+        declared_aliases = 0
+        i = 0
+        while i < n:
+            if toks[i] == "type":
+                if i + 3 >= n or toks[i + 2] != "=":
+                    return False
+                if not is_declarable(toks[i + 1]) or toks[i + 3] not in scalars:
+                    return False
+                declared_aliases += 1
+                i += 4
+                continue
+            if toks[i] != "service" or i + 2 >= n:
+                return False
+            if not is_declarable(toks[i + 1]) or toks[i + 2] != "{":
+                return False
+            services.append(toks[i + 1])
+            i += 3
+            methods: list[str] = []
+            while i < n and toks[i] != "}":
+                if toks[i] != "fn" or i + 1 >= n or not is_name(toks[i + 1]):
+                    return False
+                methods.append(toks[i + 1])
+                i += 2
+                if i >= n or toks[i] != "(":
+                    return False
+                i += 1
+                params: list[str] = []
+                while i < n and toks[i] != ")":
+                    if not is_name(toks[i]) or i + 2 >= n or toks[i + 1] != ":":
+                        return False
+                    if toks[i + 2] not in known:
+                        return False
+                    params.append(toks[i])
+                    i += 3
+                    if i < n and toks[i] == ",":
+                        i += 1
+                if i >= n or len(set(params)) != len(params):
+                    return False
+                i += 1  # the `)`
+                if i < n and toks[i] == "->":
+                    if i + 1 >= n or toks[i + 1] not in known:
+                        return False
+                    i += 2
+            if i >= n or len(set(methods)) != len(methods):
+                return False
+            i += 1  # the `}`
+        # The reference refuses a duplicate service and a duplicate method and
+        # the native gate does not, so the certifier carries those two
+        # obligations itself.
+        if len(set(services)) != len(services):
             return False
         services = [s["name"] for s in parsed["services"]]
         components = [c["name"] for c in parsed["components"]]
@@ -755,6 +819,7 @@ def make_admission_certify(tables):
         # only in letter case or underscores (issues #2224 and #2275).
         folded_services = [component_name_fold(name) for name in services]
         if len(set(folded_services)) != len(folded_services):
+        if len(set(aliases)) != len(aliases) or declared_aliases != len(aliases):
             return False
         if len(set(aliases)) != len(aliases) \
                 or parsed["declared_aliases"] != len(aliases):
@@ -770,6 +835,7 @@ def make_admission_certify(tables):
             if check_component(toks, comp, parsed["services"]) is None:
                 return False
         return True
+        return not (set(services) & set(aliases))
 
     return certify
 
@@ -784,6 +850,7 @@ class SelfhostEngine:
         namespace = build_selfhost_namespace()
         self._admit = namespace["admit_src"]
         self._admit_all = namespace["admit_all"]
+        self._admit = build_selfhost_admit()
         self._certify = build_admission_certify()
 
     def line(self, src: str) -> int:
@@ -887,12 +954,14 @@ class CrateEngine:
         for offline in (True, False):
             argv = ["cargo", "build", "--quiet", "--target-dir",
                     str(target_dir)]
+            argv = ["cargo", "build", "--quiet"]
             if offline:
                 argv.append("--offline")
             done = subprocess.run(argv, cwd=self._dir, capture_output=True,
                                   text=True)
             if done.returncode == 0:
                 return target_dir / "debug" / "revl_gate_census"
+                return self._dir / "target" / "debug" / "revl_gate_census"
             if not offline:
                 raise SystemExit(
                     "gate_reference_census: could not build the consumer "
@@ -1007,6 +1076,8 @@ ADMISSION_PROGRAMS = (
     ("near_miss_unknown_type", "service S {\n  fn a(x: Mystery) -> Int\n}\n"),
     # --- near misses in the provide-method half ---
     ("near_miss_component_unknown_service",
+    ("near_miss_component",
+     "service S {\n  fn a(x: Int) -> Int\n}\n"
      "component C provides s: S {\n  provide s {\n    fn a(x) = x\n  }\n}\n"),
     # The RETURN near miss (`fn a(x: Int) -> Str` implemented by `fn a(x) = x`)
     # is deliberately NOT a corpus entry, and the reason is worth writing down:
@@ -1047,6 +1118,7 @@ def load_corpus(oracle, *, everything: bool = False):
             text = _read(path)
             if text is not None:
                 cases.append((path.relative_to(ROOT).as_posix(), text))
+                cases.append((str(path.relative_to(ROOT)), text))
     for name, src in oracle.ACCEPTED_PROGRAMS:
         cases.append((f"oracle-accept:{name}", src))
     for entry in oracle.REJECTED_PROGRAMS:
@@ -1091,6 +1163,7 @@ HARD = "false-admit"
 # no-objection to an issued admission where the source is inside the admission
 # surface: interface declarations, which carry no term at all, and components
 # whose provide-method bodies the certifier types itself (docs/design/457 T6).
+# surface, which is the region carrying no term the reference type layer decides.
 # So this bucket is a LIVE guard on every run, and the thing it guards is the most
 # dangerous class the gate can commit: a host reading a rust admission as a green
 # and running code the reference never admitted. Both engines exercise the arm and
@@ -1453,6 +1526,7 @@ def main(argv: list[str]) -> int:
 
     if args.check:
         baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+        baseline = json.loads(BASELINE.read_text())
         problems = compare(buckets, baseline)
         if with_lines:
             problems += compare_lines(pairs, json.loads(LINE_LEDGER.read_text(encoding="utf-8")))

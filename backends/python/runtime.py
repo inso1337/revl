@@ -41,6 +41,7 @@ import time
 import types
 import weakref
 from collections import OrderedDict, deque
+from collections import OrderedDict
 from typing import Any, Callable, Optional
 
 # The confidentiality choke point (item 256 Slice 3): `confidential.py`, the
@@ -79,6 +80,7 @@ __all__ = [
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
     "JobHandle", "LeaseHandle", "LeaseRefused", "Map", "Pool", "PoolError",
     "EstopHalted", "EstopRefused", "fail_error",
+    "EstopHalted", "EstopRefused",
     "SessionCommitError", "SessionOwner",
     "SpawnHandle", "StateIncompatible",
     "EventContract",
@@ -375,14 +377,17 @@ def _json_schema_error(value, schema, path: str = "$"):
             if key in props:
                 err = _json_schema_error(item, props[key],
                                          f"{path}.{_json_schema_key(key)}")
+                err = _json_schema_error(item, props[key], f"{path}.{key}")
                 if err is not None:
                     return err
             elif extra is False:
                 return (f"{path}: unexpected property "
                         f"{_json_schema_key(key)!r}")
+                return f"{path}: unexpected property {key!r}"
             elif isinstance(extra, dict):
                 err = _json_schema_error(item, extra,
                                          f"{path}.{_json_schema_key(key)}")
+                err = _json_schema_error(item, extra, f"{path}.{key}")
                 if err is not None:
                     return err
 
@@ -551,6 +556,7 @@ def grammar_honoured_error(value, schema, path: str = "$"):
             rendered = [_json_schema_key(k) for k in observed]
             return (f"{path}: the stated grammar pins the members "
                     f"{declared!r}; the completion has {rendered!r}")
+                    f"{declared!r}; the completion has {observed!r}")
         for name, sub in schema["properties"].items():
             err = grammar_honoured_error(value[name], sub, f"{path}.{name}")
             if err is not None:
@@ -561,6 +567,7 @@ def grammar_honoured_error(value, schema, path: str = "$"):
         for name, item in value.items():
             err = grammar_honoured_error(item, extra,
                                          f"{path}.{_json_schema_key(name)}")
+            err = grammar_honoured_error(item, extra, f"{path}.{name}")
             if err is not None:
                 return err
         return None
@@ -722,6 +729,9 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
         # on a route the register holds as promoted, which is the cutover.
         served = _revl_serve_shadow(_revl_recorded_crossing.get(), value)
         return validated if served is None else served
+        # answer has validated and with no path from it to the return below.
+        _revl_serve_shadow(_revl_recorded_crossing.get(), value)
+        return validated
 
 
 async def validate_retry_async(make_call, budget: int, schema, where: str = "",
@@ -764,6 +774,9 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
         # shadow — returns from both.
         served = _revl_serve_shadow(_revl_recorded_crossing.get(), result)
         return validated if served is None else served
+        # synchronous on both, so one implementation serves both colours.
+        _revl_serve_shadow(_revl_recorded_crossing.get(), result)
+        return validated
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +993,11 @@ def revl_declare_model_decision(**members) -> None:
     `none-reported` rather than omitting the member, because an omitted member
     reads exactly like a run that had nothing to hide. The text itself is never
     declared; only its digest, and only over a non-disclosing input.
+    (`model_digest`), on what host profile (`placement_digest`, item 538's own
+    digest, opaque to revl), how the prompt was bound (`prompt_binding`), what
+    the input carried (`origins`), what the candidates were and which was taken
+    (`candidates`, `chosen`), how it was asked (`sampling`), under which rule
+    (`policy_digest`, `fallback_depth`) and where it ran (`role`, `residence`).
 
     It may NOT name `component`, `step_index` or `outcome`: the crossing is the
     one the recorder just made and the outcome is the one the validation seam
@@ -1080,10 +1098,12 @@ def revl_recorded_crossing() -> "Optional[tuple]":
 # an emitted component imports and it may not grow a dependency on the
 # compiler package. What is here is the seam itself, one hook consulted at the
 # completion crossing, whose return value IS the answer the body receives.
+# completion crossing, whose return value is discarded.
 #
 # Three properties the placement below is chosen for, each measured in
 # `tests/test_shadow_runtime_518.py` and `tests/test_shadow_cutover_1192.py`
 # rather than asserted here:
+# `tests/test_shadow_runtime_518.py` rather than asserted here:
 #
 #   * The hook cannot change the answer while the route is a shadow. It is
 #     called after the response has validated, and on a route the register does
@@ -1095,6 +1115,10 @@ def revl_recorded_crossing() -> "Optional[tuple]":
 #     instead. The distinction is the register's `live` flag and not this
 #     seam's: the seam obeys, which is what makes the promotion revertible
 #     (revert clears `live` and the next crossing is the incumbent's again).
+#   * The hook cannot change the answer. It is called after the response has
+#     validated and its result is ignored, so `validate_retry` returns the
+#     object `validate_response` produced whatever the observer does. A seam
+#     that could substitute an answer would be a cutover, not a shadow.
 #   * It fires once per crossing, on the attempt that validated, and it is
 #     handed the crossing the recorder minted for that attempt. An exhausted
 #     budget raises before it and is NOT shadowed: with no incumbent answer
@@ -1105,6 +1129,7 @@ def revl_recorded_crossing() -> "Optional[tuple]":
 #     silently would leave a window that looks short rather than broken. A
 #     faulted hook returns `None`, so a fault can only ever leave the
 #     incumbent's answer in place.
+#     silently would leave a window that looks short rather than broken.
 # ---------------------------------------------------------------------------
 
 #: The observer, or None. Absent is the default and every path below is then a
@@ -1170,6 +1195,7 @@ def revl_shadow_faults() -> tuple:
 
 
 def _revl_serve_shadow(crossing, value):
+def _revl_serve_shadow(crossing, value) -> None:
     """Consult this fiber's shadow observer for one completion crossing.
 
     Returns the answer to serve, or `None` when the incumbent's validated
@@ -1182,18 +1208,23 @@ def _revl_serve_shadow(crossing, value):
     The observer may answer with a value; on a route the register holds as
     promoted that value is the one the body receives, and on a shadow the
     observer answers `None` and this returns `None` too."""
+    Returns nothing, by construction: the caller's next statement returns the
+    incumbent's validated answer and there is no path from here to it."""
     observe = _revl_shadow.get()
     if observe is None or _revl_in_shadow.get():
         return None
+        return
     if not isinstance(crossing, tuple) or len(crossing) != 2 \
             or crossing[0] is None:
         # Recording is off, or the timeline was hand-built: there is no
         # crossing to key an observation on, and a shadow keyed on None would
         # accumulate every completion in the process under one key.
         return None
+        return
     token = _revl_in_shadow.set(True)
     try:
         return observe(crossing, value)
+        observe(crossing, value)
     except Exception as error:  # noqa: BLE001 - a shadow may not break the run
         _revl_shadow.set(None)
         _revl_shadow_faults.set((*_revl_shadow_faults.get(),
@@ -1273,6 +1304,10 @@ def revl_host_usage(raw) -> tuple:
     the model-decision record is durable evidence, so a host that answers with
     text instead of a count writes no record rather than a record whose
     numeric field is a string.
+    `revl.run._host_usage`, the driver's copy the trace uses; item 250 Slice 3a
+    needs the same read at the crossing, on this side of the boundary, so the
+    WAL record and the trace hop agree on what the host said. Pinned together by
+    the Slice 3a tests.
 
     Recognized ONLY when the return is a mapping carrying the conventional keys
     (top-level, or a nested ``usage`` object for the token counts); anything
@@ -1286,6 +1321,8 @@ def revl_host_usage(raw) -> tuple:
         raw.get("tokensIn", usage.get("tokensIn")), "tokensIn")
     tokens_out = _revl_usage_number(
         raw.get("tokensOut", usage.get("tokensOut")), "tokensOut")
+    tokens_in = raw.get("tokensIn", usage.get("tokensIn"))
+    tokens_out = raw.get("tokensOut", usage.get("tokensOut"))
     cost = raw.get("cost")
     cost = cost if isinstance(cost, dict) else None
     if cost is not None and "amount" in cost:
@@ -1651,6 +1688,7 @@ def _compensate_fired(compensation: "Optional[_Compensation]") -> None:
 
 def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
                 compensate=None):
+def extern_emit(ctx, name: "str", fn, args: "tuple"):
     """Fire a DIRECT host-extern emission (`emit announce(msg)`, a kind-3/4
     crossing) through the recording seam on `ctx` (item 414).
 
@@ -1709,6 +1747,7 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
     # issue #1504: refuse BEFORE the crossing is recorded or its host body runs.
     # issue #2758: a read-only hold refuses the same new crossing, AFTER the
     # E-Stop so a suspend is never masked by a read-only hold.
+    # issue #1504: refuse BEFORE the crossing is recorded or its host body runs
     _estop_check(name)
     _read_only_check(name)
     # issue #2688: the declared ceiling, enforced at the same seam and before
@@ -1792,6 +1831,9 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
     _extern_outcome(ctx, step, "emission-complete", None, frame, ceilings)
     return (result if compensation is None
             else _MeteredEmission(result, compensation))
+    if callable(record):
+        record(name, args)
+    return fn(*args)
 
 
 def _revl_canonical_args_bytes(args) -> bytes:
@@ -1882,11 +1924,15 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
     model_text = str(model) if model is not None else None
     if model_text is not None:
         model_text = confidential.redact_text(model_text)[:model_id_cap]
+    honest-degrade to absent)."""
     payload: dict = {
         "model": model_text,
+        "model": (str(model)[:model_id_cap] if model is not None else None),
         "modelProvenance": "host-reported",
         "tokensIn": _revl_hop_text(tokens_in),
         "tokensOut": _revl_hop_text(tokens_out),
+        "tokensIn": tokens_in,
+        "tokensOut": tokens_out,
         "usageProvenance": "host-reported",
         "latencySeconds": latency_seconds,
         "latencyProvenance": "revl-measured-bracket",
@@ -1899,6 +1945,8 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
         currency = _revl_hop_text(cost.get("currency"))
         payload["cost"] = {"amount": _revl_hop_text(cost.get("amount")),
                            "currency": currency,
+        payload["cost"] = {"amount": cost.get("amount"),
+                           "currency": cost.get("currency"),
                            "provenance": "host-reported"}
     if produced_seq:
         payload["producedSeq"] = list(produced_seq)
@@ -1998,6 +2046,7 @@ def plug(ctx, component: dict, config=None):
 #: inherits the body's frame with its copied context.
 _ACTIVATING: "contextvars.ContextVar[tuple]" = contextvars.ContextVar(
     "_revl_activating", default=())
+_ACTIVATING: list["Frame"] = []
 
 #: ctx -> the Frame of the activation on that context, for a context that
 #: cannot carry the frame itself (no instance `__dict__`). Every cordis context
@@ -2009,6 +2058,9 @@ _ACTIVATING: "contextvars.ContextVar[tuple]" = contextvars.ContextVar(
 #: component stayed reachable from this module for the life of the process,
 #: with its event loop and its open log. Stored on the context, a frame lives
 #: exactly as long as its context does.
+#: ctx -> the Frame of the activation on that context. Weak-keyed so a torn-down
+#: instance's frame is collected with its context. A `SpawnHandle` finds its
+#: instance's frame here, via the fiber context it already holds.
 _FRAME_BY_CTX: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 _REVL_FRAME = "_revl_frame"
@@ -2061,6 +2113,8 @@ def _register_resource(resource: Any) -> None:
     activating = _ACTIVATING.get()
     if activating:
         activating[-1]._resources.append(resource)
+    if _ACTIVATING:
+        _ACTIVATING[-1]._resources.append(resource)
 
 
 def _frame_for_ctx(ctx: Any) -> "Optional[Frame]":
@@ -2240,6 +2294,7 @@ def spawn(ctx, component: dict, config, realms):
 #: runs copy it, so two sessions on two threads each trace to their own sink.
 _TRACE: "contextvars.ContextVar[Optional[Callable[[str], None]]]" = (
     contextvars.ContextVar("_revl_trace", default=None))
+_trace: Optional[Callable[[str], None]] = None
 _observers: list = []
 
 
@@ -2257,6 +2312,8 @@ def set_trace(callback: Optional[Callable[[str], None]]) -> None:
     gone when that task ends.
     """
     _TRACE.set(callback)
+    global _trace
+    _trace = callback
 
 
 def add_trace(callback: Callable[[str], None]) -> Callable[[], None]:
@@ -2292,6 +2349,7 @@ def remove_trace(callback: Callable[[str], None]) -> bool:
 def trace_observers() -> int:
     """How many callbacks are currently receiving events (primary included)."""
     return len(_observers) + (1 if _TRACE.get() is not None else 0)
+    return len(_observers) + (1 if _trace is not None else 0)
 
 
 # item 259 slice 2 (docs/design/259-checked-parallel-emissions.md §4.1, HIGH-1):
@@ -2332,6 +2390,8 @@ def _record(event: str) -> None:
     trace = _TRACE.get()
     if trace is not None:
         trace(event)
+    if _trace is not None:
+        _trace(event)
     for observer in list(_observers):
         observer(event)
 
@@ -2807,6 +2867,7 @@ class _Transactional:
         # stranded, never run, whichever path reached it (a cordis unwind, a
         # method entry's drain, the session escrow, a failed UI transaction
         # unit's own unwind).
+        # method entry's drain, the session escrow).
         if _estop_poll():
             self.frame._record_estop_stranded(self)
             return None
@@ -2915,6 +2976,7 @@ def _inverse_label(disposer: Any) -> Optional[str]:
     own code object does carry one: the undo is a call, and the callee's name
     is the last global/attribute the closure loads (`lambda: a.close()` ->
     `close`, `lambda: close_b(b)` -> `close_b`). Best-effort by construction —
+    `close`, `lambda: blow('x')` -> `blow`). Best-effort by construction —
     `None` when nothing is readable — but it is what lets the record NAME the
     inverse that faulted instead of reporting an anonymous failure."""
     entry = getattr(disposer, "_revl_entry", disposer)
@@ -2974,6 +3036,7 @@ class _Compensation:
     __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq",
                  "_escrowed", "component", "method", "stamp", "_estop_stranded",
                  "emission_step")
+                 "_escrowed", "component", "method", "stamp", "_estop_stranded")
 
     def __init__(self, frame: "Frame", fn: Callable[[], Any],
                  method: Optional[str] = None) -> None:
@@ -3275,9 +3338,14 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
 # When NO owner is registered (`session_owner()` is None), every `Frame`
 # behaves byte-identically to the pre-245 world: a clean drain discharges at
 # unload (implicit commit), the compatibility clause.
+# The owner is process-global and single-slot, exactly like `_trace`: one driver
+# runs a session at a time. When NO owner is registered (`_SESSION_OWNER is
+# None`), every `Frame` behaves byte-identically to the pre-245 world — a clean
+# drain discharges at unload (implicit commit), the compatibility clause.
 
 _SESSION_OWNER: "contextvars.ContextVar[Optional[SessionOwner]]" = (
     contextvars.ContextVar("_revl_session_owner", default=None))
+_SESSION_OWNER: "Optional[SessionOwner]" = None
 
 
 def set_session_owner(owner: "SessionOwner") -> None:
@@ -3289,6 +3357,9 @@ def set_session_owner(owner: "SessionOwner") -> None:
     guarded here (one driver owns one session). Registered in the calling
     context: a thread, or an asyncio task and the tasks started from it."""
     _SESSION_OWNER.set(owner)
+    guarded here (one driver owns one session)."""
+    global _SESSION_OWNER
+    _SESSION_OWNER = owner
 
 
 def clear_session_owner() -> None:
@@ -3296,10 +3367,14 @@ def clear_session_owner() -> None:
     end). Frames built afterwards in this context get the pre-245
     implicit-commit semantics; a task that copied the owner keeps it."""
     _SESSION_OWNER.set(None)
+    end). Frames built afterwards get the pre-245 implicit-commit semantics."""
+    global _SESSION_OWNER
+    _SESSION_OWNER = None
 
 
 def session_owner() -> "Optional[SessionOwner]":
     return _SESSION_OWNER.get()
+    return _SESSION_OWNER
 
 
 def _hold_for_session(entry: Any) -> bool:
@@ -4003,6 +4078,7 @@ class Frame:
         # is the compatibility clause: drain discharges at unload, byte-identical
         # to the pre-245 world.
         self._owner: "Optional[SessionOwner]" = _SESSION_OWNER.get()
+        self._owner: "Optional[SessionOwner]" = _SESSION_OWNER
         if self._owner is not None:
             self._owner.register_frame(self)
         # item 245: set by `drain`'s mid-session-withdrawal branch, so the
@@ -4010,6 +4086,10 @@ class Frame:
         # (see `_hold_for_session`). Never set by a mid-activation failure.
         self._holding = False
         _bind_frame(ctx, self)  # so a SpawnHandle can find this frame
+        try:
+            _FRAME_BY_CTX[ctx] = self  # so a SpawnHandle can find this frame
+        except TypeError:  # pragma: no cover — non-weakrefable ctx
+            pass
         # item 334 (instance migration under recording): the emitted body is
         # handed a `_RecordingContext` wrapper when the WAL is on, but a
         # `SpawnHandle` holds the RAW fiber context and looks the frame up by
@@ -4017,6 +4097,22 @@ class Frame:
         # report an empty resource vector and a hot-swap through
         # `Gate.propose` drop the live instance's state. `_bind_frame` stores
         # the frame on the RAW context, which both spellings resolve to.
+        # handed a `_RecordingContext` wrapper when the WAL is on, so the frame
+        # is keyed above under the WRAPPER — but a `SpawnHandle` holds the RAW
+        # fiber context (`runtime.spawn`: `SpawnHandle(fiber, ...)`) and looks the
+        # frame up by it (`_frame`/`_frame_for_ctx`). Without also keying under
+        # the underlying raw context, `capture_state` finds no frame under a
+        # recording gate and silently reports an empty resource vector, so a
+        # generational hot-swap through `Gate.propose` (which records under a
+        # policy) drops the live instance's state instead of migrating it. Key
+        # the frame under the underlying context too; a bare (un-recorded)
+        # activation has no `_revl_ctx` and is untouched.
+        underlying = getattr(ctx, "_revl_ctx", None)
+        if underlying is not None and underlying is not ctx:
+            try:
+                _FRAME_BY_CTX[underlying] = self
+            except TypeError:  # pragma: no cover — non-weakrefable ctx
+                pass
         # An emitted `apply` resolves its config immediately before building
         # the Frame, so this is where the resolution finally learns which
         # component it belongs to (ConfigSchema itself is name-less in
@@ -4434,6 +4530,7 @@ class Frame:
                 iterator = body().__aiter__()
                 while True:
                     token = _ACTIVATING.set(_ACTIVATING.get() + (frame,))
+                    _ACTIVATING.append(frame)
                     try:
                         value = await iterator.__anext__()
                     except StopAsyncIteration:
@@ -4443,6 +4540,7 @@ class Frame:
                         raise
                     finally:
                         _ACTIVATING.reset(token)
+                        _ACTIVATING.pop()
                     yield frame._guard(value)
             return _async_tracked
 
@@ -4450,6 +4548,7 @@ class Frame:
             iterator = iter(body())
             while True:
                 token = _ACTIVATING.set(_ACTIVATING.get() + (frame,))
+                _ACTIVATING.append(frame)
                 try:
                     value = next(iterator)
                 except StopIteration:
@@ -4459,6 +4558,7 @@ class Frame:
                     raise
                 finally:
                     _ACTIVATING.reset(token)
+                    _ACTIVATING.pop()
                 yield frame._guard(value)
         return _tracked_gen
 
@@ -4561,6 +4661,7 @@ class Frame:
                       idempotency: Optional[str] = None,
                       scope: Optional[dict] = None,
                       call: Optional[dict] = None) -> "_Transactional":
+                      scope: Optional[dict] = None) -> "_Transactional":
         """Register a witnessed effect's declared inverse as a TRANSACTIONAL
         entry, carrying its `witness` (item 243). Returns the disposer the
         emitted body yields into the accumulator, so it sits in the same LIFO
@@ -4606,6 +4707,9 @@ class Frame:
                 receiver=receiver,
                 method=method,
                 args=args,
+                receiver=self.name,
+                method=_named_call_method(undo),
+                args=[witness],
                 origin={"phase": "activation", "key": self.name},
                 witness=witness,
                 # item 309: carry the register into the WAL so a fresh-process
@@ -4621,6 +4725,7 @@ class Frame:
                              undo_idempotent: bool = False,
                              scope: Optional[dict] = None,
                              call: Optional[dict] = None) -> "_Transactional":
+                             scope: Optional[dict] = None) -> "_Transactional":
         """Register the declared inverse of a witnessed effect that has NO body
         generator to yield its disposer into, as a transactional entry on THIS
         component's activation frame (item 318,
@@ -4694,6 +4799,9 @@ class Frame:
                 receiver=receiver,
                 method=method,
                 args=args,
+                receiver=self.name,
+                method=_named_call_method(undo),
+                args=[witness],
                 origin={"phase": "call", "key": self.name},
                 witness=witness,
                 undo_idempotent=undo_idempotent,
@@ -4716,6 +4824,7 @@ class Frame:
     def compensation(self, fn: Callable[[], Any], *,
                      call: Optional[dict] = None,
                      crossing: Optional[str] = None) -> "_Compensation":
+    def compensation(self, fn: Callable[[], Any]) -> "_Compensation":
         """Register an `emit ... compensate ...` step's offsetting call as a
         COMPENSATION entry on the SAME per-activation LIFO disposer stack as
         every bracket and transactional entry (item 247, docs/design/
@@ -4751,6 +4860,8 @@ class Frame:
         timeline = getattr(self.ctx, "_revl_timeline", None)
         if timeline is not None:
             entry.emission_step = _emission_for(timeline, fn, crossing)
+        _estop_check(f"{self.name}.{_named_call_method(fn)}")   # item 443
+        entry = _Compensation(self, fn, method=_named_call_method(fn))
         self._compensations.append(entry)
         wal = self._wal()
         if wal is not None:
@@ -4759,6 +4870,9 @@ class Frame:
                 receiver=receiver,
                 method=method,
                 args=args,
+                receiver=self.name,
+                method=_named_call_method(fn),
+                args=[],
                 origin={"phase": "activation", "key": self.name},
                 witness=None,
                 offsets=getattr(entry.emission_step, "wal_seq", None),
@@ -4769,6 +4883,7 @@ class Frame:
     def compensation_method(self, fn: Callable[[], Any], *,
                             call: Optional[dict] = None,
                             crossing: Optional[str] = None) -> "_Compensation":
+    def compensation_method(self, fn: Callable[[], Any]) -> "_Compensation":
         """Register a PROVIDE-METHOD `emit ... compensate ...` step's offsetting
         call as a COMPENSATION entry on THIS component's activation frame (the
         item-247 method-body compensate remainder, docs/design/teardown-contract.md).
@@ -4814,6 +4929,8 @@ class Frame:
         wrapping, so the WAL names the real offsetting call, not the wrapper."""
         receiver, method_name, args = _descriptor_call(call, fn, self.name, [])
         _estop_check(f"{self.name}.{method_name}")   # item 443
+        _estop_check(f"{self.name}.{_named_call_method(fn)}")   # item 443
+        method_name = _named_call_method(fn)
         timeline = getattr(self.ctx, "_revl_timeline", None)
         offsets = None
         if timeline is not None:
@@ -4823,6 +4940,7 @@ class Frame:
             offsets = getattr(emission, "wal_seq", None)
             _step, fn = timeline.record_yield(fn, f"{self.name}/compensate",
                                               emission=emission)
+            _step, fn = timeline.record_yield(fn, f"{self.name}/compensate")
         entry = _Compensation(self, fn, method=method_name)
         self._compensations.append(entry)
         self._deferred_compensations.append(entry)
@@ -4834,8 +4952,10 @@ class Frame:
             record = wal.record_discharge_descriptor(
                 "compensation",
                 receiver=receiver,
+                receiver=self.name,
                 method=method_name,
                 args=args,
+                args=[],
                 origin={"phase": "call", "key": self.name},
                 witness=None,
                 offsets=offsets,
@@ -4963,6 +5083,7 @@ class Frame:
 
     def acquire_lease(self, capability: str, ttl_ms: Any, uses: Any,
                       key: "str | None" = None, provider: Any = None) -> Any:
+    def acquire_lease(self, capability: str, ttl_ms: Any, uses: Any) -> Any:
         """`let l = effect lease <cap> …` at runtime (item 294 Slice 2). The
         standing grant was already minted from the operator's approved ticket by
         the load-time lease gate; this resolves the live lease grant for THIS
@@ -4976,6 +5097,7 @@ class Frame:
         handle is a value a delegatee may read fields of, so it carries no
         authority: `delegate_call` asks the session's ledger for the provider by
         request id, after the grant has been checked and spent."""
+        defensive twin so no self-mint ever happens with no ticket behind it."""
         owner = self._owner
         acquire = getattr(owner, "lease_acquire", None) if owner is not None \
             else None
@@ -4987,6 +5109,7 @@ class Frame:
                 "must be acquired under an approval policy that raised and "
                 "approved its ticket")
         request_id = acquire(self.name, capability, ttl_ms, uses, key, provider)
+        request_id = acquire(self.name, capability, ttl_ms, uses)
         if request_id is None:
             raise LeaseRefused(
                 capability,
@@ -5062,6 +5185,7 @@ class Frame:
         if spends and fired is not None:
             fired(spends)
         return result
+        return LeaseHandle(capability, request_id, owner.lease_revoke)
 
     def approval_crossing(self, handle: Any, capability: str,
                           fire: Callable[[], Any]) -> Any:
@@ -5144,6 +5268,9 @@ class Frame:
                 self._drain_phase2()
         finally:
             self._judge_frame()      # issue #1945: every undo of this frame has run
+        if self._committed:
+            return
+        self._drain_phase2()
 
     def drain(self) -> Any:
         """Dispose every adopted effect, newest first (yielded last by the
@@ -5693,6 +5820,7 @@ class LeaseHandle:
     single scoped revoke exemption: `l.revoke()` retires THAT grant (its own,
     always-safe: revoking your own authority only narrows), riding the LIFO
     teardown. It names no other grant.
+    teardown. It names no other grant."""
 
     Item 442 (issue #2693): a lease minted on a WIRING KEY also carries that key
     and the component that acquired it, so the same value is a delegated
@@ -5703,10 +5831,12 @@ class LeaseHandle:
     never a bearer token."""
 
     __slots__ = ("capability", "request_id", "_revoke_cb", "key", "holder")
+    __slots__ = ("capability", "request_id", "_revoke_cb")
 
     def __init__(self, capability: str, request_id: str,
                  revoke_cb: "Callable[[str], Any]", key: "str | None" = None,
                  holder: "str | None" = None) -> None:
+                 revoke_cb: "Callable[[str], Any]") -> None:
         self.capability = capability
         self.request_id = request_id
         self._revoke_cb = revoke_cb
@@ -6154,6 +6284,7 @@ class SessionOwner:
         return sum(1 for e in self._live_entries()
                    if not e.discharged and not getattr(e, "replayed", False)
                    and not getattr(e, "ran", False))
+                   if not e.discharged and not getattr(e, "replayed", False))
 
     def _target(self) -> dict:
         """The gate target, hash-bound: (queue, live witnessed count, registry
@@ -7769,6 +7900,7 @@ class Subscription:
         consumer is gone, so there is nobody left to take them. That drop is
         recorded (`stream.discard N`), not silent, because the provider was
         told each of them was accepted (issue #2711)."""
+        core guarantee is pinned on."""
         if self._closed:
             return False
         discarded = len(self._buffer)
@@ -8099,6 +8231,7 @@ class TimerHandle:
     it, or an `after` firing, releases it from ``Clock._timers`` and drops its
     body, so a host that swaps for hours neither scans dead handles on every
     ``advance`` nor keeps the generation that armed them alive."""
+    schedule's inverse — idempotent, and a no-op once the timer is spent."""
 
     __slots__ = ("serial", "mode", "interval_ms", "_body", "state", "next_at", "fired")
 
@@ -8171,6 +8304,8 @@ class Clock:
     _serial = 0
     _timers: list = []      # the live TimerHandles, registration order
     _firings: deque = deque(maxlen=FIRINGS_CAP)  # (timer serial, now_ms), fire order
+    _timers: list = []      # every TimerHandle ever armed, registration order
+    _firings: list = []     # (timer serial, now_ms) per firing, in fire order
 
     @classmethod
     def now(cls) -> int:
@@ -8219,11 +8354,13 @@ class Clock:
         if not cls._timers:
             return None
         return min(t.next_at for t in cls._timers) - cls._now_ms
+        return sum(1 for t in cls._timers if t.state == "live")
 
     @classmethod
     def firings(cls) -> list:
         """The recorded firing log: ``(timer serial, fired-at ms)`` in order,
         the most recent :attr:`FIRINGS_CAP` firings only."""
+        """The recorded firing log: ``(timer serial, fired-at ms)`` in order."""
         return list(cls._firings)
 
     @classmethod
@@ -8232,6 +8369,7 @@ class Clock:
         cls._serial = 0
         cls._timers = []
         cls._firings = deque(maxlen=cls.FIRINGS_CAP)
+        cls._firings = []
 
 
 def schedule_every(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:

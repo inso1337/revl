@@ -40,16 +40,19 @@ from pathlib import Path
 
 from .._paths import backends_root, venv_python as _venv_python
 from . import remedy
+from .._paths import backends_root
 
 #: Verbs that need a live composition, which only the runtime can boot.
 RUNTIME_VERBS = frozenset({
     "revl_load", "revl_call", "revl_act", "revl_counterfactual", "revl_swap", "revl_unload", "revl_snapshot",
+    "revl_load", "revl_call", "revl_swap", "revl_unload", "revl_snapshot",
     "revl_restore", "revl_rollback", "revl_undo", "revl_commit",
     "revl_commit_confirm", "revl_abort", "revl_estop", "revl_estop_report",
     "revl_edit", "revl_live_query", "revl_timeline", "revl_inspect_step",
     "revl_step_back", "revl_replay_bisect", "revl_replay_forward",
     "revl_fork", "revl_fork_confirm", "revl_change", "revl_export",
     "revl_knowledge",
+    "revl_fork", "revl_fork_confirm",
 })
 
 #: Verbs that still answer without the runtime, and what they lose.
@@ -75,6 +78,7 @@ def cordis_importable() -> bool:
     try:
         if importlib.util.find_spec("cordis") is None:
             return False
+        return importlib.util.find_spec("cordis") is not None
     except (ImportError, ValueError):
         return False
     try:
@@ -99,6 +103,8 @@ def venv_python() -> Path:
 #: config block starts the server with an empty environment and probes with
 #: `-E`, see `print_config.PROBE`.)
 GATE_PROBE = ("-P", "-c", "import cordis, revl")
+    """Where `backends/python/setup.sh` puts the runtime venv's interpreter."""
+    return backends_root() / "python" / ".venv" / "bin" / "python"
 
 
 def venv_has_cordis(python: Path) -> bool:
@@ -108,6 +114,7 @@ def venv_has_cordis(python: Path) -> bool:
     try:
         probe = subprocess.run(
             [str(python), *GATE_PROBE],
+            [str(python), "-P", "-c", "import cordis, revl"],
             capture_output=True, timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -132,6 +139,7 @@ def refusal(name: str) -> dict:
         # one `next` schema across every refusal (issue #1691): no MCP call
         # installs a runtime, so this remedy is an operator step
         "next": remedy.operator_step(fix),
+        "next": fix,
         "diagnostics": [{
             "severity": "error", "code": "REVL", "category": "runtime",
             "message": (f"`{name}` needs the cordis-py runtime, which this "

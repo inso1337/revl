@@ -503,6 +503,10 @@ COMPILER_DOOR_EXCEPTIONS = {
                    "action touches; lowers no host body and boots nothing, and "
                    "the source it compiles has already passed the pre-dispatch "
                    "authoring gate",
+    "persist.py": "the snapshot re-admission; its agent-facing caller "
+                  "(`revl_restore`) runs its own profiled decision compile "
+                  "first (`server._restore_authoring_refusal`), and its other "
+                  "caller is the operator's own `--restore`",
     "query_tools.py": "read-only static queries — compile only, never loads, "
                       "boots or swaps",
 }

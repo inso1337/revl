@@ -410,6 +410,7 @@ def test_filter_of_a_prop_name_is_a_tier_skip_not_an_emit_failure(tmp_path):
     py = _cli(tmp_path, str(source), "--backend", "py", "--filter", "identity holds")
     assert py.returncode == 0, py.stdout + py.stderr
     assert "[py] pass: 1 test(s) passed; 1 of 1 prop test(s) held" in py.stdout
+    assert "[py] pass: 1 of 1 prop test(s) held" in py.stdout
 
 
 def test_filter_that_leaves_a_tier_nothing_never_prints_pass(tmp_path):
@@ -471,6 +472,7 @@ def test_all_with_a_prop_only_selection_summarises_skips_not_failures(tmp_path):
                   "--filter", "identity holds")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[py] pass: 1 test(s) passed; 1 of 1 prop test(s) held" in result.stdout
+    assert "[py] pass: 1 of 1 prop test(s) held" in result.stdout
     assert "summary: 1 pass, 5 skipped, 0 failed" in result.stdout
     assert "all tiers passed" in result.stdout
     assert "tier(s) failed" not in (result.stdout + result.stderr)
@@ -613,6 +615,11 @@ def test_the_go_runner_resolves_stc_go_before_it_runs_the_module(monkeypatch):
     even where `REVL_REQUIRE_TIERS` does not name go: a pinned module that
     cannot be obtained is a provisioning break rather than an absent
     toolchain."""
+    The verdict stays a FAILURE rather than the rust tier's `Absent` skip: `go`
+    is exempt from `REVL_REQUIRE_TIERS`
+    (tests/test_env_gated_skips_run_somewhere.py), so no job would catch the
+    skip, and a pinned module that cannot be obtained is a provisioning break
+    rather than an absent toolchain."""
     monkeypatch.setattr(test_module, "_STC_GO_REASON", "")  # not probed yet
     monkeypatch.setattr(test_module.shutil, "which", lambda _name: "/usr/bin/go")
     monkeypatch.setattr(
@@ -638,6 +645,7 @@ def test_a_resolvable_stc_go_still_runs_the_emitted_module_offline(monkeypatch):
         # `go test -v` reports each test it ran; the tier counts these lines
         return subprocess.CompletedProcess(
             cmd, 0, "--- PASS: TestLifecycle (0.00s)\nPASS\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(test_module, "_STC_GO_REASON", None)  # resolvable
     monkeypatch.setattr(test_module.shutil, "which", lambda _name: "/usr/bin/go")

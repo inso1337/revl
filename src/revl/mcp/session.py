@@ -35,6 +35,7 @@ from .. import cap_order
 from .. import intent as _intent
 from .._paths import backends_root, python_backend_emitter, venv_python
 from ..gate import _ir_referenced_names
+from .._paths import backends_root, python_backend_emitter
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
@@ -281,6 +282,7 @@ def _drain_driver_residue(driver) -> list:
     taken = list(held)
     held.clear()
     return taken
+from .approval import _args_digest as _cache_args_digest
 
 
 class SessionError(RuntimeError):
@@ -290,6 +292,7 @@ class SessionError(RuntimeError):
     ``STATE_UNDISCLOSED``, item 334) for a caller that must branch on the
     refusal rather than parse its prose; it defaults to None so every existing
     single-string raise is unchanged.
+    single-string raise is unchanged."""
 
     An optional `repair` carries the structured minimal edit the raising check
     already knows (issue #2845): `target` (what to change), `edit` (the one
@@ -299,6 +302,7 @@ class SessionError(RuntimeError):
 
     def __init__(self, *args: object, code: str | None = None,
                  repair: dict | None = None) -> None:
+    def __init__(self, *args: object, code: str | None = None) -> None:
         super().__init__(*args)
         self.code = code
         self.repair = repair
@@ -396,6 +400,8 @@ def _cap_covers(wide: str, narrow: str) -> bool:
     try:
         return cap_order.covers(cap_order.parse_stored_cap(wide),
                                 cap_order.parse_stored_cap(narrow))
+        return cap_order.covers(cap_order.parse_cap(wide),
+                                cap_order.parse_cap(narrow))
     except cap_order.CapError:
         return False                    # unparseable -> only exact-string matches
 
@@ -1022,6 +1028,7 @@ class _SwapPlan:
     old_ir: dict
     new_map: dict
     rendered: _Rendered
+    source: str
     pre: dict
     handoff_pre: dict
     pre_resolved: set
@@ -1088,6 +1095,7 @@ def _backend():
             f"as `revl mcp …` (the `setup.sh`-installed console script, the "
             f"documented happy path) or, with the venv's interpreter "
             f"explicitly, `{venv_python(backend_dir / '.venv')} -m revl mcp …` "
+            f"explicitly, `{backend_dir / '.venv' / 'bin' / 'python'} -m revl mcp …` "
             f"(issue #317 closes most of `-m`'s CWD-shadowing window; `revl` "
             f"closes the rest)"
         ) from exc
@@ -1350,6 +1358,7 @@ class Session:
     started on the thread that holds the turn (from inside a method body, say)
     fails at once; a host body that boots one on a worker thread it joins
     lends it the turn (`_lend_turn`). `estop` does not wait."""
+    """One live composition, driven step by step."""
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -1871,6 +1880,9 @@ class Session:
                 loop.run_until_complete(loop.shutdown_asyncgens())
             finally:
                 loop.close()
+        if self._loop is None:
+            self._loop = asyncio.new_event_loop()
+        return self._loop.run_until_complete(coro)
 
     @property
     def loaded(self) -> bool:
@@ -1888,6 +1900,7 @@ class Session:
                 "live continuation over the shared workspace (item 250)")
         if self._driver is None:
             raise NothingLoaded("nothing is loaded — call revl_load first")
+            raise SessionError("nothing is loaded — call revl_load first")
         return self._driver
 
     # -- lifecycle ---------------------------------------------------------
@@ -1896,6 +1909,7 @@ class Session:
     def load(self, ir: dict, config: dict | None = None,
              record: bool = False, origin: dict | None = None, *,
              agent_authored: bool | None = None) -> dict:
+             record: bool = False, origin: dict | None = None) -> dict:
         """Boot `ir` as this session's composition, or change nothing.
 
         A load that is refused, raises a ticket, or faults leaves the session
@@ -1908,12 +1922,14 @@ class Session:
         server passes its compile report's `authored`, as a forward swap
         does). None records it as unknown, which an undo to this generation
         reads as agent-authored (issue #3293)."""
+        caller had been told its load failed."""
         self._refuse_if_halted("load")   # item 443
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
         checkpoint = _LoadCheckpoint(self)
         try:
             state = self._boot(ir, config, record, origin)
+            return self._boot(ir, config, record, origin)
         except BaseException as exc:
             checkpoint.restore(self)
             if checkpoint.had_no_loop and self._driver is None:
@@ -2066,6 +2082,7 @@ class Session:
         try:
             module = self._prepare_module(
                 ir, self._render_cached(self._driver, ir))
+            module = self._prepare_module(ir)
             # item 457: keep the emitted module so a caller that must rebuild
             # native ADT/Result case instances from the canonical wire encoding
             # (the HTTP face binding a typed `Request`) can reach the case
@@ -2437,6 +2454,7 @@ class Session:
 
     def _emit_or_refuse(self, driver, ir: dict,
                         source: str | None = None, code=None):
+                        source: str | None = None):
         """`driver._emit_module(ir)`, with the py tier's REFUSAL turned into a
         `SessionError` (issue #1406).
 
@@ -2456,6 +2474,7 @@ class Session:
 
         `source`, when given, is `ir` already rendered by `_render_or_refuse`,
         and `code`, when given, that text compiled by an earlier generation.
+        `source`, when given, is `ir` already rendered by `_render_or_refuse`.
         """
         rendered = {} if source is None else {"source": source}
         if code is not None:
@@ -2493,6 +2512,7 @@ class Session:
         return _Rendered(source=self._render_or_refuse(driver, ir), key=key)
 
     def _prepare_module(self, ir: dict, rendered: _Rendered | None = None):
+    def _prepare_module(self, ir: dict, source: str | None = None):
         """Emit the module and, when recording, instrument it before load.
 
         Instrumentation has to happen between emit and `plugin`, because it
@@ -2503,6 +2523,8 @@ class Session:
         from a swap that rendered it before teardown. Its text and the code
         this generation compiled from it are then kept for the next load or
         swap onto the same document.
+        `source` is `ir` already rendered, from a swap that rendered it before
+        teardown.
         """
         driver = self._driver
         if rendered is None:
@@ -2512,6 +2534,8 @@ class Session:
                                           rendered.code)
             self._renders.put(rendered.key, rendered.source,
                               getattr(driver, "emitted_code", None))
+        module = (self._emit_or_refuse(driver, ir) if source is None
+                  else self._emit_or_refuse(driver, ir, source))
         if self.recorder is not None:
             filename, source = driver.emitted
             self.recorder.register_source(filename, source)
@@ -2522,6 +2546,7 @@ class Session:
 
     def swap(self, ir: dict, origin: dict | None = None,
              migrate: str = "generational", *, agent_authored: bool) -> dict:
+             migrate: str = "generational") -> dict:
         """Replace the running composition. The caller has already had the
         candidate admitted; this performs the transition.
 
@@ -2565,6 +2590,9 @@ class Session:
           The same gate runs for ANY `agent_authored` successor, whatever
           `migrate` says (issue #2423); `declared` is how `Gate.propose` selects
           it.
+          crossed: a live instance the successor would inherit refuses BEFORE
+          teardown with STATE_UNDISCLOSED, gen N untouched, rather than being
+          silently migrated by candidate-written template name + host class alone.
 
         Composition-level (static) state is unaffected either way; this only
         reconciles the dynamic instance layer the static swap never saw.
@@ -2584,12 +2612,14 @@ class Session:
         try:
             ir = _configure_rows_from_host(ir, self.config)
             plan = self._plan_swap(driver, ir, migrate, agent_authored)
+            plan = self._plan_swap(driver, ir, migrate)
         except BaseException as exc:
             checkpoint.restore(self)
             _name_the_candidate(exc, ir)
             raise
         try:
             said = self._cut_over(driver, ir, origin, plan)
+            return self._cut_over(driver, ir, origin, plan)
         except ApprovalRequired as exc:
             _name_the_candidate(exc, ir)
             raise
@@ -2603,6 +2633,7 @@ class Session:
 
     def _plan_swap(self, driver, ir: dict, migrate: str,
                    agent_authored: bool) -> "_SwapPlan":
+    def _plan_swap(self, driver, ir: dict, migrate: str) -> "_SwapPlan":
         """Everything `swap` does before the teardown: every gate, rendering
         the successor, and capturing the state that crosses. The running
         generation is still live and serving throughout, and nothing here may
@@ -2649,6 +2680,15 @@ class Session:
         # refusable changes.
         if migrate == "declared" or (
                 agent_authored and migrate not in ("respawn", "handoff_back")):
+        # item 334 disclosure gate (`migrate="declared"`, the propose path): an
+        # AGENT-authored successor crosses the trust boundary, so gen N's live
+        # OPERATOR state must not carry onto it through any channel that is not
+        # explicitly declared AND §5-typed on both sides. The item-53 accept-vs-
+        # export type gate is manifest-threaded (compiler.py `handoffs` ambient)
+        # and never runs on propose's STANDALONE decision compile, so run the
+        # disclosure gate HERE, before any teardown — a refusal leaves gen N
+        # untouched (STATE_UNDISCLOSED), never silently carried. Fail-closed.
+        if migrate == "declared":
             self._enforce_declared_disclosure(old_ir, ir)
         # issue #1446: render the successor while the running generation is still
         # up. The emitter's refusal is raised here, so a document the py tier
@@ -2658,6 +2698,7 @@ class Session:
         # issue #3383: a document this session has already rendered (undo, redo,
         # a reverted edit, a swap onto its own code) is not rendered again.
         rendered = self._render_cached(driver, ir)
+        source = self._render_or_refuse(driver, ir)
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
         # non-instance swap is byte-identical to before. `declared` captures
@@ -2671,8 +2712,14 @@ class Session:
         # came up cold, dropping the operator's state (issue #2673). `respawn`
         # stays cold-start (F4): rollback and undo route through it, and
         # capturing there would launder the rolled-back generation's writes.
+        # non-instance swap is byte-identical to before. The item-10 instance
+        # channel has no declared type contract at any door, so it is NOT crossed
+        # under `declared` (the disclosure gate above already refused a live
+        # instance the agent successor would inherit); only `generational`
+        # (operator->operator) reconciles it.
         pre = (self._capture_instances(old_ir, ir)
                if migrate not in ("respawn", "handoff_back") else {})
+               if migrate == "generational" else {})
         # item 53: capture each stateful *provider's* live state (its
         # effect-created world) before teardown too, so a component that
         # declared a `handoff` starts its successor warm. Admission (or, under
@@ -2708,10 +2755,12 @@ class Session:
             if driver.FiberState(fiber.state).name == "PENDING")
         return _SwapPlan(old_ir=old_ir, new_map=new_map, rendered=rendered,
                          pre=pre,
+        return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
                          handoff_pre=handoff_pre, pre_resolved=pre_resolved,
                          agent_authored=(migrate == "declared" or agent_authored),
                          pre_pending=pre_pending, policy=migrate,
                          handoff_carry=handoff_carry)
+                         pre_pending=pre_pending)
 
     @_one_turn
     def _cut_over(self, driver, ir: dict, origin: dict | None,
@@ -2757,6 +2806,7 @@ class Session:
         self._install_session_owner(ir)
         try:
             self._run(driver._load(ir, self._prepare_module(ir, plan.rendered)))
+            self._run(driver._load(ir, self._prepare_module(ir, plan.source)))
             # item 334 (EDGE 1): the POST-ACTIVATION HEALTH GATE. `driver._load`
             # returns WITHOUT raising for the two most likely candidate faults —
             # item 372 makes a mid-body FAILED activation "honest and observable"
@@ -2786,6 +2836,8 @@ class Session:
                 self._history[-1].get("agentAuthored")
                 if self._history else None))
             self._set_last_applied_release(prior_applied)
+                             handoff_pre)
+            self._record_generation()
             if not isinstance(exc, _activation_error()):
                 raise
             raise SessionError(
@@ -2801,6 +2853,7 @@ class Session:
         if pre:
             try:
                 migration = self._reconcile_instances(pre, policy=plan.policy)
+                migration = self._reconcile_instances(pre)
             except driver.runtime.StateIncompatible as exc:
                 # atomicity (Q4): unwind the whole swap and re-seat the original
                 # instance state, so a rejected migration leaves nothing changed
@@ -2808,6 +2861,7 @@ class Session:
                 self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
                                  handoff_pre,
                                  saved_previous_authored=saved_previous_authored)
+                                 handoff_pre)
                 raise SessionError(
                     f"swap rejected: a live instance's state cannot migrate onto "
                     f"the successor — {exc}. The running composition is untouched "
@@ -2820,6 +2874,7 @@ class Session:
                 handoff = self._restore_provider_state(
                     ir, handoff_pre, agent_authored=plan.agent_authored,
                     carry_slots=plan.handoff_carry)
+                handoff = self._restore_provider_state(ir, handoff_pre)
             except driver.runtime.StateIncompatible as exc:
                 # defence in depth: admission gates the *declared* shapes, but a
                 # provider whose resource vector diverges from its declaration
@@ -2827,6 +2882,7 @@ class Session:
                 self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
                                  handoff_pre,
                                  saved_previous_authored=saved_previous_authored)
+                                 handoff_pre)
                 raise SessionError(
                     f"swap rejected: a provider's hand-off state cannot cross onto "
                     f"the successor — {exc}. The running composition is untouched "
@@ -2834,6 +2890,7 @@ class Session:
                     f"Dropping it would be residue (docs/state-handoff.md)."
                 ) from None
         self._record_generation(agent_authored=plan.agent_authored)
+        self._record_generation()
         # item 246: the new generation's class map goes live atomically with the
         # composition, and the outstanding-ticket table is replaced (a ticket
         # issued against the previous generation is gone, not stale — its hash
@@ -2875,9 +2932,11 @@ class Session:
           purely by candidate-written template NAME and host CLASS, with no
           declared §5 type contract at any door — so an agent successor that
           CHANGES a template with live instances would inherit the running
+          re-declares a template with live instances would inherit the running
           operator instance's state (an ungranted resource's product crossing by
           name into a `granted=[]` candidate). There is no way to DISCLOSE such a
           crossing, so a live instance whose template the successor changes
+          crossing, so a live instance whose template the successor re-declares
           refuses here rather than migrating. Quiesce it, or use a trusted
           operator swap. A template the successor re-declares with the SAME code
           (#2423 follow-up) is not a crossing: the state is re-seated on the
@@ -2893,6 +2952,7 @@ class Session:
           holder provides is new code reading the re-seated state through that
           service's method, so the consumers are part of the identity as well
           (the #2679 post-merge finding): an added consumer refuses.
+          operator swap.
         * The item-53 provider HAND-OFF channel (F1). It IS two-sided-declared
           (a `handoff` on both the predecessor and the successor), but propose's
           decision compile runs STANDALONE (no `manifest=`), so the accept-vs-
@@ -2949,6 +3009,18 @@ class Session:
                               "template name and host class alone, with no "
                               "declared hand-off type",
                 })
+            if name in new_templates and runtime.live_instances(name):
+                raise SessionError(
+                    f"propose refused: template {name!r} has live instance state "
+                    f"and the successor re-declares it. The item-10 instance "
+                    f"channel correlates old and new by template name and host "
+                    f"class alone — both candidate-written, with no declared §5 "
+                    f"type contract — so an agent-authored successor cannot "
+                    f"inherit a running instance's operator state across the "
+                    f"trust boundary. Quiesce the instances (or use a trusted "
+                    f"operator swap) before self-extending. Nothing was swapped; "
+                    f"gen N is intact and still serving.",
+                    code="STATE_UNDISCLOSED")
         running = self._declared_handoffs(old_ir)
         accepts = self._declared_handoffs(new_ir)
         for key, exported in running.items():
@@ -2959,6 +3031,8 @@ class Session:
                 raise SessionError(
                     f"the successor's `handoff` on {key!r} accepts "
                     f"`{accepted}`, but the running provider exports "
+                    f"propose refused: the successor's `handoff` on {key!r} "
+                    f"accepts `{accepted}`, but the running provider exports "
                     f"`{exported}` — the declared hand-off types are not §5-"
                     f"compatible, so operator state cannot cross onto the "
                     f"agent-authored successor (the item-53 accept-vs-export "
@@ -2976,6 +3050,10 @@ class Session:
                                   f"`{accepted}` but the running provider "
                                   f"exports `{exported}`",
                     })
+                    f"agent-authored successor (the item-53 accept-vs-export gate "
+                    f"propose's standalone compile never ran). Nothing was "
+                    f"swapped; gen N is intact.",
+                    code="STATE_UNDISCLOSED")
 
     @staticmethod
     def _declared_handoffs(ir: dict) -> dict:
@@ -3017,6 +3095,7 @@ class Session:
 
     def _reconcile_instances(self, pre: dict,
                              policy: str = "generational") -> dict:
+    def _reconcile_instances(self, pre: dict) -> dict:
         """Gate then migrate (Q2/Q3). Two passes so the whole cohort is checked
         before any of it is written — a single incompatible instance rejects the
         migration with nothing applied (Q4)."""
@@ -3038,6 +3117,7 @@ class Session:
                 handle.check_state(cap)  # gate only, no mutation
             plan[name] = pairs
         report = {"policy": policy, "templates": {}}
+        report = {"policy": "generational", "templates": {}}
         for name, pairs in plan.items():
             for handle, cap in pairs:
                 handle.restore_state(cap)
@@ -3054,6 +3134,7 @@ class Session:
                     saved_previous_origin: dict | None,
                     handoff_pre: dict | None = None, *,
                     saved_previous_authored: bool = True) -> None:
+                    handoff_pre: dict | None = None) -> None:
         """Undo a swap whose migration was rejected: tear down the rejected
         successor, reload the predecessor, and re-seat the captured state —
         both spawned-instance state and provider hand-off state — onto the
@@ -3076,6 +3157,7 @@ class Session:
             rendered = self._render_cached(driver, old_ir)
             self._run(driver._load(old_ir,
                                    self._prepare_module(old_ir, rendered)))
+            self._run(driver._load(old_ir, self._prepare_module(old_ir)))
         finally:
             driver.runtime.clear_session_owner()
         for name, info in pre.items():
@@ -3201,6 +3283,11 @@ class Session:
                     f"component failed to activate (FAILED) or has an unmet "
                     f"requirement (PENDING). item 372 makes both non-raising, "
                     f"so item 334's health gate rejects them here")
+                    f"the successor fiber is {state} after the swap load — a swap "
+                    f"must not install a generation whose component failed to "
+                    f"activate (FAILED) or has an unmet requirement (PENDING). "
+                    f"item 372 makes both non-raising, so item 334's health gate "
+                    f"rejects them here")
         # 2) every key the successor is responsible for must resolve to a live
         #    provider: the ROOT provisions (non-template declarations) plus the
         #    INHERITED ones (keys gen N actually served that the successor still
@@ -3250,6 +3337,7 @@ class Session:
         """Snapshot the live state of every running provider that declared a
         `handoff` (item 53), keyed by `_handoff_slot`: the provided key and the
         frame's whole `isolate` placement (issue #2510).
+        `handoff` (item 53), keyed by the provided key it hangs off.
 
         The value is the ordered `(resource_type, state)` vector of the
         provider's activation frame — captured while the old provider is still
@@ -3258,6 +3346,7 @@ class Session:
         be a differently-named component, is correlated by *what it provides*,
         and by the realm it provides it in, so a realm-scoped store never
         reaches a successor placed in another realm.
+        be a differently-named component, is correlated by *what it provides*.
 
         A TEMPLATE component is skipped (F5): a template's live state is the
         item-10 per-INSTANCE concern (`_capture_instances`), not a composition-
@@ -3284,6 +3373,7 @@ class Session:
             # issue #2510: the slot is (key, placement realm), never the key
             # alone, so a successor in another realm cannot claim it
             pre[_handoff_slot(comp, key)] = {
+            pre[handoff["key"]] = {
                 "component": comp["name"],
                 "type": handoff.get("type"),
                 "captured": captured,
@@ -3347,6 +3437,7 @@ class Session:
     def _restore_provider_state(self, new_ir: dict, pre: dict,
                                 agent_authored: bool = False,
                                 carry_slots: frozenset | None = None) -> dict:
+    def _restore_provider_state(self, new_ir: dict, pre: dict) -> dict:
         """Thread each captured provider state onto the successor that
         re-provides its key (item 53). Two passes — check the whole cohort,
         then apply — so a single incompatible provider rejects with nothing
@@ -3378,8 +3469,14 @@ class Session:
         A capture outside that set starts cold with `reason: "incompatible"`
         where a restored provider declares the key but its shape does not
         accept the running state; the undo still restores the code."""
+        never declared."""
         runtime = self._driver.runtime
         successors = _handoff_acceptors(new_ir)
+        new_by_key: dict = {}
+        for comp in new_ir.get("components") or []:
+            handoff = comp.get("handoff")
+            if isinstance(handoff, dict) and handoff.get("key"):
+                new_by_key[handoff["key"]] = comp
         plan: list = []
         report: dict = _handoff_cold_report(successors, pre)
         for slot, info in pre.items():
@@ -3409,6 +3506,11 @@ class Session:
                              f"agent-authored successor does not inherit "
                              f"such a frame's state, so it starts cold")})
                 continue
+        report: dict = {}
+        for key, info in pre.items():
+            comp = new_by_key.get(key)
+            if comp is None:
+                continue  # successor does not accept this key's state — cold
             # F1 defence in depth: the accept-vs-export §5 type gate. Admission
             # runs it when a manifest is threaded, and the `declared` disclosure
             # gate runs it before teardown, but a swap reached by any other path
@@ -3444,17 +3546,33 @@ class Session:
                 continue
             plan.append((slot, comp["name"], resources, captured))
         for slot, cname, resources, captured in plan:
+            if len(resources) != len(captured):
+                raise runtime.StateIncompatible(
+                    f"provider of {key!r} held {len(captured)} stateful "
+                    f"resource(s); the successor acquires {len(resources)} — "
+                    f"state cannot migrate without dropping or inventing one")
+            for pos, (res, (old_type, _snap)) in enumerate(zip(resources, captured)):
+                if type(res) is not old_type:
+                    raise runtime.StateIncompatible(
+                        f"provider of {key!r}: resource #{pos} was "
+                        f"{old_type.__name__}, the successor acquires "
+                        f"{type(res).__name__} — retyped state cannot migrate")
+            plan.append((key, comp["name"], resources, captured))
+        for key, cname, resources, captured in plan:
             for res, (_old_type, snap) in zip(resources, captured):
                 if snap is not None:
                     res.__revl_restore__(snap)
             report[_handoff_label(slot)] = _handoff_entry(slot, {
+            report[key] = {
                 "component": cname, "migrated": True,
                 # honest count of what actually crossed (item 53 operator rule)
                 "resources": sum(1 for _t, s in captured if s is not None),
             })
+            }
         return report or None
 
     def rollback(self, *, profile=None) -> dict:
+    def rollback(self) -> dict:
         if self.previous is None:
             raise SessionError("no previous generation to roll back to")
         # The pointers are deliberately NOT cleared here. `swap` saves them
@@ -3565,6 +3683,8 @@ class Session:
                 f"({unread}), so a component whose state this cold start drops "
                 f"may be missing from `components`")
         return out
+        return self.swap(restored, origin=restored_origin,
+                         migrate="respawn") | {"rolledBack": True}
 
     # -- the live SLO producer (roadmap item 473, issue #825) --------------
     #
@@ -3917,6 +4037,7 @@ class Session:
 
     def _record_generation(self, readmittable: bool = True, *,
                            agent_authored: bool | None = None) -> None:
+    def _record_generation(self, readmittable: bool = True) -> None:
         """Append the now-live generation to the retained history.
 
         The entry is a *re-admittable snapshot* (item 15's persist bundle) plus
@@ -3936,6 +4057,7 @@ class Session:
         to this generation restores the same code, so it applies the same
         agent-authored hand-off rules (issue #3293). None leaves it unknown:
         the entry has no `agentAuthored`, which reads as agent-authored."""
+        as the post-apply generation's re-admission bundle."""
         from .persist import build_snapshot  # noqa: PLC0415 — lazy
 
         # best-effort: a files-based origin materializes by reading the source
@@ -3951,6 +4073,7 @@ class Session:
             except OSError:
                 snap = None
         entry = {
+        self._history.append({
             "generation": self._generation,
             "snapshot": snap,
             "ir": self.ir,
@@ -3959,6 +4082,7 @@ class Session:
         if agent_authored is not None:
             entry["agentAuthored"] = bool(agent_authored)
         self._history.append(entry)
+        })
         # bounded retention: the oldest generations age out. `undo --to` below
         # the floor is refused (see `undo`) instead of reaching for one gone.
         if len(self._history) > HISTORY_LIMIT:
@@ -4069,6 +4193,7 @@ class Session:
 
     def _undo_dossier(self, current: dict, target: dict,
                       live: tuple[list[str], str | None]) -> dict:
+    def _undo_dossier(self, current: dict, target: dict) -> dict:
         """The undo plan/dossier — computed like any other change (item 65).
 
         An undo is a swap to the target generation's shape, so its delta is
@@ -4125,6 +4250,11 @@ class Session:
             "unloads": p["cascade"]["withdrawn"],
             "stateDropped": self._undo_state_dropped(p, target["generation"],
                                                      target["ir"], live),
+            "stateDropped": {
+                "provisions": p["provisions"]["withdrawn"],
+                "components": p["components"]["withdrawn"],
+                "teardownOrder": p["teardownOrder"],
+            },
             "cascade": p["cascade"],
             "provisions": p["provisions"],
             "unemittableCrossings": unemittable,
@@ -4188,6 +4318,7 @@ class Session:
         return out
 
     def undo(self, to: int | None = None, *, profile=None) -> dict:
+    def undo(self, to: int | None = None) -> dict:
         """Return to an earlier generation — and be, itself, a gated change.
 
         `undo()` returns to generation N−1; `undo(to=g)` to any still-retained
@@ -4228,6 +4359,7 @@ class Session:
         live = self._live_state_or_reason()
         dossier = self._undo_dossier(current, target, live)
         back = _handoff_back_pairs(self.ir, target["ir"] or {})
+        dossier = self._undo_dossier(current, target)
 
         # the gate: re-admit the target's sources exactly as a swap would. A
         # rejected recompile is a *result* (the running system is untouched),
@@ -4235,6 +4367,7 @@ class Session:
         from ..errors import RevlError  # noqa: PLC0415
         from ..diagnostics import classify  # noqa: PLC0415
         from .persist import _origin_from, _recompile, admitted_name  # noqa: PLC0415
+        from .persist import _origin_from, _recompile  # noqa: PLC0415
 
         try:
             target_ir = _recompile(target["snapshot"]["sources"],
@@ -4245,6 +4378,7 @@ class Session:
             # live.
             from ..admit_profile import check_no_realm_removal  # noqa: PLC0415
             check_no_realm_removal(self.ir, target_ir, profile)
+            target_ir = _recompile(target["snapshot"]["sources"])
         except RevlError as error:
             diag = classify(error)
             # nothing ran, so no state was dropped: the lists (`components`
@@ -4293,6 +4427,9 @@ class Session:
                            state.get("handoff"), target["generation"])
         # undo restores a generation, so it restores that generation's release
         self._set_last_applied_release(target.get("appliedRelease"))
+        state = self.swap(
+            target_ir, origin=_origin_from(target["snapshot"]["sources"]),
+            migrate="respawn")
         return {
             "undone": True,
             "toGeneration": target["generation"],
@@ -4357,6 +4494,7 @@ class Session:
         }
 
     async def _plug(self, name: str, module, ir: dict) -> None:
+    async def _plug(self, name: str, module) -> None:
         """Bring one component up from `module`, awaiting an async body exactly
         as `run._Driver._load` does for the whole composition."""
         driver = self._driver
@@ -4367,6 +4505,7 @@ class Session:
                 "artifact is inconsistent with its resulting IR")
         fiber = driver.root.plugin(body,
                                    _component_config(ir, driver.config, name))
+        fiber = driver.root.plugin(body, driver.config.get(name, {}))
         driver.fibers[name] = fiber
         await driver._flush()
         if fiber.state == driver.FiberState.LOADING:
@@ -4389,6 +4528,7 @@ class Session:
                     "state": None, "providedKeys": self._provided_keys()}
         if op["op"] == "load":
             self._run(self._plug(name, module, driver.ir))
+            self._run(self._plug(name, module))
             fiber = driver.fibers.get(name)
             state = driver.FiberState(fiber.state).name if fiber is not None else None
             return {"name": name, "absent": fiber is None, "state": state,
@@ -4436,6 +4576,7 @@ class Session:
                 state: str | None = None
                 try:
                     self._run(self._plug(name, running_module, running_ir))
+                    self._run(self._plug(name, running_module))
                     fiber = driver.fibers.get(name)
                     state = (driver.FiberState(fiber.state).name
                              if fiber is not None else None)
@@ -4556,6 +4697,7 @@ class Session:
                 gate_reads: dict[str, str] | None = None,
                 agent_supplied: bool = False,
                 compile_profile=None) -> dict:
+    def restore(self, snap: dict) -> dict:
         """Re-admit a snapshot into this (empty) session by replaying
         admission — compile through the gate, then boot. A component the
         current checker rejects fails loudly and loads nothing. `profile` is
@@ -4564,11 +4706,13 @@ class Session:
         disk reads differ from the operator gate's, and `agent_supplied`
         makes the `meta.components` check unconditional
         (`persist.restore`)."""
+        current checker rejects fails loudly and loads nothing."""
         from .persist import restore as _restore  # noqa: PLC0415 — lazy
 
         return _restore(self, snap, profile=profile, report=report,
                         gate_reads=gate_reads, agent_supplied=agent_supplied,
                         compile_profile=compile_profile)
+        return _restore(self, snap)
 
     def rehold_compensation_residue(self, *answers) -> None:
         """Put back the `compensationResidue` of answers a caller does not
@@ -4627,6 +4771,7 @@ class Session:
             owner.finalize_abort()
         residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver, residue)
+        report = self._teardown_report(driver)
         self._reset()
         return {"unloaded": True, "compensationResidue": residue, **report}
 
@@ -4906,6 +5051,7 @@ class Session:
                 with _SessionTurn(self):
                     self._own_host_trace()         # issue #1859
                     self._loop.run_until_complete(driver._dispose_all(self.ir))
+                self._loop.run_until_complete(driver._dispose_all(self.ir))
                 disposal["returned"] = True
             except asyncio.CancelledError:
                 disposal["cancelled"] = True
@@ -4918,6 +5064,7 @@ class Session:
         # and an executor thread starts with none; carry this context over.
         await host_loop.run_in_executor(
             None, contextvars.copy_context().run, _drive)
+        await host_loop.run_in_executor(None, _drive)
         result = self._settlement(driver, owner, aborting, disposal, ledger,
                                   verdict=verdict, finalize=finalize)
         self._teardown_settlement = result
@@ -4973,12 +5120,14 @@ class Session:
         extra = finalize() or {}
         residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver, residue)
+        report = self._teardown_report(driver)
         failed = [r["component"] for r in resources if r["outcome"] == "failed"]
         unattempted = [r["component"] for r in resources
                        if r["outcome"] in ("owned", "attempted")]
         # R4 alone: the compensation check is reported separately below
         r4_clean = all(v for k, v in report["checks"].items()
                        if k != "compensations")
+        r4_clean = bool(report["noResidue"])
         # `settled` is PHYSICAL settlement: the aggregate returned, every original
         # disposer that was reached returned, and R4 passes. A logged fault on a
         # single original resource withholds it even though the aggregate returned.
@@ -5121,6 +5270,7 @@ class Session:
             # hash binds the gate target, not this list, so it is unchanged
             manifest["actions"] = [dict(a) for a in self._actions]
         return manifest
+        return self._owner.manifest()
 
     @_one_turn
     def commit_confirm(self, manifest_hash: str) -> dict:
@@ -5148,6 +5298,7 @@ class Session:
         self._commit_wal(driver)                   # activation-complete + close
         residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver, residue)
+        report = self._teardown_report(driver)
         prompts = dict(owner.prompts)
         self._reset()
         return {"committed": True, "flushed": flush["fired"],
@@ -5174,6 +5325,7 @@ class Session:
         residue = self._surface_compensation_residue(owner)
         self._loop_axes.record_abort(residue)      # issue #1738
         report = self._teardown_report(driver, residue)
+        report = self._teardown_report(driver)
         prompts = dict(owner.prompts)
         self._reset()
         return {"aborted": True, "replayed": result["replayed"],
@@ -5327,6 +5479,7 @@ class Session:
         reported in `revocationErrors` rather than hidden, and never undo the
         halt. A crash between the latch and the sweep therefore leaves no
         revoked rows (docs/design/443-estop.md)."""
+        fibers); `estop_report` reads the inventory back."""
         driver = self._require()
         halt = driver.runtime.estop(reason, operator=operator or "unknown")
         self._halted = True
@@ -5336,6 +5489,7 @@ class Session:
         if sweep["errors"]:
             out["revocationErrors"] = sweep["errors"]
         return out
+        return {"halted": True, **halt}
 
     def estop_report(self) -> dict:
         """The halt inventory, without touching the world (item 443).
@@ -6032,6 +6186,10 @@ class Session:
                     if id(rec) not in seen]
         if owner is not None:
             owner.prompts["residue"] += len(residue)
+        if owner is None:
+            return []
+        residue = owner.collect_compensation_residue()
+        owner.prompts["residue"] += len(residue)
         return residue
 
     def _teardown_report(self, driver, residue=()) -> dict:
@@ -6045,6 +6203,8 @@ class Session:
         undo that did not happen. When there is any, a fifth check,
         `compensations`, is present and false, and `noResidue` is false with it.
         A boundary with none keeps the four checks, byte-identical."""
+    def _teardown_report(self, driver) -> dict:
+        """The R4 residue checks after a teardown, and the drained trace."""
         checks = {
             "registry": driver.root.registry.size == 0,
             "provisions": driver.root.reflect.store == {},
@@ -6091,6 +6251,8 @@ class Session:
         checks["hostResources"] = not unreleased
         detail["unreleased"] = unreleased
         return []
+        return {"noResidue": all(checks.values()), "checks": checks,
+                "detail": detail, "trace": driver.drain_events()}
 
     def _commit_wal(self, driver) -> None:
         """Stamp `activation-complete` and close the session's WAL (the recorder
@@ -6110,6 +6272,8 @@ class Session:
         wal = self.recorder.wal if self.recorder is not None else None
         if wal is not None and getattr(wal, "is_open", True):
             wal.close()
+        if self.recorder is not None and self.recorder.wal is not None:
+            self.recorder.wal.close()
 
     @_one_turn
     def _reset(self) -> None:
@@ -6443,6 +6607,8 @@ class Session:
                 fiber = runtime_mod.plug(
                     driver.root, getattr(module, name),
                     _component_config(driver.ir, driver.config, name))
+                fiber = runtime_mod.plug(driver.root, getattr(module, name),
+                                         driver.config.get(name, {}))
                 driver.fibers[name] = fiber
                 await driver._flush()
                 if fiber.state == driver.FiberState.LOADING:
@@ -6740,6 +6906,7 @@ class Session:
             # result). Generation-scoped: a swap drops the memo.
             pure_key = (key, method, _session_args_digest(
                 args, key, method, "`cache pure` memo"))
+            pure_key = (key, method, _cache_args_digest(args))
             if pure_key in self._cache_pure:
                 self._cache_hits += 1
                 return {"result": render(self._cache_pure[pure_key]),
@@ -6752,6 +6919,7 @@ class Session:
         if cache_active:
             entry_key = (key, method, _session_args_digest(
                 args, key, method, "seam cache entry"))
+            entry_key = (key, method, _cache_args_digest(args))
             entry = self._cache_entries.get(entry_key)
             if entry is not None and self._cache_entry_live(entry):
                 # LIVE HIT: the seam checks liveness BEFORE it consumes, so a hit
@@ -6780,6 +6948,7 @@ class Session:
         spends: list = []
         self._approval_decide_call(key, method, args, record=decision,
                                    spends=spends)
+        self._approval_decide_call(key, method, args, record=decision)
         # issue #1738: the call is decided and about to cross, so it counts
         # toward the loop axes now, policy or not.
         self._loop_axes.record_call(self._loop_call_class(key, method))
@@ -7318,6 +7487,7 @@ class Session:
         if ticket.get("classCCapabilities"):
             fields["classCCapabilities"] = sorted(
                 cap_order.parse_stored_cap(cap).token if cap in withheld else cap
+                cap_order.parse_cap(cap).token if cap in withheld else cap
                 for cap in ticket["classCCapabilities"])
         if scopes:
             fields["resourceScopes"] = {
@@ -7340,6 +7510,7 @@ class Session:
         operator's ticket was approved for gets a ticket of its own. An entry
         that names no proposers is spendable by nobody (fail closed)."""
         caller = self._operator_token()
+        bookkeeping."""
         for entry in self._ledger:
             if entry["consumed"]:
                 continue
@@ -7429,6 +7600,7 @@ class Session:
         return False
 
     def _consume_approval(self, entry: dict) -> int:
+    def _consume_approval(self, entry: dict) -> None:
         """Spend the token durably BEFORE the crossing fires (Decision 3,
         consume-before-fire). A crash between the spend and the fire leaves
         consumed-but-unfired: fail-closed, a fresh approval is demanded."""
@@ -7437,6 +7609,7 @@ class Session:
         wal = self._approval_wal()
         if wal is not None:
             wal.record_approval_consumed(entry["requestId"], use=use)
+            wal.record_approval_consumed(entry["requestId"])
         self._mint_admission_receipt(entry)
         return use
 
@@ -7576,6 +7749,7 @@ class Session:
             if wal is not None:
                 wal.record_approval_consumed(record["requestId"], use=use,
                                              scope="activation")
+                wal.record_approval_consumed(record["requestId"])
             if release["kind"] == "approval":
                 # item 471 Slice 2: the activation gate's two-phase spend is a
                 # spend, so it mints the admission receipt too. Without this the
@@ -7601,6 +7775,7 @@ class Session:
                               record: dict | None = None,
                               spends: list | None = None,
                               prefer_grant: str | None = None) -> None:
+                              record: dict | None = None) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and
@@ -7651,6 +7826,8 @@ class Session:
             raise _unencodable_args(key, method, "approval ticket",
                                     exc) from None
         self._refuse_unbounded_approval(ticket)   # issue #1755, opt-in
+        ticket = self._class_map.build_ticket(
+            reach, args, record_values=self.approval_record_values)
         # issue #1553: an operator's NO to this question refuses the re-issue it
         # was holding, once, before anything could cover it
         refusal = self._ticket_refusals.pop(ticket["hash"], None)
@@ -7660,6 +7837,7 @@ class Session:
         if standing is not None:
             use = self._consume_approval(standing)   # durable spend before fire
             _note_spend(spends, standing, use, ticket)
+            self._consume_approval(standing)   # durable spend before the fire
             if record is not None:
                 record["scope"] = ("approval", standing["requestId"])
                 record["approvalExpiresAt"] = standing.get("expiresAt")
@@ -7669,10 +7847,12 @@ class Session:
         # args included), so the shell-escape shape auto-approves against one
         # mint instead of prompting per call.
         grants = self._find_standing_grant(ticket, prefer=prefer_grant)
+        grants = self._find_standing_grant(ticket)
         if grants is not None:
             for g in grants:                   # every class-(c) cap is covered
                 use = self._consume_grant(g)   # durable spend before the fire
                 _note_spend(spends, g, use, ticket)
+                self._consume_grant(g)         # durable spend before the fire
             if record is not None:
                 record["scope"] = ("grants", [g["requestId"] for g in grants])
             return
@@ -7685,6 +7865,7 @@ class Session:
         if auto is not None:
             use = self._consume_auto_rule(auto)   # durable spend before fire
             _note_spend(spends, auto, use, ticket)
+            self._consume_auto_rule(auto)      # durable spend before the fire
             if record is not None:
                 record["scope"] = ("auto", auto["requestId"])
             return
@@ -7840,6 +8021,9 @@ class Session:
             # liveness check must use the identity the mint will use, or an
             # approved lease re-raises its ticket forever in that topology
             # (issue #2693).
+            component = lz["component"]
+            if self._live_lease_grant(component, cap) is not None:
+                continue  # already minted from an approved ticket (retry / pre-mint)
             ticket = self._build_lease_ticket(lz)
             if self._live_lease_grant(ticket["component"], cap) is not None:
                 continue  # already minted from an approved ticket (retry / pre-mint)
@@ -7983,6 +8167,7 @@ class Session:
     def _runtime_lease_acquire(self, component: str, capability: str,
                                ttl_ms, uses, key: "str | None" = None,
                                provider: object = None) -> str | None:
+                               ttl_ms, uses) -> str | None:
         """The runtime `_revl_frame.acquire_lease` bridge: resolve the standing
         grant the lease gate minted and return its `requestId` (the handle names
         it). None if no live lease grant backs it — the frame then fails closed
@@ -8001,6 +8186,7 @@ class Session:
         carries no provider, so a delegatee reading fields off it gets no
         authority; and liveness of the lender is decided against the scope it
         lent from, not against the crossing scope the grant was minted for."""
+        names the grant the body's crossings actually consume against."""
         g = self._live_lease_grant(component, capability)
         if g is None:
             # the acquiring body's component is not the crossing component (the
@@ -8112,6 +8298,7 @@ class Session:
         """After the provider returned, pair each spend with its emission record,
         exactly as `Session.call` does for an ordinary crossing."""
         self._record_spend_emissions(spends)
+        return g["requestId"] if g is not None else None
 
     def _runtime_lease_revoke(self, request_id: str) -> dict:
         """The lease disposer's own-requestId revoke (item 294, the scoped
@@ -8140,6 +8327,9 @@ class Session:
                                     raiser: str) -> dict | None:
         """A ledger entry for this ticket hash that `raiser` could still spend at
         a crossing: minted for it (issue #3216), not yet consumed, not expired. Deliberately WEAKER than
+    def _spendable_entry_for_ticket(self, ticket_hash: str) -> dict | None:
+        """A ledger entry for this ticket hash that could still be spent at a
+        crossing: minted, not yet consumed, not expired. Deliberately WEAKER than
         `_find_standing_approval` (which also pins the component and the live
         candidate hash before letting a token fire) — this one only asks whether
         an unanswered yes is still standing for the question, which is what the
@@ -8213,6 +8403,9 @@ class Session:
                 pending.pop(raiser, None)
                 pending[raiser] = round_
         self._show_pending_raisers(h)
+        if self._spendable_entry_for_ticket(h) is None \
+                and not self._quorum_pending(h):
+            self._ticket_rounds[h] = self._ticket_rounds.get(h, 0) + 1
         # the quorum opens HERE, on the asking, and not on the first vote: the
         # record's `expiresAt` is the deadline every vote is bound to, and it has
         # to run from the question rather than from whoever answers it last.
@@ -8237,6 +8430,13 @@ class Session:
             ticket["proposers"] = names
         else:
             ticket.pop("proposers", None)
+    def _ledger_entry_for_ticket(self, ticket_hash: str) -> dict | None:
+        """The entry already minted for the ticket's CURRENT answer round, if any
+        (F5: one ticket round mints AT MOST one approval). Returns it regardless
+        of `consumed` — `approve_ticket`'s idempotent-resend path has to
+        recognize a round that already minted whether or not that mint has fired
+        yet, not only a still-spendable one (that is `_find_standing_approval`'s
+        job, at the crossing).
 
     def _ledger_entry_for_ticket(self, ticket_hash: str,
                                  proposer: str) -> dict | None:
@@ -8256,6 +8456,15 @@ class Session:
         for entry in reversed(self._ledger):
             if entry["hash"] == ticket_hash \
                     and entry.get("proposers") == [proposer]:
+        Scoped to the round rather than to the hash for all time: a ticket hash
+        is stable across repeats of the same crossing, so a hash-wide match would
+        make the SECOND asking of a question permanently unanswerable — the
+        operator says yes, `approve_ticket` reports the spent entry back as
+        already-approved, and the re-issued call raises the same ticket again
+        forever."""
+        round_ = self._ticket_rounds.get(ticket_hash, 1)
+        for entry in self._ledger:
+            if entry["hash"] == ticket_hash and entry.get("round", 1) == round_:
                 return entry
         return None
 
@@ -8916,6 +9125,7 @@ class Session:
                else {})})
         self._mint_ticket_entry(
             ticket, proposer=record["proposer"], operator=actor,
+            ticket, operator=actor,
             quorum={"requestId": record["requestId"],
                     "require": record["require"], "counted": counted,
                     "approvers": list(record["approvers"]),
@@ -9179,6 +9389,8 @@ class Session:
         for entry in self._ledger:
             if entry["hash"] != ticket_hash or entry["consumed"]:
                 continue
+        entry = self._ledger_entry_for_ticket(ticket_hash)
+        if entry is not None and not entry["consumed"]:
             entry["consumed"] = True
             entry["revoked"] = True
             withdrawn = entry["requestId"]
@@ -9292,6 +9504,7 @@ class Session:
 
     def _mint_ticket_entry(self, ticket: dict, *, proposer: str,
                            operator: str | None = None,
+    def _mint_ticket_entry(self, ticket: dict, *, operator: str | None = None,
                            quorum: dict | None = None) -> dict:
         """Mint the single-use ledger entry an answered ticket authorizes, and the
         `approval-granted` WAL record that makes it durable.
@@ -9308,6 +9521,7 @@ class Session:
         Issue #3216: `proposer` is the one operator whose asking this yes
         answers and the only one that may spend it. The round is that asking's
         own, and the asking leaves the pending set."""
+        closed it, and never has to infer it."""
         ticket_hash = ticket["hash"]
         pending = self._ticket_pending_raisers.get(ticket_hash, {})
         now = self._now_ms()
@@ -9324,6 +9538,7 @@ class Session:
         round_ = pending.pop(proposer, None) \
             or self._ticket_rounds.get(ticket_hash, 1)
         self._show_pending_raisers(ticket_hash)
+        round_ = self._ticket_rounds.get(ticket_hash, 1)
         request_id = ticket_hash if round_ <= 1 \
             else f"{ticket_hash}#r{round_}"
         entry = {
@@ -9376,6 +9591,10 @@ class Session:
             # issue #3216: the operators this yes lets through, and only them
             response["proposers"] = list(ticket["proposers"])
         return response
+        return {"approved": True, "hash": ticket["hash"],
+                "component": ticket["component"], "key": ticket.get("key"),
+                "method": ticket.get("method"), "kind": ticket.get("kind"),
+                "candidateHash": ticket["candidateHash"]}
 
     def approve_ticket(self, ticket_hash: str, *, vote: str = "approve",
                        proposer: str | None = None,
@@ -9432,6 +9651,7 @@ class Session:
         refused (`_approved_proposer`) and the others keep their own asking
         pending. A resend naming the same proposer is the idempotent no-op."""
         self._refuse_if_halted("revl_approve")   # issue #2991
+        single-approver path uses."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -9453,6 +9673,9 @@ class Session:
             if ticket_hash in self._ticket_refusals or (
                     not pending and existing is not None
                     and existing.get("revoked")):
+            existing = self._ledger_entry_for_ticket(ticket_hash)
+            if ticket_hash in self._ticket_refusals \
+                    or (existing is not None and existing.get("revoked")):
                 # issue #1553: a revoke closed this round, so no yes follows it
                 raise SessionError(
                     f"ticket {ticket_hash} was revoked in this round, so it "
@@ -9469,6 +9692,10 @@ class Session:
             self._refuse_self_approval(ticket_hash)
             return self._ticket_response(
                 self._mint_ticket_entry(ticket, proposer=proposer))
+            if existing is not None:
+                return self._ticket_response(existing)
+            self._mint_ticket_entry(ticket)
+            return self._ticket_response(ticket)
         return self._cast_vote(ticket, rule, vote=vote, as_token=as_token,
                                as_secret=as_secret, as_proof=as_proof)
 
@@ -9655,6 +9882,7 @@ class Session:
             return capability == grant["capability"]
         try:
             held_cap = cap_order.parse_stored_cap(grant["capability"])
+            held_cap = cap_order.parse_cap(grant["capability"])
         except cap_order.CapError:
             return capability == grant["capability"]
         _obj, own = cap_order.split_ceilings(held_cap)
@@ -9685,6 +9913,7 @@ class Session:
             return grant["capability"]
         try:
             cap = cap_order.parse_stored_cap(grant["capability"])
+            cap = cap_order.parse_cap(grant["capability"])
         except cap_order.CapError:
             return grant["capability"]
         if any(name in dict(cap.params) for name in declared):
@@ -9704,6 +9933,7 @@ class Session:
             # is not a capability (`*` tops the order and carries no parameter,
             # so `*(calls=2)` is not a thing an operator could have granted).
             cap_order.parse_stored_cap(spelling)
+            cap_order.parse_cap(spelling)
         except (cap_order.CapError, KeyError, TypeError):
             return grant["capability"]
         return spelling
@@ -9726,6 +9956,7 @@ class Session:
     def _live_grant_for(self, capability: str, ticket: dict, now: int,
                         refusals_out: list | None = None,
                         prefer: str | None = None):
+                        refusals_out: list | None = None):
         """The first LIVE standing grant covering `capability` under this ticket's
         live closure: `_grant_covers` on the minted key, the same component and
         reach-closure candidate hash (invariants 4/5), the same session, unexpired
@@ -9755,6 +9986,8 @@ class Session:
             [g for g in self._grants if g.get("requestId") == prefer]
             + [g for g in self._grants if g.get("requestId") != prefer])
         for g in ordered:
+        a worse sentence than none."""
+        for g in self._grants:
             if g["consumed"]:
                 continue
             if g["component"] != ticket["component"]:
@@ -9779,6 +10012,7 @@ class Session:
         return None
 
     def _find_standing_grant(self, ticket: dict, prefer: str | None = None):
+    def _find_standing_grant(self, ticket: dict):
         """Every LIVE standing grant needed to JOINTLY cover this class-(c)
         ticket, or None when even one class-(c) capability the ticket reaches has
         no live covering grant (fail-closed: the crossing then prompts single-use
@@ -9841,6 +10075,7 @@ class Session:
             refused: list = []
             g = self._live_grant_for(cap, ticket, now, refusals_out=refused,
                                      prefer=prefer)
+            g = self._live_grant_for(cap, ticket, now, refusals_out=refused)
             if g is None:
                 # a class-(c) capability with no live grant -> prompt. Keep
                 # walking the rest: the operator is about to be asked about the
@@ -9862,6 +10097,7 @@ class Session:
         return grants
 
     def _consume_grant(self, grant: dict) -> int:
+    def _consume_grant(self, grant: dict) -> None:
         """Spend one use of a standing grant durably BEFORE the crossing fires
         (Decision 3, consume-before-fire — the Slice-2 WAL ordering still
         applies). Decrements `remainingUses`; a grant whose uses hit zero is
@@ -10027,6 +10263,7 @@ class Session:
         if self._class_map is None:
             return True
         return self._scope_hash(grant.get("lender")) == expected
+            wal.record_approval_consumed(grant["requestId"])
 
     # -- item 251 Slice 2: distilled AutoApproveRule enforcement -------------
 
@@ -10226,6 +10463,7 @@ class Session:
         for cap_str in class_c:
             try:
                 crossing = cap_order.parse_stored_cap(cap_str)
+                crossing = cap_order.parse_cap(cap_str)
             except cap_order.CapError:
                 return False
             if not any(cap_order.covers(rc, crossing) for rc in entry["caps"]):
@@ -10256,6 +10494,7 @@ class Session:
         return None
 
     def _consume_auto_rule(self, entry: dict) -> int:
+    def _consume_auto_rule(self, entry: dict) -> None:
         """Spend one use of a distilled rule durably BEFORE the crossing fires
         (consume-before-fire, reusing the 344 WAL ordering). A `uses`-bounded rule
         decrements `remainingUses` and marks `consumed` at zero, so an applied rule
@@ -10283,6 +10522,7 @@ class Session:
         if wal is not None:
             wal.record_approval_consumed(entry["requestId"], use=use)
         return use
+            wal.record_approval_consumed(entry["requestId"])
 
     def mint_standing_grant(self, *, ticket_hash: str | None = None,
                             capability: str | None = None,
@@ -10360,6 +10600,8 @@ class Session:
                 "operator: serve with `--http HOST:PORT --operator-profile "
                 "PROFILE` and grant `approve` to that operator "
                 "(docs/harness-gate-guide.md)")
+        return self._mint_grant(ticket_hash=ticket_hash, capability=capability,
+                                uses=uses, ttl_ms=ttl_ms)
 
     def _mint_grant(self, *, ticket_hash: str | None = None,
                     capability: str | None = None, uses: int | None = None,
@@ -10826,6 +11068,7 @@ class Session:
         and `_offer_by_id` re-folds the ledger, so both ends must check)."""
         return self._never_standing_rules(
             {"capabilities": list(getattr(rule, "caps", ()) or ())})
+        return {"offers": offers, "refusals": refusals}
 
     def _offer_by_id(self, offer_id: str):
         """Resolve an offer id back to its `DistilledOffer` (re-folding the ledger,
@@ -11128,6 +11371,7 @@ class Session:
                  "lender": g.get("lender"),
                  "subject": g.get("subject"),
                  "chain": [dict(link) for link in (g.get("chain") or [])]}
+                 "revoked": g.get("revoked", False)}
                 for g in self._grants],
             # item 251 Slice 3: the TIME AXIS. `promptsPerSessionSeries` is the
             # per-session prompt tally read from the WAL (deterministic, ordered by
@@ -11403,6 +11647,7 @@ class Session:
             # are visible — an agent can survey who holds what before it loads.
             return {"loaded": False, "leases": self.leases.document(),
                     "loopAxes": self.loop_axes(), **identity}
+                    "loopAxes": self.loop_axes()}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
         paused_now = self.slo_paused()
@@ -11410,6 +11655,8 @@ class Session:
             "loaded": True,
             "components": [
                 _component_state(driver, name, fiber)
+                {"name": name,
+                 "state": driver.FiberState(fiber.state).name}
                 for name, fiber in driver.fibers.items()
             ],
             "loadOrder": manifest.get("loadOrder") or [],
@@ -11470,6 +11717,8 @@ class Session:
         from .loop_axes import attempt_unit  # noqa: PLC0415
         return self._loop_axes.document(self._owner, self.attempt_limit,
                                         unit=attempt_unit(self))
+        numerator, a denominator and their ratio, cumulative for the session."""
+        return self._loop_axes.document(self._owner)
 
     def record_tool_call(self, name: str, arguments: dict, payload: dict,
                          ir_before: dict | None) -> None:
@@ -11597,10 +11846,15 @@ def _component_signature(comp: dict) -> str:
     component — its `body`, the keys it `provides`, what it `requires`, its
     `config` declaration — is in, canonicalized the way every other digest here
     is."""
+    `propose`'s `candidate.rvl` staging name). Everything that IS the component
+    — its `body`, the keys it `provides`, what it `requires`, its `config`
+    declaration — is in, canonicalized the way every other digest here is."""
     import json  # noqa: PLC0415 — stdlib
     entry = {k: v for k, v in comp.items() if k != "source"}
     payload = json.dumps(_code_shape(entry), sort_keys=True,
                          separators=(",", ":"), default=_plain)
+    payload = json.dumps({k: v for k, v in comp.items() if k != "source"},
+                         sort_keys=True, separators=(",", ":"), default=_plain)
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -11859,9 +12113,11 @@ def _unserved_key_message(driver, key: str) -> str:
     """Why a declared key has no value to call (issue #1513), naming the
     provider and its realm rather than guessing "inactive", and the error its
     provider's activation raised when that is the reason (issue #1895)."""
+    provider and its realm rather than guessing "inactive"."""
     from ..run import unserved_key_reason  # noqa: PLC0415 (lazy: run pulls cordis)
     return (_failed_provider_reason(driver, key)
             or unserved_key_reason(driver.ir or {}, key)
+    return (unserved_key_reason(driver.ir or {}, key)
             or f"key {key!r} is declared but not currently provided "
                "— its provider is inactive")
 

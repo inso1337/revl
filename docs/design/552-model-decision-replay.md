@@ -161,6 +161,10 @@ text is never written. `revl.replay_modes.plan` turns the member into two
 per-entry verdicts: `fromRecord` (a retained answer can be served without
 calling the model) and `rederivable` (the answer can be reproduced from the
 prompt; a hidden or summary span makes it false with the reason named).
+the decision was: the crossing, the placement, what answered and on what host
+profile, how the prompt was bound, what the candidates were and which was
+taken, how it was asked, under which rule and how far down the ladder, plus
+`reproducible()`.
 
 **`decision` is `None` whenever `verified` is false.** This is stronger than the
 exit clause's "an edited field fails its digest", and deliberately: a reader

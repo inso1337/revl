@@ -210,6 +210,7 @@ answer here (issue #2028). A code that enforces no named guarantee reports
 `"guarantee": "unclassified"` rather than leaving the field out.
 
 The same table is served over MCP by `revl_grammar` as
+than nothing. The same table is served over MCP by `revl_grammar` as
 `fixes`, alongside `guarantees` — so an agent that gets a code back can act
 on it without a second round trip.
 

@@ -11,6 +11,9 @@ each is pinned here:
 2. A `revl_edit`, `revl_swap` or `revl_change` response carries
    `blastRadius`: the revl_query_withdraw cascade for every component the
    change touches, read off the running composition.
+2. A `revl_edit` response carries `blastRadius`: the revl_query_withdraw
+   cascade for every component the edit touches, read off the running
+   composition.
 3. `revl_check` carries `selfCheck`: every guarantee G1-G9 as pass, fail (with
    the code and the fix) or unchecked, in one call.
 """

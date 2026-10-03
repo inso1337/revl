@@ -201,6 +201,8 @@ def test_an_edit_with_no_query_first_is_not_preflighted(mcp):
     shipped = _call("revl_ship", {"files": [str(paths["edited"])],
                                   "replacing": ["EchoBox"], "apply": True})
     assert shipped["shipped"] is True, shipped
+    assert _call("revl_swap", {"files": [str(paths["edited"])],
+                               "replacing": ["EchoBox"]}).get("swapped") is True
     axes = _call("revl_state", {})["loopAxes"]
     assert axes["preflightCoverage"] == {"numerator": 0, "denominator": 1, "value": 0.0}
 

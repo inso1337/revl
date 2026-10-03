@@ -529,6 +529,7 @@ def test_a_composition_without_route_model_spawns_exactly_as_before(
             monkeypatch.setattr(_placement, "_model_schedules",
                                 lambda files, processes, residency=None:
                                 (None, {}))
+                                lambda files, processes: (None, {}))
         written = _capture_specs(monkeypatch)
         work = tmp_path / ("off" if disable else "on")
         work.mkdir()

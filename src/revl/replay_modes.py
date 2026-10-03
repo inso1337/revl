@@ -587,4 +587,6 @@ __all__ = [
     "MODES", "MODE_RECORD_REQUIRES", "MODE_EXECUTOR_REQUIRES", "MODE_INTENT",
     "REQUIREMENTS", "RECORD_MODEL_DECISION", "DECISION_NOTE", "REASONING_NOTE",
     "ReplayPlanError", "plan", "render",
+    "REQUIREMENTS", "RECORD_MODEL_DECISION", "DECISION_NOTE", "ReplayPlanError",
+    "plan", "render",
 ]

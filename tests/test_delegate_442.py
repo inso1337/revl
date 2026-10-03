@@ -18,10 +18,16 @@ confinement (D2/B1), and the depth bound (D4). The mint (`effect lease` naming
 a wiring key), the delegatee's typed call, the ledger record and the runtime
 crossing live in `tests/test_delegate_442_mint.py`,
 `tests/test_delegate_442_ledger.py` and `tests/test_delegate_442_runtime.py`.
+Checker-only, no new grammar. Verdict-invariant for every existing program:
+nothing in the shipped corpus names `Delegate`.
 
 Still out: D3's augmented-graph acyclicity check, D2's dedicated clause-5
 diagnostic (B1's generic borrow diagnostic covers the position today), and the
 `revl audit` surface.
+Not in this slice (see the PR body / roadmap remainder): the mint (`effect
+lease` naming a wiring key, yielding the typed handle), the D3 augmented-graph
+acyclicity check, the D4 depth bound at a call argument, the ledger `subject` /
+`chain` fields, and the `revl audit` surface.
 """
 
 import sys

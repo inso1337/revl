@@ -7,9 +7,15 @@ recounted evidence, and `pool status` renders it
 promotion evidence is recounted rather than believed, and
 [567-pool-dispatch.md](567-pool-dispatch.md) is where a task reaches a member
 and a result is recorded as delivered once). The
+Status: slice 1 landed; the receipt slice landed on top of it
+([566-pool-execution-receipts.md](566-pool-execution-receipts.md)), which is
+where promotion evidence is now recounted rather than believed, and the dispatch
+slice on top of that ([567-pool-dispatch.md](567-pool-dispatch.md)), which is
+where a task reaches a member and a result is recorded as delivered once. The
 pool declaration, the join admission gate, the tier ladder, promotion on
 attested evidence and withdrawal are in `src/revl/peer_pool.py` with `revl pool
 init | request | join | promote | status | withdraw`; the dispatcher is in
+init | request | join | status | withdraw`; the dispatcher is in
 `src/revl/pool_dispatch.py` with `revl pool serve | ledger` and `revl run --pool
 private`; member liveness is in `src/revl/pool_health.py` with `revl pool probe`
 and `revl pool status --require-live`.
@@ -96,6 +102,8 @@ charter does not declare, so a member cannot be moved onto a rung whose cost
 nobody stated. The verb itself carries no threshold and no rung name. It reads
 the stored pairs and hands them to `peer_pool.promote`, so there is one place
 the ladder is decided and it is the checked one.
+| `replayable` | `idempotent-external` | attested receipts, count declared by the charter |
+| `durable` | `witnessed` | attested receipts, count declared by the charter |
 
 Two effect classes are reachable from no rung at all, and that is a refusal
 rather than an omission. `deferred-irreversible` is resolvable only at a trusted
@@ -390,6 +398,12 @@ last of those. What remains:
    init` has no `--ceiling-budgets`, so the ceiling holds no budget key and
    `grant_widenings` would refuse every grant `grant-ceiling`. A flag whose
    every use is refused is worse than no flag.
+7. **Promotion has no CLI verb.** `promote` recounts evidence from
+   `(receipt, attestation)` pairs and the ledger now stores those pairs for
+   every delivered task, so the input exists. The verb needs charter tiers
+   above `probation` that `pool init` can write, and it needs point 5's
+   classifier before a promoted member could be sent anything its new tier
+   allows and its old one did not.
 
 ## Liveness
 

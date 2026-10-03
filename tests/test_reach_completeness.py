@@ -172,6 +172,7 @@ def _boundary_reach(kinds: frozenset[str]) -> frozenset[str]:
     unscoped, the same `capabilities or (name,)` rule `component_reach` and the
     approval fold use)."""
     audit = audit_report(_zoo_ir(kinds, _reach_zoo(kinds), "reach.rvl"))
+    audit = audit_report(compile_source(_reach_zoo(kinds), "reach.rvl"))
     stats = audit["boundary"]["Hub"]
     caps = {tok for caps in stats["capabilities"].values() for tok in caps}
     externs = {tok for e in stats["externs"]
@@ -182,6 +183,7 @@ def _boundary_reach(kinds: frozenset[str]) -> frozenset[str]:
 def _component_reach(kinds: frozenset[str]) -> frozenset[str]:
     """Surface: `policy.component_reach`. The reached-authority token set."""
     audit = audit_report(_zoo_ir(kinds, _reach_zoo(kinds), "reach.rvl"))
+    audit = audit_report(compile_source(_reach_zoo(kinds), "reach.rvl"))
     return frozenset(r.token for r in component_reach(audit, "Hub"))
 
 
@@ -189,6 +191,7 @@ def _approval_reach(kinds: frozenset[str]) -> frozenset[str]:
     """Surface: the approval `ClassMap` fold. The capability set the worst-class
     fold over `hive.go`'s closure derives."""
     ir = _zoo_ir(kinds, _reach_zoo(kinds), "reach.rvl")
+    ir = compile_source(_reach_zoo(kinds), "reach.rvl")
     reach = ClassMap(ir).classify_call("hive", "go")
     return frozenset(reach["capabilities"]) if reach else frozenset()
 
@@ -432,6 +435,7 @@ component C provides t: TopSvc {
   let sock = effect open_sock() undo close_sock(0)
   provide t { async fn top() = sock }
 }
+component C provides t: TopSvc { provide t { async fn top() = open_sock() } }
 """
 # the SAME app but Socket is a plain value type (no `acquire` extern makes it a
 # resource) - the without-extern baseline for the taint-base kind.
@@ -531,6 +535,7 @@ def _cache_zoo(kinds: frozenset[str]) -> str:
             # needs the reach edge from the spawned child, not a registration.
             'component Child provides worker: Worker { provide worker { '
             'fn run(x) { let w = emit w_spawn(x) return emit child_read(x) } } }',
+            'fn run(x) { let w = w_spawn(x) return emit child_read(x) } } }',
         ]
         act.append("let c = effect spawn Child with { } undo c.dispose()")
         meth.append("let d = emit c.worker.run(x)")
@@ -555,6 +560,7 @@ def _cache_applicability_reach(kinds: frozenset[str]) -> frozenset[str]:
     from revl.mcp.approval import cache_applicability_findings
     from revl.mcp.session import Session
     ir = _zoo_ir(kinds, _cache_zoo(kinds), "cache.rvl")
+    ir = compile_source(_cache_zoo(kinds), "cache.rvl")
     index = Session._build_cache_index(Session.__new__(Session), ir)
     return frozenset(
         token for _key, _m, _cls, token, _what, _why
@@ -887,6 +893,7 @@ def _blast_251_reach(kinds: frozenset[str]) -> frozenset[str]:
     a fold that stopped visiting a crossing kind would drop that kind's capability
     and the differential would go RED (the blast would silently understate)."""
     ir = _zoo_ir(kinds, _reach_zoo(kinds), "reach.rvl")
+    ir = compile_source(_reach_zoo(kinds), "reach.rvl")
     return class_c_capabilities(ir, "hive", "go")
 
 
@@ -1001,6 +1008,7 @@ def test_reach_surfaces_agree_on_the_full_zoo():
     # the extern NAME is not lost: the audit's `externs` table is the host-code
     # enumeration (class, backends, ref provenance) and stays keyed by name.
     audit = audit_report(_zoo_ir(REACH_KINDS, _reach_zoo(REACH_KINDS), "reach.rvl"))
+    audit = audit_report(compile_source(_reach_zoo(REACH_KINDS), "reach.rvl"))
     assert "host_extern" in {e["name"]
                              for e in audit["boundary"]["Hub"]["externs"]}
     # the first-class launder is an UNSCOPED `emission` extern, so its token is

@@ -3,6 +3,7 @@
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
 .PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship demo-escape pre-merge pre-merge-affected formal roadmap-check roadmap-issue-state workflow-permissions runtime-seams vision-check claims-check
+.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship pre-merge pre-merge-affected formal roadmap-check workflow-permissions runtime-seams vision-check
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -20,6 +21,9 @@ pre-merge:
 # FULL and stops with the selector receipt; run `make pre-merge` to explicitly
 # escalate. NOT a replacement for `make pre-merge`, which remains the release/CI
 # gate. Override the base with: make pre-merge-affected BASE=<ref>
+# conservative superset — any core/compile-reachable or unmapped change falls back
+# to the full gate. NOT a replacement for `make pre-merge`, which remains the
+# release/CI gate. Override the base with: make pre-merge-affected BASE=<ref>
 pre-merge-affected:
 	sh tools/pre_merge.sh --affected $(if $(BASE),--base=$(BASE),)
 
@@ -40,6 +44,7 @@ pre-merge-affected:
 # `roadmap-issue-state` target below, which is deliberately not wired here.
 roadmap-check:
 	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue --check-tier-parity --audit-successors
+	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue --check-tier-parity
 
 # The same tool with all five prose checks on: self-contradiction, dangling
 # delegation, orphaned findings, single-tier fixes for language-wide
@@ -49,6 +54,11 @@ roadmap-check:
 # F6 and 422 F6); issue #1572 turned the check on once both were answered, and
 # this target now exits 0. Roadmap item 523 kept claiming otherwise until issue
 # #2100 corrected it.
+# guarantees, and duplicate item headers. A, B, C and E are green on main and
+# run in CI (the `roadmap-check` target above mirrors that line). D is the only
+# one still red, with two real findings (items 421 F6 and 422 F6), so this
+# target is RED on main by design: every finding it prints is a real finding.
+# Run it before writing a roadmap item and after closing one.
 roadmap-check-all:
 	python3 tools/check_roadmap_markers.py --check-all
 
@@ -190,5 +200,7 @@ demo-escape:
 # skip-guard cannot stop the target. The script exits 77 for that skip so
 # tools/pre_merge.sh can report it as SKIPPED; here it stays a success, since
 # the SKIP line above it already says what was not checked.
+# skip-guard cannot stop the target.
 formal:
 	sh formal/scripts/run_gate.sh || [ $$? -eq 77 ]
+	sh formal/scripts/run_gate.sh

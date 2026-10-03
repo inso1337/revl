@@ -12,6 +12,7 @@ machine. The cross-machine leg (scp/rsync staging, a pinned SSH host key) is the
 same command behind `ssh <host>`, now landed as
 :class:`deploy.StdioRunnerTransport.ssh` plus
 :func:`deploy.stage_bundle_over_ssh`.
+same command behind `ssh <host>` and is a following slice.
 
 These tests re-pin the runner-protocol properties the in-process test pins, now
 over a real child process driven by real newline-JSON bytes:

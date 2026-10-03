@@ -9,6 +9,12 @@ gate did not decide the reach fold, so a corpus document would have been a
 census row the gate could not agree with. It decides it since issue #1193
 slice 2, and the corpus documents for the fold live in
 `tests/fixtures/model_reach_crossing/` (`tests/test_model_reach_crossing.py`).
+These programs are written INLINE rather than dropped in `examples/` or
+`tests/fixtures/`, for the reason section 6.1 of
+`docs/design/531-model-placement.md` gives: both directories are census corpus
+roots (`tools/gate_reference_census.py` CORPUS_DIRS) and `selfhost/parser.rvl`
+does not parse `model role` at all, so an admitting fixture in either place
+would be a `false-reject` census entry the moment it landed.
 """
 
 import json
@@ -102,6 +108,7 @@ def test_a_routed_component_that_crosses_nothing_compiles():
     for a role to widen?" (docs/design/541-model-in-attenuation.md, section
     3.1) - rather than the proxy it used to ask, "is one of the things it holds
     spelled `model.`?"."""
+    shape every item-512 fixture has, which is why none of them migrate."""
     ir = compile_source(ROUTES_BUT_CROSSES_NOTHING, "control_b.rvl")
     assert [c["name"] for c in ir["components"]] == ["Classifier"]
     assert "model_reach" not in (ir.get("manifest") or {})

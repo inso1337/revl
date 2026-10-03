@@ -292,6 +292,7 @@ def test_double_approve_before_a_swap_still_re_prompts_with_a_new_hash(sink):
     swapped = _SOURCE.replace("emit announce(sink, msg)",
                               "emit announce(sink, \"swapped\")")
     session.swap(compile_source(swapped, "double_approve_swap.rvl"), agent_authored=False)
+    session.swap(compile_source(swapped, "double_approve_swap.rvl"))
     with pytest.raises(ApprovalRequired) as e2:
         session.call("ops", "shout", [sink, "hi"])
     assert e2.value.ticket["hash"] != e1.value.ticket["hash"]
@@ -434,6 +435,7 @@ def test_activation_body_emission_cannot_dodge_the_prompt(sink):
     candidate = compile_source(_activation_emitter(sink), "quiet2.rvl")
     with pytest.raises(ApprovalRequired) as exc:
         session.swap(candidate, agent_authored=False)
+        session.swap(candidate)
     # the swap did NOT boot: no activation effect ran
     assert _lines(sink) == []
     assert exc.value.ticket["kind"] == "activation"
@@ -442,6 +444,7 @@ def test_activation_body_emission_cannot_dodge_the_prompt(sink):
     # the approved re-issue boots and the activation emission fires exactly once
     session.approve_ticket(exc.value.ticket["hash"])
     session.swap(candidate, agent_authored=False)
+    session.swap(candidate)
     assert _lines(sink) == ["announce:boot"]
 
 

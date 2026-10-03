@@ -59,6 +59,7 @@ def _bootstrap_entry() -> list[Path]:
     """truc's own components, in the order the committed manifest names them —
     the `[assembly]` of truc-as-a-truc-project, anchored to this checkout."""
     manifest = tomllib.loads((BOOTSTRAP / "truc.toml").read_text(encoding="utf-8"))
+    manifest = tomllib.loads((BOOTSTRAP / "truc.toml").read_text())
     return [(TRUC / rel).resolve() for rel in manifest["assembly"]["entry"]]
 
 
@@ -103,6 +104,7 @@ def test_truc_assembles_truc_and_matches_the_committed_composition():
 
     got = _normalize(verdict["manifest"])
     expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    expected = json.loads(GOLDEN.read_text())
     assert got == expected, (
         "truc's self-assembly drifted from bootstrap/assembly.golden.json.\n"
         "If this change to truc's composition is intended, regenerate the "
@@ -126,6 +128,7 @@ def test_whole_composition_admits_as_one_stage0_boot():
     ir = compile_files([str(p) for p in entry])   # raises RevlError on refusal
     got = _normalize(ir["manifest"])
     assert got == json.loads(GOLDEN.read_text(encoding="utf-8"))
+    assert got == json.loads(GOLDEN.read_text())
 
 
 def test_the_brain_is_pure_the_authority_is_the_rim():
@@ -134,6 +137,7 @@ def test_the_brain_is_pure_the_authority_is_the_rim():
     and provides only `plan` — it holds no boundary authority — while the rim
     components carry every emission. Pinned via the committed composition."""
     golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    golden = json.loads(GOLDEN.read_text())
     by_name = {c["name"]: c for c in golden["components"]}
     planner = by_name["Planner"]
     assert planner["inject"] == [] and planner["provides"] == ["plan"]
@@ -220,6 +224,8 @@ def test_truc_assemble_cli_on_truc_itself_matches_golden(tmp_path):
 
     got = _normalize(json.loads((proj / "build" / "assembly.json").read_text(encoding="utf-8")))
     assert got == json.loads(GOLDEN.read_text(encoding="utf-8"))
+    got = _normalize(json.loads((proj / "build" / "assembly.json").read_text()))
+    assert got == json.loads(GOLDEN.read_text())
 
 
 @pytestmark_runtime
@@ -262,6 +268,7 @@ def package(tmp_path, monkeypatch):
 
 def _read_lock(package: Path) -> dict:
     return json.loads((package / "truc.lock").read_text(encoding="utf-8"))
+    return json.loads((package / "truc.lock").read_text())
 
 
 def _write_lock(package: Path, doc: dict) -> None:
@@ -276,6 +283,7 @@ def test_the_committed_lock_is_current():
     from revl.truc._launcher import lock_document
 
     assert json.loads(LOCK.read_text(encoding="utf-8")) == lock_document(), (
+    assert json.loads(LOCK.read_text()) == lock_document(), (
         "src/revl/truc/truc.lock drifted from truc's components.\n"
         "If this change to truc's components is intended, regenerate the lock "
         "(`python -P -m revl.truc._relock`; the `-P` is the PYTHONSAFEPATH "
@@ -332,10 +340,12 @@ def test_drifting_component_bytes_refuse_to_boot(package):
 @pytest.mark.parametrize("key", ["files", "imports"])
 @pytest.mark.parametrize("blank", ["", "   ", "not-a-hash", None, 64 * "z"])
 def test_a_row_with_no_usable_pin_refuses(package, blank, key):
+def test_a_row_with_no_usable_pin_refuses(package, blank):
     """A pin is required, not optional — the same rule `planner.plan_drift`
     applies to a project's trucs. A blank or malformed `sha256` refuses exactly
     like a drifting one, so blanking a row is not a way to opt out. An
     `imports` row (externs.rvl, issue #2561) is held to the same rule."""
+    like a drifting one, so blanking a row is not a way to opt out."""
     from revl.truc import _launcher
 
     doc = _read_lock(package)
@@ -343,6 +353,7 @@ def test_a_row_with_no_usable_pin_refuses(package, blank, key):
         doc["files"][0]["sha256"] = blank
     else:
         doc["imports"] = [{"path": "externs.rvl", "sha256": blank}]
+    doc["files"][0]["sha256"] = blank
     _write_lock(package, doc)
     with pytest.raises(_launcher.BootstrapLockError) as excinfo:
         _launcher.component_files()
@@ -422,16 +433,20 @@ def _import_outside(doc: dict) -> str:
     (_import_outside, "leaves truc's package"),
 ])
 def test_an_unusable_lock_refuses(package, text, reason):
+@pytest.mark.parametrize("text", ["{not json", "[]", '{"lockVersion": 1}'])
+def test_an_unusable_lock_refuses(package, text):
     """Unparseable, not an object, or naming no files: each is a tampering
     signal, and none of them degrades to compiling what is on disk. A lock
     that drops or empties its `imports` list, or names an import outside the
     package, refuses too: an import is bytes stage 0 compiles (issue #2561)."""
+    signal, and none of them degrades to compiling what is on disk."""
     from revl.truc import _launcher
 
     if callable(text):
         text = text(_read_lock(package))
     (package / "truc.lock").write_text(text)
     with pytest.raises(_launcher.BootstrapLockError) as excinfo:
+    with pytest.raises(_launcher.BootstrapLockError):
         _launcher.component_files()
     assert reason in str(excinfo.value)
 

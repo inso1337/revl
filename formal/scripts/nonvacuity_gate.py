@@ -65,6 +65,7 @@ def registered_from_check() -> list[str]:
     pat = re.compile(r"^#print axioms (RevL\.[A-Za-z0-9_.]+)\s*$")
     out = []
     for line in CHECK.read_text(encoding="utf-8").splitlines():
+    for line in CHECK.read_text().splitlines():
         m = pat.match(line.strip())
         if m:
             out.append(m.group(1))
@@ -75,6 +76,7 @@ def registered_from_gate() -> list[str]:
     pat = re.compile(r"^(RevL\.[A-Za-z0-9_.]+)")
     out = []
     for line in GATE.read_text(encoding="utf-8").splitlines():
+    for line in GATE.read_text().splitlines():
         if not line.startswith("  RevL."):
             continue
         m = pat.match(line.strip())
@@ -102,6 +104,7 @@ def main() -> int:
 
     rows: dict[str, tuple[str, list[str], str]] = {}
     for lineno, raw in enumerate(REGISTRY.read_text(encoding="utf-8").splitlines(), 1):
+    for lineno, raw in enumerate(REGISTRY.read_text().splitlines(), 1):
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         parts = raw.split("\t")
@@ -159,6 +162,7 @@ def main() -> int:
             )
 
     status = STATUS.read_text(encoding="utf-8")
+    status = STATUS.read_text()
     for name in sorted(known):
         if f"`{name}`" not in status:
             errors.append(

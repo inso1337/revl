@@ -41,6 +41,7 @@ pull request the root suite is collected by `root-suite-affected` alone, which
 is why that job runs on every pull request. Since issue #1817 it runs on pull
 requests ONLY: everywhere else `frontend` runs the whole suite, its 3.12 leg
 being this job's FULL selection. The model below reads both kinds of gate.
+is why that job is ungated. The model below reads both kinds of gate.
 
 Hermetic: one real YAML parse of the workflow plus control assertions that keep
 the scan from passing vacuously.
@@ -598,9 +599,12 @@ def test_the_unconditional_job_cannot_report_skipping():
     # for every pull request, so the job still cannot report `skipping` on one.
     # On every other event `frontend` runs the whole suite (pinned below).
     assert spec.get("if") in (None, PR_ONLY_IF), (
+    assert "if" not in spec, (
         f"{JOB} carries `if: {spec.get('if')!r}`; a skipped job reads as a "
         "passing one to branch protection, so the coverage job must run on "
         "every pull request"
+        "passing one to branch protection, so the coverage job must be "
+        "unconditional"
     )
     skipped_prone = {j for j in jobs
                      if _routed_on_the_fast_path(_spec(jobs, j))

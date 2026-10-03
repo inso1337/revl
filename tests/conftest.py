@@ -324,6 +324,11 @@ if _ROOT.is_dir() and str(_ROOT) not in sys.path:
 #   written to `$REVL_CORDIS_SKIP_LOG` when that is set. tools/pre_merge.sh sets
 #   it on the frontend step and re-runs exactly those files under the cordis-py
 #   venv, so a converted test still gets a real verdict in the local gate.
+# absent. When the runtime IS installed -- the `frontend-cordis` CI job, and any
+# dev running under backends/python/.venv -- the net is inert and the same error
+# still fails loudly, so it can never hide a real runtime defect. It is a
+# net under the `frontend` job, not a substitute for the guard: the guard is
+# what makes the skip reason readable.
 _RUNTIME_MISSING = "the cordis-py runtime is not installed"
 _NET_REASON = (
     "cordis-py runtime not installed: this test drives a live composition and "
@@ -355,9 +360,17 @@ def _net_converts(item, call, report) -> bool:
 def pytest_runtest_makereport(item, call):
     report = yield
     if _net_converts(item, call, report):
+    if (report.when == "call" and report.failed and call.excinfo is not None
+            and _RUNTIME_MISSING in str(call.excinfo.value)
+            and _cordis_is_absent()):
         report.outcome = "skipped"
         report.longrepr = (str(item.path), item.location[1] + 1,
                            "Skipped: " + _NET_REASON)
+        report.longrepr = (
+            str(item.path), item.location[1] + 1,
+            "Skipped: this test drives a live composition and is missing its "
+            "cordis-py guard (net in tests/conftest.py) -- add "
+            'pytest.mark.skipif(importlib.util.find_spec("cordis") is None, ...)')
     return report
 
 

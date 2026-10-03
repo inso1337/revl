@@ -15,6 +15,8 @@ The served name for that marker is `exampleExpression`, not `fill` (issue
 #2115): it is the expression position inside the example, so it carries the
 example component's own names and is refused if submitted as a fill. Section 6
 pins the name on all three doors.
+`fill` replaced by a typed hole, the fillSpec of that hole names that very
+construct and serves that very idiom.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError, compile_source, idioms  # noqa: E402
+from revl import compile_source, idioms  # noqa: E402
 from revl.admit_profile import AdmissionProfile  # noqa: E402
 from revl.mcp import fillspec  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
@@ -100,6 +103,7 @@ def test_every_idiom_admits_for_an_untrusted_author(name):
     """The profile the MCP server compiles agent text under, granted exactly
     the services the idiom declares. The idioms in `OPERATOR_ONLY_IDIOMS` are
     checked to be refused for exactly the reason named there."""
+    the services the idiom declares. No idiom needs host code."""
     ir = _compile(ENTRIES[name]["example"], name)
     granted = set(ir.get("services") or {})
     profile = AdmissionProfile.untrusted_author(granted)
@@ -161,6 +165,8 @@ def test_the_grant_idiom_resolves_as_a_composition(tmp_path):
     records = next(r for r in table.rows if r.label == "records")
     assert records.granted == ["approvals", "writer"]
     assert records.provenance[-1][2] == "grant"
+    _compile(ENTRIES[name]["example"], name,
+             profile=AdmissionProfile.untrusted_author(granted))
 
 
 # ---- 3. a fillSpec carries the idiom for its hole ------------------------------
@@ -225,6 +231,7 @@ def test_the_cli_prints_an_idiom():
                          env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"})
     assert run.returncode == 0, run.stderr
     assert json.loads(run.stdout)["exampleExpression"] == "store.drop()"
+    assert json.loads(run.stdout)["fill"] == "store.drop()"
     missing = subprocess.run([sys.executable, "-m", "revl", "idiom", "nope"],
                              capture_output=True, text=True, cwd=ROOT,
                              env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"})
