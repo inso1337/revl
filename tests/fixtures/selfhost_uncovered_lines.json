@@ -52,7 +52,7 @@
       "go": 2882,
       "java": 986,
       "py": 669,
-      "rust": 1200,
+      "rust": 1197,
       "ts": 580,
       "wasm": 1558
     },
@@ -60,7 +60,7 @@
       "go": 104,
       "java": 175,
       "py": 103,
-      "rust": 286,
+      "rust": 285,
       "ts": 97,
       "wasm": 63
     }
@@ -916,7 +916,7 @@
         "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs.": {
           "_host_of": 4,
           "_map_expr_inserts": 3,
-          "_map_insert_candidates": 7,
+          "_map_insert_candidates": 6,
           "_map_value_expr_type": 67,
           "_map_value_rust_type": 2
         },
@@ -1031,7 +1031,7 @@
           "_emit_witnessed_step": 26,
           "_method_bodies_have_compensation": 1,
           "_method_bodies_have_witnessed": 1,
-          "_method_body_lines": 40,
+          "_method_body_lines": 38,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
@@ -1060,7 +1060,7 @@
           "_stream_host_rust": 6
         }
       },
-      "uncovered_statements": 1186
+      "uncovered_statements": 1183
     },
     "ts": {
       "statements": 2208,
@@ -1920,7 +1920,7 @@
           "emit_comp_step": 8,
           "emit_let_effect_step": 6,
           "host_of": 6,
-          "map_insert_candidates": 8,
+          "map_insert_candidates": 7,
           "map_value_expr_type": 75,
           "map_value_surface_type": 1,
           "steps_use_timer": 2,
@@ -1991,7 +1991,7 @@
           "strip_index_clone": 1
         }
       },
-      "uncovered_statements": 289
+      "uncovered_statements": 288
     },
     "ts": {
       "statements": 2204,
