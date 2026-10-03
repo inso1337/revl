@@ -55,7 +55,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 9 | **yes** (one S8 row per reconstructed statement; the generated census below carries the count) | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. The oracle now decides `RevL.G8Classified.stmtSurface` over each reconstructed statement's heads against the file's `Prog` (`Oracle.stmtSurfaceB`, `stmtSurfaceB_iff`); the reference recomputes the same reach caps independently from the `EX`/`FN` rows, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries both a non-empty and an empty surface, and `g8_row_not_vacuous` proves the surface goes empty when the wrapping fn stops reaching the crossing. First-class dispatch (`star`) is `n/a` on both sides |
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
 | **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
-| **A1** iteration boundaries only during activation | **none** | 0 | no | not modelled at all: L0 has no `await` and no iteration boundary. **Unbuilt work**, and it needs L0 to grow first |
+| **A1** iteration boundaries only during activation | partial: the async-colour rules | 10 | **yes** (one A1 row per site, one A1S row per provide method; 9 agree-A1) | the iteration boundary itself is not modelled (L0 has no `await`). Since issue #1808 the async-colour rules are: `RevL.A1Async` decides, per site, that a sync provide method, an unawaited `effect`/`emit` step and an `undo`/`compensate` slot reach nothing async and that an awaited step does, over the file's async names (async externs, async service operations) and its `fn` call graph within a fuel bound (`reachB_iff`, `siteB_iff`), and that a provide method's colour is its service's (`sigB_iff`). Not modelled: an arrow's type has no colour (`a1_async_arrow_sync_type.rvl` stays out of fragment), colour polymorphism through a callback parameter, and a stream `next` as a suspension |
 | **A2** no acquisition after a provision | full over the ordered activation body | 14 | **yes** (317 A2 rows, 1 agree-A2) | the body is a step list (`acquire` / `provide` / `other` — the checker's four refused forms, the `provide` block, and everything else) and `RevL.A2.a2B` is `lower._dispatch_action`'s fold verbatim, bridged to the declarative rule by `a2B_iff`. The content is over G7's stack: with a `bracket` per release and per withdrawal, `proof_pass_is_withdrawals_then_releases` proves that under A2 `RevL.Semantics.phase1` runs every withdrawal before every release under every settling verdict, and `fixture_opens_the_window` proves the fixture's shape runs a release first. The oracle folds the same rule over the exported `AQ` body steps on both sides; `a2_coverage` fails the gate unless the corpus carries an admitted body with both a provision and an acquisition and the refused shape. **Not modelled**: entries a provide-method body registers at call time (the G7 corpus's `method` seam), and whether the runtime withdraws a provision as a bracket at all — the theorem takes the LIFO premise the rule rests on and shows A2 is exactly the ordering condition under it |
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
 | **A5** compensation accompanies an emission | **none** | 0 | no | G7 *models* the `compensation` entry kind and proves how it is disposed, but **nothing states that an emission must register one**. **Unbuilt work**, and the nearest thing to a surprise on this map |
@@ -82,11 +82,12 @@ Three summary readings of that map:
   and not a text: G7 drives `backends/python/runtime.py` over an
   enumerated teardown corpus, and A8/R4 drive `src/revl/recovery.py` over
   an enumerated WAL corpus.
-- **Five guarantee codes have no theorem at all** (A1, A3, A5, A6,
-  T1-T3). Of those, A5 is the one worth naming twice: G7 proves how a
+- **Four guarantee codes have no theorem at all** (A3, A5, A6, T1-T3).
+  Of those, A5 is the one worth naming twice: G7 proves how a
   `compensation` entry is disposed without anything proving one has to
-  exist. A9 left this list in issue 1167 and A2 in issue 1166: each rule
-  is now a theorem and a differential row.
+  exist. A9 left this list in issue 1167, A2 in issue 1166 and A1's
+  async-colour rules in issue #1808: each rule is now a theorem and a
+  differential row.
 - **One row is UNPROVED by construction** (G9 path coverage) and says so
   in the table, rather than being absent.
 
@@ -334,6 +335,16 @@ Three summary readings of that map:
 | `RevL.G1Access.declaring_admits` | G1 declared access — the fix | **proved** | none | declaring the missing key admits what it refused |
 | `RevL.G1Access.fixtures_decided` | G1 declared access — the corpus shapes | **proved** | none | `g1_undeclared_access.rvl`'s `Logger` refused, and admitted with `db` declared |
 | `RevL.G1Access.g1_access_not_vacuous` | G1 declared access — non-vacuity | **proved** | `propext, Quot.sound` | the rule refuses the undeclared access and admits the declared one |
+| `RevL.A1Async.reachB_iff` | A1 async colour — the reach (issue #1808) | **proved** | `propext, Quot.sound` | `reachB g as k n = true ↔ ReachesAsync g as k n`: a name is async, or calls through the `fn` graph one that reaches async with one step less |
+| `RevL.A1Async.reach_mono` | A1 async colour — fuel | **proved** | none | more fuel never loses a reach |
+| `RevL.A1Async.reaches_iff` | A1 async colour — a site's heads | **proved** | `propext, Quot.sound` | a site reaches async exactly when one of its heads does |
+| `RevL.A1Async.siteB_iff` | A1 async colour — the bridge | **proved** | `propext, Quot.sound` | `siteB … = true ↔ SiteOK …`: the printed `A1` verdict is exactly the per-site rule |
+| `RevL.A1Async.teardown_suspension_refused` | A1 async colour — teardown | **proved** | `propext` | an `undo` or `compensate` slot that reaches async is refused |
+| `RevL.A1Async.await_without_async_refused` | A1 async colour — decoration | **proved** | `propext` | an awaited step that reaches nothing async is refused |
+| `RevL.A1Async.await_pairing_exact` | A1 async colour — exact pairing | **proved** | `propext` | the same heads are admitted under exactly one of a step and its awaited form |
+| `RevL.A1Async.sigB_iff` | A1 async colour — the signature | **proved** | `propext` | the printed `A1S` verdict is exactly "the implementation's colour is the declaration's" |
+| `RevL.A1Async.fixtures_decided` | A1 async colour — the corpus shapes | **proved** | `propext` | the undo, effect, sync-method, emit and signature shapes of the A1 fixtures, decided both ways |
+| `RevL.A1Async.a1_not_vacuous` | A1 async colour — non-vacuity | **proved** | `propext, Quot.sound` | the reach goes through a `fn`, the awaited acquisition is admitted and its unawaited twin refused, a suspending `undo` refused and a synchronous one admitted |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -966,6 +977,28 @@ Verdicts:
   component, an admitted one with a declared access root, and an admitted
   one whose dropped roots include a local, a module callable and a host
   family.
+- **A1 / A1S rows (per site and per provide method, A1 async colour,
+  issue #1808)**: `Oracle.asyncRowB` — `RevL.A1Async.siteB` — over one
+  site's kind and heads (`AS`), the file's async names (`AN`: async
+  externs and async service operations spelled `<Service>.<op>`) and its
+  `fn` call graph (the `FN` rows), with a fuel of one step per `fn` plus
+  one. A site is a provide method (sync or async as its service declares
+  it), an activation `effect` or `emit` step (awaited or not), or an
+  `undo` / `compensate` slot; its heads are the calls it makes, a service
+  operation resolved through a requirement, a spawn handle or an alias.
+  `asyncRowB_iff` proves the printed Bool is `RevL.A1Async.SiteOK`, and
+  the reference recomputes the reach as a true fixed point, so an
+  under-fuelled oracle would show as a mismatch. `A1S` (`sigRowB_iff`)
+  compares a provide method's written colour with its service's. An A1
+  refusal files under `agree-A1` when a row fails and under the fatal
+  `missed-A1` when none does; the uncoded signature refusal is matched by
+  its message. The arrow-type refusal is not this rule and stays in
+  `out-of-fragment`. Blinding both printed verdicts was seen to produce 9
+  mismatches (8 `async_site`, 1 `async_sig`) and `missed-A1 9 FATAL`;
+  cutting the reach's call step stops `reachB_iff` from elaborating.
+  `async_coverage` fails the gate unless every rule (awaited, unawaited,
+  sync method, teardown) is both admitted and refused somewhere in the
+  corpus.
 
 ### The G7 row, and what it is evidence of
 
@@ -1139,13 +1172,14 @@ printed 1. Nothing compared the two, in either direction.
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
 **697 .rvl files -> 635 components -> 1559 statements = 445 modeled +
-223 componentless + 29 refused at parse**, and **10055 verdicts compared
+223 componentless + 29 refused at parse**, and **12121 verdicts compared
 (445 files + 635 components + 224 provide methods + 38 spawn edges + 29
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1559
 confinements + 1559 surfaces + 423 teardowns + 503 provide-clause
 components + 83 config fields + 635 A2 bodies + 445 deferred-position
 files + 56 approval crossings + 899 binding scopes + 635 access
-components), 10055 agree, 0 mismatches**.
+components + 1423 async sites + 643 async signatures), 12121 agree, 0
+mismatches**.
 
 Checker alignment over the 445 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
@@ -1168,6 +1202,7 @@ layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
+| `agree-A1` | 9 | informational |
 | `agree-A2` | 1 | informational |
 | `agree-A9` | 2 | informational |
 | `agree-G1` | 21 | informational |
@@ -1179,6 +1214,7 @@ layer.
 | `agree-accept` | 225 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
+| `missed-A1` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
 | `missed-A9` | 0 | **FATAL** |
 | `missed-G1` | 0 | **FATAL** |
@@ -1186,7 +1222,7 @@ layer.
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
 | `missed-G6` | 0 | **FATAL** |
-| `out-of-fragment` | 49 | informational |
+| `out-of-fragment` | 40 | informational |
 | `out-of-fragment-G5` | 0 | ratcheted |
 | `out-of-fragment-G6` | 0 | ratcheted |
 

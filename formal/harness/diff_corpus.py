@@ -1423,6 +1423,157 @@ def approval_rows(rel: str, comp, ctx: _ApprovalCtx, svc_objs: dict,
     return rows
 
 
+# ------------------------------------------ async colour (issue #1808)
+#
+# The checker's A1 rules (`lower._admit_effect_async`, `_admit_emit_async`,
+# the provide-method admission): a sync method, an unawaited step and a
+# teardown slot may not reach an async operation, and an awaited step must.
+# The model states them over SITES (`RevL.A1Async.SiteOK`); the exporter
+# carries the async names (`AN`), one row per site with the heads it calls
+# (`AS`), and each provide method's two colours (`AG`). The reach itself is
+# the model's, over the `FN` call graph.
+
+#: The A1 refusal the model cannot state: an arrow's type has no colour.
+A1_ARROW_MESSAGE = "but its type carries no async color"
+#: The uncoded signature refusal the `A1S` row decides.
+A1_SIGNATURE_MESSAGE = "is not async but service"
+
+
+def async_names(prog) -> list[str]:
+    """The file's async names: async externs, and async service operations
+    spelled `<Service>.<op>`."""
+    names = {e.name for e in prog.externs if getattr(e, "async_", False)}
+    for svc in prog.services:
+        for meth, decl in svc.methods.items():
+            if getattr(decl, "async_", False):
+                names.add(f"{svc.name}.{meth}")
+    return sorted(names)
+
+
+class _AsyncCtx(NamedTuple):
+    """What a site's heads resolve against."""
+    requires: dict
+    handles: dict
+    psvc: dict
+    aliases: dict
+
+
+def _async_heads(node: object, ctx: _AsyncCtx) -> list[str]:
+    """The heads a site calls, in first-call order: a bare-name callee as
+    itself, a service operation reached through a requirement, a spawn
+    handle or an alias as `<Service>.<op>`."""
+    found: list[tuple[str, str, str]] = []
+    walk_calls(node, found, "plain")
+    out: list[str] = []
+    for root, chain, _c in found:
+        if not chain:
+            name = root
+        else:
+            res = _resolve_emission(root, chain, ctx.requires, ctx.handles,
+                                    ctx.psvc, ctx.aliases)
+            if res is None:
+                continue
+            name = f"{res[0]}.{res[1]}"
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _slot_sites(stmts, ctx: _AsyncCtx, out: list) -> None:
+    """The teardown slots of the effect and emit steps under `stmts`."""
+    for node in _walk_nodes(stmts):
+        if isinstance(node, (EffectStmt, LetEffect)) \
+                and getattr(node, "undo", None) is not None:
+            out.append(("undo", _async_heads(node.undo, ctx)))
+        if isinstance(node, EmitStmt) \
+                and getattr(node, "compensate", None) is not None:
+            out.append(("compensate", _async_heads(node.compensate, ctx)))
+
+
+def _walk_nodes(node):
+    """Every AST node under `node`, outermost first."""
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        yield node
+        for f in dataclasses.fields(node):
+            yield from _walk_nodes(getattr(node, f.name))
+    elif isinstance(node, (list, tuple)):
+        for x in node:
+            yield from _walk_nodes(x)
+
+
+def async_rows(rel: str, comp, ctx: _AsyncCtx, svc_objs: dict,
+               psvc: dict) -> list[str]:
+    """The `AS` and `AG` rows of one component."""
+    sites: list[tuple[str, list[str]]] = []
+    for stmt in comp.body:
+        if isinstance(stmt, ProvideStmt):
+            continue
+        if isinstance(stmt, (EffectStmt, LetEffect)):
+            heads = _async_heads(stmt.acquire, ctx)
+            for h in _async_heads(getattr(stmt, "setup", None), ctx):
+                if h not in heads:
+                    heads.append(h)
+            sites.append(("effectAwait" if stmt.is_async else "effect", heads))
+        elif isinstance(stmt, EmitStmt):
+            sites.append(("emitAwait" if stmt.is_async else "emit",
+                          _async_heads(stmt.expr, ctx)))
+        _slot_sites([stmt], ctx, sites)
+    sigs: list[str] = []
+    for stmt in comp.body:
+        if not isinstance(stmt, ProvideStmt):
+            continue
+        svc = svc_objs.get(psvc.get(comp.name, {}).get(stmt.key))
+        for pm in stmt.methods:
+            decl = svc.methods.get(pm.name) if svc is not None else None
+            if decl is None:
+                continue
+            declared = bool(getattr(decl, "async_", False))
+            sites.append(("asyncMethod" if declared else "syncMethod",
+                          _async_heads(pm.body, ctx)))
+            _slot_sites(pm.body, ctx, sites)
+            sigs.append("\t".join([
+                "AG", rel, comp.name, f"{stmt.key}.{pm.name}",
+                "async" if declared else "sync",
+                "async" if getattr(pm, "async_", False) else "sync"]))
+    rows = ["\t".join(["AS", rel, comp.name, str(i), kind, ",".join(heads)])
+            for i, (kind, heads) in enumerate(sites)]
+    return rows + sigs
+
+
+def async_reaching(names: set[str], graph: dict[str, list[str]]) -> set[str]:
+    """The reference's reach: the names that are async or call, through the
+    `fn` graph, one that is. A true fixed point."""
+    reached = set(names)
+    changed = True
+    while changed:
+        changed = False
+        for fn, callees in graph.items():
+            if fn not in reached and any(c in reached for c in callees):
+                reached.add(fn)
+                changed = True
+    return reached
+
+
+def async_site_ok(kind: str, reaches: bool) -> bool:
+    """The reference's A1 rule for one site."""
+    if kind in ("effectAwait", "emitAwait"):
+        return reaches
+    if kind == "asyncMethod":
+        return True
+    return not reaches
+
+
+def checker_message(rel: str) -> str:
+    """The shipped checker's refusal message on one corpus file, or ""."""
+    try:
+        compile_files([str(REPO / rel)])
+        return ""
+    except RevlError as e:
+        return e.message
+
+
 # ---------------------------------------- declared access (issue #1807)
 #
 # The checker refuses a call head whose root names no declared requirement
@@ -2277,6 +2428,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         tsv.append("\t".join(["PG", rel, str(len(prog.fn_decls))]))
         extern_class_of = {e.name: e.classification for e in prog.externs}
         resolved_names = _file_resolved_names(prog)
+        # async names (AN, issue #1808), file-wide
+        for name in async_names(prog):
+            tsv.append("\t".join(["AN", rel, name]))
         file_callables = {f.name for f in prog.fn_decls} \
             | {e.name for e in prog.externs}
         # The service operations a bracket inverse READS as a value
@@ -2594,6 +2748,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         for inner in pm.body:
                             classify_stmt(inner)
             tsv.extend(f"T\t{rel}\t{c.name}\t{k}" for k in kinds)
+            # async-colour facts (AS/AG, issue #1808)
+            tsv.extend(async_rows(rel, c, _AsyncCtx(
+                require_map, handles, psvc, aliases), svc_objs, psvc))
             # declared-access facts (GA, issue #1807)
             tsv.extend(access_rows(rel, c, head_roots, resolved_names,
                                    file_callables))
@@ -3531,6 +3688,43 @@ def approval_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided for each A1 site: (admitted, kind, reaches).
+#: Filled by `reference_from_tsv`, read by `async_coverage`.
+_ASYNC_ROWS: dict = {}
+
+
+def async_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `A1` row (issue #1808).
+
+    For each rule the corpus must carry the admitted shape and the refused
+    one: an awaited step that reaches async and one that does not, an
+    unawaited step that reaches nothing and one that reaches async, a sync
+    method that reaches nothing and one that reaches async, and a teardown
+    slot that reaches nothing and one that suspends.
+
+    Returns findings, treated as gate failures."""
+    groups = {"awaited": ("effectAwait", "emitAwait"),
+              "unawaited": ("effect", "emit"),
+              "sync method": ("syncMethod",),
+              "teardown": ("undo", "compensate")}
+    findings: list[str] = []
+    seen: dict[str, str] = {}
+    for label, kinds in groups.items():
+        for want in (True, False):
+            hit = next((k for k, (ok, kind, _r) in sorted(_ASYNC_ROWS.items())
+                        if kind in kinds and ok is want), None)
+            name = f"{'an admitted' if want else 'a refused'} {label} site"
+            if hit is None:
+                findings.append(f"async coverage: NO witness of {name} — the "
+                                "A1 row would agree vacuously")
+            else:
+                seen[name] = hit[0]
+    if not findings:
+        print(f"async coverage: {len(_ASYNC_ROWS)} sites, every rule admitted "
+              "and refused at least once")
+    return findings
+
+
 #: What the REFERENCE decided for each component's access: (admitted, access
 #: roots). Filled by `reference_from_tsv`, read by `access_coverage`.
 _ACCESS_ROWS: dict = {}
@@ -3639,7 +3833,8 @@ class Verdicts(NamedTuple):
     a marked crossing reaches is covered by its `with` edge, issue #1455),
     `bindings` BU rows (G6 binding uniqueness: no binding reuses a name in
     view, issue #1812), `access` G1 rows (G1 declared access: every access
-    root is a declared requirement, issue #1807)."""
+    root is a declared requirement, issue #1807), `async_sites` A1 rows and
+    `async_sigs` A1S rows (A1 async colour, issue #1808)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -3658,6 +3853,8 @@ class Verdicts(NamedTuple):
     approvals: dict[tuple[str, str, str], str]
     bindings: dict[tuple[str, str, str], str]
     access: dict[tuple[str, str], str]
+    async_sites: dict[tuple[str, str, str], str]
+    async_sigs: dict[tuple[str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -3668,7 +3865,8 @@ class Verdicts(NamedTuple):
                 + len(self.g5reg) + len(self.a9) + len(self.configs)
                 + len(self.a2) + len(self.deferred)
                 + len(self.approvals) + len(self.bindings)
-                + len(self.access))
+                + len(self.access) + len(self.async_sites)
+                + len(self.async_sigs))
 
 
 
@@ -3698,6 +3896,8 @@ def parse_verdicts(text: str) -> Verdicts:
     approvals: dict[tuple[str, str, str], str] = {}
     bindings: dict[tuple[str, str, str], str] = {}
     access: dict[tuple[str, str], str] = {}
+    async_sites: dict[tuple[str, str, str], str] = {}
+    async_sigs: dict[tuple[str, str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -3773,6 +3973,14 @@ def parse_verdicts(text: str) -> Verdicts:
             # The approval floor: (file, comp, crossing ord) -> ok|fail.
             approvals[(parts[1], parts[2], parts[3])] = \
                 parts[4].split("=", 1)[1]
+        elif parts[0] == "A1" and len(parts) == 5:
+            # A1 async colour: (file, comp, site ord) -> ok|fail.
+            async_sites[(parts[1], parts[2], parts[3])] = \
+                parts[4].split("=", 1)[1]
+        elif parts[0] == "A1S" and len(parts) == 5:
+            # A1 signature colour: (file, comp, key.method) -> ok|fail.
+            async_sigs[(parts[1], parts[2], parts[3])] = \
+                parts[4].split("=", 1)[1]
         elif parts[0] == "G1" and len(parts) == 4:
             # G1 declared access: (file, comp) -> ok|fail.
             access[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
@@ -3784,7 +3992,8 @@ def parse_verdicts(text: str) -> Verdicts:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
-                    a2, deferred, approvals, bindings, access)
+                    a2, deferred, approvals, bindings, access,
+                    async_sites, async_sigs)
 
 
 
@@ -4209,6 +4418,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     approvals: dict[tuple[str, str, str], str] = {}
     bindings: dict[tuple[str, str, str], str] = {}
     access: dict[tuple[str, str], str] = {}
+    async_sites: dict[tuple[str, str, str], str] = {}
+    async_sigs: dict[tuple[str, str, str], str] = {}
     for key, tokens in crossing_tokens.items():
         needed = tokens & required_by_file.get(key[0], set())
         edge = crossing_edge.get(key)
@@ -4248,10 +4459,33 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         access[key] = "ok" if ok else "fail"
         _ACCESS_ROWS[key] = (ok, len(roots))
 
+    # A1 verdicts (async colour, issue #1808), recomputed from the AN, FN and
+    # AS rows with a true fixed point, and the AG signature rows.
+    anames: dict[str, set[str]] = {}
+    for r in rows:
+        if r and r[0] == "AN" and len(r) == 3:
+            anames.setdefault(r[1], set()).add(r[2])
+    reach_by_file: dict[str, set[str]] = {}
+    _ASYNC_ROWS.clear()
+    for r in rows:
+        if r and r[0] == "AS" and len(r) == 6:
+            rel = r[1]
+            if rel not in reach_by_file:
+                reach_by_file[rel] = async_reaching(
+                    anames.get(rel, set()), fns_by_file.get(rel, {}))
+            heads = [h for h in r[5].split(",") if h]
+            reaches = any(h in reach_by_file[rel] for h in heads)
+            ok = async_site_ok(r[4], reaches)
+            async_sites[(r[1], r[2], r[3])] = "ok" if ok else "fail"
+            _ASYNC_ROWS[(r[1], r[2], r[3])] = (ok, r[4], reaches)
+        elif r and r[0] == "AG" and len(r) == 6:
+            async_sigs[(r[1], r[2], r[3])] = "ok" if r[4] == r[5] else "fail"
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
 
                     recoveries, confinements, g8surface, g5reg, a9,
-                    configs, a2, deferred, approvals, bindings, access)
+                    configs, a2, deferred, approvals, bindings, access,
+                    async_sites, async_sigs)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -4371,8 +4605,8 @@ def a9_coverage() -> list[str]:
 # genuine fragment gap has `out-of-fragment*` to land in, which is the bucket
 # that says "the model has no fact here" rather than "the model disagrees".
 FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
-                 "missed-G6", "missed-A9", "missed-A2", "formal-strict",
-                 "formal-found-other")
+                 "missed-G6", "missed-A1", "missed-A9", "missed-A2",
+                 "formal-strict", "formal-found-other")
 
 
 def checker_code(rel: str) -> tuple[str, str]:
@@ -4526,6 +4760,10 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         bu_fail = any(x == "fail" for k, x in v.bindings.items() if k[0] == rel)
         # The G1 row is declared access (issue #1807), checker-visible both ways.
         g1_fail = any(x == "fail" for k, x in v.access.items() if k[0] == rel)
+        # The A1 rows are async colour (issue #1808): checker-visible both ways.
+        a1_fail = any(x == "fail" for k, x in v.async_sites.items()
+                      if k[0] == rel) or any(
+            x == "fail" for k, x in v.async_sigs.items() if k[0] == rel)
         g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows + ap_rows
         # The A2 row (issue 1166) is checker-visible: `lower._dispatch_action`
         # refuses the shape with code A2, so a model `fail` on an accepted
@@ -4539,7 +4777,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         df_fail = v.deferred.get(rel, "ok") == "fail"
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
             x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
-            and not df_fail and not bu_fail and not g1_fail
+            and not df_fail and not bu_fail and not g1_fail and not a1_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -4600,6 +4838,15 @@ def checker_alignment(file_facts: dict, componentless: list[str],
                 # counted nothing: that IS the model being weaker than the
                 # checker, and fatal.
                 record("missed-G5", rel)
+        elif code == "A1" and A1_ARROW_MESSAGE not in checker_message(rel):
+            # Async colour (issue #1808): the `A1` rows decide
+            # `RevL.A1Async` per site, so an A1 refusal the rows admit is the
+            # model being weaker, and fatal. The arrow-type refusal is not
+            # this rule (the model has no arrow types) and falls through.
+            record("agree-A1" if a1_fail else "missed-A1", rel)
+        elif code == "REVL" and A1_SIGNATURE_MESSAGE in checker_message(rel):
+            # The uncoded signature-colour refusal, decided by the `A1S` row.
+            record("agree-A1" if a1_fail else "missed-A1", rel)
         elif code == "G1":
             # Declared access (issue #1807): the `G1` row decides
             # `RevL.G1Access` over the component's access roots, so a G1
@@ -4884,6 +5131,8 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         f"{len(ref.approvals)} approval crossings",
         f"{len(ref.bindings)} binding scopes",
         f"{len(ref.access)} access components",
+        f"{len(ref.async_sites)} async sites",
+        f"{len(ref.async_sigs)} async signatures",
     ]
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
@@ -5058,7 +5307,9 @@ def main() -> int:
             ("deferred", ref.deferred, formal.deferred),
             ("approval", ref.approvals, formal.approvals),
             ("binding", ref.bindings, formal.bindings),
-            ("access", ref.access, formal.access)):
+            ("access", ref.access, formal.access),
+            ("async_site", ref.async_sites, formal.async_sites),
+            ("async_sig", ref.async_sigs, formal.async_sigs)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -5083,7 +5334,9 @@ def main() -> int:
         f"{len(ref.deferred)} deferred-position files + "
         f"{len(ref.approvals)} approval crossings + "
         f"{len(ref.bindings)} binding scopes + "
-        f"{len(ref.access)} access components) — "
+        f"{len(ref.access)} access components + "
+        f"{len(ref.async_sites)} async sites + "
+        f"{len(ref.async_sigs)} async signatures) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -5100,6 +5353,7 @@ def main() -> int:
     mismatches.extend(approval_coverage())
     mismatches.extend(binding_coverage())
     mismatches.extend(access_coverage())
+    mismatches.extend(async_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

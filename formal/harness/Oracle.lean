@@ -12,6 +12,7 @@ import RevL.Theorems.G4_DeferredPosition
 import RevL.Theorems.G4_ApprovalFloor
 import RevL.Theorems.G6_BindingUnique
 import RevL.Theorems.G1_KeyAccess
+import RevL.Theorems.A1_AsyncColour
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -49,7 +50,12 @@ proved model itself**, not from a private restatement of it (roadmap item
   * `G1 … access=` is `accessRowB`, which IS `RevL.G1Access.accessB` over
     the component's declared requirements (its `M` row) and its access
     roots (the `GA` rows); `accessRowB_iff` PROVES it equals
-    `RevL.G1Access.AccessOK` (G1 declared access, issue #1807).
+    `RevL.G1Access.AccessOK` (G1 declared access, issue #1807);
+  * `A1 … async=` is `asyncRowB`, which IS `RevL.A1Async.siteB` over one
+    site's kind and heads, the file's async names (the `AN` rows) and its
+    `fn` call graph (the `FN` rows); `asyncRowB_iff` PROVES it equals
+    `RevL.A1Async.SiteOK`, and `A1S … sig=` is `RevL.A1Async.sigB`
+    (`sigRowB_iff`) over one provide method's two colours (issue #1808).
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -175,6 +181,19 @@ Fact rows in (tab-separated, one fact per line):
                                              method): a name in view at its
                                              start, a binding, or a block
                                              boundary (G6, category `binding`)
+  AN <file> <name>                           an async name: an async extern,
+                                             or an async service operation
+                                             spelled `<Service>.<op>` (A1)
+  AS <file> <comp> <ord> <kind> <heads=csv>  one A1 site: a provide method
+                                             (`syncMethod`/`asyncMethod`), an
+                                             `effect`/`emit` step (`…Await`
+                                             when awaited), or an `undo` /
+                                             `compensate` slot, with the heads
+                                             it calls (issue #1808)
+  AG <file> <comp> <key.method> <declared> <impl>
+                                             a provide method's colour as its
+                                             service declares it and as it is
+                                             written (`async`/`sync`)
   GA <file> <comp> <root>                    one ACCESS root: a call head's
                                              root that is no binding, module
                                              callable, import, host family or
@@ -276,6 +295,11 @@ Verdict rows out:
   G1 <file> <comp> <access=ok|fail>                G1 declared access:
                                                    `RevL.G1Access.accessB`
                                                    over the `GA` roots
+  A1 <file> <comp> <ord> <async=ok|fail>           A1 async colour over one
+                                                   site: `RevL.A1Async.siteB`
+  A1S <file> <comp> <key.method> <sig=ok|fail>     A1, a provide method's
+                                                   colour is its service's:
+                                                   `RevL.A1Async.sigB`
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -1813,6 +1837,82 @@ theorem accessRowB_iff (declared roots : List String) :
 
 end KeyAccess
 
+/-! ## Deciding A1 async colour (issue #1808)
+
+An `AS` row is one site the A1 rules judge, with the heads it calls. The
+verdict is the model's `RevL.A1Async.siteB` over the site's kind, the file's
+async names (`AN`) and its `fn` call graph (the `FN` rows), with a fuel of
+one step per `fn` plus one: a shortest reach path visits each `fn` at most
+once. `asyncRowB_iff` is the bridge to `RevL.A1Async.SiteOK`. An `AG` row is
+decided by `RevL.A1Async.sigB` (`sigRowB_iff`). An unknown site kind is a
+hard error in `main`. -/
+
+section AsyncColour
+
+structure ANRow where
+  path : String
+  name : String
+
+structure ASRow where
+  path : String
+  comp : String
+  ord : String
+  kind : String
+  heads : List String
+
+structure AGRow where
+  path : String
+  comp : String
+  meth : String
+  declared : String
+  impl : String
+
+def parseAN (f : List String) : Option ANRow :=
+  match f with
+  | ["AN", path, name] => some ⟨path, name⟩
+  | _ => none
+
+def parseAS (f : List String) : Option ASRow :=
+  match f with
+  | ["AS", path, comp, ord, kind, heads] => some ⟨path, comp, ord, kind, splitKeys heads⟩
+  | _ => none
+
+def parseAG (f : List String) : Option AGRow :=
+  match f with
+  | ["AG", path, comp, meth, declared, impl] => some ⟨path, comp, meth, declared, impl⟩
+  | _ => none
+
+def parseSiteKind : String → Option RevL.A1Async.Kind
+  | "syncMethod" => some .syncMethod
+  | "asyncMethod" => some .asyncMethod
+  | "effect" => some .effect
+  | "effectAwait" => some .effectAwait
+  | "emit" => some .emit
+  | "emitAwait" => some .emitAwait
+  | "undo" => some .undo
+  | "compensate" => some .compensate
+  | _ => none
+
+/-- **Async decider**: the model's judgment over one site. -/
+def asyncRowB (g : RevL.A1Async.Graph) (as : List String) (fuel : Nat)
+    (k : RevL.A1Async.Kind) (heads : List String) : Bool :=
+  RevL.A1Async.siteB g as fuel k heads
+
+/-- **The `A1` verdict is the model's rule.** -/
+theorem asyncRowB_iff (g : RevL.A1Async.Graph) (as : List String) (fuel : Nat)
+    (k : RevL.A1Async.Kind) (heads : List String) :
+    asyncRowB g as fuel k heads = true ↔ RevL.A1Async.SiteOK g as fuel k heads :=
+  RevL.A1Async.siteB_iff g as fuel k heads
+
+/-- **Signature decider**: a provide method's colour against its service's. -/
+def sigRowB (declared impl : Bool) : Bool := RevL.A1Async.sigB declared impl
+
+theorem sigRowB_iff (declared impl : Bool) :
+    sigRowB declared impl = true ↔ RevL.A1Async.SigOK declared impl :=
+  RevL.A1Async.sigB_iff declared impl
+
+end AsyncColour
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1867,6 +1967,9 @@ def main (args : List String) : IO UInt32 := do
     let axrows := fields.filterMap parseAX
     let berows := fields.filterMap parseBE
     let garows := fields.filterMap parseGA
+    let anrows := fields.filterMap parseAN
+    let asrows := fields.filterMap parseAS
+    let agrows := fields.filterMap parseAG
     let aerows := fields.filterMap parseAE
     -- An edge with no crossing, or two edges on one crossing, is a malformed
     -- export: refuse it rather than read one of them.
@@ -1933,6 +2036,10 @@ def main (args : List String) : IO UInt32 := do
         s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\n"
     -- A `DR` row whose scope or position the model has no constructor for
     -- would drop a reach silently and move the verdict: refuse instead.
+    let unknownAS := asrows.filter (fun r => (parseSiteKind r.kind).isNone)
+    if !unknownAS.isEmpty then
+      IO.eprintln s!"oracle: AS rows of unknown site kind: {unknownAS.map (·.path)}"
+      return 1
     let unknownBE := berows.filter (fun r => !beKnown r)
     if !unknownBE.isEmpty then
       IO.eprintln s!"oracle: BE rows of unknown kind: {unknownBE.map (·.path)}"
@@ -2114,6 +2221,22 @@ def main (args : List String) : IO UInt32 := do
         let roots := (pga.filter (fun r => r.comp == m.name)).map (·.root)
         let g1v := if accessRowB m.requires roots then "ok" else "fail"
         out := out ++ s!"G1\t{p}\t{m.name}\taccess={g1v}\n"
+      -- A1 verdicts (async colour, issue #1808), one per site and one per
+      -- provide method's signature.
+      let graph : RevL.A1Async.Graph :=
+        (fnrows.filter (fun r => r.path == p)).map (fun r => (r.name, r.calls))
+      let anames := (anrows.filter (fun r => r.path == p)).map (·.name)
+      for r in asrows.filter (fun r => r.path == p) do
+        match parseSiteKind r.kind with
+        | some k =>
+          let a1v := if asyncRowB graph anames (graph.length + 1) k r.heads
+            then "ok" else "fail"
+          out := out ++ s!"A1\t{p}\t{r.comp}\t{r.ord}\tasync={a1v}\n"
+        | none => pure ()
+      for r in agrows.filter (fun r => r.path == p) do
+        let sv := if sigRowB (r.declared == "async") (r.impl == "async")
+          then "ok" else "fail"
+        out := out ++ s!"A1S\t{p}\t{r.comp}\t{r.meth}\tsig={sv}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -2177,3 +2300,5 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.approvalRowB_iff
 #print axioms RevLOracle.bindingRowB_iff
 #print axioms RevLOracle.accessRowB_iff
+#print axioms RevLOracle.asyncRowB_iff
+#print axioms RevLOracle.sigRowB_iff
