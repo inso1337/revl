@@ -148,6 +148,14 @@ CORPUS = [
     "../emit_java_corpus/comp_realm_intercept.rvl",
     "../emit_ts_corpus/realm_intercept.rvl",
     "../emit_ts_corpus/realm_isolate.rvl",
+    # ... and declared records and variants in provide bodies: record literals
+    # typed by their field set, field reads, case construction, a `match` over
+    # a declared variant (the type switch), and `.length` on a Str or a List
+    "comp_provide_records.rvl",
+    "../../../examples/rec.rvl",
+    "../../../examples/v3_step_scheduler.rvl",
+    "../emit_java_corpus/stdlib_builtins.rvl",
+    "../../../src/revl/truc/components/cli.rvl",
 ]
 
 # The combined-path documents, which import stc-go and are built against it.

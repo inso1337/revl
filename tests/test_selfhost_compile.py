@@ -598,6 +598,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # parameter (`f(f(n))`), whose whole `provide` block lower.rvl drops.
         # The other combined documents are byte-exact through the native chain.
         "comp_provide_pure.rvl",
+        # the second slice: issue #1840, a provide method that returns a
+        # nullary variant case (`= Dot`), whose whole `provide` block lower.rvl
+        # drops (the payload case, records, fields and `match` agree)
+        "comp_provide_records.rvl",
+        # `compile_to` takes one source string and resolves no `use`, so the
+        # services this document imports from assembler.rvl and shipper.rvl
+        # are missing from the native output (not a lower.rvl defect)
+        "../../../src/revl/truc/components/cli.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two

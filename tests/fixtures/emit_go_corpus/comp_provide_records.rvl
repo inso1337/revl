@@ -1,0 +1,117 @@
+// issue #106: the v3 COMBINED path, second slice. Declared records and
+// variants in provide-method bodies: a record literal typed by its field set,
+// a list of them typed by the declared return, a field read on a parameter, on
+// a service call and on a literal, a nullary and a payload case
+// construction, a `match` over a declared variant (with a bound payload, a
+// discarded `_` payload and a wildcard arm), and `.length` on a Str and on a
+// List. A match and a ternary in argument position take their result type
+// from their arms.
+type Point = { x: Int, y: Int }
+type Label = { text: Str, size: Int }
+type Shape = Dot | Circle(Int) | Box(Point)
+
+fn area(n: Int) -> Int { return n * n }
+fn show(s: Str) -> Str { return s }
+
+service Geometry {
+  fn origin() -> Point
+  fn corners() -> List[Point]
+  fn xOf(p: Point) -> Int
+  fn label(s: Str) -> Label
+  fn dot() -> Shape
+  fn circle(r: Int) -> Shape
+  fn size(s: Shape) -> Int
+  fn kind(s: Shape) -> Str
+  fn width(s: Str) -> Int
+  fn count(xs: List[Int]) -> Int
+}
+
+service Report {
+  fn line(s: Shape) -> Str
+  fn far() -> Int
+  fn lit() -> Int
+}
+
+component Plane provides geo: Geometry {
+  provide geo {
+    fn origin() = { x: 0, y: 0 }
+    fn corners() = [{ x: 0, y: 0 }, { x: 1, y: 1 }]
+    fn xOf(p) = p.x
+    fn label(s) = { text: s, size: s.length }
+    fn dot() = Dot
+    fn circle(r) = Circle(r)
+    fn size(s) = match s {
+      Dot => 0,
+      Circle(r) => area(r),
+      Box(_) => 4,
+    }
+    fn kind(s) = match s {
+      Box(p) => "box",
+      _ => "other",
+    }
+    fn width(s) = s.length
+    fn count(xs) = xs.length
+  }
+}
+
+component Printer requires geo: Geometry provides report: Report {
+  provide report {
+    fn line(s) = show(match s { Dot => "dot", _ => "shape" })
+    fn far() = geo.origin().x + area(geo.xOf({ x: 2, y: 3 }) > 1 ? 3 : 4)
+    fn lit() = ({ x: 5, y: 6 }).y
+  }
+}
+
+// Result types the renderer infers rather than reads: a ternary and a match in
+// argument position whose arms are a binary op, a negation, a list, a record,
+// a case construction, a module fn call, a required-service call, a field, a
+// comparison, a `!`, a `.length` and a nested ternary;
+// `.length` on a list literal, on a fn result and on a service result's
+// field; a match over the result of a service call; and a method with a bare
+// `return`. Two shapes are left out because both emitters render Go that does
+// not build: a match over a case built in place (`switch _m :=
+// ShapeCircle{..}.(type)`), and a match whose type is inferred (issue #1834:
+// `_comp_infer` answers the scrutinee's type for a match).
+fn keep(n: Int) -> Int { return n }
+fn keepL(xs: List[Int]) -> Int { return 0 }
+fn keepP(p: Point) -> Int { return p.x }
+fn keepS(s: Shape) -> Int { return 0 }
+fn keepB(b: Bool) -> Int { return 0 }
+
+service Infer {
+  fn a(n: Int) -> Int
+  fn b(n: Int) -> Int
+  fn c(f: Bool) -> Int
+  fn d(f: Bool) -> Int
+  fn e(f: Bool) -> Int
+  fn g(f: Bool) -> Int
+  fn h(s: Shape) -> Int
+  fn i(s: Str) -> Int
+  fn m() -> Int
+  fn q()
+  fn r(f: Bool) -> Int
+  fn t(f: Bool) -> Int
+  fn v(f: Bool, s: Str) -> Int
+  fn w(f: Bool) -> Int
+  fn x(s: Shape) -> Int
+}
+
+component Inferrer requires geo: Geometry provides inf: Infer {
+  provide inf {
+    fn a(n) = keep(n > 0 ? n + 1 : n - 1)
+    fn b(n) = keep(n > 0 ? -n : n)
+    fn c(f) = keepL(f ? [1, 2] : [3])
+    fn d(f) = keepP(f ? { x: 1, y: 2 } : { x: 3, y: 4 })
+    fn e(f) = keepS(f ? Circle(1) : Dot)
+    fn g(f) = keep(f ? area(2) : geo.xOf({ x: 1, y: 1 }))
+    fn h(s) = keep(match s { Dot => geo.origin().x, _ => 1 })
+    fn i(s) = [1, 2, 3].length + show(s).length + geo.label(s).text.length
+    fn m() = match geo.circle(1) { Box(p) => p.y, _ => 0 }
+    fn q() { return }
+    fn r(f) = keepB(f ? 1 < 2 : false)
+    fn t(f) = keepB(f ? !f : true)
+    fn v(f, s) = keep(f ? s.length : 1)
+    fn w(f) = keep(f ? (f ? 1 : 2) : 3)
+    fn x(s) = keepS(match s { _ => s })
+  }
+}

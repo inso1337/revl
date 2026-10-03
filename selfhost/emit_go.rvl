@@ -3386,11 +3386,17 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   let emitted_tests = emit_tests(value_list(value_field(ir, "tests")), fr, er, tables,
                                  functions.concat(externs), strings_alias, emitted_functions.reserved)
   let marked_lines = emitted_functions.lines.concat(emitted_tests.lines)
-  let used_stdlib = has_text(marked_lines, stdlib_mark())
+  var used_stdlib = has_text(marked_lines, stdlib_mark())
   var fnlines = []
   for (l of marked_lines) { fnlines = fnlines.push(strip_marks(l)) }
   var body = type_lines.concat(ext.lines).concat(fnlines)
-  if (combined) { body = body.concat(emit_comp_section(ir)) }
+  if (combined) {
+    let comp_lines = emit_comp_section(ir)
+    // `_COMP_NEEDS_STDLIB`: a provide method's `.length` renders through the
+    // stdlib helpers, which pull the same preamble and imports in.
+    if (has_text(comp_lines, "revlStrLen(") || has_text(comp_lines, "revlListLen(")) { used_stdlib = true }
+    body = body.concat(comp_lines)
+  }
   let rendered = fnlines.join(newline())
   let uses_fmt = rendered.indexOf("fmt.Sprintf(") >= 0
   let uses_strconv = rendered.indexOf("strconv.Format") >= 0
@@ -3453,7 +3459,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   if (unique.length() > 0) {
     out = out.push("import (").concat(list_sort(unique)).push(")").push("")
   }
-  if (combined) { out = out.push("var _ = fmt.Sprintf").push("").concat(host_runtime()) }
+  if (combined) { out = out.push("var _ = fmt.Sprintf").push("").concat(host_runtime_for(types)) }
   if (uses_reflect) {
     // Structural equality: Go `==` is a compile error on slices, and
     // DeepEqual keeps NaN unequal to itself as IEEE requires.
@@ -3496,9 +3502,10 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
 // an OBSERVABLE component renders both tiers in one package, the pure
 // typed-core tier above and the live stc-go components below. This slice
 // ports the documents whose components only `provide` single-`return` methods
-// over a small expression set, with or without `requires`, `isolate` and
-// `intercept`. Anything past it keeps the `<<UNSUPPORTED-COMPONENT:..>>`
-// markers (`combined_ok` decides).
+// over the component expression renderer (declared records and variants,
+// field reads and a variant `match` included), with or without `requires`,
+// `isolate` and `intercept`. Anything past it keeps the
+// `<<UNSUPPORTED-COMPONENT:..>>` markers (`combined_ok` decides).
 
 // `_GO_KEYWORDS` / `_safe_local`: the component tier's own rename, smaller than
 // `v3_ident`'s reserved set, and injective the same way (the `kw`/`kw_` ladder
@@ -3584,7 +3591,7 @@ fn is_tuple_surface(tv: Any) -> Bool {
 
 // `_Env` inside a provide method: params are bare locals, a required key is a
 // field on the method receiver.
-type CEnv = { params: List[Str], reqs: List[Str], types: Any }
+type CEnv = { params: List[Str], reqs: List[Str], types: Any, vt: Map[Str, Str], fr: Map[Str, Str], rq: Any, services: Any }
 
 fn comp_name_ref(env: CEnv, ident: Str) -> Str {
   if (list_contains(env.params, ident)) { return safe_local(ident) }
@@ -3598,63 +3605,203 @@ fn ref_ident(n: Any) -> Str {
   return value_str(value_field(n, "id"))
 }
 
-// Does `_expr` in a provide method render this node in the ported subset? The
-// rest of the component expression surface (builtins, `??`, field access,
-// records, ADTs, `match`, interpolation, a ternary or a list whose type only
-// `_comp_infer` knows) is outside this slice. A literal renders through
-// `go_literal`, the `_go_literal` port the extern config defaults already use.
-fn comp_expr_ok(n: Any, expected: Str) -> Bool {
-  if (value_kind(n) != "record") { return false }
-  let k = node_kind(n)
-  if (k == "name") { return true }
-  if (k == "var") { return ref_ident(n) != "None" }
-  if (k == "req") { return true }
-  if (k == "lit") { return list_contains(["str", "int", "bool", "float"], value_kind(value_field(n, "value"))) }
-  if (k == "call") {
-    let callee = value_field(n, "callee")
-    if (!value_is_null(callee)) {
-      if (node_kind(callee) == "field") {
-        if (!comp_expr_ok(value_field(callee, "target"), "")) { return false }
-      } else {
-        // a built-in Opt/Result constructor as a bare value: refused here, so
-        // it is matched by list rather than by the comparison the blind-spot
-        // gate (tools/selfhost_coverage.py) reads as a ported arm
-        if (list_contains(["Some", "None", "Ok", "Err"], ref_ident(callee))) { return false }
-        if (!comp_expr_ok(callee, "")) { return false }
+fn with_vt(env: CEnv, name: Str, t: Str) -> CEnv {
+  return { params: env.params, reqs: env.reqs, types: env.types, vt: env.vt.set(name, t),
+           fr: env.fr, rq: env.rq, services: env.services }
+}
+
+// ------------------------------------------- declared records and variants
+fn decl_kind(types: Any, name: Str) -> Str {
+  return value_str(value_field(value_field(types, name), "kind"))
+}
+
+// `_v3_record_type_for_fields`: the ONE declared record whose field set is
+// exactly `fields`, else "" (none, or more than one: the reference refuses
+// both by name).
+fn comp_record_for_fields(types: Any, fields: List[Str]) -> Str {
+  let want = sorted_key(fields)
+  var found = ""
+  var count = 0
+  for (name of value_keys(types)) {
+    if (decl_kind(types, name) == "record") {
+      if (sorted_key(value_keys(value_field(value_field(types, name), "fields"))) == want) {
+        found = name
+        count = count + 1
       }
-    } else {
-      if (!comp_expr_ok(value_field(n, "target"), "")) { return false }
     }
-    for (a of value_list(value_field(n, "args"))) { if (!comp_expr_ok(a, "")) { return false } }
-    return true
   }
-  if (k == "fn") {
-    for (a of value_list(value_field(n, "args"))) { if (!comp_expr_ok(a, "")) { return false } }
-    return true
+  if (count != 1) { return "" }
+  return found
+}
+
+fn record_field_names(n: Any) -> List[Str] {
+  var names = []
+  for (pair of value_list(value_field(n, "fields"))) { names = names.push(value_str(value_at(pair, 0))) }
+  return names
+}
+
+// `_v3_case_layout` and `_v3_case_payload` in one walk: the variant that
+// declares `case_name` and that case's payload surface, as [variant, payload],
+// or [] when no declared variant has it. With `adt` given only that variant is
+// searched; with "" the first declaring variant wins, as in the layout.
+fn case_entry(types: Any, adt: Str, case_name: Str) -> List[Str] {
+  for (name of value_keys(types)) {
+    if ((adt == "" || adt == name) && decl_kind(types, name) == "variant") {
+      for (c of value_list(value_field(value_field(types, name), "cases"))) {
+        if (value_str(value_field(c, "name")) == case_name) { return [name, value_str(value_field(c, "payload"))] }
+      }
+    }
   }
-  if (k == "bin") {
-    let op = node_op(n)
-    if (op == "??" || go_bin_op(op) == "") { return false }
-    return comp_expr_ok(value_field(n, "left"), "") && comp_expr_ok(value_field(n, "right"), "")
-  }
-  if (k == "un") {
-    let op = node_op(n)
-    if (op != "!" && op != "~" && op != "-") { return false }
-    return comp_expr_ok(value_field(n, "operand"), "")
-  }
-  if (k == "if") {
-    if (expected == "") { return false }
-    return comp_expr_ok(value_field(n, "cond"), "") && comp_expr_ok(value_field(n, "then"), expected)
-      && comp_expr_ok(value_field(n, "else"), expected)
-  }
+  return []
+}
+
+// The variant a case resolves against: `hint` when it is a declared variant
+// (the frozen node type, or the scrutinee's), else the case's own layout
+// entry. "" when neither declares it.
+fn case_variant_of(types: Any, hint: Str, case_name: Str) -> Str {
+  var e = []
+  if (decl_kind(types, hint) == "variant") { e = case_entry(types, hint, case_name) }
+  else { e = case_entry(types, "", case_name) }
+  return e.length() > 0 ? e[0] : ""
+}
+
+fn case_payload(types: Any, adt: Str, case_name: Str) -> Str {
+  let e = case_entry(types, adt, case_name)
+  return e.length() > 0 ? e[1] : ""
+}
+
+// The variant an `adt` node constructs: the type the checker froze onto it,
+// else the layout's. "" when that is not a declared variant.
+fn adt_variant(n: Any, types: Any) -> Str {
+  return case_variant_of(types, value_str(value_field(n, "type")), value_str(value_field(n, "case")))
+}
+
+// A literal's surface type by its JSON shape ("" for a null). A table rather
+// than comparisons: tools/selfhost_coverage.py would read `.. == "bool"` as
+// the legacy `bool` node kind.
+fn lit_surface(shape: Str) -> Str {
+  let shapes = ["bool", "int", "float", "str"]
+  let surfaces = ["Bool", "Int", "Float", "Str", ""]
+  var i = 0
+  while (i < shapes.length() && shapes[i] != shape) { i = i + 1 }
+  return surfaces[i]
+}
+
+// ------------------------------------------------------ `_comp_infer`
+// The surface type of a component-body expression, "" when unknown. Mirrors
+// the arms of `_comp_infer` the slice can reach.
+fn comp_infer(n: Any, env: CEnv) -> Str {
+  let k = node_kind(n)
+  if (k == "lit") { return lit_surface(value_kind(value_field(n, "value"))) }
+  if (k == "name" || k == "var") { return map_get(env.vt, ref_ident(n)) }
   if (k == "list") {
     let items = value_list(value_field(n, "items"))
-    let pinned = expected.startsWith("List[") && expected.endsWith("]")
-    if (!pinned && items.length() > 0) { return false }
-    for (it of items) { if (!comp_expr_ok(it, "")) { return false } }
-    return true
+    let el = items.length() > 0 ? comp_infer(items[0], env) : ""
+    return el == "" ? "List[Int]" : `List[${el}]`
   }
-  return false
+  if (k == "bin") {
+    if (list_contains(["==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"], node_op(n))) { return "Bool" }
+    let l = comp_infer(value_field(n, "left"), env)
+    return l != "" ? l : comp_infer(value_field(n, "right"), env)
+  }
+  if (k == "un") { return node_op(n) == "!" ? "Bool" : comp_infer(value_field(n, "operand"), env) }
+  if (k == "record") { return comp_record_for_fields(env.types, record_field_names(n)) }
+  if (k == "adt") {
+    let t = value_str(value_field(n, "type"))
+    return t != "" ? t : case_variant_of(env.types, "", value_str(value_field(n, "case")))
+  }
+  if (k == "fn") { return map_get(env.fr, value_str(value_field(n, "name"))) }
+  if (k == "call") {
+    let target = value_field(n, "target")
+    let svc = value_str(value_field(env.rq, value_str(value_field(target, "name"))))
+    let m = value_field(service_methods(env.services, svc), value_str(value_field(n, "method")))
+    return node_kind(target) == "req" ? value_str(value_field(m, "returns")) : ""
+  }
+  // a match's value type is its scrutinee's, as on the reference (issue #1834)
+  if (k == "match") { return comp_infer(value_field(n, "scrutinee"), env) }
+  if (k == "field") {
+    let tt = comp_infer(value_field(n, "target"), env)
+    let ft = value_str(value_field(value_field(value_field(env.types, tt), "fields"), value_str(value_field(n, "name"))))
+    return decl_kind(env.types, tt) == "record" ? ft : ""
+  }
+  return ""
+}
+
+// Does `_expr` in a provide method render this node in the ported subset? The
+// rest of the component expression surface (builtins, `??`, interpolation, an
+// Opt/Result `match`, an Opt/Result construction as a value) is outside it. A
+// literal renders through `go_literal`, the `_go_literal` port the extern
+// config defaults already use. Each arm is one boolean, so a declined document
+// costs no branch of its own.
+fn comp_expr_ok(n: Any, env: CEnv) -> Bool {
+  let k = node_kind(n)
+  if (k == "name" || k == "req") { return true }
+  if (k == "var") { return ref_ident(n) != "None" }
+  if (k == "lit") { return list_contains(["str", "int", "bool", "float"], value_kind(value_field(n, "value"))) }
+  if (k == "call") { return call_head_ok(n, env) && all_ok(value_list(value_field(n, "args")), env) }
+  if (k == "fn") { return all_ok(value_list(value_field(n, "args")), env) }
+  if (k == "bin") {
+    let op = node_op(n)
+    return op != "??" && go_bin_op(op) != "" && all_ok([value_field(n, "left"), value_field(n, "right")], env)
+  }
+  if (k == "un") { return list_contains(["!", "~", "-"], node_op(n)) && comp_expr_ok(value_field(n, "operand"), env) }
+  if (k == "if") { return all_ok([value_field(n, "cond"), value_field(n, "then"), value_field(n, "else")], env) }
+  if (k == "list") { return all_ok(value_list(value_field(n, "items")), env) }
+  if (k == "record") {
+    var values = []
+    for (pair of value_list(value_field(n, "fields"))) { values = values.push(value_at(pair, 1)) }
+    return comp_record_for_fields(env.types, record_field_names(n)) != "" && all_ok(values, env)
+  }
+  if (k == "adt") {
+    let adt = adt_variant(n, env.types)
+    let want = case_payload(env.types, adt, value_str(value_field(n, "case"))) == "" ? 0 : 1
+    let args = value_list(value_field(n, "args"))
+    return adt != "" && args.length() == want && all_ok(args, env)
+  }
+  if (k == "field") {
+    let target = value_field(n, "target")
+    let shape_ok = value_str(value_field(n, "name")) == "length"
+      || decl_kind(env.types, comp_infer(target, env)) == "record"
+    return shape_ok && comp_expr_ok(target, env)
+  }
+  return k == "match" && comp_match_ok(n, env)
+}
+
+// The callee or receiver of a call. A built-in Opt/Result constructor as a
+// bare value is refused; it is matched by list rather than by the comparison
+// the blind-spot gate (tools/selfhost_coverage.py) reads as a ported arm.
+fn call_head_ok(n: Any, env: CEnv) -> Bool {
+  let callee = value_field(n, "callee")
+  if (value_is_null(callee)) { return comp_expr_ok(value_field(n, "target"), env) }
+  if (node_kind(callee) == "field") { return comp_expr_ok(value_field(callee, "target"), env) }
+  return !list_contains(["Some", "None", "Ok", "Err"], ref_ident(callee)) && comp_expr_ok(callee, env)
+}
+
+fn all_ok(nodes: List[Any], env: CEnv) -> Bool {
+  var ok = true
+  for (x of nodes) { ok = ok && comp_expr_ok(x, env) }
+  return ok
+}
+
+// A `match` over a declared variant (the type switch). An Opt/Result scrutinee
+// takes the tuple form, which is outside the slice. A bound payload's type
+// stays visible to the later arms, as it does when the match renders.
+fn comp_match_ok(n: Any, env: CEnv) -> Bool {
+  let scrut = value_field(n, "scrutinee")
+  let st = comp_infer(scrut, env)
+  var ok = comp_expr_ok(scrut, env) && !st.startsWith("Opt[") && !st.startsWith("Result[")
+  var e = env
+  for (arm of value_list(value_field(n, "arms"))) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    let bind = value_str(value_field(arm, "bind"))
+    let adt = case_variant_of(env.types, st, pattern)
+    let payload = case_payload(env.types, adt, pattern)
+    let binds = bind != "" && bind != "_" && pattern != "_"
+    ok = ok && (pattern == "_" || adt != "") && (!binds || payload != "")
+    if (binds) { e = with_vt(e, bind, payload) }
+    ok = ok && comp_expr_ok(value_field(arm, "body"), e)
+  }
+  return ok
 }
 
 // `_expr(node, env, expected)` over that subset. A `widen` marker is the
@@ -3670,6 +3817,17 @@ fn comp_args(n: Any, env: CEnv) -> Str {
   var parts = []
   for (a of value_list(value_field(n, "args"))) { parts = parts.push(comp_expr(a, env, "")) }
   return parts.join(", ")
+}
+
+// The `if`/`match` result type: the expected surface's Go spelling when there
+// is one, else the first of `candidates` that has one, else `any`.
+fn result_go_type(expected: Str, candidates: List[Any], env: CEnv) -> Str {
+  if (expected != "") { return comp_go_type(expected, env.types) }
+  for (c of candidates) {
+    let gt = comp_go_type(comp_infer(c, env), env.types)
+    if (gt != "") { return gt }
+  }
+  return "any"
 }
 
 fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
@@ -3707,20 +3865,97 @@ fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
     return `(-${operand})`
   }
   if (k == "if") {
-    let gt = comp_go_type(expected, env.types)
+    let gt = result_go_type(expected, [value_field(n, "then"), value_field(n, "else")], env)
     let c = comp_expr(value_field(n, "cond"), env, "")
     let th = comp_expr(value_field(n, "then"), env, expected)
     let el = comp_expr(value_field(n, "else"), env, expected)
     return `func() ${gt} { if ${c} { return ${th} }; return ${el} }()`
   }
-  // the list arm (`comp_expr_ok` admits no other kind)
-  var elem = "any"
-  if (expected.startsWith("List[") && expected.endsWith("]")) {
-    elem = comp_go_type(expected.slice(5, expected.length() - 1), env.types)
+  if (k == "list") {
+    var elem = ""
+    let items = value_list(value_field(n, "items"))
+    if (expected.startsWith("List[") && expected.endsWith("]")) { elem = expected.slice(5, expected.length() - 1) }
+    if (elem == "" && items.length() > 0) { elem = comp_infer(items[0], env) }
+    var go_elem = "any"
+    if (elem != "") { go_elem = comp_go_type(elem, env.types) }
+    var parts = []
+    for (it of items) { parts = parts.push(comp_expr(it, env, "")) }
+    return `[]${go_elem}{${parts.join(", ")}}`
   }
-  var items = []
-  for (it of value_list(value_field(n, "items"))) { items = items.push(comp_expr(it, env, "")) }
-  return `[]${elem}{${items.join(", ")}}`
+  if (k == "record") {
+    let tname = v3_ident(comp_record_for_fields(env.types, record_field_names(n)))
+    var parts = []
+    for (pair of value_list(value_field(n, "fields"))) {
+      parts = parts.push(`${camel(value_str(value_at(pair, 0)))}: ${comp_expr(value_at(pair, 1), env, "")}`)
+    }
+    return `${tname}{${parts.join(", ")}}`
+  }
+  if (k == "adt") {
+    let adt = adt_variant(n, env.types)
+    let struct_name = v3_ident(adt).concat(value_str(value_field(n, "case")))
+    if (case_payload(env.types, adt, value_str(value_field(n, "case"))) == "") { return `${struct_name}{}` }
+    return `${struct_name}{Value: ${comp_args(n, env)}}`
+  }
+  if (k == "field") {
+    let target_node = value_field(n, "target")
+    var target = comp_expr(target_node, env, "")
+    if (value_str(value_field(n, "name")) == "length") {
+      if (comp_infer(target_node, env) == "Str") { return `revlStrLen(${target})` }
+      return `revlListLen(${target})`
+    }
+    if (!list_contains(["name", "var", "call", "host", "instance-get", "index", "field"], node_kind(target_node))) {
+      target = `(${target})`
+    }
+    return `${target}.${camel(value_str(value_field(n, "name")))}`
+  }
+  // the match arm (`comp_expr_ok` admits no other kind)
+  return comp_match(n, env, expected)
+}
+
+// `_go_comp_match` over a declared variant: an immediately applied func whose
+// type switch returns each arm's body. A bound payload's type is visible to
+// every later arm too, as on the reference (its `var_types` is restored only
+// after the whole match).
+fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
+  let scrut_node = value_field(n, "scrutinee")
+  let st = comp_infer(scrut_node, env)
+  let arms = value_list(value_field(n, "arms"))
+  var bodies = []
+  for (arm of arms) { bodies = bodies.push(value_field(arm, "body")) }
+  var exp_t = ""
+  if (expected != "") { exp_t = comp_go_type(expected, env.types) }
+  if (exp_t == "") {
+    for (b of bodies) { if (exp_t == "") { exp_t = comp_go_type(comp_infer(b, env), env.types) } }
+  }
+  if (exp_t == "") { exp_t = "any" }
+  let scrutinee = comp_expr(scrut_node, env, st)
+  var lines = [`func() ${exp_t} {`, line(1, `switch _m := ${scrutinee}.(type) {`)]
+  var has_wild = false
+  var e = env
+  for (arm of arms) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    if (pattern == "_") {
+      has_wild = true
+      lines = lines.push(line(1, "default:")).push(line(2, "_ = _m"))
+      lines = lines.push(line(2, `return ${comp_expr(value_field(arm, "body"), e, expected)}`))
+    } else {
+      let adt = case_variant_of(env.types, st, pattern)
+      lines = lines.push(line(1, `case ${v3_ident(adt)}${pattern}:`))
+      let bind = value_str(value_field(arm, "bind"))
+      if (bind != "" && bind != "_") {
+        e = with_vt(e, bind, case_payload(env.types, adt, pattern))
+        lines = lines.push(line(2, `${safe_local(bind)} := _m.Value`)).push(line(2, `_ = ${safe_local(bind)}`))
+      } else {
+        lines = lines.push(line(2, "_ = _m"))
+      }
+      lines = lines.push(line(2, `return ${comp_expr(value_field(arm, "body"), e, expected)}`))
+    }
+  }
+  if (!has_wild) {
+    lines = lines.push(line(1, "default:")).push(line(2, "_ = _m")).push(line(2, `panic("unreachable: non-exhaustive match")`))
+  }
+  lines = lines.push(line(1, "}")).push("}()")
+  return lines.join(newline())
 }
 
 // The service a provide block implements, and its declared method table.
@@ -3729,46 +3964,74 @@ fn service_methods(services: Any, svc: Str) -> Any {
 }
 
 // Is this provide method an empty body or a single `return` the slice renders?
-fn provide_method_ok(m: Any, decl: Any) -> Bool {
+fn provide_method_ok(m: Any, decl: Any, env: CEnv) -> Bool {
   let steps = value_list(value_field(m, "body"))
-  let ret = value_field(decl, "returns")
-  if (is_tuple_surface(ret)) { return false }
-  if (steps.length() == 0) { return true }
-  if (steps.length() != 1 || node_step(steps[0]) != "return") { return false }
-  for (p of value_list(value_field(decl, "params"))) {
-    if (flag_of(p, "secret")) { return false }
+  var secret = false
+  for (p of value_list(value_field(decl, "params"))) { secret = secret || flag_of(p, "secret") }
+  // an empty body, or one `return` of nothing or of an expression the slice renders
+  var body_ok = steps.length() == 0
+  for (st of steps) {
+    let e = value_field(st, "expr")
+    body_ok = steps.length() == 1 && node_step(st) == "return" && (value_is_null(e) || comp_expr_ok(e, env))
   }
-  let e = value_field(steps[0], "expr")
-  if (value_is_null(e)) { return true }
-  return comp_expr_ok(e, value_str(ret))
+  return !is_tuple_surface(value_field(decl, "returns")) && !secret && body_ok
 }
 
-fn component_ok(c: Any, services: Any) -> Bool {
-  if (value_list(value_field(c, "config")).length() > 0) { return false }
-  if (value_keys(value_field(c, "routes")).length() > 0) { return false }
-  let rq = value_field(c, "requires")
-  for (r of value_keys(rq)) {
-    if (value_str(value_field(rq, r)).startsWith("Stream")) { return false }
+// The document-wide tables a provide method's renderer reads: the declared
+// types, the services, and every module fn's and extern's declared return
+// (`_FN_RET`).
+type CDoc = { types: Any, services: Any, fr: Map[Str, Str] }
+
+fn comp_doc(ir: Any) -> CDoc {
+  var fr: Map[Str, Str] = Map.empty()
+  for (d of value_list(value_field(ir, "functions")).concat(value_list(value_field(ir, "externs")))) {
+    let name = value_str(value_field(d, "name"))
+    if (name != "") { fr = fr.set(name, value_str(value_field(d, "returns"))) }
   }
+  return { types: value_field(ir, "types"), services: value_field(ir, "services"), fr: fr }
+}
+
+// The `_Env` of one provide method: its params typed from the service
+// declaration (`env.var_types[pn] = ptypes.get(pn)`), and the component's
+// required keys as receiver fields.
+fn method_env(m: Any, decl: Any, rq: Any, doc: CDoc) -> CEnv {
+  var ptypes: Map[Str, Str] = Map.empty()
+  for (p of value_list(value_field(decl, "params"))) {
+    ptypes = ptypes.set(value_str(value_field(p, "name")), value_str(value_field(p, "type")))
+  }
+  var params = []
+  var vt: Map[Str, Str] = Map.empty()
+  for (pn of value_list(value_field(m, "params"))) {
+    let name = value_str(pn)
+    params = params.push(name)
+    vt = vt.set(name, map_get(ptypes, name))
+  }
+  return { params: params, reqs: value_keys(rq), types: doc.types, vt: vt, fr: doc.fr,
+           rq: rq, services: doc.services }
+}
+
+fn component_ok(c: Any, doc: CDoc) -> Bool {
+  let rq = value_field(c, "requires")
+  var ok = value_list(value_field(c, "config")).length() == 0 && value_keys(value_field(c, "routes")).length() == 0
+  for (r of value_keys(rq)) { ok = ok && !value_str(value_field(rq, r)).startsWith("Stream") }
   for (s of value_list(value_field(c, "body"))) {
-    if (node_step(s) != "provide") { return false }
-    let table = service_methods(services, value_str(value_field(s, "service")))
+    ok = ok && node_step(s) == "provide"
+    let table = service_methods(doc.services, value_str(value_field(s, "service")))
     for (m of value_list(value_field(s, "methods"))) {
-      if (!provide_method_ok(m, value_field(table, value_str(value_field(m, "name"))))) { return false }
+      let decl = value_field(table, value_str(value_field(m, "name")))
+      ok = ok && provide_method_ok(m, decl, method_env(m, decl, rq, doc))
     }
   }
-  return true
+  return ok
 }
 
 // `_collect_host_calls`: a `host` node whose family has no fixed runtime here
 // (anything but Pool / Map / Stream) needs a generated stub, outside the slice.
 fn has_stub_host(node: Any) -> Bool {
-  if (value_kind(node) == "record" && list_contains(["host"], node_kind(node))) {
-    let fam = value_str(value_field(node, "fn")).split(".")[0]
-    if (fam != "" && fam != "Pool" && fam != "Map" && fam != "Stream") { return true }
-  }
-  for (child of value_children(node)) { if (has_stub_host(child)) { return true } }
-  return false
+  let fam = value_str(value_field(node, "fn")).split(".")[0]
+  var hit = list_contains(["host"], node_kind(node)) && fam != "" && !list_contains(["Pool", "Map", "Stream"], fam)
+  for (child of value_children(node)) { hit = hit || has_stub_host(child) }
+  return hit
 }
 
 // A boolean IR flag, read through a helper. Used where the combined slice
@@ -3781,33 +4044,25 @@ fn flag_of(node: Any, field: Str) -> Bool { return value_bool(value_field(node, 
 // confidentiality funnel, which this slice does not carry.
 fn declares_secret(ir: Any) -> Bool {
   let services = value_field(ir, "services")
+  var marked = []
   for (sname of value_keys(services)) {
     let ms = service_methods(services, sname)
-    for (mname of value_keys(ms)) {
-      for (p of value_list(value_field(value_field(ms, mname), "params"))) {
-        if (flag_of(p, "secret")) { return true }
-      }
-    }
+    for (mname of value_keys(ms)) { marked = marked.concat(value_list(value_field(value_field(ms, mname), "params"))) }
   }
+  var hit = false
   for (e of value_list(value_field(ir, "externs"))) {
-    if (value_bool(value_field(e, "secret_return"))) { return true }
-    for (p of value_list(value_field(e, "params"))) {
-      if (flag_of(p, "secret")) { return true }
-    }
+    hit = hit || flag_of(e, "secret_return")
+    marked = marked.concat(value_list(value_field(e, "params")))
   }
-  for (c of value_list(value_field(ir, "components"))) {
-    for (f of value_list(value_field(c, "config"))) {
-      if (flag_of(f, "secret")) { return true }
-    }
-  }
-  return false
+  for (c of value_list(value_field(ir, "components"))) { marked = marked.concat(value_list(value_field(c, "config"))) }
+  for (x of marked) { hit = hit || flag_of(x, "secret") }
+  return hit
 }
 
 fn has_lifecycle_test(ir: Any) -> Bool {
-  for (t of value_list(value_field(ir, "tests"))) {
-    if (flag_of(t, "lifecycle")) { return true }
-  }
-  return false
+  var hit = false
+  for (t of value_list(value_field(ir, "tests"))) { hit = hit || flag_of(t, "lifecycle") }
+  return hit
 }
 
 // The reference routes a v3 document to `_emit_v3_combined` when a top-level
@@ -3815,26 +4070,22 @@ fn has_lifecycle_test(ir: Any) -> Bool {
 // and no lifecycle test keeps it on the live path. The rest of `combined_ok`
 // is this slice's own reach.
 fn takes_combined_path(ir: Any) -> Bool {
-  if (value_int(value_field(ir, "ir_version")) != 3) { return false }
   let comps = value_list(value_field(ir, "components"))
-  if (comps.length() == 0 || has_lifecycle_test(ir)) { return false }
   let top = carries_pure_declarations(ir) || value_list(value_field(ir, "tests")).length() > 0
-  return top && any_component_is_observable(comps)
+  return value_int(value_field(ir, "ir_version")) == 3 && comps.length() > 0 && !has_lifecycle_test(ir)
+    && top && any_component_is_observable(comps)
 }
 
 fn combined_ok(ir: Any) -> Bool {
-  if (!takes_combined_path(ir)) { return false }
-  if (value_list(value_field(ir, "fault_tests")).length() > 0) { return false }
-  if (declares_secret(ir) || has_stub_host(ir)) { return false }
+  // A declared `Map` or `Pool` renames the host runtime's own type; a
+  // declared `Row` only drops its alias (`host_runtime_for`).
   let types = value_field(ir, "types")
-  for (renamed of ["Row", "Map", "Pool"]) {
-    if (!value_is_null(value_field(types, renamed))) { return false }
-  }
-  let services = value_field(ir, "services")
-  for (c of value_list(value_field(ir, "components"))) {
-    if (!component_ok(c, services)) { return false }
-  }
-  return true
+  var ok = takes_combined_path(ir) && value_list(value_field(ir, "fault_tests")).length() == 0
+    && !declares_secret(ir) && !has_stub_host(ir)
+    && value_is_null(value_field(types, "Map")) && value_is_null(value_field(types, "Pool"))
+  let doc = comp_doc(ir)
+  for (c of value_list(value_field(ir, "components"))) { ok = ok && component_ok(c, doc) }
+  return ok
 }
 
 // `_emit_services`: one interface per declared service, in declaration order.
@@ -3890,7 +4141,7 @@ fn emit_comp_keys(comps: List[Any]) -> List[Str] {
 
 // `_emit_component` for the slice: the constructor (required services
 // resolved, each provide block wired), then one impl struct per block.
-fn emit_comp_component(c: Any, services: Any, types: Any) -> List[Str] {
+fn emit_comp_component(c: Any, doc: CDoc) -> List[Str] {
   let cname = camel(value_str(value_field(c, "name")))
   let rq = value_field(c, "requires")
   let reqs = value_keys(rq)
@@ -3923,13 +4174,15 @@ fn emit_comp_component(c: Any, services: Any, types: Any) -> List[Str] {
   }
   for (r of reqs) { out = out.push(line(3, `_ = ${lower_camel(r)}`)) }
   out = out.push(line(3, "return nil, nil")).push(line(2, "},")).push(line(1, "}")).push("}").push("")
-  for (s of steps) { out = out.concat(emit_comp_provide_impl(cname, s, rq, services, types)) }
+  for (s of steps) { out = out.concat(emit_comp_provide_impl(cname, s, rq, doc)) }
   return out
 }
 
 // `_emit_provide_impl`: the impl struct (ctx plus every required handle) and
 // one method per provided operation, typed from the service declaration.
-fn emit_comp_provide_impl(cname: Str, s: Any, rq: Any, services: Any, types: Any) -> List[Str] {
+fn emit_comp_provide_impl(cname: Str, s: Any, rq: Any, doc: CDoc) -> List[Str] {
+  let services = doc.services
+  let types = doc.types
   let struct_name = `${cname}_${value_str(value_field(s, "name"))}`
   let reqs = value_keys(rq)
   var out = [`type ${struct_name} struct {`, line(1, "ctx *stc.Context")]
@@ -3943,11 +4196,9 @@ fn emit_comp_provide_impl(cname: Str, s: Any, rq: Any, services: Any, types: Any
     for (p of value_list(value_field(decl, "params"))) {
       ptypes = ptypes.set(value_str(value_field(p, "name")), value_str(value_field(p, "type")))
     }
-    var params = []
     var gp = []
     for (pn of value_list(value_field(m, "params"))) {
       let name = value_str(pn)
-      params = params.push(name)
       let pt = map_get(ptypes, name)
       gp = gp.push(`${safe_local(name)} ${comp_go_type(pt == "" ? "any" : pt, types)}`)
     }
@@ -3955,7 +4206,7 @@ fn emit_comp_provide_impl(cname: Str, s: Any, rq: Any, services: Any, types: Any
     var sig = `func (revlSelf *${struct_name}) ${camel(mname)}(${gp.join(", ")})`
     if (ret != "") { sig = sig.concat(" ").concat(ret) }
     out = out.push(sig.concat(" {"))
-    let env: CEnv = { params: params, reqs: reqs, types: types }
+    let env = method_env(m, decl, rq, doc)
     for (ret_step of value_list(value_field(m, "body"))) {
       let e = value_field(ret_step, "expr")
       if (value_is_null(e)) { out = out.push(line(1, "return")) }
@@ -4039,10 +4290,29 @@ fn emit_comp_section(ir: Any) -> List[Str] {
   out = out.concat(emit_comp_services(services, types))
   out = out.concat(emit_comp_keys(comps))
   out = out.concat(emit_comp_realm_helper(comps))
-  for (c of comps) { out = out.concat(emit_comp_component(c, services, types)) }
+  let doc = comp_doc(ir)
+  for (c of comps) { out = out.concat(emit_comp_component(c, doc)) }
   out = out.concat(emit_comp_load_helpers(comps))
   return out
 }
+// `_host_runtime()` for this document: a declared `Row` drops the runtime's own
+// alias, so `Query` answers the declared record (issue #1356 on the reference).
+fn host_runtime_for(types: Any) -> List[Str] {
+  let rt = host_runtime()
+  if (value_is_null(value_field(types, "Row"))) { return rt }
+  var out = []
+  var i = 0
+  while (i < rt.length()) {
+    if (rt[i] == "// Row is a query result row." && i + 1 < rt.length() && rt[i + 1] == "type Row = map[string]string") {
+      i = i + 2
+    } else {
+      out = out.push(rt[i])
+      i = i + 1
+    }
+  }
+  return out
+}
+
 // `_host_runtime()` in v3 mode (`@INT@` = int64), with no `Secret[T]` declared
 // and no declared record renaming a host type: the fixed, recording Pool/Map
 // runtime the combined module always carries. One entry per line of the
