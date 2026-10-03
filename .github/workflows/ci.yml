@@ -760,6 +760,17 @@ jobs:
   # candidate before it lands, and on push to main.
   root-suite-affected:
     runs-on: ubuntu-latest
+    # Issue #1774: four shards. Every shard runs the same selection; a FULL
+    # selection (and any selection of 40 or more files) is then split by test
+    # file across the four (`REVL_TEST_SHARD`, tests/_shard.py), so a full
+    # fallback takes about a quarter of the ~70 minutes it took as one job. A
+    # smaller selection runs whole in shard 1 and the other three say so and
+    # stop. Together the shards run every selected test exactly once
+    # (tests/test_root_suite_shards_1774.py).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
@@ -836,16 +847,42 @@ jobs:
             echo "affected selection: pytest $nodes"
           fi
           echo "pytest=$nodes" >> "$GITHUB_OUTPUT"
+          full=$(printf '%s\n' "$out" | sed -n 's/^FULL //p' | head -n 1)
+          echo "full=${full:-0}" >> "$GITHUB_OUTPUT"
       - name: root suite (affected nodes)
         env:
           # diff paths are the author's, and this list is derived from them, so
           # it arrives as a variable and is only ever word-split into pytest
           # arguments; it is never re-parsed as shell source.
           SEL_PYTEST: ${{ steps.select.outputs.pytest }}
+          SEL_FULL: ${{ steps.select.outputs.full }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
         run: |
           set -euo pipefail
           set -f
-          pytest $SEL_PYTEST -q
+          # the node count, by the shell's own word split (`set -f` is on, so no
+          # path in the list is globbed)
+          set -- $SEL_PYTEST
+          count=$#
+          if [ "$SEL_FULL" = "1" ] || [ "$SEL_PYTEST" = "tests/" ] || [ "$count" -ge 40 ]; then
+            export REVL_TEST_SHARD="${SHARD_INDEX}/${SHARD_TOTAL}"
+            echo "sharded: this job runs shard ${REVL_TEST_SHARD} of the selection"
+          elif [ "$SHARD_INDEX" != "1" ]; then
+            echo "a selection of ${count} node(s) runs whole in shard 1; nothing for shard ${SHARD_INDEX}"
+            exit 0
+          fi
+          rc=0
+          pytest $SEL_PYTEST -q || rc=$?
+          if [ "$rc" = "5" ] && [ -n "${REVL_TEST_SHARD:-}" ]; then
+            # pytest's "no tests collected": a shard can be handed no file when
+            # the selection has fewer files than shards. The other shards ran
+            # them, and the partition is pinned by
+            # tests/test_root_suite_shards_1774.py.
+            echo "shard ${REVL_TEST_SHARD} was assigned no test file"
+            rc=0
+          fi
+          exit "$rc"
 
   # Issue #1342. Four pull requests read MERGED in the GitHub UI with their
   # work absent from `main`, because each was merged into a base branch that

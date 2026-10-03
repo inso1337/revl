@@ -2818,10 +2818,11 @@ class Session:
         # not a crash — the undo never bypasses admission.
         from ..errors import RevlError  # noqa: PLC0415
         from ..diagnostics import classify  # noqa: PLC0415
-        from .persist import _origin_from, _recompile  # noqa: PLC0415
+        from .persist import _origin_from, _recompile, admitted_name  # noqa: PLC0415
 
         try:
-            target_ir = _recompile(target["snapshot"]["sources"])
+            target_ir = _recompile(target["snapshot"]["sources"],
+                                   admitted_name(target["snapshot"]))
         except RevlError as error:
             diag = classify(error)
             return {

@@ -1914,6 +1914,8 @@
 
 ["tests/fixtures/emit_wasm_corpus/widening.rvl", "agree-admit"]
 
+["tests/fixtures/emit_wasm_refusals/compound_required_call.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl", "agree-admit"]

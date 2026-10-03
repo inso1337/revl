@@ -88,6 +88,9 @@ BENCH_DEPENDENT_TESTS = (
     # mapping, so a bench change must re-run it.
     "tests/test_affected_tests.py",
     "tests/test_admission_latency.py",
+    # Issue #1800: drives bench/rescore.py's and bench/run.py's compiler
+    # loaders and checks they leave one `revl` in the process.
+    "tests/test_bench_compiler_reload_keeps_one_revl.py",
     # Issue #1702: checks the blast-radius task set, its expected states, its
     # TypeScript renderings and its scorer, all under bench/blast_radius/.
     "tests/test_blast_radius_bench.py",
@@ -121,6 +124,11 @@ BENCH_DEPENDENT_TESTS = (
     # as the entry above: the guard below is mention-based, and over-selecting
     # is the safe direction.
     "tests/test_census_artifact.py",
+    # Does not READ bench. Issue #1784's regenerator leaves `bench/results/`
+    # conflicts alone unless asked, and its tests build a synthetic
+    # `bench/results/` inside a throwaway repository to prove it. Declared
+    # because the guard below is mention-based.
+    "tests/test_regen_generated.py",
     # The self-host capstone oracle pins four `bench/results/…` candidate
     # documents as members of the emit_java corpus (roadmap item 146 gap 2's
     # located-gap ratchet), so a bench change must re-run it.
@@ -1463,6 +1471,16 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_check_vision_claims.py")
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
             reasons.append("tools/check_vision_claims.py")
+            continue
+        # issue #1774: the shard weights only balance root-suite-affected's
+        # shards; they never decide which tests run (the shards partition the
+        # collection whatever the weights say, which
+        # tests/test_root_suite_shards_1774.py pins). A refresh of them, or of
+        # the tool that writes them, selects that test alone instead of a FULL
+        # run across four shards. tests/_shard.py itself stays FULL.
+        if f in ("tests/shard_weights.json", "tools/refresh_shard_weights.py"):
+            pytest_nodes.add("tests/test_root_suite_shards_1774.py")
+            reasons.append(f"{f} (shard balance only)")
             continue
         # issue #1233: the roadmap claim gate's covering test is named for the
         # DOCUMENT it reads, so the generic tools/*.py rule below looks for a
