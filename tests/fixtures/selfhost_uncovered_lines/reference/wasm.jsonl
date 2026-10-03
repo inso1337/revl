@@ -4,19 +4,15 @@
 
 ["reason", "component-only-entry-abi-helpers-legacy-component-emission", "Component-only entry/ABI helpers: legacy component emission validates require imports and scalar service boundaries, rewrites $0 format templates, and encodes custom-section metadata strings. Pure modules use v3 interp/lit nodes and _wat_bytes data segments instead."]
 
-["function", "component-only-entry-abi-helpers-legacy-component-emission", "_assert_imports_within_requires", 18, 18]
+["function", "component-only-entry-abi-helpers-legacy-component-emission", "_assert_imports_within_requires", 15, 15]
 
 ["function", "component-only-entry-abi-helpers-legacy-component-emission", "_emit_v1", 14, 14]
 
 ["function", "component-only-entry-abi-helpers-legacy-component-emission", "_format_parts", 20, 20]
 
-["function", "component-only-entry-abi-helpers-legacy-component-emission", "_is_scalar_type", 1, 1]
-
-["function", "component-only-entry-abi-helpers-legacy-component-emission", "_wat_string", 1, 1]
-
 ["reason", "declared-out-of-every-self-host-slice-realm", "declared out of every self-host slice: realm placements, routers, spawn/instances."]
 
-["function", "declared-out-of-every-self-host-slice-realm", "_ComponentEmitter._provide_routed", 18, 18]
+["function", "declared-out-of-every-self-host-slice-realm", "_ComponentEmitter._provide_routed", 15, 15]
 
 ["function", "declared-out-of-every-self-host-slice-realm", "_assert_realm_label", 2, 2]
 
@@ -138,7 +134,7 @@
 
 ["reason", "remaining-paths-reject-an-empty-document-or-duplicate", "Remaining paths reject an empty document or duplicate module names and instantiate live component emitters; the selfhost oracle accepts the single pure functions module."]
 
-["function", "remaining-paths-reject-an-empty-document-or-duplicate", "_emit_v3", 6, 6]
+["function", "remaining-paths-reject-an-empty-document-or-duplicate", "_emit_v3", 3, 3]
 
 ["reason", "remaining-paths-resolve-arrow-valued-locals-collect-capture", "Remaining paths resolve arrow-valued locals, collect capture/parameter scratch locals and inline their bodies. Inline arrows/closures are an explicit WASM oracle deferral; direct named function calls are covered."]
 
@@ -248,85 +244,73 @@
 
 ["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._opt_payload", 4, 4]
 
-["reason", "the-entire-componentemitter-is-instantiated-only-for-live", "The entire _ComponentEmitter is instantiated only for live components: it plans activation/provide calls, coeffect imports, spawn/instance handles, realm routing and witnessed undo/WAL custom sections. emit_wasm.rvl implements the separate pure _V3Emitter module ABI, not activation/deactivation or component service exports; even _delegate/_tail belong to that unentered component caller. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path."]
+["reason", "the-entire-componentemitter-is-instantiated-only-for-live-2", "The entire _ComponentEmitter is instantiated only for live components: it plans activation/provide calls, coeffect imports, spawn/instance handles, realm routing and witnessed undo/WAL custom sections. emit_wasm.rvl implements the separate pure _V3Emitter module ABI, not activation/deactivation or component service exports; even _delegate/_tail belong to that unentered component caller. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path. Issue #1601's refusal document, tests/fixtures/emit_wasm_refusals/compound_required_call.rvl, now emits a provider component and enters the consumer as far as the required call's refusal in `_op_spec`."]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter.__init__", 64, 64]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.__init__", 21, 21]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._boundary_wty", 6, 6]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._boundary_wty", 1, 1]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._called_names", 12, 12]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._called_names", 2, 2]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._delegate", 15, 15]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._expr", 2, 2]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._expr", 2, 2]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._import_module", 1, 1]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._import_module", 1, 1]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._job_id", 8, 8]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._job_id", 8, 8]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower", 61, 61]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._lower", 83, 83]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower_instance_get_call", 37, 37]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._lower_instance_get_call", 37, 37]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower_spawn", 26, 26]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._lower_spawn", 26, 26]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._method_drain", 10, 10]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._method_drain", 10, 10]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._method_undo_id", 6, 6]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._method_undo_id", 6, 6]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._method_witnessed_step", 13, 13]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._method_witnessed_step", 13, 13]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._module", 64, 64]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._module", 113, 113]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._module._dispatch", 13, 13]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._module._dispatch", 13, 13]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._need_fn", 5, 5]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._need_fn", 5, 5]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._op_spec", 6, 6]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._op_spec", 13, 13]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._plan", 14, 14]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._open_function", 13, 13]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._provide", 159, 159]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._plan", 27, 27]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._realm_sections", 9, 9]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._provide", 213, 213]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._register_witnessed_calls", 10, 10]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._provide_prefix", 1, 1]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._route_helpers", 32, 32]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._realm_sections", 15, 15]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._route_op_spec", 20, 20]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._register_witnessed_calls", 10, 10]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._scalar_operator", 26, 26]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._restore_function_state", 1, 1]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._statement", 2, 2]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._route_helpers", 35, 35]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._tail", 7, 7]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._route_op_spec", 20, 20]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._teardown_section", 4, 4]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._save_function_state", 1, 1]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._to_v3", 24, 24]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._scalar_operator", 26, 26]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._wal_undo_name", 3, 3]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._scoped_key", 2, 2]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_effect_step", 37, 37]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._statement", 2, 2]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_extern", 5, 5]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._tail", 17, 17]
-
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._teardown_section", 7, 7]
-
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._to_v3", 37, 37]
-
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._wal_undo_name", 3, 3]
-
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._witnessed_effect_step", 37, 37]
-
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter._witnessed_extern", 5, 5]
-
-["function", "the-entire-componentemitter-is-instantiated-only-for-live", "_ComponentEmitter.emit", 69, 69]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.emit", 45, 45]
 
 ["reason", "the-item-130-required-stream-t-coeffect-refusal", "The item 130 required-`Stream[T]` coeffect refusal (`_refuse_required_stream`). This tier refuses the whole stream surface by design, having no async host seam, and the coeffect is refused with it at the component's DECLARATION. A corpus document declaring `requires <k>: Stream[T]` would be refused here rather than emitted, so it cannot be a byte-agreement case; the refusal is pinned by tests/test_stream_reactive.py instead."]
 
-["function", "the-item-130-required-stream-t-coeffect-refusal", "_refuse_required_stream", 3, 3]
+["function", "the-item-130-required-stream-t-coeffect-refusal", "_refuse_required_stream", 1, 1]
 
 ["reason", "the-item-458-short-circuit-decision-for-a", "The item-458 short-circuit decision for a logical operator's right operand. Every accepting and refusing arm is now exercised: shortcircuit.rvl spells a trapping `%`, `/` and checked `*`, an index read, a `len`, a call, a `Str` comparison and a non-`!` unary, and arith.rvl/folding.rvl the constants, local reads and comparisons that keep the strict instruction. What stays unrun is the non-dict guard's refusal and the EmitError catch (with its refusal) for a leaf name the caller cannot resolve — a malformed node and an unbound name, neither of which a document that compiles can produce."]
 
