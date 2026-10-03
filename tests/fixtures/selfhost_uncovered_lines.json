@@ -52,7 +52,7 @@
       "go": 2541,
       "java": 986,
       "py": 669,
-      "rust": 1230,
+      "rust": 1184,
       "ts": 285,
       "wasm": 1558
     },
@@ -60,7 +60,7 @@
       "go": 103,
       "java": 175,
       "py": 103,
-      "rust": 286,
+      "rust": 280,
       "ts": 94,
       "wasm": 63
     }
@@ -851,7 +851,7 @@
       "uncovered_statements": 642
     },
     "rust": {
-      "statements": 3771,
+      "statements": 3859,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
           "_emit_step": 24,
@@ -861,16 +861,9 @@
         "Async function coloring is intentionally erased by the Rust tier; the residual branch strips malformed/nested Async return spellings not produced by accepted typed corpus input.": {
           "_erase_async": 1
         },
-        "Canonical ABI bridge boundary: the residuals serialize and deserialize non-scalar Value/Result payloads and emit the RPC proxy. Scalar and scalar-Option bridge paths are covered; opaque, collection, record, and Result serde remain deliberately unported.": {
-          "_bridge_arg_extract": 6,
-          "_bridge_arg_ser": 5,
-          "_bridge_ret_deser": 6,
-          "_bridge_ret_ser": 7,
-          "_bridge_serde_ok": 1,
-          "_emit_bridge": 4,
-          "_result_ok_err": 2,
-          "_result_to_json": 1,
-          "_split_result": 12
+        "Canonical ABI bridge boundary: the proxy and dispatch marshalling (`_bridge_arg_ser`/`_arg_extract`/`_ret_deser`/`_ret_ser`, the hand-encoded `Result` and `_bridge_serde_ok`) is ported since item 391 and held to byte agreement by emit_rust_corpus/bridge_types.rvl. What is left: `_split_result`'s final `return None`, reached only by a `Result<...>` with no top-level comma, which no well-formed type produces; and `_emit_bridge`'s config-default field line, which needs a bridged provider that declares a `config` default.": {
+          "_emit_bridge": 1,
+          "_split_result": 1
         },
         "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
           "_emit_component": 5,
@@ -956,9 +949,9 @@
           "_v3_instance_get": 8,
           "_v3_spawn": 14
         },
-        "Record/variant context invariants: the remaining branches diagnose duplicate or ambiguous record shapes and constructors, malformed pattern arity, and recursive boxing edges. The self-host Rust slice supports the covered unique non-recursive records and ADTs but deliberately does not mirror recursive boxing.": {
+        "Record/variant context invariants: the remaining branches diagnose duplicate or ambiguous record shapes and constructors, malformed pattern arity, and recursive boxing edges. The self-host Rust slice supports the covered unique non-recursive records and ADTs but deliberately does not mirror recursive boxing. emit_rust_corpus/bridge_types.rvl (item 391) reaches 2 more of `_V3Ctx._disambiguate_record`'s statements.": {
           "_V3Ctx.__init__": 1,
-          "_V3Ctx._disambiguate_record": 7,
+          "_V3Ctx._disambiguate_record": 5,
           "_V3Ctx._same_shape": 2,
           "_V3Ctx.constructor": 10,
           "_V3Ctx.field_is_boxed": 4,
@@ -984,7 +977,7 @@
           "_stream_chain": 1,
           "_stream_stage_arrow": 1
         },
-        "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered.": {
+        "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `_rust_type`'s statements.": {
           "_arg_ref_name": 2,
           "_config_default_lit": 1,
           "_default_for_rust_type": 11,
@@ -994,7 +987,7 @@
           "_is_fn_type": 1,
           "_param_type": 1,
           "_rust_fn_type": 1,
-          "_rust_type": 2,
+          "_rust_type": 1,
           "_rust_v3_lit": 3,
           "_split_fn_type": 1,
           "_string": 5
@@ -1024,8 +1017,8 @@
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
-        "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read — `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_render_expr": 54
+        "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read — `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `_render_expr`'s statements.": {
+          "_render_expr": 53
         },
         "backends/rust/emit.py::_borrow_list_arg: item 437d borrow of a read-only list parameter into a `&[T]` slot. The already-lowered-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual statement is the List-index place-borrow arm (`&xs[i]` via _v3_strip_index_clone), which no byte-agreement corpus document passes into a borrowed `&[T]` argument, the same shape left uncovered on _v3_strip_index_clone itself.": {
           "_borrow_list_arg": 1
@@ -1056,7 +1049,7 @@
           "_reaches_declared": 7
         }
       },
-      "uncovered_statements": 1186
+      "uncovered_statements": 1184
     },
     "ts": {
       "statements": 2208,
@@ -1846,17 +1839,14 @@
       "uncovered_statements": 103
     },
     "rust": {
-      "statements": 4092,
+      "statements": 4146,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "erase_async_ret": 1
         },
-        "Canonical ABI bridge boundary: these residuals emit opaque/non-scalar Value extraction, serialization and deserialization plus proxy glue. Scalar and scalar-Option bridge paths are covered; records, collections, Results and opaque payloads remain explicit DEFER cases.": {
-          "bridge_arg_extract": 1,
-          "bridge_arg_ser": 1,
-          "bridge_ret_deser": 1,
-          "bridge_ret_ser": 1,
-          "emit_bridge": 4
+        "Canonical ABI bridge boundary: the marshalling helpers are ported since item 391 (records, collections, std `Result` and the opaque `Value`, held to byte agreement by emit_rust_corpus/bridge_types.rvl). What is left mirrors the reference: `split_result`'s final `return []` for a `Result<...>` with no top-level comma, which no well-formed type produces, and `emit_bridge`'s config-default field line, which needs a bridged provider that declares a `config` default.": {
+          "emit_bridge": 1,
+          "split_result": 1
         },
         "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming.": {
           "checked_method": 5,
@@ -1867,8 +1857,10 @@
           "is_builtin_ctor": 1,
           "is_fn_type": 1,
           "is_scalar_option": 1,
+          "is_word_char": 1,
           "list_element_type": 3,
           "resolved": 1,
+          "result_to_json": 1,
           "rstrip": 5
         },
         "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered.": {
@@ -1907,7 +1899,7 @@
         "Host-object blocks no corpus document acquires: the corpus declares a host `Map`, so the Pool and Job literal line lists (and the CAS verb test that selects `insert_if_absent`) are emitted by a branch the corpus never takes. Each is a verbatim transcription of the reference's own literal list, so there is nothing for a second implementation to get wrong beyond the gate on which block rides along, which the Map case does exercise (issue 1153).": {
           "is_map_cas_verb": 1
         },
-        "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32.": {
+        "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `render_var`'s statements.": {
           "borrow_str_arg": 1,
           "by_value_arg": 2,
           "collect_fn_value_refs": 2,
@@ -1922,7 +1914,7 @@
           "render_inner": 2,
           "render_interp": 2,
           "render_un": 2,
-          "render_var": 2,
+          "render_var": 1,
           "str_param_readonly": 3,
           "v3_bin_ops": 3,
           "v3_is_float": 3,
@@ -1945,14 +1937,14 @@
           "stream_chain": 1,
           "stream_stage_arrow": 1
         },
-        "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered.": {
+        "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements.": {
           "build_type_tables": 2,
           "constructor": 2,
           "emit_v3_types": 1,
           "match_pattern": 1,
           "record_type_for_fields": 1,
           "ref_name": 1,
-          "rust_type_t": 3,
+          "rust_type_t": 2,
           "rust_v3_lit": 3,
           "service_param_type": 1,
           "split_fn_params": 1,
@@ -1969,7 +1961,7 @@
           "strip_index_clone": 1
         }
       },
-      "uncovered_statements": 289
+      "uncovered_statements": 280
     },
     "ts": {
       "statements": 2204,
