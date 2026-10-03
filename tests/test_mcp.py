@@ -227,6 +227,8 @@ def test_initialize_and_tools_list():
                           "revl_change",
                           # the held source written to disk on request (#1696)
                           "revl_export",
+                          # agent notes (#1754)
+                          "revl_knowledge",
                           # the session commit protocol (docs/design/245-session-commit.md)
                           "revl_commit", "revl_commit_confirm", "revl_abort",
                           # session branching (docs/design/250-session-branching.md)

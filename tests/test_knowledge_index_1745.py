@@ -242,7 +242,7 @@ def _anchors(entries) -> set:
 @needs_runtime
 def test_the_edit_response_names_the_entries_it_staled(clock_loaded):
     assert clock_loaded["knowledge"] == {"entries": 3, "live": 3, "stale": 0,
-                                         "refuted": 0}
+                                         "refuted": 0, "notes": 0}
     edited = _call("revl_edit", {"edits": [{"symbol": "FixedClock.now",
                                             "replacement": "fn now() = 8"}]})
     assert edited["swapped"] is True, edited

@@ -48,6 +48,7 @@ RUNTIME_VERBS = frozenset({
     "revl_edit", "revl_live_query", "revl_timeline", "revl_inspect_step",
     "revl_step_back", "revl_replay_bisect", "revl_replay_forward",
     "revl_fork", "revl_fork_confirm", "revl_change", "revl_export",
+    "revl_knowledge",
 })
 
 #: Verbs that still answer without the runtime, and what they lose.

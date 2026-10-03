@@ -440,6 +440,8 @@ UNGATED = {
     "revl_tools": "returns the tool surface",
     "revl_source": "reads one declaration of the held source; changes nothing "
                    "(issue #1714)",
+    "revl_knowledge": "records and reads notes about declarations; a note is data "
+                      "and changes nothing that admits, plans or swaps (#1754)",
     "revl_state": "reports session state",
     "revl_estop_report": "reports a halt that already happened",
     "revl_distillation_offers": "proposes rules; installs none",

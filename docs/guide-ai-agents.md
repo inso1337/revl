@@ -295,7 +295,7 @@ is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 never has to touch the filesystem. This is your primary interface.
 
 <!-- docgen:agents-mcp-count begin -->
-The complete advertised verb set is 58 verbs, from
+The complete advertised verb set is 59 verbs, from
 `src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what
 you reach for; each verb's exact inputs and outputs are in
 [mcp-reference.md](mcp-reference.md).
@@ -312,6 +312,7 @@ you reach for; each verb's exact inputs and outputs are in
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
 | `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-reference.md](mcp-reference.md#revl_audit) |
 | `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-reference.md](mcp-reference.md#revl_load) |
+| `revl_knowledge` | leave a **note** on a declaration (rationale, invariant, trap, ...); notes ride on later edits of it, go stale when its code changes, and survive the session through `revl_export {with_knowledge: true}` | [mcp-reference.md](mcp-reference.md#revl_knowledge) |
 | `revl_export` | write the committed (held) source to disk, on request: disk is an export, never a side effect | [mcp-reference.md](mcp-reference.md#revl_export) |
 | `revl_change` | **propose, verify, commit**: speculative by default (nothing swaps until `commit: true`), one call for a whole change: `{edit}`, `{replace: {component, source}}` or `{withdraw}`; loads if needed, plans (the withdrawal cascade), verifies (admission, gates, optional gauntlet) and commits only if all pass, naming every component touched | [mcp-reference.md](mcp-reference.md#revl_change) |
 | `revl_source` | read **one declaration** by symbol (`NotesHttp`, `<file>:Name`, `<file>:<line>`), optionally with the declarations it names and without comments, instead of the whole file | [mcp-reference.md](mcp-reference.md#revl_source) |
