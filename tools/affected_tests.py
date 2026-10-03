@@ -25,6 +25,7 @@ the FULL gate, never fails open. Concretely:
     direct importers (issue #2962).
     computed here from the real tree (see `compile_reachable`) so a newly added
     core module cannot silently fall through to a narrow selection.
+    tests that name it or any module that imports it.
   * A changed file matching NO mapping rule -> FULL.
   * Structural changes (Makefile, tools/pre_merge.sh, CI config, tests/conftest.py,
     shared test helpers/fixtures, the reference IR, or a test file DELETED) -> FULL.
@@ -1261,6 +1262,11 @@ def compile_reachable(root: Path):
       module that ANY `backends/**/*.py` file imports. These are edges, not
       roots: a backend file runs only when something on the graph loads it.
       No `src/revl` module is itself loaded that way (checked: every
+    * Every `revl.*` module that a `backends/**/*.py` file imports is a root
+      too. The reached modules load backend files by path
+      (`spec_from_file_location`), and an import inside one of those files is
+      invisible to an import walk of `src/revl` alone. No `src/revl` module is
+      loaded by path or by a computed name (checked: every
       `spec_from_file_location` / `import_module` under src/revl targets a
       `backends/` file or a backend runtime module).
 
@@ -1417,6 +1423,9 @@ def _loads_code(text: str) -> bool:
 
 def _backend_imports(root: Path, mods: dict[str, Path]) -> set[str]:
     """Every `revl.*` module some `backends/**/*.py` file imports."""
+def _backend_roots(root: Path, mods: dict[str, Path]) -> set[str]:
+    """`revl.*` modules imported by a backend file the compile path may load by
+    path (see `compile_reachable`)."""
     out: set[str] = set()
     for path in (root / "backends").rglob("*.py"):
         if "node_modules" in path.parts or ".venv" in path.parts:
@@ -1487,6 +1496,10 @@ def _compile_reachable_uncached(root: Path):
                 if d in mods or (d + ".__init__") in mods:
                     stack.append(d)
         return {m.split(".")[0] for m in seen}
+        graph = {name: _module_edges(mods, name,
+                                     _import_nodes(path.read_text(encoding="utf-8")))
+                 for name, path in mods.items()}
+        graph["__backend__"] = _backend_roots(root, mods)
     except (OSError, SyntaxError, ValueError):
         return None
     return graph
@@ -1498,12 +1511,14 @@ def _compile_reachable_uncached(root: Path):
         return None
     seen: set[str] = set()
     stack = ["__init__"]
+    stack = ["__init__", *graph["__backend__"]]
     while stack:
         module = stack.pop()
         if module in seen or module not in graph:
             continue
         seen.add(module)
         stack.extend(graph[module] - seen)
+    seen.discard("__backend__")
     return seen
 
 
@@ -1522,6 +1537,8 @@ def importers_of(root: Path, module: str) -> set[str]:
     the whole suite was word-matching this closure's names, not following the
     closure itself.
     """
+    """Every `src/revl` module that executes `module` through some chain of
+    imports, itself included."""
     graph = import_graph(root) or {}
     reverse: dict[str, set[str]] = {}
     for src, targets in graph.items():
@@ -1535,6 +1552,7 @@ def importers_of(root: Path, module: str) -> set[str]:
             continue
         seen.add(current)
         stack.extend(reverse.get(current, set()) - seen)
+    seen.discard("__backend__")
     return seen
 
 
@@ -1872,6 +1890,18 @@ def select(changed, root) -> dict:
             hits |= set().union(*(_word_tests(root, n) for n in sorted(names)))
                 return _full(f"src/revl/{top} is {where} -> full")
             hits = _word_tests(root, top)
+            # Not on the compile path, so only a test that executes this module
+            # can see the change, and a test executes it only by importing it or
+            # a module that imports it. Select every test naming any of them:
+            # each importer's own name and, for a subpackage module, its
+            # package's (issue #1780).
+            names = set()
+            for importer in importers_of(root, module):
+                parts = importer.split(".")
+                if parts[-1] == "__init__":
+                    parts = parts[:-1]
+                names.update(parts[:1] + parts[-1:])
+            hits = set().union(*(_word_tests(root, n) for n in sorted(names)))
             if not hits:
                 return _full(f"src/revl/{module} (leaf) has no referencing test -> full")
                 return _full(f"src/revl/{top} (leaf) has no referencing test -> full")
