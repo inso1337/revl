@@ -278,6 +278,15 @@ The seven required checks (`lint` and the six `backend-*` jobs) are among
 them, and on a pull request `root-suite-affected` is the job that collects the
 root suite.
 
+`root-suite-affected` runs as four shards (issue #1774). Each shard computes
+the same `tools/affected_tests.py` selection. When it is the full root suite
+(about 70 minutes as one job), or 40 or more files, the shards split it by test
+file with `REVL_TEST_SHARD=k/4`, balanced by the per-file seconds in
+`tests/shard_weights.json`. A smaller selection runs whole in shard 1. The
+shards run every selected test exactly once, which
+`tests/test_root_suite_shards_1774.py` pins. A stale weight only makes the
+shards uneven. To run one shard locally: `REVL_TEST_SHARD=2/4 pytest tests/ -q`.
+
 The heavy jobs never run on a pull request (issue #1678): `frontend` (the
 3.11/3.12/3.13 matrix), `frontend-cordis`, `conformance`, `formal`,
 `temporal-exit`, `sandbox-container` and `sandbox-microvm`. They run on the

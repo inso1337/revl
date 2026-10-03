@@ -123,6 +123,43 @@ for _name in REPOSITORY_LOCAL_GIT_ENV + HOOK_COMMIT_IDENTITY_ENV:
     os.environ.pop(_name, None)
 del _name
 
+# Issue #1774: `REVL_TEST_SHARD=k/N` runs only the test files tests/_shard.py
+# assigns to shard k, so CI can split a long run across N jobs. Every shard
+# computes the same assignment from the same collection, so together they run
+# each collected test exactly once (tests/test_root_suite_shards_1774.py).
+
+def _shard_module():
+    spec = importlib.util.spec_from_file_location(
+        "revl_tests_shard", Path(__file__).with_name("_shard.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Read once and removed from the environment: a pytest that a test starts
+# (several do, against fixture trees) must run its whole collection, not a
+# shard of it.
+_SHARD_SPEC = os.environ.pop("REVL_TEST_SHARD", "")
+
+
+def pytest_collection_modifyitems(config, items):
+    spec = _SHARD_SPEC
+    if not spec:
+        return
+    shard = _shard_module()
+    k, n = shard.parse(spec)
+    owner = shard.assign({item.nodeid.split("::", 1)[0] for item in items},
+                         shard.load_weights(), n)
+    keep = [item for item in items if owner[item.nodeid.split("::", 1)[0]] == k - 1]
+    drop = [item for item in items if owner[item.nodeid.split("::", 1)[0]] != k - 1]
+    items[:] = keep
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+    files = {item.nodeid.split("::", 1)[0] for item in keep}
+    print(f"\nREVL_TEST_SHARD {k}/{n}: {len(files)} file(s), {len(keep)} test(s) "
+          f"of {len(keep) + len(drop)} collected")
+
+
 def pytest_configure(config):
     # tools/hooks/pre-commit runs with pytest-timeout's `--timeout=60`. A test
     # that is slow by nature (not re-deriving anything a session could share)
