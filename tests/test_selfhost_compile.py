@@ -629,6 +629,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # rather than skipped, so the day lower.rvl grows that surface this list
         # shrinks instead of quietly keeping a waiver nobody rereads.
         "comp_stream.rvl",
+        # item 391: the bridge marshalling document. Emitter-exact from the
+        # reference IR; the native IR producer drops the whole component body
+        # when a provide method's body is a bare `None` (`fn weight(name) =
+        # None`), so the native chain emits the component with no provision.
+        "bridge_types.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),

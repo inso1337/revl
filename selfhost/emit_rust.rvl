@@ -5164,15 +5164,69 @@ fn emit_component_auto(comp: Any, services: Any, ir: Any) -> List[Str] {
 }
 
 // ---------------------------------------------------------------- the bridge
-// The scalar bridge marshalling helpers (`_bridge_arg_ser`/`_arg_extract`/
-// `_ret_deser`/`_ret_ser`), SUBSET: the `String`/`i64`/`f64`/`bool` scalars, the
-// scalar-`Option` return table, and `()`. Result/serde/`Vec<Value>`/opaque-Value
-// marshalling is DEFERRED — a `<<DEFER-*>>` / `<<NONE>>` marker keeps it loud.
+// The bridge marshalling helpers (`_bridge_arg_ser`/`_arg_extract`/`_ret_deser`/
+// `_ret_ser`): the `String`/`i64`/`f64`/`bool` scalars, the scalar-`Option`
+// table, `()`, a std `Result` encoded by hand to the canonical
+// `{"$kind","$value"}` (std `Result` serializes externally tagged), any other
+// serde-able type, and the opaque cordis `Value`, which is not marshalled. The
+// reference's `_SECRET_MODE` Err funnel is a process-wide switch the oracle
+// runs with OFF, and this port carries no secret registry, so `Result` takes
+// the plain encoding.
+
+// `_bridge_serde_ok`: a type crosses via serde unless it names the opaque
+// cordis `Value` (as a whole word).
+fn bridge_serde_ok(rtype: Str) -> Bool {
+  var i = rtype.indexOf("Value")
+  var from = 0
+  while (i >= 0) {
+    let at = from + i
+    let prev = at == 0 ? "" : rtype.charAt(at - 1)
+    let next = at + 5 >= rtype.length() ? "" : rtype.charAt(at + 5)
+    if (!is_word_char(prev) && !is_word_char(next)) { return false }
+    from = at + 5
+    i = rtype.slice(from, rtype.length()).indexOf("Value")
+  }
+  return true
+}
+
+fn is_word_char(ch: Str) -> Bool {
+  return ch != "" && "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".indexOf(ch) >= 0
+}
+
+// `_split_result`: `Result<T, E>` -> [T, E] at the top-level comma, else [].
+fn split_result(raw: Str) -> List[Str] {
+  let rtype = trim(raw)
+  if (!rtype.startsWith("Result<") || !rtype.endsWith(">")) { return [] }
+  let inner = rtype.slice(7, rtype.length() - 1)
+  var depth = 0
+  var i = 0
+  while (i < inner.length()) {
+    let ch = inner.charAt(i)
+    if (ch == "<") { depth = depth + 1 }
+    if (ch == ">") { depth = depth - 1 }
+    if (ch == "," && depth == 0) { return [trim(inner.slice(0, i)), trim(inner.slice(i + 1, inner.length()))] }
+    i = i + 1
+  }
+  return []
+}
+
+// `_result_ok_err`: a std Result built from a canonical `{"$kind","$value"}`.
+fn result_ok_err(value: Str, ok_ty: Str, err_ty: Str) -> Str {
+  let payload = `_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)`
+  return `{ let _r = ${value}.clone(); if _r.get("$kind").and_then(|k| k.as_str()) == Some("Ok") { Ok(serde_json::from_value::<${ok_ty}>(${payload}).expect("bridge: decode Ok")) } else { Err(serde_json::from_value::<${err_ty}>(${payload}).expect("bridge: decode Err")) } }`
+}
+
+// `_result_to_json`: a std Result encoded to the canonical `{"$kind","$value"}`.
+fn result_to_json(call: Str) -> Str {
+  return `{ match ${call} { Ok(_v) => serde_json::json!({"$kind": "Ok", "$value": serde_json::to_value(&_v).unwrap_or(serde_json::Value::Null)}), Err(_e) => serde_json::json!({"$kind": "Err", "$value": serde_json::to_value(&_e).unwrap_or(serde_json::Value::Null)}) } }`
+}
+
 fn bridge_arg_ser(name: Str, rtype: Str) -> Str {
   if (rtype == "String" || rtype == "i64" || rtype == "f64" || rtype == "bool") {
     return `serde_json::json!(${name})`
   }
-  return `<<DEFER-bridge-arg-ser:${rtype}>>`
+  if (split_result(rtype).length() == 2) { return result_to_json(name) }
+  return bridge_serde_ok(rtype) ? `serde_json::to_value(&${name}).unwrap_or(serde_json::Value::Null)` : "serde_json::Value::Null"
 }
 fn bridge_arg_extract(index: Int, rtype: Str) -> Str {
   let i = num_str(index)
@@ -5180,7 +5234,9 @@ fn bridge_arg_extract(index: Int, rtype: Str) -> Str {
   if (rtype == "i64") { return `args[${i}].as_i64().unwrap_or(0)` }
   if (rtype == "f64") { return `args[${i}].as_f64().unwrap_or(0.0)` }
   if (rtype == "bool") { return `args[${i}].as_bool().unwrap_or(false)` }
-  return "<<NONE>>"
+  let result = split_result(rtype)
+  if (result.length() == 2) { return result_ok_err(`args[${i}]`, result[0], result[1]) }
+  return bridge_serde_ok(rtype) ? `serde_json::from_value::<${rtype}>(args[${i}].clone()).expect("bridge: decode arg")` : "<<NONE>>"
 }
 fn bridge_ret_deser(value: Str, rtype: Str) -> Str {
   if (rtype == "i64") { return `${value}.as_i64().unwrap_or(0)` }
@@ -5191,7 +5247,10 @@ fn bridge_ret_deser(value: Str, rtype: Str) -> Str {
   if (rtype == "Option<String>") { return `${value}.as_str().map(|s| s.to_string())` }
   if (rtype == "Option<i64>") { return `${value}.as_i64()` }
   if (rtype == "Option<bool>") { return `${value}.as_bool()` }
-  return "<<NONE>>"
+  if (rtype == "Vec<Value>") { return `${value}.as_array().map(|a| a.iter().map(|x| Value::new(x.to_string())).collect()).unwrap_or_default()` }
+  let result = split_result(rtype)
+  if (result.length() == 2) { return result_ok_err(value, result[0], result[1]) }
+  return bridge_serde_ok(rtype) ? `serde_json::from_value::<${rtype}>(${value}.clone()).expect("bridge: decode return")` : "<<NONE>>"
 }
 fn is_scalar_option(rtype: Str) -> Bool {
   return rtype == "Option<String>" || rtype == "Option<i64>" || rtype == "Option<bool>" || rtype == "Option<f64>"
@@ -5201,7 +5260,9 @@ fn bridge_ret_ser(call: Str, rtype: Str) -> Str {
     return `serde_json::json!(${call})`
   }
   if (rtype == "()") { return `{ ${call}; serde_json::Value::Null }` }
-  return `<<DEFER-bridge-ret-ser:${rtype}>>`
+  if (rtype == "Vec<Value>") { return `{ let _r = ${call}; serde_json::json!(_r.iter().map(|v| v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default()).collect::<Vec<_>>()) }` }
+  if (split_result(rtype).length() == 2) { return result_to_json(call) }
+  return bridge_serde_ok(rtype) ? `{ let _r = ${call}; serde_json::to_value(&_r).unwrap_or(serde_json::Value::Null) }` : `{ let _ = ${call}; serde_json::Value::Null }`
 }
 
 // The fixed `_revl_rpc` preamble — the Unix-socket JSON-RPC proxy the bridge

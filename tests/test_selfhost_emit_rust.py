@@ -277,6 +277,10 @@ CORPUS = [
                              #   `<<DEFER-comp-step>>` marker and the oracle
                              #   agreed, because no corpus document had a
                              #   component body step that was not a provision.
+    "bridge_types.rvl",      # item 391: the bridge's marshalling beyond the scalars:
+                             #   a std `Result` (return and argument, the canonical
+                             #   `{"$kind","$value"}`), a List and a record through
+                             #   serde, an `Opt[Float]` return
 ]
 
 
