@@ -878,7 +878,7 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict
     return {"ok": True, **_summary(ir), **state}
 
 
-def _boot_draft(vs: dict, config, record) -> dict:
+def _boot_draft(vs: dict, config, record, verify=None) -> dict:
     """Boot a hole-free draft through every gate `revl_load` runs (issue
     #1727): the load half of the operator gate, a lease on a cold load, the
     compile, and `Session.load`. Refused, the draft stays held."""
@@ -893,6 +893,9 @@ def _boot_draft(vs: dict, config, record) -> dict:
         ir = _edit.compile_virtual(vs)
     except RevlError as error:
         return _draft.still_a_draft(report(error))
+    refused = verify(candidate) if verify is not None else None
+    if refused is not None:
+        return _draft.still_a_draft(refused)
     modules = _edit.file_modules(vs) if vs.get("files") else vs.get("modules")
     booted = _boot(ir, vs.get("source"), modules, config, bool(record),
                    _edit._origin_from(vs))
@@ -1078,7 +1081,7 @@ def _swap_server_side(replacing: tuple) -> dict:
             "fromServerSide": True, **_summary(full), **state}
 
 
-def _tool_edit(arguments: dict) -> dict:
+def _tool_edit(arguments: dict, verify=None) -> dict:
     """Patch the server-side source of the running composition and re-admit —
     deltas, not documents (roadmap item 50, docs/mcp-bridge.md).
 
@@ -1087,7 +1090,7 @@ def _tool_edit(arguments: dict) -> dict:
     to learn that the edit verb needs a load verb before it."""
     carried = any(arguments.get(k) is not None for k in ("source", "files"))
     if not carried and not SESSION.loaded and _draft.pending(SESSION) is not None:
-        return _edit_draft(arguments)
+        return _edit_draft(arguments, verify)
     if carried and SESSION.loaded:
         return _session_error(
             "a composition is already loaded: revl_edit patches it, so omit "
@@ -1107,21 +1110,49 @@ def _tool_edit(arguments: dict) -> dict:
         if not loaded.get("ok"):
             return {**loaded, "loaded": False, "edited": False, "swapped": False}
         if loaded.get("draft"):
-            return _edit_draft(arguments)
-    result = _edit_loaded(arguments)
+            return _edit_draft(arguments, verify)
+    result = _edit_loaded(arguments, verify)
     return {**result, "loaded": True} if loaded is not None else result
 
 
-def _edit_draft(arguments: dict) -> dict:
+def _tool_change(arguments: dict) -> dict:
+    """One intent-shaped call for the whole change loop (issue #1695): load if
+    needed, plan, apply to a working copy, verify (admission, the gates, and
+    with `gauntlet: true` the gauntlet), and commit only if all of it passed.
+    Every intent is carried out as `revl_edit` edits, so the jail, the trust
+    rule, the gates and the draft handling are revl_edit's own."""
+    from . import change as _change  # noqa: PLC0415
+
     try:
-        return _draft.edit_draft(SESSION, arguments, _boot_draft)
+        intent = _change.intent_of(arguments)
+        plan = None
+        if intent == "withdraw":
+            component, _ = _change._withdraw_spec(arguments["withdraw"])
+            plan = _change.cascade_of(_change.running_ir(SESSION), component)
+        edit_arguments = _change.edit_arguments(intent, arguments, plan)
+    except _change.ChangeError as error:
+        return _session_error(str(error), committed=False)
+    verifier = (_change.gauntlet_verifier(SESSION)
+                if arguments.get("gauntlet") is True else None)
+    refused = (_change.cascade_refusal(arguments, plan)
+               if intent == "withdraw" else None)
+    result = refused or _tool_edit(edit_arguments, verify=verifier)
+    return _change.shape(intent, result, plan,
+                         _change.withdrawn_names(edit_arguments), verifier)
+
+
+def _edit_draft(arguments: dict, verify=None) -> dict:
+    def boot(vs, config, record):
+        return _boot_draft(vs, config, record, verify=verify)
+    try:
+        return _draft.edit_draft(SESSION, arguments, boot)
     except _edit.EditError as error:
         return _session_error(str(error), edited=False, swapped=False, draft=True)
 
 
-def _edit_loaded(arguments: dict) -> dict:
+def _edit_loaded(arguments: dict, verify=None) -> dict:
     try:
-        return _edit.apply_edit(SESSION, arguments)
+        return _edit.apply_edit(SESSION, arguments, verify=verify)
     except _edit.EditError as error:
         return _session_error(str(error), edited=False, swapped=False)
     except SessionError as error:
@@ -2711,6 +2742,50 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_edit,
+    },
+    {
+        "name": "revl_change",
+        "description": "Make one change in ONE call: name the intent and the "
+                       "server loads (if `files`/`source` are given and nothing is "
+                       "loaded), plans, applies it to a working copy, verifies it "
+                       "(admission against the running composition, the lease and "
+                       "quarantine gates, and with `gauntlet: true` an isolated "
+                       "boot and unload), and commits (hot swap, or boots a "
+                       "draft) only if everything passed. Intents: {edit: {target?, "
+                       "edits}} (revl_edit's patch); {replace: {component, source}} "
+                       "(one declaration by name); {withdraw: \"Name\"} or "
+                       "{withdraw: {component, cascade: true}} (remove a component; "
+                       "the plan reports the cascade of dependents that would lose "
+                       "a provider, and without `cascade: true` admission refuses "
+                       "it). Returns `committed`, `verified`, the `plan`, the "
+                       "`touched` symbols and every `component` the change touched. "
+                       "A failed verification commits nothing and says why.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "edit": {"type": "object",
+                         "description": "{target?, edits}: as revl_edit takes them"},
+                "replace": {"type": "object",
+                            "description": "{component, source}: the declaration's "
+                                           "name and its whole new text"},
+                "withdraw": {"description": "a component name, or {component, "
+                                            "cascade?: true}"},
+                "gauntlet": {"type": "boolean",
+                             "description": "also grade the candidate in the "
+                                            "gauntlet's isolated session before "
+                                            "committing"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: load these first"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: load this first"},
+                "modules": {"type": "object",
+                            "description": "in-memory `use` modules for that load"},
+                "config": {"type": "object",
+                           "description": "config for that load"},
+            },
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_change,
     },
     {
         "name": "revl_source",

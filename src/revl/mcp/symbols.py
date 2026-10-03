@@ -253,6 +253,23 @@ def replace(vs: dict, symbol: str, replacement: str) -> tuple[tuple[str, str], s
                               "kind": decl.kind, "line": decl.start}
 
 
+def remove(vs: dict, symbol: str) -> tuple[tuple[str, str], str, dict]:
+    """Delete the addressed declaration and the comment block directly above
+    it (issue #1695: a withdrawal). Returns the buffer, its new text and the
+    edit's echo."""
+    buffer, text, decl = resolve(vs, symbol)
+    isolate(text, decl, buffer[1])
+    first = leading_comment_start(text, decl)
+    lines = text.split("\n")
+    kept = lines[:first - 1] + lines[decl.end:]
+    # do not leave two blank lines where the declaration was
+    while first - 1 < len(kept) and first > 1 and not kept[first - 2].strip() \
+            and not kept[first - 1].strip():
+        del kept[first - 1]
+    return buffer, "\n".join(kept), {"form": "remove", "symbol": decl.name,
+                                      "kind": decl.kind, "line": decl.start}
+
+
 # ---------------------------------------------------------------- what changed
 
 def _shapes(text: str, name: str) -> dict[tuple[str, str], object] | None:
@@ -299,4 +316,5 @@ def touched(before: dict, after: dict) -> list[dict]:
     return out
 
 
-__all__ = ["SymbolError", "declarations", "resolve", "read", "replace", "touched"]
+__all__ = ["SymbolError", "declarations", "resolve", "read", "replace", "remove",
+           "touched"]
