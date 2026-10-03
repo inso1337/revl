@@ -158,9 +158,21 @@ class AdmissionProfile:
     # is not trusted" rather than of one call site is what closes the shape
     # instead of the instance.
     no_realm_placement: bool = False
+    # issue #1728: the OPERATOR's binding of realm placeholders,
+    # `((name, realm), ...)` sorted. `isolate <key> in realm(?<name>)` is the
+    # one realm form an untrusted author may write; it names a placeholder, and
+    # `realm_placeholders.bind` maps it to the realm bound here, before
+    # lowering, or refuses it by name. Empty (the default) binds nothing, so a
+    # compile that writes no placeholder is byte-identical. Set only from the
+    # operator's side (`--bind-realm`), never from an argument the author sends.
+    realm_bindings: tuple = ()
+
+    @property
+    def bindings(self) -> dict:
+        return dict(self.realm_bindings)
 
     @staticmethod
-    def untrusted_author(granted) -> "AdmissionProfile":
+    def untrusted_author(granted, realm_bindings=()) -> "AdmissionProfile":
         """THE profile for source whose AUTHOR is not trusted: no new host code,
         reach bounded to an explicit granted service set, no self-minted
         declassifier (item 249 Slice C), derived taint sinks/sources so the
@@ -178,10 +190,11 @@ class AdmissionProfile:
                                 granted=frozenset(granted or ()),
                                 no_declassify=True,
                                 taint_strict=True,
-                                no_realm_placement=True)
+                                no_realm_placement=True,
+                                realm_bindings=tuple(realm_bindings or ()))
 
     @staticmethod
-    def self_extension(granted) -> "AdmissionProfile":
+    def self_extension(granted, realm_bindings=()) -> "AdmissionProfile":
         """The profile a SELF-EXTENDING proposal is admitted under (item 334,
         slice 2) — `Gate.propose`'s door, named for the reader who arrives from
         the proposal loop.
@@ -198,7 +211,7 @@ class AdmissionProfile:
         is the realm on every ticket that turn raises, and one covered crossing
         is all an exfiltration needs. Kept as a distinct name because `propose`'s
         refusal is load-bearing enough to be greppable."""
-        return AdmissionProfile.untrusted_author(granted)
+        return AdmissionProfile.untrusted_author(granted, realm_bindings)
 
     @property
     def active(self) -> bool:
@@ -420,6 +433,10 @@ def check_no_realm_placement(root_programs: list[Program],
     for program in root_programs:
         found: list = []
         _iter_realm_placements(program.components, found)
+        # issue #1728: `realm(?<name>)` names a placeholder the operator binds,
+        # not a realm, so it is not the authority grab this refuses.
+        found = [stmt for stmt in found
+                 if getattr(stmt, "placeholder", None) is None]
         if not found:
             continue
         stmt = found[0]

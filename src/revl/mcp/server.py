@@ -142,6 +142,10 @@ class AuthoringTrust:
     granted: frozenset[str] | None = None
     providers: dict[str, str] | None = None
     roots: tuple[str, ...] = ()
+    # issue #1728: the operator's `--bind-realm NAME=REALM` pairs, sorted. Every
+    # compile through `compile_under_authoring` binds `realm(?NAME)` with them;
+    # an argument the agent sends never can.
+    realm_bindings: tuple = ()
 
     def profile(self) -> AdmissionProfile | None:
         """The admission profile agent-authored source compiles under, or `None`
@@ -162,14 +166,16 @@ class AuthoringTrust:
         if self.host_code:
             return None
         if self.granted is not None:
-            return AdmissionProfile.untrusted_author(self.granted)
+            return AdmissionProfile.untrusted_author(self.granted,
+                                                     self.realm_bindings)
         # the untrusted-author profile with the reach allowlist left OFF, and
         # nothing else off: `no_extern` (+ its transitive reach sweep),
         # `no_declassify`, `taint_strict` and `no_realm_placement` are all
         # correct with no operator input. The allowlist is not — there is no
         # honest default for which of a running system's services this agent may
         # reach — so the operator declares it with `--grant` or it is inert.
-        return replace(AdmissionProfile.untrusted_author(()), granted=None)
+        return replace(AdmissionProfile.untrusted_author((), self.realm_bindings),
+                       granted=None)
 
 
 # The live trust level. `revl mcp serve` sets it from its flags; a test or an
@@ -576,8 +582,20 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
 
     if providers and profile is not None:
         _compile_once(profile, {})              # 1. the decision
-        return _compile_once(None, providers)   # 2. what loads
-    return _compile_once(profile, providers)
+        return _compile_once(_bound_only(None), providers)   # 2. what loads
+    return _compile_once(_bound_only(profile), providers)
+
+
+def _bound_only(profile: AdmissionProfile | None) -> AdmissionProfile | None:
+    """`profile` carrying the operator's realm bindings (issue #1728). A
+    compile with no profile (a trusted author, a jailed operator file, the
+    composition compile) gets a profile that does nothing but bind, so a
+    `realm(?NAME)` binds the same way through every arm of this door."""
+    if not AUTHORING.realm_bindings:
+        return profile
+    if profile is None:
+        return AdmissionProfile(realm_bindings=AUTHORING.realm_bindings)
+    return replace(profile, realm_bindings=AUTHORING.realm_bindings)
 
 
 def _candidate_of(arguments: dict) -> tuple:

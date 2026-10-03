@@ -330,7 +330,20 @@ _DIRECT_CONSTRUCTION = {
     "src/revl/__main__.py":
         "`revl compile --taint-strict`: an OPERATOR hardening its own compile. "
         "The author is the human running the command, so no author-trust flag "
-        "belongs on it (`AdmissionProfile.untrusted` is False for it).",
+        "belongs on it (`AdmissionProfile.untrusted` is False for it). Also "
+        "`revl compile --bind-realm` (issue #1728), the operator's own realm "
+        "bindings for its own compile.",
+    "src/revl/mcp/server.py":
+        "`_bound_only(None)` (issue #1728): the operator's `--bind-realm` "
+        "bindings for a compile that has NO author profile, which is a trusted "
+        "author, a jailed operator file, or the composition compile after the "
+        "untrusted decision compile passed. An untrusted author's compile keeps "
+        "`untrusted_author` and only gains the bindings by `replace`.",
+    "src/revl/gate.py":
+        "`_compile_candidate_composition` (issue #1728): the composition compile "
+        "after `propose`'s `self_extension` decision compile passed, carrying "
+        "only that decision's operator realm bindings so the same placeholder "
+        "binds the same way in both.",
 }
 
 
@@ -391,6 +404,15 @@ def test_the_untrusted_author_profile_carries_every_author_flag():
     for field in fields(AdmissionProfile):
         if field.name == "granted":
             assert profile.granted == frozenset({"Ops"})
+            continue
+        if field.name == "realm_bindings":
+            # issue #1728: like `granted`, operator INPUT rather than a property
+            # of the author. Empty unless the operator binds a placeholder, and
+            # carried through when it does.
+            assert profile.realm_bindings == ()
+            bound = AdmissionProfile.untrusted_author(["Ops"], (("t", "tenant_a"),))
+            assert bound.realm_bindings == (("t", "tenant_a"),)
+            assert bound.no_realm_placement is True
             continue
         assert getattr(profile, field.name) is True, (
             f"`untrusted_author` leaves `{field.name}` off. Every field here is "

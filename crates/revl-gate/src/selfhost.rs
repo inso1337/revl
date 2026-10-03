@@ -13000,6 +13000,22 @@ pub fn foreign_scan(src: String) -> String {
     return foreign_scan_ts(&lex_src(src.clone()));
 }
 
+fn realm_placeholder_msg(name: &str, key: &str) -> String {
+    return ((((String::from("realm placeholder `?").revl_concat(&name)).revl_concat("` (on `isolate ")).revl_concat(&key)).revl_concat("`) is not bound: the operator binds it to a realm at admission, ")).revl_concat("and until then the provision has no realm to check G2 against");
+}
+
+fn realm_placeholder_scan(ts: &[Token]) -> Verd {
+    let mut i = 0i64;
+    while (i < ts.revl_length()) {
+        if ((((((atw(ts, i, "isolate") && atw(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in")) && atw(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realm")) && atk(ts, (i).checked_add(4i64).expect("revl: Int overflow"), "(")) && atk(ts, (i).checked_add(5i64).expect("revl: Int overflow"), "?")) && atk(ts, (i).checked_add(6i64).expect("revl: Int overflow"), "ident")) && atk(ts, (i).checked_add(7i64).expect("revl: Int overflow"), ")")) {
+            let msg = realm_placeholder_msg(&tkc(ts, (i).checked_add(6i64).expect("revl: Int overflow")).text, &tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text);
+            return mk_verd(tagged("G2", &msg), tkc(ts, i).line);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return mk_verd(String::from(""), 0i64);
+}
+
 fn ends_expr_kw(w: &str) -> bool {
     if (((((w == "let") || (w == "var")) || (w == "return")) || (w == "if")) || (w == "else")) {
         return true;
@@ -18608,6 +18624,10 @@ pub fn admit_src(src: String) -> String {
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
     }
+    let rph = realm_placeholder_scan(&ts);
+    if (rph.v != "") {
+        return rph.v;
+    }
     return pick_min(&collect_refusals(ts.clone(), pg.clone()));
 }
 
@@ -18627,6 +18647,10 @@ pub fn admit_all(src: String) -> String {
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
         return fmt_all(&(vec![mk_verd(tagged("BAD", &pg.bad), 0i64)]));
+    }
+    let rph = realm_placeholder_scan(&ts);
+    if (rph.v != "") {
+        return fmt_all(&(vec![rph.clone()]));
     }
     return fmt_all(&collect_refusals(ts.clone(), pg.clone()));
 }
@@ -19073,6 +19097,10 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
+    }
+    let rph = realm_placeholder_scan(&ts);
+    if (rph.v != "") {
+        return rph.v;
     }
     let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
     let drop = dropped_names(pg.comps.clone(), 0i64, man.repl.clone());
