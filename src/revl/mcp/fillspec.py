@@ -27,6 +27,9 @@ The shape added to every obligation in `revl_check` is::
       "version": 2,
       "expected": "Str",
       "grammarCategory": "expression",
+      "construct": "provide-method",
+      "idiom": {"name": "provide-method", "rules": ["G4: ..."],
+                "fill": "db.get(key)", "example": "..."},
       "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                      "reason": "..."},
       "crossing": {"permitted": false, "required": false, "form": null,
@@ -95,13 +98,20 @@ syntactic category a fill is a document of, a key of
 decoder to the hole's slot. It is read off the grammar derived from the parser
 (`source_grammar.hole_category`), not a table: the narrowest category every
 parse of the `hole` keyword passes through.
+
+`construct` and `idiom` (issue #1701, additive) name where the hole stands
+(`CONSTRUCTS`: a plain or an emission provide method, a component body
+statement, the acquisition or the inverse of an `effect`, a function, a test)
+and serve that construct's minimal admitted example with the one or two rules
+that make it correct (`revl.idioms`), so an agent sees the smallest correct
+instance of exactly the construct it is filling.
 """
 
 from __future__ import annotations
 
 import re
 
-from .. import source_grammar
+from .. import idioms, source_grammar
 from ..diagnostics import GUARANTEES
 from ..holes import EMITTABLE_SECTIONS
 from ..resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS
@@ -546,6 +556,33 @@ def _capability(emission: bool, capabilities, in_method: bool,
     }
 
 
+#: Every construct a fillSpec names, one per hole position (issue #1701). Each
+#: has an idiom in `revl.idioms` of the same name.
+CONSTRUCTS = ("provide-method", "emission-method", "component-setup",
+              "effect-acquire", "effect-undo", "function", "test")
+
+
+def _construct(position: str | None, capability: dict) -> str:
+    """The construct a hole stands in: where it is, and for a provide method
+    whether its operation may cross the boundary."""
+    if position == "method":
+        return ("emission-method" if capability.get("permitsCrossing")
+                else "provide-method")
+    construct = {"setup": "component-setup"}.get(position, position)
+    if construct not in CONSTRUCTS:
+        raise ValueError(f"fillspec: a hole at position {position!r} names no construct")
+    return construct
+
+
+def _idiom(construct: str) -> dict:
+    """The served idiom for `construct`: the rules and the minimal admitted
+    example (`revl.idioms`)."""
+    entry = idioms.get(construct)
+    if entry is None:
+        raise ValueError(f"fillspec: no idiom for construct {construct!r}")
+    return idioms.served(entry)
+
+
 def _obligation(hole: dict, fill_spec: dict) -> dict:
     """One obligation, in the same shape `diagnostics.obligations` produces,
     with the `fillSpec` added. Base fields stay byte-identical so an agent that
@@ -619,10 +656,13 @@ def _collect_exprs(node, services, functions, bindings, capability,
             extern_block = _externs(externs, calls,
                                     bindings.get("@position") or "pure",
                                     untrusted)
+            construct = _construct(bindings.get("@position"), capability)
             collected.append((node, {
                 "version": FILL_SPEC_VERSION,
                 "expected": node.get("type"),
                 "grammarCategory": source_grammar.hole_category(),
+                "construct": construct,
+                "idiom": _idiom(construct),
                 "capability": capability,
                 "crossing": _crossing(capability, calls),
                 "bindings": visible,
@@ -780,7 +820,10 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                 acquire_scope = {**setup_scope, "@position": "effect-acquire"}
                 _collect_exprs(stmt.get("acquire"), services, functions,
                                acquire_scope, pure, collected)
-                rest = {k: v for k, v in stmt.items() if k != "acquire"}
+                undo_scope = {**setup_scope, "@position": "effect-undo"}
+                _collect_exprs(stmt.get("undo"), services, functions,
+                               undo_scope, pure, collected)
+                rest = {k: v for k, v in stmt.items() if k not in ("acquire", "undo")}
                 _collect_exprs(rest, services, functions, dict(setup_scope),
                                pure, collected)
             else:
@@ -809,6 +852,6 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
     return [_obligation(hole, spec) for hole, spec in collected]
 
 
-__all__ = ["enrich", "EMITTABLE_SECTIONS", "FILL_SPEC_VERSION",
+__all__ = ["enrich", "CONSTRUCTS", "EMITTABLE_SECTIONS", "FILL_SPEC_VERSION",
            "CROSSING_FORM", "CROSSING_RULE", "EXTERN_PLACEMENT",
            "EXTERN_TEMPLATE", "UNTRUSTED_EXTERNS", "unfillable", "step_name"]
