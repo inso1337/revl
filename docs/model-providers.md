@@ -7,13 +7,14 @@ by configuration" ([531-model-placement.md](design/531-model-placement.md),
 section 5). This page is that configuration, and the runtime adapters it binds
 (issue #1461).
 
-Three wire formats are supported, one page each:
+Four wire formats are supported, one page each:
 
 | `provider` | Covers | Page |
 | ---------- | ------ | ---- |
 | `openai-compatible` | vLLM, SGLang, llama.cpp server, LM Studio, Ollama (`/v1`), hosted services that copy the OpenAI shape | [providers-openai-compatible.md](providers-openai-compatible.md) |
 | `anthropic` | Anthropic Messages API | [providers-anthropic.md](providers-anthropic.md) |
 | `gemini` | Gemini on Google AI, and on Vertex AI | [providers-gemini.md](providers-gemini.md) |
+| `ollama` | Ollama's native API, with the model loaded and unloaded by revl on the scheduled device | [providers-ollama.md](providers-ollama.md) |
 
 The adapters use the standard library's HTTP client (`urllib`). revl keeps zero
 required runtime dependencies, and no provider SDK is needed or used.
@@ -29,6 +30,26 @@ revl run app.rvl --providers providers.json --plan    # print the bindings, make
 component provides, and whose service declares `model.*` operations, is served
 by a model host built from the file. The host is an ambient provision, provided
 before any component loads and withdrawn at teardown.
+
+With `--placement`, each process serves the model keys its own components
+require, from the same file, checked again in the child:
+
+```
+revl run app.rvl --placement placement.toml --providers providers.json --once
+```
+
+An `ollama` role is loaded by revl on the device the model schedule chose for
+that host, once however many hosts route to it, and unloaded after the last
+component is gone. The per-process residue proof then asks the server whether
+it still holds the model. That needs a schedule, so an `ollama` role runs only
+under `--placement`. See [providers-ollama.md](providers-ollama.md).
+
+With `--watch`, a reload keeps the model hosts, and the new generation's
+components reach the same hosts. The
+configuration is read again and checked against the edited program on every
+reload. If the result is not exactly the hosts already bound (a model key,
+operation, role or binding changed), the edit is refused and the running
+generation keeps serving. Restart the run to rebind.
 
 ## The program side
 
@@ -93,7 +114,7 @@ Fields every provider accepts:
 
 | Field | Meaning | Default |
 | ----- | ------- | ------- |
-| `provider` | `openai-compatible`, `anthropic` or `gemini` | required |
+| `provider` | `openai-compatible`, `anthropic`, `gemini` or `ollama` | required |
 | `model` | the provider's model name | required |
 | `base_url` | the endpoint | per provider |
 | `api_key_env` | the NAME of the environment variable holding the credential | none (required for `anthropic` and `gemini`) |
@@ -157,8 +178,8 @@ the endpoint the prompt reaches.
 
 | Endpoint | Residence |
 | -------- | --------- |
-| `openai-compatible` on `localhost`, `127.0.0.0/8` or `::1` | `on_device` |
-| `openai-compatible` anywhere else (including a LAN address) | `off_device` |
+| `openai-compatible` or `ollama` on `localhost`, `127.0.0.0/8` or `::1` | `on_device` |
+| `openai-compatible` or `ollama` anywhere else (including a LAN address) | `off_device` |
 | `anthropic`, `gemini`, whatever `base_url` says | `off_device` |
 
 Configuration may narrow a residence (`"residence": "off_device"` on a loopback
@@ -191,6 +212,7 @@ adapter attaches one of them to the request, chosen by the binding's
 | `openai-compatible` | `gbnf` | `grammar: <GBNF text>` (llama.cpp's server) | yes |
 | `anthropic` | `tool` (default) | one forced tool whose `input_schema` is the wire schema | no |
 | `gemini` | `response-schema` (default) | `responseMimeType: application/json` and a translated `responseSchema` | no |
+| `ollama` | `none` (the only value) | nothing | no |
 | any | `none` | nothing | no |
 
 **Claiming** means the adapter took the artifact through the runtime's
@@ -262,7 +284,9 @@ Not checked:
 `revl.providers` exposes the same pieces for a host that is not `revl run`:
 `load_config`, `placement_of_files` / `placement_of_program`, `build_hosts`
 (which runs the check and raises `PlacementRefused`), `Adapter`,
-`CompletionRequest`, `Completion`, and `request_json`, the one HTTP client that
+`CompletionRequest`, `Completion`, `open_hosts` / `close_hosts` /
+`provision_residue` (the load, unload and residue proof of the `ollama` roles
+a set of hosts route to), and `request_json`, the one HTTP client that
 `bench/model_pin.py`, `bench/run.py` and `bench/decode_grammar_probe.py` also
 use.
 
@@ -273,3 +297,7 @@ server per wire format, so CI makes no network call. One test is opt-in: with
 `REVL_LIVE_OLLAMA_MODEL` set to a pulled model tag, it sends one completion to
 the Ollama on `127.0.0.1:11434` through the OpenAI-compatible adapter, and it
 skips cleanly when the variable is unset or no Ollama answers.
+
+`tests/test_model_provision_515.py` covers the `ollama` provider's load, unload
+and residue proof, in process and through `revl run --placement --providers`,
+against a loopback fake of Ollama's native API.

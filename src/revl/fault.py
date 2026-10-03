@@ -37,8 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import re
 import sys
+import textwrap
 import types
 
 from ._paths import backends_root, python_backend_emitter
@@ -793,7 +795,8 @@ def _format_sweep(dossier: dict, per_component: list, printer) -> None:
             f"failed, {counts['unreachable']} unreachable")
 
 
-def run_sweep(ir: dict, out=None, only: str | None = None) -> tuple[int, dict]:
+def run_sweep(ir: dict, out=None, only: str | None = None,
+              outputs: dict | None = None) -> tuple[int, dict]:
     """Sweep every top-level step of every component (or just *only*), run the
     full assertion set at each on the py reference tier, and report.
 
@@ -802,6 +805,10 @@ def run_sweep(ir: dict, out=None, only: str | None = None) -> tuple[int, dict]:
     (src/revl/mcp/gauntlet.py) — a later task wires it; here the shape is made
     compatible.  Raises ``ModuleNotFoundError`` when cordis-py is absent, so
     the caller can report a skip (never a pass) rather than crash.
+
+    With *outputs* given, each step's stdout is captured into it, keyed
+    ``(component, step)``, instead of reaching the terminal: the cross-tier
+    sweep reads the compensation markers out of it.
     """
     printer = (lambda line: print(line)) if out is None else out
     emit, runtime_mod, Context, FiberState = _load_py_tier()
@@ -818,8 +825,10 @@ def run_sweep(ir: dict, out=None, only: str | None = None) -> tuple[int, dict]:
         results: list = []
         for unit in sweep_units(ir, name):
             try:
-                outcome = asyncio.run(_drive(ir, unit, emit, runtime_mod,
-                                             Context, FiberState, exclude=excluded))
+                outcome = _drive_capturing(
+                    outputs, (name, unit["step"]),
+                    lambda: asyncio.run(_drive(ir, unit, emit, runtime_mod, Context,
+                                               FiberState, exclude=excluded)))
             except Exception as error:  # noqa: BLE001 — a driver crash is a failure
                 results.append((unit,
                                 [_driver_failure(emit, error, "fault-test")], []))
@@ -832,6 +841,22 @@ def run_sweep(ir: dict, out=None, only: str | None = None) -> tuple[int, dict]:
     dossier = _sweep_dossier(per_component)
     _format_sweep(dossier, per_component, printer)
     return dossier["counts"]["failed"], dossier
+
+
+def _drive_capturing(outputs: dict | None, key: tuple, drive):
+    """Run *drive*; when *outputs* is a dict, capture its stdout there under
+    *key*, even when it raises."""
+    if outputs is None:
+        return drive()
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            return drive()
+    finally:
+        outputs[key] = buffer.getvalue()
 
 
 def sweep_dossier(ir: dict, only: str | None = None) -> dict:
@@ -977,14 +1002,17 @@ def _host_lines(output: str) -> list:
     """The composition's own output inside a captured `--once` run: every
     non-empty line after the runner's ``== load composition`` header that is
     not runner protocol (a ``[run]`` line) and not the runner's closing
-    ``error: the <tier> composition ...`` diagnostic.  Before the header is
-    the build, which the verdict already summarises (issue #1614)."""
+    ``error: the <tier> composition ...`` diagnostic, and not the sweep's own
+    ``[revl-sweep] compensation ran:`` marker, which the compensation check
+    reads (issue #1511).  Before the header is the build, which the verdict
+    already summarises (issue #1614)."""
     lines = output.splitlines()
     start = next((i + 1 for i, line in enumerate(lines)
                   if line.startswith(_LOAD_HEADER)), len(lines))
     return [line.rstrip() for line in lines[start:]
             if line.strip()
             and not line.lstrip().startswith("[run]")
+            and not line.lstrip().startswith(_COMPENSATION_MARK)
             and not _RUNNER_EPILOGUE.match(line)]
 
 
@@ -1030,6 +1058,169 @@ def _prune_dependents(ir: dict, target: str) -> dict:
     return pruned
 
 
+# ---------------------------------------------------------------------------
+# compensations: which ran, against which were declared (issue #1511)
+# ---------------------------------------------------------------------------
+#
+# A residue proof cannot see a compensation. An emission's offset leaves the
+# runtime exactly as clean whether it ran or not, so a tier that silently
+# dropped a declared compensation read as "residue-free" and the sweep
+# printed AGREEMENT over it. The sweep now also checks, at every fault point,
+# that the tier ran exactly the compensations the program declared owed,
+# newest first.
+#
+# OWED is read off the IR: the faulted component's top-level steps 1..N, each
+# `emit` that carries a site-spelled `compensate`, and each `emit` of an extern
+# that DECLARES one (`extern emission fn put(..) compensate undo()`). Nothing
+# else is owed: every other component tears down cleanly, which discharges its
+# compensations.
+#
+# RAN is observed, not inferred: each compensation callee that is an extern
+# gets one line prepended to its host body on every tier, printing
+# `_COMPENSATION_MARK <name>` to stdout. The marker is written by the host body
+# itself, so it proves the compensation ran, on any runtime, with no runner
+# cooperation. A callee that is not an extern with an inline body for the tier
+# (a service call, a `fn`, a host builtin, a `@<tier> ref`) cannot be observed
+# that way; it is listed as UNOBSERVED on the point, never counted as run.
+
+_COMPENSATION_MARK = "[revl-sweep] compensation ran:"
+
+#: the key an extern's `bodies` uses for each tier the sweep can instrument
+_BODY_KEY = {"py": "py", "ts": "ts", "go": "go", "java": "java", "rust": "rs"}
+
+
+def _compensation_callee(node) -> str | None:
+    """The callee of a compensation expression when it is a plain named call:
+    an extern's declared slot (`{"kind": "call", "callee": {"kind": "var"}}`)
+    or a site-spelled `fn` call. `None` for any other shape."""
+    if not isinstance(node, dict):
+        return None
+    if node.get("kind") == "fn":
+        return node.get("name")
+    if node.get("kind") == "call" and "method" not in node:
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            return callee.get("name")
+    return None
+
+
+def _declared_compensations(ir: dict) -> dict:
+    """Emission extern name -> the compensation expression it declares."""
+    return {ext["name"]: ext["compensate"]
+            for ext in ir.get("externs") or []
+            if ext.get("compensate") is not None and ext.get("name")}
+
+
+def _owed_compensations(ir: dict, component: str, upto: int) -> list:
+    """The compensations a fault after step *upto* of *component* owes, in
+    registration order. Each entry is ``{"name", "declared"}``: *name* is the
+    callee (or a rendering of the expression when it is not a named call),
+    *declared* is True for an extern-declared compensation."""
+    declared = _declared_compensations(ir)
+    owed: list = []
+    for step in _body_of(ir, component)[:upto]:
+        if step.get("step") != "emit":
+            continue
+        site = step.get("compensate")
+        expr = step.get("expr") or {}
+        if site is not None:
+            node, is_declared = site, False
+        elif expr.get("kind") == "fn" and expr.get("name") in declared:
+            node, is_declared = declared[expr["name"]], True
+        else:
+            continue
+        owed.append({"name": _compensation_callee(node) or _render(node),
+                     "declared": is_declared})
+    return owed
+
+
+def _extern_bodies(ir: dict) -> dict:
+    return {ext.get("name"): ext.get("bodies") or {}
+            for ext in ir.get("externs") or []}
+
+
+def _observable(ir: dict, tier: str, name: str) -> bool:
+    """Whether the sweep can see *name* run on *tier*: it is an extern with an
+    inline host body for that tier."""
+    key = _BODY_KEY.get(tier)
+    return key is not None and isinstance(
+        _extern_bodies(ir).get(name, {}).get(key), str)
+
+
+def _marker_line(tier: str, name: str) -> str:
+    text = json.dumps(f"{_COMPENSATION_MARK} {name}")
+    if tier == "py":
+        return f"print({text}, flush=True)"
+    if tier == "ts":
+        return f"console.log({text})"
+    if tier == "go":
+        return f"//revl:import fmt\nfmt.Println({text})"
+    if tier == "java":
+        return f"System.out.println({text}); System.out.flush();"
+    if tier == "rust":
+        return f"println!({text});"
+    raise KeyError(tier)  # pragma: no cover; callers check _BODY_KEY first
+
+
+def _instrument_compensations(ir: dict, tier: str) -> dict:
+    """A copy of *ir* whose compensation externs print the sweep's marker, on
+    *tier*, before their own body runs. Every other byte of the program is
+    unchanged. *ir* itself is not touched."""
+    key = _BODY_KEY.get(tier)
+    names = set()
+    for node in _declared_compensations(ir).values():
+        names.add(_compensation_callee(node))
+    for component in ir.get("components") or []:
+        for step in component.get("body") or []:
+            names.add(_compensation_callee(step.get("compensate")))
+    names.discard(None)
+    if key is None or not names:
+        return ir
+    instrumented = copy.deepcopy(ir)
+    for ext in instrumented.get("externs") or []:
+        bodies = ext.get("bodies") or {}
+        if ext.get("name") in names and isinstance(bodies.get(key), str):
+            body = bodies[key]
+            if tier == "py":  # the py emitter dedents the body; match it
+                body = textwrap.dedent(body.strip("\n"))
+            bodies[key] = _marker_line(tier, ext["name"]) + "\n" + body
+    return instrumented
+
+
+def _compensations_ran(output: str) -> list:
+    """The compensation names a run printed, in the order they ran."""
+    ran = []
+    for line in output.splitlines():
+        at = line.find(_COMPENSATION_MARK)
+        if at >= 0:
+            ran.append(line[at + len(_COMPENSATION_MARK):].strip())
+    return ran
+
+
+def _compensation_check(ir: dict, tier: str, unit: dict, output: str) -> dict:
+    """Compare what ran at one fault point against what was declared owed.
+
+    ``expected`` is the observable owed compensations, newest first. The point
+    DIVERGES when ``ran`` differs from it in any way: a missing compensation
+    (a tier that ran none is the case this exists for), an extra one (an offset
+    fired on a clean teardown), or the wrong order."""
+    owed = _owed_compensations(ir, unit["component"], unit["step"])
+    expected = [entry["name"] for entry in reversed(owed)
+                if _observable(ir, tier, entry["name"])]
+    unobserved = [entry["name"] for entry in owed
+                  if not _observable(ir, tier, entry["name"])]
+    ran = _compensations_ran(output)
+    return {"owed": [entry["name"] for entry in owed],
+            "declared": [entry["name"] for entry in owed if entry["declared"]],
+            "expected": expected, "ran": ran, "unobserved": unobserved,
+            "diverged": ran != expected}
+
+
+def _divergence_detail(check: dict) -> str:
+    return (f"owed newest first [{', '.join(check['expected'])}], "
+            f"ran [{', '.join(check['ran'])}]")
+
+
 def _compiled_tier_sweep(tier: str, ir: dict, config: dict, files,
                          cap: int | None) -> dict:
     """Sweep a compiled/hosted *tier*: inject the fault at each corpus point,
@@ -1049,16 +1240,18 @@ def _compiled_tier_sweep(tier: str, ir: dict, config: dict, files,
                 "reason": f"toolchain absent — {absent}"}
 
     corpus = _corpus_units(ir, cap)
+    observed = _instrument_compensations(ir, tier)
     points: list = []
     for unit in corpus:
-        faulted = _prune_dependents(_inject(ir, unit), unit["component"])
+        faulted = _prune_dependents(_inject(observed, unit), unit["component"])
         code, output, crash, proof = _run_once(runner, faulted, config, files)
         kind, detail = _classify_once(code, output, crash, proof)
         host = _host_lines(output)
         if kind == "clean":
-            points.append({"where": unit["where"], "component": unit["component"],
-                           "status": "clean",
-                           **({"hostOutput": host} if host else {})})
+            point = _checked_point(ir, tier, unit, output)
+            if host:
+                point["hostOutput"] = host
+            points.append(point)
         elif kind == "residue":
             points.append({"where": unit["where"], "component": unit["component"],
                            "status": "residue", "detail": detail,
@@ -1074,7 +1267,45 @@ def _compiled_tier_sweep(tier: str, ir: dict, config: dict, files,
                                f"faulting activation on this tier "
                                f"({len(points)} point(s) proved clean first) — "
                                f"{detail}")}
-    return {"tier": tier, "status": "executed", "points": points, "reason": ""}
+    return _tier_record(tier, points)
+
+
+def _checked_point(ir: dict, tier: str, unit: dict, output: str) -> dict:
+    """A residue-free point, with its compensation check. It stays ``clean``
+    only when the tier ran exactly the compensations owed; otherwise it is
+    ``diverged``."""
+    check = _compensation_check(ir, tier, unit, output)
+    point = {"where": unit["where"], "component": unit["component"],
+             "status": "diverged" if check["diverged"] else "clean",
+             "compensations": check}
+    if check["diverged"]:
+        point["detail"] = _divergence_detail(check)
+    return point
+
+
+def _tier_record(tier: str, points: list, **extra) -> dict:
+    """The record of a tier that swept every point residue-free: ``executed``
+    when every point ran exactly the owed compensations, ``diverged`` when
+    any did not."""
+    diverged = [p for p in points if p["status"] == "diverged"]
+    if diverged:
+        first = diverged[0]
+        return {"tier": tier, "status": "diverged", "points": points, **extra,
+                "reason": (f"ran compensations other than those declared at "
+                           f"{len(diverged)} of {len(points)} fault point(s); "
+                           f"first at {first['where']}: {first['detail']}")}
+    return {"tier": tier, "status": "executed", "points": points, **extra,
+            "reason": ""}
+
+
+def _py_host_lines(output: str) -> list:
+    """The program's own lines in one captured py step: the py leg captures
+    each step's stdout to read the compensation markers (issue #1511), so what
+    the program printed is replayed, labelled, like a compiled tier's
+    (issue #1614), minus the sweep's own markers."""
+    return [line.rstrip() for line in output.splitlines()
+            if line.strip()
+            and not line.lstrip().startswith(_COMPENSATION_MARK)]
 
 
 def _py_tier_sweep(ir: dict) -> dict:
@@ -1082,16 +1313,31 @@ def _py_tier_sweep(ir: dict) -> dict:
     the runtime interrogated).  Returns the same per-tier record shape as the
     compiled tiers, so agreement compares like with like.  A missing cordis-py
     runtime is a loud skip, never a pass."""
+    outputs: dict = {}
     try:
-        failed, dossier = run_sweep(ir, out=lambda _line: None)
+        failed, dossier = run_sweep(_instrument_compensations(ir, "py"),
+                                    out=lambda _line: None, outputs=outputs)
     except ModuleNotFoundError as error:
         return {"tier": "py", "status": "skipped", "points": [],
                 "reason": (f"the cordis-py runtime is not installed "
                            f"({error.name!r} missing — sh backends/python/setup.sh)")}
-    points = [{"where": step["where"], "component": section["component"],
-               "status": "residue" if step["status"] == "fail" else "clean",
-               **({"detail": "; ".join(step["problems"])} if step["problems"] else {})}
-              for section in dossier["components"] for step in section["steps"]]
+    points = []
+    for section in dossier["components"]:
+        for step in section["steps"]:
+            output = outputs.get((section["component"], step["step"]), "")
+            if step["problems"]:
+                point = {"where": step["where"],
+                         "component": section["component"],
+                         "status": "residue",
+                         "detail": "; ".join(step["problems"])}
+            else:
+                unit = {"where": step["where"], "component": section["component"],
+                        "step": step["step"]}
+                point = _checked_point(ir, "py", unit, output)
+            host = _py_host_lines(output)
+            if host:
+                point["hostOutput"] = host
+            points.append(point)
     unreachable = dossier.get("unreachable") or []
     if failed:
         leak = next((p for p in points if p["status"] == "residue"), None)
@@ -1099,8 +1345,7 @@ def _py_tier_sweep(ir: dict) -> dict:
                 "unreachable": unreachable,
                 "reason": (f"residue at {leak['where']}: {leak.get('detail', '')}"
                            if leak else f"{failed} step(s) left residue")}
-    return {"tier": "py", "status": "executed", "points": points,
-            "unreachable": unreachable, "reason": ""}
+    return _tier_record("py", points, unreachable=unreachable)
 
 
 def cross_tier_sweep(ir: dict, config: dict | None = None, files=None,
@@ -1132,6 +1377,7 @@ def cross_tier_sweep(ir: dict, config: dict | None = None, files=None,
     dossier = _cross_tier_dossier(ir, records, cap)
     _format_cross_tier(dossier, printer)
     failures = (dossier["counts"]["tiersLeakingResidue"]
+                + dossier["counts"]["tiersDiverging"]
                 + dossier["counts"]["disagreements"])
     return failures, dossier
 
@@ -1143,27 +1389,39 @@ def _cross_tier_dossier(ir: dict, records: list, cap: int | None) -> dict:
     tier reached, every executing tier that swept it must have reached the same
     residue-free verdict.  A point clean on one tier and residue on another is
     a disagreement (a portability failure).  Pure over the records, so the
-    aggregation is tested without any runtime."""
+    aggregation is tested without any runtime.
+
+    A ``diverged`` tier swept every point residue-free but ran compensations
+    other than the ones the program declared owed (issue #1511). It is a
+    failure in its own right, whatever the other tiers did: a tier that ran
+    none is never counted as agreeing. Its points still join the per-point
+    comparison, so a point clean on one tier and diverged on another is also a
+    disagreement."""
     executed = [r for r in records if r["status"] == "executed"]
+    diverging = [r for r in records if r["status"] == "diverged"]
     leaking = [r for r in records if r["status"] == "failed"]
     skipped = [r for r in records if r["status"] == "skipped"]
 
-    # verdict per (where) point across executing tiers
+    # verdict per point across every tier that swept to the end. A point is
+    # keyed by its component too: `step 1 (emit)` in two components is two
+    # points, not one.
     by_point: dict = {}
-    for record in executed:
+    for record in executed + diverging:
         for point in record["points"]:
-            by_point.setdefault(point["where"], {})[record["tier"]] = point["status"]
+            key = (point.get("component") or "", point["where"])
+            by_point.setdefault(key, {})[record["tier"]] = point["status"]
     disagreements = []
     cross_checked = 0  # points ≥2 executing tiers both swept — the real overlap
-    for where, verdicts in sorted(by_point.items()):
+    for (component, where), verdicts in sorted(by_point.items()):
         if len(verdicts) >= 2:
             cross_checked += 1
         statuses = set(verdicts.values())
         if len(statuses) > 1:
-            disagreements.append({"where": where, "verdicts": dict(verdicts)})
+            disagreements.append({"component": component, "where": where,
+                                  "verdicts": dict(verdicts)})
 
-    agree = bool(executed) and not disagreements and not leaking
-    status = "failed" if (leaking or disagreements) else (
+    agree = bool(executed) and not disagreements and not leaking and not diverging
+    status = "failed" if (leaking or disagreements or diverging) else (
         "passed" if executed else "skipped")
     return {
         "kind": "cross-tier-sweep",
@@ -1182,6 +1440,8 @@ def _cross_tier_dossier(ir: dict, records: list, cap: int | None) -> dict:
             "executed": [r["tier"] for r in executed],
             "skipped": [{"tier": r["tier"], "reason": r["reason"]} for r in skipped],
             "leaking": [{"tier": r["tier"], "reason": r["reason"]} for r in leaking],
+            "diverging": [{"tier": r["tier"], "reason": r["reason"]}
+                          for r in diverging],
             "disagreements": disagreements,
             "points": len(by_point),
             "crossChecked": cross_checked,
@@ -1191,16 +1451,17 @@ def _cross_tier_dossier(ir: dict, records: list, cap: int | None) -> dict:
             "executed": len(executed),
             "skipped": len(skipped),
             "tiersLeakingResidue": len(leaking),
+            "tiersDiverging": len(diverging),
             "disagreements": len(disagreements),
         },
     }
 
 
 def _format_host_output(record: dict, printer) -> None:
-    """Replay what the program printed at each fault point on a captured tier,
-    labelled with the tier and the point, under that tier's line.  The py leg
-    runs in process uncaptured, so its host output already reached the
-    terminal and carries no ``hostOutput`` (issue #1614)."""
+    """Replay what the program printed at each fault point, labelled with the
+    tier and the point, under that tier's line (issue #1614).  Every tier's
+    output is captured now: the compiled tiers' to read the `--once` proof, the
+    py leg's to read the compensation markers (issue #1511)."""
     for point in record.get("points") or []:
         host = point.get("hostOutput")
         if not host:
@@ -1224,27 +1485,46 @@ def _format_cross_tier(dossier: dict, printer) -> None:
         if record["status"] == "executed":
             clean = sum(1 for p in record["points"] if p["status"] == "clean")
             printer(f"  {tier:5} EXECUTED — {clean} fault point(s), all "
-                    f"residue-free")
+                    f"residue-free, every owed compensation run")
         elif record["status"] == "failed":
             printer(f"  {tier:5} RESIDUE  — {record['reason']}")
+        elif record["status"] == "diverged":
+            printer(f"  {tier:5} DIVERGED - {record['reason']}")
         else:
             printer(f"  {tier:5} skipped  — {record['reason']}")
+        unobserved = sorted({name for p in record["points"]
+                             for name in (p.get("compensations") or {})
+                             .get("unobserved", [])})
+        if unobserved:
+            printer(f"        not observed on this tier (not an extern with an "
+                    f"inline body): {', '.join(unobserved)}")
         _format_host_output(record, printer)
     printer("")
     agreement = dossier["agreement"]
     if dossier["counts"]["disagreements"]:
-        printer("DISAGREEMENT — the tiers do not agree on residue-freedom:")
+        printer("DISAGREEMENT — the tiers do not agree at these fault points:")
         for item in agreement["disagreements"]:
             verdicts = ", ".join(f"{t}={s}" for t, s in item["verdicts"].items())
-            printer(f"  {item['where']}: {verdicts}")
+            printer(f"  {item['component']} {item['where']}: {verdicts}")
+    if agreement["diverging"]:
+        printer("DIVERGENCE: "
+                + ", ".join(d["tier"] for d in agreement["diverging"])
+                + " did not run the compensations the program declared; "
+                  "not agreement.")
     executed = agreement["executed"]
-    if len(executed) >= 2:
+    if (dossier["counts"]["disagreements"] or agreement["leaking"]
+            or agreement["diverging"]):
+        if executed:
+            printer(f"  clean on: {', '.join(executed)}")
+    elif len(executed) >= 2:
         printer(f"AGREEMENT — {len(executed)} tiers ({', '.join(executed)}) "
                 f"agree on {agreement['crossChecked']} shared fault point(s): "
-                f"residue-free on every tier.")
+                f"residue-free on every tier, and each ran exactly the "
+                f"compensations declared owed.")
     elif len(executed) == 1:
         printer(f"one tier executed ({executed[0]}): residue-free at every "
-                f"fault point; no cross-tier agreement to check (the others "
+                f"fault point, with exactly the compensations declared owed; "
+                f"no cross-tier agreement to check (the others "
                 f"loud-skipped — see above).")
     else:
         printer("no tier could execute the sweep — every tier loud-skipped "

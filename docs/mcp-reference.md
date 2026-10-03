@@ -209,7 +209,19 @@ author.
 ### `revl_grammar`
 
 The revl surface syntax and the rules that reject code - small enough to keep in
-context while generating. No inputs.
+context while generating. With no inputs it returns that prose summary
+(`grammar`) with the guarantees and their fixes.
+
+- Inputs (all optional): `format` (`lark`, `gbnf` or `ebnf`) returns instead
+  the grammar of revl source derived from the parser, the text
+  `revl grammar --format` prints ([commands-reference.md](commands-reference.md#revl-grammar)),
+  as `{ok, format, category, grammar}`. `lark` is llguidance's dialect, `gbnf`
+  the character-level GBNF the llama.cpp server and XGrammar read.
+  `category` (`program`, `component-body`, `statements`, `expression` or
+  `type`, default `program`) scopes it to one syntactic slot, so a client
+  filling a hole can constrain its decoder to that slot (each hole's
+  `fillSpec.grammarCategory` names it). `category` without
+  `format`, or a value outside these lists, is refused.
 
 ---
 
@@ -496,6 +508,15 @@ records who closed it and why with the named outcome `revoked`. Only the
 proposer or an approver the rule names may close it; a bystander is refused and
 the refusal recorded. A pending question and a minted grant are two different
 objects, so they are two branches of one verb and not two spellings of one.
+
+The same `hash` on a SINGLE-PARTY ticket (no rule names its approvers) is the
+operator's NO (issue #1553): the next re-issue of the crossing that ticket holds
+is refused (`ApprovalRefused`, outcome `refused`) and fires nothing, and a yes
+minted for it and not yet spent is withdrawn (`approval-revoked`). The revoke
+closes that round, so a later `revl_approve` of it is refused. One no refuses
+one re-issue; asking again after that is a new question. This is how an
+operator refuses a ticket an app request raised on `revl serve --http`
+(`--operator-listen`). `asToken`, `asSecret` and `asProof` do not apply to it.
 
 - Inputs: `capability`; `requestId`; `hash`; `reason`; `asToken`; `asSecret`;
   `asProof`.

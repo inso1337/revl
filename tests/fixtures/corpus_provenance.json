@@ -39,6 +39,7 @@
    "backends/go/scenarios/counter.rvl",
    "backends/go/scenarios/emitted/jsonwire/jsonwire.rvl",
    "backends/go/scenarios/emitted/timer/timer.rvl",
+   "backends/go/scenarios/extern_compensate.rvl",
    "backends/go/scenarios/memkv.rvl",
    "backends/go/scenarios/method_compensate.rvl",
    "backends/go/scenarios/provide_method_witnessed.rvl",

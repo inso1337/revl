@@ -23,9 +23,11 @@ Both refuse by name, with `ModelPlacementRefused`:
   the "any free device" answer the scheduler exists to refuse.
 
 WHAT THIS DOES NOT DO. It does not load a model, and it cannot stop host code
-that never asks. The provider adapters that will load and unload a member per
-role (slice S2) are the code that is meant to ask, on every load. Until they
-exist, this is the checked answer a provider reads, not a sandbox around one.
+that never asks. The code that asks is a role's provision
+(`revl.providers.provision`, slice S2): it loads a managed role only on the
+device `device_for` answers, and reads `device_class` to check the class the
+server reports the model loaded on. Host code that loads a model without a
+provision is still not refused.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ _DOC = "docs/model-scheduling.md"
 _lock = threading.Lock()
 _host: str | None = None
 _resident: MappingProxyType | None = None
+_classes: MappingProxyType = MappingProxyType({})
 
 
 class ModelPlacementRefused(RuntimeError):
@@ -49,29 +52,32 @@ class ModelPlacementRefused(RuntimeError):
         self.role = role
 
 
-def install(host: str, resident: dict) -> None:
-    """Install this process's schedule: `{role: device}` for host `host`.
+def install(host: str, resident: dict, classes: dict | None = None) -> None:
+    """Install this process's schedule: `{role: device}` for host `host`,
+    and `{device: class}` for the devices the host declared.
 
     Called once by the runner at boot, after it has re-derived the schedule.
     A second install with a different schedule is refused rather than
     replacing the first, so the device a role was answered with at boot is the
     one it is answered with for the life of the process.
     """
-    global _host, _resident
+    global _host, _resident, _classes
     frozen = MappingProxyType(dict(resident))
+    kinds = MappingProxyType(dict(classes or {}))
     with _lock:
-        if _resident is not None and (_host, dict(_resident)) != (host, dict(frozen)):
+        if _resident is not None and (_host, dict(_resident), dict(_classes)) \
+                != (host, dict(frozen), dict(kinds)):
             raise ModelPlacementRefused(
                 "", f"a model schedule for host `{_host}` is already installed "
                     f"in this process; a second, different schedule is refused")
-        _host, _resident = host, frozen
+        _host, _resident, _classes = host, frozen, kinds
 
 
 def uninstall() -> None:
     """Remove the installed schedule. For tests and in-process tooling."""
-    global _host, _resident
+    global _host, _resident, _classes
     with _lock:
-        _host, _resident = None, None
+        _host, _resident, _classes = None, None, MappingProxyType({})
 
 
 def installed() -> dict | None:
@@ -98,6 +104,13 @@ def device_for(role: str) -> str:
                   f"(scheduled here: {placed or 'nothing'}); a role runs only "
                   f"where the schedule placed it ({_DOC})")
     return resident[role]
+
+
+def device_class(device: str) -> str | None:
+    """The class (`cpu`, `gpu`, `npu`) the host declared `device` as, or None
+    when the installed schedule carried no class for it."""
+    with _lock:
+        return _classes.get(device)
 
 
 def claim(role: str, device: str) -> str:
