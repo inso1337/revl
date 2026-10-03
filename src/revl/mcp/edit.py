@@ -64,6 +64,7 @@ other two.
 from __future__ import annotations
 
 import copy
+import os
 import re
 
 from ..compiler import compile_source
@@ -83,52 +84,109 @@ class EditError(RuntimeError):
 # ---------------------------------------------------------------- buffers
 
 def virtual_source(session) -> dict:
-    """The server-side working source set for `session`: ``{source, modules}``.
+    """The server-side working source set for `session`.
 
     Seeded from the running composition's admission inputs (`session.origin`)
     and carried on ``session.draft`` across edits, so an agent edits a source
-    the server already holds instead of resending it. Only inline buffers are
-    editable — the `source` string and any in-memory `modules` — because those
-    are the ones the audit's #1 finding re-serializes and the ones a snapshot
-    can faithfully reproduce. A file-backed composition edits on disk and swaps.
+    the server already holds instead of resending it.
+
+    Two shapes. An inline composition is ``{source, modules}``. A composition
+    loaded from `files` is ``{files, files_content, modules}``: one buffer per
+    loaded file, keyed by the path it was loaded under (issue #1690). Its text is
+    the text the session last swapped in when an edit has run, and otherwise the
+    file as it is on disk now. Disk is never written: the edited text lives on
+    the session, and `revl_snapshot` carries it.
     """
     draft = getattr(session, "draft", None)
     if draft is not None:
         return draft
     origin = getattr(session, "origin", None) or {}
+    if origin.get("source") is None and origin.get("files"):
+        return _files_source(origin)
     return {"source": origin.get("source"),
             "modules": dict(origin.get("modules") or {})}
 
 
-def _resolve_buffer(vs: dict, target: str | None) -> str:
-    """Which named buffer an edit addresses. `None`/"source" is the main inline
-    source; anything else must name an in-memory module."""
-    if target in (None, "source"):
-        if vs.get("source") is None:
-            raise EditError(
-                "there is no inline `source` buffer to edit — this composition "
-                "was not loaded from inline source, so revl_edit has nothing "
-                "server-side to patch. Edit the file(s) and revl_swap, or "
-                "revl_load an inline `source` to iterate on it with revl_edit")
-        return "source"
-    if target in vs.get("modules", {}):
+def _files_source(origin: dict) -> dict:
+    files = list(origin["files"])
+    held = origin.get("files_content") or {}
+    return {"source": None, "files": files,
+            "files_content": {path: held[path] if path in held else _read_disk(path)
+                              for path in files},
+            "modules": dict(origin.get("modules") or {})}
+
+
+def _read_disk(path: str) -> str | None:
+    """A loaded file's text on disk, or None when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _match_file(files: list, target: str) -> str | None:
+    """The loaded path `target` names: the same spelling, or the same file."""
+    if target in files:
         return target
-    available = ["source"] if vs.get("source") is not None else []
-    available += sorted(vs.get("modules") or {})
+    wanted = os.path.realpath(os.path.abspath(target))
+    for path in files:
+        if os.path.realpath(os.path.abspath(path)) == wanted:
+            return path
+    return None
+
+
+def _editable(vs: dict) -> list[str]:
+    names = ["source"] if vs.get("source") is not None else []
+    return names + list(vs.get("files") or []) + sorted(vs.get("modules") or {})
+
+
+def _resolve_buffer(vs: dict, target: str | None) -> tuple[str, str]:
+    """Which buffer an edit addresses, as ``(kind, key)``. `None`/"source" is the
+    main inline source, or the one loaded file when there is exactly one; a
+    file path names a loaded file; anything else must name an in-memory module."""
+    files = vs.get("files") or []
+    if target in (None, "source"):
+        if vs.get("source") is not None:
+            return "source", "source"
+        if target is None and len(files) == 1:
+            return "file", files[0]
+        if files:
+            raise EditError(
+                f"this composition was loaded from {len(files)} files; name the "
+                f"one to edit in `target`: {', '.join(files)}")
+        raise EditError("the running composition has no source buffer to edit")
+    path = _match_file(files, target)
+    if path is not None:
+        return "file", path
+    if target in (vs.get("modules") or {}):
+        return "module", target
     raise EditError(
         f"no server-side source buffer named {target!r}; "
-        f"editable buffers: {', '.join(available) or 'none'}")
+        f"editable buffers: {', '.join(_editable(vs)) or 'none'}")
 
 
-def _get_text(vs: dict, buffer: str) -> str:
-    return vs["source"] if buffer == "source" else vs["modules"][buffer]
+def _get_text(vs: dict, buffer: tuple[str, str]) -> str:
+    kind, key = buffer
+    if kind == "source":
+        return vs["source"]
+    if kind == "file":
+        text = vs["files_content"].get(key)
+        if text is None:
+            raise EditError(f"the loaded file {key!r} cannot be read, so there is "
+                            "no text to patch")
+        return text
+    return vs["modules"][key]
 
 
-def _set_text(vs: dict, buffer: str, text: str) -> None:
-    if buffer == "source":
+def _set_text(vs: dict, buffer: tuple[str, str], text: str) -> None:
+    kind, key = buffer
+    if kind == "source":
         vs["source"] = text
+    elif kind == "file":
+        vs["files_content"][key] = text
     else:
-        vs["modules"][buffer] = text
+        vs["modules"][key] = text
 
 
 # ---------------------------------------------------------------- patching
@@ -253,6 +311,23 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
         f"(got keys: {', '.join(sorted(edit)) or 'none'})")
 
 
+def _apply_to_buffers(vs: dict, edits: list, default_target) -> list[dict]:
+    """Apply every edit in order, each to the buffer its own `target` names (or
+    the call's), so one call can change several files at once: a new import
+    and the definition it needs land together or not at all."""
+    applied: list[dict] = []
+    for edit in edits:
+        target = edit.get("target", default_target) if isinstance(edit, dict) \
+            else default_target
+        buffer = _resolve_buffer(vs, target)
+        text, echo = _apply_one(_get_text(vs, buffer), edit)
+        _set_text(vs, buffer, text)
+        if buffer[0] != "source":
+            echo["target"] = buffer[1]
+        applied.append(echo)
+    return applied
+
+
 def _apply_edits(text: str, edits: list) -> tuple[str, list[dict]]:
     """Apply every edit in order. Ranges refer to offsets in the text *as each
     edit sees it*, so an agent that sends offset-based edits should order them
@@ -283,13 +358,55 @@ def compile_virtual(vs: dict, *, manifest: dict | None = None,
         return compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
                               replacing=replacing, modules=vs.get("modules") or None,
                               profile=AUTHORING.profile())
-    raise EditError("the working source set has no inline `source` to compile")
+    if vs.get("files"):
+        from .server import compile_under_authoring  # noqa: PLC0415 — cycle
+
+        return compile_under_authoring(None, list(vs["files"]), manifest=manifest,
+                                       modules=file_modules(vs) or None,
+                                       replacing=replacing)
+    raise EditError("the working source set has no source to compile")
+
+
+def file_modules(vs: dict) -> dict:
+    """A files-loaded working set as `compile_under_authoring` takes it: every
+    buffer whose text is not what the file holds on disk, keyed by absolute path,
+    beside any in-memory modules. The compiler reads a path from this map before
+    the disk, so a `use` between two edited files resolves to the edited text.
+
+    Only an edited buffer rides here, and that is what decides trust: text in
+    this map arrived over the transport, so the compile runs under the
+    authoring profile, exactly as `revl_swap` with `modules` does. A
+    composition whose files are all unedited compiles as the operator's own
+    jailed files, as at load."""
+    modules = dict(vs.get("modules") or {})
+    for path, text in (vs.get("files_content") or {}).items():
+        if text is not None and text != _read_disk(path):
+            modules[os.path.abspath(path)] = text
+    return modules
+
+
+def candidate_arguments(vs: dict, replacing: tuple = ()) -> dict:
+    """The working set in the argument shape `revl_swap` takes, for the gates
+    that read a candidate from its arguments (the lease derivation, the
+    quarantine run). A files-loaded set carries its edited text as `modules`,
+    so a gate compiles the patched files, never the stale ones on disk."""
+    if vs.get("files"):
+        arguments = {"files": list(vs["files"])}
+        modules = file_modules(vs)
+        if modules:
+            arguments["modules"] = modules
+    else:
+        arguments = {k: v for k, v in vs.items() if k in ("source", "modules")}
+    return {**arguments, "replacing": list(replacing)}
 
 
 def _origin_from(vs: dict) -> dict:
     origin: dict = {}
     if vs.get("source") is not None:
         origin["source"] = vs["source"]
+    if vs.get("files"):
+        origin["files"] = list(vs["files"])
+        origin["files_content"] = dict(vs.get("files_content") or {})
     if vs.get("modules"):
         origin["modules"] = dict(vs["modules"])
     return origin
@@ -318,9 +435,8 @@ def apply_edit(session, arguments: dict) -> dict:
 
     # Work on a copy: nothing about the session changes until an edit compiles.
     vs = copy.deepcopy(virtual_source(session))
-    buffer = _resolve_buffer(vs, arguments.get("target") or arguments.get("component"))
-    new_text, applied = _apply_edits(_get_text(vs, buffer), edits)
-    _set_text(vs, buffer, new_text)
+    applied = _apply_to_buffers(
+        vs, edits, arguments.get("target") or arguments.get("component"))
 
     replacing = tuple(arguments.get("replacing") or ())
 
@@ -383,7 +499,7 @@ def apply_edit(session, arguments: dict) -> dict:
     # the lease derivation scopes the edit's real replacement targets (and falls
     # back to the whole composition, i.e. fails closed, when they cannot be
     # derived).
-    gate_arguments = {**vs, "replacing": list(replacing)}
+    gate_arguments = candidate_arguments(vs, replacing)
     refusal = _srv._leases.check_swap(session, gate_arguments)
     if refusal is not None:
         return _srv._refused_by_lease(refusal)
@@ -403,4 +519,5 @@ def _summary(ir: dict) -> dict:
     return _s(ir)
 
 
-__all__ = ["apply_edit", "virtual_source", "compile_virtual", "EditError"]
+__all__ = ["apply_edit", "virtual_source", "compile_virtual", "file_modules",
+           "candidate_arguments", "EditError"]
