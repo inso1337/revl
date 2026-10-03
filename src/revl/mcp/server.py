@@ -2818,8 +2818,11 @@ TOOLS = [
                        "is never written. With nothing loaded, pass `files` or `source` "
                        "and this loads it first, then edits it. {symbol, replacement} "
                        "replaces one top-level declaration by name (read it first with "
-                       "revl_source); {append} adds new declarations at the end of "
-                       "the buffer, refusing a name already declared. A response "
+                       "revl_source); {symbol, body} replaces only a method's or "
+                       "fn's body, keeping its declared header (write the decision, "
+                       "not the frame); {append} adds new declarations at the end of "
+                       "the buffer, refusing a name already declared. Terse text is "
+                       "fine: it is stored as `revl fmt` writes it. A response "
                        "that edited lists the `touched` symbols.",
         "inputSchema": {
             "type": "object",
@@ -2855,6 +2858,11 @@ TOOLS = [
                                                       "whole top-level declaration "
                                                       "this names (as revl_source "
                                                       "addresses it)"},
+                            "body": {"type": "string",
+                                     "description": "with `symbol` naming a method "
+                                                    "or fn: its new body only (an "
+                                                    "expression, or statements); "
+                                                    "the header stays"},
                             "append": {"type": "string",
                                        "description": "new top-level declarations to "
                                                       "add at the end of the buffer "

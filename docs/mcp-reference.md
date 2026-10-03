@@ -409,6 +409,29 @@ finest level that holds. When only a component's methods (or a service's
 operations, or a type's members) changed, the members are reported, each with
 `parent` and `parentKind`; otherwise the whole declaration is.
 
+**Write the decision, not the frame (issue #1700).** Output tokens are the
+expensive ones, so the edit path asks for as little text as it can:
+
+- `{symbol, body}` replaces only the body of a method (`Comp.key.method`) or a
+  top-level `fn`. The server keeps the declared header (name, parameters,
+  return type). An expression becomes `= expr`; a body with a line that starts
+  with `let`, `var` or `return` becomes a block. A symbol that is not a method
+  or fn is refused; send `replacement` for it.
+- Terse text is accepted everywhere an edit takes source (`replacement`,
+  `body`, `append`, and `revl_change`'s `replace` and `add`). It is stored as
+  `revl fmt` writes it, so `fn now()=4+5` is held as `fn now() = 4 + 5`. When
+  the stored text differs from what was sent, the edit's echo in `applied`
+  carries it as `canonical`, so there is nothing to re-send.
+- The minimal forms, smallest first, for changing one method:
+  `{symbol: "C.k.m", body: "<expr>"}`, then `{symbol: "C.k.m", replacement:
+  "fn m(..) = <expr>"}`, then `revl_change {replace: {component, source}}`, then
+  a whole-file `revl_swap`. For the reference change in
+  `tests/test_mcp_terse_edits_1700.py` (one body in `examples/user_cache.rvl`)
+  these are 77, 98, 420 and 1,290 bytes of arguments.
+- A member that shares a line with something else (a one-line
+  `provide k { fn m() = 1 }`) cannot be addressed alone; lay the provide block
+  out one member per line first (`revl_fmt` does not split lines).
+
 An `{append}` edit adds new top-level declarations at the end of the buffer
 (the only one, or `target`), with no offset to compute. A name that is already
 declared in any buffer is refused; replace it with `{symbol, replacement}`
@@ -432,7 +455,7 @@ components, where the top-level `touched` above names symbols:
 
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
   replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}` /
-  `{append}`, each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
+  `{symbol, body}` / `{append}`, each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
   inline source or the one loaded file, a loaded file's path, or an in-memory
   module); `replacing`; with nothing loaded, `files` / `source` / `modules` /
   `config` to load first.
