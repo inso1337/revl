@@ -171,14 +171,32 @@ class SseWriter:
         return self._raw(b"")
 
 
+def _readable_now(connection) -> bool:
+    """Is there something to read (data, or the peer's FIN) right now?
+
+    `poll`, not `select`: `select()` refuses a descriptor at or above
+    FD_SETSIZE (1024) with `ValueError`, so a process holding that many files
+    read every connection as closed and ended every listen stream at its first
+    quiet poll (issue #1716; it reddened `frontend-cordis`, whose full suite
+    holds more than 1024 descriptors by the time it reaches the stream tests).
+    `select` stays only where `poll` does not exist."""
+    poll = getattr(select, "poll", None)
+    if poll is None:  # pragma: no cover - Windows has no poll
+        readable, _, _ = select.select([connection], [], [], 0)
+        return bool(readable)
+    poller = poll()
+    poller.register(connection, select.POLLIN | select.POLLPRI
+                    | select.POLLHUP | select.POLLERR)
+    return bool(poller.poll(0))
+
+
 def peer_closed(connection) -> bool:
     """Has the client closed the connection? Plain sockets only; under TLS a
     closed peer is found by the next write instead."""
     if connection is None or hasattr(connection, "getpeercert"):
         return False
     try:
-        readable, _, _ = select.select([connection], [], [], 0)
-        if not readable:
+        if not _readable_now(connection):
             return False
         return connection.recv(1, socket.MSG_PEEK) == b""
     except (OSError, ValueError):

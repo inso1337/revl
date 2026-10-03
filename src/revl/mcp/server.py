@@ -83,6 +83,7 @@ from . import gauntlet as _gauntlet
 from . import quarantine as _quarantine
 from . import quorum as _quorum
 from . import repair as _repair
+from . import runtime_gate as _runtime_gate
 from . import ship as _ship
 from . import deploy as _mcp_deploy
 from .persist import RestoreError
@@ -91,6 +92,7 @@ from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha
 from .. import query as Q
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
+from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
 from .session import Session, SessionError
 
@@ -1764,7 +1766,11 @@ def _tool_check(arguments: dict) -> dict:
     try:
         ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
-        return report(error)
+        rejected = report(error)
+        # issue #1704: every guarantee in the same answer, not only the one
+        # that refused, so the self-check is one call
+        rejected["selfCheck"] = _authoring_loop.self_check(rejected["diagnostics"])
+        return rejected
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
@@ -1777,7 +1783,8 @@ def _tool_check(arguments: dict) -> dict:
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
     return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": holes}
+            "holes": holes,
+            "selfCheck": _authoring_loop.self_check(None, holes)}
 
 
 def _untrusted_author() -> bool:
@@ -2226,7 +2233,11 @@ _SOURCE_INPUT = {
 TOOLS = [
     {
         "name": "revl_check",
-        "description": "Compile a revl component. Returns the composition summary, "
+        "description": _authoring_loop.step_label("revl_check") + " "
+                       "Compile a revl component and self-check it: `selfCheck` "
+                       "lists every guarantee G1-G9 as pass, fail (with the code "
+                       "and the fix) or unchecked, plus `admissible`. Also returns "
+                       "the composition summary, "
                        "the G8 boundary and `holes` (open typed-hole obligations, "
                        "each with file, line, expected type and message) on success, "
                        "or structured diagnostics (code, guarantee, expected/actual, "
@@ -2238,7 +2249,8 @@ TOOLS = [
     },
     {
         "name": "revl_admit",
-        "description": "Check a candidate component against a RUNNING composition "
+        "description": _authoring_loop.step_label("revl_admit") + " "
+                       "Check a candidate component against a RUNNING composition "
                        "(the admission gate): ambient services are in scope, G2/G3 "
                        "span both, and interface drift is refused. Use before "
                        "hot-swapping generated code into a live system.",
@@ -2469,8 +2481,11 @@ TOOLS = [
     },
     {
         "name": "revl_edit",
-        "description": "Patch the SERVER-SIDE source of the running composition and "
-                       "re-admit — deltas, not documents. Instead of re-sending the "
+        "description": _authoring_loop.step_label("revl_edit") + " "
+                       "Patch the SERVER-SIDE source of the running composition and "
+                       "re-admit — deltas, not documents. The response carries "
+                       "`blastRadius`: the revl_query_withdraw cascade for every "
+                       "component the edit touches, so preflight comes with it. Instead of re-sending the "
                        "whole composition to change one line (revl_swap's cost, which "
                        "scales with the running system), send a small structured patch "
                        "against a named buffer the server already holds. Each edit is "
@@ -3276,7 +3291,12 @@ TOOLS = [
     {
         "name": "revl_state",
         "description": "What is loaded right now: fiber states, provided keys, whether "
-                       "a rollback is available, and the trace since the last call.",
+                       "a rollback is available, and the trace since the last call. "
+                       "Always carries `loopAxes`: reversibility rate, share "
+                       "auto-approved with proof, prompts per session, preflight "
+                       "coverage, violations caught before execution and residue "
+                       "after abort, each as numerator, denominator and value, "
+                       "cumulative for the session.",
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_state,
@@ -3484,7 +3504,8 @@ TOOLS = [
 TOOLS.extend([
     {
         "name": "revl_scaffold",
-        "description": "Generate a typed, holed component skeleton from a spec "
+        "description": _authoring_loop.step_label("revl_scaffold") + " "
+                       "Generate a typed, holed component skeleton from a spec "
                        "(docs/scaffold.md) and return it WITH every open hole's "
                        "fillSpec in one call — expected type, capability bound, "
                        "in-scope bindings, reachable services (the same shape "
@@ -3589,7 +3610,8 @@ TOOLS.extend([
 # appended additively so the tool literal above stays owned by the core verbs
 TOOLS.append({
     "name": "revl_resolve",
-    "description": "Find a component to IMPORT instead of regenerating one. "
+    "description": _authoring_loop.step_label("revl_resolve") + " "
+                   "Find a component to IMPORT instead of regenerating one. "
                    "Give the NEED — a `service` declaration (source), a hole's "
                    "fill spec (verbatim from revl_check), or a service shape "
                    "object — and it returns ranked candidates whose provided "
@@ -3748,6 +3770,27 @@ for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
 
+# issue #1692: whether this interpreter can boot a composition at all. Probed
+# once, on first use; `set_runtime_available` overrides it (tests, transports).
+_RUNTIME_AVAILABLE: bool | None = None
+
+
+def runtime_available() -> bool:
+    global _RUNTIME_AVAILABLE
+    if _RUNTIME_AVAILABLE is None:
+        _RUNTIME_AVAILABLE = _runtime_gate.cordis_importable()
+    return _RUNTIME_AVAILABLE
+
+
+def set_runtime_available(available: bool | None) -> None:
+    """Pin the probe (`None` re-probes on next use)."""
+    global _RUNTIME_AVAILABLE
+    _RUNTIME_AVAILABLE = available
+
+
+# issue #1704: the authoring loop, in order, with the exact verbs
+_INSTRUCTIONS = _authoring_loop.INSTRUCTIONS
+
 
 # ---------------------------------------------------------------- protocol
 
@@ -3761,9 +3804,8 @@ def handle(message: dict) -> dict | None:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": "Compile revl components before proposing them; use "
-                            "revl_admit against the running manifest before a swap, "
-                            "and revl_plan to see what that swap would do first.",
+            "instructions": _INSTRUCTIONS if runtime_available()
+                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
         }
     elif method == "tools/list":
         result = {"tools": _ADVERTISED}
@@ -3789,7 +3831,15 @@ def handle(message: dict) -> dict | None:
             pass                    # refused above; the handler never runs
         elif decision.gated and not decision.allowed:
             payload = _refused_by_operator(decision)
+        elif not runtime_available() and _runtime_gate.is_refused(name, arguments):
+            # issue #1692: a verb that needs a live composition, on an
+            # interpreter that cannot boot one, refuses by name with the fix in
+            # `next`, instead of failing on an import error or on "nothing is
+            # loaded". After the operator gate: "you may not" outranks "this
+            # server cannot".
+            payload = _runtime_gate.refusal(name)
         else:
+            ir_before = getattr(SESSION, "ir", None)
             try:
                 payload = handler(arguments)
                 _remember_live_host_bodies()
@@ -3806,6 +3856,12 @@ def handle(message: dict) -> dict | None:
                 }]}
             if decision.gated and decision.allowed:
                 _stamp_authority(payload, decision)
+            # issue #1738: the loop axes read every call that reached a handler
+            # (preflight queries, composition edits, and refusals before and at
+            # run time).
+            record_tool_call = getattr(SESSION, "record_tool_call", None)
+            if record_tool_call is not None:
+                record_tool_call(name, arguments, payload, ir_before)
         result = {
             "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),
