@@ -9,6 +9,7 @@ import RevL.Theorems.R4_NoResidue
 import RevL.Theorems.A9_ProvideKeyDeclared
 import RevL.Theorems.A2_NoAcquisitionAfterProvision
 import RevL.Theorems.G4_DeferredPosition
+import RevL.Theorems.G4_ApprovalFloor
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -33,7 +34,12 @@ proved model itself**, not from a private restatement of it (roadmap item
     `LComponent` beside its installed provide-block keys (the `PB` rows)
     and its routed keys (the `PR` rows); `a9RowB_iff` PROVES
     `a9RowB c blocks routed = true ↔ RevL.A9.A9OK ⟨c, blocks, routed⟩`,
-    both directions of the rule (issues 1167 and #1172).
+    both directions of the rule (issues 1167 and #1172);
+  * `AP … approval=` is `approvalRowB`, which IS
+    `RevL.G4Approval.crossingB` over one marked crossing's tokens (the
+    `AX` rows), its `with` edge (the `AE` row) and the file's
+    approval-required tokens (the `AR` rows); `approvalRowB_iff` PROVES
+    it equals `RevL.G4Approval.CrossingOK` (issue #1455).
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -125,9 +131,13 @@ Fact rows in (tab-separated, one fact per line):
                                              KEY it went through (what the
                                              provide-method bound compares
                                              against its service's
-                                             `emission[...]`). `A` and `K`
-                                             feed the fold alone and carry
-                                             the boundary spelling only
+                                             `emission[...]`); for a host
+                                             emission it is the capability
+                                             TOKEN the call reaches, a scoped
+                                             extern's scope (issue #1455).
+                                             `A` and `K` feed the fold alone
+                                             and carry the boundary spelling
+                                             only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context:
@@ -190,6 +200,14 @@ Fact rows in (tab-separated, one fact per line):
                                              re-issued. Not a WAL record — a
                                              property of the world the
                                              reference drives.
+  AR <file> <token>                          an approval-required capability
+                                             token: an extern declares
+                                             `requires approval`, and this is
+                                             its scope, or its name
+  AX <file> <comp> <ord> <token>             one token the component's
+                                             marked crossing `ord` reaches
+  AE <file> <comp> <ord> <scope>             that crossing's `with` edge; no
+                                             row when it carries none
   AQ <file> <comp> <ord> <acquire|provide|other>
                                              one activation-body statement,
                                              at body index `ord`, as the A2
@@ -227,6 +245,9 @@ Verdict rows out:
   DF <file> <deferred=ok|fail>                     G4 deferred position:
                                                    `RevL.G4Deferred.deferredB`
                                                    over the file's `DR` reaches
+  AP <file> <comp> <ord> <approval=ok|fail>        the approval floor over one
+                                                   marked crossing:
+                                                   `RevL.G4Approval.crossingB`
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -1630,6 +1651,63 @@ theorem a2OKB_iff (steps : List RevL.A2.Step) :
 
 end A2Ordering
 
+/-! ## Deciding the approval floor (issue #1455)
+
+Item 246's declaration-owned floor: a marked crossing that reaches a
+capability token some extern declared `requires approval` for must carry a
+`with` edge whose scope covers it (`lower._require_declared_approval`). The
+exporter resolves the three facts the rule is stated over, per crossing:
+the tokens it reaches (`AX`), its edge (`AE`) and the file's required tokens
+(`AR`). The verdict is the model's `RevL.G4Approval.crossingB`, and
+`approvalRowB_iff` is the bridge to `RevL.G4Approval.CrossingOK`. -/
+
+section ApprovalFloor
+
+structure ARRow where
+  path : String
+  token : String
+
+structure AXRow where
+  path : String
+  comp : String
+  ord : String
+  token : String
+
+structure AERow where
+  path : String
+  comp : String
+  ord : String
+  scope : String
+
+def parseAR (f : List String) : Option ARRow :=
+  match f with
+  | ["AR", path, token] => some ⟨path, token⟩
+  | _ => none
+
+def parseAX (f : List String) : Option AXRow :=
+  match f with
+  | ["AX", path, comp, ord, token] => some ⟨path, comp, ord, token⟩
+  | _ => none
+
+def parseAE (f : List String) : Option AERow :=
+  match f with
+  | ["AE", path, comp, ord, scope] => some ⟨path, comp, ord, scope⟩
+  | _ => none
+
+/-- **Approval decider**: the model's judgment over one crossing. -/
+def approvalRowB (required tokens : List String) (edge : Option String) : Bool :=
+  RevL.G4Approval.crossingB required ⟨tokens, edge⟩
+
+/-- **The approval verdict is the model's rule**: the printed Bool is
+`true` exactly when every approval-required token the crossing reaches is
+covered by its edge. -/
+theorem approvalRowB_iff (required tokens : List String) (edge : Option String) :
+    approvalRowB required tokens edge = true ↔
+      RevL.G4Approval.CrossingOK required ⟨tokens, edge⟩ :=
+  RevL.G4Approval.crossingB_iff required ⟨tokens, edge⟩
+
+end ApprovalFloor
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1680,6 +1758,18 @@ def main (args : List String) : IO UInt32 := do
     let lruns := fields.filterMap parseLRun
     let lfails := fields.filterMap parseLFail
     let aqrows := fields.filterMap parseAQ
+    let arrows' := fields.filterMap parseAR
+    let axrows := fields.filterMap parseAX
+    let aerows := fields.filterMap parseAE
+    -- An edge with no crossing, or two edges on one crossing, is a malformed
+    -- export: refuse it rather than read one of them.
+    for e in aerows do
+      if !(axrows.any fun x => x.path == e.path && x.comp == e.comp && x.ord == e.ord) then
+        IO.eprintln s!"oracle: AE row without a crossing: {e.path} {e.comp} {e.ord}"
+        return 1
+      if (aerows.filter fun x => x.path == e.path && x.comp == e.comp && x.ord == e.ord).length > 1 then
+        IO.eprintln s!"oracle: two AE rows on one crossing: {e.path} {e.comp} {e.ord}"
+        return 1
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
@@ -1885,6 +1975,17 @@ def main (args : List String) : IO UInt32 := do
       let reaches := (drrows.filter (fun r => r.path == p)).filterMap reachOf
       let dfv := if deferredOKB reaches then "ok" else "fail"
       out := out ++ s!"DF\t{p}\tdeferred={dfv}\n"
+      -- AP verdicts (the approval floor, issue #1455), one per marked
+      -- crossing that reaches a token: the model's `crossingB` over its `AX`
+      -- tokens, its `AE` edge and the file's `AR` required tokens.
+      let required := (arrows'.filter (fun r => r.path == p)).map (·.token)
+      let pax := axrows.filter (fun r => r.path == p)
+      let pae := aerows.filter (fun r => r.path == p)
+      for k in (pax.map (fun r => (r.comp, r.ord))).eraseDups do
+        let toks := (pax.filter (fun r => r.comp == k.1 && r.ord == k.2)).map (·.token)
+        let edge := (pae.find? (fun r => r.comp == k.1 && r.ord == k.2)).map (·.scope)
+        let apv := if approvalRowB required toks edge then "ok" else "fail"
+        out := out ++ s!"AP\t{p}\t{k.1}\t{k.2}\tapproval={apv}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -1945,3 +2046,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.parseStep_stepName
 #print axioms RevLOracle.a2OKB_iff
 #print axioms RevLOracle.deferredOKB_iff
+#print axioms RevLOracle.approvalRowB_iff

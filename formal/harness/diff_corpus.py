@@ -122,6 +122,10 @@ from revl.typecheck import (
 )
 from revl.taint import strip_qualifiers  # the shipped qualifier normalization
 from revl.wal import WAL_GUARANTEE, WAL_VERSION
+# The approval floor's two pieces of algebra (item 246), imported rather than
+# restated: the scope an `Approval[C]` type carries, and whether a scope
+# covers a token. The reference's `AP` verdicts are the shipped ones.
+from revl.lower import _approval_covers, _approval_scope_of
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
     EffectStmt,
@@ -137,6 +141,7 @@ from revl.parser import (
     ExprRecord,
     ExprVar,
     IsolateStmt,
+    LetApprovalStmt,
     LetEffect,
     Parser,
     ProvideStmt,
@@ -471,6 +476,51 @@ def _fn_emitting(prog) -> set[str]:
                 emitting.add(fn)
                 changed = True
     return emitting
+
+
+def _emitting_tokens(prog) -> dict[str, set[str]]:
+    """`emission_analysis._emitting_capabilities` over the parser AST: name ->
+    the capability TOKENS a call to it reaches.
+
+    An `emission` or `witnessed` extern is seeded with its declared scope,
+    or its own name when it declares none ("a scope replaces the name; it
+    does not join it", docs/capabilities.md section 2). A module `fn`
+    carries the union of what its bare-name callees reach, and a
+    first-class reference to an emitting callable in its body adds `*` (the
+    token no `emission[...]` list can name) beside that callable's tokens,
+    exactly as the checker's `passed` channel does. The call and value
+    channels are `_fn_body_calls`, the same split the `FN` row's `star`
+    marker is read from.
+
+    Two readers: the F row's bound column (`_reach_call`), which the checker
+    measures against a service operation's `emission[...]` entries, and the
+    approval floor's crossing tokens (`_approval_tokens`), which the checker
+    measures against `requires approval`. Both key the requirement by token,
+    so a scoped host emission carries its scope into the model rather than
+    its name or `*` (issue #1455)."""
+    caps: dict[str, set[str]] = {
+        e.name: set(e.capabilities or ()) or {e.name}
+        for e in prog.externs
+        if getattr(e, "classification", "") in ("emission", "witnessed")}
+    calls: dict[str, list[str]] = {}
+    passed: dict[str, set[str]] = {}
+    for fn in prog.fn_decls:
+        calls[fn.name], passed[fn.name] = _fn_body_calls(fn.body)
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            reached: set[str] = set()
+            for callee in called:
+                reached |= caps.get(callee, set())
+            for ref in sorted(passed.get(name, ())):
+                if caps.get(ref):
+                    reached.add("*")
+                    reached |= caps[ref]
+            if reached and not reached <= caps.get(name, set()):
+                caps.setdefault(name, set()).update(reached)
+                changed = True
+    return caps
 
 
 # -------------------------------------------------- whole-Prog export (#276)
@@ -868,7 +918,7 @@ def collect_arrow_param_aliases(body, handles: dict, aliases: dict,
 def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
                 requires: dict, handles: dict, psvc: dict, bounds: dict,
                 em_set: set, emitting: set, aliases: dict | None,
-                externs: "set[str] | None") -> None:
+                host_tokens: "dict[str, set[str]] | None") -> None:
     """The crossing ONE call head contributes (see `walk_reach`). The
     arguments are the caller's to walk, under whatever region encloses them:
     a call evaluated to produce an argument is not the marked crossing."""
@@ -908,21 +958,25 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
         # A host emission. The two namespaces part company here (#1169 F3):
         # the attenuation fold gives it the unnameable `*` whatever the
         # extern is called (`_emit_step_caps_pairs`: a non-`req` target is
-        # `Cap("*")`), but the provide-method BOUND names a DIRECT emission
-        # extern by the extern — `_emitting_capabilities` seeds the fixed
-        # point with `{wire}` for `extern emission fn wire`, and
-        # `_method_emissions` measures that name against the declared
-        # `emission[...]` entries, which is why `Db.execute` can be declared
-        # `emission[wire, ...]` at all. A transitively-emitting named fn
-        # stays `*` on both sides (STATUS.md, "known fidelity limits").
-        bound = root if externs is not None and root in externs else "*"
-        out.add(("*", bound))
+        # `Cap("*")`), but the provide-method BOUND names the capability
+        # TOKENS the call reaches, read off `_emitting_capabilities`' fixed
+        # point (`_emitting_tokens`), which `_method_emissions` measures
+        # against the declared `emission[...]` entries. An unscoped
+        # `extern emission fn wire` is the token `wire`, which is why
+        # `Db.execute` can be declared `emission[wire, ...]` at all; a SCOPED
+        # `extern emission[pay] fn charge` is `pay` and not `charge` ("a
+        # scope replaces the name", issue #1455); a named fn reaching either
+        # carries the tokens it reaches, and `*` beside them only for a
+        # first-class reference, as the checker's fold adds it.
+        reached = (host_tokens or {}).get(root) or {"*"}
+        for token in sorted(reached):
+            out.add(("*", token))
 
 
 def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
                handles: dict, psvc: dict, bounds: dict, em_set: set,
                emitting: set, aliases: dict | None = None,
-               externs: "set[str] | None" = None) -> None:
+               host_tokens: "dict[str, set[str]] | None" = None) -> None:
     """Collect the emission caps `node` crosses, each as the PAIR
     `(attenuation spelling, bound spelling)` — the two namespaces a crossing
     has (see `_canon_cap` / `_declared_cap`). The caller keeps whichever half
@@ -932,9 +986,10 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     surface, like `_collect_emit_caps_pairs`) or "all" (also count any
     resolved emission call — a provide method's reach for the bound, like
     `_method_emissions.walk`). A spawn-handle emission is the unnameable
-    `*` in both namespaces; an emitting-fn call too; a DIRECT emission-extern
-    call is `*` for the fold and the extern's name for the bound
-    (`_reach_call`). `externs` is the file's emission-extern name set.
+    `*` in both namespaces; a host emission (an emission extern, or a fn
+    reaching one) is `*` for the fold and the capability tokens it reaches
+    for the bound (`_reach_call`). `host_tokens` is the file's
+    `_emitting_tokens` table.
 
     An `emit` marks its HEAD call only: `_emit_step_caps_pairs` reads the
     step's `expr.target` and nothing beneath it, so the arguments (and a
@@ -944,7 +999,8 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     as a marked crossing (#1169 F2, the `walk_calls` leak's twin)."""
     if node is None or isinstance(node, (str, int, float, bool)):
         return
-    args = (requires, handles, psvc, bounds, em_set, emitting, aliases, externs)
+    args = (requires, handles, psvc, bounds, em_set, emitting, aliases,
+            host_tokens)
     if isinstance(node, (EmitStmt, EmitExpr)) and not isinstance(node, type):
         expr = getattr(node, "expr", None)
         if isinstance(expr, ExprCall):
@@ -970,6 +1026,256 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     if isinstance(node, (list, tuple)):
         for x in node:
             walk_reach(x, out, region, *args)
+
+
+# ---------------------------------------- the approval floor (issue #1455)
+#
+# Item 246's declaration-owned floor (`lower._require_declared_approval`): a
+# marked crossing that reaches a capability TOKEN some extern declared
+# `requires approval` for must carry a `with` edge whose `Approval[C]` scope
+# covers it. The model states the rule (`RevL.G4Approval.CrossingOK`); the
+# exporter carries the three facts it is stated over:
+#
+#   AR <file> <token>               an approval-required token
+#                                   (`lower._approval_index`'s `required`)
+#   AX <file> <comp> <ord> <token>  one token marked crossing `ord` reaches
+#                                   (`lower._approval_crossed_caps`)
+#   AE <file> <comp> <ord> <scope>  that crossing's `with` edge, absent when
+#                                   it has none
+#
+# One crossing per `emit` head (step or value form), plus one per emission
+# crossing in a step's `compensate` slot, which shares the step's edge
+# (`lower._compensate_crossings`). Only files that declare an
+# approval-required token carry the rows: elsewhere every crossing is
+# admitted by construction and a row would agree about nothing.
+
+
+class _ApprovalCtx(NamedTuple):
+    """What one component's crossings resolve against."""
+    requires: dict           # require local -> service
+    bounds: dict             # (service, op) -> (mode, declared entries)
+    em_set: set              # (service, op) pairs declared `emission`
+    handles: dict            # spawn handle var -> child component
+    psvc: dict               # component -> provide key -> service
+    aliases: dict            # provision aliases, as the marker rule reads them
+    extern_caps: dict        # emission extern -> its tokens
+    host_tokens: dict        # `_emitting_tokens`
+
+
+def _approval_required(prog) -> list[str]:
+    """`lower._approval_index`'s `required`: every extern that declares
+    `requires approval` contributes its capability TOKENS, its declared scope
+    when it has one and its name otherwise. Keyed by token, so the
+    requirement belongs to the capability, not to the extern."""
+    return sorted({token for e in prog.externs
+                   if getattr(e, "requires_approval", False)
+                   for token in (list(e.capabilities or ()) or [e.name])})
+
+
+def _op_tokens(bounds: dict, svc: str, meth: str) -> "list[str] | None":
+    """A service operation's declared scope, `*` when it declares none; None
+    when the service has no such operation."""
+    bound = bounds.get((svc, meth))
+    if bound is None:
+        return None
+    _mode, entries = bound
+    return list(entries) if entries else ["*"]
+
+
+def _approval_tokens(call: object, ctx: _ApprovalCtx) -> list[str]:
+    """`lower._approval_crossed_caps` over the AST: the tokens one marked
+    crossing reaches, in the checker's order of resolution.
+
+      1. a required service operation: its `emission[...]` scope, `*` when
+         bare or unresolvable (`_emit_crossed_caps`, the `req` arm);
+      2. a direct emission extern: its scope, or its name;
+      3. a provision's op, however the receiver holds it: off a spawn
+         handle, through a `let` alias, a field or element read off one, a
+         receiver written in place (an `if`, a `match`, a record or list
+         literal), a provide method's service-typed parameter, or an arrow's
+         service-typed parameter that an application binds a provision into:
+         the op's scope, `*` when bare (`_instance_get_call`,
+         `_service_receiver_decl`, `_check_arrow_param_crossings`);
+      4. a module `fn` (or a witnessed extern): the tokens it reaches
+         (`env.emitting_caps`).
+
+    Arm 3 reads the same alias table the marker rule does, through
+    `_route_values`, so a receiver the `G` row resolves is the receiver the
+    `AP` row resolves (issue #1455). An arrow never applied to a provision
+    gets no alias and so reaches no token, as the checker admits it."""
+    if not isinstance(call, ExprCall):
+        return []
+    rt = _route(call.callee)
+    if rt is not None:
+        root, chain = rt
+        if root in ctx.requires and chain and "." not in chain:
+            tokens = _op_tokens(ctx.bounds, ctx.requires[root], chain)
+            return tokens if tokens is not None else ["*"]
+        if not chain and root in ctx.extern_caps:
+            return list(ctx.extern_caps[root])
+    res = _provision_op(call, ctx)
+    if res is not None:
+        return _op_tokens(ctx.bounds, *res) or []
+    if rt is not None and not rt[1] and rt[0] in ctx.host_tokens:
+        return sorted(ctx.host_tokens[rt[0]])
+    return []
+
+
+def _provision_op(call: ExprCall, ctx: _ApprovalCtx) -> "tuple[str, str] | None":
+    """(service, op) a call reaches through a provision receiver, read the
+    way the marker rule reads it (`_route_values` over the alias table)."""
+    rv = _route_values(call.callee)
+    if rv is None:
+        return None
+    return _resolve_emission(rv[0], rv[1], {}, ctx.handles, ctx.psvc,
+                             ctx.aliases)
+
+
+def _is_emission_call_ast(call: ExprCall, ctx: _ApprovalCtx) -> bool:
+    """`lower._is_emission_call` over the AST, for the crossings a
+    `compensate` slot holds: a host callable that reaches a crossing, or an
+    `emission` operation through a required service or a spawn handle."""
+    rt = _route(call.callee)
+    if rt is not None:
+        root, chain = rt
+        if not chain:
+            return root in ctx.host_tokens
+        if root in ctx.requires and "." not in chain:
+            bound = ctx.bounds.get((ctx.requires[root], chain))
+            return bound is not None and bound[0] != "plain"
+    res = _provision_op(call, ctx)
+    return res is not None and res in ctx.em_set
+
+
+def _compensate_calls(node: object, ctx: _ApprovalCtx, out: list) -> None:
+    """`lower._compensate_crossings`: every emission crossing in a
+    `compensate` slot, outermost first. The slot is lowered bare, so a
+    crossing there carries no marker and is found by walking."""
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    if isinstance(node, ExprCall) and _is_emission_call_ast(node, ctx):
+        out.append(node)
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            _compensate_calls(getattr(node, f.name), ctx, out)
+        return
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            _compensate_calls(x, ctx, out)
+
+
+def _approval_edges(node: object, edges: dict) -> None:
+    """Fill `edges` (name -> the scope of the `Approval[C]` it holds) from the
+    bindings that produce one: `let a = await approval[C] { ... }`, a `let`
+    annotated `Approval[C]`, and a `let` aliasing a name already held."""
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    if isinstance(node, LetApprovalStmt):
+        edges[node.bind] = node.request.capability
+    elif type(node).__name__ == "LetStmt":
+        scope = _approval_scope_of(getattr(node, "type", None))
+        value = getattr(node, "value", None)
+        if scope is not None:
+            edges[node.name] = scope
+        elif isinstance(value, ExprVar) and value.name in edges:
+            edges[node.name] = edges[value.name]
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            _approval_edges(getattr(node, f.name), edges)
+        return
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            _approval_edges(x, edges)
+
+
+def _approval_edge(expr: object, edges: dict) -> "str | None":
+    """The scope a `with` clause's value carries. An expression the exporter
+    cannot name is read as NO edge, the fail-closed direction: were the
+    checker to admit it, the file would land in the fatal `formal-strict`."""
+    if isinstance(expr, ExprVar):
+        return edges.get(expr.name)
+    return None
+
+
+def _approval_crossings(node: object, ctx: _ApprovalCtx, edges: dict,
+                        out: list) -> None:
+    """Append `(tokens, edge)` for every marked crossing under `node`, in
+    source order: an `emit` step's head under its `with` edge, then each
+    crossing in its `compensate` slot under the same edge, and every `emit`
+    value form with no edge (it has no `with` clause)."""
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    if isinstance(node, EmitStmt):
+        edge = _approval_edge(node.approval, edges)
+        out.append((_approval_tokens(node.expr, ctx), edge))
+        comp: list = []
+        _compensate_calls(node.compensate, ctx, comp)
+        for call in comp:
+            out.append((_approval_tokens(call, ctx), edge))
+        head = node.expr
+        _approval_crossings(head.args if isinstance(head, ExprCall) else head,
+                            ctx, edges, out)
+        return
+    if isinstance(node, EmitExpr):
+        out.append((_approval_tokens(node.expr, ctx), None))
+        head = node.expr
+        _approval_crossings(head.args if isinstance(head, ExprCall) else head,
+                            ctx, edges, out)
+        return
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            _approval_crossings(getattr(node, f.name), ctx, edges, out)
+        return
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            _approval_crossings(x, ctx, edges, out)
+
+
+def approval_rows(rel: str, comp, ctx: _ApprovalCtx, svc_objs: dict,
+                  psvc: dict) -> list[str]:
+    """The `AX`/`AE` rows of one component: its activation body under the
+    approvals it mints, then each provide method under those plus its own
+    `Approval[C]`-typed parameters (read off the service declaration, by
+    position). A crossing that reaches no token gets no row: it cannot meet
+    the floor."""
+    act_edges: dict[str, str] = {}
+    for stmt in comp.body:
+        if not isinstance(stmt, ProvideStmt):
+            _approval_edges(stmt, act_edges)
+    crossings: list[tuple[list[str], "str | None"]] = []
+    for stmt in comp.body:
+        if not isinstance(stmt, ProvideStmt):
+            _approval_crossings(stmt, ctx, act_edges, crossings)
+    for stmt in comp.body:
+        if not isinstance(stmt, ProvideStmt):
+            continue
+        svc = svc_objs.get(psvc.get(comp.name, {}).get(stmt.key))
+        for pm in stmt.methods:
+            edges = dict(act_edges)
+            decl = svc.methods.get(pm.name) if svc is not None else None
+            declared = [t for _n, t in (decl.params if decl is not None else [])]
+            written = list(getattr(pm, "param_types", None) or [])
+            for i, name in enumerate(pm.params):
+                ptype = (written[i] if i < len(written) and written[i]
+                         else declared[i] if i < len(declared) else None)
+                scope = _approval_scope_of(ptype)
+                if scope is not None:
+                    edges[name] = scope
+                else:
+                    edges.pop(name, None)  # a parameter shadows the binding
+            _approval_edges(pm.body, edges)
+            _approval_crossings(pm.body, ctx, edges, crossings)
+    rows: list[str] = []
+    ord_ = 0
+    for tokens, edge in crossings:
+        if not tokens:
+            continue
+        for token in sorted(set(tokens)):
+            rows.append("\t".join(["AX", rel, comp.name, str(ord_), token]))
+        if edge is not None:
+            rows.append("\t".join(["AE", rel, comp.name, str(ord_), edge]))
+        ord_ += 1
+    return rows
 
 
 def collect_spawns(node, handles: dict, rows: list) -> None:
@@ -1558,10 +1864,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for e in sorted(entries):
                 tsv.append("\t".join(["Q", rel, svc, meth, e]))
         emitting = _fn_emitting(prog)
-        # The DIRECT emission externs, for the F row's bound column: the one
-        # host crossing the reference can name (`_reach_call`).
-        emission_externs = {e.name for e in prog.externs
-                            if getattr(e, "classification", "") == "emission"}
+        # The capability TOKENS each host callable reaches, for the F row's
+        # bound column (`_reach_call`) and the approval floor's crossings.
+        host_tokens = _emitting_tokens(prog)
         templates = _spawn_templates(prog)
         fns_by_name = {fn.name: fn for fn in prog.fn_decls}
         # provide-key -> service, file-wide (children resolve handle receivers).
@@ -1604,6 +1909,15 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         # deferred-position facts (DR, issue #1742), file-wide: every reach of
         # a `deferred` emission extern and where it sits.
         tsv.extend(deferred_reach_rows(prog, rel))
+
+        # approval-floor facts (AR), file-wide: the approval-required tokens.
+        # The per-crossing AX/AE rows follow each component below.
+        approval_required = _approval_required(prog)
+        for token in approval_required:
+            tsv.append("\t".join(["AR", rel, token]))
+        extern_caps = {e.name: list(e.capabilities or ()) or [e.name]
+                       for e in prog.externs
+                       if getattr(e, "classification", "") == "emission"}
 
         ff: dict = {"components": {}}
         for c in prog.components:
@@ -1715,7 +2029,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for stmt in c.body:
                 walk_reach(stmt, act_reach, "emit-step", require_map, handles,
                            psvc, bounds, em_set, emitting, aliases,
-                           emission_externs)
+                           host_tokens)
             act_caps = {cap for cap, _bound in act_reach}
             caps_seen.update(act_caps)
             for cap in sorted(act_caps):
@@ -1745,13 +2059,21 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
                                        psvc, bounds, em_set, emitting, aliases,
-                                       emission_externs)
+                                       host_tokens)
                         for cap, bound in sorted(reach):
                             caps_seen.add(cap)
                             caps_seen.add(bound)
                             tsv.append("\t".join(
                                 ["F", rel, c.name, stmt.key, svc, pm.name,
                                  cap, bound]))
+
+            # approval-floor facts (AX/AE): each marked crossing's tokens and
+            # its `with` edge, in a file that declares an approval-required
+            # token (issue #1455).
+            if approval_required:
+                tsv.extend(approval_rows(rel, c, _ApprovalCtx(
+                    require_map, bounds, em_set, handles, psvc, aliases,
+                    extern_caps, host_tokens), svc_objs, psvc))
 
             calls: list[tuple[str, str, str, str]] = []
             kinds: list[str] = []
@@ -2729,6 +3051,59 @@ def deferred_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided for each marked crossing under the approval
+#: floor: (admitted, carries an edge, reaches an approval-required token).
+#: Filled by `reference_from_tsv`, read by `approval_coverage`.
+_APPROVAL_ROWS: dict = {}
+
+
+def approval_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `AP` row (issue #1455).
+
+    Every approval refusal in the corpus is a crossing with NO edge, and a
+    row that only ever refused edgeless crossings could not tell the floor
+    from "an approval-required token is never crossed". So the corpus must
+    exercise the edge on the reference's own coverage test:
+
+      * a crossing ADMITTED because its edge covers the approval-required
+        token it reaches (the head of
+        `examples/rejections/g4_approval_compensate_other_edge.rvl`);
+      * a crossing REFUSED although it carries an edge, because the edge's
+        scope does not reach the token (that file's compensation);
+      * a crossing REFUSED with no edge at all (the value form, and every
+        other approval fixture);
+      * a crossing ADMITTED with no edge because it reaches no
+        approval-required token (the head of
+        `examples/rejections/g4_approval_compensate.rvl`): the floor is keyed
+        by token, not by the file.
+
+    Returns findings, treated as gate failures."""
+    witnesses = {"covered": None, "other-edge": None, "no-edge": None,
+                 "unrequired": None}
+    for key, (ok, has_edge, needed) in sorted(_APPROVAL_ROWS.items()):
+        if ok and has_edge and needed:
+            witnesses["covered"] = witnesses["covered"] or key
+        if not ok and has_edge:
+            witnesses["other-edge"] = witnesses["other-edge"] or key
+        if not ok and not has_edge:
+            witnesses["no-edge"] = witnesses["no-edge"] or key
+        if ok and not needed:
+            witnesses["unrequired"] = witnesses["unrequired"] or key
+    labels = {
+        "covered": "a crossing admitted because its edge covers the token",
+        "other-edge": "a crossing refused under an edge that does not cover it",
+        "no-edge": "a crossing refused for carrying no edge",
+        "unrequired": "a crossing admitted with no edge, reaching no "
+                      "approval-required token",
+    }
+    findings = [f"approval coverage: NO witness of {labels[k]} — the AP row "
+                "would agree vacuously" for k, w in witnesses.items() if w is None]
+    if not findings:
+        print(f"approval coverage: {len(_APPROVAL_ROWS)} crossings; "
+              + " ".join(f"{k}={w}" for k, w in witnesses.items()))
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -2760,7 +3135,9 @@ class Verdicts(NamedTuple):
     `configs` CD rows (G4 config-is-data: a config field's declared type is
     built out of data), `a2` A2 rows (A2: no acquisition after a provision in
     a component's activation body), `deferred` DF rows (G4 deferred position:
-    a `deferred` emission is reached only by a call in a component)."""
+    a `deferred` emission is reached only by a call in a component),
+    `approvals` AP rows (the G4 approval floor: every approval-required token
+    a marked crossing reaches is covered by its `with` edge, issue #1455)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -2776,6 +3153,7 @@ class Verdicts(NamedTuple):
     configs: dict[tuple[str, str, str, str], str]
     a2: dict[tuple[str, str], str]
     deferred: dict[str, str]
+    approvals: dict[tuple[str, str, str], str]
 
 
     def total(self) -> int:
@@ -2785,7 +3163,8 @@ class Verdicts(NamedTuple):
                 + len(self.confinements) + len(self.g8surface)
 
                 + len(self.g5reg) + len(self.a9) + len(self.configs)
-                + len(self.a2) + len(self.deferred))
+                + len(self.a2) + len(self.deferred)
+                + len(self.approvals))
 
 
 
@@ -2812,6 +3191,7 @@ def parse_verdicts(text: str) -> Verdicts:
     configs: dict[tuple[str, str, str, str], str] = {}
     a2: dict[tuple[str, str], str] = {}
     deferred: dict[str, str] = {}
+    approvals: dict[tuple[str, str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -2883,11 +3263,15 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "DF" and len(parts) == 3:
             # G4 deferred position (issue #1742): file -> ok|fail.
             deferred[parts[1]] = parts[2].split("=", 1)[1]
+        elif parts[0] == "AP" and len(parts) == 5:
+            # The approval floor: (file, comp, crossing ord) -> ok|fail.
+            approvals[(parts[1], parts[2], parts[3])] = \
+                parts[4].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
-                    a2, deferred)
+                    a2, deferred, approvals)
 
 
 
@@ -3292,10 +3676,35 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         deferred[rel] = "fail" if bad else "ok"
         _DEFERRED_FILES[rel] = (not bad, frozenset(mine))
 
+    # AP rows (the approval floor, issue #1455), recomputed from the AR/AX/AE
+    # rows with the checker's own coverage test (`lower._approval_covers`):
+    # every token the crossing reaches that the file requires approval for
+    # must be covered by the crossing's edge. One verdict per crossing that
+    # has an AX row.
+    required_by_file: dict[str, set[str]] = {}
+    for r in rows:
+        if r and r[0] == "AR" and len(r) == 3:
+            required_by_file.setdefault(r[1], set()).add(r[2])
+    crossing_tokens: dict[tuple[str, str, str], set[str]] = {}
+    crossing_edge: dict[tuple[str, str, str], str] = {}
+    for r in rows:
+        if r and r[0] == "AX" and len(r) == 5:
+            crossing_tokens.setdefault((r[1], r[2], r[3]), set()).add(r[4])
+        elif r and r[0] == "AE" and len(r) == 5:
+            crossing_edge[(r[1], r[2], r[3])] = r[4]
+    _APPROVAL_ROWS.clear()
+    approvals: dict[tuple[str, str, str], str] = {}
+    for key, tokens in crossing_tokens.items():
+        needed = tokens & required_by_file.get(key[0], set())
+        edge = crossing_edge.get(key)
+        ok = all(edge is not None and _approval_covers(edge, t) for t in needed)
+        approvals[key] = "ok" if ok else "fail"
+        _APPROVAL_ROWS[key] = (ok, edge is not None, bool(needed))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
 
                     recoveries, confinements, g8surface, g5reg, a9,
-                    configs, a2, deferred)
+                    configs, a2, deferred, approvals)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -3536,7 +3945,11 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     # callable nor a capability (item 378) — is `Oracle.configDataOK` over the
     # `CN` type-shape facts (issue 1161); it is the one G4 rule that judges a
     # declaration rather than a body, which is why it needed facts of a new
-    # kind rather than a case in an existing rule.
+    # kind rather than a case in an existing rule. The APPROVAL FLOOR — a
+    # marked crossing of an approval-required capability token carries a
+    # covering `with` edge (item 246) — is `RevL.G4Approval.crossingB` over the
+    # `AR`/`AX`/`AE` facts, one `AP` row per crossing (issue #1455). It was a
+    # ratcheted `out-of-fragment-approval` bucket until then.
     # So a G4 refusal is fatal in EVERY category again: there is
     # no out-of-fragment exemption. The two G4-coded refusals the model still
     # cannot see — `g4_missing_undo.rvl` and `v2_extern_acquire_no_undo.rvl` —
@@ -3555,7 +3968,11 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # G4 refusal the model would otherwise have missed, and a CD failure
         # over a file the checker accepts is `formal-strict` like any other.
         cfg_rows = [(k, x) for k, x in v.configs.items() if k[0] == rel]
-        g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows
+        # The AP row is the approval floor (issue #1455), the fourth rule the
+        # checker reports under G4 (category `approval`), so it joins the
+        # fold the same way.
+        ap_rows = [(k, x) for k, x in v.approvals.items() if k[0] == rel]
+        g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows + ap_rows
         # The A2 row (issue 1166) is checker-visible: `lower._dispatch_action`
         # refuses the shape with code A2, so a model `fail` on an accepted
         # file is `formal-strict` and a checker A2 with the row `ok` is the
@@ -3577,18 +3994,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # model does not — the model is stricter than the fragment it
             # covers, which is a finding to chase, not a licence to relax it.
             record("agree-accept" if formal_clean else "formal-strict", rel)
-        elif code == "G4" and category == "approval":
-            # The declaration-owned approval floor (item 246, `lower.
-            # _require_declared_approval`) carries the G4 code, but it is not
-            # the marker rule the `G` row states: it asks whether a crossing's
-            # capability TOKEN is covered by an `Approval[C]` edge, and the
-            # model carries no fact about approvals at all. Judged against
-            # the `G` row it would be a `missed-G4` the row was never aimed
-            # at. It is an absence of fact, so it is ratcheted by name like
-            # G5 and G6 below: a new approval refusal joins the ledger, or
-            # somebody models the floor.
-            record("out-of-fragment-approval" if formal_clean
-                   else "formal-found-other", rel)
         elif code == "G4" and category == "deferred":
             # The deferred-position rule (item 400, issue #1457, `lower.
             # _deferred_value_refusal` and its call arms) is the model's
@@ -3759,18 +4164,18 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # the `C` confinement surface — so "no fact about this file" is a claim
 # about a specific row that exists, and that is the claim worth pinning.
 OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
-OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
-                       "out-of-fragment-approval")
+OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6")
 OOF_LEDGER_ABOUT = [
-    "The corpus files the checker refuses G5, G6 or with the G4 approval",
-    "floor, and the model has NO fact about: `out-of-fragment-G5`,",
-    "`out-of-fragment-G6` and `out-of-fragment-approval` in",
+    "The corpus files the checker refuses G5 or G6 and the model has NO",
+    "fact about: `out-of-fragment-G5` and `out-of-fragment-G6` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "(The G4 deferred-position rule left this ledger in issue #1742: the",
-    "model states it as `RevL.G4Deferred`, decided as the `DF` row.)",
+    "model states it as `RevL.G4Deferred`, decided as the `DF` row. The",
+    "G4 approval floor left it in issue #1455: `RevL.G4Approval`, decided",
+    "as the `AP` row.)",
     "",
-    "Each bucket records an absence, so none can disagree with anything",
-    "and none could fail the gate on its own (issue #1169). This ledger",
+    "Both buckets record an absence, so neither can disagree with anything",
+    "and neither could fail the gate on its own (issue #1169). This ledger",
     "is what makes them fire: MEMBERSHIP is checkable even when the",
     "contents are not. A file that joins a bucket without a line here is a",
     "gate failure, and a line that is no longer in its bucket is a gate",
@@ -3904,6 +4309,7 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         f"{len(ref.a9)} provide-clause components",
         f"{len(ref.configs)} config fields", f"{len(ref.a2)} A2 bodies",
         f"{len(ref.deferred)} deferred-position files",
+        f"{len(ref.approvals)} approval crossings",
     ]
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
@@ -4075,7 +4481,8 @@ def main() -> int:
 
             ("config_data", ref.configs, formal.configs),
             ("a2", ref.a2, formal.a2),
-            ("deferred", ref.deferred, formal.deferred)):
+            ("deferred", ref.deferred, formal.deferred),
+            ("approval", ref.approvals, formal.approvals)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -4097,7 +4504,8 @@ def main() -> int:
         f"{len(ref.a9)} provide-clause components + "
         f"{len(ref.configs)} config fields + "
         f"{len(ref.a2)} a2 bodies + "
-        f"{len(ref.deferred)} deferred-position files) — "
+        f"{len(ref.deferred)} deferred-position files + "
+        f"{len(ref.approvals)} approval crossings) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -4111,6 +4519,7 @@ def main() -> int:
     mismatches.extend(config_coverage())
     mismatches.extend(a2_coverage())
     mismatches.extend(deferred_coverage())
+    mismatches.extend(approval_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
