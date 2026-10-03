@@ -87,6 +87,7 @@ C=k:T        handoff: C exports state of type T at key k                       (
 :S           service: the running composition declares service S              (item 346)
 :S,a,b       service: ... and its operations are exactly `a` and `b`          (457 T4b)
 :S,a(k:Str)  service: ... and `a`'s declared parameters are exactly those    (issue #346)
+:S,a(k:Str):Str  service: ... and `a`'s declared return is exactly that      (457 T6)
 ```
 
 Provision rows are exactly today's; a manifest of provision rows parses as
@@ -116,9 +117,24 @@ nothing about the arguments and leaves the rule silent. The renderer WITHHOLDS a
 list it cannot spell without one of the wire's own structural characters
 (`Map[Str, Int]` carries the operation separator), so a token that arrives
 carrying one is a garbled row and refuses the wire by name rather than being
-read as a shorter parameter list. Return types, emission and async markings are
-NOT on the wire: the G4 and A1 arms read those, and an arm answering from a
-declaration nobody sent is the wave-through this block exists to avoid. `-C` and `C=k:T` are the
+read as a shorter parameter list.
+
+A PLAIN operation's token also carries its declared RETURN after the list
+(`:S,a(k:Str):Str`, docs/design/457 T6), the last level of the same claim, and
+it is what lets the rust crate's admission certifier TYPE a candidate's
+provide-method body against the running declaration rather than withhold it.
+PLAIN is exactly an IR method entry whose key set is `{params, returns,
+emission}` with `emission` false (`revl.manifest._PLAIN_METHOD_KEYS`): every
+MARKING - emission, async, a capability, `commutative`, `idempotent`,
+`termination`, `cache`, `validated`, `route` - withholds the return, and so does
+a marking added to `lower.py` later, without an edit to the renderer. That is
+the same rule as before in a stronger form: an arm answering from a declaration
+nobody sent is the wave-through this block exists to avoid, and the G4 and A1
+arms read the markings, so a declaration that lost one is a declaration nobody
+sent. The fold VALIDATES the return and drops it - its readers on that side are
+refusal rules, and turning them on against a wire-built declaration is a
+separate slice with its own census rows - while the admission certifier reads
+it, which is why both sides must accept the same token shape. `-C` and `C=k:T` are the
 contrast: each of them CHANGES what the fold must compute, which is why one is
 folded in full and the other still refuses. A malformed `:S` name is held to the
 same bare-identifier rule a `-C` name is, and refuses the same way.
@@ -128,7 +144,11 @@ Its consumer is the rust crate's admission certifier
 running service NAMES to tell a fresh interface from a redeclaration of a running
 one: the reference gates the second on the compatibility relation of §5
 (`revl.admission._admit_service_replacement`, reached only when the declared name
-is already in the ambient service table) and admits the first outright.
+is already in the ambient service table) and admits the first outright. Since
+457 T6 it needs the operation DECLARATIONS too, parameters and return both: a
+candidate whose provide-method body calls an ambient operation is admitted only
+when that call can be typed, and a token spelling only half its declaration is
+a silence the certifier withholds on.
 
 The `!services` HEADER carries the whole weight. Without it the wire makes no
 claim about the running services, so a reader must treat the set as UNKNOWN, not
