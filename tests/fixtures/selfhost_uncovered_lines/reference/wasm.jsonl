@@ -1,0 +1,333 @@
+["reason", "command-line-json-input-output-directory-creation-and", "Command-line JSON input, output directory creation and WAT-file writing are not entered by the in-process emit(ir) oracle."]
+
+["function", "command-line-json-input-output-directory-creation-and", "<module>", 12, 12]
+
+["reason", "component-only-entry-abi-helpers-legacy-component-emission", "Component-only entry/ABI helpers: legacy component emission validates require imports and scalar service boundaries, rewrites $0 format templates, and encodes custom-section metadata strings. Pure modules use v3 interp/lit nodes and _wat_bytes data segments instead."]
+
+["function", "component-only-entry-abi-helpers-legacy-component-emission", "_assert_imports_within_requires", 15, 15]
+
+["function", "component-only-entry-abi-helpers-legacy-component-emission", "_emit_v1", 14, 14]
+
+["function", "component-only-entry-abi-helpers-legacy-component-emission", "_format_parts", 20, 20]
+
+["reason", "declared-out-of-every-self-host-slice-realm", "declared out of every self-host slice: realm placements, routers, spawn/instances."]
+
+["function", "declared-out-of-every-self-host-slice-realm", "_ComponentEmitter._provide_routed", 15, 15]
+
+["function", "declared-out-of-every-self-host-slice-realm", "_assert_realm_label", 2, 2]
+
+["reason", "demand-generated-float-formatting-and-k-ary-string", "Demand-generated Float formatting and k-ary string concatenation are selected by interpolation. All WASM interpolation is explicitly deferred; ordinary binary Str + uses the covered two-argument helper."]
+
+["function", "demand-generated-float-formatting-and-k-ary-string", "_V3Emitter._helper_f64_to_str", 1, 1]
+
+["function", "demand-generated-float-formatting-and-k-ary-string", "_V3Emitter._helper_str_concat_n", 18, 18]
+
+["function", "demand-generated-float-formatting-and-k-ary-string", "_V3Emitter._interp_expr", 20, 20]
+
+["reason", "float-valued-module-signatures-operands-are-refused-by", "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float."]
+
+["function", "float-valued-module-signatures-operands-are-refused-by", "_f64_literal", 1, 1]
+
+["function", "float-valued-module-signatures-operands-are-refused-by", "_finite_float", 3, 3]
+
+["function", "float-valued-module-signatures-operands-are-refused-by", "_refuse_float_operands", 1, 1]
+
+["reason", "item-459-f6-refuse-bodyless-extern-states-by", "Item 459 F6. `_refuse_bodyless_extern` states, by name, that a DECLARED extern carrying no `@wasm` body is not portable to this tier, naming the tiers that do carry one - the sentence the other five emitters have always given, where wasm answered `callee 'x' is not a lowerable function`, which is also what it says for a MISSPELLED callee. EVERY statement of it is on a refusal path: it raises on every input that reaches it, and its one quiet arm returns straight into the caller's own raise, so NO successfully emitted document executes a line of it. A corpus document therefore cannot reach it, and that is structural rather than inconvenient - the corpus is the list of documents the reference EMITS and holds byte-identical against the port, and tools/selfhost_line_coverage.py::measure() calls emit() with no `except`, so a refusing document would abort the measurement itself. WHAT WOULD HAVE TO CHANGE for a document to be possible, stated so this is a decision and not a shrug: (1) the oracle would need a REFUSAL workload beside `CORPUS` holding both sides to the same diagnostic rather than to the same bytes, the diagnostic-agreement shape tests/test_selfhost_lower.py already has and this tier's emit oracle does not; (2) measure() would need to run that workload and count the lines executed before the raise, which measure_full_tree() in the same module already does deliberately (a refusal path is reference logic too), so this half is small; and (3) selfhost/emit_wasm.rvl would have to be able to REFUSE at all. It cannot: a pure self-host emitter fn cannot `fail`, which is why every deferred family on this tier answers with an `<<UNSUPPORTED-...>>` marker instead (test_fn_type_param_refused, test_deferred_families_remain_explicit). (3) is the real blocker and it is a PORT property, not a corpus one. Until it lifts the refusal is pinned by tests/test_selfhost_emit_wasm.py::test_reference_refuses_a_bodyless_extern_by_name, which drives BOTH entry points (_call_expr for a call in expression position, _call_type for a `let` initializer; they refuse independently), by tests/test_json_stdlib.py::test_wasm_tier_refuses_extern_without_body, and by tests/test_asset_runtime_load_459.py's per-tier refusal sweep."]
+
+["function", "item-459-f6-refuse-bodyless-extern-states-by", "_V3Emitter._refuse_bodyless_extern", 3, 3]
+
+["reason", "only-the-negative-lookup-for-a-nonvariant-non", "Only the negative lookup for a nonvariant, non-Opt/Result type remains. The no-expected-type lookup is covered by bare Some; typed tagged constructors supply a valid tagged layout."]
+
+["function", "only-the-negative-lookup-for-a-nonvariant-non", "_V3Emitter._tagged_layout", 1, 1]
+
+["reason", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/wasm/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper."]
+
+["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_deferred_emissions", 8, 8]
+
+["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_validated_emissions", 8, 8]
+
+["reason", "remaining-arms-cover-explicitly-deferred-coalescing-float-op", "Remaining arms cover explicitly deferred coalescing/Float operations, invalid/void operand refusals, and legacy List +. Current frontend rejects List + (only numeric or Str +), so that compatibility branch is not a missing accepted source corpus family. Item 458's `&&`/`||` short-circuit branch lives in the same function and is now reached: shortcircuit.rvl spells the trapping right operands and arith.rvl the trap-free ones, so only that branch's void-operand refusal stays unrun, alongside the other invalid-operand guards."]
+
+["function", "remaining-arms-cover-explicitly-deferred-coalescing-float-op", "_V3Emitter._bin_expr", 20, 20]
+
+["reason", "remaining-assembly-paths-detect-in-file-test-name", "Remaining assembly paths detect in-file test name collisions, emit tests/externs/missing-body comments, and append demanded interpolation/indexOf/split/join helpers. Each is an explicit scaffold deferral, not absent ordinary pure-function emission."]
+
+["function", "remaining-assembly-paths-detect-in-file-test-name", "_V3Emitter.emit", 12, 12]
+
+["reason", "remaining-branches-are-checked-division-indexof-split-join", "Remaining branches are checked division, indexOf/split/join helper demand, Map operations rejected by this backend, and wrong/void receiver or unsupported-method refusals. Covered length/concat/push and arithmetic conversions must not be conflated with these precise deferred families. Item 458 adds four: the `Int.MIN / -1` arm of checked division, which answers Err(\"revl: Int overflow\") as a value where `i64.div_s` used to trap. Same deferred family as the rest of the arm; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py."]
+
+["function", "remaining-branches-are-checked-division-indexof-split-join", "_V3Emitter._builtin_expr", 50, 50]
+
+["function", "remaining-branches-are-checked-division-indexof-split-join", "_V3Emitter._builtin_type", 23, 23]
+
+["reason", "remaining-branches-capture-deferred-arrow-valued-lets-or", "Remaining branches capture deferred arrow-valued lets or reject undeclared assignment, void binding, bare typed return, loop control outside a loop and unknown steps. Ordinary loops and scalar/local statements are covered."]
+
+["function", "remaining-branches-capture-deferred-arrow-valued-lets-or", "_V3Emitter._emit_stmts", 14, 14]
+
+["reason", "remaining-branches-merge-equivalent-async-sync-polymorphic-e", "Remaining branches merge equivalent async/sync polymorphic externs and rewrite call names after colour erasure; extern emission is outside the WASM module corpus."]
+
+["function", "remaining-branches-merge-equivalent-async-sync-polymorphic-e", "_dedup_colour_erased_poly_externs", 11, 11]
+
+["function", "remaining-branches-merge-equivalent-async-sync-polymorphic-e", "_dedup_colour_erased_poly_externs._rewrite", 6, 6]
+
+["reason", "remaining-branches-resolve-deferred-inline-arrows-or-reject", "Remaining branches resolve deferred inline arrows or reject unknown/non-callable callees and argument-count/type mismatches; direct declared calls are covered. Item 459 F6 adds one statement here: before raising the generic unknown-callee error, the arm asks `_refuse_bodyless_extern` whether the name is a DECLARED extern with no `@wasm` body, so a portability limit is no longer spelled as a typo. It is on the same refusal path as the rest of this entry and is uncovered for the same reason."]
+
+["function", "remaining-branches-resolve-deferred-inline-arrows-or-reject", "_V3Emitter._call_type", 7, 7]
+
+["reason", "remaining-branches-retain-a-module-with-indirect-table", "Remaining branches retain a module with indirect/table/start edges or seed callees of unnamed exported component functions. The pure module ABI emits named exports and direct calls only."]
+
+["function", "remaining-branches-retain-a-module-with-indirect-table", "prune_unreachable_funcs", 2, 2]
+
+["reason", "remaining-continue-skips-an-arrow-valued-binding-because", "Remaining continue skips an arrow-valued binding because capture locals are handled separately; inline arrow lowering is deferred."]
+
+["function", "remaining-continue-skips-an-arrow-valued-binding-because", "_V3Emitter._collect_locals", 1, 1]
+
+["reason", "remaining-dispatch-rejects-nondict-unknown-version-ir-or", "Remaining dispatch rejects nondict/unknown-version IR or routes legacy component versions to _emit_v1; the oracle uses canonical v3 pure-module documents."]
+
+["function", "remaining-dispatch-rejects-nondict-unknown-version-ir-or", "emit", 3, 3]
+
+["reason", "remaining-expression-paths-are-malformed-unbound-unsupported", "Remaining expression paths are malformed/unbound/unsupported literals, component-injected __wat, Float, interpolation/tagged reads, and explicit refusals of escaping arrow values, Map, optional chaining and record update."]
+
+["function", "remaining-expression-paths-are-malformed-unbound-unsupported", "_V3Emitter._expr", 18, 18]
+
+["reason", "remaining-fallback-declines-folding-when-textual-constant-wi", "Remaining fallback declines folding when textual constant width disagrees with the typed operand width; canonical rendering and widening select matching widths before this call."]
+
+["function", "remaining-fallback-declines-folding-when-textual-constant-wi", "_fold_int_const", 1, 1]
+
+["reason", "remaining-false-returns-handle-empty-nondiverging-typed-bodi", "Remaining false returns handle empty/nondiverging typed bodies. The caller asks this only for non-Unit result functions; frontend return checking rejects those fall-through bodies, while Unit functions bypass the check."]
+
+["function", "remaining-false-returns-handle-empty-nondiverging-typed-bodi", "_V3Emitter._diverges", 2, 2]
+
+["reason", "remaining-generation-uniquing-of-in-file-test-export", "Remaining generation/uniquing of in-file test export names belongs to the explicitly deferred test harness, not normal exported source functions."]
+
+["function", "remaining-generation-uniquing-of-in-file-test-export", "test_export_names", 10, 10]
+
+["reason", "remaining-inference-includes-deferred-coalescing-interpolati", "Remaining inference includes deferred coalescing/interpolation/match/Float/component __wat, legacy List + and Str index rejected by today's frontend, and malformed/unbound/unsupported kinds and type errors. Expected-free user ADT inference is now covered."]
+
+["function", "remaining-inference-includes-deferred-coalescing-interpolati", "_V3Emitter._infer_type", 41, 41]
+
+["reason", "remaining-literal-pool-branches-collect-checked-division-err", "Remaining literal-pool branches collect checked-division error text and interpolation/legacy-format text; checked division and interpolation are deferred, and format is component vocabulary. Item 458 adds two: the pooling of that arm's second Err reason (`revl: Int overflow`), which only the three quotient forms carry."]
+
+["function", "remaining-literal-pool-branches-collect-checked-division-err", "_V3Emitter._collect_string_literals.walk", 9, 9]
+
+["reason", "remaining-loop-pools-extra-component-descriptor-strings-pass", "Remaining loop pools extra component descriptor strings passed by component planning; pure function literals use the covered tree traversal."]
+
+["function", "remaining-loop-pools-extra-component-descriptor-strings-pass", "_V3Emitter._collect_string_literals", 1, 1]
+
+["reason", "remaining-negative-lookups-return-no-layout-for-nonrecord", "Remaining negative lookups return no layout for nonrecord/nonvariant type declarations; valid typed allocation callers provide the corresponding record/tagged type."]
+
+["function", "remaining-negative-lookups-return-no-layout-for-nonrecord", "_V3Emitter._record_fields", 1, 1]
+
+["reason", "remaining-none-fallbacks-handle-unsupported-comparison-width", "Remaining None fallbacks handle unsupported comparison widths and non-Int arithmetic types; valid scalar operator combinations are covered."]
+
+["function", "remaining-none-fallbacks-handle-unsupported-comparison-width", "_bin_instr", 2, 2]
+
+["reason", "remaining-paths-accept-legacy-length-ir-or-reject", "Remaining paths accept legacy .length IR or reject nonrecord, absent and void fields. Current source List/Str length calls lower through len/builtin, not this legacy field spelling."]
+
+["function", "remaining-paths-accept-legacy-length-ir-or-reject", "_V3Emitter._field_expr", 4, 4]
+
+["reason", "remaining-paths-infer-an-anonymous-record-with-no", "Remaining paths infer an anonymous record with no matching/expected named declaration and construct its anonymous layout; this fallback is explicitly outside the selfhost record-layout subset."]
+
+["function", "remaining-paths-infer-an-anonymous-record-with-no", "_V3Emitter._anon_record", 4, 4]
+
+["function", "remaining-paths-infer-an-anonymous-record-with-no", "_V3Emitter._record_type", 2, 2]
+
+["reason", "remaining-paths-reject-an-empty-document-or-duplicate", "Remaining paths reject an empty document or duplicate module names and instantiate live component emitters; the selfhost oracle accepts the single pure functions module."]
+
+["function", "remaining-paths-reject-an-empty-document-or-duplicate", "_emit_v3", 3, 3]
+
+["reason", "remaining-paths-resolve-arrow-valued-locals-collect-capture", "Remaining paths resolve arrow-valued locals, collect capture/parameter scratch locals and inline their bodies. Inline arrows/closures are an explicit WASM oracle deferral; direct named function calls are covered."]
+
+["function", "remaining-paths-resolve-arrow-valued-locals-collect-capture", "_V3Emitter._arrow_callee", 2, 2]
+
+["function", "remaining-paths-resolve-arrow-valued-locals-collect-capture", "_V3Emitter._collect_arrow_locals", 7, 7]
+
+["function", "remaining-paths-resolve-arrow-valued-locals-collect-capture", "_V3Emitter._inline_arrow", 17, 17]
+
+["reason", "remaining-raise-is-an-internal-invariant-failure-a", "Remaining raise is an internal invariant failure: a rendered string literal was not pooled by the preceding literal collection pass."]
+
+["function", "remaining-raise-is-an-internal-invariant-failure-a", "_V3Emitter._str_ptr", 1, 1]
+
+["reason", "remaining-raise-rejects-a-for-of-receiver-that", "Remaining raise rejects a for-of receiver that is not List; frontend typing enforces List iteration."]
+
+["function", "remaining-raise-rejects-a-for-of-receiver-that", "_V3Emitter._emit_for", 1, 1]
+
+["reason", "remaining-raise-rejects-an-invalid-empty-emitted-identifier", "Remaining raise rejects an invalid/empty emitted identifier; accepted frontend names satisfy the identifier grammar."]
+
+["function", "remaining-raise-rejects-an-invalid-empty-emitted-identifier", "_ident", 1, 1]
+
+["reason", "remaining-raise-rejects-effect-frame-bearing-loops-successfu", "Remaining raise rejects effect-frame-bearing loops; successful module loops are pure/frame-neutral."]
+
+["function", "remaining-raise-rejects-effect-frame-bearing-loops-successfu", "_V3Emitter._guard_frame_neutral_loop", 1, 1]
+
+["reason", "remaining-raise-rejects-len-on-a-non-list", "Remaining raise rejects len on a non-List/non-Str receiver; canonical frontend len nodes carry supported collection types."]
+
+["function", "remaining-raise-rejects-len-on-a-non-list", "_V3Emitter._len_expr", 1, 1]
+
+["reason", "remaining-raises-explicitly-reject-fault-injection-or-lifecy", "Remaining raises explicitly reject fault-injection or lifecycle test harnesses unsupported by the WASM backend."]
+
+["function", "remaining-raises-explicitly-reject-fault-injection-or-lifecy", "_refuse_fault_tests", 2, 2]
+
+["function", "remaining-raises-explicitly-reject-fault-injection-or-lifecy", "_refuse_lifecycle_tests", 2, 2]
+
+["reason", "remaining-raises-reject-an-absent-tagged-layout-or", "Remaining raises reject an absent tagged layout or a case absent from that layout; accepted constructor nodes name declared/builtin cases."]
+
+["function", "remaining-raises-reject-an-absent-tagged-layout-or", "_V3Emitter._make_tagged", 1, 1]
+
+["function", "remaining-raises-reject-an-absent-tagged-layout-or", "_V3Emitter._tag_of", 1, 1]
+
+["reason", "remaining-raises-reject-declared-function-value-types-includ", "Remaining raises reject declared function-value types (including fields recursively containing one) or other nonlowerable types. The reference itself refuses closure-valued module signatures."]
+
+["function", "remaining-raises-reject-declared-function-value-types-includ", "_V3Emitter._check_type", 3, 3]
+
+["reason", "remaining-raises-reject-missing-or-void-valued-record", "Remaining raises reject missing or void-valued record fields; frontend record checking supplies all declared nonvoid fields."]
+
+["function", "remaining-raises-reject-missing-or-void-valued-record", "_V3Emitter._record_expr", 2, 2]
+
+["reason", "remaining-raises-reject-unequal-branch-result-types-or", "Remaining raises reject unequal branch result types or void conditional results; successful frontend conditionals have compatible value branches."]
+
+["function", "remaining-raises-reject-unequal-branch-result-types-or", "_V3Emitter._if_expr", 2, 2]
+
+["reason", "remaining-raises-reject-void-list-elements-empty-lists", "Remaining raises reject void list elements, empty lists without an expected type, or heterogeneous element types. Valid typed lists use the covered allocation/layout paths."]
+
+["function", "remaining-raises-reject-void-list-elements-empty-lists", "_V3Emitter._list_expr", 1, 1]
+
+["function", "remaining-raises-reject-void-list-elements-empty-lists", "_V3Emitter._list_type", 3, 3]
+
+["reason", "remaining-raises-reject-void-operands-and-unsupported-unary", "Remaining raises reject void operands and unsupported unary operators; canonical numeric negation, Bool not and Int32 complement are covered."]
+
+["function", "remaining-raises-reject-void-operands-and-unsupported-unary", "_V3Emitter._un_expr", 2, 2]
+
+["reason", "remaining-scanner-paths-attach-the-comments-preceding-deferr", "Remaining scanner paths attach the comments preceding deferred str_concatN helpers to their removable function block, skip escaped export-string characters, or terminate an EOF comment. Pure named exports do not need escaped names; noncanonical/raw-WAT text belongs to the explicitly deferred extern/component paths."]
+
+["function", "remaining-scanner-paths-attach-the-comments-preceding-deferr", "_top_level_funcs", 4, 4]
+
+["reason", "remaining-scratch-local-collection-is-for-checked-div", "Remaining scratch-local collection is for checked_div_* returning tagged Result; that builtin family is explicitly deferred."]
+
+["function", "remaining-scratch-local-collection-is-for-checked-div", "_V3Emitter._collect_cdiv_locals", 3, 3]
+
+["reason", "remaining-signature-scanner-recognizes-parenthesized-declare", "Remaining signature scanner recognizes parenthesized declared function types; _check_type refuses them because this MVP module ABI has no function values."]
+
+["function", "remaining-signature-scanner-recognizes-parenthesized-declare", "_is_fn_type", 10, 10]
+
+["reason", "remaining-str-index-compatibility-branch-cannot-be-produced", "Remaining Str-index compatibility branch cannot be produced by current source (Str [...] is rejected in favor of charAt); other residuals reject non-List receivers or void elements."]
+
+["function", "remaining-str-index-compatibility-branch-cannot-be-produced", "_V3Emitter._index_expr", 4, 4]
+
+["reason", "remaining-traversal-raise-detects-unresolved-holes-including", "Remaining traversal/raise detects unresolved holes, including service signatures; successful compiled source documents contain no holes."]
+
+["function", "remaining-traversal-raise-detects-unresolved-holes-including", "_refuse_holes", 4, 4]
+
+["function", "remaining-traversal-raise-detects-unresolved-holes-including", "_refuse_holes.walk", 1, 1]
+
+["reason", "rendering-a-wasm-bodied-extern-as-a-real", "Rendering a @wasm-bodied extern as a real `(func $name …)` is outside the module oracle's subset; source-defined functions do not exercise raw-WAT extern handling. The NAMING of a bodyless extern is no longer deferred: tests/fixtures/emit_wasm_corpus/externs.rvl reaches `_unsupported_comments` and `_extern_wasm_body` (issue 1130)."]
+
+["function", "rendering-a-wasm-bodied-extern-as-a-real", "_emit_extern_func", 17, 17]
+
+["reason", "residual-declarations-allocate-locals-for-deferred-match-bin", "Residual declarations allocate locals for deferred match bindings/scrutinees and inline arrows; test_mode appends its success result. The empty non-Unit body fallback is a defensive path: frontend return checking rejects such functions. Empty Unit source is covered and emits nop, not unreachable."]
+
+["function", "residual-declarations-allocate-locals-for-deferred-match-bin", "_V3Emitter._emit_function", 6, 6]
+
+["reason", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "Tagged-value reads: match scrutinee/payload temporaries, per-arm binding/result blocks and Opt coalescing payload selection. The port constructs tagged values but explicitly defers match and ?? reads; construction coverage does not imply these helpers are ported."]
+
+["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._collect_match_locals", 6, 6]
+
+["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._match_expr", 16, 16]
+
+["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._match_expr.arm_body", 13, 13]
+
+["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._match_expr.arm_scope", 15, 15]
+
+["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._nullish_expr", 15, 15]
+
+["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._nullish_type", 4, 4]
+
+["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._opt_payload", 4, 4]
+
+["reason", "the-entire-componentemitter-is-instantiated-only-for-live-2", "The entire _ComponentEmitter is instantiated only for live components: it plans activation/provide calls, coeffect imports, spawn/instance handles, realm routing and witnessed undo/WAL custom sections. emit_wasm.rvl implements the separate pure _V3Emitter module ABI, not activation/deactivation or component service exports; even _delegate/_tail belong to that unentered component caller. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path. Issue #1601's refusal document, tests/fixtures/emit_wasm_refusals/compound_required_call.rvl, now emits a provider component and enters the consumer as far as the required call's refusal in `_op_spec`."]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.__init__", 21, 21]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._boundary_wty", 1, 1]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._called_names", 2, 2]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._expr", 2, 2]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._import_module", 1, 1]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._job_id", 8, 8]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower", 61, 61]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower_instance_get_call", 37, 37]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower_spawn", 26, 26]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._method_drain", 10, 10]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._method_undo_id", 6, 6]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._method_witnessed_step", 13, 13]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._module", 64, 64]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._module._dispatch", 13, 13]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._need_fn", 5, 5]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._op_spec", 6, 6]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._plan", 14, 14]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._provide", 158, 158]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._realm_sections", 9, 9]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._register_witnessed_calls", 10, 10]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._route_helpers", 32, 32]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._route_op_spec", 20, 20]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._scalar_operator", 26, 26]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._statement", 2, 2]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._tail", 7, 7]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._teardown_section", 4, 4]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._to_v3", 24, 24]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._wal_undo_name", 3, 3]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_effect_step", 37, 37]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_extern", 5, 5]
+
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.emit", 45, 45]
+
+["reason", "the-item-130-required-stream-t-coeffect-refusal", "The item 130 required-`Stream[T]` coeffect refusal (`_refuse_required_stream`). This tier refuses the whole stream surface by design, having no async host seam, and the coeffect is refused with it at the component's DECLARATION. A corpus document declaring `requires <k>: Stream[T]` would be refused here rather than emitted, so it cannot be a byte-agreement case; the refusal is pinned by tests/test_stream_reactive.py instead."]
+
+["function", "the-item-130-required-stream-t-coeffect-refusal", "_refuse_required_stream", 1, 1]
+
+["reason", "the-item-458-short-circuit-decision-for-a", "The item-458 short-circuit decision for a logical operator's right operand. Every accepting and refusing arm is now exercised: shortcircuit.rvl spells a trapping `%`, `/` and checked `*`, an index read, a `len`, a call, a `Str` comparison and a non-`!` unary, and arith.rvl/folding.rvl the constants, local reads and comparisons that keep the strict instruction. What stays unrun is the non-dict guard's refusal and the EmitError catch (with its refusal) for a leaf name the caller cannot resolve — a malformed node and an unbound name, neither of which a document that compiles can produce."]
+
+["function", "the-item-458-short-circuit-decision-for-a", "_trap_free_operand", 3, 3]
+
+["reason", "the-remaining-call-paths-inline-a-deferred-arrow", "The remaining call paths inline a deferred arrow or raise for an indirect callee, wrong Some arity, unknown named function, wrong declared-function arity, or void argument. Expected-free Some payload inference is covered by the bare expression statement. Item 459 F6 adds one statement here: before raising the generic unknown-callee error, the arm asks `_refuse_bodyless_extern` whether the name is a DECLARED extern with no `@wasm` body, so a portability limit is no longer spelled as a typo. It is on the same refusal path as the rest of this entry and is uncovered for the same reason."]
+
+["function", "the-remaining-call-paths-inline-a-deferred-arrow", "_V3Emitter._call_expr", 7, 7]
+
+["reason", "these-helper-text-generators-are-demanded-only-by", "These helper text generators are demanded only by indexOf/join/split; the selfhost scaffold lacks those helpers and the oracle explicitly excludes those methods."]
+
+["function", "these-helper-text-generators-are-demanded-only-by", "_V3Emitter._helper_str_index_of", 1, 1]
+
+["function", "these-helper-text-generators-are-demanded-only-by", "_V3Emitter._helper_str_join", 1, 1]
+
+["function", "these-helper-text-generators-are-demanded-only-by", "_V3Emitter._helper_str_split", 1, 1]
+
+["reason", "two-refusals-neither-of-which-a-corpus-document", "Two refusals, neither of which a corpus document can carry: the raise that rejects rebinding one emitted local name at incompatible WASM widths, and the raise that rejects a `Float` BINDING by name. Valid typed source locals retain their declared width. A Float local cannot become a corpus case for the same reason every other Float position cannot — the emitter REFUSES it, and a corpus document is one the reference emits and holds byte-identical against the port. Before that refusal the binding emitted an f64 into an i32 local and the module failed wasmtime validation at load; tests/test_458_conversion_dispatch.py and tests/test_wasm_backend.py execute both halves instead."]
+
+["function", "two-refusals-neither-of-which-a-corpus-document", "_V3Emitter._declare_local", 2, 2]

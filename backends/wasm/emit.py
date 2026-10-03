@@ -324,8 +324,15 @@ class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, ir_version: int = IR_VERSION,
                  types: dict | None = None, functions: list | None = None,
                  externs: list | None = None, is_template: bool = False,
-                 spawn_targets: dict | None = None, record: bool = False) -> None:
+                 spawn_targets: dict | None = None, record: bool = False,
+                 peer_keys: frozenset = frozenset()) -> None:
         self.ir = component
+        # issue #1601: the keys another component of this composition provides.
+        # A required call to one of them crosses into a different module's
+        # memory, so only scalars may cross it; a key no component provides is
+        # the host's, and a host-provided coeffect is handed the calling fiber,
+        # so it can read the caller's memory.
+        self.peer_keys = peer_keys
         self.services = services
         self.ir_version = ir_version
         # item 322 Slice 2: durable-WAL record mode. OFF by default and gated at
@@ -610,6 +617,8 @@ class _ComponentEmitter:
             raise EmitError(f"{where}: {key}.{op} is not a method of {service_name}")
         param_types = [param.get("type") for param in spec.get("params") or []]
         return_type = spec.get("returns")
+        if key in self.peer_keys:
+            _refuse_cross_module_compound(key, op, param_types, return_type, where)
         param_wtys = [
             self._boundary_wty(pty, f"{where}: {key}.{op} param {i}")
             for i, pty in enumerate(param_types)
@@ -2815,6 +2824,36 @@ def _emit_extern_func(ext: dict, check_type) -> str:
     if decl:
         header += " " + " ".join(decl)
     return f"  {header}\n    {body or 'nop'})"
+
+
+def _refuse_cross_module_compound(key: str, op: str, param_types: list,
+                                  return_type: str | None, where: str) -> None:
+    """Issue #1601: a compound value cannot cross a required service that
+    another component of the composition provides.
+
+    The consumer and the provider are separate cordis-wasm instances with
+    separate linear memories, and the runtime forwards a coeffect call's
+    arguments and result as the integers they are. A Str/List/record/variant/
+    Opt/Result crosses as an address, so the other side read its OWN memory at
+    the caller's address: measured, a three-element list arrived with length
+    0, and an index into it trapped in `$list_slot`. The routed require
+    (`_route_op_spec`) and the spawn instance accessor refuse this shape for
+    the same reason; the plain require now does too. A key no component
+    provides is left alone: cordis-wasm hands a host-provided coeffect the
+    calling fiber, so the host can read the caller's memory."""
+    compound = [f"param {i} is {ty!r}" for i, ty in enumerate(param_types)
+                if not _is_unit_type(ty) and not _is_scalar_type(ty)]
+    compound += ([f"the return is {return_type!r}"]
+                 if not _is_unit_type(return_type) and not _is_scalar_type(return_type)
+                 else [])
+    if compound:
+        raise EmitError(
+            f"{where}: {key}.{op}: {compound[0]}, and only scalar (Int/Bool) "
+            f"values cross a service another component provides on this tier. "
+            f"The provider is another module with its own linear memory and the runtime passes "
+            f"a compound value as an address, so the other side would read its "
+            f"own memory at that address (issue #1601). Pass scalars, keep the "
+            f"compound value inside one component, or use a hosted backend")
 
 
 def _is_unit_type(ty: str | None) -> bool:
@@ -6105,6 +6144,11 @@ class _V3Emitter:
         return module
 
 
+def _peer_keys(components: list) -> frozenset:
+    """Every key a component of this composition provides (issue #1601)."""
+    return frozenset(key for c in components for key in (c.get("provides") or {}))
+
+
 def _emit_v1(ir: dict, record: bool = False) -> dict[str, str]:
     """Lower a v1/v2 component document to WAT modules, one per component.
 
@@ -6124,7 +6168,8 @@ def _emit_v1(ir: dict, record: bool = False) -> dict[str, str]:
         emitter = _ComponentEmitter(
             component, services, ir_version=version,
             types=ir.get("types"), functions=ir.get("functions"),
-            externs=ir.get("externs"), record=record)
+            externs=ir.get("externs"), record=record,
+            peer_keys=_peer_keys(components))
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
@@ -6168,7 +6213,8 @@ def _emit_v3(ir: dict, record: bool = False) -> dict[str, str]:
                                     types=types, functions=functions,
                                     externs=externs,
                                     is_template=component.get("name") in templates,
-                                    spawn_targets=spawn_targets, record=record)
+                                    spawn_targets=spawn_targets, record=record,
+                                    peer_keys=_peer_keys(components))
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()

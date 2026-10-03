@@ -64,6 +64,37 @@ So an undo gets no such path. It is a change like any other change, and it earns
 its way in the same way — which is also why an undo can itself be undone (the
 git-revert of a git-revert is a commit).
 
+## Every change answers with its undo (issue #1703)
+
+An agent should not have to work out which of `revl_undo`, `revl_rollback`,
+`revl_restore` and `revl_unload` reverts the call it just made. So every
+successful mutating MCP call answers with `undo: {tool, arguments}`, the one
+call that returns the session to the state it had before, byte for byte (the
+snapshot's `sources` and `manifest`):
+
+| the call | its `undo` |
+|---|---|
+| `revl_load`, `revl_restore` into an empty session | `revl_unload` |
+| `revl_swap`, `revl_edit`, `revl_undo`, `revl_rollback`, an applied `revl_ship`/`revl_repair` | `revl_undo {to: <the generation that ran before>}` |
+| `revl_unload` | `revl_restore {snapshot: <what ran>}` |
+| a fresh `revl_lease` claim | `revl_lease {action: release}` |
+
+A verb with no exact inverse answers `undo: null` and names why in
+`undoReason` (`src/revl/mcp/undo_record.py` lists each): a crossing cannot be
+un-emitted, a halt, an approval or an override is recorded evidence, a timeline
+move re-runs or unwinds steps rather than restoring them. A generation loaded
+without recorded sources has no snapshot to re-admit, so its successor's undo
+is `null` too. An undo is a gated change like any other: `revl_undo` re-admits
+the earlier generation through the gate, and a snapshot re-admits under the
+file name its manifest recorded, so nothing about the restored composition
+differs from what ran.
+
+`revl_step_back` with no arguments runs the newest recorded undo; each further
+call reverts the change before it, and `undoDepth` on every mutating response
+says how many are left. An undo run by a step back is not itself recorded, so
+repeated step backs walk back instead of toggling; the step back answers with
+the `redo` call instead.
+
 ## The undo dossier
 
 Because an undo is a change, its plan is computed like any change:
