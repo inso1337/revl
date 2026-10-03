@@ -3115,7 +3115,7 @@
    ],
    [
     "selfhost/emit_rust.rvl",
-    "8d9d14a11bc61a03299133a838323520daa134ae57fe386311cc0f9408a55796",
+    "9dc1c1a424016dee16e695bf8b90764333e1a6c505b057d4b8e6567b9837f735",
     "frontier-declined"
    ],
    [
@@ -5468,11 +5468,11 @@
    },
    "report_inputs": {
     "crates/revl-gate/Cargo.toml": "de0fdc92fd47facfe7b962a233722285724deddca3f2a8495dd427008ff9f25c",
-    "crates/revl-gate/src/admission.rs": "9617fda2d2ab22f2b0be00f0048411d3c8041d09b5525a4f3f9aabed01bb9eaf",
-    "crates/revl-gate/src/frontier.rs": "a670904a2786d5f09e2d34c7d809ad95395a4d9639a027026481dd2add1c5ecc",
+    "crates/revl-gate/src/admission.rs": "518e5bf7e46b6dd16be65320c39326b725149b19643e22d1391a01b8be1a3eb1",
+    "crates/revl-gate/src/frontier.rs": "3fd3ed98276b34dd785e901cc8c0a523665fcefa760d7f896d8e60961073d0d5",
     "crates/revl-gate/src/ir.rs": "0d171beeb651561811e855308c62554f44fbfca7a64bb3030abf0a3f20f9793b",
     "crates/revl-gate/src/lib.rs": "e9c5ddb7d29b757a7e08df675ae54fbaa637a7e952c3421c0ca6934016a13869",
-    "crates/revl-gate/src/selfhost.rs": "4ad36bf9509470952a23f52a36a8e96f9de802135b47f872101b4d1a118fd38e",
+    "crates/revl-gate/src/selfhost.rs": "2aa630125ab2df6ff95ef7bef436be4333848e6846a7b148d64d8e472441780f",
     "crates/revl-gate/src/session.rs": "98470ddaf7803dd69da9e6c8c6750fc23956906d6529d5de5514ad0e02da6455",
     "crates/revl-gate/src/symbols.rs": "698969ee2ea20647b73a6b758da946a29658f1c72b1553153d50551b94becbec",
     "tests/fixtures/census_crate_reproduction.json": "d488c1db5f25417065c1725705b5891bdca419bb7f0ae3676dd113fb3a8c7cfb",
@@ -5604,7 +5604,7 @@
    "tracked_buckets_agree": true,
    "what": "the committed crates/revl-gate, built by cargo and asked through a standalone consumer, over the same corpus"
   },
-  "run": "census-selfhost-5a148cfd85fc",
+  "run": "census-selfhost-bfa65d0126b6",
   "schema": "GATE-CENSUS-1",
   "tracked_bucket_prefixes": [
    "false-admission",
@@ -5621,7 +5621,7 @@
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-5a148cfd85fc"
+    "run": "census-selfhost-bfa65d0126b6"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5632,7 +5632,7 @@
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-5a148cfd85fc"
+    "run": "census-selfhost-bfa65d0126b6"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5642,7 +5642,7 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-5a148cfd85fc"
+    "run": "census-selfhost-bfa65d0126b6"
    },
    "public": true,
    "rung": "measured",
@@ -5652,7 +5652,7 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-5a148cfd85fc"
+    "run": "census-selfhost-bfa65d0126b6"
    },
    "public": true,
    "rung": "measured",
@@ -5661,7 +5661,7 @@
  ],
  "generator": {
   "name": "selfhost/lower.rvl admit_src behind crates/revl-gate",
-  "run": "census-selfhost-5a148cfd85fc",
+  "run": "census-selfhost-bfa65d0126b6",
   "tool": "tools/gate_reference_census.py --engine selfhost"
  },
  "grader": {
