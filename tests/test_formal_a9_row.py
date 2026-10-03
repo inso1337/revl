@@ -47,10 +47,16 @@ CONVERSE_FIXTURE = "examples/rejections/a9_provides_without_block.rvl"
 #: The routes exemption, exercised: stdlib/router.rvl's shape in the corpus.
 ROUTED = "tests/formal_corpus/a9_routes_installs_key.rvl"
 
-#: The one other routed component the corpus carries: `Router`'s `worker` in
-#: the py self-host placement fixture (item 391), the routed-require shape
-#: selfhost/emit_py.rvl is held to byte agreement on.
-ROUTED_PY = "tests/fixtures/emit_py_placement.rvl"
+#: Every route the corpus carries, as (file, component, key). The formal
+#: fixture above is the one this module is about; the ts and py self-host
+#: emitter corpora each carry a routed component of the same shape (#106). A
+#: new `PR` row anywhere else is either a new routed fixture (add it here) or
+#: an export that invents a route.
+ROUTES = sorted([
+    (ROUTED, "RoundRobin", "worker"),
+    ("tests/fixtures/emit_ts_corpus/routed_timers.rvl", "Balancer", "worker"),
+    ("tests/fixtures/emit_py_placement.rvl", "Router", "worker"),
+])
 
 #: An admitted provider with a block under a declared key.
 ADMITTED = ("examples/tenants.rvl", "TenantAStore")
@@ -143,15 +149,13 @@ def test_the_converse_fixture_declares_and_installs_nothing(tsv):
 
 def test_the_pr_row_carries_the_route_as_data(tsv):
     """The exemption is a fact off the `RouteStmt`, not a heuristic: exactly
-    `RoundRobin`'s `worker`, and the backends carry blocks instead. The only
-    other `PR` row in the corpus is the placement fixture's own route."""
+    `RoundRobin`'s `worker`, and the backends carry blocks instead."""
     assert [(r[2], r[3]) for r in _rows(tsv, "PR", ROUTED)] == [
         ("RoundRobin", "worker")]
     assert sorted((r[2], r[3]) for r in _rows(tsv, "PB", ROUTED)) == [
         ("PoolWorker1", "worker"), ("PoolWorker2", "worker"),
         ("PoolWorker3", "worker")]
-    assert sorted((r[1], r[2], r[3]) for r in _rows(tsv, "PR") if r[1] != ROUTED) == [
-        (ROUTED_PY, "Router", "worker")]
+    assert sorted((r[1], r[2], r[3]) for r in _rows(tsv, "PR")) == ROUTES
 
 
 def test_the_m_row_keeps_the_routed_requirement(tsv):
@@ -308,12 +312,13 @@ def test_the_coverage_ratchet_is_satisfied(harness, verdicts):
     with redirect_stdout(buf):
         findings = harness.a9_coverage()
     assert findings == []
+    out = buf.getvalue()
     for rel in (FIXTURE, CONVERSE_FIXTURE):
-        assert rel in buf.getvalue()
-    # The ratchet names the FIRST routed witness in row order, which is either
-    # routed document the corpus carries.
-    routed = re.search(r"routed=\('([^']+)'", buf.getvalue())
-    assert routed and routed.group(1) in (ROUTED, ROUTED_PY)
+        assert rel in out
+    # The ratchet names the FIRST routed witness it meets; any admitted
+    # route in the corpus satisfies it, so pin the witness to the set.
+    routed = re.search(r"routed=\('([^']+)', '([^']+)'\)", out)
+    assert routed and (routed[1], routed[2]) in {(f, c) for f, c, _ in ROUTES}
 
 
 def test_the_coverage_ratchet_bites_without_each_witness(harness, verdicts):

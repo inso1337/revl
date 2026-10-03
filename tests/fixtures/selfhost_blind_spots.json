@@ -271,35 +271,6 @@
       ]
     },
     "unported": {
-      "component `call`, `load`, and `unload` steps require routed instance/reference lifecycle machinery rather than the mirrored provide/guard/effect subset; their source branches terminate in the reference component runtime, not v3 statement emission": [
-        "step=call",
-        "step=load",
-        "step=unload"
-      ],
-      "in-file lifecycle tests are emitted by reference-only `_emit_ts_lifecycle_tests`; corpus oracle documents compile library/application output and the port intentionally has no test-runner generation path": [
-        "lifecycle=<true>"
-      ],
-      "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81: the java tier, which still refuses the whole stream surface)": [
-        "kind=stream-merge",
-        "kind=subscribe",
-        "stage=take",
-        "step=stream-iter"
-      ],
-      "reference roots named `stdlib` enter `_emit_ts_ref_runtime`/`_emit_ts_ref_thunk`; the self-host corpus contract requires ordinary host roots and refuses missing host roots instead of synthesizing reference-runtime thunks": [
-        "root=stdlib"
-      ],
-      "temporal `every` and component timer/advance/assert-no-residue steps are handled by reference-only `_emit_temporal` and runtime scheduler hooks, outside the self-host emitter's synchronous component subset": [
-        "mode=every",
-        "step=advance",
-        "step=assert_no_residue",
-        "step=timer"
-      ],
-      "the reference routes `do` through `_v3_do_expr`, whose frame-neutral control-transfer protocol is not mirrored; the self-host emitter keeps this expression outside its declared v3 subset": [
-        "kind=do"
-      ],
-      "transactional witnessed steps use the reference-only undo/frame/replay protocol (`_witnessed_step`, `_method_witnessed_step`, and `_witnessed_extern`); the self-host v3 slice deliberately refuses this component class rather than emitting an unsound partial transaction": [
-        "class=witnessed"
-      ],
       "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
         "kind=hole"
       ]
