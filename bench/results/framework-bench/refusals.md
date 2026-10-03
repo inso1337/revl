@@ -36,13 +36,13 @@ Gate: `python3 tools/selfhost_coverage.py --check`
 
 | tier | unported constructs | distinct reasons | blind |
 |---|---:|---:|---:|
-| go | **48** | 10 | 1 |
+| go | **49** | 11 | 1 |
 | java | **30** | 14 | 6 |
 | py | **27** | 10 | 1 |
 | rust | **20** | 7 | 14 |
 | ts | **16** | 8 | 4 |
 | wasm | **46** | 11 | 4 |
-| **total** | **187** | | |
+| **total** | **188** | | |
 
 ## Dispatch arms no corpus document exercises
 
@@ -55,8 +55,8 @@ known-broken.
 
 | oracle | unreached arms |
 |---|---:|
+| emit_go | 50 |
 | emit_wasm | 50 |
-| emit_go | 49 |
 | emit_java | 36 |
 | emit_rust | 34 |
 | emit_py | 28 |
@@ -64,7 +64,7 @@ known-broken.
 | gate_census | 5 |
 | lower_ir | 5 |
 | compile | 1 |
-| **total** | **228** |
+| **total** | **229** |
 
 ## Where the gate is more permissive than the reference
 
