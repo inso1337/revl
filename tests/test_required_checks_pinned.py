@@ -110,7 +110,7 @@ NOT_REQUIRED_CHECKS = {
     # this is enforced: `tools/evolution_reward.py` carries it as the `held-out`
     # component, and a conjunction there admits no advisory verdict.
     "held-out": "item 537 held-out scoring; a scorer-touching diff is REFUSED by design, so it is advisory here and enforced in the promotion reward",
-    # Issue #1572: keeps `docs/census-artifact.{md,json}` current. It runs the
+    # Issue #1572: keeps the census records (`docs/census-artifact/`) current. It runs the
     # census only when a pull request moves an input of the artifact, so on
     # most pull requests it passes having checked nothing, and a check context
     # that is green for "not applicable" is a poor thing to pin in branch
