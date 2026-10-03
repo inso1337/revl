@@ -1438,6 +1438,8 @@
 
 ["tests/fixtures/emit_go_corpus/comp_provide_builtins.rvl", "agree-admit"]
 
+["tests/fixtures/emit_go_corpus/comp_provide_config.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_go_corpus/comp_provide_pure.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_go_corpus/comp_provide_records.rvl", "agree-admit"]

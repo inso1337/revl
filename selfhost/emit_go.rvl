@@ -3659,9 +3659,7 @@ fn case_entry(types: Any, adt: Str, case_name: Str) -> List[Str] {
 // (the frozen node type, or the scrutinee's), else the case's own layout
 // entry. "" when neither declares it.
 fn case_variant_of(types: Any, hint: Str, case_name: Str) -> Str {
-  var e = []
-  if (decl_kind(types, hint) == "variant") { e = case_entry(types, hint, case_name) }
-  else { e = case_entry(types, "", case_name) }
+  let e = case_entry(types, decl_kind(types, hint) == "variant" ? hint : "", case_name)
   return e.length() > 0 ? e[0] : ""
 }
 
@@ -3949,8 +3947,7 @@ fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
     let callee = value_field(n, "callee")
     if (!value_is_null(callee)) {
       if (node_kind(callee) == "field") {
-        let recv = comp_expr(value_field(callee, "target"), env, "")
-        return `${recv}.${camel(value_str(value_field(callee, "name")))}(${comp_args(n, env)})`
+        return `${comp_expr(value_field(callee, "target"), env, "")}.${camel(value_str(value_field(callee, "name")))}(${comp_args(n, env)})`
       }
       return `${comp_expr(callee, env, "")}(${comp_args(n, env)})`
     }

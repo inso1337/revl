@@ -40,7 +40,6 @@
     "fn=Map.new",
     "has_config=<true>",
     "kind=bool",
-    "kind=config",
     "kind=hole",
     "kind=host",
     "kind=instance-get",

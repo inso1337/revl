@@ -1,0 +1,42 @@
+// issue #106: the v3 COMBINED path, fourth slice. A component `config { .. }`
+// block read from provide-method bodies: the `<Name>Config` struct and its
+// `Default<Name>Config()` constructor (a Str, Int, Bool and Float default, and
+// a field with no default, which the constructor leaves out), the component
+// constructor taking `cfg`, the provider's `cfg` field, `config.<f>` rendered
+// as `revlSelf.cfg.<F>` and typed from the schema in arithmetic, comparison,
+// a ternary and interpolation, and the `Load<Name>` helper taking `cfg` both
+// for a plain component and for one that isolates its key into a realm.
+fn seed() -> Int { return 0 }
+
+service Greeter {
+  fn greet(who: Str) -> Str
+  fn loud() -> Bool
+}
+
+service Meter {
+  fn scaled(n: Int) -> Int
+  fn over(n: Int) -> Bool
+  fn ratio() -> Float
+  fn label(n: Int) -> Str
+}
+
+component Hello provides g: Greeter {
+  config { prefix: Str = "hi, ", shout: Bool = false, suffix: Str }
+
+  provide g {
+    fn greet(who) = config.shout ? config.prefix + who + "!" : config.prefix + who + config.suffix
+    fn loud() = config.shout
+  }
+}
+
+component Gauge provides m: Meter {
+  config { factor: Int = 3, limit: Int = 10, weight: Float = 1.5, unit: Str = "kg" }
+  isolate m in realm("lab")
+
+  provide m {
+    fn scaled(n) = n * config.factor
+    fn over(n) = n * config.factor > config.limit
+    fn ratio() = config.weight
+    fn label(n) = `${n * config.factor} ${config.unit}`
+  }
+}

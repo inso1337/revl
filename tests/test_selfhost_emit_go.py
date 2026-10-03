@@ -160,6 +160,14 @@ CORPUS = [
     "comp_provide_builtins.rvl",
     "../../../bench/codegen/java/cases/interp_format/case.rvl",
     "../emit_ts_corpus/services_composite_provide.rvl",
+    # ... and a component `config { .. }` block read from provide bodies: the
+    # config struct and its defaults, `cfg` through the constructor and the
+    # Load helper, and `config.<f>` typed from the schema
+    "comp_provide_config.rvl",
+    "../emit_java_corpus/comp_config_provide.rvl",
+    "../emit_java_corpus/component_format.rvl",
+    "../emit_rust_corpus/config.rvl",
+    "../emit_ts_corpus/property_edges.rvl",
 ]
 
 # The combined-path documents, which import stc-go and are built against it.
@@ -425,15 +433,18 @@ def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_pat
     a declaration beside an observable component, where both sides emit the
     function and only the reference emits the component. The planted token must
     be refused by name; the honest form (the reference's component, absent from
-    the port) still passes. The component carries a config field because a
-    provide-only one is on the combined slice the port carries now (issue #106).
+    the port) still passes. The document carries a lifecycle test because a
+    provide-only component, with or without config, is on the combined slice
+    the port carries now (issue #106).
     """
     path = tmp_path / "planted.rvl"
     path.write_text("fn f() -> Int { return 1 }\n"
                     "service S { fn g() -> Int }\n"
-                    "component C provides s: S {\n"
-                    "  config { n: Int = 1 }\n"
-                    "  provide s { fn g() = 1 }\n"
+                    "component C provides s: S { provide s { fn g() = 1 } }\n"
+                    "lifecycle test \"t\" {\n"
+                    "  load C\n"
+                    "  unload C\n"
+                    "  assert no_residue\n"
                     "}\n")
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)
@@ -500,13 +511,15 @@ def test_an_observable_component_on_the_pure_path_is_named_by_the_port(emitted,
     genuinely incidental component, below.
     """
     path = tmp_path / "observable.rvl"
-    # A config field is past the combined path's ported slice (issue #106,
+    # A lifecycle test is past the combined path's ported slice (issue #106,
     # COMBINED_CORPUS), so this component is still one the port names.
     path.write_text("fn f() -> Int { return 1 }\n"
                     "service S { fn g() -> Int }\n"
-                    "component C provides s: S {\n"
-                    "  config { n: Int = 1 }\n"
-                    "  provide s { fn g() = 1 }\n"
+                    "component C provides s: S { provide s { fn g() = 1 } }\n"
+                    "lifecycle test \"t\" {\n"
+                    "  load C\n"
+                    "  unload C\n"
+                    "  assert no_residue\n"
                     "}\n")
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)

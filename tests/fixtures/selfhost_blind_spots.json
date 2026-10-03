@@ -33,9 +33,8 @@
       "Lifecycle fault/teardown harness assertion checks runtime residue; in-file lifecycle tests and the live component teardown ABI are outside emit_go.rvl.": [
         "step=assert_no_residue"
       ],
-      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all. Issue #106 ports the combined path's provide-only slice (a `provide` block of single-`return` methods, required services and the service interfaces), so `step=provide`, `kind=req` and `idempotent` left this list; the rest of the live ABI stays here.": [
+      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all. Issue #106 ports the combined path's provide-only slice (a `provide` block of single-`return` methods, required services and the service interfaces), so `step=provide`, `kind=req` and `idempotent` left this list, and its fourth slice ports a component `config` block read from provide bodies, so `kind=config` left too; the rest of the live ABI stays here.": [
         "has_config=<true>",
-        "kind=config",
         "kind=host",
         "kind=instance-get",
         "kind=spawn",
