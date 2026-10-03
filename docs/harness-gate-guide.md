@@ -106,11 +106,18 @@ includes: one prompt covers the whole call or none of it.
 Because the class is the worst over the WHOLE reach, an indirection does not
 preserve it. A class-(a) `witnessed` op is 0-prompt, but an `emission fn` that
 merely forwards to it reaches an emission crossing and is class-(c), one prompt
-per call (D1). So a witnessed call factored behind any relay, wrapper, or helper
-emission silently loses the auto-approve guarantee: the natural refactor is not
-class-preserving, and there is no warning at the call site. To keep a witnessed
-op's (a) guarantee, keep the crossing direct. A relay over it is a deliberate
-escalation to (c), not a free abstraction.
+per call (D1). So a witnessed call factored behind a relay, wrapper, or helper
+emission loses the auto-approve guarantee: the natural refactor is not
+class-preserving. It is no longer silent (issue #1707). Every verb that
+compiles, admits or edits reports each provided operation's class as
+`effectClasses`, and `revl_admit`, `revl_plan`, `revl_ship`, `revl_swap` and
+`revl_edit` add an `EFFECT_CLASS_ROSE` warning for each operation whose class
+rose against the running composition, naming the operation and the crossing
+that raised it. For the helper refactor that reads ``"`ops.stash` (Agent) rose
+from class (a) to class (c): `emit stage.stage` in Agent raised it"``
+([mcp-reference.md](mcp-reference.md) has the field shapes). To keep a
+witnessed op's (a) guarantee, keep the crossing direct. A relay over it is an
+escalation to (c), and now a reported one.
 
 The three classes
 map onto three externs:

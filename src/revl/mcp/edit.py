@@ -69,6 +69,7 @@ import re
 from ..compiler import compile_source
 from ..diagnostics import report
 from ..errors import RevlError
+from . import effect_classes as _effect_classes
 from . import fillspec
 
 _WORD_HOLE = re.compile(r"\bhole\b")
@@ -349,6 +350,7 @@ def apply_edit(session, arguments: dict) -> dict:
         return {"ok": True, "edited": True, "swapped": False, "admitted": False,
                 "applied": applied, "holes": holes,
                 **_summary(ir),
+                **_effect_classes.report(ir, session.ir, against=True),
                 "note": f"{len(holes)} open hole(s) remain — the edit was applied "
                         "to the server-side source and it compiles, but a hole may "
                         "not enter a running composition; fill them, then it swaps"}
@@ -391,10 +393,12 @@ def apply_edit(session, arguments: dict) -> dict:
     if quarantined is not None:  # required quarantine: not proved, not swapped
         return {**quarantined, "edited": False, "applied": applied}
 
+    running = session.ir
     state = session.swap(ir, origin=_origin_from(vs))
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
-            "applied": applied, **_summary(ir), **state}
+            "applied": applied, **_summary(ir), **state,
+            **_effect_classes.report(ir, running, against=True)}
 
 
 def _summary(ir: dict) -> dict:
