@@ -1,0 +1,6 @@
+package cache
+
+func Get(key string) (string, bool) {
+	v, ok := items[key]
+	return v, ok
+}

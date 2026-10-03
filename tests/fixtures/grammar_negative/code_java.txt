@@ -1,0 +1,3 @@
+public String get(String key) {
+    return items.getOrDefault(key, null);
+}

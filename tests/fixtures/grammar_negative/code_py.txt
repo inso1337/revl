@@ -1,0 +1,4 @@
+def get(key):
+    if key in cache:
+        return cache[key]
+    return None
