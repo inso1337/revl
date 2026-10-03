@@ -3457,6 +3457,17 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # somebody models the floor.
             record("out-of-fragment-approval" if formal_clean
                    else "formal-found-other", rel)
+        elif code == "G4" and category == "deferred":
+            # The deferred-position rule (item 400, issue #1457, `lower.
+            # _deferred_value_refusal` and its call arms) carries the G4 code,
+            # but it is not the marker rule either: it asks WHERE a `deferred`
+            # emission extern is reached (only an `emit`-marked call in a
+            # component enqueues it for the session commit), and the model has
+            # no fact about extern positions in a `fn` or `test` body or about
+            # a function value. Absence of fact, ratcheted by name exactly as
+            # the approval floor is (issue #1688 added the first documents).
+            record("out-of-fragment-deferred" if formal_clean
+                   else "formal-found-other", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -3619,11 +3630,12 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # about a specific row that exists, and that is the claim worth pinning.
 OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
 OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
-                       "out-of-fragment-approval")
+                       "out-of-fragment-approval", "out-of-fragment-deferred")
 OOF_LEDGER_ABOUT = [
-    "The corpus files the checker refuses G5, G6 or with the G4 approval",
-    "floor, and the model has NO fact about: `out-of-fragment-G5`,",
-    "`out-of-fragment-G6` and `out-of-fragment-approval` in",
+    "The corpus files the checker refuses G5, G6, with the G4 approval",
+    "floor or with the G4 deferred-position rule, and the model has NO",
+    "fact about: `out-of-fragment-G5`, `out-of-fragment-G6`,",
+    "`out-of-fragment-approval` and `out-of-fragment-deferred` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "",
     "Each bucket records an absence, so none can disagree with anything",

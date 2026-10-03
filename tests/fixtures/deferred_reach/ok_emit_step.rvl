@@ -1,0 +1,12 @@
+// ADMITTED: the deferred extern called under its `emit` marker in a provide
+// method, the one spelling that enqueues it. The file name's prefix is the
+// expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_gate_deferred_reach_1688.py holds it.
+
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops {
+    fn enqueue(sink, msg) { emit deliver(sink, msg) }
+  }
+}

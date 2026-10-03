@@ -1,0 +1,16 @@
+// REFUSED G4 (issue #1457): a test body passes the deferred extern as a
+// function value. The file name's prefix is the expected verdict (`g4_`
+// refused, `ok_` admitted); tests/test_gate_deferred_reach_1688.py holds it.
+
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+fn apply(f: (Str, Str) -> Unit, a: Str, b: Str) -> Unit { return f(a, b) }
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops {
+    fn enqueue(sink, msg) { emit deliver(sink, msg) }
+  }
+}
+test "hands it on" {
+  let r = apply(deliver, "s", "m")
+  assert true
+}

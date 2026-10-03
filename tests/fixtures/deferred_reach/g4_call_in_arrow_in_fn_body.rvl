@@ -1,0 +1,16 @@
+// REFUSED G4 (item 400, issue #1457): the call sits inside an arrow in a fn
+// body, and the refusal names that route. The file name's prefix is the
+// expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_gate_deferred_reach_1688.py holds it.
+
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+fn apply(f: (Str, Str) -> Unit, a: Str, b: Str) -> Unit { return f(a, b) }
+fn run(a: Str, b: Str) -> Unit {
+  return apply((x: Str, y: Str) => deliver(x, y), a, b)
+}
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops {
+    fn enqueue(sink, msg) { emit run(sink, msg) }
+  }
+}
