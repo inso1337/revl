@@ -285,7 +285,8 @@ def test_no_residue_proof_holds_over_a_real_teardown(realms_ir):
     assert residue["proven"] is True
     # the four R4 checks: registry, provisions, effect disposables, listeners
     assert all(residue["checks"].values())
-    assert set(residue["checks"]) == {"registry", "provisions", "effects", "listeners"}
+    assert set(residue["checks"]) == {"registry", "provisions", "effects",
+                                      "listeners", "hostResources"}  # issue #1859
     assert report["summary"]["stateGoneProven"] is True
 
 

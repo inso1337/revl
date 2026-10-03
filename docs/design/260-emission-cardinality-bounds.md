@@ -232,6 +232,23 @@ per-capability count read structurally off the step list:
   contributes `*` at multiplicity 1 per syntactic call site, and marks the
   capability set with `*` (we can count the call sites, but not name the
   boundary; see §5.1 for why this does not let a body under-report).
+- **An emitting arrow is counted where it RUNS, once per invocation, never
+  once per literal (issue #1757).**
+  - A `let`, `var` or assignment that binds an arrow counts nothing there.
+    Each direct call of the bound name contributes the arrow body's count, so
+    two calls are two crossings. A name bound to several arrows (two methods,
+    a reassigned `var`) costs the worst of them.
+  - An arrow argument to a top-level fn, whether a literal or a bound name,
+    contributes its body's count times the number of direct invocations of
+    the receiving parameter on one path of that fn (path-max: an `if`/`match`
+    takes the worse branch). A data argument is evaluated once, as before.
+  - Anything that hides the number of runs makes the arrow's capabilities
+    `unbounded` with that reason: an alias, a field or element read, storage
+    in a record or list, a pass to another fn, an invocation inside another
+    arrow, an unknown or recursive callee the loop recognizer did not
+    certify, or a callee that invokes its parameters inside a `while`/`for`.
+  - An early `return` inside an `if` with no `else` is over-approximated as
+    falling through, which only raises a ceiling.
 
 This is a bottom-up evaluation over the call graph condensation (SCCs). A
 non-looping body is one whose reachable SCCs are all singletons with no
@@ -286,8 +303,24 @@ is NOT in scope and reports `unbounded` (clause (4)):
    is over paths (an `if`/`match` whose arms EACH contain one in-SCC call is
    still linear - only one arm runs); the violation is two in-SCC calls
    sequentially reachable on one path.
+5. **The dispatch is the one counted (issue #1755).** Every recursive call
+   passes each FUNCTION-TYPED parameter unchanged, in its own position, so an
+   iteration cannot swap in a wider dispatch than the one the loop was entered
+   with. Function-typed means the declared type can hold a function: an arrow
+   type, or a record or variant that can, transitively; an undefined name or a
+   generic parameter counts as one. A DATA parameter may take any value on the
+   back-edge, and an agent loop needs that to grow its history
+   (`msgs + [req.result]` above). Its new value is computed in the recursive
+   arm, so every arrow invoked to compute it is already in
+   `per_iter_crossings`, and a call to any other fn, a host reach or a named
+   capability anywhere in the body already makes the loop `unbounded`. And a
+   parameter whose entry argument carries a crossing is used only by
+   invoking it directly (`step(msgs)`) or by passing it on unchanged. An
+   alias (`let f = step`), a field or element read (`s.step`, `fs[0]`) or any
+   other pass makes the loop `unbounded` with that reason. Its invocations are
+   no longer direct, and counting it as zero would drop the crossing.
 
-When (1)-(4) hold, the recursion is LINEAR (clause (4)), so the max iteration
+When (1)-(5) hold, the recursion is LINEAR (clause (4)), so the max iteration
 count is `ceil((N0 - c) / k)` (with a LITERAL `N0`), and the per-activation
 per-capability ceiling is:
 

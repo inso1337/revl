@@ -58,6 +58,8 @@
 
 ["reference", "src/revl/navigate.py"]
 
+["reference", "src/revl/operator_text.py"]
+
 ["reference", "src/revl/ownership.py"]
 
 ["reference", "src/revl/parallel.py"]

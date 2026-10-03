@@ -638,6 +638,10 @@ class Policy:
     # rules. PARSE-ONLY this slice (no evaluation wiring); empty by default so
     # every existing policy parses/evaluates byte-identically.
     auto_approve_rules: tuple[AutoApproveRule, ...] = ()
+    # issue #1755: `approvals require bounded crossings` refuses a call whose
+    # class-(c) capability has an `unbounded` item-260 ceiling in the crossing
+    # component, instead of ticketing it. Off by default.
+    approvals_bounded: bool = False
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
@@ -648,6 +652,7 @@ class Policy:
             and not self.teardown_rules \
             and not self.reissue_rules \
             and not self.auto_approve_rules \
+            and not self.approvals_bounded \
             and not self.evidence_root_local
 
     def reissue_strength(self) -> str | None:
@@ -907,6 +912,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     mcp_allow: tuple[str, ...] | None = None
     leases_enforced = False
     quarantine_required = False
+    approvals_bounded = False
     approval_rules: list[ApprovalRule] = []
     declassify_rules: list[Rule] = []
     taint_flow_rules: list[TaintFlowRule] = []
@@ -1090,6 +1096,12 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         if low in ("leases enforced", "leases are enforced"):
             leases_enforced = True
             continue
+        # issue #1755: refuse a call whose approval would cover an `unbounded`
+        # number of crossings (item 260) rather than ask a human to bound it
+        if low in ("approvals require bounded crossings",
+                   "approvals require a bounded crossing count"):
+            approvals_bounded = True
+            continue
         # item 251, Slice 1: `component <glob> may auto-approve <caps> [in realm
         # <r>] [admitting <o>-taint,...] [ttl <D>] [uses <N>]`. Checked before the
         # `may reach` loop (it shares neither verb, but this keeps the distilled
@@ -1136,7 +1148,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   tuple(teardown_rules),
                   tuple(reissue_rules),
                   evidence_root_local,
-                  tuple(auto_approve_rules))
+                  tuple(auto_approve_rules),
+                  approvals_bounded=approvals_bounded)
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -1173,6 +1186,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
     mcp_allow = tuple(mcp["allow"]) if mcp.get("allow") is not None else None
     leases_enforced = bool((doc.get("leases") or {}).get("enforced"))
     quarantine_required = bool((doc.get("quarantine") or {}).get("required"))
+    approvals_bounded = bool(
+        (doc.get("approvalCeilings") or {}).get("refuseUnbounded"))
     approval_rules: list[ApprovalRule] = []
     for entry in doc.get("approvals") or []:
         cap = entry.get("capability") or entry.get("pattern")
@@ -1314,7 +1329,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
                   tuple(teardown_rules),
                   tuple(reissue_rules),
                   evidence_root_local,
-                  tuple(auto_approve_rules))
+                  tuple(auto_approve_rules),
+                  approvals_bounded=approvals_bounded)
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
