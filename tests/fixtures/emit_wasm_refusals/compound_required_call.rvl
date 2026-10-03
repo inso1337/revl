@@ -1,0 +1,33 @@
+// A component that calls a required service with a `Str` argument, where the
+// service is provided by another component of the same composition. The
+// frontend admits it. The wasm reference REFUSES it by name (issue #1601): the
+// provider is another cordis-wasm instance with its own linear memory, the
+// runtime forwards the argument as the integer address it is, and the provider
+// would read its own memory at that address. Measured before the refusal, a
+// three-element list arrived with length 0. The same document over an `Int`
+// argument emits, and so does this one with `Notes` removed (the key is then
+// the host's, which can read the caller's memory), so a compound value
+// crossing between two of the composition's own modules is the only reason
+// for the refusal.
+//
+// This is not a byte-agreement case, so it cannot live in the tier's CORPUS.
+// The line-coverage gate drives the reference over it here, which is the only
+// way
+//
+//   backends/wasm/emit.py::_refuse_cross_module_compound
+//
+// ever runs. The refusal's text is asserted by
+// backends/wasm/test_coeffect_compound_boundary_1601.py.
+//
+// selfhost/emit_wasm.rvl has no counterpart to this refusal: it does not emit
+// components.
+service Bus { fn note(m: Str) -> Int }
+service S { fn f(x: Int) -> Int }
+
+component Notes provides bus: Bus {
+  provide bus { fn note(m) = m.length() }
+}
+
+component C requires bus: Bus provides s: S {
+  provide s { fn f(x) = bus.note("hello") }
+}
