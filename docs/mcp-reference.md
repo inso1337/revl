@@ -409,6 +409,11 @@ finest level that holds. When only a component's methods (or a service's
 operations, or a type's members) changed, the members are reported, each with
 `parent` and `parentKind`; otherwise the whole declaration is.
 
+An `{append}` edit adds new top-level declarations at the end of the buffer
+(the only one, or `target`), with no offset to compute. A name that is already
+declared in any buffer is refused; replace it with `{symbol, replacement}`
+instead. `revl_change {add}` is this edit.
+
 `commit: false` proposes instead of swapping: the edit lands in your proposal,
 shared with `revl_change`, and `revl_change {commit: true}` commits it (issue
 #1696). The default stays `commit: true` for now; see the design note.
@@ -426,8 +431,8 @@ components, where the top-level `touched` above names symbols:
 - `breaks`: the total across the touched components.
 
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
-  replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}`,
-  each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
+  replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}` /
+  `{append}`, each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
   inline source or the one loaded file, a loaded file's path, or an in-memory
   module); `replacing`; with nothing loaded, `files` / `source` / `modules` /
   `config` to load first.
@@ -472,15 +477,18 @@ rule for edited files, the gates and drafts behave exactly as for `revl_edit`:
 | `{replace: {component, source}}` | replaces one declaration by name with its whole new text |
 | `{withdraw: "Name"}` | removes the component (and the comment above it) and withdraws it. Refused from the plan when the cascade is not empty |
 | `{withdraw: {component, cascade: true}}` | withdraws the component and its whole cascade together |
+| `{add: {source, target?}}` | appends new declarations to the only buffer, or to `target` (a loaded file's path, a module key, or `source`). Refused before anything applies when a name is already declared (use `replace`), when `source` declares nothing, or when there are several buffers and no `target` |
 
-The answer carries `committed`, `verified` (`admission`, and `gauntlet` when
-asked), `plan` for a withdrawal (`cascade`, `withdrawalOrder`,
+The answer carries `committed`, `verified` (`admission`; `guarantees`, the
+G1-G9 self-check `revl_check` returns, whenever a compile judged the
+candidate: every guarantee `pass` once admitted, the failing one with its code,
+message and fix when refused; and `gauntlet` when asked), `plan` for a withdrawal (`cascade`, `withdrawalOrder`,
 `orphanedKeys`), the `touched` symbols, and `components`: every component the
 change touched, each with `added` / `changed` / `removed`, plus `would lose a
 provider` for a refused cascade. A change that fails verification commits
 nothing, and the running composition is unchanged.
 
-- Inputs: one of `edit` / `replace` / `withdraw`; `gauntlet`; `commit`
+- Inputs: one of `edit` / `replace` / `withdraw` / `add`; `gauntlet`; `commit`
   (default false: propose only); `discard`; with nothing loaded, `files` /
   `source` / `modules` / `config`.
 

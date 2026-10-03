@@ -323,6 +323,9 @@ def _apply_to_buffers(vs: dict, edits: list, default_target) \
     for edit in edits:
         if isinstance(edit, dict) and "symbol" in edit:
             buffer, text, echo = _apply_symbol(vs, edit)
+        elif isinstance(edit, dict) and "append" in edit:
+            buffer, text, echo = _apply_append(
+                vs, edit, edit.get("target", default_target))
         else:
             target = edit.get("target", default_target) \
                 if isinstance(edit, dict) else default_target
@@ -335,6 +338,40 @@ def _apply_to_buffers(vs: dict, edits: list, default_target) \
         if buffer not in touched:
             touched.append(buffer)
     return applied, touched
+
+
+def _apply_append(vs: dict, edit: dict, target) -> tuple[tuple[str, str], str, dict]:
+    """``{append, target?}``: add new top-level declarations at the end of a
+    buffer (issue #1695, `revl_change {add}`). Position independent, like
+    `symbol` and `anchor`, so no offset is needed. A name that is already
+    declared in any buffer is refused: replacing it is `{symbol, replacement}`."""
+    from . import symbols  # noqa: PLC0415
+
+    added = edit.get("append")
+    if not isinstance(added, str) or not added.strip():
+        raise EditError("an append edit needs `append`, the declarations to add")
+    buffer = _resolve_buffer(vs, target)
+    try:
+        new_decls = symbols.declarations(added, "<added>")
+        existing = {decl.name: key for key, text in symbols.buffers(vs)
+                    for decl in symbols.declarations(text, key[1])}
+    except symbols.SymbolError as error:
+        raise EditError(str(error)) from None
+    if not new_decls:
+        raise EditError("the text to add declares nothing (a component, service, "
+                        "type or fn)")
+    taken = [d.name for d in new_decls if d.name in existing]
+    if taken:
+        raise EditError(
+            f"{', '.join(taken)} is already declared; to change it, replace it "
+            f"by name ({{replace: {{component, source}}}} in revl_change, or "
+            f"{{symbol, replacement}} in revl_edit)")
+    text = _get_text(vs, buffer)
+    body = added if added.endswith("\n") else added + "\n"
+    joint = "" if not text or text.endswith("\n\n") else \
+        ("\n" if text.endswith("\n") else "\n\n")
+    return buffer, text + joint + body, {
+        "form": "append", "declared": [d.name for d in new_decls]}
 
 
 def _apply_symbol(vs: dict, edit: dict) -> tuple[tuple[str, str], str, dict]:
