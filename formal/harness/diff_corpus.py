@@ -137,6 +137,7 @@ from revl.parser import (
     ExprIf,
     ExprIndex,
     ExprList,
+    ExprLit,
     ExprMatch,
     ExprRecord,
     ExprVar,
@@ -547,6 +548,148 @@ def _undo_callee(expr: object) -> str | None:
     if isinstance(expr, ExprVar):
         return expr.name
     return None
+
+
+_UNBOUND = object()
+
+
+class _InverseCtx(NamedTuple):
+    """What one bracket inverse's indirections resolve against."""
+    bindings: dict           # `let` name -> the value it was bound to
+    emitting: set            # `_fn_emitting`: emission externs + fns reaching one
+    externs: dict            # extern name -> classification
+    requires: dict           # require local -> service
+    handles: dict            # spawn handle var -> child component
+    psvc: dict               # component -> provide key -> service
+    aliases: dict            # provision aliases, as the marker rule reads them
+    services: dict           # service -> op -> declared `emission`
+
+
+def _inverse_project(e, ctx: _InverseCtx, seen: frozenset = frozenset()):
+    """The value `e` holds with every `let`-bound name replaced by what it was
+    bound to, `_UNBOUND` when nothing is known (`lower._walk_inverse_emissions`'
+    `_project`): through a name, a second name, a record field and a list
+    element; an `if`/`match` value is handed back whole, so every arm is read."""
+    if isinstance(e, ExprVar):
+        if e.name in seen or e.name not in ctx.bindings:
+            return _UNBOUND
+        value = ctx.bindings[e.name]
+        held = _inverse_project(value, ctx, seen | {e.name})
+        return value if held is _UNBOUND else held
+    if isinstance(e, ExprField):
+        base = _inverse_project(e.target, ctx, seen)
+        if isinstance(base, ExprRecord):
+            for key, item in base.fields:
+                if key == e.name:
+                    held = _inverse_project(item, ctx, seen)
+                    return item if held is _UNBOUND else held
+            return None
+        return _UNBOUND
+    if isinstance(e, ExprIndex):
+        base = _inverse_project(e.target, ctx, seen)
+        if isinstance(base, ExprList):
+            index = e.index
+            if isinstance(index, ExprLit) and isinstance(index.value, int) \
+                    and not isinstance(index.value, bool):
+                if not 0 <= index.value < len(base.items):
+                    return None
+                item = base.items[index.value]
+                held = _inverse_project(item, ctx, seen)
+                return item if held is _UNBOUND else held
+            return base
+        return _UNBOUND
+    return _UNBOUND
+
+
+def _inverse_op(e: ExprField, ctx: _InverseCtx) -> "tuple[str, str] | None":
+    """(service, op) when the field read `e` names an `emission` service
+    operation: off a require binding (`net.send`), a spawn handle
+    (`w.task.run`) or a local aliasing a provision (`t.run`)."""
+    rv = _route_values(e)
+    if rv is None or not rv[1]:
+        return None
+    res = _resolve_emission(rv[0], rv[1], ctx.requires, ctx.handles, ctx.psvc,
+                            ctx.aliases)
+    if res is None or not ctx.services.get(res[0], {}).get(res[1], False):
+        return None
+    return res
+
+
+def inverse_reach_heads(expr: object, ctx: _InverseCtx) -> list[str]:
+    """The heads a bracket inverse reaches through an INDIRECTION, issue
+    #1792: `lower._walk_inverse_emissions`' arms that read a value rather
+    than a call written in the slot.
+
+      * a call to a `let`-bound arrow reaches what the arrow's body reaches;
+      * an arrow literal's body is slot code, wherever it is dispatched;
+      * a first-class reference to an emitting callable in value position
+        (`app(wrap, key)`) reaches what it names;
+      * a read of an `emission` service operation in value position
+        (`dispatch1(w.task.run)`) is that crossing, one indirection later;
+      * a `let`-bound name is read as its value, through a second name, a
+        record field, a list element or an `if`/`match` arm.
+
+    A call read out of a binding the body already evaluated is a value, not a
+    crossing in the slot (`let t = emit mint(u)` then `undo store.remove(t)`),
+    as the checker's `_computed` flag has it. A provision operation CALLED in
+    the slot (`undo w.task.run(k)`) is not repeated here: it is an unmarked
+    call to an `emission` operation, which the `G` row refuses.
+
+    Returns names in first-reach order: a declared fn or extern, or the
+    `<Service>.<op>` spelling of a service operation, which the exporter
+    declares in the `Prog` as an `emission` boundary (`EX`)."""
+    out: list[str] = []
+
+    def add(name: str) -> None:
+        if name not in out:
+            out.append(name)
+
+    def walk(e, seen_arrows: tuple, computed: bool) -> None:
+        if e is None or isinstance(e, (str, int, float, bool)):
+            return
+        held = _inverse_project(e, ctx)
+        if held is not _UNBOUND and held is not e:
+            walk(held, seen_arrows, True)
+            return
+        if isinstance(e, ExprVar):
+            if e.name in ctx.emitting:
+                add(e.name)
+            return
+        if isinstance(e, ExprCall):
+            callee = e.callee
+            if not computed and isinstance(callee, ExprVar):
+                name = callee.name
+                cls = ctx.externs.get(name)
+                if cls in ("emission", "witnessed") or (
+                        cls is None and name in ctx.emitting):
+                    add(name)
+                elif isinstance(ctx.bindings.get(name), ExprArrow) \
+                        and name not in seen_arrows:
+                    walk(ctx.bindings[name].body, seen_arrows + (name,),
+                         computed)
+            for a in e.args:
+                walk(a, seen_arrows, computed)
+            return
+        if isinstance(e, ExprField):
+            op = _inverse_op(e, ctx)
+            if op is not None:
+                add(f"{op[0]}.{op[1]}")
+            else:
+                walk(e.target, seen_arrows, computed)
+            return
+        if isinstance(e, ExprArrow):
+            walk(e.body, seen_arrows, False)
+            return
+        if dataclasses.is_dataclass(e) and not isinstance(e, type):
+            for f in dataclasses.fields(e):
+                walk(getattr(e, f.name), seen_arrows, computed)
+            return
+        if isinstance(e, (list, tuple)):
+            for x in e:
+                walk(x, seen_arrows, computed)
+
+    walk(expr, (), False)
+    return out
 
 
 def _fn_body_calls(body: object) -> tuple[list[str], set[str]]:
@@ -1891,6 +2034,12 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         star_fns = {name: bool(vals & crossing_names)
                     for name, vals in fn_values.items()}
         tsv.append("\t".join(["PG", rel, str(len(prog.fn_decls))]))
+        extern_class_of = {e.name: e.classification for e in prog.externs}
+        # The service operations a bracket inverse READS as a value
+        # (`undo dispatch1(w.task.run)`, issue #1792), each declared in the
+        # `Prog` below as an `emission` boundary named `<Service>.<op>`. No
+        # extern can be spelled with a dot, so the names cannot collide.
+        op_boundaries: dict[str, list[str]] = {}
         for e in prog.externs:
             tsv.append("\t".join([
                 "EX", rel, e.name, e.classification,
@@ -2090,10 +2239,26 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 violation: marker-presence != interface-declared emission."""
                 nonlocal stmts
                 stmts += 1
+                if type(stmt).__name__ == "LetStmt" \
+                        and isinstance(getattr(stmt, "name", None), str):
+                    inv_lets[stmt.name] = stmt.value
                 if isinstance(stmt, (EffectStmt, LetEffect)):
                     kinds.append("effect")
                     primary = _term_heads(getattr(stmt, "acquire"))
                     inverse = _term_heads(getattr(stmt, "undo"))
+                    # what the inverse reaches through an indirection (a
+                    # dispatched arrow, a passed reference, a bound value),
+                    # as `lower._walk_inverse_emissions` resolves it (#1792)
+                    for head in inverse_reach_heads(
+                            getattr(stmt, "undo"), _InverseCtx(
+                                inv_lets, emitting, extern_class_of,
+                                require_map, handles, psvc, aliases,
+                                services)):
+                        if head not in inverse:
+                            inverse.append(head)
+                        if "." in head:
+                            op_boundaries[head] = bounds.get(
+                                tuple(head.split(".", 1)), ("", []))[1]
                     terms.append((len(terms), "effect", primary, inverse))
                     # effect-form calls are STILL plain context: an emission
                     # call whose pairing is an inverse is refused (the
@@ -2164,12 +2329,19 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # first pass descend into a `provide` would classify every method
             # statement twice — a doubled census and a duplicated U row for
             # every provide-body crossing.
+            # `inv_lets`: the `let` bindings in scope, read by an inverse that
+            # dispatches a bound value. A method sees the activation's lets
+            # and its own, its parameters shadowing both.
+            inv_lets: dict[str, object] = {}
             for stmt in c.body:
                 if not isinstance(stmt, ProvideStmt):
                     classify_stmt(stmt)
+            act_lets = dict(inv_lets)
             for stmt in c.body:
                 if isinstance(stmt, ProvideStmt):
                     for pm in stmt.methods:
+                        inv_lets = {k: v for k, v in act_lets.items()
+                                    if k not in pm.params}
                         for inner in pm.body:
                             classify_stmt(inner)
             tsv.extend(f"T\t{rel}\t{c.name}\t{k}" for k in kinds)
@@ -2184,6 +2356,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 tsv.append("\t".join(["AQ", rel, c.name, str(ord_),
                                        _a2_step(stmt)]))
             ff["components"][c.name] = {"calls": calls, "kinds": kinds}
+        for name, caps in sorted(op_boundaries.items()):
+            tsv.append("\t".join(["EX", rel, name, "emission", "-", "-",
+                                   ",".join(caps)]))
         file_facts[rel] = ff
     # Z/Y decomposition rows go FIRST so the oracle can build its table in
     # one pass; the harness refuses a capability the checker cannot re-read.
@@ -3864,11 +4039,12 @@ def g5_files_the_prog_resolves(tsv) -> set[str]:
 
     G5 is stated over a `Prog` — the extern table plus the fn call graph — so
     the U5 row can only count a teardown crossing it reaches through a NAMED
-    fn or extern. An `undo w.task.run(...)` (a spawn handle), an
-    `undo store.drop()` (a host receiver), an `undo f()` (an arrow parameter)
-    and an `undo dispatch1(...)` whose `dispatch1` calls its own parameter all
-    leave the `Prog` at the first hop: the fold has no declaration to follow
-    and counts nothing. A zero there is the model having no fact, not the
+    fn or extern. An `undo store.drop()` (a host receiver) and an `undo
+    f(key)` through a function-typed parameter leave the `Prog` at the first
+    hop: the fold has no declaration to follow and counts nothing. (A
+    dispatched `let`-bound arrow, a passed emitting fn and a service
+    operation read off a spawn handle no longer do: `inverse_reach_heads`
+    adds what they reach to the inverse heads, issue #1792.) A zero there is the model having no fact, not the
     model disagreeing, and filing it as `missed-G5` would red the gate over a
     documented fragment boundary.
 
@@ -4034,7 +4210,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
                 _G5_WITNESS[rel] = "G"
             elif rel not in g5_resolved:
                 # Every `undo` in the file leaves the `Prog` at the first hop
-                # (a handle, a host receiver, an arrow or a dispatched
+                # (a host receiver, or a call through a function-typed
                 # parameter), so the U5 row has no declaration to follow and
                 # its zero is an absence of fact. Named in full below, never
                 # counted silently.
@@ -4081,7 +4257,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     total = sum(align.values())
     print(f"checker alignment ({total} modeled files; every disagreeing "
           f"bucket is FATAL: {'/'.join(FATAL_BUCKETS)}):")
-    for k in sorted(set(align) | set(FATAL_BUCKETS)):
+    for k in sorted(set(align) | set(FATAL_BUCKETS) | set(OOF_RATCHET_BUCKETS)):
         n = align.get(k, 0)
         mark = "  FATAL" if k in FATAL_BUCKETS and n else ""
         print(f"  {k:20} {n}{mark}")
@@ -4138,11 +4314,11 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 #     in it once the model does have a fact about it.
 #
 # The inputs that make it fail, named: dropping a new
-# `examples/rejections/g5_undo_*.rvl` whose `undo` reads its crossing off a
-# handle into the corpus reds the gate with `joined out-of-fragment-G5`;
-# teaching the `U5` fold to follow a handle reds it with `left
-# out-of-fragment-G5` on each of the ten files it newly resolves, until
-# their lines go. Deleting the ledger reds it as well — a missing ratchet
+# `examples/rejections/g5_undo_*.rvl` whose `undo` calls a function-typed
+# parameter into the corpus reds the gate with `joined out-of-fragment-G5`;
+# teaching the exporter to follow a handle's method reference, a dispatched
+# arrow and a passed fn (issue #1792) red it with `left out-of-fragment-G5`
+# on each of the ten files it newly resolved, until their lines went. Deleting the ledger reds it as well — a missing ratchet
 # reads as a failure, never as nothing to check.
 #
 # It records NAMES ONLY — no counts, no totals, no line numbers — so the
@@ -4172,7 +4348,9 @@ OOF_LEDGER_ABOUT = [
     "(The G4 deferred-position rule left this ledger in issue #1742: the",
     "model states it as `RevL.G4Deferred`, decided as the `DF` row. The",
     "G4 approval floor left it in issue #1455: `RevL.G4Approval`, decided",
-    "as the `AP` row.)",
+    "as the `AP` row. The G5 list emptied in issue #1792, when the exporter",
+    "began resolving an inverse's indirections; the bucket stays, so a new",
+    "unresolvable `undo` still reds the gate.)",
     "",
     "Both buckets record an absence, so neither can disagree with anything",
     "and neither could fail the gate on its own (issue #1169). This ledger",
@@ -4355,7 +4533,7 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         "| bucket | files | gate |",
         "| --- | --- | --- |",
     ]
-    for k in sorted(set(align) | set(FATAL_BUCKETS)):
+    for k in sorted(set(align) | set(FATAL_BUCKETS) | set(OOF_RATCHET_BUCKETS)):
         gate = ("**FATAL**" if k in FATAL_BUCKETS else
                 "ratcheted" if k in OOF_RATCHET_BUCKETS else "informational")
         lines.append(f"| `{k}` | {align.get(k, 0)} | {gate} |")

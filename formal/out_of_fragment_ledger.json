@@ -6,7 +6,9 @@
     "(The G4 deferred-position rule left this ledger in issue #1742: the",
     "model states it as `RevL.G4Deferred`, decided as the `DF` row. The",
     "G4 approval floor left it in issue #1455: `RevL.G4Approval`, decided",
-    "as the `AP` row.)",
+    "as the `AP` row. The G5 list emptied in issue #1792, when the exporter",
+    "began resolving an inverse's indirections; the bucket stays, so a new",
+    "unresolvable `undo` still reds the gate.)",
     "",
     "Both buckets record an absence, so neither can disagree with anything",
     "and neither could fail the gate on its own (issue #1169). This ledger",
@@ -23,18 +25,7 @@
     "It records NAMES only -- never counts, totals or line numbers -- so it",
     "is identical under CI's python 3.11 and a 3.14 developer venv."
   ],
-  "out-of-fragment-G5": [
-    "examples/rejections/g5_undo_arrow_emission.rvl",
-    "examples/rejections/g5_undo_fn_value_emission.rvl",
-    "examples/rejections/g5_undo_handle_ref_arg.rvl",
-    "examples/rejections/g5_undo_handle_ref_let.rvl",
-    "examples/rejections/g5_undo_method_ref_alias.rvl",
-    "examples/rejections/g5_undo_method_ref_if_arm.rvl",
-    "examples/rejections/g5_undo_method_ref_let.rvl",
-    "examples/rejections/g5_undo_method_ref_list.rvl",
-    "examples/rejections/g5_undo_method_ref_match_arm.rvl",
-    "examples/rejections/g5_undo_method_ref_record.rvl"
-  ],
+  "out-of-fragment-G5": [],
   "out-of-fragment-G6": [
     "examples/rejections/g6_method_local_shadows_component.rvl"
   ]
