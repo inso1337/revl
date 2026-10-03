@@ -53,7 +53,7 @@ def _spec(message: str) -> dict:
 
 def test_the_spec_is_versioned_and_keeps_the_version_one_fields():
     spec = _spec("store the entry")
-    assert spec["version"] == fillspec.FILL_SPEC_VERSION == 3
+    assert spec["version"] == fillspec.FILL_SPEC_VERSION == 2
     cap = spec["capability"]
     assert cap["mayEmit"] is cap["permitsCrossing"] is True
     assert cap["bound"] == ["db"]

@@ -44,6 +44,13 @@ component is gone. The per-process residue proof then asks the server whether
 it still holds the model. That needs a schedule, so an `ollama` role runs only
 under `--placement`. See [providers-ollama.md](providers-ollama.md).
 
+With `--watch`, a reload keeps the model hosts, and the new generation's
+components reach the same hosts. The
+configuration is read again and checked against the edited program on every
+reload. If the result is not exactly the hosts already bound (a model key,
+operation, role or binding changed), the edit is refused and the running
+generation keeps serving. Restart the run to rebind.
+
 ## The program side
 
 A model crossing names its role in its capability:

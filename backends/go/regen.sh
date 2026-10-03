@@ -142,6 +142,15 @@ python3 "$here/emit.py" "$here/scenarios/emitted/provide_method_witnessed/provid
 python3 "$here/emit.py" "$here/scenarios/emitted/method_compensate/method_compensate.ir.json" methodcompensate \
   > "$here/scenarios/emitted/method_compensate/gen_method_compensate_test.go"
 
+# --- an extern-declared compensate at every emit site (issue #1592) ----------
+# extern_compensate.ir.json is compiled from scenarios/extern_compensate.rvl by
+# the frozen frontend (`revl compile`). An emission extern that DECLARES its own
+# `compensate` (item 254) registers it from an activation body, a provide-method
+# body and a timer firing. exec_test.go (hand-written) drives discharge on a
+# clean commit and Phase 2 on an abort at each site.
+python3 "$here/emit.py" "$here/scenarios/emitted/extern_compensate/extern_compensate.ir.json" externcompensate \
+  > "$here/scenarios/emitted/extern_compensate/gen_extern_compensate_test.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -170,6 +179,7 @@ if command -v gofmt >/dev/null 2>&1; then
            "$here/scenarios/emitted/secret_trace/gen_secret_trace_test.go" \
            "$here/scenarios/emitted/provide_method_witnessed/gen_provide_method_witnessed_test.go" \
            "$here/scenarios/emitted/method_compensate/gen_method_compensate_test.go" \
+           "$here/scenarios/emitted/extern_compensate/gen_extern_compensate_test.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

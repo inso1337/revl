@@ -232,7 +232,7 @@ The `revl_check` MCP result enriches every open hole with one:
   "file": "draft.rvl", "line": 8, "expected": "Str",
   "message": "look it up", "guarantee": "…",
   "fillSpec": {
-    "version": 3,
+    "version": 2,
     "expected": "Str",
     "grammarCategory": "expression",
     "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
@@ -257,7 +257,7 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
 
 * **`expected`** — the hole's type (§2). A fill that does not have it is a
   type error before it is a wrong answer.
-* **`grammarCategory`** (version 3): the syntactic category a fill is a
+* **`grammarCategory`** (additive, still version 2): the syntactic category a fill is a
   document of, one of `program`, `component-body`, `statements`, `expression`,
   `type`. Pass it to `revl grammar --format lark|gbnf|ebnf --category <it>` or
   to the MCP `revl_grammar` tool to constrain a decoder to this slot: a fill
@@ -305,9 +305,24 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   whether this position may call the method at all: a plain method always, an
   emission method only where it is one of the `crossing.calls`.
 
-`version` is `3`. Version 3 added `grammarCategory`; every version-2 field is
-unchanged. A version-1 spec had no `version` key; every version-1 field is
-unchanged, so a reader of version 1 or 2 keeps working.
+* **`externs`**: where an extern goes and who may write one. `placement`
+  says an extern is a top-level declaration, written beside `service` and
+  `component`, never inside a component body or a method, and what each class
+  means; `template` is the declaration's shape (`extern pure fn <name>(<param>:
+  <Type>) -> <Type> = @py { ... }`); `declared` lists the program's externs,
+  each with its call-site form (`sha(<text: Str>)`, `effect open_it(<n:
+  Int>)`, `emit audit(<line: Str>)`) and `callableHere` for this position: a
+  `pure` extern anywhere, an `emission` one only as a permitted crossing, an
+  `acquire`/`witnessed` one only in the acquisition slot of an `effect`.
+  `mayDeclare` is false for an untrusted author (the MCP server's default,
+  `--author-trust`), who may neither declare nor reach an extern (G8): the
+  spec then lists every extern as not callable and offers none as a
+  crossing, and `reason` says a completion that needs new host code cannot be
+  written by this author.
+
+`version` is `2`. A version-1 spec had no `version` key; every version-1 field
+is unchanged, so a reader of version 1 keeps working. The version moves only
+when a field's meaning changes: a new field, such as `externs`, is additive.
 
 None of this is new inference. Each field is read off the compiled IR — the
 services table, the component's `requires`/`config`, the enclosing method's

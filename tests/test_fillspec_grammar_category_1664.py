@@ -1,4 +1,4 @@
-"""fillSpec version 3: each hole names the grammar category of its fill (issue #1664).
+"""fillSpec: each hole names the grammar category of its fill (issue #1664).
 
 `grammarCategory` is a key of `revl.source_grammar.CATEGORIES`. A client
 passes it to `revl grammar --format F --category C` (or the MCP `revl_grammar`
@@ -13,7 +13,8 @@ The exit tests from the issue:
    `grammarCategory`, and it is a key of `CATEGORIES`;
 2. for each scaffold fixture, the text that fills each hole in a known-good
    completion is accepted by the grammar of that category under llguidance;
-3. the version moves to 3 (the docs follow in docs/holes.md).
+3. the field is additive, so the version stays 2 (the rule #1657 states),
+   and the docs follow in docs/holes.md.
 """
 
 from __future__ import annotations
@@ -110,7 +111,8 @@ def test_every_revl_check_obligation_names_its_category():
     assert len(obligations) == 3, obligations
     for ob in obligations:
         spec = ob["fillSpec"]
-        assert spec["version"] == fillspec.FILL_SPEC_VERSION == 3
+        # additive (the version moves only when a meaning changes, #1657)
+        assert spec["version"] == fillspec.FILL_SPEC_VERSION == 2
         assert spec["grammarCategory"] in sg.CATEGORIES
         assert spec["grammarCategory"] == sg.hole_category()
 
