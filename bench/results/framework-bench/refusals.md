@@ -22,10 +22,10 @@ them. That is the cost, stated first.
 | go | **3** | 38 | 35 |
 | java | **0** | 59 | 59 |
 | py | **6** | 59 | 53 |
-| rust | **3** | 41 | 38 |
+| rust | **1** | 41 | 40 |
 | ts | **16** | 76 | 60 |
 | wasm | **0** | 21 | 21 |
-| **total** | **28** | 294 | 266 |
+| **total** | **26** | 294 | 268 |
 
 Tiers with no residual: java, wasm.
 

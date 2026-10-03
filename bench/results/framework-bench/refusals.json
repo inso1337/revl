@@ -35,13 +35,11 @@
           ]
         },
         "rust": {
-          "residual": 3,
+          "residual": 1,
           "corpus": 41,
-          "reproduced": 38,
+          "reproduced": 40,
           "documents": [
-            "bridge_types.rvl",
-            "comp_stream.rvl",
-            "component_edges.rvl"
+            "comp_stream.rvl"
           ]
         },
         "ts": {
@@ -74,7 +72,7 @@
           "documents": []
         }
       },
-      "total_residual": 28,
+      "total_residual": 26,
       "total_corpus": 294,
       "clean_tiers": [
         "java",
