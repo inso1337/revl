@@ -292,7 +292,13 @@ python3 scripts/axioms_gate.py \
   RevL.Prelude.methodB_iff \
   RevL.Prelude.undeclared_method_refused \
   RevL.Prelude.fixtures_decided \
-  RevL.Prelude.prelude_rules_not_vacuous < .axioms.out
+  RevL.Prelude.prelude_rules_not_vacuous \
+  RevL.ModelPlace.placeB_iff \
+  RevL.ModelPlace.off_device_refused \
+  RevL.ModelPlace.open_origin_anywhere \
+  RevL.ModelPlace.on_device_admitted \
+  RevL.ModelPlace.fixtures_decided \
+  RevL.ModelPlace.placement_not_vacuous < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -344,6 +350,8 @@ python3 scripts/axioms_gate.py \
   RevLOracle.sigRowB_iff \
   RevLOracle.preludeRowB_iff \
   RevLOracle.interceptRowB_iff \
-  RevLOracle.methodRowB_iff < .oracle-axioms.out
+  RevLOracle.methodRowB_iff \
+  RevLOracle.placeRowB_iff \
+  RevLOracle.modelReachB_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py

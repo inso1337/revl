@@ -1424,6 +1424,111 @@ def approval_rows(rel: str, comp, ctx: _ApprovalCtx, svc_objs: dict,
     return rows
 
 
+# ---------------------------------------- G-MODEL-PLACE (issue #1811)
+
+#: The placement refusals the `MPV` row decides: a role, or a council member,
+#: placed off the device for a confidentiality origin. The other
+#: `model-placement` refusals (a duplicate arm, an unknown action, a council
+#: among candidates) are shape rules, not this one.
+MODEL_PLACE_MESSAGE = "may not leave"
+#
+# Placement: a `route model` arm may not send a confidentiality origin to a
+# model role declared `off_device`, directly or through a council member that
+# receives it (`model_route.check`). Reach (item 519): a component that
+# consults a model role is held to the role's `reaches [...]`, so the role's
+# reach must be covered by what the component holds
+# (`lower._check_model_attenuation`). The model states the placement rule
+# (`RevL.ModelPlace`) and decides the reach with the spawn rule's proved
+# `attenuatesB`; the exporter carries the placed arms (`MP`, `MO`), the roles
+# a component consults (`ME`) and each role's reach (`MRC`).
+
+from revl import model_council as _model_council  # noqa: E402
+from revl import model_route as _model_route  # noqa: E402
+from revl.lower import (  # noqa: E402
+    _consults_a_model as _lower_consults_a_model,
+    _model_reach_caps as _lower_model_reach_caps,
+)
+
+
+def _model_tables(prog, rel: str) -> tuple[dict, dict]:
+    """The file's validated model roles and councils, or empty tables when
+    the declarations are themselves refused (another rule's business)."""
+    try:
+        roles = _model_route.roles(prog, rel)
+    except RevlError:
+        return {}, {}
+    try:
+        councils = _model_council.check(prog, rel)
+    except RevlError:
+        councils = {}
+    return roles, councils
+
+
+def model_place_rows(rel: str, comp, roles: dict, councils: dict
+                     ) -> tuple[list[str], list[str]]:
+    """The `MP` rows of one component's route arms, and the roles the arms
+    name (every candidate, a council's every member) for the reach edges."""
+    from revl.parser import ModelRouteStmt  # noqa: PLC0415
+
+    rows: list[str] = []
+    named: list[str] = []
+    for stmt in comp.body:
+        if not isinstance(stmt, ModelRouteStmt):
+            continue
+        for arm in stmt.arms:
+            for name in list(getattr(arm, "candidates", None) or (arm.role,)):
+                council = councils.get(name)
+                if council is not None:
+                    placement = _model_route._council_placement(council, roles)
+                    named.extend(placement["member_roles"])
+                    for m in _model_route.receiving_members(placement, arm.origin):
+                        rows.append("\t".join(["MP", rel, comp.name, stmt.action,
+                                               arm.origin, m["role"],
+                                               m["residence"]]))
+                elif name in roles:
+                    named.append(name)
+                    rows.append("\t".join(["MP", rel, comp.name, stmt.action,
+                                           arm.origin, name,
+                                           roles[name].residence]))
+    return rows, named
+
+
+def model_reach_rows(rel: str, comp, roles: dict, named: list[str],
+                     held: set[str], crossed_names: set[str],
+                     host_tokens: dict, caps_seen: set) -> list[str]:
+    """The `ME` and `MRC` rows of one component: the roles it consults,
+    by a block naming them or a crossing placed on them by a `model.<role>`
+    token, when it consults a model at all (`lower._consults_a_model` over
+    its held set)."""
+    held_caps = {parse_cap(c) for c in held}
+    if not roles or not _lower_consults_a_model(held_caps):
+        return []
+    crossed = {c.token for c in held_caps}
+    for name in crossed_names:
+        crossed.update(host_tokens.get(name) or ())
+    edges = set(named)
+    for token in crossed:
+        role = _model_route.role_of_crossing(token, roles)
+        if role is not None:
+            edges.add(role)
+    rows: list[str] = []
+    for role in sorted(edges):
+        if role not in roles:
+            continue
+        rows.append("\t".join(["ME", rel, comp.name, role]))
+    return rows
+
+
+def model_role_reach_rows(rel: str, roles: dict, caps_seen: set) -> list[str]:
+    """The `MRC` rows of a file: each role's reach, `*` when undeclared."""
+    rows: list[str] = []
+    for name in sorted(roles):
+        for cap in sorted({c.to_str() for c in _lower_model_reach_caps(roles[name])}):
+            caps_seen.add(cap)
+            rows.append("\t".join(["MRC", rel, name, cap]))
+    return rows
+
+
 # ------------------------------- out of scope by kind (issue #1810)
 #
 # `out-of-fragment` collects refusals under a rule the model states no row
@@ -2517,6 +2622,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         tsv.append("\t".join(["PG", rel, str(len(prog.fn_decls))]))
         extern_class_of = {e.name: e.classification for e in prog.externs}
         resolved_names = _file_resolved_names(prog)
+        # model roles and councils (issue #1811), file-wide
+        model_roles, model_councils = _model_tables(prog, str(path))
+        file_has_mp = False
+        tsv.extend(model_role_reach_rows(rel, model_roles, caps_seen))
         # async names (AN, issue #1808), file-wide
         for name in async_names(prog):
             tsv.append("\t".join(["AN", rel, name]))
@@ -2670,6 +2779,8 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             caps_seen.update(act_caps)
             for cap in sorted(act_caps):
                 tsv.append("\t".join(["A", rel, c.name, cap]))
+            # the component's held set, for the model-reach edges (#1811)
+            held_strs: set[str] = set(act_caps) | {cap for _l, cap in krows}
 
             # host acquisition facts (HA): each host-family acquisition the
             # component's reachable code names, with the POSITION that decides
@@ -2699,6 +2810,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         for cap, bound in sorted(reach):
                             caps_seen.add(cap)
                             caps_seen.add(bound)
+                            held_strs.add(cap)
                             tsv.append("\t".join(
                                 ["F", rel, c.name, stmt.key, svc, pm.name,
                                  cap, bound]))
@@ -2839,6 +2951,17 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         for inner in pm.body:
                             classify_stmt(inner)
             tsv.extend(f"T\t{rel}\t{c.name}\t{k}" for k in kinds)
+            # model placement and reach facts (MP/ME, issue #1811)
+            mp_rows, mp_named = model_place_rows(rel, c, model_roles,
+                                                 model_councils)
+            tsv.extend(mp_rows)
+            if mp_rows:
+                file_has_mp = True
+            tsv.extend(model_reach_rows(
+                rel, c, model_roles, mp_named, held_strs,
+                {root for root, chain in head_calls
+                 if not chain and root in host_tokens},
+                host_tokens, caps_seen))
             # declaration-rule facts (PS/IT/MC, issue #1809)
             op_calls = []
             for root, chain in head_calls:
@@ -2865,6 +2988,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 tsv.append("\t".join(["AQ", rel, c.name, str(ord_),
                                        _a2_step(stmt)]))
             ff["components"][c.name] = {"calls": calls, "kinds": kinds}
+        if file_has_mp:
+            for origin in _model_route.CONFIDENTIALITY_ORIGINS:
+                tsv.append("\t".join(["MO", rel, origin]))
         for name, caps in sorted(op_boundaries.items()):
             tsv.append("\t".join(["EX", rel, name, "emission", "-", "-",
                                    ",".join(caps)]))
@@ -3788,6 +3914,35 @@ def approval_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided for each model placement and reach edge:
+#: `("place", file, comp) -> (admitted, routes a confidentiality origin)`,
+#: `("reach", file, comp, role) -> (admitted, True)`.
+_MODEL_ROWS: dict = {}
+
+
+def model_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `MPV` and `MAV` rows (issue #1811):
+    a confidentiality origin placed on the device and one placed off it, and
+    a consulted role whose reach the component covers and one it does not.
+    Returns findings, treated as gate failures."""
+    def hit(kind: str, ok: bool, need_conf: bool = False) -> bool:
+        return any(k[0] == kind and v[0] is ok and (v[1] or not need_conf)
+                   for k, v in _MODEL_ROWS.items())
+
+    witnesses = {
+        "an admitted confidential placement": hit("place", True, True),
+        "a refused off-device placement": hit("place", False, True),
+        "an admitted model reach": hit("reach", True),
+        "a refused model reach": hit("reach", False),
+    }
+    findings = [f"model coverage: NO witness of {k} — the row would agree "
+                "vacuously" for k, ok in witnesses.items() if not ok]
+    if not findings:
+        print(f"model coverage: {len(_MODEL_ROWS)} placements and reach "
+              "edges, each admitted and refused")
+    return findings
+
+
 #: What the REFERENCE read for each component's declaration rules: (steps,
 #: intercept targets, provides, operations). Read by `prelude_coverage`.
 _PRELUDE_ROWS: dict = {}
@@ -3970,7 +4125,8 @@ class Verdicts(NamedTuple):
     root is a declared requirement, issue #1807), `async_sites` A1 rows and
     `async_sigs` A1S rows (A1 async colour, issue #1808), and `preludes`
     PL, `intercepts` IC and `methods` MS rows (prelude ordering, intercept
-    target and method in service, issue #1809)."""
+    target and method in service, issue #1809), `places` MPV and
+    `model_reach` MAV rows (G-MODEL-PLACE, issue #1811)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -3994,6 +4150,8 @@ class Verdicts(NamedTuple):
     preludes: dict[tuple[str, str], str]
     intercepts: dict[tuple[str, str], str]
     methods: dict[tuple[str, str], str]
+    places: dict[tuple[str, str], str]
+    model_reach: dict[tuple[str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -4006,7 +4164,8 @@ class Verdicts(NamedTuple):
                 + len(self.approvals) + len(self.bindings)
                 + len(self.access) + len(self.async_sites)
                 + len(self.async_sigs) + len(self.preludes)
-                + len(self.intercepts) + len(self.methods))
+                + len(self.intercepts) + len(self.methods)
+                + len(self.places) + len(self.model_reach))
 
 
 
@@ -4041,6 +4200,8 @@ def parse_verdicts(text: str) -> Verdicts:
     preludes: dict[tuple[str, str], str] = {}
     intercepts: dict[tuple[str, str], str] = {}
     methods: dict[tuple[str, str], str] = {}
+    places: dict[tuple[str, str], str] = {}
+    model_reach: dict[tuple[str, str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -4124,6 +4285,11 @@ def parse_verdicts(text: str) -> Verdicts:
             # A1 signature colour: (file, comp, key.method) -> ok|fail.
             async_sigs[(parts[1], parts[2], parts[3])] = \
                 parts[4].split("=", 1)[1]
+        elif parts[0] == "MPV" and len(parts) == 4:
+            places[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
+        elif parts[0] == "MAV" and len(parts) == 5:
+            model_reach[(parts[1], parts[2], parts[3])] = \
+                parts[4].split("=", 1)[1]
         elif parts[0] in ("PL", "IC", "MS") and len(parts) == 4:
             # the three declaration rules: (file, comp) -> ok|fail.
             {"PL": preludes, "IC": intercepts, "MS": methods}[parts[0]][
@@ -4140,7 +4306,8 @@ def parse_verdicts(text: str) -> Verdicts:
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
-                    async_sites, async_sigs, preludes, intercepts, methods)
+                    async_sites, async_sigs, preludes, intercepts, methods,
+                    places, model_reach)
 
 
 
@@ -4332,6 +4499,35 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     closed.get((rel, child), set()))
                 if len(closed[(rel, parent)]) != before:
                     changed = True
+    # MPV / MAV verdicts (G-MODEL-PLACE, issue #1811): the placed arms
+    # against the confidentiality origins, and each consulted role's reach
+    # within the component's held set, by the spawn rule's own halves.
+    conf_by_file: dict[str, set[str]] = {}
+    mp_by: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    reach_by: dict[tuple[str, str], set[str]] = {}
+    for r in rows:
+        if r and r[0] == "MO" and len(r) == 3:
+            conf_by_file.setdefault(r[1], set()).add(r[2])
+        elif r and r[0] == "MP" and len(r) == 7:
+            mp_by.setdefault((r[1], r[2]), []).append((r[4], r[6]))
+        elif r and r[0] == "MRC" and len(r) == 4:
+            reach_by.setdefault((r[1], r[2]), set()).add(r[3])
+    places: dict[tuple[str, str], str] = {}
+    model_reach: dict[tuple[str, str, str], str] = {}
+    _MODEL_ROWS.clear()
+    for key, arms in mp_by.items():
+        conf = conf_by_file.get(key[0], set())
+        ok = all(o not in conf or res == "on_device" for o, res in arms)
+        places[key] = "ok" if ok else "fail"
+        _MODEL_ROWS[("place",) + key] = (ok, any(o in conf for o, _r in arms))
+    for r in rows:
+        if r and r[0] == "ME" and len(r) == 4:
+            hset = held.get((r[1], r[2]), set())
+            rset = reach_by.get((r[1], r[3]), set())
+            resource, ceiling = attenuation_halves(hset, rset)
+            model_reach[(r[1], r[2], r[3])] = "ok" if resource and ceiling else "fail"
+            _MODEL_ROWS[("reach", r[1], r[2], r[3])] = (resource and ceiling, True)
+
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
     for r in srows:
@@ -4665,7 +4861,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
 
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
-                    async_sites, async_sigs, preludes, intercepts, methods)
+                    async_sites, async_sigs, preludes, intercepts, methods,
+                    places, model_reach)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -4787,6 +4984,7 @@ def a9_coverage() -> list[str]:
 FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
                  "missed-G6", "missed-A1", "missed-A6", "missed-A9",
                  "missed-A2", "missed-prelude", "missed-intercept",
+                 "missed-G-MODEL-PLACE",
                  "formal-strict", "formal-found-other")
 
 
@@ -4943,6 +5141,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         g1_fail = any(x == "fail" for k, x in v.access.items() if k[0] == rel)
         # The A1 rows are async colour (issue #1808): checker-visible both ways.
         pl_fail = any(x == "fail" for k, x in v.preludes.items() if k[0] == rel)
+        mp_fail = any(x == "fail" for k, x in v.places.items() if k[0] == rel)
+        ma_fail = any(x == "fail" for k, x in v.model_reach.items() if k[0] == rel)
         ic_fail = any(x == "fail" for k, x in v.intercepts.items() if k[0] == rel)
         ms_fail = any(x == "fail" for k, x in v.methods.items() if k[0] == rel)
         a1_fail = any(x == "fail" for k, x in v.async_sites.items()
@@ -4962,7 +5162,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
             x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
             and not df_fail and not bu_fail and not g1_fail and not a1_fail \
-            and not pl_fail and not ic_fail and not ms_fail
+            and not pl_fail and not ic_fail and not ms_fail \
+            and not mp_fail and not ma_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -5032,6 +5233,16 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         elif code == "REVL" and A1_SIGNATURE_MESSAGE in checker_message(rel):
             # The uncoded signature-colour refusal, decided by the `A1S` row.
             record("agree-A1" if a1_fail else "missed-A1", rel)
+        elif code == "G-MODEL-PLACE" and category == "model-placement" \
+                and MODEL_PLACE_MESSAGE in checker_message(rel):
+            # Model placement (issue #1811): a confidentiality origin placed
+            # off the device, decided by the `MPV` row.
+            record("agree-G-MODEL-PLACE" if mp_fail else "missed-G-MODEL-PLACE",
+                   rel)
+        elif code == "G-MODEL-PLACE" and category == "capability-attenuation":
+            # Model reach (issue #1811, item 519), decided by the `MAV` row.
+            record("agree-G-MODEL-PLACE" if ma_fail else "missed-G-MODEL-PLACE",
+                   rel)
         elif code == "A6" and METHOD_MESSAGE in checker_message(rel):
             # Method in service (issue #1809), the call-site half of A6.
             record("agree-A6" if ms_fail else "missed-A6", rel)
@@ -5336,6 +5547,8 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         f"{len(ref.async_sites)} async sites",
         f"{len(ref.async_sigs)} async signatures",
         f"{len(ref.preludes)} x 3 declaration-rule components",
+        f"{len(ref.places)} model placements",
+        f"{len(ref.model_reach)} model reach edges",
     ]
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
@@ -5519,7 +5732,9 @@ def main() -> int:
             ("async_sig", ref.async_sigs, formal.async_sigs),
             ("prelude", ref.preludes, formal.preludes),
             ("intercept", ref.intercepts, formal.intercepts),
-            ("method", ref.methods, formal.methods)):
+            ("method", ref.methods, formal.methods),
+            ("model_place", ref.places, formal.places),
+            ("model_reach", ref.model_reach, formal.model_reach)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -5547,7 +5762,9 @@ def main() -> int:
         f"{len(ref.access)} access components + "
         f"{len(ref.async_sites)} async sites + "
         f"{len(ref.async_sigs)} async signatures + "
-        f"{len(ref.preludes)} x 3 declaration-rule components) — "
+        f"{len(ref.preludes)} x 3 declaration-rule components + "
+        f"{len(ref.places)} model placements + "
+        f"{len(ref.model_reach)} model reach edges) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -5566,6 +5783,7 @@ def main() -> int:
     mismatches.extend(access_coverage())
     mismatches.extend(async_coverage())
     mismatches.extend(prelude_coverage(ref))
+    mismatches.extend(model_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

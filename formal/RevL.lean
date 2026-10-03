@@ -34,3 +34,4 @@ import RevL.Theorems.G6_BindingUnique
 import RevL.Theorems.G1_KeyAccess
 import RevL.Theorems.A1_AsyncColour
 import RevL.Theorems.Prelude_InterceptMethod
+import RevL.Theorems.ModelPlacement

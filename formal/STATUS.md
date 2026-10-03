@@ -55,6 +55,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 9 | **yes** (one S8 row per reconstructed statement; the generated census below carries the count) | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. The oracle now decides `RevL.G8Classified.stmtSurface` over each reconstructed statement's heads against the file's `Prog` (`Oracle.stmtSurfaceB`, `stmtSurfaceB_iff`); the reference recomputes the same reach caps independently from the `EX`/`FN` rows, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries both a non-empty and an empty surface, and `g8_row_not_vacuous` proves the surface goes empty when the wrapping fn stops reaching the crossing. First-class dispatch (`star`) is `n/a` on both sides |
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
 | **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
+| **G-MODEL-PLACE** model placement and model reach | partial: the placement and reach rules | 6 | **yes** (one MPV row per routed component, one MAV row per consulted role; 9 agree-G-MODEL-PLACE) | since issue #1811 `RevL.ModelPlace.PlaceOK` decides that a confidentiality origin is placed on the device only, through a council member that receives it too (`placeB_iff`), and the model-reach rule of item 519 (a consulted role's `reaches [...]` within what the component holds) is decided with the spawn rule's proved `attenuatesB`. Which roles a component consults, and whether it consults a model at all, are the exporter's, read as `lower._model_reach_edges` / `_consults_a_model` read them. Not modelled: the route-block shape rules and the value-level origin ceiling (item 514) |
 | **A1** iteration boundaries only during activation | partial: the async-colour rules | 10 | **yes** (one A1 row per site, one A1S row per provide method; 9 agree-A1) | the iteration boundary itself is not modelled (L0 has no `await`). Since issue #1808 the async-colour rules are: `RevL.A1Async` decides, per site, that a sync provide method, an unawaited `effect`/`emit` step and an `undo`/`compensate` slot reach nothing async and that an awaited step does, over the file's async names (async externs, async service operations) and its `fn` call graph within a fuel bound (`reachB_iff`, `siteB_iff`), and that a provide method's colour is its service's (`sigB_iff`). Not modelled: an arrow's type has no colour (`a1_async_arrow_sync_type.rvl` stays out of fragment), colour polymorphism through a callback parameter, and a stream `next` as a suspension |
 | **A2** no acquisition after a provision | full over the ordered activation body | 14 | **yes** (317 A2 rows, 1 agree-A2) | the body is a step list (`acquire` / `provide` / `other` — the checker's four refused forms, the `provide` block, and everything else) and `RevL.A2.a2B` is `lower._dispatch_action`'s fold verbatim, bridged to the declarative rule by `a2B_iff`. The content is over G7's stack: with a `bracket` per release and per withdrawal, `proof_pass_is_withdrawals_then_releases` proves that under A2 `RevL.Semantics.phase1` runs every withdrawal before every release under every settling verdict, and `fixture_opens_the_window` proves the fixture's shape runs a release first. The oracle folds the same rule over the exported `AQ` body steps on both sides; `a2_coverage` fails the gate unless the corpus carries an admitted body with both a provision and an acquisition and the refused shape. **Not modelled**: entries a provide-method body registers at call time (the G7 corpus's `method` seam), and whether the runtime withdraws a provision as a bracket at all — the theorem takes the LIFO premise the rule rests on and shows A2 is exactly the ordering condition under it |
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
@@ -354,6 +355,12 @@ Three summary readings of that map:
 | `RevL.Prelude.undeclared_method_refused` | A6 method in service — the refusal | **proved** | none | one undeclared operation refuses the component |
 | `RevL.Prelude.fixtures_decided` | the three declaration rules — the corpus shapes | **proved** | none | `v2_isolate_after_effect`, `v2_intercept_on_provision` and `a6_method_not_in_service` refused, their twins admitted |
 | `RevL.Prelude.prelude_rules_not_vacuous` | the three declaration rules — non-vacuity | **proved** | `propext, Quot.sound` | each rule refuses its corpus shape and admits the twin |
+| `RevL.ModelPlace.placeB_iff` | G-MODEL-PLACE placement — the bridge (issue #1811) | **proved** | `propext, Quot.sound` | the printed `MPV` verdict is exactly "every confidentiality origin is placed on the device" |
+| `RevL.ModelPlace.off_device_refused` | G-MODEL-PLACE placement — the refusal | **proved** | none | a confidentiality origin placed off the device refuses the component |
+| `RevL.ModelPlace.open_origin_anywhere` | G-MODEL-PLACE placement — open origins | **proved** | `propext` | an origin that is not a confidentiality origin may be placed anywhere |
+| `RevL.ModelPlace.on_device_admitted` | G-MODEL-PLACE placement — admission | **proved** | none | placing every arm on the device is always admitted |
+| `RevL.ModelPlace.fixtures_decided` | G-MODEL-PLACE placement — the corpus shapes | **proved** | none | `gmodelplace_confidential_off_device` and the council-member fixture refused, their on-device and open-origin twins admitted |
+| `RevL.ModelPlace.placement_not_vacuous` | G-MODEL-PLACE placement — non-vacuity | **proved** | `propext, Quot.sound` | the rule refuses the off-device placement and admits the on-device one |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -1026,6 +1033,27 @@ Verdicts:
   to produce 3 mismatches and one fatal `missed-*` each.
   `prelude_coverage` fails the gate unless each rule is admitted and
   refused somewhere in the corpus.
+- **MPV / MAV rows (G-MODEL-PLACE, issue #1811)**: `Oracle.placeRowB`
+  — `RevL.ModelPlace.placeB` — over a component's placed route arms
+  (`MP`: one row per candidate role, and for a council arm one per member
+  that receives the origin) and the confidentiality origins (`MO`, read
+  off `model_route.CONFIDENTIALITY_ORIGINS`); and `Oracle.modelReachB` —
+  the spawn rule's proved `attenuatesB` — over the component's held set
+  (the same `A`/`F`/`K` set the `W` row reads) and each consulted role's
+  reach (`ME` edges, `MRC` caps, `*` for a role that declares none). An
+  edge is a role a `route model` block names (every candidate, every
+  council member) or a role a `model.<role>` crossing is placed on, for a
+  component that consults a model at all (`lower._consults_a_model`). The
+  reference recomputes both, the reach with the same attenuation halves as
+  the `W` row. A G-MODEL-PLACE refusal in category `model-placement` (the
+  off-device message) or `capability-attenuation` files under
+  `agree-G-MODEL-PLACE` or the fatal `missed-G-MODEL-PLACE`. Blinding both
+  printed verdicts was seen to produce 9 mismatches (2 `model_place`, 7
+  `model_reach`) and `missed-G-MODEL-PLACE 9 FATAL`; a `placeB` that
+  ignores the residence stops `placeB_iff` from elaborating.
+  `model_coverage` fails the gate unless the corpus carries an admitted
+  and a refused confidential placement and an admitted and a refused model
+  reach.
 
 ### The G7 row, and what it is evidence of
 
@@ -1199,14 +1227,15 @@ printed 1. Nothing compared the two, in either direction.
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
 **697 .rvl files -> 635 components -> 1559 statements = 445 modeled +
-223 componentless + 29 refused at parse**, and **14026 verdicts compared
+223 componentless + 29 refused at parse**, and **14049 verdicts compared
 (445 files + 635 components + 224 provide methods + 38 spawn edges + 29
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1559
 confinements + 1559 surfaces + 423 teardowns + 503 provide-clause
 components + 83 config fields + 635 A2 bodies + 445 deferred-position
 files + 56 approval crossings + 899 binding scopes + 635 access
 components + 1423 async sites + 643 async signatures + 635 x 3
-declaration-rule components), 14026 agree, 0 mismatches**.
+declaration-rule components + 10 model placements + 13 model reach
+edges), 14049 agree, 0 mismatches**.
 
 Checker alignment over the 445 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
@@ -1236,6 +1265,7 @@ work that never touched this layer.
 | `agree-A2` | 1 | informational |
 | `agree-A6` | 1 | informational |
 | `agree-A9` | 2 | informational |
+| `agree-G-MODEL-PLACE` | 9 | informational |
 | `agree-G1` | 21 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
@@ -1251,6 +1281,7 @@ work that never touched this layer.
 | `missed-A2` | 0 | **FATAL** |
 | `missed-A6` | 0 | **FATAL** |
 | `missed-A9` | 0 | **FATAL** |
+| `missed-G-MODEL-PLACE` | 0 | **FATAL** |
 | `missed-G1` | 0 | **FATAL** |
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
@@ -1258,7 +1289,7 @@ work that never touched this layer.
 | `missed-G6` | 0 | **FATAL** |
 | `missed-intercept` | 0 | **FATAL** |
 | `missed-prelude` | 0 | **FATAL** |
-| `out-of-fragment` | 16 | informational |
+| `out-of-fragment` | 7 | informational |
 | `out-of-fragment-G5` | 0 | ratcheted |
 | `out-of-fragment-G6` | 0 | ratcheted |
 | `out-of-scope` | 21 | informational |

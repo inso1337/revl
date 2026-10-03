@@ -408,3 +408,12 @@ import RevL
 #print axioms RevL.Prelude.undeclared_method_refused
 #print axioms RevL.Prelude.fixtures_decided
 #print axioms RevL.Prelude.prelude_rules_not_vacuous
+-- Issue #1811: G-MODEL-PLACE placement. A confidentiality origin is placed on
+-- the device only, decided by the oracle's `MPV` row; the model-reach half is
+-- decided by the oracle's `MAV` row through the proved `attenuatesB`.
+#print axioms RevL.ModelPlace.placeB_iff
+#print axioms RevL.ModelPlace.off_device_refused
+#print axioms RevL.ModelPlace.open_origin_anywhere
+#print axioms RevL.ModelPlace.on_device_admitted
+#print axioms RevL.ModelPlace.fixtures_decided
+#print axioms RevL.ModelPlace.placement_not_vacuous
