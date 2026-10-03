@@ -69,6 +69,7 @@ import re
 from ..compiler import compile_source
 from ..diagnostics import report
 from ..errors import RevlError
+from . import effect_classes as _effect_classes
 from . import fillspec
 from .authoring_loop import blast_radius
 
@@ -351,6 +352,7 @@ def apply_edit(session, arguments: dict) -> dict:
                 "applied": applied, "holes": holes,
                 "blastRadius": blast_radius(session.ir, ir),
                 **_summary(ir),
+                **_effect_classes.report(ir, session.ir, against=True),
                 "note": f"{len(holes)} open hole(s) remain — the edit was applied "
                         "to the server-side source and it compiles, but a hole may "
                         "not enter a running composition; fill them, then it swaps"}
@@ -395,11 +397,13 @@ def apply_edit(session, arguments: dict) -> dict:
 
     # issue #1704: the cascade of what this edit replaces, read off the
     # composition that is running now, so preflight comes with the change.
-    radius = blast_radius(session.ir, ir)
+    running = session.ir
+    radius = blast_radius(running, ir)
     state = session.swap(ir, origin=_origin_from(vs))
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
-            "applied": applied, "blastRadius": radius, **_summary(ir), **state}
+            "applied": applied, "blastRadius": radius, **_summary(ir), **state,
+            **_effect_classes.report(ir, running, against=True)}
 
 
 def _summary(ir: dict) -> dict:
