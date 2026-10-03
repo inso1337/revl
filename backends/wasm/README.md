@@ -63,8 +63,13 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
 - **`match` / variants in component and method bodies**: tagged-union cells
   (`[u32 tag][pad][payload]`), including `match` over `Opt`/`Result`.
 - **rich service boundaries**: a Str/List/record/variant/`Opt`/`Result`
-  service param or return crosses as a pointer into the module's memory —
-  the v3 value model widened the boundary beyond scalars.
+  param or return on a provider's EXPORT crosses as a pointer into the
+  provider's memory, which a host reads through the exported `memory`, and
+  a required call to a host-provided key may pass one too. A required call to
+  a key another component of the composition provides stays scalar
+  (Int/Bool): that provider is another instance with its own memory, so a
+  compound value would arrive as an address in the wrong one, and it is
+  refused by name (issue #1601).
 - **`await Job.run(name)`** continues to lower to the runtime's async host op.
 - **`lifecycle test` blocks (item 142)** — `revl test --backend wasm` boots the
   emitted components on the live cordis-wasm runtime, calls through provision

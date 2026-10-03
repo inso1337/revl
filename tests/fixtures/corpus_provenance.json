@@ -966,6 +966,7 @@
    "tests/fixtures/emit_wasm_corpus/transforms.rvl",
    "tests/fixtures/emit_wasm_corpus/variants.rvl",
    "tests/fixtures/emit_wasm_corpus/widening.rvl",
+   "tests/fixtures/emit_wasm_refusals/compound_required_call.rvl",
    "tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl",
    "tests/fixtures/emit_wasm_refusals/secret_fed_plain_witness.rvl",
    "tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl",

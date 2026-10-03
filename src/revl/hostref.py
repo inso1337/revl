@@ -123,6 +123,29 @@ def _pick_root(child_real: str, root_dirs: list[str]) -> str | None:
     return best
 
 
+def _pick_root_lexical(key: str, root_dirs: list[str]) -> str | None:
+    """`_pick_root` for an in-memory compile (issue #1776): the deepest root
+    that lexically contains `key`, with no `realpath` on either side.
+
+    An in-memory compile reads nothing from disk, so its `sources` keys and its
+    roots are both `abspath` spellings of the paths the caller named, as in
+    `hostfile.read_body_file_memory`. Resolving the roots through a symlink
+    (macOS `/var` is `/private/var`) while the key kept the caller's spelling
+    refused every asset and ref under a linked root. `abspath` has already
+    folded any `..`, so an escape is still out."""
+    best: str | None = None
+    for root in (os.path.abspath(r) for r in root_dirs):
+        if _contained(key, root) and (best is None or len(root) > len(best)):
+            best = root
+    return best
+
+
+def _lexical_roots(root_dirs: list[str], install_root: str | None) -> list[str]:
+    """The roots an in-memory module's jail is checked against, unresolved."""
+    return [os.path.abspath(install_root)] if install_root is not None \
+        else [os.path.abspath(r) for r in root_dirs]
+
+
 def _validate_specifier(rel_path: str, backend: str, decl_name: str,
                         filename: str, line: int) -> None:  # noqa: PLR0913
     """Refuse a ref whose resolved path cannot become a legal import specifier
@@ -208,7 +231,8 @@ def resolve_refs(program, module_dir: str, root_dirs: list[str],
                                      program.filename, body.line)
             if is_virtual:
                 _resolve_ref_memory(body, ext.name, module_dir, sources,
-                                    jail_roots, program.filename, root_kind)
+                                    _lexical_roots(root_dirs, install_root),
+                                    program.filename, root_kind)
             else:
                 _resolve_ref_disk(body, ext.name, module_dir, jail_roots,
                                   program.filename, root_kind)
@@ -264,10 +288,10 @@ def _outside_root_hint(root_kind: str | None) -> str:
             "(`= @backend file`) instead (item 396 option B jail)")
 
 
-def _resolve_ref_memory(body, decl_name, module_dir, sources, real_roots,
+def _resolve_ref_memory(body, decl_name, module_dir, sources, roots,
                         filename, root_kind=None):
     key = os.path.abspath(os.path.join(module_dir, body.path))
-    root = _pick_root(key, [os.path.abspath(r) for r in real_roots])
+    root = _pick_root_lexical(key, roots)
     if root is None:
         raise RevlError(
             filename, body.line,
@@ -356,7 +380,7 @@ def resolve_assets(program, module_dir: str, root_dirs: list[str],
         _reject_bad_asset_path(node, program.filename)
         if is_virtual:
             _resolve_asset_memory(node, module_dir, sources,
-                                  [os.path.abspath(r) for r in jail_roots],
+                                  _lexical_roots(root_dirs, install_root),
                                   program.filename, root_kind)
         else:
             _resolve_asset_disk(node, module_dir, jail_roots,
@@ -444,10 +468,10 @@ def _resolve_asset_disk(node, module_dir, real_roots, filename, root_kind):
                   hashlib.sha256(data).hexdigest(), root_kind)
 
 
-def _resolve_asset_memory(node, module_dir, sources, real_roots, filename,
+def _resolve_asset_memory(node, module_dir, sources, roots, filename,
                           root_kind):
     key = os.path.abspath(os.path.join(module_dir, node.written))
-    root = _pick_root(key, real_roots)
+    root = _pick_root_lexical(key, roots)
     if root is None:
         raise RevlError(
             filename, node.line,
