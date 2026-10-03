@@ -105,6 +105,10 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_framework_bench.py",
     "tests/test_inprocess_gate.py",
     "tests/test_inprocess_gate_rust.py",
+    # Issue #1829: the bare-name guard walks every importable `.py` in the
+    # repository, `bench/` included (five `bench/**/run.py` files are why it
+    # exists), so a new or renamed bench module can change its verdict.
+    "tests/test_load_by_path_is_the_only_by_path_loader.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
     # Issue #1461: loads `bench/run.py` by path and checks that the bench
@@ -129,6 +133,9 @@ BENCH_DEPENDENT_TESTS = (
     # `bench/results/` inside a throwaway repository to prove it. Declared
     # because the guard below is mention-based.
     "tests/test_regen_generated.py",
+    # Issue #1817: pins that a bench/ change runs the six backend jobs, because
+    # backends/typescript runs a bench script. A bench change re-runs it.
+    "tests/test_ci_backend_gate.py",
     # The self-host capstone oracle pins four `bench/results/…` candidate
     # documents as members of the emit_java corpus (roadmap item 146 gap 2's
     # located-gap ratchet), so a bench change must re-run it.
@@ -1540,13 +1547,14 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_formal_a9_row.py")
             pytest_nodes.add("tests/test_formal_a2_row.py")
             pytest_nodes.add("tests/test_formal_alignment.py")
-            # `formal/STATUS.md` is not only prose: `revl.cert` PARSES it for
-            # the census the component certificate reports, and the alignment
-            # census is generated into it by the harness. Rewriting that
-            # section without this node reds `test_826_component_certificate`
-            # in CI while the selector says the change was covered (measured
-            # on issue #1169, where the rewrite dropped the agree/mismatch
-            # clause `cert.oracle_census` reads).
+            # `formal/` is not only prose: `revl.cert` PARSES `STATUS.md` for
+            # the map rows and injection tables the component certificate
+            # reports, and since issue #1768 runs `harness/diff_corpus.py
+            # --census-json` for its oracle census. Changing either without
+            # this node reds `test_826_component_certificate` in CI while the
+            # selector says the change was covered (measured on issue #1169,
+            # where a STATUS.md rewrite dropped the clause the census reader
+            # then parsed, and again on #1768).
             pytest_nodes.add("tests/test_826_component_certificate.py")
             reasons.append(f"{f} (formal gate)")
             continue
@@ -1868,6 +1876,128 @@ def _test_add_delete_override(changed, added, deleted, root):
 # --------------------------------------------------------------------------- #
 # CLI.                                                                          #
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# The six CI backend jobs on a pull request (issue #1817, --ci-backends).   #
+# --------------------------------------------------------------------------- #
+# `.github/workflows/ci.yml` skips the six `backend-*` jobs on a pull request
+# when this answers "none"; every other event (main, the merge queue, nightly)
+# runs all six whatever it says. The answer is all six or none, never a subset:
+# the tiers' tests read one another's emitters, goldens and fixtures (the ts
+# tests compile through backends/python, the go tests read the ts fixtures), so
+# no per-tier split of the backends/ tree can be argued sound.
+#
+# SOUNDNESS. It is deny-by-default: the jobs are skipped only when EVERY changed
+# path is one no backend job can observe. Any other path runs them:
+#   * a FULL selection, or an empty changed set (an unresolved base);
+#   * anything under src/revl/: the backend tests run `python -m revl` as a
+#     subprocess, which the import graph behind FULL does not see;
+#   * anything under backends/, stdlib/, selfhost/, examples/, crates/, tck/,
+#     ci/, schema/ or any tree not listed below.
+# The paths that do not run them:
+#   * docs/** and a top-level *.md: no backend file reads a document (they
+#     cite them in comments and messages), which tests/test_ci_backend_gate.py
+#     pins; a *.md elsewhere is not blind (the gate crate tests read
+#     crates/revl-gate/README.md);
+#   * dogfood/, formal/, site/, LICENSES/, playground/, grammar/,
+#     tree-sitter-revl/ and assets/: no backend file or backend job step names
+#     those trees outside a comment, also pinned there (bench/ is not on the
+#     list: backends/typescript/test_blast_radius_ts.py runs a bench script);
+#   * a top-level file of tests/ or tools/ whose stem no backend file and no
+#     backend job step in ci.yml mentions as a word, and that no root test a
+#     backend job runs imports (tests/test_gate_crate_admit.py, run by
+#     backend-rust, imports test_selfhost_lower). That keeps
+#     tests/test_wasm_backend.py (backend-wasm), tools/regen_goldens.py
+#     (backend-go) and the helpers backend tests import (`from validate import`,
+#     `_load_by_path`) on the running side.
+# A miss can still only land a red on main, never ship one: main runs all six.
+# The `backend-<tier>` jobs: one per tier.
+CI_BACKEND_JOBS = BACKEND_TIERS
+CI_BACKEND_BLIND_TREES = ("docs/", "dogfood/", "formal/", "site/", "LICENSES/",
+                          "playground/", "grammar/", "tree-sitter-revl/",
+                          "assets/")
+_CI_CORPUS_SUFFIXES = (".py", ".sh", ".mjs", ".js", ".ts", ".toml", ".json")
+_CI_CORPUS_SKIP_DIRS = {"node_modules", ".venv", "target", "golden", "goldens"}
+
+
+def ci_backend_corpus(root: Path) -> str:
+    """The text a backend job can read a path out of: every script and config
+    under backends/ (not goldens, vendored packages or build output) plus the
+    six `backend-*` job blocks of ci.yml."""
+    parts = []
+    for path in sorted((root / "backends").rglob("*")):
+        if (path.suffix not in _CI_CORPUS_SUFFIXES or not path.is_file()
+                or _CI_CORPUS_SKIP_DIRS & set(path.relative_to(root).parts)):
+            continue
+        try:
+            parts.append(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+    jobs = _ci_backend_job_text(root)
+    parts.append(jobs)
+    parts.extend(_ci_backend_root_tests(root, jobs))
+    return "\n".join(parts)
+
+
+_IMPORT_NAME = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)
+
+
+def _ci_backend_root_tests(root: Path, jobs: str) -> list:
+    """The text of every root test file a backend job step runs, and of the
+    tests/ and tools/ modules those import, transitively."""
+    todo = [root / p for p in re.findall(r"tests/[A-Za-z0-9_]+\.py", jobs)]
+    seen, out = set(), []
+    while todo:
+        path = todo.pop()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        text = path.read_text(encoding="utf-8")
+        out.append(text)
+        for name in _IMPORT_NAME.findall(text):
+            todo += [root / "tests" / f"{name}.py", root / "tools" / f"{name}.py"]
+    return out
+
+
+def _ci_backend_job_text(root: Path) -> str:
+    try:
+        lines = (root / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    names = {f"  backend-{tier}:" for tier in CI_BACKEND_JOBS}
+    out, inside = [], False
+    for line in lines:
+        if re.match(r"^  [A-Za-z0-9_-]+:\s*$", line):
+            inside = line.rstrip() in names
+        if inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _ci_backend_blind(f: str, corpus: str) -> bool:
+    if f.startswith("backends/"):
+        return False
+    if f.startswith(CI_BACKEND_BLIND_TREES) or (f.endswith(".md") and "/" not in f):
+        return True
+    head, _, rest = f.partition("/")
+    if head in ("tests", "tools") and rest and "/" not in rest:
+        stem = Path(rest).stem
+        return re.search(rf"(?<![A-Za-z0-9_]){re.escape(stem)}(?![A-Za-z0-9_])",
+                         corpus) is None
+    return False
+
+
+def ci_backends(changed, result: dict, root: Path) -> list:
+    """The backend jobs a pull request with these changes must run: all six,
+    or none when no changed path is one a backend job can observe."""
+    if result["full"] or not changed:
+        return list(CI_BACKEND_JOBS)
+    corpus = ci_backend_corpus(root)
+    if all(_ci_backend_blind(f, corpus) for f in changed):
+        return []
+    return list(CI_BACKEND_JOBS)
+
+
 def _emit(result: dict, base: str, fmt: str) -> str:
     lines: list[str] = []
     if fmt in ("human", "both"):
@@ -1899,6 +2029,9 @@ def main(argv=None) -> int:
                     help="base ref (default: merge-base with origin/main)")
     ap.add_argument("--format", choices=("human", "machine", "both"), default="both")
     ap.add_argument("--root", default=None, help="repo root (default: git toplevel)")
+    ap.add_argument("--ci-backends", action="store_true",
+                    help="print only `CI_BACKENDS <tiers>`: the backend jobs a pull "
+                         "request with this diff must run (all six or none)")
     args = ap.parse_args(argv)
 
     if args.root:
@@ -1910,6 +2043,9 @@ def main(argv=None) -> int:
     changed, added, deleted, base = changed_files(root, args.base)
     result = (_test_add_delete_override(changed, added, deleted, root)
               or select(changed, root))
+    if args.ci_backends:
+        print(f"CI_BACKENDS {' '.join(ci_backends(changed, result, root))}".rstrip())
+        return 0
     print(_emit(result, base, args.format))
     return 0
 

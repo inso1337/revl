@@ -302,9 +302,25 @@ as a `workflow_call`, so the PyPI publish gates on the full matrix too.
 schedule, and on `workflow_dispatch`. It deliberately does NOT run on
 `pull_request`: six language lanes per PR made it roughly half the queue on a
 repo whose runner concurrency is the throughput limit, and the required `ci`
-workflow was queuing behind scans of code that had not landed. Everything that
-reaches main is still scanned. What a PR loses is the pre-merge signal; dispatch
-a scan by hand against the branch when a change warrants one.
+workflow was queuing behind scans of code that had not landed. All code that
+reaches main is still scanned, by its own push or a later one. What a PR loses
+is the pre-merge signal; dispatch a scan by hand against the branch when a
+change warrants one.
+
+Issue #1817 trims three things:
+
+- `root-suite-affected` runs on pull requests only. On every other event
+  `frontend` runs the whole root suite, and its 3.12 leg is exactly this job's
+  FULL selection.
+- The six `backend-*` jobs skip on a pull request when every changed path is
+  one no backend job can observe, per `tools/affected_tests.py --ci-backends`.
+  That means documentation, a few trees no backend file reads (`formal/`,
+  `site/`, `dogfood/` and others), and top-level `tests/` or `tools/` files that
+  no backend file, backend job step or backend-run root test names. Anything
+  else, including any `src/revl/` change, runs all six. Main and the merge queue
+  always run all six. A skipped backend job reports `skipping`.
+- CodeQL on main is grouped by ref, so a burst of merges is scanned once at the
+  newest commit, and a documentation-only push is not scanned.
 
 ## What CI does not cover
 
