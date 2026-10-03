@@ -187,11 +187,11 @@ mirrors. The reproduction asks the REAL crate, built by cargo, and is
 recorded in `tests/fixtures/census_crate_reproduction.json` because it needs a rust toolchain
 and minutes rather than seconds.
 
-- programs: **1035**
+- programs: **1043**
 - tracked buckets agree: **yes**
 - crate `false-admission` members: **0**
-- recorded at checker version: `GATE-CENSUS-1+6feced95a60e`
-- current for this run: **NO, stale: it lifts no claim**
+- recorded at checker version: `GATE-CENSUS-1+7db5c6d30e30`
+- current for this run: **yes**
 
 What it does not establish: The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.
 
