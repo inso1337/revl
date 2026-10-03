@@ -27,7 +27,8 @@ The definitions (docs/harness-gate-guide.md carries the same text):
 `preflightCoverage`
     Composition edits whose touched components were all named by a
     blast-radius query earlier in the session (`revl_query_*`,
-    `revl_live_query`, `revl_plan`), over all composition edits. An edit is
+    `revl_live_query`, `revl_plan`) or by the cascade the edit's own response
+    carries (`blastRadius`, #1704), over all composition edits. An edit is
     a `revl_swap`, `revl_edit`, `revl_rollback`, `revl_undo`, `revl_restore`,
     `revl_ship` or `revl_repair` that changed at least one component; a
     refused or no-op one touched nothing and is not counted.
@@ -105,6 +106,19 @@ def covered_components(arguments: dict, payload: dict) -> set[str]:
     return names
 
 
+def carried_components(payload: dict) -> set[str]:
+    """The components an edit response's own cascade covers (`blastRadius`,
+    #1704): the ones it touched, and each one's withdrawal cascade."""
+    radius = payload.get("blastRadius")
+    if not isinstance(radius, dict):
+        return set()
+    names = {n for n in radius.get("touched") or [] if isinstance(n, str)}
+    for entry in (radius.get("components") or {}).values():
+        if isinstance(entry, dict):
+            names |= _names(entry.get("cascade"))
+    return names
+
+
 def names_a_guarantee(payload: dict) -> bool:
     return any(isinstance(d, dict) and d.get("guarantee")
                for d in payload.get("diagnostics") or [])
@@ -163,8 +177,11 @@ class LoopAxes:
             self.covered |= covered_components(arguments, payload)
         if name in EDIT_TOOLS and touched:
             self.edits += 1
-            if set(touched) <= self.covered:
+            if set(touched) <= self.covered | carried_components(payload):
                 self.preflighted_edits += 1
+        if name in EDIT_TOOLS:
+            # an answer the agent was handed covers later edits as a query does
+            self.covered |= carried_components(payload)
         if name in PRE_EXECUTION_TOOLS and is_refusal(payload) \
                 and names_a_guarantee(payload):
             self.refused_before += 1

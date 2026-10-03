@@ -257,7 +257,7 @@ ratio rounded to four places, or null while the denominator is 0.
 | `reversibilityRate` | executed boundary calls witnessed with a registered inverse, class (a) | executed boundary calls, classes (a), (b) and (c) |
 | `autoApprovedWithProof` | executed boundary calls the checker proved revertible or deferred, classes (a) and (b) | the same |
 | `promptsPerSession` | prompts raised: per-call tickets, commit prompts and residue prompts (the `prompts` tally above) | commit sessions, from a `load` to the unload, commit or abort that ends it, the open one included |
-| `preflightCoverage` | composition edits whose touched components were all named by an earlier blast-radius query | composition edits |
+| `preflightCoverage` | composition edits whose touched components were all named by an earlier blast-radius query, or by the cascade the edit's response carries | composition edits |
 | `violationsCaughtBeforeExecution` | refusals at check, admit, plan, load, swap or edit time whose diagnostics name a guarantee | those, plus `revl_call`s that failed at run time |
 | `residueAfterAbort` | unresolved compensation records `revl_abort` left | aborts |
 
@@ -278,7 +278,9 @@ Details that decide the counts:
   `revl_query_dependents`, `revl_query_reach`, `revl_query_emitters`,
   `revl_live_query` or `revl_plan`. The components it covers are the one it
   asked about and every component its result names (cascade, providers, call
-  sites, `components`, `impacted`).
+  sites, `components`, `impacted`). An edit whose response carries
+  `blastRadius` (`revl_edit`, #1704) covers its own touched components and
+  their cascades, for itself and for later edits.
 - A composition edit is a `revl_swap`, `revl_edit`, `revl_rollback`,
   `revl_undo`, `revl_restore`, `revl_ship` or `revl_repair` that changed at
   least one component of the running composition. A refused or no-op one is

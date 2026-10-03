@@ -19,7 +19,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from revl.mcp import server as server_mod  # noqa: E402
-from revl.mcp.loop_axes import LoopAxes, covered_components  # noqa: E402
+from revl.mcp.loop_axes import LoopAxes, carried_components, covered_components  # noqa: E402
 from revl.mcp.server import SESSION, handle  # noqa: E402
 
 needs_cordis = pytest.mark.skipif(
@@ -202,6 +202,36 @@ def test_an_edit_with_no_query_first_is_not_preflighted(mcp):
     assert axes["preflightCoverage"] == {"numerator": 0, "denominator": 1, "value": 0.0}
 
 
+# No host code, so it loads from inline source under the default trust.
+_CHAIN = (
+    "service Store { fn get(k: Str) -> Opt[Str] }\n"
+    "service Front { fn hit(k: Str) -> Opt[Str] }\n"
+    "component Mem provides store: Store {\n"
+    "  let m = effect Map.new() undo m.drop()\n"
+    "  provide store { fn get(k) = m.get(k) }\n"
+    "}\n"
+    "component Web requires store: Store provides front: Front {\n"
+    "  provide front { fn hit(k) = store.get(k) }\n"
+    "}\n"
+)
+
+
+@needs_cordis
+def test_an_edit_that_carries_its_cascade_is_preflighted(mcp):
+    """#1704 (PR #1731): a `revl_edit` response carries `blastRadius`, the
+    exact cascade of what it touched, so the agent had the preflight answer
+    without asking for it first. It also covers a later edit of the same
+    component, as an earlier query would."""
+    assert _call("revl_load", {"source": _CHAIN})["ok"]
+    edited = _call("revl_edit", {"edits": [{
+        "anchor": "fn hit(k) = store.get(k)",
+        "replacement": "fn hit(k) = store.get(\"front:\" + k)"}]})
+    assert edited["swapped"] is True, edited
+    assert edited["blastRadius"]["touched"] == ["Web"]
+    axes = _call("revl_state", {})["loopAxes"]
+    assert axes["preflightCoverage"] == {"numerator": 1, "denominator": 1, "value": 1.0}
+
+
 @needs_cordis
 def test_a_failing_call_is_a_refusal_at_run_time(mcp, tmp_path):
     _, paths = mcp
@@ -223,3 +253,10 @@ def test_query_coverage_reads_every_result_shape():
         == {"C", "D", "E", "F"}
     assert covered_components({}, {"components": {"added": ["G"], "replaced": ["H"],
                                                   "withdrawn": []}}) == {"G", "H"}
+
+
+def test_carried_cascade_reads_touched_and_each_cascade():
+    payload = {"blastRadius": {"touched": ["Mem"], "components": {
+        "Mem": {"cascade": [{"component": "Web"}, {"component": "Client"}]}}}}
+    assert carried_components(payload) == {"Mem", "Web", "Client"}
+    assert carried_components({"swapped": True}) == set()
