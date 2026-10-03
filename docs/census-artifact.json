@@ -5338,7 +5338,7 @@
    "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
   },
   "checker_version": "GATE-CENSUS-1+6feced95a60e",
-  "compiler_tree_digest": "src/revl@sha256:eb399b5f334c",
+  "compiler_tree_digest": "src/revl@sha256:6e2fd21a68b4",
   "compiler_tree_digest_note": "EVAL-REPORT-1 names this field `compiler_commit`. It is not a commit. It is a sha256 over the src/revl/**/*.py modules the census run opened, listed in `pins.reference`, which is narrower than a commit (a commit that touched no module the run reads does not move it) and recomputable by anyone with a checkout.",
   "corpus_dirs": [
    "examples",
@@ -5409,7 +5409,7 @@
     "src/revl/attest.py": "305085235db218edab30c23bcbc3ceb799fc62c4fa8f3068815e1a22baa33776",
     "src/revl/boundary.py": "21ec0b322e0693ca5471e4ee2a04968ef407acab895dd94e5c2881e98496e0d6",
     "src/revl/cap_order.py": "de1032d05b402839a79287cbe62e2b0d2e91dd24002d04dd7264a41e74ed651f",
-    "src/revl/cardinality.py": "b3ece8c5c213a047244f45563df9764cf894b203a9eddd1cb6193615df5d2ea0",
+    "src/revl/cardinality.py": "564440d7505eb5c9455d704979037f78313dd2358e4666c3e215b708413ea79c",
     "src/revl/compiler.py": "9f9c210b6b7dc0a78fe9e1017b4a9017d6a94cd6c048a7c514b51225c895fc45",
     "src/revl/decode_grammar.py": "f0f44dc8da22fc9674573bf3a584366bac0ae87ff0472f2cdc975aea294d266a",
     "src/revl/diagnostics.py": "7bcfa4eacf1a8a056d2cd7b73ffc9ed5746199e926f18371bb0aad86f701dfbc",
@@ -5450,7 +5450,7 @@
     "crates/revl-gate/src/selfhost.rs": "2aa630125ab2df6ff95ef7bef436be4333848e6846a7b148d64d8e472441780f",
     "crates/revl-gate/src/session.rs": "98470ddaf7803dd69da9e6c8c6750fc23956906d6529d5de5514ad0e02da6455",
     "crates/revl-gate/src/symbols.rs": "698969ee2ea20647b73a6b758da946a29658f1c72b1553153d50551b94becbec",
-    "tests/fixtures/census_crate_reproduction.json": "d488c1db5f25417065c1725705b5891bdca419bb7f0ae3676dd113fb3a8c7cfb",
+    "tests/fixtures/census_crate_reproduction.json": "f2040501f0f142e18f97300842e62e0edd17166b375e9160aa51b2d3b5b2dc2a",
     "tests/fixtures/corpus_provenance.json": "090c81170b3655237e021a45e69246f88e120938d72ce7a1e97fa9ae1b4c73f4",
     "tools/gate_reference_census_baseline.json": "5dc8b0ab9b4be6c8dd5e480f99446cce787a923334f113a5badf5dde0c946852"
    }
@@ -5573,7 +5573,7 @@
    "current_checker_version": "GATE-CENSUS-1+6feced95a60e",
    "does_not_establish": "The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.",
    "is_current": true,
-   "n": 1035,
+   "n": 1040,
    "recorded_at_checker_version": "GATE-CENSUS-1+6feced95a60e",
    "recorded_in": "tests/fixtures/census_crate_reproduction.json",
    "tracked_buckets_agree": true,
@@ -5593,7 +5593,7 @@
  "claims": [
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:6e2fd21a68b4",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
     "run": "census-selfhost-42b8e2fa2470"
@@ -5604,7 +5604,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:6e2fd21a68b4",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
     "run": "census-selfhost-42b8e2fa2470"
@@ -5615,7 +5615,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:6e2fd21a68b4",
     "protocol": "EVAL-1",
     "run": "census-selfhost-42b8e2fa2470"
    },
@@ -5625,7 +5625,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:6e2fd21a68b4",
     "protocol": "EVAL-1",
     "run": "census-selfhost-42b8e2fa2470"
    },
