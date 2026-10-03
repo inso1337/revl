@@ -304,3 +304,45 @@ def test_each_functions_module_case_runs(case, export, arg, want):
     module = wasmtime.Module(store.engine, modules["functions"])
     instance = wasmtime.Instance(store, module, [])
     assert instance.exports(store)[export](store, arg) == want
+
+
+# ------------------------------------------------- the canonical tier
+
+canonical = load_by_path("revl_wasm_canonical_1756", BACKEND / "canonical.py")
+
+PROVIDE_SYMBOLS = """
+service A { fn get_x(k: Str) -> Str }
+service B { fn x(k: Str) -> Str }
+component P provides kv: A, kv_get: B {
+  provide kv { fn get_x(k) = k.concat("a") }
+  provide kv_get { fn x(k) = k.concat("b") }
+}
+"""
+
+LIST_HELPERS = """
+type List_A_ = { v: Int, w: Int }
+type A = { v: Int }
+fn one(xs: List[List[A]]) -> Int { return 0 }
+fn two(xs: List[List_A_]) -> Int { return 0 }
+"""
+
+
+def test_two_provide_exports_get_two_canonical_symbols():
+    """`provide:kv.get_x` and `provide:kv_get.x` were both `$__prov_kv_get_x`."""
+    wasmtime = _wasmtime()
+    core = canonical.emit_component(compile_source(PROVIDE_SYMBOLS), service="A")["core_wat"]
+    assert '(func $__prov:kv.get_x (export "provide:kv.get_x")' in core
+    assert '(func $__prov:kv_get.x (export "provide:kv_get.x")' in core
+    wasmtime.Module(wasmtime.Engine(), wasmtime.wat2wasm(core))
+
+
+def test_a_list_of_lists_and_a_list_of_records_get_their_own_lift():
+    """The element types `List[A]` and `List_A_` used to share one helper,
+    `$__canon_lift_list_List_A_`, so one of the two was lifted with the other's
+    layout. Each now has its own."""
+    wasmtime = _wasmtime()
+    core = canonical.emit_component(compile_source(LIST_HELPERS), service="Lists")["core_wat"]
+    assert "(func $__canon_lift_list_List<A> " in core
+    assert "(func $__canon_lift_list_List_A_ " in core
+    assert canonical._san("Result[Int, Str]") == "Result<Int|Str>"
+    wasmtime.Module(wasmtime.Engine(), wasmtime.wat2wasm(core))

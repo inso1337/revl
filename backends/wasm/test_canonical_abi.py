@@ -268,14 +268,14 @@ def test_service_wit_matches_golden():
 
 def test_service_provide_method_is_named_and_wrapped():
     """The provide-method export the component tier emits (an anonymous
-    `provide:<key>.<method>` core func) is given a callable `$__prov_*` symbol,
+    `provide:<key>.<method>` core func) is given a callable `$__prov:*` symbol,
     and a canonical wrapper with the interface-qualified export name delegates to
     it over cabi_realloc + the lift/lower library."""
     core = _emit_svc()["core_wat"]
     assert '(func (export "cabi_realloc")' in core
-    assert '(func $__prov_reg_greet (export "provide:reg.greet")' in core
+    assert '(func $__prov:reg.greet (export "provide:reg.greet")' in core
     assert '(func (export "revl:exported/registry#greet")' in core
-    assert "(call $__prov_reg_greet" in core
+    assert "(call $__prov:reg.greet" in core
     assert "$__canon_lift_str" in core
 
 

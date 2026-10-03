@@ -179,6 +179,8 @@ contain no `.`.
 | a config field, a spawn target | `$config.<field>`, `$spawn.<Template>` |
 | a component binding's global | `$g.<name>` |
 | a parameter, a local | `$p_<name>`, `$l_<name>` |
+| canonical tier: a provide method's callable symbol | `$__prov:<key>.<op>` (the export path, kept as it is) |
+| canonical tier: a per-type lift/lower helper | `$__canon_lift_list_<type>` and kin, with `[`, `]`, `,` spelled `<`, `>`, `\|` (`List<A>`, `Result<Int\|Str>`), so `List[A]` and a record `List_A_` get two helpers |
 
 A hand-written `@wasm` body keeps calling the fixed helpers (`$alloc`) and
 reading its parameters as `$p_<name>`: those spellings did not change. A `fn`

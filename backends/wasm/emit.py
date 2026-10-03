@@ -6399,8 +6399,12 @@ def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
 
 _UNSWEEPABLE = ("ref.func", "call_indirect", "\n  (table", "\n  (elem",
                 "\n  (start")
-_FUNC_HEAD = re.compile(r'^\s*\(func\s+(?:(\$[\w:.#$-]+)\s*)?(?:\(export\s+"([^"]+)"\))?')
-_CALL_EDGE = re.compile(r"\(call\s+(\$[\w:.#$-]+)")
+# A WAT identifier is `$` and one or more idchars. The canonical tier names
+# helpers with `<`, `>`, `|` and `/` in them (issue #1756), so the sweep reads
+# the whole idchar set, not only the characters this file's own names use.
+_WAT_ID = r"\$[0-9A-Za-z!#$%&'*+\-./:<=>?@\\^_`|~]+"
+_FUNC_HEAD = re.compile(r'^\s*\(func\s+(?:(' + _WAT_ID + r')\s*)?(?:\(export\s+"([^"]+)"\))?')
+_CALL_EDGE = re.compile(r"\(call\s+(" + _WAT_ID + r")")
 
 
 def _top_level_funcs(wat: str) -> list[tuple[str | None, str | None, str, str]]:
