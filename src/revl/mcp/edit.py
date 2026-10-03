@@ -525,7 +525,8 @@ def _origin_from(vs: dict) -> dict:
 
 # ---------------------------------------------------------------- the verb
 
-def apply_edit(session, arguments: dict, verify=None) -> dict:
+def apply_edit(session, arguments: dict, verify=None, *, commit: bool = True,
+               base: dict | None = None) -> dict:
     """Patch the server-side source of the running composition, then re-admit.
 
     Returns the admission verdict / open holes / diagnostic — never the whole
@@ -545,7 +546,8 @@ def apply_edit(session, arguments: dict, verify=None) -> dict:
         raise EditError("`edits` must be a non-empty array of patch operations")
 
     # Work on a copy: nothing about the session changes until an edit compiles.
-    before = virtual_source(session)
+    # A speculative edit (issue #1696) starts from the caller's proposal.
+    before = base if base is not None else virtual_source(session)
     vs = copy.deepcopy(before)
     applied, touched = _apply_to_buffers(
         vs, edits, arguments.get("target") or arguments.get("component"))
@@ -555,7 +557,16 @@ def apply_edit(session, arguments: dict, verify=None) -> dict:
         return _jail_refused(str(error))
 
     replacing = tuple(arguments.get("replacing") or ())
+    return admit(session, vs, before, applied, replacing, verify, commit=commit)
 
+
+def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
+          verify=None, *, commit: bool = True) -> dict:
+    """Compile, admit and gate a working set, then swap it in, or, with
+    `commit=False`, stop short of the swap (issue #1696): the verdict comes back
+    with `speculative: true` and the working set under `_proposal`, for the
+    server to hold as the caller's proposal. Nothing about the session changes
+    on that path."""
     # (1) compile the patched source on its own. This surfaces open holes as a
     # result (a draft compiles; admission is what refuses it) and catches any
     # parse/type error independent of the running composition. A failure here
@@ -577,7 +588,14 @@ def apply_edit(session, arguments: dict, verify=None) -> dict:
     holes = (fillspec.enrich(ir, untrusted=_untrusted_author())
              if ir.get("holes") else [])
     if holes:
-        session.draft = vs
+        if commit:
+            session.draft = vs
+        else:
+            return {"ok": True, "edited": True, "swapped": False, "admitted": False,
+                    "speculative": True, "_proposal": vs, "applied": applied,
+                    "touched": _touched(before, vs), "holes": holes, **_summary(ir),
+                    "note": f"proposed with {len(holes)} open hole(s); fill them "
+                            "before it can commit"}
         return {"ok": True, "edited": True, "swapped": False, "admitted": False,
                 "applied": applied, "touched": _touched(before, vs), "holes": holes,
                 **_summary(ir),
@@ -629,6 +647,13 @@ def apply_edit(session, arguments: dict, verify=None) -> dict:
         return {**refused, "edited": False, "swapped": False, "applied": applied,
                 "touched": _touched(before, vs)}
 
+    if not commit:
+        return {"ok": True, "edited": True, "admitted": True, "swapped": False,
+                "speculative": True, "_proposal": vs, "applied": applied,
+                "touched": _touched(before, vs), **_summary(ir),
+                "note": "proposed and verified: admission and every gate passed "
+                        "against the running composition, which is unchanged. "
+                        "Commit it, or discard it"}
     state = session.swap(ir, origin=_origin_from(vs))
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,

@@ -159,7 +159,7 @@ def test_revl_edit_by_member_swaps_and_reports_the_member(tmp_path, monkeypatch)
         assert [t["symbol"] for t in result["touched"]] == ["T.tool.size"]
         assert _call("revl_call", {"key": "tool", "method": "size"})["result"] == 2
         assert _call("revl_call", {"key": "tool", "method": "describe"})["result"] == "one"
-        change = _call("revl_change", {"replace": {"component": "T.tool.describe",
+        change = _call("revl_change", {"commit": True, "replace": {"component": "T.tool.describe",
                                                    "source": 'fn describe() = "two"'}})
         assert change["committed"] is True, change
         assert change["components"] == [{"component": "T", "change": "changed"}]

@@ -8,6 +8,9 @@ with:
 * a failing verification commits nothing and reports why;
 * the result names every component the change touched;
 
+Since issue #1696 `revl_change` is speculative by default, so these call it
+with `commit: true`; test_mcp_speculation_1696.py holds the speculative path.
+
 plus `{replace}`, `{edit}`, the optional gauntlet, a load from files in the same
 call, and a draft whose holes the change fills and boots.
 """
@@ -80,7 +83,7 @@ def loaded():
 
 
 def test_a_withdraw_and_verify_change_completes_in_one_call(loaded):
-    result = _call("revl_change", {"withdraw": "FixedClock"})
+    result = _call("revl_change", {"commit": True, "withdraw": "FixedClock"})
     assert result["ok"] is True and result["committed"] is True, result
     assert result["intent"] == "withdraw"
     assert result["verified"]["admission"] == "passed"
@@ -90,7 +93,7 @@ def test_a_withdraw_and_verify_change_completes_in_one_call(loaded):
 
 
 def test_a_withdrawal_with_dependents_commits_nothing_and_says_why(loaded):
-    result = _call("revl_change", {"withdraw": "MemStore"})
+    result = _call("revl_change", {"commit": True, "withdraw": "MemStore"})
     assert result["ok"] is False and result["committed"] is False
     assert result["verified"]["admission"] == "refused"
     assert [c["component"] for c in result["plan"]["cascade"]] == ["ApiImpl"]
@@ -106,7 +109,7 @@ def test_a_withdrawal_with_dependents_commits_nothing_and_says_why(loaded):
 
 
 def test_a_cascading_withdrawal_takes_the_dependents_with_it(loaded):
-    result = _call("revl_change", {"withdraw": {"component": "MemStore",
+    result = _call("revl_change", {"commit": True, "withdraw": {"component": "MemStore",
                                                 "cascade": True}})
     assert result["committed"] is True, result
     assert {(c["component"], c["change"]) for c in result["components"]} == {
@@ -123,7 +126,7 @@ def test_a_cascading_withdrawal_takes_the_dependents_with_it(loaded):
 
 
 def test_replace_swaps_one_component_by_name(loaded):
-    result = _call("revl_change", {"replace": {
+    result = _call("revl_change", {"commit": True, "replace": {
         "component": "FixedClock",
         "source": "component FixedClock provides clock: Clock {\n"
                   "  provide clock { fn now() = 9 }\n}\n"}})
@@ -133,7 +136,7 @@ def test_replace_swaps_one_component_by_name(loaded):
 
 
 def test_a_replace_that_breaks_a_guarantee_commits_nothing(loaded):
-    result = _call("revl_change", {"replace": {
+    result = _call("revl_change", {"commit": True, "replace": {
         "component": "FixedClock",
         "source": "component FixedClock provides clock: Clock {\n"
                   '  provide clock { fn now() = "nine" }\n}\n'}})
@@ -143,7 +146,7 @@ def test_a_replace_that_breaks_a_guarantee_commits_nothing(loaded):
 
 
 def test_edit_runs_revl_edits_patch(loaded):
-    result = _call("revl_change", {"edit": {"edits": [
+    result = _call("revl_change", {"commit": True, "edit": {"edits": [
         {"anchor": '"stored"', "replacement": '"edited"'}]}})
     assert result["committed"] is True, result
     assert result["components"] == [{"component": "MemStore", "change": "changed"}]
@@ -154,7 +157,7 @@ def test_edit_runs_revl_edits_patch(loaded):
 
 
 def test_the_gauntlet_passes_a_sound_change(loaded):
-    result = _call("revl_change", {"withdraw": "FixedClock", "gauntlet": True})
+    result = _call("revl_change", {"commit": True, "withdraw": "FixedClock", "gauntlet": True})
     assert result["committed"] is True, result
     assert result["verified"]["gauntlet"] == "passed"
 
@@ -164,7 +167,7 @@ def test_a_failing_gauntlet_commits_nothing_and_reports_why(loaded, monkeypatch)
 
     monkeypatch.setattr(gauntlet, "run", lambda session, arguments: {
         "ok": True, "verdict": "rejected", "tested": {}})
-    result = _call("revl_change", {"withdraw": "FixedClock", "gauntlet": True})
+    result = _call("revl_change", {"commit": True, "withdraw": "FixedClock", "gauntlet": True})
     assert result["committed"] is False
     assert result["verified"]["gauntlet"] == "failed"
     assert "gauntlet did not pass" in result["diagnostics"][0]["message"]
@@ -177,7 +180,7 @@ def test_a_failing_gauntlet_commits_nothing_and_reports_why(loaded, monkeypatch)
 def test_one_call_loads_files_and_changes_them(clean_session):
     path = clean_session / "app.rvl"
     path.write_text(SOURCE, encoding="utf-8")
-    result = _call("revl_change", {"files": [str(path)], "withdraw": "FixedClock"})
+    result = _call("revl_change", {"commit": True, "files": [str(path)], "withdraw": "FixedClock"})
     assert result["committed"] is True and result["loaded"] is True, result
     assert _components() == {"MemStore", "ApiImpl"}
     assert path.read_text(encoding="utf-8") == SOURCE
@@ -188,7 +191,7 @@ def test_filling_a_drafts_holes_and_booting_it_is_a_change(clean_session):
                                        "methods": ["greet() -> Str"]})
     opened = _call("revl_load", {"source": scaffold["source"]})
     assert opened["draft"] is True and not server_mod.SESSION.loaded
-    result = _call("revl_change", {"edit": {"edits": [
+    result = _call("revl_change", {"commit": True, "edit": {"edits": [
         {"hole": opened["holes"][0]["line"], "expr": '"hi"'}]}})
     assert result["committed"] is True and result["booted"] is True, result
     assert _call("revl_call", {"key": "greeter", "method": "greet"})["result"] == "hi"

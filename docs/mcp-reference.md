@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 57 verbs below, one section each.
+The advertised list is exactly the 58 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -74,6 +74,7 @@ the current interpreter (issue #1692).
 | `revl_call` | no | no | `key`, `method` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` (source) |
+| `revl_export` | no | yes | - |
 | `revl_change` | no | yes | - (source) |
 | `revl_source` | yes | no | `symbol` (source) |
 | `revl_gauntlet` | yes | no | - (source) |
@@ -360,6 +361,10 @@ finest level that holds. When only a component's methods (or a service's
 operations, or a type's members) changed, the members are reported, each with
 `parent` and `parentKind`; otherwise the whole declaration is.
 
+`commit: false` proposes instead of swapping: the edit lands in your proposal,
+shared with `revl_change`, and `revl_change {commit: true}` commits it (issue
+#1696). The default stays `commit: true` for now; see the design note.
+
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
   replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}`,
   each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
@@ -368,6 +373,19 @@ operations, or a type's members) changed, the members are reported, each with
   `config` to load first.
 
 ### `revl_change`
+
+**Speculative by default (issue #1696,
+[design](design/1696-speculation.md)).** A `revl_change` applies the change to
+YOUR proposal (a working copy of the held source, one per caller) and runs the
+whole verification, then stops: nothing swaps, nothing is written, and other
+callers see nothing. Successive changes build on the same proposal.
+`revl_change {commit: true}` with no intent re-verifies the proposal against
+the running composition as it is now and swaps it in (or boots a held draft);
+`{intent, commit: true}` proposes and commits in one call; `{discard: true}`
+drops the proposal. A commit is refused if the running composition moved since
+the proposal was built (another caller committed): it would undo that change.
+`revl_source {proposal: true}` reads the proposal. The loop is propose, verify,
+commit; `revl_export` writes the committed source to disk when you want a file.
 
 Make one change in ONE call (issue #1695). An agent names the intent; the
 server runs the loop an agent used to orchestrate itself (in a benchmark, eight
@@ -402,8 +420,24 @@ change touched, each with `added` / `changed` / `removed`, plus `would lose a
 provider` for a refused cascade. A change that fails verification commits
 nothing, and the running composition is unchanged.
 
-- Inputs: one of `edit` / `replace` / `withdraw`; `gauntlet`; with nothing
-  loaded, `files` / `source` / `modules` / `config`.
+- Inputs: one of `edit` / `replace` / `withdraw`; `gauntlet`; `commit`
+  (default false: propose only); `discard`; with nothing loaded, `files` /
+  `source` / `modules` / `config`.
+
+### `revl_export`
+
+Write the running composition's HELD source to disk, on request (issue #1696).
+The held source (what was loaded or last committed, including text `revl_edit`
+changed) is the source of truth, and disk is an export: no other verb writes a
+file. A composition loaded from files writes each loaded file whose held text
+differs from disk back to its own path. One loaded from inline source writes to
+`path`, with its in-memory modules beside it, and refuses to overwrite an
+existing file unless `overwrite: true`. Every path must be inside the sanctioned
+roots, checked before anything is written. A proposal is never exported; commit
+it first. After an export, the files on disk equal `revl_snapshot`'s
+`files_content`. Authorized as `snapshot`.
+
+- Inputs: `path` and `overwrite` (inline compositions).
 
 ### `revl_source`
 
@@ -445,8 +479,9 @@ changed. A member that shares a line with anything else (`provide p { fn a() =
 edit still reaches it. The answer is
 `{symbol, kind, buffer, line, text}`, plus `deps` as a list of the same shape.
 
-- Inputs: `symbol` (required); `with`; `comments`; `files` / `source` when
-  nothing is loaded.
+- Inputs: `symbol` (required); `with`; `comments`; `proposal` (true: read
+  your speculative proposal, issue #1696); `files` / `source` when nothing is
+  loaded.
 
 ### `revl_unload`
 

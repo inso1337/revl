@@ -178,7 +178,12 @@ def shape(intent: str, result: dict, plan: dict | None, withdrawn: list[str],
         out["plan"] = {"cascade": plan.get("cascade") or [],
                        "withdrawalOrder": plan.get("withdrawalOrder") or [],
                        "orphanedKeys": plan.get("orphanedKeys") or []}
-    if not committed:
+    if result.get("speculative") and result.get("ok") is not False:
+        out["note"] = ("proposed and verified; the running composition is "
+                       "unchanged. Commit with revl_change {commit: true}, or "
+                       "drop it with {discard: true}") if not result.get("holes") \
+            else result.get("note")
+    elif not committed:
         out["note"] = (result.get("note") or "the change was not committed") \
             + "; the running composition is unchanged"
     return out

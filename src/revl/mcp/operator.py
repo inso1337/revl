@@ -56,6 +56,9 @@ TOOL_VERB = {
     # issue #1695: an intent carried out as revl_edit edits, under the same
     # authority (its self-load half answers to `load` inside the handler)
     "revl_change": "edit",
+    # issue #1696: the held source written to disk is the same read of the
+    # composition `revl_snapshot` makes, sent somewhere else
+    "revl_export": "snapshot",
     "revl_unload": "unload",
     "revl_restore": "restore",
     "revl_snapshot": "snapshot",

@@ -76,6 +76,7 @@ from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import fillspec
 from . import draft as _draft
+from . import proposal as _proposal
 from . import edit as _edit
 from . import leases as _leases
 from . import operator as _operator
@@ -1034,6 +1035,12 @@ def _tool_source(arguments: dict) -> dict:
 
 
 def _source_set(arguments: dict) -> dict:
+    if arguments.get("proposal") is True:
+        held = _proposal.base(SESSION)
+        if held is None:
+            raise _edit.EditError("nothing is proposed: `proposal: true` reads "
+                                  "the caller's speculative working copy")
+        return held
     if SESSION.loaded:
         return _edit.running_source(SESSION)
     if _draft.pending(SESSION) is not None and arguments.get("source") is None \
@@ -1123,13 +1130,23 @@ def _tool_change(arguments: dict) -> dict:
     rule, the gates and the draft handling are revl_edit's own."""
     from . import change as _change  # noqa: PLC0415
 
+    commit = arguments.get("commit") is True
+    if arguments.get("discard") is True:
+        dropped = _proposal.discard(SESSION)
+        return {"ok": True, "discarded": dropped, "committed": False,
+                "note": ("the proposal was dropped; the running composition "
+                         "never saw it") if dropped else "nothing was proposed"}
+    if commit and not any(arguments.get(name) is not None
+                          for name in _change.INTENTS):
+        return _commit_held(arguments)
     try:
         intent = _change.intent_of(arguments)
         plan = None
         if intent == "withdraw":
             component, _ = _change._withdraw_spec(arguments["withdraw"])
             plan = _change.cascade_of(_change.running_ir(SESSION), component)
-        edit_arguments = _change.edit_arguments(intent, arguments, plan)
+        edit_arguments = {**_change.edit_arguments(intent, arguments, plan),
+                          "commit": commit}
     except _change.ChangeError as error:
         return _session_error(str(error), committed=False)
     verifier = (_change.gauntlet_verifier(SESSION)
@@ -1141,8 +1158,94 @@ def _tool_change(arguments: dict) -> dict:
                          _change.withdrawn_names(edit_arguments), verifier)
 
 
+def _tool_export(arguments: dict) -> dict:
+    """Write the running composition's held source to disk, on request (issue
+    #1696). The held source is the source of truth; this is its one way out.
+    A files-loaded composition writes each loaded file whose held text differs
+    from disk back to its own path. An inline one writes to `path`, and its
+    in-memory modules beside it, refusing to overwrite unless `overwrite`.
+    Every path must be inside the sanctioned roots, checked before anything is
+    written, so a refusal writes nothing."""
+    if not SESSION.loaded:
+        return _session_error("nothing is loaded: revl_export writes the held "
+                              "source of a running composition")
+    held = _edit.running_source(SESSION)
+    try:
+        plan = _export_plan(held, arguments)
+    except _edit.EditError as error:
+        return _session_error(str(error), written=[])
+    for path, text in plan:
+        _write_atomic(path, text)
+    return {"ok": True, "written": [p for p, _ in plan],
+            "note": "the held source was written to disk"
+                    if plan else "the disk already holds the held source"}
+
+
+def _export_plan(held: dict, arguments: dict) -> list[tuple[str, str]]:
+    roots = _file_roots()
+    if held.get("files"):
+        targets = [(path, held["files_content"].get(path)) for path in held["files"]]
+        targets = [(p, t) for p, t in targets
+                   if t is not None and t != _edit._read_disk(p)]
+    else:
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path:
+            raise _edit.EditError("this composition was loaded from inline source: "
+                                  "name the file to write in `path`")
+        base_dir = os.path.dirname(os.path.abspath(path))
+        targets = [(os.path.abspath(path), held["source"])] + [
+            (os.path.normpath(os.path.join(base_dir, key)), text)
+            for key, text in (held.get("modules") or {}).items()]
+        if arguments.get("overwrite") is not True:
+            existing = [p for p, _ in targets if os.path.exists(p)]
+            if existing:
+                raise _edit.EditError(
+                    f"refused: {', '.join(existing)} already exists; pass "
+                    "`overwrite: true` to replace it")
+    outside = [p for p, _ in targets if not _within_roots(p, roots)]
+    if outside:
+        raise _edit.EditError(
+            f"refused: {', '.join(outside)} is outside the operator-sanctioned "
+            "root(s); nothing was written")
+    return targets
+
+
+def _write_atomic(path: str, text: str) -> None:
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temporary = os.path.join(directory, f".{os.path.basename(path)}.revl-export")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.replace(temporary, path)
+
+
+def _commit_held(arguments: dict) -> dict:
+    """`revl_change {commit: true}` with no intent: commit what is held. A
+    held draft boots (once hole-free); otherwise the caller's proposal is
+    re-verified against the running composition and swapped in."""
+    from . import change as _change  # noqa: PLC0415
+
+    verifier = (_change.gauntlet_verifier(SESSION)
+                if arguments.get("gauntlet") is True else None)
+    if not SESSION.loaded and _draft.pending(SESSION) is not None:
+        result = _draft.boot_held(
+            SESSION, arguments,
+            lambda vs, config, record: _boot_draft(vs, config, record,
+                                                   verify=verifier))
+    else:
+        result = _proposal.commit(SESSION, verify=verifier)
+    return _change.shape("commit", result, None, [], verifier)
+
+
 def _edit_draft(arguments: dict, verify=None) -> dict:
+    commit = arguments.get("commit", True) is not False
+
     def boot(vs, config, record):
+        if not commit:  # issue #1696: a speculative change does not boot it
+            return {"ok": True, "draft": True, "booted": False, "loaded": False,
+                    "holeCount": 0, "speculative": True,
+                    "note": "the draft is hole-free and compiles; commit it "
+                            "(revl_change {commit: true}) to boot it"}
         return _boot_draft(vs, config, record, verify=verify)
     try:
         return _draft.edit_draft(SESSION, arguments, boot)
@@ -1151,8 +1254,28 @@ def _edit_draft(arguments: dict, verify=None) -> dict:
 
 
 def _edit_loaded(arguments: dict, verify=None) -> dict:
+    """Edit the running composition: speculatively, into the caller's proposal
+    (`commit: false`, issue #1696), or committed. Either way a held proposal
+    is what the edit builds on, and a commit is refused if it went stale."""
+    commit = arguments.get("commit", True) is not False
+    base = _proposal.base(SESSION)
+    if commit and base is not None and _proposal.stale(SESSION):
+        return _session_error(_proposal.stale(SESSION), edited=False,
+                              swapped=False)
+    if commit and base is not None:
+        held = _proposal.held(SESSION)["replacing"]
+        arguments = {**arguments, "replacing": held + [
+            name for name in arguments.get("replacing") or () if name not in held]}
+    running = _edit.running_source(SESSION)
     try:
-        return _edit.apply_edit(SESSION, arguments, verify=verify)
+        result = _edit.apply_edit(SESSION, arguments, verify=verify,
+                                  commit=commit, base=base)
+        if commit and result.get("swapped"):
+            if base is not None:  # what the commit changed, against what ran
+                result["touched"] = _edit._touched(
+                    running, _edit.running_source(SESSION))
+            _proposal.discard(SESSION)
+        return _proposal.keep(SESSION, result, arguments.get("replacing") or ())
     except _edit.EditError as error:
         return _session_error(str(error), edited=False, swapped=False)
     except SessionError as error:
@@ -2737,6 +2860,10 @@ TOOLS = [
                             "description": "in-memory `use` modules for that load"},
                 "config": {"type": "object",
                            "description": "config for that load, as revl_load takes it"},
+                "commit": {"type": "boolean",
+                           "description": "false: propose and verify only, into "
+                                          "your proposal (revl_change commits it). "
+                                          "Default true: swap once admitted"},
             },
             "required": ["edits"],
         },
@@ -2744,8 +2871,35 @@ TOOLS = [
         "handler": _tool_edit,
     },
     {
+        "name": "revl_export",
+        "description": "Write the running composition's HELD source to disk, on "
+                       "request: the held source is the source of truth and disk "
+                       "is an export (docs/design/1696-speculation.md). A "
+                       "composition loaded from files writes each file whose held "
+                       "text differs back to its own path; one loaded from inline "
+                       "source writes to `path` (and its modules beside it), "
+                       "refusing to overwrite unless `overwrite: true`. Every path "
+                       "must be inside the sanctioned roots, or nothing is written. "
+                       "Never writes a proposal: commit it first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "inline composition: the file to write"},
+                "overwrite": {"type": "boolean",
+                              "description": "replace an existing file at `path`"},
+            },
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_export,
+    },
+    {
         "name": "revl_change",
-        "description": "Make one change in ONE call: name the intent and the "
+        "description": "Make one change in ONE call. SPECULATIVE BY DEFAULT "
+                       "(docs/design/1696-speculation.md): the change is applied "
+                       "to your proposal and verified, and nothing swaps until "
+                       "you commit (`commit: true`, now or later with no intent) "
+                       "or drop it (`discard: true`). Name the intent and the "
                        "server loads (if `files`/`source` are given and nothing is "
                        "loaded), plans, applies it to a working copy, verifies it "
                        "(admission against the running composition, the lease and "
@@ -2774,6 +2928,13 @@ TOOLS = [
                              "description": "also grade the candidate in the "
                                             "gauntlet's isolated session before "
                                             "committing"},
+                "commit": {"type": "boolean",
+                           "description": "true: commit (swap in) after verifying. "
+                                          "Default false: propose and verify only. "
+                                          "With no intent: commit the held "
+                                          "proposal (or boot a held draft)"},
+                "discard": {"type": "boolean",
+                            "description": "true: drop the held proposal"},
                 "files": {"type": "array", "items": {"type": "string"},
                           "description": "with nothing loaded: load these first"},
                 "source": {"type": "string",
@@ -2817,6 +2978,9 @@ TOOLS = [
                           "description": "with nothing loaded: files to read from"},
                 "source": {"type": "string",
                            "description": "with nothing loaded: source to read from"},
+                "proposal": {"type": "boolean",
+                             "description": "true: read your speculative proposal "
+                                            "instead of the running source"},
             },
             "required": ["symbol"],
         },
