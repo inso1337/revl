@@ -71,12 +71,38 @@ that provide the same key (see the note atop `tests/semantics.test.ts`).
 | `tests/frame_teardown.test.ts` | `Frame` unit coverage — bracket / transactional / compensation on one LIFO stack, two-phase abort, residue records (item 243 Slice 2b) |
 | `tests/witnessed_teardown.test.ts` | the three-entry-kind teardown loop end to end through a real cordis composition (item 243 Slice 2b) |
 | `tests/method_witnessed.test.ts` | THE H1 GATE (item 318 → 324): a witnessed fs mutation fired from a PROVIDE-METHOD, per tool call — persists on clean unload, reverts on `frame.abort()`, residue enumerable (`Frame.transactionalMethod`) |
+| `tests/declared_compensate.test.ts` | an extern that declares its own `compensate`, crossed from a provide method in every position and from an activation body: an abort runs exactly the declared compensations, newest first; a commit discharges them (issue #1511) |
 | `tests/reserved_method_names.test.ts` | every TypeScript keyword the frontend admits, as a provided method: called by its contract name and through a required service (issue #1512) |
 | `REPORT.md` | impedance mismatches, upstream bugs, IR contract notes, LOC, ship-first recommendation |
 
 The reference IR is read from `../../examples/user_cache.ir.json` when this
 directory sits inside the revl repo; a byte-identical vendored copy in
 `tests/fixtures/` is used (and checked for sync) otherwise.
+
+## Extern-declared compensations (issue #1511)
+
+An emission extern may declare its own compensation:
+
+```
+extern emission fn put(k: Str) -> Int compensate undo_put() = @ts { ... }
+```
+
+Every call to it is owed that compensation, wherever it sits.
+
+- At an `emit put(k)` statement (an activation body, a provide method, a
+  timer firing) the call renders bare and the statement registers the
+  compensation after it, the site-spelled clause first (issue #1592,
+  `_emit_compensations`).
+- Anywhere else inside a provide method (a `let`, a `return`, an argument, a
+  nested operand) the call goes through `_declared_call` and becomes
+  `$revl_frame.declared(put(k), <crossing>, "undo_put", () => undo_put())`.
+  `Frame.declared` runs after the call has returned and parks the offset with
+  `compensationMethod`, the same entry the statement path makes. A call that
+  throws registers nothing.
+- Any other position inside a component has no frame to register on, and the
+  emitter refuses it by name rather than drop the compensation.
+
+A commit discharges these entries; an abort runs them in Phase 2, newest first.
 
 ## The one lowering decision that matters
 
