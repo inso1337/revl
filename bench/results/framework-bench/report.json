@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+    "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -994,10 +994,13 @@
                 }
               },
               "rust": {
-                "unported_constructs": 20,
-                "unported_reasons": 7,
+                "unported_constructs": 21,
+                "unported_reasons": 8,
                 "blind_constructs": 14,
                 "reasons": {
+                  "Issue #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit` and every other position of a provide method (a block expression registering on `revl_teardown_of(&self.ctx)` for a `let`, a `return`, an argument, a nested operand or an `if` arm), and a timer firing. selfhost/emit_rust.rvl ports no compensation registration, so no emit_rust_corpus document can carry it; the runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
+                    "class=emission"
+                  ],
                   "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
                     "secret=<true>",
                     "secret_return=<true>"
@@ -1120,7 +1123,7 @@
                 }
               }
             },
-            "total_unported": 151
+            "total_unported": 152
           },
           "unreached-constructs": {
             "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -1131,13 +1134,13 @@
               "emit_go": 50,
               "emit_java": 36,
               "emit_py": 5,
-              "emit_rust": 34,
+              "emit_rust": 35,
               "emit_ts": 5,
               "emit_wasm": 50,
               "gate_census": 5,
               "lower_ir": 1
             },
-            "total_unreached": 187
+            "total_unreached": 188
           },
           "gate-reference-divergence": {
             "source": "tools/gate_reference_census_baseline.json",
@@ -1170,7 +1173,7 @@
         "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
         "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter"
       },
-      "unported_constructs": 151,
+      "unported_constructs": 152,
       "fail_open_programs": 0
     },
     "unload-paths": {
@@ -2536,7 +2539,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2546,7 +2549,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2556,7 +2559,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2566,7 +2569,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2576,7 +2579,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2586,7 +2589,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2596,7 +2599,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2606,7 +2609,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "0e85072f1233a19e435213344f25a525996b2f13",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }

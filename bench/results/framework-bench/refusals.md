@@ -39,10 +39,10 @@ Gate: `python3 tools/selfhost_coverage.py --check`
 | go | **49** | 11 | 1 |
 | java | **30** | 14 | 6 |
 | py | **5** | 3 | 0 |
-| rust | **20** | 7 | 14 |
+| rust | **21** | 8 | 14 |
 | ts | **1** | 1 | 4 |
 | wasm | **46** | 11 | 4 |
-| **total** | **151** | | |
+| **total** | **152** | | |
 
 ## Dispatch arms no corpus document exercises
 
@@ -58,13 +58,13 @@ known-broken.
 | emit_go | 50 |
 | emit_wasm | 50 |
 | emit_java | 36 |
-| emit_rust | 34 |
+| emit_rust | 35 |
 | emit_py | 5 |
 | emit_ts | 5 |
 | gate_census | 5 |
 | compile | 1 |
 | lower_ir | 1 |
-| **total** | **187** |
+| **total** | **188** |
 
 ## Where the gate is more permissive than the reference
 
