@@ -90,11 +90,12 @@ It moves both ways and has moved both ways (21 of the 88 changes to the ledger
 LOWERED the mass, and the 2026-09-05 corpus triage took 2234 statements out of
 it in five commits), but nothing bounded it, so `--write` plus a written reason was
 a complete answer to the gate firing, and over 2026-09-16..24 that is the answer
-that got given. `_budget` in the ledger is the bound: a per-half, per-tier count
-that `--write` does not write and that the gate holds the recorded mass to
-EXACTLY, so recording costs an integer raised by hand in the diff and an
-improvement permanently lowers the ceiling instead of leaving headroom. The
-target it shrinks toward is zero.
+that got given. The budget in the ledger is the bound: a count that `--write`
+does not write and that the gate holds the recorded count to EXACTLY, so
+recording costs an integer raised by hand in the diff and an improvement
+permanently lowers the ceiling instead of leaving headroom. It was per half and
+tier until issue #1768 and is per function now. The target it shrinks toward is
+zero.
 
 THE THIRD OPTION, same issue. `tests/fixtures/emit_<tier>_refusals/` holds
 documents the tier's reference REFUSES BY NAME. Both halves are driven over them.
@@ -110,6 +111,34 @@ measured, but the port's emitted Python statements map to `.rvl` FUNCTIONS,
 not `.rvl` source lines: source-line provenance is still absent. And a covered
 line is not a correct line: when both sides agree and both are wrong, no
 coverage number says so.
+
+THE LAYOUT, AND WHY IT IS ONE RECORD PER LINE (issue #1768). The ledger used to
+be one JSON file with a per-half, per-tier `_budget` block and per-tier
+`statements`/`uncovered_statements` totals. Every pull request that moved a
+count rewrote one of six adjacent budget lines and a total, so two pull requests
+that touched different functions of the same emitter, or even of different
+emitters, conflicted after every landing. The totals were never checked, and
+they had drifted. Now the ledger is `tests/fixtures/selfhost_uncovered_lines/`,
+with one file per half and tier, `<half>/<tier>.jsonl`, holding two kinds of
+record, one per line, a blank line between records, sorted by reason id:
+
+    ["reason", "<reason id>", "<why these statements are unreached>"]
+    ["function", "<reason id>", "<qualified function>", <uncovered>, <budget>]
+
+The budget is PER FUNCTION now. It means what `_budget` meant, at a finer grain:
+`--write` rewrites `<uncovered>` and never `<budget>`, and the gate holds each
+function's recorded count to its budget EXACTLY, in both directions. Raising one
+is still a single integer edited by hand, and it now sits beside the function it
+pays for. A per-function budget is at least as strict as the per-tier one it
+replaces, which let one function's rise hide behind another's fall. Totals are
+computed when the report prints them, never stored. Two pull requests now
+conflict in the ledger only when both touched the same record.
+
+A merge conflict in the ledger is resolved with
+`python3 tools/selfhost_line_coverage.py --write`: it reads through the conflict
+markers (the first copy of a record that appears twice wins), re-measures every
+count and rewrites the files clean. It never writes a budget, so `--check` then
+names any budget the merged counts disagree with.
 
 Usage:
     python3 tools/selfhost_line_coverage.py            # the report
@@ -133,7 +162,11 @@ from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LEDGER = ROOT / "tests" / "fixtures" / "selfhost_uncovered_lines.json"
+# The ledger is a directory (issue #1768): `README.md` says what it is, and one
+# `<half>/<tier>.jsonl` per half and tier holds its records. See
+# "THE LAYOUT, AND WHY IT IS ONE RECORD PER LINE" above.
+LEDGER = ROOT / "tests" / "fixtures" / "selfhost_uncovered_lines"
+HALVES = ("reference", "selfhost")
 
 
 # The self-host module's entry function, per tier. ALL SIX tiers now spell it
@@ -527,94 +560,169 @@ GROUPS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _load_ledger() -> dict:
-    raw = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
-    return {k: v for k, v in raw.items() if not k.startswith("_")}
+# --------------------------------------------------------------- the ledger
+#
+# In memory, per half and tier: `{"reasons": {id: text}, "functions": {name:
+# {"uncovered": n, "budget": b, "reason": id}}}`, plus the format problems the
+# reader found. On disk, `<half>/<tier>.jsonl`, one record per line.
+
+def _tier_file(base: Path, half: str, tier: str) -> Path:
+    return Path(base) / half / f"{tier}.jsonl"
 
 
-def _load_budget() -> dict:
-    """`_budget`: what the ledger is allowed to hold, per half and tier.
+def _load_tier(path: Path) -> tuple[dict | None, list[str]]:
+    """One tier file, parsed. A record that is not one of the two shapes is a
+    problem rather than an exception, so the gate fails closed and names it."""
+    if not path.is_file():
+        return None, []
+    entry: dict = {"reasons": {}, "functions": {}}
+    problems: list[str] = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        where = f"{path.parent.name}/{path.name}:{lineno}"
+        if line.startswith(("<<<<<<<", "=======", ">>>>>>>", "|||||||")):
+            problems.append(f"{where}: unresolved merge conflict marker")
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            problems.append(f"{where}: unreadable record")
+            continue
+        if (isinstance(record, list) and len(record) == 3
+                and record[0] == "reason" and isinstance(record[1], str)
+                and isinstance(record[2], str)):
+            _, rid, text = record
+            if rid in entry["reasons"]:
+                problems.append(f"{where}: reason `{rid}` is declared twice")
+            entry["reasons"][rid] = text
+        elif (isinstance(record, list) and len(record) == 5
+                and record[0] == "function" and isinstance(record[1], str)
+                and isinstance(record[2], str)):
+            _, rid, name, uncovered, budget = record
+            if name in entry["functions"]:
+                previous = entry["functions"][name]["reason"]
+                problems.append(
+                    f"{path.parent.name}/{path.stem}: `{name}` appears in "
+                    f"multiple reasons ({previous}, {rid})")
+                continue
+            entry["functions"][name] = {"uncovered": uncovered,
+                                        "budget": budget, "reason": rid}
+        else:
+            problems.append(f"{where}: not a reason or function record")
+    return entry, problems
 
-    WHY A SECOND COPY OF A NUMBER THE LEDGER ALREADY IMPLIES. Because the ledger
-    is regenerable and this is not. `--write` re-measures every per-function
-    count and rewrites them all; it does not touch `_budget`, and it is not
-    supposed to. So recording a newly unreached statement takes two edits in two
-    places, and the second one is a single integer going UP in a diff a reviewer
-    reads in one second. Before this, recording took `--write` plus a sentence,
-    and a sentence is easy to write and hard to count.
 
-    The gate holds the budget to the mass EXACTLY, in both directions:
+def _load_ledger(base: Path | None = None) -> dict:
+    """`{half: {tier: entry}}`, and the reader's problems under `_problems`."""
+    base = LEDGER if base is None else Path(base)
+    ledger: dict = {"_problems": []}
+    for half in HALVES:
+        side = {}
+        for tier in TIERS:
+            entry, problems = _load_tier(_tier_file(base, half, tier))
+            ledger["_problems"] += problems
+            if entry is not None:
+                side[tier] = entry
+        if side:
+            ledger[half] = side
+    return ledger
 
-      mass ABOVE the budget: statements were recorded that the budget does not
-      have. Reach them, or raise the number and say why in the same diff.
 
-      mass BELOW the budget: an improvement landed and left headroom. Lower the
-      number. Headroom is the form in which a recorded improvement gets quietly
-      spent again on the next unreached region, which is exactly how a ratchet
-      stops being one.
+def _record_key(record: list) -> tuple:
+    return (record[1], 0 if record[0] == "reason" else 1,
+            record[2] if record[0] == "function" else "")
+
+
+def tier_text(entry: dict) -> str:
+    """One tier's records as `--write` lays them out: sorted by reason id, a
+    reason before its functions, functions by name, a blank line between."""
+    records = [["reason", rid, text] for rid, text in entry["reasons"].items()]
+    records += [["function", f["reason"], name, f["uncovered"], f["budget"]]
+                for name, f in entry["functions"].items()]
+    records.sort(key=_record_key)
+    return "\n\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n"
+
+
+def dump_ledger(ledger: dict, base: Path | None = None) -> None:
+    """Write `{half: {tier: entry}}` in the on-disk layout."""
+    base = LEDGER if base is None else Path(base)
+    for half in HALVES:
+        for tier, entry in ledger.get(half, {}).items():
+            path = _tier_file(base, half, tier)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(tier_text(entry), encoding="utf-8")
+
+
+def _flatten(entry: dict) -> dict[str, int]:
+    """`{function: recorded uncovered count}` over the well-formed counts."""
+    if not isinstance(entry, dict):
+        return {}
+    return {name: f["uncovered"] for name, f in entry.get("functions", {}).items()
+            if type(f.get("uncovered")) is int and f["uncovered"] >= 0}
+
+
+def _budget_problems(ledger: dict) -> list[str]:
+    """Each function's recorded count against its budget, EXACTLY.
+
+    WHY A SECOND COPY OF A NUMBER THE LEDGER ALREADY HOLDS. Because the count
+    is regenerable and the budget is not. `--write` re-measures every count
+    and rewrites them all; it does not touch a budget, and it is not supposed
+    to. So recording a newly unreached statement takes two edits, and the
+    second one is a single integer going UP in a diff a reviewer reads in one
+    second. Before #1419, recording took `--write` plus a sentence, and a
+    sentence is easy to write and hard to count.
+
+      count ABOVE the budget: statements were recorded that the budget does
+      not have. Reach them, or raise the number and say why in the same diff.
+
+      count BELOW the budget: an improvement landed and left headroom. Lower
+      the number. Headroom is the form in which a recorded improvement gets
+      quietly spent again on the next unreached region, which is exactly how a
+      ratchet stops being one.
 
     So the budget is monotone DOWN except where a human deliberately raises it,
-    and the target it is shrinking toward is zero: every statement here is one
-    that some document should reach, or that should not exist. The 2026-09-24
-    value is 9086. It has been as high as 10321 (`40a08c036`, 2026-09-05) and the
-    five triage commits that followed took it to 8087, so a falling direction is
-    something this ledger has done and not an aspiration.
+    and the target it is shrinking toward is zero. It was one number per half
+    and tier until issue #1768; it is one per function now, so it is at least
+    as strict (one function's rise can no longer hide behind another's fall)
+    and two pull requests that pay for different functions do not edit the
+    same line.
     """
-    raw = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
-    budget = raw.get("_budget")
-    return budget if isinstance(budget, dict) else {}
-
-
-def _budget_problems(ledger: dict, budget: dict) -> list[str]:
     problems: list[str] = []
-    for half in ("reference", "selfhost"):
+    for half in HALVES:
         side = ledger.get(half)
-        declared = budget.get(half)
         if not isinstance(side, dict):
-            continue
-        if not isinstance(declared, dict):
-            problems.append(
-                f"{half}: no `_budget` declared in {LEDGER.name}. Every recorded "
-                f"statement has to come out of a number someone raised on "
-                f"purpose, or recording is free and the ledger is an inventory.")
             continue
         for tier in TIERS:
             entry = side.get(tier)
             if not isinstance(entry, dict):
                 continue
-            mass = sum(_flatten(entry).values())
-            allowed = declared.get(tier)
-            if type(allowed) is not int or allowed < 0:
-                problems.append(
-                    f"{half}/{tier}: `_budget` is missing or not a count. It is "
-                    f"{mass} today; write that number and the gate holds you to it.")
-            elif mass > allowed:
-                problems.append(
-                    f"{half}/{tier}: the ledger records {mass} uncovered "
-                    f"statement(s) and `_budget` allows {allowed}. Reach the "
-                    f"{mass - allowed} extra statement(s) with a corpus or refusal "
-                    f"document, or raise `_budget.{half}.{tier}` to {mass} in this "
-                    f"same diff and say in the commit message what bought the rise.")
-            elif mass < allowed:
-                problems.append(
-                    f"{half}/{tier}: the ledger records {mass} uncovered "
-                    f"statement(s) and `_budget` still allows {allowed}. Lower "
-                    f"`_budget.{half}.{tier}` to {mass}. Unspent budget is budget "
-                    f"the next unreached region spends without anyone noticing, "
-                    f"which is how a two-way ratchet becomes a one-way inventory.")
+            for name, f in sorted(entry.get("functions", {}).items()):
+                mass, allowed = f.get("uncovered"), f.get("budget")
+                if type(mass) is not int or mass < 0:
+                    continue
+                if type(allowed) is not int or allowed < 0:
+                    problems.append(
+                        f"{half}/{tier}: `{name}` has no budget, or it is not a "
+                        f"count. It records {mass} today; write that number as "
+                        f"its budget and the gate holds you to it.")
+                elif mass > allowed:
+                    problems.append(
+                        f"{half}/{tier}: `{name}` records {mass} uncovered "
+                        f"statement(s) and its budget allows {allowed}. Reach the "
+                        f"{mass - allowed} extra statement(s) with a corpus or "
+                        f"refusal document, or raise its budget to {mass} in this "
+                        f"same diff and say in the commit message what bought "
+                        f"the rise.")
+                elif mass < allowed:
+                    problems.append(
+                        f"{half}/{tier}: `{name}` records {mass} uncovered "
+                        f"statement(s) and its budget still allows {allowed}. "
+                        f"Lower its budget to {mass}. Unspent budget is budget "
+                        f"the next unreached region spends without anyone "
+                        f"noticing, which is how a two-way ratchet becomes a "
+                        f"one-way inventory.")
     return problems
-
-
-def _flatten(entry: dict) -> dict[str, int]:
-    if not isinstance(entry, dict) or not isinstance(entry.get("uncovered"), dict):
-        return {}
-    flat: dict[str, int] = {}
-    for functions in entry.get("uncovered", {}).values():
-        if isinstance(functions, dict):
-            for name, count in functions.items():
-                if isinstance(name, str) and type(count) is int and count >= 0:
-                    flat[name] = count
-    return flat
 
 
 _GENERIC_REASONS = (
@@ -627,8 +735,8 @@ _GENERIC_REASONS = (
 
 def _closure_problems(ledger: dict) -> list[str]:
     """Reject generic or structurally incomplete line-coverage baselines."""
-    problems: list[str] = []
-    for half in ("reference", "selfhost"):
+    problems: list[str] = list(ledger.get("_problems", []))
+    for half in HALVES:
         side = ledger.get(half)
         if not isinstance(side, dict):
             problems.append(f"{half}: missing line-coverage side")
@@ -638,27 +746,19 @@ def _closure_problems(ledger: dict) -> list[str]:
             if not isinstance(entry, dict):
                 problems.append(f"{half}/{tier}: missing line-coverage tier")
                 continue
-            reasons = entry.get("uncovered")
-            if not isinstance(reasons, dict):
-                problems.append(f"{half}/{tier}: missing uncovered reason map")
-                continue
-            seen: dict[str, str] = {}
-            for reason, functions in reasons.items():
-                if not isinstance(reason, str) or not reason.strip():
-                    problems.append(f"{half}/{tier}: missing reason")
+            reasons = entry.get("reasons", {})
+            used = {f["reason"] for f in entry.get("functions", {}).values()}
+            for rid, reason in sorted(reasons.items()):
+                if not reason.strip():
+                    problems.append(f"{half}/{tier}: missing reason for `{rid}`")
                 elif any(marker in reason.upper() for marker in _GENERIC_REASONS):
                     problems.append(f"{half}/{tier}: generic reason `{reason}`")
-                if not isinstance(functions, dict) or not functions:
-                    problems.append(f"{half}/{tier}: reason has no functions")
-                    continue
-                for function in functions:
-                    previous = seen.get(function)
-                    if previous is not None:
-                        problems.append(
-                            f"{half}/{tier}: `{function}` appears in multiple "
-                            f"reasons ({previous}, {reason})")
-                    else:
-                        seen[function] = reason
+                if rid not in used:
+                    problems.append(f"{half}/{tier}: reason `{rid}` has no functions")
+            for rid in sorted(used - set(reasons)):
+                problems.append(
+                    f"{half}/{tier}: functions name reason `{rid}`, which is "
+                    f"not declared")
     return problems
 
 
@@ -683,7 +783,7 @@ WHERE = {
 def check(data: dict) -> list[str]:
     ledger = _load_ledger()
     problems = _closure_problems(ledger)
-    problems += _budget_problems(ledger, _load_budget())
+    problems += _budget_problems(ledger)
     if not isinstance(data, dict):
         return problems + ["survey data is not a map"]
     for half in ("reference", "selfhost"):
@@ -702,14 +802,11 @@ def check(data: dict) -> list[str]:
             recorded = _flatten(recorded_half.get(tier, {}))
             raw_entry = recorded_half.get(tier)
             if isinstance(raw_entry, dict):
-                raw_reasons = raw_entry.get("uncovered")
-                if isinstance(raw_reasons, dict):
-                    for functions in raw_reasons.values():
-                        if isinstance(functions, dict):
-                            for name, count in functions.items():
-                                if type(count) is not int or count < 0:
-                                    problems.append(
-                                        f"{half}/{tier}: invalid uncovered count for `{name}`")
+                for name, f in sorted(raw_entry.get("functions", {}).items()):
+                    count = f.get("uncovered")
+                    if type(count) is not int or count < 0:
+                        problems.append(
+                            f"{half}/{tier}: invalid uncovered count for `{name}`")
             for name in sorted(set(found) | set(recorded)):
                 now, before = found.get(name, 0), recorded.get(name)
                 if type(now) is not int or now < 0:
@@ -718,7 +815,8 @@ def check(data: dict) -> list[str]:
                 if before is None:
                     problems.append(
                         f"{half}/{tier}: `{name}` has {now} statement(s) that no "
-                        f"corpus document executes, and is not in {LEDGER.name}. "
+                        f"corpus document executes, and is not in "
+                        f"{LEDGER.name}/{half}/{tier}.jsonl. "
                         f"The byte-agreement oracle runs {WHERE[half]} and never "
                         f"runs these lines. THREE responses, in order of "
                         f"preference. (1) A corpus document that reaches them. "
@@ -729,7 +827,7 @@ def check(data: dict) -> list[str]:
                         f"instead, and assert the refusal's text in the tier "
                         f"oracle. (3) If they run on nothing at all, delete them. "
                         f"Recording the count is the LAST resort and costs a "
-                        f"`_budget` raise in the same diff.")
+                        f"budget written by hand in the same diff.")
                 elif now > before:
                     problems.append(
                         f"{half}/{tier}: `{name}` went from {before} to {now} "
@@ -748,48 +846,61 @@ def check(data: dict) -> list[str]:
     return problems
 
 
+def _reason_id(text: str, taken: set[str]) -> str:
+    """A stable id for a reason `--write` has to file a function under: the
+    first words of its text, made unique within the tier."""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    stem = "-".join(words[:8])[:60].strip("-") or "reason"
+    rid, n = stem, 2
+    while rid in taken:
+        rid, n = f"{stem}-{n}", n + 1
+    return rid
+
+
 def write_ledger(data: dict) -> None:
-    """Rewrite the per-function counts. `_budget` and `_about` are NOT rewritten.
+    """Rewrite the per-function counts. Budgets and reasons are NOT rewritten.
 
     That omission is the point. `--write` is the fastest green, it is always
     available, and it will stay both of those things; what it cannot do is
-    finish the job. It leaves `_budget` exactly where it was, so a `--write` that
-    records a new region leaves `--check` RED with a message naming the tier and
-    the number, and the only way out is one integer edited by hand. Issue #1419
-    asked for a mechanism that survives `--write`. This is it: not a harder
-    `--write`, a `--write` that is no longer sufficient.
+    finish the job. It leaves every budget exactly where it was, so a `--write`
+    that records a new region leaves `--check` RED with a message naming the
+    function and the number, and the only way out is one integer edited by
+    hand. Issue #1419 asked for a mechanism that survives `--write`. This is
+    it: not a harder `--write`, a `--write` that is no longer sufficient.
     """
-    raw = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
-    for half in ("reference", "selfhost"):
-        out: dict[str, dict] = {}
+    previous = _load_ledger()
+    out: dict = {}
+    for half in HALVES:
+        out[half] = {}
         for tier in TIERS:
             found = data[half][tier]
-            # Counts always come from the fresh measurement; the GROUPING is
-            # preserved, so a reason someone wrote by hand survives a
-            # regeneration and only the numbers move. Functions that are no
-            # longer uncovered fall out of their bucket on their own.
-            previous = raw.get(half, {}).get(tier, {}).get("uncovered", {})
-            grouped: dict[str, dict[str, int]] = {}
-            claimed: set[str] = set()
-            for reason, names in previous.items():
-                kept = {n: found["functions"][n] for n in names
-                        if n in found["functions"]}
-                if kept:
-                    grouped[reason] = kept
-                    claimed |= set(kept)
+            # Counts always come from the fresh measurement; the GROUPING and
+            # the budgets are preserved, so a reason someone wrote by hand
+            # survives a regeneration and only the counts move. Functions that
+            # are no longer uncovered fall out of their reason on their own.
+            before = previous.get(half, {}).get(tier, {"reasons": {}, "functions": {}})
+            reasons = dict(before["reasons"])
+            by_text = {text: rid for rid, text in reasons.items()}
+            functions = {}
             for name, count in found["functions"].items():
-                if name in claimed:
+                old = before["functions"].get(name)
+                if old is not None:
+                    functions[name] = {"uncovered": count, "budget": old["budget"],
+                                       "reason": old["reason"]}
                     continue
-                reason = _group_for(name, count, found["sizes"].get(name, count))
-                grouped.setdefault(reason, {})[name] = count
-            out[tier] = {
-                "statements": found["statements"],
-                "uncovered_statements": sum(found["functions"].values()),
-                "uncovered": {reason: dict(sorted(entries.items()))
-                              for reason, entries in sorted(grouped.items())},
+                text = _group_for(name, count, found["sizes"].get(name, count))
+                rid = by_text.get(text)
+                if rid is None:
+                    rid = _reason_id(text, set(reasons))
+                    reasons[rid] = by_text[text] = text
+                functions[name] = {"uncovered": count, "budget": None,
+                                   "reason": rid}
+            used = {f["reason"] for f in functions.values()}
+            out[half][tier] = {
+                "reasons": {rid: t for rid, t in reasons.items() if rid in used},
+                "functions": functions,
             }
-        raw[half] = out
-    LEDGER.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
+    dump_ledger(out)
 
 
 def _table(title: str, data: dict, docs: dict[str, int]) -> tuple[int, int]:
@@ -855,9 +966,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.write:
         write_ledger(data)
         print(f"wrote {LEDGER.relative_to(ROOT)}")
-        for problem in _budget_problems(_load_ledger(), _load_budget()):
+        for problem in _budget_problems(_load_ledger()):
             print(f"STILL RED {problem}")
-        print("`_budget` was not touched; run --check.")
+        print("no budget was touched; run --check.")
         return 0
     if args.check:
         problems = check(data)
