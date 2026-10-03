@@ -52,7 +52,7 @@
       "go": 2897,
       "java": 986,
       "py": 669,
-      "rust": 1230,
+      "rust": 1227,
       "ts": 285,
       "wasm": 1558
     },
@@ -862,7 +862,7 @@
       "uncovered_statements": 642
     },
     "rust": {
-      "statements": 3771,
+      "statements": 3859,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
           "_emit_step": 24,
@@ -913,9 +913,9 @@
           "_emit_v3_externs": 11,
           "_rust_extern_config_bind": 9
         },
-        "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs.": {
+        "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs. Issue #1734's emit_rust_corpus/comp_str_builtin.rvl returns a nested call (`k.concat(\"!\")`) from a provide method of a component holding a `Map`, so `_map_expr_inserts` now walks a call node's arguments and target; what is left is its non-dict guard.": {
           "_host_of": 4,
-          "_map_expr_inserts": 3,
+          "_map_expr_inserts": 1,
           "_map_insert_candidates": 7,
           "_map_value_expr_type": 67,
           "_map_value_rust_type": 2
@@ -1035,8 +1035,8 @@
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
-        "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read — `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_render_expr": 54
+        "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read — `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1734 reaches the component-position property `.length` (a `field` node marked `sized_length`, rendered through `revl_length`) with emit_rust_corpus/comp_str_builtin.rvl, so that return no longer counts here.": {
+          "_render_expr": 53
         },
         "backends/rust/emit.py::_borrow_list_arg: item 437d borrow of a read-only list parameter into a `&[T]` slot. The already-lowered-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual statement is the List-index place-borrow arm (`&xs[i]` via _v3_strip_index_clone), which no byte-agreement corpus document passes into a borrowed `&[T]` argument, the same shape left uncovered on _v3_strip_index_clone itself.": {
           "_borrow_list_arg": 1
@@ -1067,7 +1067,7 @@
           "_reaches_declared": 7
         }
       },
-      "uncovered_statements": 1186
+      "uncovered_statements": 1227
     },
     "ts": {
       "statements": 2208,
@@ -1857,7 +1857,7 @@
       "uncovered_statements": 103
     },
     "rust": {
-      "statements": 4092,
+      "statements": 4112,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "erase_async_ret": 1
@@ -1980,7 +1980,7 @@
           "strip_index_clone": 1
         }
       },
-      "uncovered_statements": 289
+      "uncovered_statements": 286
     },
     "ts": {
       "statements": 2204,
