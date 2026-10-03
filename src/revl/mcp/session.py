@@ -5672,6 +5672,7 @@ class Session:
         from .approval import ApprovalRequired  # noqa: PLC0415
         ticket = self._class_map.build_ticket(
             reach, args, record_values=self.approval_record_values)
+        self._refuse_unbounded_approval(ticket)   # issue #1755, opt-in
         # issue #1553: an operator's NO to this question refuses the re-issue it
         # was holding, once, before anything could cover it
         refusal = self._ticket_refusals.pop(ticket["hash"], None)
@@ -5708,6 +5709,28 @@ class Session:
             return
         self._issue_ticket(ticket)
         raise ApprovalRequired(ticket)
+
+    def _refuse_unbounded_approval(self, ticket: dict) -> None:
+        """Under `approvals require bounded crossings` (issue #1755, off by
+        default), refuse a call whose class-(c) capability has an `unbounded`
+        item-260 ceiling in the crossing component, before anything is spent or
+        ticketed: no approval, single or standing, can be sized for a count the
+        analysis cannot bound."""
+        policy = getattr(self, "sandbox", None)
+        if policy is None or not getattr(policy, "approvals_bounded", False):
+            return
+        from .approval_ceilings import first_unbounded  # noqa: PLC0415
+        hit = first_unbounded(ticket.get("ceilings") or {})
+        if hit is None:
+            return
+        capability, reason = hit
+        raise SessionError(
+            f"`{ticket.get('key')}.{ticket.get('method')}` reaches capability "
+            f"`{capability}`, which needs approval, and its crossing count is "
+            f"unbounded: {reason}. The policy says `approvals require bounded "
+            f"crossings`, so the call is refused rather than ticketed (issue "
+            f"#1755). Bound the loop that crosses it (docs/expressible-"
+            f"iteration.md), or drop that policy line")
 
     def _enforce_activation_gate(self, ir: dict, class_map=None,
                                  components: set | None = None,
