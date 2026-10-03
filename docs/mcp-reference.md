@@ -219,7 +219,8 @@ context while generating. With no inputs it returns that prose summary
   the character-level GBNF the llama.cpp server and XGrammar read.
   `category` (`program`, `component-body`, `statements`, `expression` or
   `type`, default `program`) scopes it to one syntactic slot, so a client
-  filling a hole can constrain its decoder to that slot. `category` without
+  filling a hole can constrain its decoder to that slot (each hole's
+  `fillSpec.grammarCategory` names it). `category` without
   `format`, or a value outside these lists, is refused.
 
 ---
