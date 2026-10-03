@@ -93,6 +93,7 @@ from .. import query as Q
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
+from . import ambient as _ambient
 from . import remedy as _remedy
 from .session import NothingLoaded, Session, SessionError
 
@@ -3893,6 +3894,9 @@ def handle(message: dict) -> dict | None:
                 }]}
             if decision.gated and decision.allowed:
                 _stamp_authority(payload, decision)
+        # issue #1693: every response, success or refusal, says what the
+        # session holds now
+        payload = _ambient.stamp(payload, SESSION)
         result = {
             "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),

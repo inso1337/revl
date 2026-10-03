@@ -80,6 +80,27 @@ live in `src/revl/mcp/runtime_gate.py`, and `revl doctor` reports which case
 applies (the `mcp server runtime` line). Set `REVL_MCP_NO_REEXEC=1` to stay on
 the current interpreter (issue #1692).
 
+**Every response says what the session holds.** Each `tools/call` result, on
+success and refusal alike, ends with the same footer (issue #1693):
+
+```json
+"sessionState": {"loaded": true, "generation": 2, "components": ["MemCache"],
+                 "dirty": false, "draft": false}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `loaded` | a composition is running |
+| `generation` | the running generation: 1 after `revl_load`, plus one per swap, edit that swaps, rollback or undo; `null` when nothing is loaded |
+| `components` | the running components' names, in load order |
+| `dirty` | the server-side working source (what `revl_edit` patches) differs from the source the running generation was admitted from |
+| `draft` | an edit with open holes is pending; the working source cannot swap until they are filled |
+
+The footer is computed after the verb ran, so it describes the state the call
+left behind. It is named `sessionState` because several verbs already return a
+top-level `state` (fiber states). A refusal that changed nothing returns the
+same footer as the call before it.
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->
