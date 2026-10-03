@@ -1,0 +1,25 @@
+// REFUSED G4 (marker rule, issue #1681): the receiver is a list literal read in
+// place, `[w.pay][0]`, whose static type is the service `Pay`, and `.charge(n)`
+// is called on it with no `emit`. Admitted before with neither the marker nor
+// the approval floor seeing the crossing: the resolver of issue #1509 read only
+// a receiver rooted at a `let`-bound local. The file name's prefix is the
+// expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_service_receiver_expressions.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let x = [w.pay][0].charge(n)
+      return x
+    }
+  }
+}

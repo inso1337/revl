@@ -266,11 +266,25 @@ rather than a convenience:
 A crossing whose capability set the per-crossing resolution cannot name is
 refused for the same reason. That covers a bare `emission` callee (which names
 no capability at all), the `*` token, and the shapes where the resolution
-returns nothing, such as a provision call off a spawn handle or a crossing
-through a service-typed parameter. No declared object can be SHOWN to cover any
-of them, and reading the unnameable as the declared one is exactly the direction
-slice 1 was built to close: an empty capability set is "nothing to compare", not
-"nothing to check".
+returns nothing. No declared object can be SHOWN to cover any of them, and
+reading the unnameable as the declared one is exactly the direction slice 1 was
+built to close: an empty capability set is "nothing to compare", not "nothing
+to check".
+
+This paragraph used to list a provision call off a spawn handle and a crossing
+through a service-typed parameter among the shapes the resolution returns
+nothing for. That was a fact about the code at the time, not about the
+crossing, and it no longer holds (issue #1508). Both are named by the op's
+DECLARED `emission[...]` scope, which is a fact the provider is held to by its
+own G4 provider bound, the same fact a `requires` crossing is read by. The
+shared resolver (`lower._resolved_crossed_caps`, used by the approval floor
+too) now resolves them for this check: `emit w.task.run(p) acting { verb: run
+}` under `within { object: net, verbs: [run] }` compiles when `Task.run` is
+`emission[net]`, and is still refused for a wrong verb, a wider object, a
+missing `acting`, or a bare op (which still names nothing). The provider upper
+bound reads the same crossing at the same scope (`lower._resolved_crossings`),
+so a parent bound that misses it still refuses. The self-host gate does not
+parse `within`/`acting` and stays out of slice for this item.
 
 Both clauses are CONTEXTUAL, recognised only in the one slot each occupies (the
 post-return-type slot of a service operation, which the `cache` clause already

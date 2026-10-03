@@ -51,7 +51,7 @@
     "reference": {
       "go": 2897,
       "java": 986,
-      "py": 669,
+      "py": 670,
       "rust": 1230,
       "ts": 285,
       "wasm": 1558
@@ -693,15 +693,16 @@
           "_ComponentEmitter._timer_compensation": 1
         },
         "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; the unknown-host-root refusal; spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal).": {
-          "_ComponentEmitter._expr": 81
+          "_ComponentEmitter._expr": 82
         },
         "Declared-`Secret[Map[K, V]]` marking (item 481): `_split_type_name` splits a declared type spelling into its head and its generic arguments, and `_secret_shape_facts` walks a document's declared secret roots transitively to answer whether any shape reachable from one is a `Map` and to render the field table the runtime needs so a map's keys and values are routed through their own declared types. The python corpus reaches both, but only through the non-generic splitter path and the no-Map answers; the branches that fire for a declared `Map` reachable from a secret root are not reached, because no `emit_py_corpus` document declares one. `selfhost/emit_py.rvl` carries the declared-`Secret[T]` marking import line only, not the call-site shape (item-429(d)), so a corpus document that reached them would flip the byte-agreement oracle red rather than close this gap. The reference half is pinned by tests/test_secret_map_key_redaction.py.": {
           "_secret_shape_facts": 3,
           "_split_type_name": 1
         },
-        "Deferred delivery boundary: _deferred_extern's non-fn/lookup paths require a nonempty deferred table; _deferred_step builds frame.emit_deferred; _deferred_register_kwargs handles absent register and declared key position/argument count. The port does not implement deferred delivery. tests/test_standing_approval.py::_SOURCE declares the representative deferred deliver extern. Witnessed register kwargs are separately ported.": {
+        "Deferred delivery boundary: _deferred_extern's non-fn/lookup paths require a nonempty deferred table; _deferred_step emits the enqueue that _deferred_enqueue renders, which is also the expression every value-position deferred call renders to since issue #1457 (the _expr arm that reaches it is the one statement that moved into _expr); _deferred_register_kwargs handles absent register and declared key position/argument count. The port does not implement deferred delivery. tests/test_standing_approval.py::_SOURCE declares the representative deferred deliver extern. Witnessed register kwargs are separately ported.": {
           "_ComponentEmitter._deferred_extern": 3,
-          "_ComponentEmitter._deferred_step": 5,
+          "_ComponentEmitter._deferred_step": 1,
+          "_ComponentEmitter._deferred_enqueue": 4,
           "_deferred_register_kwargs": 12
         },
         "Destructuring binder scan only: _inline_bound_names iterates step.names strings for let_pattern. Port inline_bound mirrors it; ordinary name/bind/rest/arrow/match binders are exercised. Destructuring remains the existing explicit separate boundary.": {

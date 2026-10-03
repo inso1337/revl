@@ -1,0 +1,14 @@
+// ADMITTED: `model_extern_block_value.rvl` with role `tool` reaching `[*]`,
+// which the component holds. The file name's prefix is the expected verdict
+// (`model_` refused under G-MODEL-PLACE, `ok_` admitted);
+// tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device reaches [*]
+
+extern emission[model.tool] fn run_tool(p: Str) -> Str = @py { return p }
+service Answer { emission fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  route model on classify { * -> tool }
+  provide out { fn classify(text) = emit run_tool(text) }
+}

@@ -43,7 +43,11 @@ from revl.mcp.approval import ClassMap, _cache_scope_findings  # noqa: E402
 # own module name shares one copy with pytest's collection of that file.
 _T118 = load_by_path("test_deploy_118", ROOT / "tests" / "test_deploy_118.py")
 SPELLINGS = sorted(_T118._FN_VALUE_SPELLINGS)
-EXTERNS = {"bare": _T118._BARE_CHARGE, "deferred": _T118._DEFERRED_CHARGE}
+# A `deferred` extern reached as a function value no longer compiles (issue
+# #1457: a deferral that cannot be honoured is refused), so the facts are read
+# over the bare extern only; `tests/test_deploy_118.py` pins the refusal for
+# every spelling.
+EXTERNS = {"bare": _T118._BARE_CHARGE}
 SCOPE = "C:s.go"
 
 

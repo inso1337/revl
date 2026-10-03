@@ -1,0 +1,40 @@
+// REFUSED G4 (issue #1682, the issue's reproducer): `Shop` passes a
+// spawn-handle provision into `Till.go`'s service-typed parameter, and
+// `Register` crosses `production.payment` through it unmarked, unapproved and
+// outside `Till.go`'s declared `emission[audit.log]`. The marker rule is the
+// first to refuse it. The file name's prefix is the expected verdict (`g4_`
+// refused, `ok_` admitted); tests/test_service_typed_params.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay {
+  emission[production.payment] fn charge(cents: Int) -> Int
+  fn status() -> Int
+}
+service Till { emission[audit.log] fn go(p: Pay, n: Int) -> Int }
+service Front { emission fn run(n: Int) -> Int }
+
+component Worker provides pay: Pay {
+  provide pay {
+    fn charge(cents) = 1
+    fn status() = 0
+  }
+}
+
+component Register provides till: Till {
+  provide till {
+    fn go(p, n) {
+      let x = p.charge(n)
+      return x
+    }
+  }
+}
+
+component Shop requires till: Till provides front: Front {
+  provide front {
+    fn run(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let r = emit till.go(w.pay, n)
+      return r
+    }
+  }
+}

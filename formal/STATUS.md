@@ -1035,15 +1035,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**590 .rvl files -> 461 components -> 1197 statements = 338 modeled +
-223 componentless + 29 refused at parse**, and **6505 verdicts compared
-(338 files + 461 components + 132 provide methods + 19 spawn edges + 29
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1197
-confinements + 1197 surfaces + 357 teardowns + 344 provide-clause
-components + 83 config fields + 461 A2 bodies), 6505 agree, 0
+**688 .rvl files -> 626 components -> 1549 statements = 436 modeled +
+223 componentless + 29 refused at parse**, and **7957 verdicts compared
+(436 files + 626 components + 217 provide methods + 38 spawn edges + 29
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1549
+confinements + 1549 surfaces + 423 teardowns + 494 provide-clause
+components + 83 config fields + 626 A2 bodies), 7957 agree, 0
 mismatches**.
 
-Checker alignment over the 338 modeled files. Every bucket recording a
+Checker alignment over the 436 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1068,9 +1068,9 @@ layer.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 64 | informational |
+| `agree-G4` | 91 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 183 | informational |
+| `agree-accept` | 222 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
@@ -1078,10 +1078,10 @@ layer.
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
-| `out-of-fragment` | 57 | informational |
+| `out-of-fragment` | 70 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
-| `out-of-fragment-approval` | 15 | ratcheted |
+| `out-of-fragment-approval` | 34 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1097,9 +1097,23 @@ buckets are:
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_match_arm.rvl`
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_record.rvl`
 - `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_method.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_other_edge.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_helper_reach.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_scoped_extern.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_alias.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_method.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_value_form_method.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_alias_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_arrow_param_applied.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_handle_direct_value.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_if_local_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_if_local_value.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_list_element_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_record_alias_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_record_field_step.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl`
@@ -1112,6 +1126,11 @@ buckets are:
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_if_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_list_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_match_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_record_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.
