@@ -2182,6 +2182,8 @@ for the key lifecycle and what the signature binds.
     non-loopback bind also needs the `crypto` extra (the `cryptography`
     package), installed from a source checkout with
     `pip install -e '.[crypto]'`, and exits 2 naming it before binding,
+    non-loopback bind also needs the `revl[crypto]` extra
+    (`pip install 'revl[crypto]'`) and exits 2 naming it before binding,
     because the peer signs a receipt for every task a remote party sends and
     the pure-Python signer's timing leaks its key (issue #1460; see
     [tee-attestation-root.md](tee-attestation-root.md)).

@@ -369,6 +369,7 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
                   outcome: str = COMPLETED,
                   budget_consumed: Optional[Mapping[str, Any]] = None) -> dict:
                   bundle: Optional[Mapping[str, Any]] = None) -> dict:
+                  network_exposed: bool = False) -> dict:
     """The peer signs what it ran and what came out.
 
     ``identity.peer_id`` is the peer named in the receipt; it is not a separate

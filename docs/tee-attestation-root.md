@@ -293,6 +293,7 @@ private key from a modest number of them (issue #1460).
 So signing has two backends:
 
 * **`cryptography`**, when it is installed: `pip install '.[crypto]'` from a checkout of the repository. It
+* **`cryptography`**, when it is installed: `pip install 'revl[crypto]'`. It
   signs through OpenSSL with deterministic nonces (RFC 6979, `cryptography` 44
   or later), and derives public keys there too. An installed `cryptography` that
   cannot sign deterministically is treated as absent.
