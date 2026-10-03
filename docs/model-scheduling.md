@@ -253,14 +253,16 @@ with it is refused as placed on a host with no devices.
   program. The scheduler compares two declarations. What a member was actually
   loaded onto is the provider's published profile, which reaches revl only as
   the opaque `placement_digest` (`src/revl/model_profile.py`, item 538).
-- **It does not load or unload anything.** The child answers which device a
-  role is scheduled on and refuses any other, but nothing in revl loads a
-  member there. The provision keyed by role, with one load, one unload and
-  `no_residue` at teardown for N consumers, is slice S2 and is not built.
-- **It cannot stop host code that never asks.** `revl.model_placement` is
-  the checked answer a provider reads. A host body that loads a model without
-  asking is not refused; the S2 provider adapters are the code meant to ask on
-  every load.
+- **It loads only through a provision.** With `--providers`, a role bound to
+  `provider = "ollama"` is loaded by its provision on the device this schedule
+  chose, once per host however many model hosts route to it, and unloaded
+  after the last component is gone, with the model in the residue proof
+  ([providers-ollama.md](providers-ollama.md), slice S2). Every other
+  provider's endpoint manages its own residency, and for those roles the
+  schedule is the checked answer and nothing loads.
+- **It cannot stop host code that never asks.** The provision asks
+  `revl.model_placement` on every load and every call. A host body that loads
+  a model itself, without a provision, is not refused.
 - **It does not detect a consistent rewrite of the spec.** The child
   re-derives the schedule from the files and the devices carried in its own
   spec, so an edited decision is refused, but an edit to the devices and the

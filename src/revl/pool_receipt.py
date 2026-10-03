@@ -81,7 +81,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from . import peer_identity
+from . import peer_identity, pool_bundle
 from .attest import NotCanonicalizable, _canonical_bytes
 from .peer_identity import (
     Attribution,
@@ -241,12 +241,19 @@ def verify_result(record: Mapping[str, Any], result: Any) -> tuple[bool, str]:
 
 def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
                   result: Any, identity: PeerIdentity,
-                  at: Optional[datetime] = None) -> dict:
+                  at: Optional[datetime] = None,
+                  bundle: Optional[Mapping[str, Any]] = None) -> dict:
     """The peer signs what it ran and what came out.
 
     ``identity.peer_id`` is the peer named in the receipt; it is not a separate
     parameter, so a receipt cannot be issued in another peer's name by a caller
-    that holds only its own key."""
+    that holds only its own key.
+
+    ``bundle`` is the ``{digest, files}`` block of a multi-file artifact
+    (`pool_bundle`). It goes inside the signed body, so the receipt names the
+    bundle digest and every path, mode and file digest it covers, and
+    :func:`check_receipt` refuses one whose block disagrees with its
+    ``artifact_digest``."""
     if not isinstance(identity, PeerIdentity):
         raise ReceiptError("issuing a receipt needs the peer's own PeerIdentity")
     for name, value in (("pool_id", pool_id), ("task_id", task_id),
@@ -263,6 +270,9 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
         "result_digest": result_digest(result),
         "issued_at": _iso(at or _utc_now()),
     }
+    if bundle is not None:
+        body["bundle"] = {"digest": bundle.get("digest", ""),
+                          "files": [dict(e) for e in bundle.get("files", ())]}
     return peer_identity.sign_record(RECEIPT_DOMAIN, body, identity)
 
 
@@ -433,6 +443,16 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
                       f"the receipt is for artifact "
                       f"{record['artifact_digest'][:16]}, and {peer_id!r} was "
                       f"admitted running {artifact_digest[:16]}")
+    if "bundle" in record:
+        # One claim, two spellings: the artifact digest and the bundle block
+        # the peer signed beside it. They must agree, or the receipt says two
+        # different things about what ran.
+        why = pool_bundle.described_problem(record["bundle"],
+                                            record["artifact_digest"])
+        if why:
+            return refuse(LINK_RECEIPT_ARTIFACT,
+                          f"the receipt names a bundle that is not its "
+                          f"artifact: {why}")
 
     issued = _parse_iso(record["issued_at"])
     admitted = _parse_iso(admitted_at)

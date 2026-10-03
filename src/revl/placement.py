@@ -249,6 +249,29 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+def _java_placements(ir: dict, own: list) -> dict:
+    """`key -> [{component, realm}]` for every provision this java process's
+    own components make, with the realm an `isolate` publishes it in (None for
+    the shared realm).
+
+    Issue #1567: the JDK-17 stub runner (`PlacementRunner`) resolved a served
+    or probed key with a shared-realm `ctx.get`, so an isolated provider could
+    be neither served over a seam nor probed. It now resolves each key in the
+    py tier's `resolve_key` order from this map: the shared realm when the key
+    is provided there, else its one isolated realm, and a key isolated in two
+    or more realms is refused by name. The real-cordis4j runner keeps the
+    contexts its components isolate into itself (`RealPlacementRunner.Realms`,
+    issue #1581) and does not read this map."""
+    by_name = {c.get("name"): c for c in ir.get("components") or []}
+    out: dict = {}
+    for name in own:
+        comp = by_name.get(name) or {}
+        isolate = comp.get("isolate") or {}
+        for key in comp.get("provides") or {}:
+            out.setdefault(key, []).append({"component": name, "realm": isolate.get(key)})
+    return out
+
+
 def _parse_probe(expr: str, ir: dict | None = None) -> dict:
     """`key.method('a', 41)` -> {"key","method","args"} for the rust and go
     runners, whose probes are structured rather than eval'd strings.
@@ -2236,6 +2259,66 @@ def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
     return None, {host.host: model_schedule.handoff(host) for host in schedules}
 
 
+def _model_host_plan(ir, files, providers_path: str, processes: dict,
+                     requires: dict, model_handoffs: dict) -> tuple:
+    """Check `--providers` against a placement (item 515 S2). Returns
+    `(refusal, {model key: service}, {process: managed roles it loads})`.
+
+    Refused here, before anything spawns: a configuration the program's
+    placement forbids (the same check `revl run --providers` makes); a model
+    key required on a tier with no model host; a process that would load a
+    managed role with no model schedule to say where; and a scheduled device
+    the role's binding names no load options for.
+    """
+    from . import providers as _p  # noqa: PLC0415 - loaded only when asked
+    try:
+        hosts = _p.bind_for_run(ir, files, providers_path)
+        config = _p.load_config(providers_path)
+    except (_p.ProviderConfigError, _p.PlacementRefused, _p.ProviderError,
+            RevlError) as exc:
+        return str(exc), {}, {}
+    except OSError as exc:
+        return f"cannot read provider configuration: {exc}", {}, {}
+    served = _p.model_keys(ir)
+    loads: dict[str, list[str]] = {}
+    for pname, pconf in processes.items():
+        keys = sorted(k for k in requires[pname] if k in served)
+        if not keys:
+            continue
+        backend = _canonical_backend(pconf.get("backend", "py"))
+        if backend != "py":
+            return (f"process `{pname}` requires model key(s) "
+                    f"{', '.join(keys)} and is on the {backend} tier; "
+                    f"--providers binds model hosts on the py tier only"), {}, {}
+        managed = sorted({role for key in keys for role in hosts[key]._revl_roles()
+                          if role and config.binding(role).managed})
+        entry = model_handoffs.get(pname)
+        if managed and entry is None:
+            return (f"process `{pname}` would load model role(s) "
+                    f"{', '.join(managed)}, which revl loads itself, but no "
+                    f"model action is scheduled on it, so nothing says which "
+                    f"device to load them on. Route the action with `route "
+                    f"model` and declare the host's devices "
+                    f"(docs/model-scheduling.md)"), {}, {}
+        resident = (entry or {}).get("schedule", {}).get("resident") or {}
+        for role in managed:
+            device = resident.get(role)
+            if device is None:
+                continue
+            binding = config.binding(role)
+            if binding.device_options(device) is None:
+                return (f"host `{pname}`: the model schedule places role "
+                        f"`{role}` on device `{device}`, and its "
+                        f"{binding.provider} binding in {config.source} names "
+                        f"no load options for `{device}` (it names "
+                        f"{', '.join(binding.device_names())}). The member is "
+                        f"loaded only where the schedule placed it; add "
+                        f"`devices.{device}` to the binding"), {}, {}
+        if managed:
+            loads[pname] = managed
+    return None, served, loads
+
+
 def model_binding_view(files, placement: dict) -> tuple[list[str], str | None]:
     """`revl audit --placement`: each model role's binding per host and the
     bindings digest (item 515 S5), computed by the same scheduler the
@@ -2293,6 +2376,36 @@ def _successor_model_schedule(files, old_spec: dict, succ: str, component: str,
                       f"the {to_backend} tier's runner does not read a model "
                       f"schedule (item 515)")
     return model_schedule.handoff(decided[0]), None
+
+
+def _successor_providers(old_spec: dict, managed: list, component: str,
+                         to_backend: str) -> tuple[str | None, str | None]:
+    """The `providers` entry a swap successor is handed (item 515 S2), as
+    `(configuration path or None, refusal or None)`.
+
+    The boot path serves a model key in the process that requires it and gives
+    that process no proxy for it, so a successor without this entry would have
+    nothing bound to the key. It is carried as-is, with two refusals. A
+    successor off the py tier cannot bind a model host (the boot path refuses
+    the same placement). A managed role cannot cross a swap, because provisions
+    are per process: the successor would load the member, and the
+    predecessor's teardown would then unload it from under the successor."""
+    path = old_spec.get("providers")
+    if path is None:
+        return None, None
+    backend = _canonical_backend(to_backend)
+    if backend != "py":
+        return None, (f"component {component!r} requires model key(s) served "
+                      f"in-process by --providers, and the {to_backend} tier "
+                      f"binds no model host; --providers binds them on the py "
+                      f"tier only")
+    if managed:
+        return None, (f"component {component!r} loads model role(s) "
+                      f"{', '.join(managed)}, which revl loads itself; a "
+                      f"provision belongs to one process, so the "
+                      f"predecessor's teardown would unload the member the "
+                      f"successor loaded. Restart the placement to move it")
+    return path, None
 
 
 # --------------------------------------------------------------------------
@@ -3732,7 +3845,8 @@ def _estop_halt_report(record: dict, latch: str, roster: dict,
 
 
 def run_placement(files, placement_path: str, once: bool = False,
-                  estop_latch: str | None = None) -> int:
+                  estop_latch: str | None = None,
+                  providers: str | None = None) -> int:
     # item 443: the operator E-Stop. `--estop-latch FILE` (or the ambient
     # REVL_ESTOP_LATCH) arms it; UNARMED is the default, and a placement that
     # never arms one runs byte-identically to the pre-443 conductor — no
@@ -3903,6 +4017,20 @@ def run_placement(files, placement_path: str, once: bool = False,
     model_problem, model_handoffs = _model_schedules(files, processes)
     if model_problem:
         return abort(model_problem)
+
+    # --- model hosts (item 515 S2, over issue #1461's adapters): with
+    # `--providers FILE`, a key whose service is a model service and that no
+    # component provides is served INSIDE each process that requires it, by a
+    # model host loading its managed roles on the devices just scheduled. The
+    # configuration is checked here, before anything spawns. Without the flag
+    # nothing changes: such a key is still "provided by no process".
+    model_served: dict = {}
+    model_loads: dict = {}
+    if providers:
+        model_problem, model_served, model_loads = _model_host_plan(
+            ir, files, providers, processes, requires, model_handoffs)
+        if model_problem:
+            return abort(model_problem)
 
     if placement.get("report_colocation"):
         for advice in colocation_advice(processes, placed, ir):
@@ -4251,7 +4379,7 @@ def run_placement(files, placement_path: str, once: bool = False,
         p_deadlines = {m: float(s) for m, s in (pconf.get("seam_deadlines") or {}).items()}
         proxies: dict[str, dict] = {}
         for key, service in requires[pname].items():
-            if key in provides[pname]:
+            if key in provides[pname] or key in model_served:
                 continue
             host = owner.get(key)
             if host is None and key not in remote_specs:
@@ -4370,6 +4498,12 @@ def run_placement(files, placement_path: str, once: bool = False,
             # by the child before any component activates. Absent for a host
             # that routes no model action, so its spec is unchanged.
             spec["modelSchedule"] = model_handoffs[pname]
+        model_keys_here = sorted(k for k in requires[pname] if k in model_served)
+        if model_keys_here:
+            # item 515 S2: the child binds these keys to model hosts from the
+            # same configuration, checked again there, and loads each managed
+            # role on this host's scheduled device before anything activates.
+            spec["providers"] = str(Path(providers).resolve())
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service
             # declaration* admits for each exported key, read off the IR. The
@@ -4539,6 +4673,7 @@ def run_placement(files, placement_path: str, once: bool = False,
                           | set(spec["provides"]))
             spec["ifaces"] = {k: f"revl.Components${key_service[k]}"
                               for k in iface_keys if k in key_service}
+            spec["placements"] = _java_placements(ir, spec["components"])
 
     def command_for(backend: str, spec_file: Path) -> tuple[list, dict | None, str]:
         if backend == "node":
@@ -5203,6 +5338,16 @@ def run_placement(files, placement_path: str, once: bool = False,
             return
         if succ_model is not None:
             succ_spec["modelSchedule"] = succ_model
+        # item 515 S2: a model key the predecessor served in-process stays
+        # served in-process on the successor, or the swap refuses.
+        succ_providers, providers_refusal = _successor_providers(
+            specs[old], model_loads.get(old, []), component, to_backend)
+        if providers_refusal:
+            print(f"swap refused: {providers_refusal}", flush=True)
+            print("  running composition untouched.", flush=True)
+            return
+        if succ_providers is not None:
+            succ_spec["providers"] = succ_providers
         _old_corr = old_serve.get("correlation")
         if _old_corr and to_backend in _CORRELATION_SEALING_TIERS:
             succ_spec["serve"]["correlation"] = {

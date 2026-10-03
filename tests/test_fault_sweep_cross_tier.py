@@ -413,9 +413,11 @@ component Shouter provides probe: Probe {
 
 @needs_cordis
 @needs_go
-def test_go_host_output_reaches_the_sweep_report(capfd):
-    """Measured on the base: the py leg's prints reached the terminal and the
-    go leg's did not, though `revl run --backend go --once` shows them."""
+def test_go_host_output_reaches_the_sweep_report():
+    """Measured on the base: the go leg's prints never reached the report,
+    though `revl run --backend go --once` shows them. Since the py leg
+    captures each step to read the compensation markers (issue #1511), its
+    prints are replayed the same way."""
     lines: list = []
     failures, dossier = fault_mod.cross_tier_sweep(
         compile_source(SHOUTING, "shouting.rvl"), tiers=("py", "go"),
@@ -426,7 +428,10 @@ def test_go_host_output_reaches_the_sweep_report(capfd):
     assert all("HOST-PRINT go open 1" in p["hostOutput"] for p in go["points"])
     report = "\n".join(lines)
     assert report.count("[go] host output at ") == len(go["points"])
-    assert "HOST-PRINT py open 1" in capfd.readouterr().out  # py passes through
+    py = next(r for r in dossier["tiers"] if r["tier"] == "py")
+    assert all("HOST-PRINT py open 1" in p["hostOutput"] for p in py["points"])
+    assert report.count("[py] host output at ") == len(py["points"])
+    assert "[revl-sweep]" not in report  # the sweep's own markers stay out
 
 
 # Measured 71s and 100s in two local runs on a loaded laptop (load average up
