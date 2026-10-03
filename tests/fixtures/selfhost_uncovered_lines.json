@@ -52,7 +52,7 @@
       "go": 2906,
       "java": 991,
       "py": 669,
-      "rust": 1200,
+      "rust": 1230,
       "ts": 289,
       "wasm": 1558
     },
@@ -300,9 +300,6 @@
         "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
           "_v3_fill_erased": 1
         },
-        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every … in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on … as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 §8's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the §4.5 `replay(…)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead. Item 130 §4.5's last-n backlog is LOWERED on this tier now, so `_refuse_unlowered_stream_surface` (2) is gone and `_replay_count` (6) replaces it: it reads the `replay(<n>)` declaration and request and refuses the durable `replay(from: …)` cursor. `_expr` rises by 5 for the `StreamSource(n)` and `StreamSubscribeReplay` arms. All of it is on the stream-holding path, and a cursor refusal document is no way out: every `.rvl` under tests/fixtures is a gate/reference census case and the native gate (selfhost/lower.rvl) false-rejects any document carrying `replay(…)`. Executed by backends/go/test_stream_exec_130.py.": {
-          "_replay_count": 6
-        },
         "Extern-declared compensate (item 254, issue #1592): `_compensated_table` builds the table of emission externs that declare their own `compensate`, `_emit_compensations` adds that compensation to the ones an `emit` registers, `_timer_has_compensate` flags a timer firing that registers one, `_declared_call` and `_reaches_declared` register one for a call in a value position of a provide method (a `let`, a `return`, an argument, a nested operand, through `revlDeclared`), and `_as_fn_call` re-spells the slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_go.rvl ports no extern-declared compensation. The behaviour is pinned and executed against real stc-go by backends/go/scenarios/emitted/extern_compensate/exec_test.go.": {
           "_as_fn_call": 5,
           "_compensated_table": 1,
@@ -310,6 +307,9 @@
           "_emit_compensations": 9,
           "_reaches_declared": 9,
           "_timer_has_compensate": 1
+        },
+        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every … in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on … as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 §8's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the §4.5 `replay(…)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead. Item 130 §4.5's last-n backlog is LOWERED on this tier now, so `_refuse_unlowered_stream_surface` (2) is gone and `_replay_count` (6) replaces it: it reads the `replay(<n>)` declaration and request and refuses the durable `replay(from: …)` cursor. `_expr` rises by 5 for the `StreamSource(n)` and `StreamSubscribeReplay` arms. All of it is on the stream-holding path, and a cursor refusal document is no way out: every `.rvl` under tests/fixtures is a gate/reference census case and the native gate (selfhost/lower.rvl) false-rejects any document carrying `replay(…)`. Executed by backends/go/test_stream_exec_130.py.": {
+          "_replay_count": 6
         }
       },
       "uncovered_statements": 3190
@@ -867,7 +867,7 @@
       "statements": 3771,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
-          "_emit_step": 21,
+          "_emit_step": 24,
           "_guard_frame_neutral_loop": 1,
           "_uses_timer.walk": 1
         },
@@ -1019,7 +1019,7 @@
           "emit": 3
         },
         "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers this family rather than emitting a partial transaction.": {
-          "_body_has_compensation": 2,
+          "_body_has_compensation": 3,
           "_body_has_witnessed": 2,
           "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6,
@@ -1031,9 +1031,9 @@
           "_emit_teardown_begin": 3,
           "_emit_teardown_commit": 2,
           "_emit_witnessed_step": 26,
-          "_method_bodies_have_compensation": 1,
+          "_method_bodies_have_compensation": 2,
           "_method_bodies_have_witnessed": 1,
-          "_method_body_lines": 40,
+          "_method_body_lines": 41,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
@@ -1060,6 +1060,13 @@
           "_secret_method_params": 4,
           "_secret_result_lines": 8,
           "_stream_host_rust": 6
+        },
+        "Extern-declared compensate (item 254, issue #1592): `_emit_compensations` adds the compensation an emission extern declares to the ones an `emit` registers, `_reaches_declared` and `_declared_call` register one for a call in any other position of a provide method (a `let`, a `return`, an argument, a nested operand, an `if` arm) as a block expression, and `_as_fn_call` re-spells that slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_rust.rvl ports no compensation registration (the family the witnessed/compensation group above defers). The behaviour is pinned and executed against real cordis-rs by backends/rust/test_emit_rust.py::test_extern_declared_compensation_registers_at_every_site.": {
+          "_as_fn_call": 5,
+          "_component_has_effectful_methods": 1,
+          "_declared_call": 7,
+          "_emit_compensations": 4,
+          "_reaches_declared": 7
         }
       },
       "uncovered_statements": 1186
