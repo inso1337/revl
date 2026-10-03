@@ -448,8 +448,13 @@ It then runs every generator's own check, and stages what it resolved.
 - **`bench/results/` is left alone** unless you pass `--bench`, which takes
   main's side, including a file main deleted.
 - **A step whose tool is missing** (`lake`, `cargo`) is skipped with a loud
-  banner, and the files it owns are left as they were. `--fast` skips the
-  crate census on purpose.
+  banner, and the files it owns are left as they were. The run then exits 1,
+  because a file nothing checked is not a passing one; pass `--allow-skip` on
+  a machine that cannot install the tool. Before giving up, the tool looks in
+  `~/.elan/bin` for `lake` and `~/.cargo/bin` for `cargo`, so a shell that never
+  sourced their profiles still finds them; `formal/scripts/run_gate.sh` looks in
+  `~/.elan/bin` too. `--fast` skips the crate census on purpose, and that skip
+  does not fail the run.
 - **Provenance has no default generation** for your branch's new census
   documents. Pass `--provenance-generation N` when its manifest conflicts, or
   when its check names an UNDECLARED document this branch added:
@@ -463,7 +468,8 @@ and `TRANSITIONS`,
 which `tests/test_regen_generated.py` checks against the tree. `--list`
 prints what it knows; `--all` and `--only NAME` regenerate outside a
 conflict. It exits 0 when every conflict it owns is resolved and every check
-passes, and 1 when a check fails or a conflict is left for a human.
+passes, and 1 when a check fails, a conflict is left for a human, or a
+generator was skipped for a missing tool without `--allow-skip`.
 
 ## Merging
 

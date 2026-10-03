@@ -32,8 +32,15 @@ This tool does exactly that, and nothing a generator does not do:
   conflict on the old file. `TRANSITIONS` names those moves: main's side is
   taken (usually the deletion) and the new layout is regenerated.
 * `bench/results/` is left alone unless `--bench` is passed.
-* A generator whose tool is missing (`lake`, `cargo`) is skipped LOUDLY, and
-  the files it owns are left as they are.
+* A tool is looked for on PATH and then in its own install directory
+  (`TOOL_HOMES`: elan puts `lake` in `~/.elan/bin`, rustup puts `cargo` in
+  `~/.cargo/bin`), because a shell that never sourced their profile scripts
+  has neither on PATH. A directory found that way goes on the generators' PATH.
+* A generator whose tool is still missing is skipped LOUDLY and the files it
+  owns are left as they are. The run then exits 1, because an unchecked file
+  is not a passing one (issue #1864); `--allow-skip` accepts the skip on a
+  machine that cannot install the tool. A slow step `--fast` skips is the
+  caller's choice and does not fail the run.
 
 Usage, from inside the worktree, after the merge stops on its conflicts:
 
@@ -46,7 +53,8 @@ Usage, from inside the worktree, after the merge stops on its conflicts:
     python3 tools/regen_generated.py --list         # what it knows
 
 Exit status: 0 when every conflict it owns is resolved and every check
-passes; 1 when a check fails or a conflict is left for a human; 2 on usage.
+passes; 1 when a check fails, a conflict is left for a human, or a generator
+was skipped for a missing tool without --allow-skip; 2 on usage.
 """
 
 from __future__ import annotations
@@ -311,15 +319,46 @@ def _hand_rule(path: str, hand) -> str | None:
 
 # -------------------------------------------------------------- running
 
+# Where a tool's installer puts it when the shell's PATH does not say
+# (issue #1864). Looked in only after PATH, so a PATH entry always wins.
+TOOL_HOMES = {
+    "lake": ["~/.elan/bin"],
+    "cargo": ["~/.cargo/bin"],
+}
+
+
+def _homes(tool: str) -> list:
+    return [os.path.expanduser(d) for d in TOOL_HOMES.get(tool, ())]
+
+
+def _find(tool: str) -> str | None:
+    """The tool's executable: on PATH, else in its install directory."""
+    found = shutil.which(tool)
+    if found is None:
+        homes = os.pathsep.join(_homes(tool))
+        found = shutil.which(tool, path=homes) if homes else None
+    return found
+
+
+def _home_dirs() -> list:
+    """The install directories that hold a tool PATH does not."""
+    return [os.path.dirname(found) for tool in TOOL_HOMES
+            if shutil.which(tool) is None and (found := _find(tool))]
+
+
 class Context:
     def __init__(self, root: str, python: str, tmp: str, args) -> None:
         self.root, self.python, self.tmp, self.args = root, python, tmp, args
+        self.skipped: list = []      # labels skipped for a missing tool
 
     def env(self) -> dict:
         """The generators' environment: THIS tree's `src/` first on the path,
         so `python -m revl` and every tool import the revl being regenerated,
         never another checkout's editable install."""
         env = dict(os.environ)
+        extra = _home_dirs()
+        if extra:
+            env["PATH"] = os.pathsep.join([*extra, env.get("PATH", "")])
         src = os.path.join(self.root, "src")
         if os.path.isdir(src):
             env["PYTHONPATH"] = os.pathsep.join(
@@ -333,8 +372,23 @@ class Context:
 
 
 def _missing(step: dict) -> list:
-    return [tool for tool in step.get("requires") or ()
-            if shutil.which(tool) is None]
+    return [tool for tool in step.get("requires") or () if _find(tool) is None]
+
+
+def _resolve(cmd: list) -> list:
+    """A bare command name found only in its install directory, by path."""
+    if cmd and os.sep not in cmd[0] and shutil.which(cmd[0]) is None:
+        found = _find(cmd[0])
+        if found:
+            return [found, *cmd[1:]]
+    return cmd
+
+
+def _skip_missing(ctx, label: str, missing: list, what: str) -> None:
+    ctx.skipped.append(f"{label} ({' '.join(missing)})")
+    _loud(f"{label}: {' '.join(missing)} is not installed, so {what}"
+          + ("" if ctx.args.allow_skip else
+             ". This fails the run; install it, or pass --allow-skip"))
 
 
 def _say(message: str) -> None:
@@ -352,9 +406,9 @@ def _run_step(step: dict, ctx: Context, label: str) -> bool | None:
     shown = " ".join(cmd)
     missing = _missing(step)
     if missing:
-        _loud(f"{label}: {' '.join(missing)} is not installed, so `{shown}` "
-              f"did not run")
+        _skip_missing(ctx, label, missing, f"`{shown}` did not run")
         return None
+    cmd = _resolve(cmd)
     if step.get("slow") and ctx.args.fast:
         _loud(f"{label}: --fast, so the slow step `{shown}` did not run")
         return None
@@ -390,8 +444,8 @@ def _group_runnable(group: dict, ctx: Context) -> bool:
         return False
     missing = _missing(group)
     if missing:
-        _loud(f"{group['name']}: {' '.join(missing)} is not installed, so "
-              f"{', '.join(group['paths'])} are left exactly as they are")
+        _skip_missing(ctx, group["name"], missing,
+                      f"{', '.join(group['paths'])} are left exactly as they are")
         return False
     option = group.get("option")
     if option and getattr(ctx.args, option, None) is None:
@@ -417,8 +471,8 @@ def _check(group: dict, ctx: Context) -> bool | None:
     if _absent_layout(group, ctx):
         return None
     if _missing(group):
-        _loud(f"{group['name']} check: {' '.join(_missing(group))} is not "
-              f"installed")
+        _skip_missing(ctx, f"{group['name']} check", _missing(group),
+                      "its check did not run")
         return None
     results = [_run_step(step, ctx, f"{group['name']} check")
                for step in group["check"]]
@@ -593,6 +647,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--provenance-generation", type=int, default=None,
                     metavar="N", help="the generation to declare this branch's "
                     "new census documents at (passed to corpus_provenance.py)")
+    ap.add_argument("--allow-skip", action="store_true",
+                    help="a generator skipped because its tool is missing does "
+                         "not fail the run (the banner still prints)")
     ap.add_argument("--fast", action="store_true",
                     help="skip the slow steps (the cargo-built crate census)")
     ap.add_argument("--no-check", action="store_true",
@@ -706,8 +763,9 @@ def main(argv: list | None = None) -> int:
                 if _check(group, ctx) is False:
                     failed.append(f"{group['name']} check")
 
-    _summary(left, failed, merging)
-    return 1 if (left or failed) else 0
+    unchecked = [] if args.allow_skip else ctx.skipped
+    _summary(left, failed, unchecked, merging)
+    return 1 if (left or failed or unchecked) else 0
 
 
 def _select(registry, args, by_group: dict) -> list:
@@ -730,13 +788,19 @@ def _select(registry, args, by_group: dict) -> list:
     return [g for g in registry if g["name"] in wanted]
 
 
-def _summary(left: list, failed: list, merging: bool) -> None:
+def _summary(left: list, failed: list, unchecked: list, merging: bool) -> None:
+    if unchecked:
+        _say("UNCHECKED, so this run fails: " + ", ".join(unchecked) + " did not "
+             "run because a tool is missing (looked on PATH and in "
+             + ", ".join(sorted({d for ds in TOOL_HOMES.values() for d in ds}))
+             + "). Install it, or pass --allow-skip to accept the files as they "
+             "are")
     if left:
         _say("still in conflict, for a human: " + ", ".join(sorted(set(left))))
     if failed:
         _say("FAILED: " + ", ".join(failed) + ". Rerun the named generator with "
              "--only NAME, or everything with --all, against this merged tree")
-    if not left and not failed:
+    if not left and not failed and not unchecked:
         _say("every generated conflict is resolved and every check passes"
              + ("; review and `git commit`" if merging else ""))
 

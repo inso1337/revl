@@ -57,6 +57,14 @@ A composition is three things at once, and `revl diff` reports a delta on each:
      the new composition, and was satisfiable before: the dependency the change
      quietly severed.
 
+   Wiring is matched per realm. A consumer that reaches `db` in realm `b`
+   (`isolate db in realm("b")`) is satisfied only by a provider of `db` in
+   realm `b`, the same rule `revl query withdraw` applies. So removing realm
+   `b`'s provider breaks realm `b`'s consumers even while realm `a` still
+   provides `db` (issue #1848). A record for a realm-scoped key carries a
+   `realm` field (`{"key": "db", "realm": "b", ...}`), and its guarantee
+   sentence names the realm. A single-realm composition's records carry none.
+
 ## Inputs
 
 Each side is one path, in either accepted form:

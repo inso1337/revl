@@ -104,7 +104,7 @@
 
 ["function", "host-map-binding-inference-these-functions-scan-let", "_map_expr_inserts", 3, 3]
 
-["function", "host-map-binding-inference-these-functions-scan-let", "_map_insert_candidates", 7, 7]
+["function", "host-map-binding-inference-these-functions-scan-let", "_map_insert_candidates", 6, 6]
 
 ["function", "host-map-binding-inference-these-functions-scan-let", "_map_value_expr_type", 67, 67]
 
@@ -340,7 +340,7 @@
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_bodies_have_witnessed", 1, 1]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_body_lines", 41, 41]
+["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_body_lines", 39, 39]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_step_is_witnessed_effect", 2, 2]
 
