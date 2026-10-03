@@ -2,8 +2,8 @@
  "briefs": [
   {
    "hard_gate": "compiles",
-   "n": 524,
-   "note": "The 524 census programs the reference admits compile under the current checker with no error and no compiler crash, and the gate raised no objection to any of them. Reference faults over the whole corpus: 0.",
+   "n": 527,
+   "note": "The 527 census programs the reference admits compile under the current checker with no error and no compiler crash, and the gate raised no objection to any of them. Reference faults over the whole corpus: 0.",
    "reference_faults": [],
    "result": "pass",
    "spec": "census/agree-admit"
@@ -14,7 +14,7 @@
   "buckets": [
    {
     "bucket": "agree-admit",
-    "count": 524
+    "count": 527
    },
    {
     "bucket": "agree-refuse/G4",
@@ -30,7 +30,7 @@
    },
    {
     "bucket": "no-objection-out-of-slice",
-    "count": 53
+    "count": 54
    },
    {
     "bucket": "agree-refuse/A1",
@@ -2389,6 +2389,11 @@
     "agree-admit"
    ],
    [
+    "tests/fixtures/emit_ts_corpus/extern_compensate.rvl",
+    "a7043f709336020d6d6ed459e377d0869bb7987a61d54bf57fbf9d2d55cce994",
+    "agree-admit"
+   ],
+   [
     "tests/fixtures/emit_ts_corpus/instance_get.rvl",
     "e15d1d6b22a7d2e89564a7cc28228385cf383d7ca0a21f08be8ea77e1a3b159a",
     "agree-admit"
@@ -2421,6 +2426,16 @@
    [
     "tests/fixtures/emit_ts_corpus/records.rvl",
     "bca07d840d7d1b5e4ed1a0511314e6ec5644dd1023b6f46445dc20cd77224273",
+    "agree-admit"
+   ],
+   [
+    "tests/fixtures/emit_ts_corpus/ref_externs.rvl",
+    "cc8c40d844cfd1a679b12958933164b4566cd5d6254f24834fdd50a735a81e6d",
+    "no-objection-out-of-slice"
+   ],
+   [
+    "tests/fixtures/emit_ts_corpus/routed_timers.rvl",
+    "88bc3840203ffe6c941d120572cc3ced8c8d54b1fedf00b1f2608c1e2649cb8a",
     "agree-admit"
    ],
    [
@@ -2501,6 +2516,11 @@
    [
     "tests/fixtures/emit_ts_refusals/deferred_emission_call.rvl",
     "bc12006e3a559ce9cc720126b9b49f96501508155651acd7242909554448da4c",
+    "agree-admit"
+   ],
+   [
+    "tests/fixtures/emit_ts_refusals/fault_test_section.rvl",
+    "9f7aa06c60ddfacf64c85dbbb67714caab0475b54dc987aefa1ef21e3e7f6e7d",
     "agree-admit"
    ],
    [
@@ -3065,12 +3085,12 @@
    ],
    [
     "selfhost/emit_rust.rvl",
-    "664543ee43c32659fd58ace78eca9462090548171b65c75ae86b6b812a4522ad",
+    "c6a20e5f930c03d404dc5b36522054b160a358d8569c5738f36e74e2a9b24b86",
     "frontier-declined"
    ],
    [
     "selfhost/emit_ts.rvl",
-    "593544079e89d0370e8df102d8144b2a9581cb4ab6a62b784185b57cf32b8d05",
+    "6def4e7fb1d22cf179bbb45ef5532b0fbf186e1e430c396ca87ef490467d24fe",
     "refuse-out-of-slice/BAD"
    ],
    [
@@ -5357,8 +5377,8 @@
    "measured_but_not_baselined": [],
    "total": 0
   },
-  "n": 1037,
-  "n_distinct": 1031,
+  "n": 1041,
+  "n_distinct": 1035,
   "n_note": "`n` is programs RUN. `n_distinct` is distinct case ids: 6 case ids reach the corpus twice, once from each of two entries that spell the same name, so every bucket count and `n` itself carry them twice. The distinct number is the one to quote.",
   "not_established": [
    "This report says nothing about any implementation other than revl's own two. It is not a comparison and carries no comparative claim.",
@@ -5366,7 +5386,7 @@
    "Generation zero in the provenance manifest is a declaration about the tree as it stood, not a measurement. What holds from there on is that an arriving document must name its generation, and that an undeclared one counts as loop-authored.",
    "Generation zero does not mean a person typed it. Issue #1397 measured the generation-zero set against the commits that introduced it: 153 of 850 entries arrived on a branch named agent/*, 132 more on a commit carrying an AI co-author trailer, 415 on commits pushed to the trunk with no branch to read, and the repository's root commit carries such a trailer itself. Both signals are lower bounds. The honest reading is that this corpus is model-written and pre-loop, and the floors gate the second word, not the first.",
    "A mislabelled provenance entry defeats the provenance measurement exactly as re-recording the baseline would defeat the census. Neither is detected by a tool; both are edits in a diff somebody reads.",
-   "The corpus holds 6 case ids that appear twice, so `n` (1037) counts 6 programs twice and `n_distinct` (1031) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported."
+   "The corpus holds 6 case ids that appear twice, so `n` (1041) counts 6 programs twice and `n_distinct` (1035) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported."
   ],
   "pins": {
    "decides_verdicts": {
@@ -5418,15 +5438,15 @@
    },
    "report_inputs": {
     "crates/revl-gate/Cargo.toml": "de0fdc92fd47facfe7b962a233722285724deddca3f2a8495dd427008ff9f25c",
-    "crates/revl-gate/src/admission.rs": "b6018094d24563ba0e1275a97b94a0a7a2b5d7f185727df62ad1867201dae84f",
-    "crates/revl-gate/src/frontier.rs": "bf1a85193dc3ed9ae8f8e1416a2264517ade54e5ad37f080b31f2a7e69d41265",
+    "crates/revl-gate/src/admission.rs": "64d95d1c41c8bc3f8dca0169492d98f6afe9060063559c55338b32ff6fdade6e",
+    "crates/revl-gate/src/frontier.rs": "0985a6d27e4add2b95c54b8977406be22f8ec7ed96208f96a710300f09901ecf",
     "crates/revl-gate/src/ir.rs": "0d171beeb651561811e855308c62554f44fbfca7a64bb3030abf0a3f20f9793b",
     "crates/revl-gate/src/lib.rs": "e9c5ddb7d29b757a7e08df675ae54fbaa637a7e952c3421c0ca6934016a13869",
-    "crates/revl-gate/src/selfhost.rs": "36441da52b98e064d792e0eda6102b8253698bd8a02fa5052359afaaf87e12b5",
+    "crates/revl-gate/src/selfhost.rs": "b5520af70f3e06ecefe495a05e797fa54ebd8a7a297140305f4752e33bd139b2",
     "crates/revl-gate/src/session.rs": "98470ddaf7803dd69da9e6c8c6750fc23956906d6529d5de5514ad0e02da6455",
     "crates/revl-gate/src/symbols.rs": "698969ee2ea20647b73a6b758da946a29658f1c72b1553153d50551b94becbec",
     "tests/fixtures/census_crate_reproduction.json": "d488c1db5f25417065c1725705b5891bdca419bb7f0ae3676dd113fb3a8c7cfb",
-    "tests/fixtures/corpus_provenance.json": "de4b2e1fd10bde35b652f626232540c4ff386208a8498acfc8a04227de812ea9",
+    "tests/fixtures/corpus_provenance.json": "8aa562ebbfcf1ab2c440a56b06b57c29b648ee6aa4418fe884608e2fbe4f043d",
     "tools/gate_reference_census_baseline.json": "5dc8b0ab9b4be6c8dd5e480f99446cce787a923334f113a5badf5dde0c946852"
    }
   },
@@ -5441,7 +5461,7 @@
      "independent_percent": "100.0",
      "independent_permille": 1000,
      "loop_authored": 0,
-     "total": 1037,
+     "total": 1041,
      "undeclared": 0
     },
     {
@@ -5501,7 +5521,7 @@
      "independent_percent": "100.0",
      "independent_permille": 1000,
      "loop_authored": 0,
-     "total": 42,
+     "total": 45,
      "undeclared": 0
     },
     {
@@ -5554,7 +5574,7 @@
    "tracked_buckets_agree": true,
    "what": "the committed crates/revl-gate, built by cargo and asked through a standalone consumer, over the same corpus"
   },
-  "run": "census-selfhost-9443c0020361",
+  "run": "census-selfhost-8b0c29095ce8",
   "schema": "GATE-CENSUS-1",
   "tracked_bucket_prefixes": [
    "false-admission",
@@ -5571,18 +5591,18 @@
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-9443c0020361"
+    "run": "census-selfhost-8b0c29095ce8"
    },
    "public": true,
    "rung": "demonstrated",
-   "text": "Over 1031 distinct programs (1037 runs; 6 case ids appear more than once and are named in the report), the gate issued no admission the reference refuses: the `false-admission` bucket is empty, and it is in NEVER_BASELINED, so `--record` cannot write one into the baseline and `--check` fails on any member however the baseline reads."
+   "text": "Over 1035 distinct programs (1041 runs; 6 case ids appear more than once and are named in the report), the gate issued no admission the reference refuses: the `false-admission` bucket is empty, and it is in NEVER_BASELINED, so `--record` cannot write one into the baseline and `--check` fails on any member however the baseline reads."
   },
   {
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-9443c0020361"
+    "run": "census-selfhost-8b0c29095ce8"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5592,26 +5612,26 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-9443c0020361"
+    "run": "census-selfhost-8b0c29095ce8"
    },
    "public": true,
    "rung": "measured",
-   "text": "0 of 1037 census programs were produced by a generation of the self-improvement loop at or after generation 1 (100.0% independent of the loop, 0 undeclared), measured by tools/corpus_provenance.py over tests/fixtures/corpus_provenance.json. The loop has never run, which is why this figure is what it is."
+   "text": "0 of 1041 census programs were produced by a generation of the self-improvement loop at or after generation 1 (100.0% independent of the loop, 0 undeclared), measured by tools/corpus_provenance.py over tests/fixtures/corpus_provenance.json. The loop has never run, which is why this figure is what it is."
   },
   {
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-9443c0020361"
+    "run": "census-selfhost-8b0c29095ce8"
    },
    "public": true,
    "rung": "measured",
-   "text": "0 of 1037 census programs are declared in tests/fixtures/corpus_provenance.json as typed by a person (0.0%). This report makes no claim that its corpus is human-written, and the figure above is not that claim: it is the share no generation of the self-improvement loop produced."
+   "text": "0 of 1041 census programs are declared in tests/fixtures/corpus_provenance.json as typed by a person (0.0%). This report makes no claim that its corpus is human-written, and the figure above is not that claim: it is the share no generation of the self-improvement loop produced."
   }
  ],
  "generator": {
   "name": "selfhost/lower.rvl admit_src behind crates/revl-gate",
-  "run": "census-selfhost-9443c0020361",
+  "run": "census-selfhost-8b0c29095ce8",
   "tool": "tools/gate_reference_census.py --engine selfhost"
  },
  "grader": {

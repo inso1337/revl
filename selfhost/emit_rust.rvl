@@ -1713,8 +1713,10 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
       // needle path below never applies to it; the two are disjoint.
       let iplace = strip_index_clone(a, r)
       if (iplace != "") { r = iplace }
-      if (method == "indexOf" && recv_type.startsWith("List[") && ctx.bp.has(ref_name(a))) {
-        // The List overload needs &String rather than the string overload's &str.
+      if (method == "indexOf" && recv_type != "Str" && ctx.bp.has(ref_name(a))) {
+        // The List overload needs &String rather than the string overload's &str;
+        // any receiver not known to be a Str (a bare `List` literal type, an
+        // untyped field or call) takes it, as the reference does.
         r = `${r}.to_string()`
       }
       let lit = borrowed_str_lit(a)

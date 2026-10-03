@@ -1,0 +1,50 @@
+// issue #106 / item 391: function-level shapes the self-host ts port used to
+// refuse by name or emit differently. Each failed against the port before it
+// learned the shape.
+//
+//   * `@ts ref` externs against the USER root (item 396 option B): an async
+//     one loads through a dynamic `import()`, and a sync one whose declared
+//     return is `Secret[Str]` marks the value where it enters (item 421 F6);
+//   * config externs (item 378 Stage 5): the plug-time config seam, and the
+//     `_revl_config` first body line in a sync and an async extern. The port
+//     used to drop both without a marker;
+//   * the empty-list inference reading a `Map` subscript's declared value
+//     type (#957) next to a plain List index;
+//   * in-file tests: an empty test body, an `!=` assertion (vitest's matcher
+//     expects `false` from `revlEq`), and a non-comparison assertion
+//     (`toBeTruthy`).
+extern emission async fn fetch_remote(url: Str) -> Str = @ts ref fetchRemote from "./ref_host.ts"
+extern pure fn mint(label: Str) -> Secret[Str] = @ts ref mintToken from "./ref_host.ts"
+
+extern pure fn greet(name: Str) -> Str
+  config { prefix: Str = "hi", times: Int = 2 }
+  = @ts { return String(_revl_config["prefix"]) + name }
+
+extern emission async fn send(to: Str)
+  config { endpoint: Str, retries: Int = 1 }
+  = @ts { return; }
+
+fn gather(m: Map[Str, Int], xs: List[Int], k: Str) -> List[Int] {
+  var out = []
+  let v = m[k]
+  let w = xs[0]
+  out = out.push(v)
+  out = out.push(w)
+  return out
+}
+
+fn is_even(n: Int) -> Bool {
+  return n % 2 == 0
+}
+
+test "nothing to check" {
+}
+
+test "an inequality" {
+  let m = Map.empty().set("a", 1)
+  assert gather(m, [2], "a") != [2, 1]
+}
+
+test "a plain condition" {
+  assert is_even(4)
+}
