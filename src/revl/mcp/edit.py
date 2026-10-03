@@ -491,9 +491,44 @@ def file_modules(vs: dict) -> dict:
     jailed files, as at load."""
     modules = dict(vs.get("modules") or {})
     for path, text in (vs.get("files_content") or {}).items():
-        if text is not None and text != _read_disk(path):
+        on_disk = _read_disk(path)
+        if text is not None and text != on_disk:
             modules[os.path.abspath(path)] = text
+            modules.update(_operator_assets(path, on_disk, modules))
     return modules
+
+
+def _operator_assets(path: str, on_disk: str | None, already: dict) -> dict:
+    """The `asset` files the operator's own text of `path` names, read from
+    disk, for an edited buffer of it (issue #1745 found it: editing any file
+    that declares an `asset` failed). An in-memory module resolves an asset
+    only through the sources map, so the edited buffer lost its operator's
+    assets. Only paths the operator's text names are read, inside the
+    sanctioned roots, so an edit gains no new file read; an asset the edit adds
+    is not supplied, and the profile refuses it anyway."""
+    from ..lexer import lex  # noqa: PLC0415
+    from .server import _file_roots, _within_roots  # noqa: PLC0415 — cycle
+
+    if on_disk is None:
+        return {}
+    try:
+        tokens = lex(on_disk, path)
+    except RevlError:
+        return {}
+    roots, base = _file_roots(), os.path.dirname(os.path.abspath(path))
+    out = {}
+    for tok, after in zip(tokens, tokens[1:]):
+        if not (tok.kind == "ident" and tok.value == "asset" and after.kind == "string"):
+            continue
+        key = os.path.abspath(os.path.join(base, after.value))
+        if key in already or not _within_roots(key, roots) or not os.path.isfile(key):
+            continue
+        try:
+            with open(key, encoding="utf-8", newline="") as handle:
+                out[key] = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue  # a binary asset cannot ride in the text map
+    return out
 
 
 def candidate_arguments(vs: dict, replacing: tuple = ()) -> dict:
