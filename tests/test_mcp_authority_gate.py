@@ -437,6 +437,7 @@ UNGATED = {
     "revl_fmt": "formats source text",
     "revl_explain": "renders a diagnostic",
     "revl_grammar": "returns the grammar",
+    "revl_idiom": "returns a fixed example document",
     "revl_tools": "returns the tool surface",
     "revl_state": "reports session state",
     "revl_estop_report": "reports a halt that already happened",

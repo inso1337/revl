@@ -331,6 +331,15 @@ their reasoning contained.
 
 ### What the committed report does not contain
 
+The refused column. It is recomputed from the ledgers the tests gate every time
+the report is built (`python3 bench/framework_bench.py`, or
+`python3 bench/refusal_inventory.py` for the column alone), and `--write`
+commits a snapshot that names that command instead of freezing the numbers.
+Those ledgers move in ordinary fix pull requests, and a frozen copy made each of
+them rewrite the report and conflict with every other one (issue #1768). The
+snapshot names the scoring compiler by a content digest of `src/revl`, not by a
+commit.
+
 `bench/results/framework-bench/report.md` lists its own remaining gates: the
 three-host row has not been generated with the pinned model (the report prints
 the command that would), every claim stands at the `measured` rung because

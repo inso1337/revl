@@ -1,0 +1,12 @@
+// idiom: test
+// summary: an assertion in a `test` block
+// rule: a test body is pure: it calls functions and asserts on their results
+// rule: T1: `assert` takes a `Bool`
+// fill: double(2) == 4
+// type: Bool
+
+fn double(x: Int) -> Int = x * 2
+
+test "doubling" {
+  assert double(2) == 4
+}

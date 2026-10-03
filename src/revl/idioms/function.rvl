@@ -1,0 +1,8 @@
+// idiom: function
+// summary: the body of a top-level `fn`: pure, typed by its signature
+// rule: G6: a function is pure; it cannot `emit` or acquire
+// rule: T1: the body has the declared return type
+// fill: x * 2
+// type: Int
+
+fn double(x: Int) -> Int = x * 2

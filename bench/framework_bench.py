@@ -15,6 +15,16 @@ pin, and it emits two artifacts:
     validates for no-self-score, named gates and the claim ladder;
   * `report.md`, the table, with the refused column first.
 
+`--write` commits a SNAPSHOT of both (issue #1768). Every column measured from a
+committed run is frozen as built. The refused column is not: it is recomputed
+from the ledgers the tests gate on every build, those ledgers move in ordinary
+fix pull requests, and a frozen copy made every such pull request rewrite the
+report (and its commit line) and conflict with every other one. So the snapshot
+carries the command that recomputes the column instead of its numbers, and the
+report printed by this module without `--write` carries the numbers. That
+`recomputed` state is the one exception to the first rule below, and it exists
+only in the committed snapshot.
+
 ## Three rules this file follows and a reader should check it followed
 
 **A cell is a number or it is `not-run`.** There is no third state. When the
@@ -45,9 +55,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
-import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
@@ -69,25 +81,24 @@ REPORT_SCHEMA = "EVAL-REPORT-1"
 NOT_RUN = "not-run"
 
 
-def git_sha() -> str:
-    """The commit, with `-dirty` when the COMPILER is uncommitted.
+def compiler_digest() -> str:
+    """The scoring compiler, by content: `src/revl@sha256:<12 hex>` over the
+    name and sha256 of every `src/revl/**/*.py`, in sorted order.
 
-    The dirty check is scoped to `src/revl` the way `bench/rescore.py` scopes
-    it, and for the same reason: the question this field answers is which
-    compiler produced the numbers. Writing this report dirties the tree by
-    definition, so a whole-tree check would mark every report dirty and the
-    flag would stop meaning anything.
+    This field used to be `git rev-parse HEAD` (with `-dirty`). A commit sha
+    names a branch tip that a squash merge never puts on main, it moved on
+    every regeneration whatever the regeneration changed, and so any two pull
+    requests that rewrote the report conflicted on it (issue #1768). A digest
+    of the compiler's own files moves only when the compiler does, needs no
+    git, and is recomputable from any checkout, the same identity
+    `tools/census_artifact.py` publishes.
     """
-    try:
-        out = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-                             capture_output=True, text=True, timeout=30)
-        sha = out.stdout.strip() or "unknown"
-        dirty = subprocess.run(
-            ["git", "-C", str(ROOT), "status", "--porcelain", "--", "src/revl"],
-            capture_output=True, text=True, timeout=30)
-        return sha + ("-dirty" if dirty.stdout.strip() else "")
-    except Exception:
-        return "unknown"
+    h = hashlib.sha256()
+    src = ROOT / "src" / "revl"
+    for path in sorted(src.rglob("*.py")):
+        rel = path.relative_to(ROOT).as_posix()
+        h.update(f"{rel}:{hashlib.sha256(path.read_bytes()).hexdigest()}\n".encode())
+    return f"src/revl@sha256:{h.hexdigest()[:12]}"
 
 
 def _compiler_path(parent: Path) -> str:
@@ -128,7 +139,7 @@ def checker_version() -> dict:
         "language": version.get("language"),
         "frontier": version.get("frontier"),
         "compiler_path": _compiler_path(Path(revl.__file__).parent),
-        "compiler_commit": git_sha(),
+        "compiler_commit": compiler_digest(),
         "report_schema": REPORT_SCHEMA,
     }
 
@@ -208,6 +219,66 @@ def column_refused() -> dict:
     if inv["unavailable"]:
         cell["unavailable"] = inv["unavailable"]
     return cell
+
+
+# What `--write` commits in place of the refused column (issue #1768). The
+# column is recomputed from ledgers that ordinary fix pull requests move
+# (`LOWER_GAP_DOCS`, the self-host corpora, the blind-spot ledger), so a frozen
+# copy of it was stale after any of them, and a test made each one rewrite the
+# whole report to bring it back: the report's commit line and counts then
+# conflicted between every two such pull requests. The snapshot names the
+# command that recomputes the column instead, and holds no number a fix pull
+# request can move.
+SNAPSHOT_REFUSED = {
+    "status": "recomputed",
+    "recomputed_by": "python3 bench/refusal_inventory.py",
+    "why": ("The refused column is recomputed from the ledgers the tests gate "
+            "every time the report is built, and is not frozen into the "
+            "committed snapshot: a frozen copy went stale on every pull "
+            "request that moved one of those ledgers. Run "
+            "`python3 bench/framework_bench.py` for the report with it, or "
+            "`python3 bench/refusal_inventory.py` for the column alone."),
+}
+
+
+def snapshot(report: dict) -> dict:
+    """The report as `--write` commits it: every measured column as built,
+    the refused column replaced by `SNAPSHOT_REFUSED`, and the claim that
+    quotes its headline left out, so nothing in the committed copy is a number
+    that moves when a ledger does."""
+    out = copy.deepcopy(report)
+    head = out["columns"]["refused"].get("headline")
+    out["columns"]["refused"] = dict(SNAPSHOT_REFUSED)
+    if head:
+        out["claims"] = [c for c in out["claims"]
+                         if c.get("evidence", {}).get("run") != head["gate"]]
+    return out
+
+
+def snapshot_problems(committed: dict) -> list[str]:
+    """Why a committed `report.json` is not a snapshot `--write` produces:
+    a frozen refused column, a claim quoting its headline, or a scoring
+    compiler named by a commit rather than by content. Empty means the
+    committed copy holds no number a fix pull request can move."""
+    import re  # noqa: PLC0415
+    problems = []
+    refused = committed.get("columns", {}).get("refused")
+    if refused != SNAPSHOT_REFUSED:
+        problems.append(
+            "columns.refused is frozen into the committed report; it is "
+            "recomputed on every build. Regenerate: python3 "
+            "bench/framework_bench.py --write")
+    if isinstance(refused, dict) and refused.get("headline"):
+        gate = refused["headline"].get("gate")
+        if any(c.get("evidence", {}).get("run") == gate
+               for c in committed.get("claims", [])):
+            problems.append("a committed claim quotes the refused headline")
+    commit = committed.get("checker", {}).get("compiler_commit", "")
+    if not re.fullmatch(r"src/revl@sha256:[0-9a-f]{12}", str(commit)):
+        problems.append(
+            f"checker.compiler_commit is {commit!r}, not a content digest of "
+            f"src/revl; a commit sha moves on every regeneration")
+    return problems
 
 
 def corpus_models(run: str) -> list:
@@ -1427,8 +1498,10 @@ def render(report: dict) -> str:
                 f"**{refused['fail_open_programs']}**.")
         lines += ["",
                   "The full inventory, with the named documents and the gate",
-                  "behind each count, is `refusals.json` beside this file and",
-                  "is regenerated by `python3 bench/refusal_inventory.py`.", ""]
+                  "behind each count, is printed by",
+                  "`python3 bench/refusal_inventory.py`.", ""]
+    elif refused.get("status") == SNAPSHOT_REFUSED["status"]:
+        lines += [textwrap.fill(refused["why"], width=70), ""]
     else:
         lines += ["The inventory could not be read. Sections unavailable: "
                   + ", ".join(sorted(refused.get("unavailable", {}))), ""]
@@ -1458,6 +1531,10 @@ def render(report: dict) -> str:
         lines.append(
             f"| **refused** | 0 (TypeScript compiles everything) | {fw()} | "
             f"**{head['documents_refused']} / {head['corpus']}** |")
+    elif refused.get("status") == SNAPSHOT_REFUSED["status"]:
+        lines.append(
+            f"| **refused** | 0 (TypeScript compiles everything) | {fw()} | "
+            f"recomputed, see above |")
     admits = cols["admits"]
     if admits.get("status") == "measured":
         best = max(admits["by_variant"].items(), key=lambda kv: kv[1]["n"])
@@ -1661,14 +1738,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.write:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        (OUT_DIR / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-        (OUT_DIR / "report.md").write_text(render(report))
-        inv = report["columns"]["refused"].get("inventory")
-        if inv:
-            (OUT_DIR / "refusals.json").write_text(json.dumps(inv, indent=2) + "\n")
-            (OUT_DIR / "refusals.md").write_text(refusal_inventory.render(inv))
-        print(f"wrote {_rel(OUT_DIR)}/report.json, report.md, "
-              "refusals.json, refusals.md")
+        frozen = snapshot(report)
+        (OUT_DIR / "report.json").write_text(json.dumps(frozen, indent=2) + "\n")
+        (OUT_DIR / "report.md").write_text(render(frozen))
+        print(f"wrote {_rel(OUT_DIR)}/report.json, report.md (the refused "
+              "column is recomputed on every build and not committed)")
     elif args.json:
         print(json.dumps(report, indent=2))
     else:

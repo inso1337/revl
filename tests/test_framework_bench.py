@@ -1029,17 +1029,105 @@ def test_the_committed_report_is_what_the_documented_command_reproduces():
             f"a default names {label}, which is not committed")
 
 
-def test_the_committed_report_headline_agrees_with_a_fresh_recompute():
+def test_the_built_report_headline_agrees_with_a_fresh_recompute(report):
     """The refused column is the headline and it is recomputed from ledgers
-    that move. A committed artifact whose headline no longer matches the tree
-    is a published number nobody can reproduce."""
-    committed = json.loads(COMMITTED_REPORT.read_text())["columns"]["refused"]
+    that move, so the report this module builds carries the recompute. Since
+    issue #1768 the committed snapshot carries no copy of it to go stale (the
+    next test), which is why this is asserted on the built report."""
+    built = report["columns"]["refused"]
     section = refusal_inventory.build()["sections"]["native-chain-residual"]
-    assert committed["headline"]["documents_refused"] == section["total_residual"]
-    assert committed["headline"]["corpus"] == section["total_corpus"]
-    assert committed["headline"]["n"] == section["total_corpus"]
-    assert committed["headline"]["per_tier"] == {
+    assert built["headline"]["documents_refused"] == section["total_residual"]
+    assert built["headline"]["corpus"] == section["total_corpus"]
+    assert built["headline"]["n"] == section["total_corpus"]
+    assert built["headline"]["per_tier"] == {
         tier: body["residual"] for tier, body in section["tiers"].items()}
+
+
+def test_the_committed_snapshot_holds_no_number_a_fix_pull_request_moves():
+    """Issue #1768. The committed report used to freeze the refused column,
+    whose counts come from `LOWER_GAP_DOCS`, the self-host corpora and the
+    blind-spot ledger, and a test held that copy current. So every fix pull
+    request that moved one of those ledgers rewrote the whole report,
+    including its `compiler commit` line (`git rev-parse HEAD`), and any two
+    of them conflicted. The snapshot now carries the command instead of the
+    numbers, and names the scoring compiler by content."""
+    committed = json.loads(COMMITTED_REPORT.read_text())
+    assert framework_bench.snapshot_problems(committed) == []
+    text = (BENCH / "results" / "framework-bench" / "report.md").read_text()
+    assert "recomputed" in text and "bench/refusal_inventory.py" in text
+    import re  # noqa: PLC0415
+    assert not re.search(r"\b[0-9a-f]{40}\b", text), (
+        "report.md names a commit sha")
+    for stale in ("refusals.json", "refusals.md"):
+        assert not (BENCH / "results" / "framework-bench" / stale).exists(), (
+            f"{stale} is a frozen copy of the recomputed column")
+
+
+def test_a_snapshot_with_a_frozen_column_fails_the_check(report):
+    """The check bites on exactly the layout it replaced: the built report,
+    committed as it was before #1768, has a frozen column, a claim quoting it
+    and (once a commit sha is put back) a commit for a compiler."""
+    old = json.loads(json.dumps(report))
+    old["checker"]["compiler_commit"] = "74c9094472f15bd2ce35b0801fa258f309366a7a"
+    problems = framework_bench.snapshot_problems(old)
+    assert len(problems) == 3, problems
+    assert framework_bench.snapshot_problems(framework_bench.snapshot(report)) == []
+
+
+def test_two_ledger_moves_leave_the_snapshot_unchanged(report, monkeypatch):
+    """Two fix pull requests that each move a ledger the refused column reads
+    produce the same snapshot, so neither has a reason to touch the committed
+    report and they cannot conflict in it. Before #1768 each one's report
+    differed in the headline, the per-tier table and the claim."""
+    frozen = framework_bench.snapshot(report)
+    moved = json.loads(json.dumps(report))
+    head = moved["columns"]["refused"]["headline"]
+    head["documents_refused"] += 1
+    head["corpus"] += 2
+    moved["columns"]["refused"]["unported_constructs"] = 999
+    assert framework_bench.snapshot(moved) == frozen
+    assert framework_bench.render(framework_bench.snapshot(moved)) == \
+        framework_bench.render(frozen)
+
+
+def test_two_fix_pull_requests_merge_in_the_bench_snapshot(report):
+    """The exit test of issue #1768 for this file, through `git merge-tree`.
+    Two fix pull requests each move a ledger the refused column reads and
+    regenerate. In the layout this replaces their reports differ in the
+    headline, the per-tier rows, the claim and the commit line, and conflict.
+    In the snapshot neither changes anything."""
+    from _merge_tree import git_has_merge_tree, merge  # noqa: PLC0415
+    if not git_has_merge_tree():
+        pytest.skip("git merge-tree --write-tree needs git 2.38")
+
+    def moved(by: int, sha: str | None = None) -> dict:
+        out = json.loads(json.dumps(report))
+        head = out["columns"]["refused"]["headline"]
+        head["documents_refused"] += by
+        head["corpus"] += by
+        out["claims"][0]["text"] += f" ({by})"
+        if sha is not None:  # the old layout stamped `git rev-parse HEAD`
+            out["checker"]["compiler_commit"] = sha
+        return out
+
+    def files(r: dict) -> dict:
+        return {"report.json": json.dumps(r, indent=2) + "\n",
+                "report.md": framework_bench.render(r)}
+
+    base, left, right = moved(0, "a" * 40), moved(1, "b" * 40), moved(2, "c" * 40)
+    clean, conflicted = merge(files(base), files(left), files(right))
+    assert not clean and sorted(conflicted) == ["report.json", "report.md"]
+    snap = framework_bench.snapshot
+    assert snap(moved(1)) == snap(moved(2)) == snap(moved(0))
+    clean, conflicted = merge(files(snap(moved(0))), files(snap(moved(1))),
+                              files(snap(moved(2))))
+    assert clean, conflicted
+
+
+def test_the_scoring_compiler_is_named_by_content():
+    digest = framework_bench.compiler_digest()
+    assert digest.startswith("src/revl@sha256:") and len(digest) == 28
+    assert digest == framework_bench.compiler_digest()
 
 
 def test_the_bench_runner_is_the_one_in_bench_and_not_a_namesake():

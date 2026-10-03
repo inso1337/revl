@@ -488,7 +488,8 @@ roughly nine minutes each on a contended machine.
   plus the markdown table, and validates itself with
   `tools/check_eval_report.py` under `--check`.
 - `bench/results/framework-bench/`: the committed artifacts, raw beside the
-  summary.
+  summary. Since issue #1768 `report.{json,md}` there is a snapshot that does
+  not freeze the refused column, which is recomputed on every build.
 - `tests/test_framework_bench.py`: the tests.
 
 Nothing is published outside this repository. Publication is a named remaining
