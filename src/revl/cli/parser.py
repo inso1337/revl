@@ -20,6 +20,106 @@ BUNDLE_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
 REPLAY_MODES = ("exact", "tool-only", "model-substitute", "counterfactual")
 
 
+def _add_exposure_arguments(sub) -> None:
+    """The listener options every revl HTTP server shares (issue #1463,
+    `revl.mcp.http_guard`): TLS, and the Host and Origin allowlists."""
+    sub.add_argument("--tls-cert", default=None, metavar="PEM",
+                     help="serve HTTPS with this certificate chain (with "
+                          "--tls-key). Required to listen on any address "
+                          "other than loopback")
+    sub.add_argument("--tls-key", default=None, metavar="PEM",
+                     help="the private key for --tls-cert")
+    sub.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                     help="a Host header value to answer besides the bind "
+                          "address (repeatable); a request naming any other "
+                          "host is refused, which is what stops DNS rebinding")
+    sub.add_argument("--allow-origin", action="append", default=[],
+                     metavar="ORIGIN",
+                     help="a browser origin that may call this server, exactly "
+                          "(repeatable). A request with any other Origin header "
+                          "is refused; one with no Origin is not a browser page")
+
+
+def _add_profile_settle_argument(sub) -> None:
+    sub.add_argument("--profile-settle-ms", type=int, default=1000, metavar="MS",
+                     help="adopt an edited --operator-profile only once it reads "
+                          "identical twice this far apart (default: 1000). "
+                          "Requests are refused while it settles, except "
+                          "revl_estop. 0 removes the protection against "
+                          "adopting a half-written file")
+
+
+def _add_mcp_http_arguments(sub) -> None:
+    """`--http HOST:PORT` and its identity options for `revl mcp serve` and
+    `revl mcp proxy` (docs/mcp-http-transport.md)."""
+    sub.add_argument("--http", default=None, metavar="HOST:PORT",
+                     help="serve MCP 2026-07-28 Streamable HTTP at "
+                          "http(s)://HOST:PORT/mcp instead of stdio. Needs "
+                          "--operator-profile: every request is bound to one of "
+                          "its operators")
+    sub.add_argument("--auth", default="bearer", choices=("bearer", "mtls"),
+                     help="how an HTTP caller proves which operator it is: a "
+                          "bearer secret whose SHA-256 is the operator's `key "
+                          "sha256:` line (default), or a client certificate "
+                          "whose commonName is the operator token (needs "
+                          "--tls-client-ca)")
+    sub.add_argument("--tls-client-ca", default=None, metavar="PEM",
+                     help="require a client certificate signed by this CA "
+                          "(mutual TLS, --auth mtls)")
+    _add_exposure_arguments(sub)
+
+
+def _add_serve_operator_arguments(serve) -> None:
+    """`revl serve --http`'s approval policy and its operator listener (issue
+    #1553, design 569 C2). The app face keeps its own exposure options; the
+    operator listener has its own, and never an `--allow-origin`."""
+    serve.add_argument("--approval-policy", default=None, metavar="MODE",
+                       choices=("auto",),
+                       help="--http: load the auto-approve policy (item 246) on "
+                            "the served session, so a class-(c) crossing an app "
+                            "request reaches is held with a ticket instead of "
+                            "firing. The app caller gets `pending_approval` and "
+                            "the ticket id; an operator answers it on "
+                            "--operator-listen. Omit for no policy")
+    serve.add_argument("--refuse-ungated-emissions", action="store_true",
+                       help="--http: while no approval policy is loaded, refuse "
+                            "by name (403 `ungated_emission`) an app request that "
+                            "reaches a class-(c) crossing, instead of letting it "
+                            "fire unapproved. Opt-in; with --approval-policy the "
+                            "policy holds such a crossing instead")
+    serve.add_argument("--operator-listen", default=None, metavar="HOST:PORT",
+                       help="--http: also serve operators, on a second address, "
+                            "over the MCP HTTP transport at /mcp against the same "
+                            "session (E-Stop, and approve or revoke the tickets "
+                            "the face hands out). Needs --operator-profile; never "
+                            "the app face's port, never a browser origin")
+    serve.add_argument("--operator-profile", default=None, metavar="PROFILE",
+                       help="the operator profile every request on "
+                            "--operator-listen authenticates against and is "
+                            "gated by (item 55); re-read when it changes")
+    serve.add_argument("--operator-auth", default="bearer",
+                       choices=("bearer", "mtls"),
+                       help="how an operator proves who it is on "
+                            "--operator-listen: a bearer secret whose SHA-256 is "
+                            "its `key sha256:` line (default), or a client "
+                            "certificate whose commonName is its token (needs "
+                            "--operator-tls-client-ca)")
+    serve.add_argument("--operator-tls-cert", default=None, metavar="PEM",
+                       help="serve the operator listener over HTTPS with this "
+                            "certificate chain (with --operator-tls-key). "
+                            "Required off loopback")
+    serve.add_argument("--operator-tls-key", default=None, metavar="PEM",
+                       help="the private key for --operator-tls-cert")
+    serve.add_argument("--operator-tls-client-ca", default=None, metavar="PEM",
+                       help="require an operator client certificate signed by "
+                            "this CA (mutual TLS, --operator-auth mtls)")
+    serve.add_argument("--operator-allow-host", action="append", default=[],
+                       metavar="NAME",
+                       help="a Host header value the operator listener answers "
+                            "besides its bind address (repeatable)")
+    _add_profile_settle_argument(serve)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
     parser = argparse.ArgumentParser(prog="revl")
@@ -969,6 +1069,8 @@ def build_parser() -> argparse.ArgumentParser:
                                 "`registry`) may name (repeatable). Defaults to "
                                 "the directory the server was started in; anything "
                                 "outside is refused before it is read")
+    _add_mcp_http_arguments(mcp_serve)
+    _add_profile_settle_argument(mcp_serve)
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -1028,6 +1130,8 @@ def build_parser() -> argparse.ArgumentParser:
                            help="whether an approved crossing's caller-supplied "
                                 "resource value is written to the durable approval "
                                 "log (default: withheld)")
+    _add_mcp_http_arguments(mcp_proxy)
+    _add_profile_settle_argument(mcp_proxy)
 
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")
@@ -1320,6 +1424,7 @@ def build_parser() -> argparse.ArgumentParser:
                             "it is not exposed off-host by default)")
     serve.add_argument("--port", type=int, default=8080, metavar="PORT",
                        help="--http bind port (default: 8080)")
+    _add_exposure_arguments(serve)
     serve.add_argument("--config", default=None,
                        help="TOML/JSON file of `component-name = { ... }` config "
                             "tables — supplied to each component at boot")
@@ -1329,6 +1434,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="tool/route-name prefix (MCP tools are "
                             "`<prefix>.<key>.<op>`; HTTP routes are "
                             "`/<prefix>/<key>/<op>`)")
+    _add_serve_operator_arguments(serve)
 
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")

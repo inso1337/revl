@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import os
 
+from ..errors import RevlError
+
 from .adapter import Adapter, read_credential
 from .completion import Completion, CompletionRequest
 from .config import (Binding, ProviderConfig, ProviderConfigError,
@@ -47,7 +49,8 @@ __all__ = [
     "load_config",
     "missing_credentials", "model_keys", "model_operations", "open_hosts",
     "parse_config", "placement_of_files", "placement_of_program",
-    "provision_residue", "provision_summaries", "read_credential", "redact",
+    "provision_residue", "provision_summaries", "read_credential",
+    "rebind_problem", "redact",
     "request_json",
 ]
 
@@ -76,6 +79,38 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
             "not set: " + ", ".join(f"`{env}` (role `{role}`)"
                                     for role, env in missing))
     return hosts
+
+
+def rebind_problem(ir, files, config_path, hosts) -> str | None:
+    """Why the model hosts bound at boot cannot serve an edited composition,
+    or None when they can (issue #1569).
+
+    A `revl run --watch` reload keeps the model hosts, and any member a
+    provision loaded, instead of rebuilding them. So an edit is accepted only
+    when the configuration, read again and checked against the edited
+    program, yields exactly the hosts already bound: the same keys, services,
+    operations, roles and bindings. Anything else is refused and the running
+    generation is left as it was, because a host checked against the old
+    program would otherwise serve the new one unchecked.
+    """
+    try:
+        fresh = bind_for_run(ir, files, config_path)
+    except (ProviderConfigError, PlacementRefused, ProviderError, RevlError,
+            OSError) as exc:
+        return (f"the provider configuration does not admit the edited "
+                f"composition: {exc}")
+    if _host_shape(fresh) != _host_shape(hosts):
+        return ("the edit changes the model hosts the composition needs "
+                "(keys, operations, roles or bindings); `--providers` binds "
+                "them at boot, so restart the run to rebind them")
+    return None
+
+
+def _host_shape(hosts) -> dict:
+    return {key: (host._revl_service,
+                  {method: (op, adapter.binding)
+                   for method, (op, adapter) in host._revl_routes.items()})
+            for key, host in hosts.items()}
 
 
 def describe_hosts(hosts) -> list:

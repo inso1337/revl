@@ -1,0 +1,499 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Ops": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        },
+        "site": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        },
+        "bound": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        },
+        "returned": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        },
+        "argument": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        },
+        "nested": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "SiteAbort",
+      "source": "backends/go/scenarios/extern_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "note",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "s"
+              }
+            ]
+          },
+          "compensate": {
+            "kind": "fn",
+            "name": "restore_row",
+            "args": []
+          }
+        },
+        {
+          "step": "fail",
+          "message": {
+            "kind": "lit",
+            "value": "boom"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ExternOk",
+      "source": "backends/go/scenarios/extern_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "put_row",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "y"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ExternAbort",
+      "source": "backends/go/scenarios/extern_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "put_row",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "y"
+              }
+            ]
+          }
+        },
+        {
+          "step": "fail",
+          "message": {
+            "kind": "lit",
+            "value": "boom"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Agent",
+      "source": "backends/go/scenarios/extern_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_row",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "x"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "site",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "note",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "x"
+                      }
+                    ]
+                  },
+                  "compensate": {
+                    "kind": "fn",
+                    "name": "restore_row",
+                    "args": []
+                  }
+                }
+              ]
+            },
+            {
+              "name": "bound",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "a",
+                  "value": {
+                    "kind": "fn",
+                    "name": "put_row",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "x"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "a"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "returned",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_row",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "x"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "argument",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "s",
+                  "value": {
+                    "kind": "fn",
+                    "name": "keep",
+                    "args": [
+                      {
+                        "kind": "fn",
+                        "name": "put_row",
+                        "args": [
+                          {
+                            "kind": "name",
+                            "id": "x"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "s"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "nested",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "b",
+                  "value": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "fn",
+                      "name": "put_row",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "b"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Beat",
+      "source": "backends/go/scenarios/extern_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "timer",
+          "mode": "every",
+          "interval_ms": 10000,
+          "body": [
+            {
+              "step": "emit",
+              "expr": {
+                "kind": "fn",
+                "name": "put_row",
+                "args": [
+                  {
+                    "kind": "lit",
+                    "value": "x"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "SiteAbort",
+        "file": "backends/go/scenarios/extern_compensate.rvl",
+        "inject": [],
+        "provides": []
+      },
+      {
+        "name": "ExternOk",
+        "file": "backends/go/scenarios/extern_compensate.rvl",
+        "inject": [],
+        "provides": []
+      },
+      {
+        "name": "ExternAbort",
+        "file": "backends/go/scenarios/extern_compensate.rvl",
+        "inject": [],
+        "provides": []
+      },
+      {
+        "name": "Agent",
+        "file": "backends/go/scenarios/extern_compensate.rvl",
+        "inject": [],
+        "provides": [
+          "ops"
+        ]
+      },
+      {
+        "name": "Beat",
+        "file": "backends/go/scenarios/extern_compensate.rvl",
+        "inject": [],
+        "provides": []
+      }
+    ],
+    "loadOrder": [
+      "SiteAbort",
+      "ExternOk",
+      "ExternAbort",
+      "Agent",
+      "Beat"
+    ]
+  },
+  "externs": [
+    {
+      "name": "put_row",
+      "class": "emission",
+      "params": [
+        {
+          "name": "body",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put \" + body)\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "restore_row"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "restore_row",
+      "class": "emission",
+      "params": [],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"restore\")\n\treturn 0\n"
+      }
+    },
+    {
+      "name": "note",
+      "class": "emission",
+      "params": [
+        {
+          "name": "body",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"note \" + body)\n\treturn 1\n"
+      }
+    },
+    {
+      "name": "keep",
+      "class": "pure",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\treturn n\n"
+      }
+    }
+  ],
+  "tests": [
+    {
+      "name": "clean unload of an un-called agent leaves no residue",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "Agent",
+          "config": {}
+        },
+        {
+          "step": "unload",
+          "component": "Agent"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    }
+  ]
+}
