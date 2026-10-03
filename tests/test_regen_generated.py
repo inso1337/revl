@@ -71,10 +71,10 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
 def _registry(repo: Path, **extra) -> Path:
     data = {
         "registry": [
-            {"name": "toy", "paths": ["out.txt"], "whole": True,
+            {"name": "toy", "paths": ["out.txt"], "merge": "theirs",
              "write": [{"run": ["{python}", "gen.py"]}],
              "check": [{"run": ["{python}", "gen.py", "--check"]}]},
-            {"name": "part", "paths": ["notes.md"], "whole": False,
+            {"name": "part", "paths": ["notes.md"], "merge": "three-way",
              "write": [{"run": ["{python}", "part.py"]}],
              "check": [{"run": ["{python}", "part.py", "--check"]}]},
         ],
@@ -242,7 +242,7 @@ def test_bench_results_take_mains_side_with_the_flag(repo):
 
 
 def test_a_generator_whose_tool_is_missing_is_skipped_loudly(repo):
-    more = [{"name": "needs-tool", "paths": ["never.txt"], "whole": True,
+    more = [{"name": "needs-tool", "paths": ["never.txt"], "merge": "theirs",
              "requires": ["definitely-not-a-real-tool-1784"],
              "write": [{"run": ["definitely-not-a-real-tool-1784"]}],
              "check": [{"run": ["definitely-not-a-real-tool-1784", "--check"]}]}]
@@ -262,6 +262,196 @@ def test_a_failing_check_is_reported(repo):
     assert "FAILED: toy check" in result.stdout
 
 
+# rec.py: the OLD layout writes old.json from src.txt; once records/README
+# exists (the NEW layout) it writes records/a.jsonl instead
+REC = '''import json, os, sys
+rows = open("src.txt").read().splitlines()
+new = os.path.exists("records/README")
+path, want = (("records/a.jsonl", "".join(json.dumps(r) + "\\n" for r in rows))
+              if new else ("old.json", json.dumps(rows) + "\\n"))
+if "--check" in sys.argv:
+    sys.exit(0 if open(path).read() == want else 1)
+open(path, "w").write(want)
+'''
+
+
+def _layout_repo(tmp_path, main_moves: bool) -> Path:
+    """`feature` changes src.txt and regenerates old.json. `main` changes
+    src.txt too and, when `main_moves`, moves the output to the records
+    layout: old.json deleted, records/ added. The merge conflicts on old.json
+    (modify/delete when main moved it)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "rec.py").write_text(REC, encoding="utf-8")
+    (repo / "src.txt").write_text("a\nm\nn\nb\n", encoding="utf-8")
+    (repo / "old.md").write_text("generated page 0\n", encoding="utf-8")
+    subprocess.run([sys.executable, "rec.py"], cwd=repo, check=True)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "src.txt").write_text("a-feature\nm\nn\nb\n", encoding="utf-8")
+    (repo / "old.md").write_text("generated page 1\n", encoding="utf-8")
+    subprocess.run([sys.executable, "rec.py"], cwd=repo, check=True)
+    _git(repo, "commit", "-q", "-am", "feature")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "src.txt").write_text("a\nm\nn\nb-main\n", encoding="utf-8")
+    if main_moves:
+        _git(repo, "rm", "-q", "old.json")
+        (repo / "records").mkdir()
+        (repo / "records" / "README").write_text("records\n", encoding="utf-8")
+        (repo / "old.md").write_text("a hand-written page now\n", encoding="utf-8")
+    else:
+        (repo / "old.md").write_text("generated page 2\n", encoding="utf-8")
+    subprocess.run([sys.executable, "rec.py"], cwd=repo, check=True)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "main")
+    _git(repo, "checkout", "-q", "feature")
+    assert _git(repo, "merge", "main", check=False).returncode != 0
+    assert "old.json" in _unmerged(repo)
+    return repo
+
+
+def _layout_registry(repo: Path, before: dict) -> Path:
+    data = {
+        "registry": [{"name": "rec", "paths": ["records/*"], "merge": "theirs",
+                      "write": [{"run": ["{python}", "rec.py"]}],
+                      "check": [{"run": ["{python}", "rec.py", "--check"]}]}],
+        "transitions": [{"paths": ["old.json", "old.md"], "marker": "records/README",
+                         "group": "rec", "before": before}],
+    }
+    path = repo.parent / "registry.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def test_a_file_main_moved_to_a_new_layout_takes_the_deletion_and_regenerates(tmp_path):
+    """The one-time modify/delete conflict every branch cut before a layout
+    move hits: main's deletion is taken and the new layout regenerated from
+    the merged inputs."""
+    repo = _layout_repo(tmp_path, main_moves=True)
+    result = _tool(repo, _layout_registry(repo, {"group": "rec"}))
+    assert result.returncode == 0, result.stdout
+    assert not _unmerged(repo)
+    assert not (repo / "old.json").exists()
+    records = (repo / "records" / "a.jsonl").read_text(encoding="utf-8")
+    assert records == '"a-feature"\n"m"\n"n"\n"b-main"\n'
+    assert "old.json: main moved it to a new layout (deleted on main)" in result.stdout
+    # the page main put in place of a generated file is main's, as written
+    assert (repo / "old.md").read_text() == "a hand-written page now\n"
+    assert "old.md: main moved it to a new layout (replaced on main)" in result.stdout
+    staged = _git(repo, "diff", "--cached", "--name-status").stdout
+    assert "records/a.jsonl" in staged
+
+
+def test_before_main_moves_the_old_file_is_still_its_generators(tmp_path):
+    repo = _layout_repo(tmp_path, main_moves=False)
+    result = _tool(repo, _layout_registry(repo, {"group": "rec"}))
+    assert result.returncode == 0, result.stdout
+    assert json.loads((repo / "old.json").read_text()) == ["a-feature", "m", "n", "b-main"]
+
+
+def test_before_main_moves_a_hand_file_keeps_its_rule(tmp_path):
+    repo = _layout_repo(tmp_path, main_moves=False)
+    result = _tool(repo, _layout_registry(repo, {"rule": "edit it by hand"}))
+    assert result.returncode == 1
+    assert "old.json" in _unmerged(repo)
+    assert "HAND-MAINTAINED" in result.stdout and "edit it by hand" in result.stdout
+
+
+# fix.py reads through conflict markers itself (keeps every record once,
+# sorted) and its check refuses a record whose budget is still null
+FIX = '''import sys
+lines = open("led.jsonl").read().splitlines()
+keep = sorted({l for l in lines if l and not l.startswith(("<<<<<<<", "=======", ">>>>>>>"))})
+if "--check" in sys.argv:
+    sys.exit(1 if any("null" in l for l in keep) else 0)
+open("led.jsonl", "w").write("".join(l + "\\n" for l in keep))
+'''
+
+
+def _in_place_repo(tmp_path, feature_row: str) -> tuple:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "fix.py").write_text(FIX, encoding="utf-8")
+    (repo / "led.jsonl").write_text('["f1", 1]\n', encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    for branch, row in (("feature", feature_row), ("main", '["f3", 3]')):
+        _git(repo, "checkout", "-q", *(["-b", "feature"] if branch == "feature" else ["main"]))
+        (repo / "led.jsonl").write_text('["f1", 1]\n' + row + "\n", encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", branch)
+    _git(repo, "checkout", "-q", "feature")
+    assert _git(repo, "merge", "main", check=False).returncode != 0
+    data = {"registry": [{"name": "led", "paths": ["led.jsonl"], "merge": "in-place",
+                          "write": [{"run": ["{python}", "fix.py"]}],
+                          "check": [{"run": ["{python}", "fix.py", "--check"]}],
+                          "hint": "set the null budget by hand"}]}
+    registry = repo.parent / "registry.json"
+    registry.write_text(json.dumps(data), encoding="utf-8")
+    return repo, registry
+
+
+def test_an_in_place_generator_resolves_its_own_conflict_markers(tmp_path):
+    repo, registry = _in_place_repo(tmp_path, '["f2", 2]')
+    result = _tool(repo, registry)
+    assert result.returncode == 0, result.stdout
+    assert not _unmerged(repo)
+    assert (repo / "led.jsonl").read_text() == '["f1", 1]\n["f2", 2]\n["f3", 3]\n'
+
+
+def test_an_in_place_check_failure_prints_the_hand_step(tmp_path):
+    repo, registry = _in_place_repo(tmp_path, '["f2", null]')
+    result = _tool(repo, registry)
+    assert result.returncode == 1
+    assert not _unmerged(repo)                      # resolved and staged...
+    assert "FAILED: led check" in result.stdout     # ...but a budget is owed
+    assert "set the null budget by hand" in result.stdout
+
+
+def test_an_in_place_generator_that_did_not_run_leaves_the_conflict(tmp_path):
+    repo, registry = _in_place_repo(tmp_path, '["f2", 2]')
+    data = json.loads(registry.read_text())
+    data["registry"][0]["write"][0]["slow"] = True
+    registry.write_text(json.dumps(data), encoding="utf-8")
+    result = _tool(repo, registry, "--fast")
+    assert result.returncode == 1
+    assert "led.jsonl" in _unmerged(repo)
+    assert "still has conflict markers" in result.stdout
+
+
+def test_a_generator_whose_layout_is_absent_does_not_run(repo):
+    more = [{"name": "later", "paths": ["later/*.jsonl"], "merge": "in-place",
+             "when": "later/README",
+             "write": [{"run": ["{python}", "-c", "raise SystemExit(3)"]}],
+             "check": [{"run": ["{python}", "-c", "raise SystemExit(3)"]}]}]
+    result = _tool(repo, _registry(repo, more=more), "--only", "later")
+    assert "predates the layout" in result.stdout
+    assert "later write" not in result.stdout and "later check" not in result.stdout
+
+
+def test_bench_takes_mains_deletion_with_the_flag(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "bench" / "results").mkdir(parents=True)
+    (repo / "bench" / "results" / "gone.json").write_text("{}\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "bench" / "results" / "gone.json").write_text('{"f": 1}\n', encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "feature")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "rm", "-q", "bench/results/gone.json")
+    _git(repo, "commit", "-q", "-m", "main")
+    _git(repo, "checkout", "-q", "feature")
+    assert _git(repo, "merge", "main", check=False).returncode != 0
+    result = _tool(repo, _registry(repo), "--bench", "--no-check")
+    assert not _unmerged(repo), result.stdout
+    assert not (repo / "bench" / "results" / "gone.json").exists()
+
+
 def test_outside_a_merge_it_needs_an_explicit_selection(tmp_path):
     repo = tmp_path / "plain"
     repo.mkdir()
@@ -274,10 +464,11 @@ def test_the_real_registry_lists_every_generator_in_dependency_order():
     result = subprocess.run([sys.executable, str(TOOL), "--list"], cwd=ROOT,
                             capture_output=True, text=True, check=True)
     names = [line.split(" ", 1)[0] for line in result.stdout.splitlines()
-             if line and not line.startswith((" ", "hand-maintained", "left alone"))]
+             if line and not line.startswith((" ", "hand-maintained", "left alone", "layout move"))]
     assert names == ["gate-crates", "grammar", "provenance", "census", "formal",
-                     "conformance", "docgen"]
-    assert "tests/fixtures/selfhost_uncovered_lines.json" in result.stdout
+                     "conformance", "ledger", "docgen"]
+    assert "layout move: tests/fixtures/selfhost_uncovered_lines.json -> ledger" in result.stdout
+    assert "layout move: docs/census-artifact.json, docs/census-artifact.md -> census" in result.stdout
     assert "left alone unless --bench: bench/results/*" in result.stdout
 
 
@@ -299,3 +490,29 @@ def test_the_real_registry_names_tools_and_files_that_exist():
     for entry in tool.HAND:
         for path in entry["paths"]:
             assert (ROOT / path).is_file(), path
+
+
+def test_a_generator_reruns_the_ones_it_feeds(repo):
+    """Regenerating an input reruns the generator that reads it: `--only toy`
+    with toy feeding `part` regenerates both."""
+    registry = _registry(repo)
+    data = json.loads(registry.read_text())
+    data["registry"][0]["feeds"] = ["part"]
+    registry.write_text(json.dumps(data), encoding="utf-8")
+    result = _tool(repo, registry, "--only", "toy", "--no-check")
+    assert "part: reads what this run regenerates, so it reruns too" in result.stdout
+    assert "part write: " in result.stdout
+
+
+def test_the_real_provenance_generator_feeds_the_census():
+    sys.path.insert(0, str(ROOT / "tools"))
+    try:
+        import regen_generated as tool
+    finally:
+        sys.path.pop(0)
+    names = [g["name"] for g in tool.REGISTRY]
+    for group in tool.REGISTRY:
+        for fed in group.get("feeds", ()):
+            assert names.index(fed) > names.index(group["name"]), (group["name"], fed)
+    provenance = next(g for g in tool.REGISTRY if g["name"] == "provenance")
+    assert "census" in provenance["feeds"]

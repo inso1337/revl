@@ -21,10 +21,16 @@ This tool does exactly that, and nothing a generator does not do:
   results are merged with `git merge-file`. The hand-written text merges like
   any text; a real conflict in it stays a conflict, with the generated region
   already fresh. Neither side's prose is ever dropped.
+* A file whose generator reads through conflict markers itself (the coverage
+  ledger since issue #1768) is handed to that generator as it stands. Only the
+  numbers a person owns are left: the ledger's per-function budgets, which its
+  `--check` names.
 * Hand-maintained ratchets are never resolved. A conflict in one is printed
-  with the rule for resolving it by hand. The coverage ledger is the case
-  that matters: its counts are per function and are moved one at a time from
-  `tools/selfhost_line_coverage.py --check`, never regenerated wholesale.
+  with the rule for resolving it by hand.
+* When main has moved a generated file to a new layout (one file split into
+  records, say), every branch cut before that hits a one-time modify/delete
+  conflict on the old file. `TRANSITIONS` names those moves: main's side is
+  taken (usually the deletion) and the new layout is regenerated.
 * `bench/results/` is left alone unless `--bench` is passed.
 * A generator whose tool is missing (`lake`, `cargo`) is skipped LOUDLY, and
   the files it owns are left as they are.
@@ -54,9 +60,15 @@ import subprocess
 import sys
 import tempfile
 
-# Each generator: the files it owns (globs, repo-relative), whether they are
-# WHOLLY generated, the commands that regenerate them in order, and the
-# commands that check them. `{python}` is this interpreter, `{tmp}` a scratch
+# Each generator: the files it owns (globs, repo-relative), how a conflict in
+# one is merged, the commands that regenerate them in order, and the commands
+# that check them. `merge` is "theirs" (wholly generated: take main's side,
+# regenerate), "three-way" (partly generated: regenerate each side, merge the
+# results) or "in-place" (the generator resolves the conflict markers itself).
+# `when` names a path that must exist in the merged tree for the generator to
+# run (a layout it only knows from a given commit on); `hint` is printed when
+# its check fails; `feeds` names the later generators that read this one's
+# output, so regenerating it reruns them too. `{python}` is this interpreter, `{tmp}` a scratch
 # directory, `{generation}` the --provenance-generation value. A step may name
 # `requires` (executables that must be on PATH), `cwd` (relative to the repo
 # root), `needs` (a path that must exist, usually an earlier step's output)
@@ -67,7 +79,7 @@ REGISTRY = [
     {
         "name": "gate-crates",
         "paths": ["crates/revl-gate/*", "crates/revl-gate-wasm/*"],
-        "whole": True,
+        "merge": "theirs",
         "write": [{"run": ["{python}", "tools/build_gate_crate.py"]},
                   {"run": ["{python}", "tools/build_gate_wasm.py"]}],
         "check": [{"run": ["{python}", "tools/build_gate_crate.py", "--check"]},
@@ -76,7 +88,7 @@ REGISTRY = [
     {
         "name": "grammar",
         "paths": ["grammar/revl.lark", "grammar/revl.gbnf", "grammar/revl.ebnf"],
-        "whole": True,
+        "merge": "theirs",
         "write": [{"run": ["{python}", "-m", "revl", "grammar", "--write"]}],
         "check": [{"run": ["{python}", "-m", "revl", "grammar", "--check"]}],
     },
@@ -85,17 +97,26 @@ REGISTRY = [
         "paths": ["tests/fixtures/corpus_provenance.json"],
         # main's declarations plus this branch's new documents, re-declared at
         # the generation the author names: there is deliberately no default.
-        "whole": False,
+        "merge": "three-way",
         "option": "provenance_generation",
+        # the census pins the manifest and reports its table
+        "feeds": ["census"],
         "write": [{"run": ["{python}", "tools/corpus_provenance.py", "--write",
                            "--generation", "{generation}"]}],
         "check": [{"run": ["{python}", "tools/corpus_provenance.py", "--check"]}],
+        "hint": "an UNDECLARED document is one this branch added without a "
+                "generation. Declare it with `python3 tools/regen_generated.py "
+                "--only provenance --provenance-generation N` (N is the "
+                "generation that authored it; the manifest's other documents "
+                "show which is current).",
     },
     {
         "name": "census",
-        "paths": ["docs/census-artifact.json", "docs/census-artifact.md",
+        # the records layout of issue #1768; the single json + md before it is
+        # in TRANSITIONS
+        "paths": ["docs/census-artifact/*",
                   "tests/fixtures/census_crate_reproduction.json"],
-        "whole": True,
+        "merge": "theirs",
         "write": [
             {"run": ["{python}", "tools/gate_reference_census.py", "--engine",
                      "crate", "--check", "--no-provenance", "--json",
@@ -112,7 +133,7 @@ REGISTRY = [
     {
         "name": "formal",
         "paths": ["formal/STATUS.md"],
-        "whole": False,
+        "merge": "three-way",
         "requires": ["lake"],
         "write": [{"run": ["lake", "build"], "cwd": "formal"},
                   {"run": ["{python}", "formal/harness/diff_corpus.py",
@@ -125,9 +146,25 @@ REGISTRY = [
     {
         "name": "conformance",
         "paths": ["README.md", "docs/conformance.md"],
-        "whole": False,
+        "merge": "three-way",
         "write": [{"run": ["{python}", "tools/conformance.py", "--write-readme"]}],
         "check": [{"run": ["{python}", "tools/conformance.py", "--check-readme"]}],
+    },
+    {
+        "name": "ledger",
+        # per half and tier since issue #1768; the single json before it was
+        # hand-maintained, see TRANSITIONS
+        "paths": ["tests/fixtures/selfhost_uncovered_lines/*/*.jsonl"],
+        "merge": "in-place",
+        "when": "tests/fixtures/selfhost_uncovered_lines/README.md",
+        "write": [{"run": ["{python}", "tools/selfhost_line_coverage.py",
+                           "--write"], "slow": True}],
+        "check": [{"run": ["{python}", "tools/selfhost_line_coverage.py",
+                           "--check"], "slow": True}],
+        "hint": "`--write` re-measured every count but never writes a budget. "
+                "Each function the check names needs its budget (the last "
+                "field of its record) set BY HAND to the merged count, in this "
+                "merge commit. Lower is the goal; a raised budget needs a reason.",
     },
     {
         "name": "docgen",
@@ -136,7 +173,7 @@ REGISTRY = [
                   "docs/commands-reference.md", "docs/rejections.md",
                   "DESIGN.md", "docs/guide-humans.md", "docs/vision.md",
                   "docs/selfhost-compile.md", "docs/selfhost-findings.md"],
-        "whole": False,
+        "merge": "three-way",
         "write": [{"run": ["{python}", "tools/docgen.py", "--write"]}],
         "check": [{"run": ["{python}", "tools/docgen.py", "--check"]}],
     },
@@ -144,13 +181,6 @@ REGISTRY = [
 
 # Hand-maintained files that look generated and are not. Never resolved here.
 HAND = [
-    {"paths": ["tests/fixtures/selfhost_uncovered_lines.json"],
-     "rule": "the coverage ledger is hand-maintained PER FUNCTION. Take main's "
-             "side (`git checkout --theirs -- <file>`), run "
-             "`python3 tools/selfhost_line_coverage.py --check`, and move only "
-             "the counts it names, lowering `_budget` by exactly what you close. "
-             "Never `--write` it wholesale, and keep any reason key this branch "
-             "edited."},
     {"paths": ["tests/fixtures/selfhost_blind_spots.json",
                "tests/fixtures/oracle_construct_reach_ledger.json"],
      "rule": "a hand-recorded construct ratchet. Take main's side, then re-add "
@@ -160,6 +190,29 @@ HAND = [
 ]
 
 BENCH = ["bench/results/*"]
+
+LEDGER_RULE = ("the coverage ledger is hand-maintained PER FUNCTION. Take main's "
+               "side (`git checkout --theirs -- <file>`), run "
+               "`python3 tools/selfhost_line_coverage.py --check`, and move only "
+               "the counts it names, lowering `_budget` by exactly what you "
+               "close. Never `--write` it wholesale, and keep any reason key this "
+               "branch edited.")
+
+# A generated file main has moved to a new layout. `marker` is a path only the
+# new layout has. Main without it: the old paths are still current and belong
+# to `before` (a generator name, or a hand rule). Main with it and the merge
+# base without it: this merge crosses the move once, so main's side of the old
+# paths is taken (the deletion, or the page that replaced the file) and
+# `group` regenerates the new layout. Both with it: the move is history and the
+# old paths are ordinary files (`docs/census-artifact.md` is hand-written now).
+TRANSITIONS = [
+    {"paths": ["docs/census-artifact.json", "docs/census-artifact.md"],
+     "marker": "docs/census-artifact/cases.jsonl",
+     "group": "census", "before": {"group": "census"}},
+    {"paths": ["tests/fixtures/selfhost_uncovered_lines.json"],
+     "marker": "tests/fixtures/selfhost_uncovered_lines/README.md",
+     "group": "ledger", "before": {"rule": LEDGER_RULE}},
+]
 
 
 # ------------------------------------------------------------------ git
@@ -194,6 +247,52 @@ def _stage_text(root: str, path: str, stage: int) -> str | None:
     result = subprocess.run(["git", "-C", root, "show", f":{stage}:{path}"],
                             capture_output=True, text=True)
     return result.stdout if result.returncode == 0 else None
+
+
+def _has_path(root: str, rev: str | None, path: str) -> bool:
+    if rev is None:
+        return False
+    return bool(_git(root, "ls-tree", "--name-only", rev, "--", path,
+                     check=False).strip())
+
+
+def _merge_base(root: str) -> str | None:
+    result = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "MERGE_HEAD"],
+                            capture_output=True, text=True)
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+# -------------------------------------------------------------- layouts
+
+def _apply_transitions(registry, hand, transitions, root: str, merging: bool):
+    """The registry and hand list for the layout main is at, plus the paths
+    this merge moves across a layout change: {path: group name}."""
+    registry = [dict(g, paths=list(g["paths"])) for g in registry]
+    hand = list(hand)
+    moving: dict = {}
+    main_rev = "MERGE_HEAD" if merging else "HEAD"
+    base_rev = _merge_base(root) if merging else None
+    for move in transitions:
+        on_main = _has_path(root, main_rev, move["marker"])
+        if not on_main:
+            before = move["before"]
+            if "rule" in before:
+                hand.append({"paths": move["paths"], "rule": before["rule"]})
+            else:
+                owner = next(g for g in registry if g["name"] == before["group"])
+                owner["paths"] += move["paths"]
+        elif merging and not _has_path(root, base_rev, move["marker"]):
+            for path in move["paths"]:
+                moving[path] = move["group"]
+    return registry, hand, moving
+
+
+def _cross_layout(root: str, path: str, group: str) -> None:
+    """Take main's side of a file main moved to a new layout."""
+    gone = _stage_text(root, path, 3) is None
+    _take_theirs(root, path)
+    _say(f"{path}: main moved it to a new layout ({'deleted' if gone else 'replaced'}"
+         f" on main); took main's side, {group} regenerates the new files")
 
 
 # ------------------------------------------------------------- matching
@@ -275,7 +374,20 @@ def _run_step(step: dict, ctx: Context, label: str) -> bool | None:
     return True
 
 
+def _absent_layout(group: dict, ctx: Context) -> str | None:
+    """The `when` path this tree lacks, so the generator does not apply."""
+    when = group.get("when")
+    if when and not os.path.exists(os.path.join(ctx.root, when)):
+        return when
+    return None
+
+
 def _group_runnable(group: dict, ctx: Context) -> bool:
+    absent = _absent_layout(group, ctx)
+    if absent:
+        _say(f"{group['name']}: this tree has no {absent}, so it predates the "
+             f"layout this generator writes; not run")
+        return False
     missing = _missing(group)
     if missing:
         _loud(f"{group['name']}: {' '.join(missing)} is not installed, so "
@@ -302,6 +414,8 @@ def _regenerate(group: dict, ctx: Context) -> bool:
 
 
 def _check(group: dict, ctx: Context) -> bool | None:
+    if _absent_layout(group, ctx):
+        return None
     if _missing(group):
         _loud(f"{group['name']} check: {' '.join(_missing(group))} is not "
               f"installed")
@@ -309,6 +423,8 @@ def _check(group: dict, ctx: Context) -> bool | None:
     results = [_run_step(step, ctx, f"{group['name']} check")
                for step in group["check"]]
     if any(r is False for r in results):
+        if group.get("hint"):
+            _say(f"{group['name']} check: {group['hint']}")
         return False
     return None if all(r is None for r in results) else True
 
@@ -316,7 +432,12 @@ def _check(group: dict, ctx: Context) -> bool | None:
 # --------------------------------------------------------- resolution
 
 def _take_theirs(root: str, path: str) -> None:
+    """Main's side of `path`, staged; main's deletion when main deleted it."""
+    if _stage_text(root, path, 3) is None:
+        _git(root, "rm", "-q", "--force", "--", path)
+        return
     _git(root, "checkout", "--theirs", "--", path)
+    _git(root, "add", "--", path)
 
 
 def _write(root: str, path: str, text: str | None) -> None:
@@ -390,17 +511,43 @@ def _resolve_partial(group: dict, paths: list, ctx: Context) -> list:
     return left
 
 
+def _has_markers(text: str) -> bool:
+    return any(line.startswith(("<<<<<<< ", ">>>>>>> ")) or line == "======="
+               for line in text.splitlines())
+
+
+def _resolve_in_place(group: dict, paths: list, ctx: Context) -> list:
+    """Hand the conflicted `paths` to a generator that reads through conflict
+    markers; return the paths it left marked (or did not get to run on)."""
+    if not _regenerate(group, ctx):
+        _say(f"{group['name']}: a generator failed; {', '.join(paths)} restored "
+             f"to their conflicted state")
+        return _restore(ctx.root, paths)
+    left = []
+    for path in paths:
+        if _has_markers(_read(ctx.root, path)):
+            _say(f"{path}: still has conflict markers (its generator did not "
+                 f"run, see above); left for you")
+            left.append(path)
+            continue
+        _git(ctx.root, "add", "-A", "--", path)
+    return left
+
+
 def _restore(root: str, paths: list) -> list:
     for path in paths:
-        _git(root, "checkout", "-m", "--", path)
+        # a path main deleted has no conflict to recreate; it stays deleted
+        _git(root, "checkout", "-m", "--", path, check=False)
     return list(paths)
 
 
 def _resolve_group(group: dict, paths: list, ctx: Context) -> list:
     """Resolve `paths` (all owned by `group`) and stage them; return the paths
     left in conflict."""
-    if not group["whole"]:
+    if group["merge"] == "three-way":
         return _resolve_partial(group, paths, ctx)
+    if group["merge"] == "in-place":
+        return _resolve_in_place(group, paths, ctx)
     for path in paths:
         _take_theirs(ctx.root, path)
     if not _regenerate(group, ctx):
@@ -408,7 +555,8 @@ def _resolve_group(group: dict, paths: list, ctx: Context) -> list:
              f"to their conflicted state")
         return _restore(ctx.root, paths)
     for path in paths:
-        _git(ctx.root, "add", "--", path)
+        if os.path.exists(os.path.join(ctx.root, path)):
+            _git(ctx.root, "add", "--", path)
     return []
 
 
@@ -452,29 +600,32 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--list", action="store_true",
                     help="print the generators and hand-maintained files, then exit")
     ap.add_argument("--registry", metavar="FILE",
-                    help="a JSON {registry, hand, bench} replacing the built-in "
+                    help="a JSON {registry, hand, transitions, bench} replacing the built-in "
                          "tables (for tests and experiments)")
     return ap
 
 
 def _tables(args):
     if not args.registry:
-        return REGISTRY, HAND, BENCH
+        return REGISTRY, HAND, TRANSITIONS, BENCH
     with open(args.registry, encoding="utf-8") as handle:
         data = json.load(handle)
-    return data.get("registry", []), data.get("hand", []), data.get("bench", [])
+    return (data.get("registry", []), data.get("hand", []),
+            data.get("transitions", []), data.get("bench", []))
 
 
-def _list(registry, hand, bench) -> int:
+def _list(registry, hand, transitions, bench) -> int:
     for group in registry:
-        kind = "whole" if group["whole"] else "partly generated"
-        print(f"{group['name']} ({kind}): {', '.join(group['paths'])}")
+        print(f"{group['name']} ({group['merge']}): {', '.join(group['paths'])}")
         for step in group["write"]:
             print(f"    write: {' '.join(step['run'])}")
         for step in group["check"]:
             print(f"    check: {' '.join(step['run'])}")
     for entry in hand:
         print(f"hand-maintained: {', '.join(entry['paths'])}")
+    for move in transitions:
+        print(f"layout move: {', '.join(move['paths'])} -> {move['group']} "
+              f"once main has {move['marker']}")
     print(f"left alone unless --bench: {', '.join(bench)}")
     return 0
 
@@ -485,9 +636,9 @@ def _report_hand(path: str, rule: str) -> None:
 
 def main(argv: list | None = None) -> int:
     args = _parser().parse_args(argv)
-    registry, hand, bench = _tables(args)
+    registry, hand, transitions, bench = _tables(args)
     if args.list:
-        return _list(registry, hand, bench)
+        return _list(registry, hand, transitions, bench)
     names = {g["name"] for g in registry}
     unknown = sorted(set(args.only) - names)
     if unknown:
@@ -502,9 +653,15 @@ def main(argv: list | None = None) -> int:
              "anyway")
         return 2
 
+    registry, hand, moving = _apply_transitions(registry, hand, transitions,
+                                                root, merging)
     left: list = []
     by_group: dict = {}
     for path in conflicted:
+        if path in moving:
+            _cross_layout(root, path, moving[path])
+            by_group.setdefault(moving[path], [])
+            continue
         rule = _hand_rule(path, hand)
         if rule is not None:
             _report_hand(path, rule)
@@ -513,7 +670,6 @@ def main(argv: list | None = None) -> int:
         if _matches(path, bench):
             if args.bench:
                 _take_theirs(root, path)
-                _git(root, "add", "--", path)
                 _say(f"{path}: took main's side (--bench)")
             else:
                 _say(f"{path}: under bench/results/, left in conflict "
@@ -522,14 +678,14 @@ def main(argv: list | None = None) -> int:
             continue
         group = _owner(path, registry)
         if group is None:
-            _say(f"{path}: not a generated file; resolve it by hand")
+            gone = _stage_text(root, path, 3) is None
+            _say(f"{path}: not a generated file; resolve it by hand"
+                 + (" (main deleted it and this branch changed it)" if gone else ""))
             left.append(path)
             continue
         by_group.setdefault(group["name"], []).append(path)
 
-    selected = [g for g in registry
-                if (args.all or g["name"] in args.only or g["name"] in by_group)
-                and (not args.only or g["name"] in args.only)]
+    selected = _select(registry, args, by_group)
     failed: list = []
     with tempfile.TemporaryDirectory(prefix="regen-generated-") as tmp:
         ctx = Context(root, sys.executable, tmp, args)
@@ -552,6 +708,26 @@ def main(argv: list | None = None) -> int:
 
     _summary(left, failed, merging)
     return 1 if (left or failed) else 0
+
+
+def _select(registry, args, by_group: dict) -> list:
+    """The generators to run, in registry order: every one with a conflict
+    (or named by --only, or all of them), plus every generator a selected one
+    `feeds`, since its output is now stale. --only limits the first set, never
+    the second."""
+    asked = {g["name"] for g in registry
+             if args.all or g["name"] in args.only
+             or (not args.only and g["name"] in by_group)}
+    wanted = set(asked)
+    while True:
+        fed = {name for g in registry if g["name"] in wanted
+               for name in g.get("feeds", ())}
+        if fed <= wanted:
+            break
+        wanted |= fed
+    for name in sorted(wanted - asked):
+        _say(f"{name}: reads what this run regenerates, so it reruns too")
+    return [g for g in registry if g["name"] in wanted]
 
 
 def _summary(left: list, failed: list, merging: bool) -> None:
