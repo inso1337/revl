@@ -107,9 +107,17 @@ is a named function so that the assertion "the coverage matches
 - `cert.gate_steps` and `cert.gate_theorems` read the numbered steps and the
   `RevL.*` / `RevLOracle.*` theorem lists of `formal/scripts/run_gate.sh`, plus
   the axiom policy the gate states.
-- `cert.oracle_census`, `cert.injection_proofs` and `cert.injection_sweep` read
-  the oracle census, the injection table and the mutation sweep paragraph out of
-  `formal/STATUS.md`.
+- `cert.injection_proofs` and `cert.injection_sweep` read the injection table
+  and the mutation sweep paragraph out of `formal/STATUS.md`.
+  `cert.oracle_census` asks `formal/harness/diff_corpus.py --census-json` for the
+  oracle census, the files, components and statements the differential row
+  covers and the verdicts it compares. It used to parse them out of the census
+  paragraph that harness rendered into `formal/STATUS.md`; since issue #1768 that
+  block stores no count that moves with the corpus, and the run is the stronger
+  source anyway, because a document can hold a count the corpus no longer
+  produces. The agreement half (`N agree, 0 mismatches`) is the formal gate's,
+  which fails on any mismatch, exactly as the rendered paragraph's was. A package
+  with no harness beside it, or a run that measures nothing, is a refusal.
 
 `cert.certifiable(state, guarantees)` is the gate on the build side. It refuses
 to produce a certificate whose statuses are asserted rather than checked: a

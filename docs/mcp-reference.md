@@ -225,6 +225,35 @@ nothing and carries no undo field.
 
 ---
 
+## Effect classes in compile, admit and edit answers
+
+The approval policy decides each call on its checked effect class, the worst
+over the call's whole reach (see the class table in
+[harness-gate-guide.md](harness-gate-guide.md)). Every verb that compiles,
+admits or edits reports it, so a change of class is never discovered by the
+first `approvalRequired`:
+
+- `effectClasses` (on `revl_check`, `revl_admit`, `revl_plan`, `revl_ship`,
+  `revl_load`, `revl_swap` and `revl_edit`): one entry per provided operation,
+  `{key, method, component, class, raisedBy}`. `class` is `a`, `b`, `c`, or
+  null for an operation that touches no boundary. `raisedBy` lists the
+  crossings at that class, each with a `text` such as
+  ``"`emit stage.stage` in Agent"``.
+- `effectClassChanges` (on `revl_admit`, `revl_plan`, `revl_ship`, `revl_swap`
+  and `revl_edit`): every operation whose class differs from the running
+  composition, `{key, method, component, before, after}`. An operation added
+  by the candidate has `before: null`; one it withdraws has `after: null`.
+- `effectClassWarnings` (same verbs): one `EFFECT_CLASS_ROSE` entry for every
+  operation whose class ROSE, with `before`, `after`, the `crossings` that
+  raised it (the ones at the new class the old reach did not have) and a
+  `message`. A class that stays the same or falls is not warned about.
+
+`revl_admit` and `revl_plan` measure the diff against `manifest` (`revl_plan`
+falls back to the loaded session); `revl_swap` and `revl_edit` measure it
+against the running composition. The report reads the same class map the
+per-call decision reads, so the two cannot disagree, and it is computed whether
+or not an approval policy is on.
+
 ## Author and admit
 
 ### `revl_check`
