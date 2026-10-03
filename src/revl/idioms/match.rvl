@@ -1,0 +1,7 @@
+// idiom: match
+// summary: branch on an `Opt` or a sum type with `match`
+// rule: T1: every arm has the same type, and the arms cover every case
+// rule: T2: absence is `Opt[T]`: match `Some(x)` and `None`, never compare with `null`
+// fill: match o { Some(n) => n, None => 0 }
+
+fn or_zero(o: Opt[Int]) -> Int = match o { Some(n) => n, None => 0 }

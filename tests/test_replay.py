@@ -59,6 +59,19 @@ import replay  # noqa: E402
 import runtime as runtime_mod  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _runtime_gate_open():
+    """These tests pin what each handler answers by itself (an argument check,
+    an empty session, a rejected snapshot), so they hold the issue #1692
+    runtime gate open. A cordis-less server refuses those verbs before the
+    handler runs; tests/test_mcp_runtime_gate_1692.py tests that."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_runtime_available(True)
+    yield
+    server_mod.set_runtime_available(None)
+
+
 # --------------------------------------------------------------------- sources
 
 USER_CACHE = (ROOT / "examples" / "user_cache.rvl").read_text(encoding="utf-8")
@@ -781,7 +794,10 @@ def test_replay_tools_say_recording_must_be_switched_on_at_load(
 
 
 def test_replay_tools_validate_their_arguments():
-    assert _call("revl_step_back", {})["diagnostics"][0]["message"].startswith("`to`")
+    # with no arguments at all, step_back reverts the last session change
+    # (issue #1703); naming a component without `to` still requires it
+    assert _call("revl_step_back", {"component": "C"})["diagnostics"][0][
+        "message"].startswith("`to`")
     assert _call("revl_inspect_step", {})["diagnostics"][0]["message"].startswith("`at`")
     assert _call("revl_replay_forward", {})["diagnostics"][0]["message"].startswith("`from`")
     assert _call("revl_replay_bisect", {})["diagnostics"][0]["message"].startswith("`assert`")

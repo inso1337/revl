@@ -118,13 +118,13 @@ of the toolchain already trusts; the generator is the only new code.
   "admissible": false,
   "obligations": [
     {"code": "T3", "expected": "AnalysisResource", "line": 15, "message": "…",
-     "fillSpec": {"expected": "AnalysisResource",
+     "fillSpec": {"version": 2, "expected": "AnalysisResource", "grammarCategory": "expression",
                   "capability": {"permitsCrossing": false, "mayEmit": false,
                                  "bound": [], "reason": "…"},
                   "crossing": {"permitted": false, "required": false, …},
                   "bindings": [], "reachableServices": []}},
     {"code": "T3", "expected": "Str", "line": 19, "message": "…",
-     "fillSpec": {"expected": "Str",
+     "fillSpec": {"version": 2, "expected": "Str", "grammarCategory": "expression",
                   "capability": {"permitsCrossing": true, "mayEmit": true,
                                  "bound": ["filesystem"],
                                  "reason": "an emission-declared provide-method scoped to filesystem"},
@@ -140,3 +140,20 @@ of the toolchain already trusts; the generator is the only new code.
 `admissible` is the standing verdict: a scaffold with open holes never is. An
 agent reads the skeleton, fills one hole against its spec, re-checks, and
 repeats until `holeCount` reaches zero.
+
+An emission method bound to two or more capabilities is not one hole: the
+scaffold writes one `let <token>_step = hole[T] "the crossing through
+<token>, if any; a pure value otherwise"` per capability, then `return
+hole[T] "the result of <method>, from the steps above"`, so each obligation
+is one sentence (issue #1660, [holes.md](holes.md) §8 `split`). The stub
+services carry no operations yet, so the scaffold splits by the bound it
+declares, and each step takes the method's return type.
+
+`unfillable` (present only when there is one) lists the holes the requesting
+author can never fill, `{line, expected, reason}` each, read off each fill
+spec's `fillable` ([holes.md](holes.md) §8). Through `revl_scaffold` under the
+default authoring trust, the effect scaffolding's resource hole is one: its
+type is a handle only host code builds, and an untrusted author may neither
+declare nor reach an extern (G8). It is flagged here so the agent asks the
+operator for a granted service or for host-code trust instead of spending its
+budget on a hole it cannot fill; `--no-effect` scaffolds without it.

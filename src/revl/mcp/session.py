@@ -51,6 +51,24 @@ class SessionError(RuntimeError):
         self.code = code
 
 
+class NothingLoaded(SessionError):
+    """A verb that acts on the running composition, called with nothing loaded.
+    Typed so the MCP surface can answer it with the reload that works
+    (`revl.mcp.remedy.load_next`, issue #1691) instead of parsing the prose."""
+
+
+def _note_spend(spends: list | None, entry: dict, use: int, ticket: dict) -> None:
+    """Remember one per-call spend so `Session.call` can write its
+    `approval-emission` once the crossing returns (issue #1781)."""
+    if spends is None:
+        return
+    capability = entry.get("capability") or ",".join(
+        ticket.get("classCCapabilities") or ticket.get("capabilities") or [])
+    spends.append({"requestId": entry["requestId"], "use": use,
+                   "capability": capability,
+                   "component": ticket.get("component")})
+
+
 class ApprovalRefused(SessionError):
     """A class-(c) crossing whose pending ticket an operator answered NO
     (`revl_revoke` with the ticket `hash`, issue #1553). Raised once, on the
@@ -364,8 +382,14 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     # so restoring it would hand a failed load a fresh budget every time.
     "_tickets", "_ticket_rounds", "_ticket_refusals", "_ledger", "_grants",
     "_grants_consumed",
+    # issue #1781: the per-id spend index rides with the spends it numbers
+    "_spend_uses",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
     "_quorums", "_quorum_receipts",
+    # The agent-loop axes (issue #1738). They count what the session did,
+    # refusals included, and a count that a failed load could take back would
+    # be one an agent can lower on demand.
+    "_loop_axes",
     # The event loop the load ran on. It is plumbing, not composition state, and
     # putting back `None` would orphan an open loop rather than undo anything.
     "_loop",
@@ -408,6 +432,7 @@ class _LoadCheckpoint:
                 self._contents[name] = contents
         self._bridges = [(bridge, bridge.current())
                          for bridge in (admit_bridge, reflect_bridge)]
+        self.had_no_loop = self._namespace.get("_loop") is None
 
     def restore(self, session: "Session") -> None:
         live = vars(session)
@@ -447,6 +472,9 @@ class _SwapPlan:
     pre: dict
     handoff_pre: dict
     pre_resolved: set
+    # issue #1751: the components gen N was ALREADY running PENDING (an unmet
+    # requirement, e.g. an ambient host service this host does not supply)
+    pre_pending: frozenset = frozenset()
 
 
 def _container_copy(value):
@@ -473,6 +501,12 @@ def _emitter_refused(refusal: BaseException) -> "SessionError":
     """The py emitter's refusal, as the `SessionError` the transport reports
     as `category: "session"` (issue #1406)."""
     return SessionError(f"the py emitter refused this composition: {refusal}")
+
+
+def _close_abandoned_loop(loop) -> None:
+    """Close the event loop of a Session that was collected (issue #1720)."""
+    if not loop.is_closed() and not loop.is_running():
+        loop.close()
 
 
 def _backend():
@@ -663,6 +697,12 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #1781: how many times each approval `requestId` has been spent
+        # in this session. Every `approval-consumed` and `approval-emission`
+        # record the session writes carries `use`, the 1-based index from here,
+        # so `(requestId, use)` names one spend of a multi-use grant. Never reset
+        # while the session lives, so an index never repeats for an id.
+        self._spend_uses: dict = {}
         # roadmap 425 F3 / 427 F5: whether a CALLER-SUPPLIED resource valuation
         # may be written into the durable, cross-session approval WAL when a
         # crossing is approved. "withheld" (the DEFAULT) records it as UNRECORDED
@@ -689,6 +729,14 @@ class Session:
         # at every load/swap so a call decided against a stale map is impossible.
         # None when nothing is loaded or the policy is off.
         self._class_map = None
+        # issue #1738: the agent-loop axes `state()` always reports. Cumulative
+        # for the whole MCP session, so `_reset` leaves them alone, and a failed
+        # load does not roll them back (`_SURVIVES_A_FAILED_LOAD`). The class map
+        # they classify a call against when the policy is off is built lazily
+        # per generation, `(generation, map)`.
+        from .loop_axes import LoopAxes  # noqa: PLC0415
+        self._loop_axes = LoopAxes()
+        self._loop_class_map: tuple | None = None
         # the outstanding-ticket table (Fix 8): every class-(c) ticket the server
         # issues, keyed by its hash. `revl_approve` refuses a hash not in here —
         # an approval can only be minted for a question the server actually asked.
@@ -924,7 +972,46 @@ class Session:
     def _run(self, coro):
         if self._loop is None:
             self._loop = asyncio.new_event_loop()
+            # a session dropped while still loaded never reaches `_reset`;
+            # close its loop when it is collected rather than leave that to
+            # the loop's own finalizer and its ResourceWarning (issue #1720)
+            weakref.finalize(self, _close_abandoned_loop, self._loop)
         return self._loop.run_until_complete(coro)
+
+    def _close_loop(self) -> None:
+        """Close the event loop a torn-down session ran on (issue #1720).
+
+        An event loop holds descriptors (its selector and the self-pipe socket
+        pair), and nothing closed this one: every Session that ever loaded kept
+        three open for the life of the process. A long-running server that loads
+        and unloads, and the test suite, grew by three per session. The next
+        `load` opens a fresh loop through `_run`. Pending tasks are cancelled
+        first: with nothing loaded there is nothing for them to finish, and a
+        later `_run` would otherwise resume them against the next generation.
+        A loop still running (a teardown offloaded to a thread that has not
+        returned) is left alone; it is not ours to close yet."""
+        loop = self._loop
+        if loop is None or loop.is_closed() or loop.is_running():
+            return
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        if asyncio._get_running_loop() is not None:
+            # torn down from a coroutine on the HOST loop (`aclose`, `aabort`):
+            # this thread cannot drive a second loop, so a loop with work
+            # still pending is left to the finalizer, and an idle one closes
+            if not pending:
+                self._loop = None
+                loop.close()
+            return
+        self._loop = None
+        try:
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
 
     @property
     def loaded(self) -> bool:
@@ -941,7 +1028,7 @@ class Session:
                 "parent is retired at k and non-callable; the branch is the only "
                 "live continuation over the shared workspace (item 250)")
         if self._driver is None:
-            raise SessionError("nothing is loaded — call revl_load first")
+            raise NothingLoaded("nothing is loaded — call revl_load first")
         return self._driver
 
     # -- lifecycle ---------------------------------------------------------
@@ -963,6 +1050,10 @@ class Session:
             return self._boot(ir, config, record, origin)
         except BaseException as exc:
             checkpoint.restore(self)
+            if checkpoint.had_no_loop and self._driver is None:
+                # issue #1720: the failed load opened the loop; put that back
+                # too, so a refused load leaves no descriptor behind either
+                self._close_loop()
             _name_the_candidate(exc, ir)
             raise
 
@@ -1641,8 +1732,14 @@ class Session:
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
         pre_resolved = set(driver.resolved_keys())
+        # issue #1751: and the components it was running PENDING, so the gate
+        # does not hold the successor to a health its predecessor never had
+        pre_pending = frozenset(
+            name for name, fiber in driver.fibers.items()
+            if driver.FiberState(fiber.state).name == "PENDING")
         return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
-                         handoff_pre=handoff_pre, pre_resolved=pre_resolved)
+                         handoff_pre=handoff_pre, pre_resolved=pre_resolved,
+                         pre_pending=pre_pending)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
@@ -1692,7 +1789,8 @@ class Session:
             # opposite of the revert guarantee. So assert the successor activated
             # CLEANLY and, if not, raise into the `_activation_error` branch below,
             # which routes to `_abort_swap` (revert to gen N, keep serving gen N).
-            self._assert_successor_activated(ir, plan.pre_resolved)
+            self._assert_successor_activated(ir, plan.pre_resolved,
+                                             plan.pre_pending)
         except BaseException as exc:
             # item 372: the successor's activation did not complete — roll the
             # whole swap back to the predecessor (which activated cleanly) so the
@@ -1954,7 +2052,8 @@ class Session:
                         pass
 
     def _assert_successor_activated(self, ir: dict,
-                                    pre_resolved: set | None = None) -> None:
+                                    pre_resolved: set | None = None,
+                                    pre_pending: frozenset | None = None) -> None:
         """The item-334 post-activation health gate (EDGE 1).
 
         `driver._load` returns cleanly even when the successor did not truly come
@@ -1997,6 +2096,17 @@ class Session:
         and `Gate.propose` both report the smaller set honestly). What it may
         not do is claim a key it inherited and deliver nothing.
 
+        A component gen N was ALREADY running PENDING (`pre_pending`, issue
+        #1751) may come back PENDING: the swap does not make it worse, and
+        refusing it made a composition with one legitimately pending component
+        (an ambient host service this host does not supply, as
+        `examples/app/notes.rvl`'s `NotesConsole` needs `webui`) impossible to
+        swap at all, even to itself. Its root keys are not held against the
+        successor either, since gen N never served them. Everything else stands:
+        a FAILED fiber, a component that was ACTIVE and comes back PENDING, a
+        new component that comes up PENDING, and a key gen N served that no
+        longer resolves are all refused.
+
         On any failure, raise `ActivationError` so the enclosing `swap` catches it
         in its `_activation_error()` branch and routes to `_abort_swap` — reverting
         to gen N exactly as a raised activation fault does. `_dispose_all` in the
@@ -2005,9 +2115,14 @@ class Session:
         as part of the rollback (the 245 owner was installed before this load)."""
         ActivationError = _activation_error()
         driver = self._driver
-        # 1) no successor fiber may be FAILED or PENDING.
+        # 1) no successor fiber may be FAILED or PENDING, except one that was
+        #    already PENDING in gen N (issue #1751).
+        still_pending = set()
         for name, fiber in driver.fibers.items():
             state = driver.FiberState(fiber.state).name
+            if state == "PENDING" and name in (pre_pending or ()):
+                still_pending.add(name)
+                continue
             if state in ("FAILED", "PENDING"):
                 comp = next((c for c in (ir.get("components") or [])
                              if c.get("name") == name), {})
@@ -2031,7 +2146,7 @@ class Session:
         for comp in (ir.get("components") or []):
             keys = set((comp.get("provides") or {}).keys())
             declared_all |= keys
-            if comp.get("name") not in templates:
+            if comp.get("name") not in templates and comp.get("name") not in still_pending:
                 declared_root |= keys
         inherited = declared_all & set(pre_resolved or ())
         resolved = driver.resolved_keys()
@@ -2709,10 +2824,11 @@ class Session:
         # not a crash — the undo never bypasses admission.
         from ..errors import RevlError  # noqa: PLC0415
         from ..diagnostics import classify  # noqa: PLC0415
-        from .persist import _origin_from, _recompile  # noqa: PLC0415
+        from .persist import _origin_from, _recompile, admitted_name  # noqa: PLC0415
 
         try:
-            target_ir = _recompile(target["snapshot"]["sources"])
+            target_ir = _recompile(target["snapshot"]["sources"],
+                                   admitted_name(target["snapshot"]))
         except RevlError as error:
             diag = classify(error)
             return {
@@ -3563,6 +3679,7 @@ class Session:
         result = owner.finalize_abort()            # aborted record (+ escrow Phase 2)
         self._close_wal()
         residue = self._surface_compensation_residue(owner)
+        self._loop_axes.record_abort(residue)      # issue #1738
         report = self._teardown_report(driver)
         prompts = dict(owner.prompts)
         self._reset()
@@ -4251,8 +4368,9 @@ class Session:
             self.recorder.wal.close()
 
     def _close_wal(self) -> None:
-        if self.recorder is not None and self.recorder.wal is not None:
-            self.recorder.wal.close()
+        wal = self.recorder.wal if self.recorder is not None else None
+        if wal is not None and getattr(wal, "is_open", True):
+            wal.close()
 
     def _reset(self) -> None:
         if self._driver is not None:
@@ -4273,12 +4391,21 @@ class Session:
         # trace the measurement reads lives on the driver.
         self._seal_generation()
         self._driver = None
+        self._close_loop()
+        # issue #1720: a plain unload left the generation's WAL file open, and
+        # the next `load` opens a new recorder and log, so every recorded load
+        # leaked one descriptor. Every record is already flushed and fsync'd,
+        # so closing changes nothing on disk; a closed log reads as absent to
+        # `_approval_wal`, exactly as after `commit_confirm` or `abort`.
+        self._close_wal()
         # the teardown boundary is the last generation boundary this session will
         # see, so settle any approval the outgoing generation spent before the
         # owner that recorded the spend is dropped — otherwise a fresh `load`
         # seeds the next owner from an entry still reading `consumed: False` and
         # a single-use approval re-arms across the unload.
         self._settle_approval_spend(self._owner)
+        # issue #1738: the commit session ends here; keep its prompt tally.
+        self._loop_axes.close_owner(self._owner)
         self._owner = None
         self.ir = None
         self.previous = None
@@ -4897,7 +5024,12 @@ class Session:
         # `decision` records which authority the miss consumed, so the stored entry
         # binds to THAT grant/approval (not any that could have covered).
         decision: dict | None = {} if cache_active else None
-        self._approval_decide_call(key, method, args, record=decision)
+        spends: list = []
+        self._approval_decide_call(key, method, args, record=decision,
+                                   spends=spends)
+        # issue #1738: the call is decided and about to cross, so it counts
+        # toward the loop axes now, policy or not.
+        self._loop_axes.record_call(self._loop_call_class(key, method))
 
         async def invoke():
             result = target(*(args or []))
@@ -4928,6 +5060,10 @@ class Session:
             runtime_mod.clear_session_owner()
             if self.recorder is not None:
                 self.recorder.activation_origin()
+        # issue #1781: the crossing returned, so each spend that authorized it
+        # gets its emission record (a raise above leaves the spend unmatched)
+        if spends:
+            self._record_spend_emissions(spends)
         # item 330: a per-turn source admitted through the in-language crossing
         # DURING this call was queued (the loop was busy); wire it now the call
         # has returned and the loop is free — the turn's keys become callable and
@@ -5377,15 +5513,37 @@ class Session:
             return True
         return False
 
-    def _consume_approval(self, entry: dict) -> None:
+    def _consume_approval(self, entry: dict) -> int:
         """Spend the token durably BEFORE the crossing fires (Decision 3,
         consume-before-fire). A crash between the spend and the fire leaves
         consumed-but-unfired: fail-closed, a fresh approval is demanded."""
         entry["consumed"] = True
+        use = self._next_spend_use(entry["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(entry["requestId"])
+            wal.record_approval_consumed(entry["requestId"], use=use)
         self._mint_admission_receipt(entry)
+        return use
+
+    def _next_spend_use(self, request_id: str) -> int:
+        """The 1-based index of the spend about to be recorded for `request_id`
+        (issue #1781)."""
+        use = self._spend_uses.get(request_id, 0) + 1
+        self._spend_uses[request_id] = use
+        return use
+
+    def _record_spend_emissions(self, spends: list) -> None:
+        """After the crossing a per-call spend authorized has returned, write
+        one `approval-emission` per spend, naming the same `requestId` and `use`
+        as its `approval-consumed` (issue #1781). Not called when the call
+        raised: that spend stays unmatched on the record, which reads as owed
+        or ambiguous, never as fired."""
+        wal = self._approval_wal()
+        if wal is None:
+            return
+        for spend in spends:
+            wal.record_approval_emission(spend["requestId"], spend["capability"],
+                                         spend["component"], use=spend["use"])
 
     # -- item 204: the two-phase spend the activation gate walks under --------
     #
@@ -5499,8 +5657,9 @@ class Session:
             elif release["kind"] == "auto":
                 self._auto_consumed += 1
                 self._persist_auto_spend(record)
+            use = self._next_spend_use(record["requestId"])
             if wal is not None:
-                wal.record_approval_consumed(record["requestId"])
+                wal.record_approval_consumed(record["requestId"], use=use)
             if release["kind"] == "approval":
                 # item 471 Slice 2: the activation gate's two-phase spend is a
                 # spend, so it mints the admission receipt too. Without this the
@@ -5523,7 +5682,8 @@ class Session:
             owner.approvals[bucket] += 1
 
     def _approval_decide_call(self, key: str, method: str, args,
-                              record: dict | None = None) -> None:
+                              record: dict | None = None,
+                              spends: list | None = None) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and
@@ -5576,7 +5736,8 @@ class Session:
             raise ApprovalRefused(ticket, refusal)
         standing = self._find_standing_approval(ticket)
         if standing is not None:
-            self._consume_approval(standing)   # durable spend before the fire
+            use = self._consume_approval(standing)   # durable spend before fire
+            _note_spend(spends, standing, use, ticket)
             if record is not None:
                 record["scope"] = ("approval", standing["requestId"])
                 record["approvalExpiresAt"] = standing.get("expiresAt")
@@ -5588,7 +5749,8 @@ class Session:
         grants = self._find_standing_grant(ticket)
         if grants is not None:
             for g in grants:                   # every class-(c) cap is covered
-                self._consume_grant(g)         # durable spend before the fire
+                use = self._consume_grant(g)   # durable spend before the fire
+                _note_spend(spends, g, use, ticket)
             if record is not None:
                 record["scope"] = ("grants", [g["requestId"] for g in grants])
             return
@@ -5599,7 +5761,8 @@ class Session:
         # distiller only selected it.
         auto = self._find_auto_approve(ticket)
         if auto is not None:
-            self._consume_auto_rule(auto)      # durable spend before the fire
+            use = self._consume_auto_rule(auto)   # durable spend before fire
+            _note_spend(spends, auto, use, ticket)
             if record is not None:
                 record["scope"] = ("auto", auto["requestId"])
             return
@@ -7440,7 +7603,7 @@ class Session:
             return None
         return grants
 
-    def _consume_grant(self, grant: dict) -> None:
+    def _consume_grant(self, grant: dict) -> int:
         """Spend one use of a standing grant durably BEFORE the crossing fires
         (Decision 3, consume-before-fire — the Slice-2 WAL ordering still
         applies). Decrements `remainingUses`; a grant whose uses hit zero is
@@ -7453,9 +7616,11 @@ class Session:
             if grant["remainingUses"] <= 0:
                 grant["consumed"] = True
         self._grants_consumed += 1
+        use = self._next_spend_use(grant["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(grant["requestId"])
+            wal.record_approval_consumed(grant["requestId"], use=use)
+        return use
 
     # -- item 251 Slice 2: distilled AutoApproveRule enforcement -------------
 
@@ -7676,7 +7841,7 @@ class Session:
                 return entry
         return None
 
-    def _consume_auto_rule(self, entry: dict) -> None:
+    def _consume_auto_rule(self, entry: dict) -> int:
         """Spend one use of a distilled rule durably BEFORE the crossing fires
         (consume-before-fire, reusing the 344 WAL ordering). A `uses`-bounded rule
         decrements `remainingUses` and marks `consumed` at zero, so an applied rule
@@ -7699,9 +7864,11 @@ class Session:
                 entry["consumed"] = True
         self._persist_auto_spend(entry)
         self._auto_consumed += 1
+        use = self._next_spend_use(entry["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(entry["requestId"])
+            wal.record_approval_consumed(entry["requestId"], use=use)
+        return use
 
     def mint_standing_grant(self, *, ticket_hash: str | None = None,
                             capability: str | None = None,
@@ -8673,7 +8840,8 @@ class Session:
         if self._driver is None:
             # even with nothing loaded, the workspace's active leases (item 61)
             # are visible — an agent can survey who holds what before it loads.
-            return {"loaded": False, "leases": self.leases.document()}
+            return {"loaded": False, "leases": self.leases.document(),
+                    "loopAxes": self.loop_axes()}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
         paused_now = self.slo_paused()
@@ -8719,8 +8887,46 @@ class Session:
             # configured (off-policy `state()` is byte-identical).
             **({"approval": self.approval_metrics()}
                if self.approval_policy is not None else {}),
+            # issue #1738: the six agent-loop axes, always.
+            "loopAxes": self.loop_axes(),
             **({"trace": driver.drain_events()} if drain else {}),
         }
+
+    def loop_axes(self) -> dict:
+        """The agent-loop axes of issue #1738 (`revl.mcp.loop_axes`), each a
+        numerator, a denominator and their ratio, cumulative for the session."""
+        return self._loop_axes.document(self._owner)
+
+    def record_tool_call(self, name: str, arguments: dict, payload: dict,
+                         ir_before: dict | None) -> None:
+        """Feed one finished MCP tool call to the loop axes. `ir_before` is the
+        running composition before the handler ran; the components that differ
+        from it now are the ones the call touched."""
+        from .loop_axes import EDIT_TOOLS  # noqa: PLC0415
+        touched = None
+        if name in EDIT_TOOLS and self.ir is not ir_before:
+            from .operator import _changed_targets  # noqa: PLC0415
+            touched = [component for component, _ in
+                       _changed_targets(ir_before or {}, self.ir or {})]
+        self._loop_axes.record_tool(name, arguments, payload, touched)
+
+    def _loop_call_class(self, key: str, method: str):
+        """The class of a call's reach for the loop axes: the policy's own class
+        map when there is one, else a policy-independent one for the live
+        generation. `False` when the call cannot be classified."""
+        class_map = self._class_map
+        if class_map is None and self.ir is not None:
+            cached = self._loop_class_map
+            if cached is None or cached[0] is not self.ir:
+                from .approval import ClassMap  # noqa: PLC0415 — lazy, no cordis
+                try:
+                    cached = (self.ir, ClassMap(self.ir))
+                except Exception:  # noqa: BLE001 — unclassifiable, counted as such
+                    cached = (self.ir, None)
+                self._loop_class_map = cached
+            class_map = cached[1]
+        reach = class_map.classify_call(key, method) if class_map is not None else None
+        return False if reach is None else reach["class"]
 
 
 def _decision_id_of(sources: dict, granted, base_manifest_hash: str | None,

@@ -10,8 +10,8 @@ The verb set, in the order the parser declares it:
 
 <!-- docgen:cli-verbs begin -->
 ```text
-compile  explain  grammar  adapt  doctor  scaffold  composition  layer
-audit  goal  policy  simulate  diff  changelog  version  contract
+compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
+layer  audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
 dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
@@ -138,6 +138,29 @@ revl explain G4
 revl explain t3 --json
 ```
 
+### `revl idiom`
+
+Print the minimal admitted example of one construct and the one or two rules
+that make it correct (issue #1701). No sources; it reads the idiom files under
+`src/revl/idioms/`. Each hole's `fillSpec` carries the idiom of its construct
+already; this command is for reading one by name.
+
+- `NAME` - an idiom: one per construct a fillSpec names (`provide-method`,
+  `emission-method`, `component-setup`, `effect-acquire`, `effect-undo`,
+  `function`, `test`) and a few served by name only (`spawn`, `subscribe`,
+  `match`, `timer`). With no name, the list.
+- `--json` - the entry as `{name, summary, rules, fill, example}`.
+
+Every idiom compiles, admits for an untrusted author, and, with its `fill`
+replaced by a hole, yields a fillSpec naming that same construct
+(`tests/test_idioms_1701.py`). An unknown name exits 2.
+
+```bash
+revl idiom                      # the list
+revl idiom emission-method      # one idiom, as text
+revl idiom effect-undo --json
+```
+
 ### `revl grammar`
 
 Print the language surface, sized for a prompt, or a machine-readable grammar
@@ -149,16 +172,21 @@ of revl source for a grammar-constrained decoder. No sources.
   reading the parser's code (`src/revl/source_grammar.py`), not copied by hand.
   `lark` is llguidance's Lark dialect, `gbnf` the character-level GBNF the
   llama.cpp server and XGrammar read, `ebnf` a plain form for reading. The
-  grammar is an over-approximation of the parser: every document the parser
-  accepts is in its language, and semantic checks stay with the checker. It
-  still refuses shapes the parser refuses, such as a requirement written in a
-  component body (`component C { requires k: S }`) instead of on the header.
+  grammar is an over-approximation of the parser, and semantic checks stay
+  with the checker. It still refuses shapes the parser refuses, such as a
+  requirement written in a component body (`component C { requires k: S }`)
+  instead of on the header. One rule is narrower than the parser, so that a
+  constrained decoder cannot write prose: an expression statement that
+  follows another statement starts a new line (or follows a `;`). The parser
+  would read `the quick brown fox` in a function body as four statements;
+  every corpus document the rule refuses is one the compiler refuses too.
 - `--category program|component-body|statements|expression|type` - scope the
   grammar to one syntactic slot, so a generator filling a hole is held to that
   slot. Defaults to `program`. The MCP `revl_grammar` tool takes the same
   `format` and `category` ([mcp-reference.md](mcp-reference.md#revl_grammar)).
 - `--notes` - where the derivation is looser than the parser: each read it
-  models as any token, and each backtracking construct.
+  models as any token (none today, issue #1698), and each backtracking
+  construct.
 - `--write` / `--check` - regenerate, or check, the committed `grammar/revl.lark`,
   `grammar/revl.gbnf` and `grammar/revl.ebnf` (run from a checkout). A parser
   change that alters the grammar fails `tests/test_source_grammar_1661.py` until
@@ -942,7 +970,9 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   - `--peer-addr HOST:PORT` - where that member's `revl pool serve` is
     listening. The address is how to REACH the peer; its identity is the key it
     signs with, so an address nobody vouched for reaches a peer whose receipts
-    then fail to verify.
+    then fail to verify. A non-loopback address needs the `revl[crypto]` extra
+    for constant-time signing and exits 2 naming it, before the ledger is
+    touched, when it is missing (issue #1460).
   - `--dispatch-identity PATH` - the operator's PRIVATE identity file, which
     signs the task. The peer holds only its public half.
   - `--attest-identity PATH` - the private identity file that attests the
@@ -1416,6 +1446,8 @@ for the key lifecycle and what the signature binds.
   - `--peer-addr HOST:PORT` - where that member's `pool serve` listens. Needs
     exactly one `--peer`. Without it the address of the member's last verified
     contact is used, and a member never contacted is refused on `no-address`.
+    Probing a non-loopback address needs the `revl[crypto]` extra and exits 2
+    naming it, before anything is signed, sent or recorded (issue #1460).
   - `--dispatch-identity PATH` - the operator's private identity file, the one
     `run --pool private` signs tasks with.
   - `--timeout SECONDS` - per member (default 10).
@@ -1453,7 +1485,12 @@ for the key lifecycle and what the signature binds.
     security: every record on it is signed, so nothing can be forged
     undetected, and nothing on it is secret - the artifact source crosses in
     the clear. A confidential cross-machine channel is roadmap item 118's mTLS
-    work, which this is a caller of rather than a second copy of.
+    work, which this is a caller of rather than a second copy of. A
+    non-loopback bind also needs the `revl[crypto]` extra
+    (`pip install 'revl[crypto]'`) and exits 2 naming it before binding,
+    because the peer signs a receipt for every task a remote party sends and
+    the pure-Python signer's timing leaks its key (issue #1460; see
+    [tee-attestation-root.md](tee-attestation-root.md)).
   - `--workdir DIR` - where artifacts are written and run (default: a fresh
     temporary directory removed on exit).
   - `--timeout SECONDS` - how long one artifact may run (default 300).

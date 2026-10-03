@@ -6,12 +6,33 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 55 verbs below, one section each.
+The advertised list is exactly the 56 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
 for its flags). The protocol is JSON over stdio; `tools/list` returns these
 verbs and `tools/call` invokes one.
+
+## The authoring loop
+
+The server's `initialize` instructions name the loop an agent should take, in
+order, and each verb on it opens its description with "Authoring loop step N of
+6" (issue #1704; the text lives in `src/revl/mcp/authoring_loop.py`):
+
+1. **reuse:** `revl_resolve` returns an existing component with its source and
+   manifest, so nothing is generated.
+2. **scaffold:** `revl_scaffold` returns a typed skeleton whose unknowns are
+   `hole[T]`, each with a fillSpec.
+3. **fill:** one hole at a time from its fillSpec. Write the expression into the
+   draft and re-run `revl_check`, or send `revl_edit {hole, expr}` once the
+   composition is running.
+4. **preflight:** `revl_query_withdraw` gives the exact blast radius of replacing
+   or removing a component. `revl_edit` returns it in `blastRadius` for the
+   components it touches, and `revl_plan` shows what a swap would do.
+5. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
+   fail with the code and the fix.
+6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
+   `revl_edit` re-admits and swaps on its own. On a cold start, use `revl_load`.
 
 ## How to read this
 
@@ -41,6 +62,94 @@ flows through `revl_check`, `revl_gauntlet`, `revl_edit`, and every other verb
 that admits, so an agent gets rule + call-chain + fix in one response, never a
 second round-trip. A rejected candidate never deploys: the compile runs before
 the transition, so the running system keeps serving.
+
+**Refusals carry their next call.** A refusal with a known remedy returns it as
+data in `next`, beside the prose (issue #1691):
+
+```json
+"next": {"tool": "revl_load", "arguments": {"files": ["app.rvl"]}, "ready": true}
+```
+
+`tool` is the verb to call and `arguments` its arguments, pre-filled from what
+the session holds. `ready` is true when `arguments`, sent as-is, are expected to
+succeed. When it is false, `needs` says what the caller must add. Where several
+remedies exist, `next` is a list in preference order. A remedy no MCP call can
+perform (an operator has to act outside the session) is an operator step
+instead, `{"operator": "<what to do>", "ready": false}`. The refusal's message
+ends with the same remedy in words, so the two never disagree. Remedies today:
+
+| Refusal | `next` |
+| ------- | ------ |
+| nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
+| `revl_edit` on a composition loaded from one file | `revl_swap` with your patch applied to that file's text as inline `source`. `ready` only if that swap would admit. After it, `revl_edit` patches the inline source directly. The file on disk is not changed |
+| `revl_swap` with no source, on a composition loaded from files | `revl_swap` with those `files` |
+| a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
+
+**Verbs that need the cordis-py runtime.** Every verb under "Drive a live
+session" and the record/replay and halt verbs act on a live composition, and
+only `revl_load` can boot one, which needs `cordis`. If the server's interpreter
+cannot import it, `revl mcp serve` first looks for the repository's runtime venv
+(`backends/python/.venv`, built by `backends/python/setup.sh`). If that venv can
+import cordis, the server re-executes under it and says so on stderr. Otherwise
+it starts, names the unavailable verbs on stderr and in the `initialize`
+instructions, and each of those verbs answers with
+`{"ok": false, "refused": true, "unavailable": "cordis-py runtime", "next": ...}`,
+`next` being the operator step that fixes it. A few verbs keep working with less: `revl_ship` cannot
+`apply`, `revl_gauntlet` and `revl_quarantine` skip their substrate battery,
+and the history verbs answer only from an inline `timeline`/`trace`. The lists
+live in `src/revl/mcp/runtime_gate.py`, and `revl doctor` reports which case
+applies (the `mcp server runtime` line). Set `REVL_MCP_NO_REEXEC=1` to stay on
+the current interpreter (issue #1692).
+
+**Every response says what the session holds.** Each `tools/call` result, on
+success and refusal alike, ends with the same footer (issue #1693):
+
+```json
+"sessionState": {"loaded": true, "generation": 2, "components": ["MemCache"],
+                 "dirty": false, "draft": false}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `loaded` | a composition is running |
+| `generation` | the running generation: 1 after `revl_load`, plus one per swap, edit that swaps, rollback or undo; `null` when nothing is loaded |
+| `components` | the running components' names, in load order |
+| `dirty` | the server-side working source (what `revl_edit` patches) differs from the source the running generation was admitted from |
+| `draft` | an edit with open holes is pending; the working source cannot swap until they are filled |
+
+The footer is computed after the verb ran, so it describes the state the call
+left behind. It is named `sessionState` because several verbs already return a
+top-level `state` (fiber states). A refusal that changed nothing returns the
+same footer as the call before it.
+
+**A repeated refusal is never the same twice.** The server remembers the last
+refused call, by verb and a digest of its arguments (key order does not
+matter). When the very next call is that same call and it is refused again,
+the refusal changes (issue #1694):
+
+- its first diagnostic reads `attempt N of this same call, refused again for
+  the same reason: <the reason>. The session now: <the footer in words>`;
+- it carries `"repeat": {"attempt": N, "bound": 3}`, and keeps its `next` call;
+- from attempt 3 on, it leads with a diagnostic of code `REPEATED_REFUSAL`,
+  which says that sending the call unchanged will be refused again and what to
+  do instead: send `next`; or, when `next` is an operator step, that an operator
+  has to act first; or, with no `next`, change the arguments or the state the
+  refusal names.
+
+Different arguments, a different verb, or a call that succeeds resets the count.
+A successful response is never rewritten.
+
+**Changes carry their undo.** Since issue #1703, a successful call to a verb
+that mutates the session answers with `undo: {tool, arguments}`: the one call
+that returns the session to where it was, byte for byte (the snapshot's
+`sources` and `manifest`). A load's undo is `revl_unload`, an unload's is a
+`revl_restore` of what ran, and a swap, edit, undo, rollback, restore or
+applied ship/repair answers with `revl_undo` back to the earlier generation; a
+fresh `revl_lease` claim answers with its release. A verb with no exact inverse
+says so: `undo: null` and an `undoReason` (an emission cannot be un-emitted, a
+halt or an approval is recorded evidence). `undoDepth` is how many changes
+`revl_step_back` with no arguments can still revert. A refused call changed
+nothing and carries no undo field.
 
 ## The verb set at a glance
 
@@ -85,10 +194,11 @@ the transition, so the running system keeps serving.
 | `revl_restore` | no | no | `snapshot` |
 | `revl_timeline` | yes | no | - |
 | `revl_inspect_step` | yes | no | `at` |
-| `revl_step_back` | no | yes | `to` |
+| `revl_step_back` | no | yes | - |
 | `revl_replay_bisect` | yes | no | `assert` |
 | `revl_replay_forward` | no | yes | `from` |
 | `revl_grammar` | yes | no | - |
+| `revl_idiom` | yes | no | - |
 | `revl_scaffold` | yes | no | `service` |
 | `revl_fmt` | yes | no | `source` |
 | `revl_explain` | yes | no | `code` |
@@ -115,6 +225,25 @@ Compile a component. Returns the composition summary, the G8 boundary, and
 message) on success, or structured diagnostics (code, guarantee,
 expected/actual, `fix` hint) on rejection. A draft with holes compiles; it is
 refused at admission until every hole is filled.
+
+Both answers carry `selfCheck`, the one-call self-check against every
+guarantee:
+
+- `guarantees`: one row per guarantee, G1 to G9, each with `code`, `guarantee`
+  (what it means) and `status`:
+  - `pass` when the compile succeeded, since the checker enforces every
+    guarantee before it returns an IR.
+  - `fail` when a diagnostic names it. The row carries the `fix` and the
+    `failures` (code, message, file, line, fix).
+  - `unchecked` when the compile refused before it could prove that guarantee.
+    That is not a pass. Fix the failures and check again.
+- `summary`: the `pass` / `fail` / `unchecked` counts.
+- `admissible`: true only when the compile succeeded with no open holes.
+- `otherFailures`: refusals under any other code (a type error, an amendment,
+  an extended guarantee such as `G-SECRET`), so a green row is never read past
+  a red one elsewhere.
+- `note`: why a draft with holes is not admissible, or why rows are
+  `unchecked`.
 
 - Inputs: `source` / `files` / `modules`.
 
@@ -219,8 +348,22 @@ context while generating. With no inputs it returns that prose summary
   the character-level GBNF the llama.cpp server and XGrammar read.
   `category` (`program`, `component-body`, `statements`, `expression` or
   `type`, default `program`) scopes it to one syntactic slot, so a client
-  filling a hole can constrain its decoder to that slot. `category` without
+  filling a hole can constrain its decoder to that slot (each hole's
+  `fillSpec.grammarCategory` names it). `category` without
   `format`, or a value outside these lists, is refused.
+
+### `revl_idiom`
+
+The minimal admitted example of one construct, with the one or two rules that
+make it correct (issue #1701). Every hole's `fillSpec` already carries the
+idiom of its construct (`construct`, `idiom`; [holes.md](holes.md) §8), so
+this tool is for asking about a construct before there is a hole in it.
+
+- Inputs (optional): `name`, an idiom such as `emission-method`, `effect-undo`
+  or `spawn`, returns `{ok, idiom: {name, summary, rules, fill, example}}`.
+  With no `name` it returns `{ok, idioms: [{name, summary}]}`. An unknown name
+  is refused, listing the idioms. The same table is printed by
+  [`revl idiom`](commands-reference.md#revl-idiom).
 
 ---
 
@@ -288,6 +431,14 @@ component you just loaded. Returns the result and the trace it produced.
 What is loaded right now: fiber states, provided keys, whether a rollback is
 available, and the trace since the last call. No inputs.
 
+It always carries `loopAxes`, loaded or not and with or without an approval
+policy: six measures of how the session used the loop, each
+`{numerator, denominator, value}` with `value` null while the denominator is 0,
+plus `boundaryCalls` (executed `revl_call`s by class). The counts are
+cumulative for the MCP session; an unload, commit or abort does not reset
+them. The definitions are in
+[harness-gate-guide.md](harness-gate-guide.md#the-agent-loop-axes-revl_state-loopaxes).
+
 ### `revl_swap`
 
 Admit a candidate against the RUNNING composition and hot-swap it in. A rejected
@@ -309,6 +460,17 @@ patch that breaks a guarantee is refused with its diagnostic and the running
 system is untouched. A clean patch is hot-swapped in; one that still has open
 holes advances the server-side source but swaps nothing. Returns the admission
 verdict / holes / diagnostic, never the whole source.
+
+A swapped edit and a draft edit with open holes both carry `blastRadius`, which
+makes preflight automatic. It is read off the composition that is running when
+the edit arrives:
+- `touched`: the components whose definition changed, plus added and removed
+  ones. Shifted source lines alone do not count. A component also counts when a
+  service it provides or requires changed its declaration.
+- `components`: for each touched component, the `revl_query_withdraw` answer:
+  `cascade`, `withdrawalOrder`, `orphanedKeys`, `breaks`, `precision`. An added
+  component carries `added: true` and an empty cascade.
+- `breaks`: the total across the touched components.
 
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
   replacement}` / `{anchor, replacement, count?}`); `target` (which server-side
@@ -789,13 +951,22 @@ emissions at or before k.
 
 ### `revl_step_back`
 
-Unwind the accumulator to step k by running the registered inverses from the top
-down, newest first - leaving the component LIVE, not torn down. Refuses if the
-range crosses an emission with no `compensate`; `force` crosses anyway and
-reports what was crossed. The guarantee is "the inverses ran in order", never
-"state was restored".
+With no arguments, revert the last change this session made, by running the
+exact `undo` that change's response carried (issue #1703). Each further call
+reverts the change before it; a change that answered `undo: null` is not on the
+stack, so it is skipped rather than half-undone. The answer names the reverted
+change, the undo it ran (`via`, through the same gates as any call) and the
+`redo` call, with `undoDepth` left. With nothing left to revert it is a refusal
+with `undoDepth: 0`.
 
-- Inputs: `to` (required; `-1` unwinds everything); `component`; `force`.
+With `to`, unwind the accumulator to step k by running the registered inverses
+from the top down, newest first - leaving the component LIVE, not torn down.
+Refuses if the range crosses an emission with no `compensate`; `force` crosses
+anyway and reports what was crossed. The guarantee is "the inverses ran in
+order", never "state was restored".
+
+- Inputs: none (revert the last change); or `to` (`-1` unwinds everything),
+  `component`, `force`.
 
 ### `revl_replay_bisect`
 
