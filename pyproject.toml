@@ -48,16 +48,26 @@ classifiers = [
 # not rely on the module agreeing with itself. It imports `cryptography` HARD:
 # behind an `importorskip` the one independent check on the quote verifier's
 # crypto would report SKIPPED, which is the same colour as a pass, on every
-# machine that happens not to have the library (issue #266). Nothing in
-# `src/revl` imports it, and tests/test_ecdsa_differential.py asserts that.
+# machine that happens not to have the library (issue #266). The one module in
+# `src/revl` that imports it is the optional signing backend below, and
+# tests/test_1460_signing_backend.py asserts that; the differentials pin that
+# backend off so they still compare two implementations.
 # `llguidance`: a TEST dependency too, so the grammar-engine checks in
 # tests/test_constrained_decoding_1462.py run in CI instead of skipping, and
 # tests/test_source_grammar_1661.py runs the grammar `revl grammar --format
 # lark` exports over every parseable `.rvl` in the tree with it (imported hard,
 # so that check cannot skip). At run time it is the optional `constrain` extra
 # below and never required; `src/revl` never imports it for the grammar export.
-test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography>=42.0",
+test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography>=44.0",
         "llguidance>=1.0"]
+# `crypto`: constant-time ECDSA SIGNING (issue #1460). The pure-Python signer in
+# src/revl/tee_quote.py takes time that depends on the secret nonce, so with this
+# extra installed `ecdsa_sign` goes through OpenSSL instead (src/revl/
+# _ecdsa_backend.py), byte-for-byte the same RFC 6979 signatures. A signer that
+# is exposed to a network refuses without it. Verification never needs it. 44 is
+# the first release with deterministic ECDSA. revl still has no REQUIRED runtime
+# dependency.
+crypto = ["cryptography>=44.0"]
 # Constrained decoding's local grammar engine (issue #1462). When installed,
 # the provider adapters compile a derived GBNF grammar before claiming it and
 # check a completion made under a `gbnf` claim byte for byte. Absent, both
