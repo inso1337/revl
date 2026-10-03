@@ -655,9 +655,9 @@ SESSION = Session()
 UNDO_STACK = _undo_record.UndoStack()
 
 
-def _session_error(message: str, **extra) -> dict:
+def _session_error(message: str, category: str = "session", **extra) -> dict:
     return {"ok": False, "diagnostics": [{
-        "severity": "error", "code": "REVL", "category": "session",
+        "severity": "error", "code": "REVL", "category": category,
         "message": message,
     }], **extra}
 
@@ -3888,10 +3888,7 @@ def _run_handler(name: str, arguments: dict) -> dict:
         # generic handler so it never reads as an internal fault.
         return _approval_required(exc)
     except Exception as exc:  # a tool failure is a result, not a transport error
-        return {"ok": False, "diagnostics": [{
-            "severity": "error", "code": "REVL", "category": "internal",
-            "message": f"{type(exc).__name__}: {exc}",
-        }]}
+        return _session_error(f"{type(exc).__name__}: {exc}", category="internal")
 
 
 def _attach_undo(name: str, arguments: dict, pre, payload: dict,
