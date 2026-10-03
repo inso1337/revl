@@ -288,34 +288,28 @@ def render_ts(name: str) -> str:
 
 # -------------------------------------------------------------- the scorer
 
-# The approval-gate axes the scorer reads from a `revl_state` result. Each is
-# a path into the result; an axis the session did not report is `null`, never
-# a guess. Only these two are carried by `revl_state` today (its `approval`
-# block, present when an approval policy is configured).
-STATE_AXES = {
-    "promptsPerSession": ("approval", "promptsPerSession"),
-    "percentAutoApprovedWithProof": ("approval", "percentAutoApproved"),
-}
-# Axes issue #1702 asks for that `revl_state` does not carry yet. They are
-# reported as missing, by name, so a score never reads an absence as a zero.
-STATE_AXES_NOT_IN_STATE = (
-    "reversibilityRate", "preflightCoverage", "violationsCaughtBeforeExecution",
-    "residueAfterAbort",
+# The approval-gate axes the scorer reads from a `revl_state` result's
+# `loopAxes` block (issue #1738). Each is `{numerator, denominator, value}`
+# as the session reported it. An axis the result does not carry is `null` and
+# is named in `notInRevlState`, so a score never reads an absence as a zero.
+STATE_AXES = (
+    "reversibilityRate", "autoApprovedWithProof", "promptsPerSession",
+    "preflightCoverage", "violationsCaughtBeforeExecution", "residueAfterAbort",
 )
 
 
-def _dig(value, path):
-    for step in path:
-        if not isinstance(value, dict) or step not in value:
-            return None
-        value = value[step]
-    return value
+def _axis(reported) -> dict | None:
+    if not isinstance(reported, dict):
+        return None
+    if not {"numerator", "denominator", "value"} <= set(reported):
+        return None
+    return {k: reported[k] for k in ("numerator", "denominator", "value")}
 
 
 def gate_axes(state: dict | None) -> dict:
-    axes = {name: (_dig(state, path) if state else None)
-            for name, path in STATE_AXES.items()}
-    axes["notInRevlState"] = list(STATE_AXES_NOT_IN_STATE)
+    reported = (state or {}).get("loopAxes") or {}
+    axes = {name: _axis(reported.get(name)) for name in STATE_AXES}
+    axes["notInRevlState"] = [name for name in STATE_AXES if axes[name] is None]
     return axes
 
 

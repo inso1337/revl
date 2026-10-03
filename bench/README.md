@@ -326,12 +326,13 @@ optionally the session's last `revl_state` result. The score reports:
   right.
 - `touched`, `touchedBeyondCascade` and `missedCascade`.
 - `turns` and `tokensWritten`, as submitted.
-- `gate`: the approval-gate axes read from `revl_state`. Today it carries
-  `promptsPerSession` and `percentAutoApproved` (as
-  `percentAutoApprovedWithProof`), and only when an approval policy is
-  configured. Reversibility rate, preflight coverage, violations caught before
-  execution and residue after an abort are not in `revl_state`, so the score
-  lists them under `notInRevlState` instead of reporting a number.
+- `gate`: the six approval-gate axes read from the `loopAxes` block of the
+  session's last `revl_state` result (issue #1738): reversibility rate, share
+  auto-approved with proof, prompts per session, preflight coverage,
+  violations caught before execution and residue after abort. Each is copied
+  as `{numerator, denominator, value}`. An axis the result does not carry is
+  `null` and listed under `notInRevlState`, so a missing axis never reads as
+  zero.
 
 ## Re-scoring without spending anything
 
