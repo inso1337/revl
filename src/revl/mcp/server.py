@@ -893,6 +893,19 @@ def _tool_act(arguments: dict) -> dict:
                               trace=SESSION.state().get("trace", []))
 
 
+def _tool_counterfactual(arguments: dict) -> dict:
+    """What the gate would have decided had the agent acted differently at one
+    action (issue #1752): replace, insert or drop it in this session's revl_act
+    log, decide both arms with the gate's pure parts, and report the
+    divergence. Runs nothing and changes nothing."""
+    try:
+        return {"ok": True, **SESSION.counterfactual(
+            arguments.get("at"), replace=arguments.get("replace"),
+            insert=arguments.get("insert"), drop=bool(arguments.get("drop")))}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_swap(arguments: dict) -> dict:
     """Admit a candidate against what is running, then hot-swap it in. A
     rejected candidate changes nothing — that is the whole point.
@@ -2524,6 +2537,36 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_act,
+    },
+    {
+        "name": "revl_counterfactual",
+        "description": "What would the gate have decided if the agent had acted "
+                       "differently (issue #1752)? Takes this session's revl_act "
+                       "log, replaces, inserts or drops the action at `at`, and "
+                       "decides both arms with the gate's own rules: each "
+                       "action's class, whether it executes, defers or tickets, "
+                       "which recorded approvals still cover what, and the "
+                       "irreversible residue. Reports where the arms diverge and "
+                       "whether the recorded arm reproduces the recording. "
+                       "Nothing is run and the session is unchanged.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "at": {"type": "integer",
+                       "description": "the action index (receipt `seq`) to vary"},
+                "replace": {"type": "object",
+                            "description": "the action to run instead: "
+                                           "`{key, method, args}`"},
+                "insert": {"type": "object",
+                           "description": "an action to add before `at`: "
+                                          "`{key, method, args}`"},
+                "drop": {"type": "boolean",
+                         "description": "leave the action at `at` out"},
+            },
+            "required": ["at"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_counterfactual,
     },
     {
         "name": "revl_swap",

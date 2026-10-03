@@ -18,6 +18,7 @@ call — between tool calls the composition is simply idle.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import hashlib
 import sys
@@ -670,6 +671,13 @@ class Session:
         # issue #1708: the receipts `act` records, one per proposed action, in
         # order. The commit manifest lists them; teardown drops them
         self._actions: list = []
+        # issue #1752: what a counterfactual needs beside the receipts, kept in
+        # memory only: each action's call (its own caller's arguments, never
+        # written to the manifest or the WAL), and the ticket approvals minted
+        # between actions, keyed by how many actions preceded them
+        self._act_calls: list = []
+        self._act_approvals: dict = {}
+        self._act_grants = 0
         # issue #1706: separation of duties for a single-approver ticket. When
         # set, the identity that raised a ticket (`_operator_token()` at the
         # asking) cannot approve it: with no operator profile both are the
@@ -4306,6 +4314,9 @@ class Session:
         self._settle_approval_spend(self._owner)
         self._owner = None
         self._actions = []
+        self._act_calls = []
+        self._act_approvals = {}
+        self._act_grants = 0
         self.ir = None
         self.previous = None
         self.origin = None
@@ -5001,17 +5012,55 @@ class Session:
                    "argsDigest": _cache_args_digest(args),
                    "class": reach["class"] if reach is not None else None}
         before = self._act_marks()
+        call = {"key": key, "method": method, "args": copy.deepcopy(args or []),
+                "generation": self._generation}
+        acted = True
         try:
             out = self.call(key, method, args)
         except (ApprovalRequired, ApprovalRefused) as exc:
             self._act_held(receipt, exc)
             raise
         except SessionError:
-            raise                      # refused before anything ran
+            acted = False              # refused before anything ran
+            raise
         except Exception as exc:       # the operation raised after the gate
             self._act_raised(receipt, exc, before, reach)
             raise
+        finally:
+            if acted:
+                self._act_calls.append(call)
         return self._act_done(receipt, before, reach, out)
+
+    def counterfactual(self, at: int, *, replace: dict | None = None,
+                       insert: dict | None = None, drop: bool = False) -> dict:
+        """What the gate would have decided had the agent acted differently at
+        action `at` (issue #1752): one action replaced, inserted or dropped,
+        both arms decided by the gate's pure parts over this session's `act`
+        log, and the divergence between them. Nothing runs and the session is
+        not touched (`revl.mcp.counterfactual_act`)."""
+        from . import counterfactual_act as _cf  # noqa: PLC0415
+        self._require()
+        if self._class_map is None or not self._act_calls:
+            raise SessionError(
+                "a counterfactual is asked of this session's revl_act log, and "
+                "there is none: act through revl_act under the approval gate "
+                "first (issue #1752)")
+        if any(c["generation"] != self._generation for c in self._act_calls):
+            raise SessionError(
+                "the composition was swapped after some of these actions, so "
+                "they were decided under a class map that is no longer live; "
+                "a counterfactual across a swap is not supported (issue #1752)")
+        calls = [{k: c[k] for k in ("key", "method", "args")}
+                 for c in self._act_calls]
+        try:
+            out = _cf.report(self._class_map, calls, self._actions,
+                             self._act_approvals, at,
+                             record_values=self.approval_record_values,
+                             replace=replace, insert=insert, drop=drop)
+        except _cf.CounterfactualActError as error:
+            raise SessionError(str(error)) from None
+        out["standingGrantsMinted"] = self._act_grants
+        return out
 
     def _act_held(self, receipt: dict, exc) -> None:
         """Record a class-(c) action the gate held: a ticket, or an operator's
@@ -7177,6 +7226,8 @@ class Session:
         if wal is not None:
             wal.record_approval_granted(granted)
         self._approval_records.append({"record": "approval-granted", **granted})
+        # issue #1752: where this yes stands among the session's actions
+        self._act_approvals.setdefault(len(self._actions), []).append(ticket_hash)
         return entry
 
     @staticmethod
@@ -7916,8 +7967,10 @@ class Session:
         and never off anything an operator sent. This verb passes no `decision`,
         so the public mint can never take that route."""
         self._refuse_self_grant(ticket_hash)
-        return self._mint_grant(ticket_hash=ticket_hash, capability=capability,
-                                uses=uses, ttl_ms=ttl_ms)
+        grant = self._mint_grant(ticket_hash=ticket_hash, capability=capability,
+                                 uses=uses, ttl_ms=ttl_ms)
+        self._act_grants += 1    # issue #1752: a counterfactual does not model it
+        return grant
 
     def _refuse_self_grant(self, ticket_hash: str | None) -> None:
         """Issue #1706: under `approval_separation` a standing grant is the

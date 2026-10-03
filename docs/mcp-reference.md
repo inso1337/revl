@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 56 verbs below, one section each.
+The advertised list is exactly the 57 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -73,6 +73,7 @@ the current interpreter (issue #1692).
 | `revl_load` | no | no | - (source) |
 | `revl_call` | no | no | `key`, `method` |
 | `revl_act` | no | no | `key`, `method` |
+| `revl_counterfactual` | yes | no | `at` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` |
 | `revl_gauntlet` | yes | no | - (source) |
@@ -327,6 +328,33 @@ receipt is kept, and `revl_commit`'s manifest lists them under `actions`.
 - Needs the approval gate on (`revl mcp serve --approval-policy auto`); without
   it the call is refused, because there is no class to report.
 - The CLI form is `revl act FILES` ([commands-reference.md](commands-reference.md#revl-act)).
+
+### `revl_counterfactual`
+
+What would the gate have decided if the agent had acted differently at one
+action (issue #1752)? Takes this session's `revl_act` log, varies the action at
+`at`, and decides both arms with the gate's own rules. It runs nothing and the
+session is unchanged: no host body fires and the commit manifest's hash stays
+the same.
+
+- Inputs: `at` (the receipt `seq` to vary, required) and exactly one of
+  `replace` (`{key, method, args}` to run instead), `insert` (`{key, method,
+  args}` to add before `at`; `at` may be one past the last action) or `drop:
+  true`.
+- Each arm lists, per action, its `class`, `outcome` (`executed`, `deferred`,
+  `ticket`), ticket hash, witnessed crossings with their inverse, deferred
+  externs and residue. A class-(c) action executes only where an approval the
+  session minted for its exact ticket hash is still unspent at that point. The
+  approvals sit where they were minted, and each is spent once.
+- `divergence` names the first step whose decision differs and every
+  downstream step whose decision changes; `delta` compares the two arms'
+  tickets, residue, deferred externs, witnessed count and unused approvals.
+- `reproducesRecording` is false when the recorded arm's recompute does not
+  match a receipt, with each step in `notReproduced`: a standing grant, a
+  distilled rule or a revoked ticket the slice does not simulate. Read a
+  divergence only off an arm that reproduces the recording.
+- `liveEffects` is always 0 and `bounds` lists what a gate-level recompute
+  cannot see (static reach, no result values, no ttl).
 
 ### `revl_state`
 

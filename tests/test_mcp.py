@@ -220,7 +220,7 @@ def test_initialize_and_tools_list():
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     assert set(tools) == {"revl_check", "revl_admit", "revl_plan", "revl_audit",
                           "revl_tools", "revl_grammar", "revl_load", "revl_call",
-                          "revl_act",
+                          "revl_act", "revl_counterfactual",
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
                           # the session commit protocol (docs/design/245-session-commit.md)
                           "revl_commit", "revl_commit_confirm", "revl_abort",

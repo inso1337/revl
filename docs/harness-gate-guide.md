@@ -273,6 +273,19 @@ CLI form, `revl act FILES`, reads the actions as JSON lines on stdin
 ([commands-reference.md](commands-reference.md#revl-act)); it has no operator,
 so a class-(c) action there stays a ticket.
 
+### Asking what would have happened: `revl_counterfactual`
+
+After a run, the harness can ask how the gate would have decided had the agent
+acted differently at action `at` (issue #1752): `revl_counterfactual {at,
+replace | insert | drop}`. Both arms are decided by the gate's own rules over
+the session's `revl_act` log and the approvals minted between its actions,
+with nothing run. The report shows, per action, the class and outcome in each
+arm, the first divergence and every downstream step it changes (a recorded yes
+spent earlier, or left unused), and the delta in tickets, residue and deferred
+work. Check `reproducesRecording` first: when the recorded arm does not
+reproduce the receipts, a standing grant or distilled rule covered a step, and
+the divergence at that step is not the substitution's.
+
 ## The `session.state()` metrics
 
 `revl_state` surfaces the session's approval metrics (None off-policy, so
