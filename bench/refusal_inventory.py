@@ -57,7 +57,12 @@ making the same selective argument it claims to be correcting. Source:
 Usage:
   python3 bench/refusal_inventory.py                  # the table
   python3 bench/refusal_inventory.py --json out.json  # machine-readable
-  python3 bench/refusal_inventory.py --write          # commit the artifact
+  python3 bench/refusal_inventory.py --write          # a local copy (not committed)
+
+The column is recomputed on every build and is not committed (issue #1768):
+`--write` leaves a local copy beside the report, which `.gitignore` keeps
+out of the tree, because a committed copy went stale on every pull request
+that moved one of the ledgers above.
 """
 
 from __future__ import annotations
