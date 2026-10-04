@@ -1,0 +1,100 @@
+// issue #106: the v3 COMBINED path (`_emit_v3_combined`), first slice. A
+// top-level fn beside components whose provide methods are single `return`s
+// (or empty) over the component expression renderer: params, literals, the
+// binary and unary operators (the Int negation through `revlSub`, the Int32
+// shifts' masked count), a ternary and a list typed by the declared return, a
+// call to the module fn, and calls through a required service. Both
+// components ride one package with the pure tier, the host runtime and the
+// load helpers.
+fn clamp(n: Int, hi: Int) -> Int {
+  if (n > hi) { return hi }
+  return n
+}
+
+service Scores {
+  fn score(n: Int) -> Int
+  fn sign(n: Int) -> Int
+  fn label(ok: Bool) -> Str
+  fn tags(n: Int) -> List[Str]
+  fn mask(bits: Int32) -> Int32
+  fn ping()
+}
+
+service Report {
+  fn summary(n: Int) -> Str
+  fn alive() -> Bool
+}
+
+component Scorer provides scores: Scores {
+  provide scores {
+    fn score(n) = clamp(n * 2 + 1, 100)
+    fn sign(n) = n < 0 ? -n : n
+    fn label(ok) = !ok ? "bad" : "good"
+    fn tags(n) = ["a", "b"]
+    fn mask(bits) = (bits << bits) ^ ~bits
+    fn ping() { }
+  }
+}
+
+// Declared and required but never called: its interface still renders, and an
+// `idempotent` emission takes the re-delivery comment.
+service Audit {
+  emission idempotent fn record(line: Str)
+}
+
+component Reporter requires scores: Scores, audit: Audit provides report: Report {
+  provide report {
+    fn summary(n) = scores.label(scores.score(n) >= 10)
+    fn alive() = scores.sign(0 - 1) == 1 && true
+  }
+}
+
+// The service surface the interface renderer spells: an Opt and a Result in
+// return position (the tuple convention), a Map, a declared record, a
+// function-typed parameter, Float and Int32. Required and called through, and
+// the function value is called by its parameter name.
+type Point = { x: Int, y: Int }
+
+service Shapes {
+  fn find(k: Str) -> Opt[Int]
+  fn parse(s: Str) -> Result[Int, Str]
+  fn table() -> Map[Str, Int]
+  fn origin() -> Point
+  fn apply(f: (Int) -> Int, n: Int) -> Int
+  fn ratio(n: Int) -> Float
+}
+
+service Math {
+  fn twice(f: (Int) -> Int, n: Int) -> Int
+  fn widen(n: Int) -> Float
+}
+
+component Calculator requires shapes: Shapes provides math: Math {
+  provide math {
+    fn twice(f, n) = f(f(n))
+    fn widen(n) = shapes.ratio(n) + 1.0
+  }
+}
+
+// An extern and an in-file test ride the pure tier of the same package; a
+// parameter named for a Go keyword takes the `_safe_local` rename, and an
+// Opt parameter is the value-position `*T`.
+extern pure fn tagged(s: Str) -> Str = @go { return "#" + s }
+
+service Picker {
+  fn pick(select: Int) -> Int
+  fn label(s: Str) -> Str
+  fn present(k: Opt[Int]) -> Bool
+}
+
+component PickerBox provides picker: Picker {
+  provide picker {
+    fn pick(select) = select
+    fn label(s) = tagged(s)
+    fn present(k) = false
+  }
+}
+
+test "clamp caps at the bound" {
+  assert clamp(7, 5) == 5
+}

@@ -1048,17 +1048,25 @@ def _prune_dependents(ir: dict, target: str) -> dict:
     dependents = _provider_dependents(ir).get(target, set())
     if not dependents:
         return ir
+    return subset_composition(ir, lambda name: name not in dependents)
+
+
+def subset_composition(ir: dict, keep) -> dict:
+    """A copy of *ir* holding only the components whose name ``keep(name)``
+    accepts, in its component list and in the manifest's `components` and
+    `loadOrder`. The one place a composition is cut down to some of its
+    components; `revl.recover_binding` uses it for a placement process's
+    share of the composition."""
     pruned = copy.deepcopy(ir)
     pruned["components"] = [c for c in pruned.get("components") or []
-                            if c.get("name") not in dependents]
+                            if keep(c.get("name"))]
     manifest = pruned.get("manifest")
     if isinstance(manifest, dict):
         if isinstance(manifest.get("components"), list):
             manifest["components"] = [c for c in manifest["components"]
-                                      if c.get("name") not in dependents]
+                                      if keep(c.get("name"))]
         if isinstance(manifest.get("loadOrder"), list):
-            manifest["loadOrder"] = [n for n in manifest["loadOrder"]
-                                     if n not in dependents]
+            manifest["loadOrder"] = [n for n in manifest["loadOrder"] if keep(n)]
     return pruned
 
 

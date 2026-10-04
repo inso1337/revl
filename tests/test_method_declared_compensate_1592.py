@@ -89,7 +89,10 @@ def _method(src: str, name: str) -> list:
 
 
 FIRE = "_revl_extern_emit(_revl_ctx, 'put_row', put_row, (m,))"
-DECLARED = "_revl_frame.compensation_method(lambda: restore_row())"
+# the named call rides beside the thunk so a fresh process can re-issue it
+# (issue #1369's WAL descriptor)
+DECLARED = ("_revl_frame.compensation_method(lambda: restore_row(), "
+            "call={'receiver': None, 'method': 'restore_row', 'args': []})")
 
 
 def test_an_emit_statement_registers_the_declared_compensation():
@@ -98,7 +101,9 @@ def test_an_emit_statement_registers_the_declared_compensation():
 
 def test_a_site_spelled_compensation_registers_first_then_the_declared_one():
     assert _method(_emitted(), "both") == [
-        FIRE, "_revl_frame.compensation_method(lambda: plain_restore())", DECLARED]
+        FIRE, "_revl_frame.compensation_method(lambda: plain_restore(), "
+              "call={'receiver': None, 'method': 'plain_restore', 'args': []})",
+        DECLARED]
 
 
 def test_a_value_emission_registers_the_declared_compensation_before_returning():

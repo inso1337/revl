@@ -85,9 +85,11 @@ lets the identical call fire once. `revl_approve` with `capability` and
 
 **Without an operator profile the gate is advisory.** The client that makes the
 call can also call `revl_approve`, so an agent can answer its own tickets. The
-proxy prints the same startup warning `revl mcp serve --approval-policy auto`
-prints. Bind a profile in which only the human's identity holds `approve`
-([operator-capabilities.md](operator-capabilities.md)).
+proxy prints a startup warning saying so. Bind a profile in which only the
+human's identity holds `approve`
+([operator-capabilities.md](operator-capabilities.md)). `revl mcp serve` closes
+this hole differently since issue #1706: it refuses an approval from the
+identity that raised the ticket.
 
 ## Read-only honesty
 
