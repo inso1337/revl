@@ -51,9 +51,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 # Every backend tier that has a checked-in emitter / golden tree.
@@ -941,11 +943,15 @@ def compile_reachable(root: Path):
       compiling, and whether it is depends on a call graph this tool does not
       build. Following the edge costs a FULL run when it was not needed; not
       following it could skip a test that a change breaks.
-    * Every `revl.*` module that a `backends/**/*.py` file imports is a root
-      too. The reached modules load backend files by path
-      (`spec_from_file_location`), and an import inside one of those files is
-      invisible to an import walk of `src/revl` alone. No `src/revl` module is
-      loaded by path or by a computed name (checked: every
+    * Code that is not imported but loaded is counted where it is loaded. A
+      module that loads by path or by name (`spec_from_file_location`,
+      `import_module`, `__import__`) or runs source it was handed
+      (`exec(compile(...))`, the emitted python) can execute a `backends/` file
+      or emitted code, and their `revl.*` imports are invisible to an import
+      walk of `src/revl`. So such a module gets an edge to every `revl.*`
+      module that ANY `backends/**/*.py` file imports. These are edges, not
+      roots: a backend file runs only when something on the graph loads it.
+      No `src/revl` module is itself loaded that way (checked: every
       `spec_from_file_location` / `import_module` under src/revl targets a
       `backends/` file or a backend runtime module).
 
@@ -1070,9 +1076,34 @@ def _module_edges(mods: dict[str, Path], module: str, tree: ast.AST) -> set[str]
     return out
 
 
-def _backend_roots(root: Path, mods: dict[str, Path]) -> set[str]:
-    """`revl.*` modules imported by a backend file the compile path may load by
-    path (see `compile_reachable`)."""
+#: A module that loads code by path or by name, or executes source it was
+#: handed (see `compile_reachable`). The regex is a prefilter; `_loads_code`
+#: confirms a hit on the token stream, so a mention in a comment or a string
+#: (`emit sh.exec(...)` in lower.py's prose) is not a call.
+_LOADS_CODE = re.compile(
+    r"spec_from_file_location\(|import_module\(|__import__\(|\bexec\(")
+_LOADER_CALLS = frozenset({"spec_from_file_location", "import_module",
+                           "__import__", "exec"})
+
+
+def _loads_code(text: str) -> bool:
+    """Whether `text` calls one of `_LOADER_CALLS`: a NAME token for it
+    directly followed by `(`. Undecidable text counts as a call."""
+    if not _LOADS_CODE.search(text):
+        return False
+    try:
+        tokens = [t for t in tokenize.generate_tokens(io.StringIO(text).readline)
+                  if t.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+                                    tokenize.DEDENT, tokenize.COMMENT)]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return True
+    return any(t.type == tokenize.NAME and t.string in _LOADER_CALLS
+               and nxt.type == tokenize.OP and nxt.string == "("
+               for t, nxt in zip(tokens, tokens[1:]))
+
+
+def _backend_imports(root: Path, mods: dict[str, Path]) -> set[str]:
+    """Every `revl.*` module some `backends/**/*.py` file imports."""
     out: set[str] = set()
     for path in (root / "backends").rglob("*.py"):
         if "node_modules" in path.parts or ".venv" in path.parts:
@@ -1100,10 +1131,13 @@ def _import_graph_uncached(root: Path) -> dict[str, set[str]] | None:
         return None
     try:
         mods = _module_index(pkg)
-        graph = {name: _module_edges(mods, name,
-                                     _import_nodes(path.read_text(encoding="utf-8")))
-                 for name, path in mods.items()}
-        graph["__backend__"] = _backend_roots(root, mods)
+        backend = _backend_imports(root, mods)
+        graph = {}
+        for name, path in mods.items():
+            text = path.read_text(encoding="utf-8")
+            graph[name] = _module_edges(mods, name, _import_nodes(text))
+            if _loads_code(text):
+                graph[name] |= backend - {name}
     except (OSError, SyntaxError, ValueError):
         return None
     return graph
@@ -1114,14 +1148,13 @@ def _compile_reachable_uncached(root: Path):
     if graph is None:
         return None
     seen: set[str] = set()
-    stack = ["__init__", *graph["__backend__"]]
+    stack = ["__init__"]
     while stack:
         module = stack.pop()
         if module in seen or module not in graph:
             continue
         seen.add(module)
         stack.extend(graph[module] - seen)
-    seen.discard("__backend__")
     return seen
 
 
@@ -1146,7 +1179,6 @@ def importers_of(root: Path, module: str) -> set[str]:
             continue
         seen.add(current)
         stack.extend(reverse.get(current, set()) - seen)
-    seen.discard("__backend__")
     return seen
 
 
