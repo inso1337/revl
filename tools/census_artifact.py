@@ -108,8 +108,13 @@ THE REPRODUCTION, AND WHY IT IS RECORDED RATHER THAN RE-RUN
 questions the fast engine answers. It takes about fourteen minutes and needs a
 rust toolchain, so `--check` cannot run it and neither can a CI job that is
 allowed to be cheap. The result is recorded instead, in
-`tests/fixtures/census_crate_reproduction.json`, beside the CHECKER VERSION it
-was taken at.
+`tests/fixtures/census_crate_reproduction/`, beside the CHECKER VERSION it was
+taken at: `reproduction.json` holds the version, the tracked buckets and the
+false admissions, and `programs.jsonl` the programs the run covered, one per
+line, sorted. The count is derived from that list rather than stored, because a
+stored count was the one line every corpus-moving pull request rewrote, so two
+of them always conflicted on it (issue #1768). A program the census now runs
+and the recorded reproduction did not is counted and reported.
 
 A recorded result rots, so it is not trusted blind: every run compares the
 recorded checker version against the current one, and a reproduction taken at a
@@ -186,8 +191,11 @@ RECORDS_SCHEMA = "GATE-CENSUS-RECORDS-1"
 VERDICT_PIN_GROUPS = ("decides_verdicts", "reference", "report_inputs")
 
 # The recorded `--engine crate` reproduction. In tests/fixtures/ rather than in
-# docs/ because it is an input to the artifact, not part of it.
-CRATE_REPRODUCTION = ROOT / "tests" / "fixtures" / "census_crate_reproduction.json"
+# docs/ because it is an input to the artifact, not part of it. A directory
+# since issue #1768: the facts in one file, the covered programs one per line.
+CRATE_REPRODUCTION = ROOT / "tests" / "fixtures" / "census_crate_reproduction"
+REPRODUCTION_FACTS = "reproduction.json"
+REPRODUCTION_PROGRAMS = "programs.jsonl"
 
 # The frozen schemas this artifact is written against. `EVAL-REPORT-1` is
 # `docs/design/478-eval-honesty-protocol.md`'s, validated by
@@ -333,7 +341,8 @@ def corpus_digest(rows) -> str:
 REPORT_INPUTS = (
     "tools/gate_reference_census_baseline.json",
     "tests/fixtures/corpus_provenance.json",
-    "tests/fixtures/census_crate_reproduction.json",
+    "tests/fixtures/census_crate_reproduction/reproduction.json",
+    "tests/fixtures/census_crate_reproduction/programs.jsonl",
 )
 
 # The shipped gate, which the crate engine builds with cargo in a subprocess,
@@ -712,6 +721,10 @@ def build_report(census, provenance, measured: dict,
             "current_checker_version": version,
             "is_current": current,
             "n": crate.get("n"),
+            "census_programs_not_in_reproduction": (
+                None if crate.get("programs") is None else len(
+                    {row[0] for row in measured["case_rows"]}
+                    - set(crate["programs"]))),
             "tracked_buckets_agree": theirs == ours,
             "crate_tracked_buckets": {k: len(v) for k, v in sorted(theirs.items())},
             "crate_false_admissions": sorted(crate.get("false_admissions", [])),
@@ -1189,6 +1202,9 @@ def render_markdown(report: dict) -> str:
         w("and minutes rather than seconds.")
         w("")
         w(f"- programs: **{rep['n']}**")
+        if rep.get("census_programs_not_in_reproduction") is not None:
+            w("- census programs this run read that the reproduction did not: "
+              f"**{rep['census_programs_not_in_reproduction']}**")
         w("- tracked buckets agree: "
           f"**{'yes' if rep['tracked_buckets_agree'] else 'NO'}**")
         w(f"- crate `{fa['bucket']}` members: "
@@ -1929,10 +1945,11 @@ def render_verify_section(c: dict, w) -> None:
 def trim_reproduction(census, raw: dict) -> dict:
     """A raw `--engine crate --json` census, reduced to what is recorded.
 
-    Only the tracked buckets and the census size: the untracked buckets are
-    where the two engines are ALLOWED to be described differently, and
-    recording them would make the fixture churn on changes that cannot hide a
-    divergence.
+    Only the tracked buckets and the programs the run covered: the untracked
+    buckets are where the two engines are ALLOWED to be described
+    differently, and recording them would make the fixture churn on changes
+    that cannot hide a divergence. The programs are a sorted list, a
+    repeated case id once per run of it, and the count is derived from them.
     """
     if raw.get("engine") != "crate":
         raise SystemExit(
@@ -1950,20 +1967,51 @@ def trim_reproduction(census, raw: dict) -> dict:
                  "stale and lifts no claim."),
         "engine": "crate",
         "checker_version": version,
-        "n": sum(len(v) for v in buckets.values()),
         "tracked_buckets": {k: sorted(v) for k, v in sorted(buckets.items())
                             if k.split("/", 1)[0] in census.TRACKED},
         "false_admissions": sorted(buckets.get(census.ADMISSION, [])),
+        "programs": sorted(cid for ids in buckets.values() for cid in ids),
     }
+
+
+def reproduction_texts(recorded: dict) -> dict[str, str]:
+    """`{file name: bytes}` for `tests/fixtures/census_crate_reproduction/`."""
+    # `n` is derived on load and `programs` has its own file; neither is a fact.
+    facts = {k: v for k, v in recorded.items() if k not in ("programs", "n")}
+    return {
+        REPRODUCTION_FACTS: json.dumps(facts, indent=1, sort_keys=True) + "\n",
+        REPRODUCTION_PROGRAMS: _record_text(sorted(recorded["programs"])),
+    }
+
+
+def load_reproduction(base: Path = CRATE_REPRODUCTION) -> dict | None:
+    """The recorded reproduction, with `n` derived from its program list.
+    None when nothing is recorded."""
+    base = Path(base)
+    facts_path = base / REPRODUCTION_FACTS
+    if not facts_path.is_file():
+        return None
+    recorded = json.loads(facts_path.read_text(encoding="utf-8"))
+    programs = []
+    for lineno, line in enumerate(
+            (base / REPRODUCTION_PROGRAMS).read_text(encoding="utf-8")
+            .splitlines(), 1):
+        if not line.strip():
+            continue
+        case_id = json.loads(line)
+        if not isinstance(case_id, str):
+            raise ValueError(f"{REPRODUCTION_PROGRAMS}:{lineno}: not a case id")
+        programs.append(case_id)
+    recorded["programs"] = programs
+    recorded["n"] = len(programs)
+    return recorded
 
 
 def _read_crate(crate_json: Path | None) -> dict | None:
     """The recorded crate reproduction, or `crate_json` in its place."""
-    path = crate_json if crate_json is not None else (
-        CRATE_REPRODUCTION if CRATE_REPRODUCTION.is_file() else None)
-    if path is None:
-        return None
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    if crate_json is None:
+        return load_reproduction()
+    return json.loads(Path(crate_json).read_text(encoding="utf-8"))
 
 
 def generate(engine: str,
@@ -2012,7 +2060,7 @@ def main(argv: list[str]) -> int:
                          "the recorded reproduction")
     ap.add_argument("--record-reproduction", action="store_true",
                     help="trim --crate-json into "
-                         "tests/fixtures/census_crate_reproduction.json "
+                         "tests/fixtures/census_crate_reproduction/ "
                          "and stop")
     ap.add_argument("--write", action="store_true",
                     help="write the records in docs/census-artifact/")
@@ -2075,10 +2123,11 @@ def main(argv: list[str]) -> int:
             ap.error("--record-reproduction needs --crate-json")
         census = _load("tools/gate_reference_census.py", "artifact_census")
         raw = json.loads(args.crate_json.read_text(encoding="utf-8"))
-        CRATE_REPRODUCTION.write_text(
-            json.dumps(trim_reproduction(census, raw), indent=1,
-                       sort_keys=True) + "\n", encoding="utf-8")
-        print(f"recorded {CRATE_REPRODUCTION.relative_to(ROOT)}")
+        CRATE_REPRODUCTION.mkdir(parents=True, exist_ok=True)
+        for name, text in reproduction_texts(
+                trim_reproduction(census, raw)).items():
+            (CRATE_REPRODUCTION / name).write_text(text, encoding="utf-8")
+        print(f"recorded {CRATE_REPRODUCTION.relative_to(ROOT)}/")
         return 0
 
     if args.from_records:
