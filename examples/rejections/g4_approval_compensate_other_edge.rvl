@@ -1,0 +1,16 @@
+// REJECTED, G4: the step's `with` edge covers its HEAD (`mail`) but not the
+// capability its compensation crosses (`pay`). One edge covers a crossing
+// only when its scope reaches that crossing's token.
+//
+// expected error:
+//   crossing capability `pay` requires approval, but this `emit` carries no
+//     covering `with` edge
+
+extern emission[pay] fn charge(amount: Int) -> Int requires approval = @py { return 1 }
+extern emission[mail] fn notify(n: Int) -> Int requires approval = @py { return 1 }
+service Ops { fn ping() -> Int }
+component Biller provides ops: Ops {
+  let a = await approval[mail] { reason: "send" }
+  emit notify(1) compensate charge(2) with a
+  provide ops { fn ping() = 1 }
+}

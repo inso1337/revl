@@ -1,0 +1,16 @@
+// REFUSED G-MODEL-PLACE (item 519, issue #1193 slice 2): `Classifier` crosses
+// `model.tool` through the module `fn` `ask`, which reaches the extern
+// `run_tool`. The tokens a crossing declares are read through the helper, so
+// the crossing is placed on role `tool`, which reaches `shell.exec`. The file
+// name's prefix is the expected verdict (`model_` refused under G-MODEL-PLACE,
+// `ok_` admitted); tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+extern emission[model.tool] fn run_tool(p: Str) -> Str = @py { return p }
+fn ask(p: Str) -> Str { return run_tool(p) }
+service Answer { emission fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = emit ask(text) }
+}

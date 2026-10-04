@@ -61,9 +61,13 @@ def test_compiler_and_lower_are_full():
 
 
 def test_compile_reachable_nonleaf_is_full():
-    # run_go is on the lazy compile-reachable graph -> full even though it looks
-    # tier-specific. Fail-safe over-selection is intended.
-    assert sel("src/revl/run_go.py")["full"] is True
+    # `attest` is not documented core, but the compile path imports it
+    # (`retention` -> `attest`), so a change to it is FULL even though its name
+    # suggests a leaf. Fail-safe over-selection is intended. (This used to be
+    # `run_go`, which issue #1780 took off the compile graph.)
+    assert "attest" in at.compile_reachable(ROOT)
+    r = sel("src/revl/attest.py")
+    assert r["full"] is True and "compile-reachable" in r["reason"]
 
 
 # --- stdlib module -> only tests touching its public API ------------------- #
@@ -1206,18 +1210,35 @@ def test_reachability_is_per_module_and_resolves_relative_imports(tmp_path):
     assert "sub.unused" not in reach
 
 
-def test_a_module_a_backend_imports_is_reachable(tmp_path):
-    """The compile path loads backend files by path, so their `revl.*` imports
-    are roots even though no `src/revl` module names them."""
+def test_a_backend_import_counts_where_the_backend_is_loaded(tmp_path):
+    """A `backends/` file runs only when something loads it, so its `revl.*`
+    imports are edges from every module that loads code (by path, by name, or
+    by `exec`), not roots. A mention of `exec(` in a comment loads nothing."""
     root = _tree(tmp_path, {
-        "src/revl/__init__.py": "",
+        "src/revl/__init__.py": "from . import loader, prose\n",
+        "src/revl/loader.py": "import importlib.util\n"
+                              "def load(p):\n"
+                              "    return importlib.util.spec_from_file_location('x', p)\n",
+        "src/revl/prose.py": "# a shell sink: emit sh.exec(emit fs.read(p))\n",
         "src/revl/viahost.py": "",
         "src/revl/alone.py": "",
         "backends/py/emit.py": "from revl.viahost import thing\n",
     })
     at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    graph = at.import_graph(root)
+    assert "viahost" in graph["loader"] and "viahost" not in graph["prose"]
     reach = at.compile_reachable(root)
     assert "viahost" in reach and "alone" not in reach
+
+    # no reached module loads code: the backend import is not reachable
+    root2 = _tree(tmp_path / "quiet", {
+        "src/revl/__init__.py": "from . import prose\n",
+        "src/revl/prose.py": "# emit sh.exec(...)\n",
+        "src/revl/viahost.py": "",
+        "backends/py/emit.py": "from revl.viahost import thing\n",
+    })
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    assert "viahost" not in at.compile_reachable(root2)
 
 
 def test_the_import_scan_matches_a_full_parse():
@@ -1243,22 +1264,40 @@ def test_an_mcp_module_off_the_compile_path_selects_a_narrow_set():
     assert "tests/test_mcp_http_transport.py" in r["pytest"]   # an importer's tests
 
 
-def test_an_mcp_module_on_the_compile_path_still_selects_full():
-    """The other direction, on a real chain: `revl.gate` (on the import chain
-    of `revl/__init__`) lazily imports `revl.mcp.session`, which imports
-    `revl.mcp.operator`, which imports `revl.mcp.server`. Each of those can run
-    while compiling, so a change to any of them is FULL."""
+def test_an_mcp_module_on_the_compile_path_still_selects_full(tmp_path):
+    """The other direction. On the real tree no `revl.mcp` module is
+    compile-reachable any more (tests/test_compile_never_imports_mcp_1780.py),
+    so the direction is held on a tree where one is: the compile path lazily
+    imports `mcp.session`, so `mcp.session` and `mcp/__init__` are reachable
+    and a sibling the path never names is not. On the real tree, the type
+    schema that issue #1780 moved out of `revl.mcp` is on the compile path and
+    selects FULL."""
+    root = _tree(tmp_path, {
+        "src/revl/__init__.py": "def compile_source():\n"
+                                "    from .mcp.session import Session\n",
+        "src/revl/mcp/__init__.py": "",
+        "src/revl/mcp/session.py": "from .approval import ApprovalRequired\n",
+        "src/revl/mcp/approval.py": "",
+        "src/revl/mcp/http_stream.py": "",
+    })
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    reach = at.compile_reachable(root)
+    assert {"mcp.__init__", "mcp.session", "mcp.approval"} <= reach
+    assert "mcp.http_stream" not in reach
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    r = sel("src/revl/type_schema.py")
+    assert r["full"] is True and "compile-reachable" in r["reason"]
+
+
+def test_the_runtime_is_off_the_compile_graph():
+    """Issue #1780's layering: the modules that RUN a program (the session, the
+    gate, the tier runners, placement, the fault sweep) are not on the compile
+    path, so a change to one selects the tests that reach it, not FULL."""
     reach = at.compile_reachable(ROOT)
-    assert {"gate", "mcp.session", "mcp.operator", "mcp.server"} <= reach
-    for module in ("session", "operator", "server"):
-        r = sel(f"src/revl/mcp/{module}.py")
-        assert r["full"] is True, module
-        assert "compile-reachable" in r["reason"]
+    for module in ("run", "gate", "placement", "fault", "run_go",
+                   "mcp.session", "mcp.server"):
+        assert module not in reach, module
+    for path in ("src/revl/run.py", "src/revl/gate.py", "src/revl/mcp/session.py"):
+        assert sel(path)["full"] is False, path
 
 
-def test_a_module_reached_only_through_a_subpackage_is_full():
-    """The unsound direction the old graph had: `revl.run` is reached only
-    through a `revl.mcp` module's relative import, which the old resolution
-    dropped, so a change to it got a narrow selection."""
-    assert "run" in at.compile_reachable(ROOT)
-    assert sel("src/revl/run.py")["full"] is True

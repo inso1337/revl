@@ -184,7 +184,7 @@ def test_diverging_if_else_body_validates_and_runs(tmp_path):
     """
     wat = emit.emit(compile_source(source))["functions"]
     # the diverging-if body is closed with a trailing `unreachable`
-    pick = wat[wat.index("(func $pick"):wat.index("(func $nested")]
+    pick = wat[wat.index("(func $fn.pick"):wat.index("(func $fn.nested")]
     assert "unreachable)" in pick.rstrip()
 
     # the module type-checks (wasm-tools if present)
@@ -272,7 +272,7 @@ def test_v3_externs_are_documented_and_tests_lower_to_exports():
     assert "functions" in modules
     wat = modules["functions"]
     assert "unsupported on this tier: externs host_call" in wat
-    assert '(func $revl_test_would_run_on_a_hosted_backend ' \
+    assert '(func $fn.revl_test_would_run_on_a_hosted_backend ' \
         '(export "revl_test_would_run_on_a_hosted_backend")' in wat
     # deterministic export list, shared with the host-side runner
     assert emit.test_export_names(ir["tests"]) == [

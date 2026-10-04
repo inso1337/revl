@@ -1,0 +1,16 @@
+// REJECTED, G4: the spawn-handle crossing of an approval-required capability
+// in a provide method, with no `with` edge.
+//
+// expected error:
+//   crossing capability `pay` requires approval, but this `emit` carries no
+//     covering `with` edge
+
+extern emission[pay] fn charge(amount: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[pay] fn run(n: Int) -> Int }
+service Sup { emission fn go(n: Int) -> Int }
+component Worker provides task: Pay {
+  provide task { fn run(n) = n }
+}
+component Supervisor provides sup: Sup {
+  provide sup { fn go(n) { let w = effect spawn Worker with { } undo w.dispose()  emit w.task.run(n)  return 0 } }
+}

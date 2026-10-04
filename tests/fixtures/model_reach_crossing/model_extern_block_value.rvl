@@ -1,0 +1,18 @@
+// REFUSED G-MODEL-PLACE (item 519): `Classifier` routes `classify` through role
+// `tool`, which reaches `shell.exec`, and crosses the host extern only as a
+// value (an expression-bodied method). The held set read `emit` STEPS alone, so
+// the value-form crossing was invisible, the component looked as if it
+// consulted no model, and the block was never folded. It now reads every
+// crossing in every position, as the spawn fold does since issue #1562. The
+// file name's prefix is the expected verdict (`model_` refused under
+// G-MODEL-PLACE, `ok_` admitted); tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+extern emission[model.tool] fn run_tool(p: Str) -> Str = @py { return p }
+service Answer { emission fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  route model on classify { * -> tool }
+  provide out { fn classify(text) = emit run_tool(text) }
+}

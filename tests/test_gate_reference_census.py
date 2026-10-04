@@ -274,6 +274,166 @@ def test_every_authority_rule_after_a_block_is_refused_by_both(measured):
     assert not wrong, "\n  ".join(["block-nesting documents moved:"] + wrong)
 
 
+# --- spawn attenuation over value-position crossings (issue #1562) ------------
+#
+# A child that crossed a boundary as a value (`let`, `return`, an expression
+# body, an `if` arm, an argument, a compensation, a host extern, its own spawn
+# handle) was spawned by a parent that does not hold it. On the base the
+# reference admitted all eight and the gate refused four of them, a split no
+# corpus document exposed. Held by name like the block-nesting corpus: `g4_`
+# both refuse under G4, `ok_` both admit.
+SPAWN_ATTENUATION_VALUE = ROOT / "tests" / "fixtures" / "spawn_attenuation_value"
+
+
+def test_every_value_crossing_bounds_a_spawned_child_in_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(SPAWN_ATTENUATION_VALUE.glob("*.rvl"))
+    assert len(docs) == 16, f"the value-crossing corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["value-crossing documents moved:"] + wrong)
+
+
+# --- the model reach fold (item 519, issue #1193 slice 2, issue #1451) --------
+#
+# A role a component's crossing is placed on was outside the product unless a
+# `route model` block named it, and the gate did not decide the fold at all.
+# The gate now folds it on the held set its spawn attenuation builds and spells
+# the refusal byte for byte. `model_` documents both refuse under MODEL, `ok_`
+# both admit.
+MODEL_REACH_CROSSING = ROOT / "tests" / "fixtures" / "model_reach_crossing"
+
+
+def test_every_model_reach_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(MODEL_REACH_CROSSING.glob("*.rvl"))
+    assert len(docs) == 13, f"the model-reach corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["model-reach documents moved:"] + wrong)
+
+
+# --- crossings through service-typed locals (issue #1509) ----------------------
+#
+# A provision held by a local chosen by an `if`, a record field or a list
+# element crossed past the approval floor, and through a field or an element
+# past the marker rule too. Both engines read one resolver for it now. `g4_`
+# both refuse under G4, `ok_` both admit.
+APPROVAL_SERVICE_LOCALS = ROOT / "tests" / "fixtures" / "approval_service_locals"
+
+
+def test_every_service_local_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(APPROVAL_SERVICE_LOCALS.glob("*.rvl"))
+    assert len(docs) == 18, f"the service-local corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["service-local documents moved:"] + wrong)
+
+
+# --- crossings through a service-typed receiver expression (issue #1681) -------
+#
+# The same crossing as the service-typed local, with the receiver written in
+# place: an `if`, a `match`, a record or list literal read in place. `g4_` both
+# refuse under G4, `ok_` both admit.
+SERVICE_RECEIVER_EXPRESSIONS = ROOT / "tests" / "fixtures" / "service_receiver_expressions"
+
+
+def test_every_receiver_expression_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(SERVICE_RECEIVER_EXPRESSIONS.glob("*.rvl"))
+    assert len(docs) == 18, f"the receiver-expression corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["receiver-expression documents moved:"] + wrong)
+
+
+# --- crossings through a service-typed method parameter (issue #1682) ---------
+#
+# A provide method's own parameter of a service type: a call through it is a
+# crossing of the service's declared scopes, judged in the method (marker,
+# approval floor, provider upper bound). `g4_` both refuse under G4, `ok_`
+# both admit.
+SERVICE_TYPED_PARAMS = ROOT / "tests" / "fixtures" / "service_typed_params"
+
+
+def test_every_service_typed_param_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(SERVICE_TYPED_PARAMS.glob("*.rvl"))
+    assert len(docs) == 10, f"the service-typed-param corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["service-typed-param documents moved:"] + wrong)
+
+
+# --- the provider bound reads a handle crossing at the op's scope (#1508) -----
+#
+# A spawn-handle crossing (direct, aliased, in value position) is read at the
+# op's declared scope, a bare op stays `*`. `g4_` both refuse under G4, `ok_`
+# both admit.
+HANDLE_PROVIDER_BOUND = ROOT / "tests" / "fixtures" / "handle_provider_bound"
+
+
+def test_every_handle_bound_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(HANDLE_PROVIDER_BOUND.glob("*.rvl"))
+    assert len(docs) == 8, f"the handle-bound corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["handle-bound documents moved:"] + wrong)
+
+
+# --- a method call on a record in a component body (issue #1547) -------------
+#
+# Refused with the `fn` body's message ("no builtin method `f` on values"),
+# which the census tags T1. `t1_` both refuse, `ok_` both admit.
+RECORD_FIELD_CALL = ROOT / "tests" / "fixtures" / "record_field_call"
+
+
+def test_every_record_field_call_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(RECORD_FIELD_CALL.glob("*.rvl"))
+    assert len(docs) == 9, f"the record-field-call corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["record-field-call documents moved:"] + wrong)
+
+
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
     """The vocabulary `tools/oracle_construct_reach.py`'s `gate_census` row
     calls its reference set is read STATICALLY out of `_classify`, so that the
