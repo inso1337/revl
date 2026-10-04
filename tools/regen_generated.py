@@ -123,7 +123,7 @@ REGISTRY = [
         # the records layout of issue #1768; the single json + md before it is
         # in TRANSITIONS
         "paths": ["docs/census-artifact/*",
-                  "tests/fixtures/census_crate_reproduction.json"],
+                  "tests/fixtures/census_crate_reproduction/*"],
         "merge": "theirs",
         "write": [
             {"run": ["{python}", "tools/gate_reference_census.py", "--engine",
@@ -220,6 +220,11 @@ TRANSITIONS = [
     {"paths": ["tests/fixtures/selfhost_uncovered_lines.json"],
      "marker": "tests/fixtures/selfhost_uncovered_lines/README.md",
      "group": "ledger", "before": {"rule": LEDGER_RULE}},
+    # the recorded crate reproduction, a directory since issue #1768: its
+    # stored program count was the line every corpus-moving branch rewrote
+    {"paths": ["tests/fixtures/census_crate_reproduction.json"],
+     "marker": "tests/fixtures/census_crate_reproduction/programs.jsonl",
+     "group": "census", "before": {"group": "census"}},
 ]
 
 

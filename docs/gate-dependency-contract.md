@@ -77,6 +77,10 @@ returns three fields:
   py wheel it is `reference-full:<language>`, the whole reference compiler.
   A native gate (the rust crate, the wasm component) pins a narrower
   frontier, `selfhost-admit:<hash>`, a self-hosted subset of the language.
+  `<hash>` is the first 16 hex digits of a sha256 over the crate's own
+  sources (`Cargo.toml`, `build.rs`, `src/**/*.rs`), computed by
+  `crates/revl-gate/build.rs` when cargo builds it, so it names the exact
+  bytes compiled. Read it from `gate_version()`; no committed file stores it.
 
 **`frontier` is not an advanced-user footnote. Treat it as part of the
 verdict itself.** Two gates at different frontiers can disagree on the same

@@ -1,0 +1,80 @@
+// item 391: the component shapes selfhost/emit_py.rvl used to DROP without a
+// marker, which is worse than refusing them: the port emitted a program that
+// looked complete and was not.
+//
+//   Front   - a ROUTED require (`isolate ... in realms(...) strategy(...)`,
+//             item 167) READ inside a provide method. The call must go through
+//             the `_revl_route_<key>` proxy, which re-resolves a live worker
+//             per call, and the key must stay out of the inject gate. The port
+//             emitted `_revl_ctx.worker`, no proxy, and no router class.
+//   Ledger  - service-table dispatch flags on `commutative` and `idempotent`
+//             operations. The port dropped every flag, so the runtime never
+//             learned it may retry or reorder. (A `commutative service` is
+//             ported too, but the self-host gate refuses that declaration, so
+//             tests/test_selfhost_emit_py.py pins it from an inline source.)
+//   Tally   - method-body inverses that read a `var` the body reassigns
+//             afterwards. Both the effect's undo and the emission's compensate
+//             must pin the local BY VALUE (`lambda n=n: ...`), or teardown acts
+//             on the final value instead of the one the forward step used.
+//
+// The two worker components carry the plain single-realm `isolate`, which the
+// port also dropped before.
+//
+// This document sits beside emit_py_corpus/, not in it, and the py CORPUS
+// list names it by path. tests/test_selfhost_lower_ir.py globs that directory
+// and has no gap list, and selfhost/lower.rvl does not yet lower three things
+// here (the `routes` entry, the modifier-prefixed operations, the method
+// `undo_captures` pin). That gap is recorded where the fully-native chain is
+// measured: LOWER_GAP_DOCS in tests/test_selfhost_compile.py.
+
+service Worker { fn call(request: Str) -> Str }
+service Front { fn ask(q: Str) -> Str }
+
+service Ledger {
+  commutative emission fn add(n: Int)
+  idempotent emission fn set(n: Int)
+  fn total() -> Int
+}
+
+service Tally { emission fn bump(n: Int) -> Int }
+
+component W1 provides worker: Worker {
+  isolate worker in realm("w1")
+  provide worker { fn call(request) = "w1:" + request }
+}
+
+component W2 provides worker: Worker {
+  isolate worker in realm("w2")
+  provide worker { fn call(request) = "w2:" + request }
+}
+
+component Router requires worker: Worker provides front: Front {
+  isolate worker in realms("w1", "w2") strategy(least_loaded)
+  provide front { fn ask(q) = worker.call(q) }
+}
+
+component Books provides ledger: Ledger {
+  let cells = effect Map.new() undo cells.drop()
+  provide ledger {
+    fn add(n) {
+      effect cells.insert("add", n) undo cells.remove("add")
+    }
+    fn set(n) {
+      effect cells.insert("set", n) undo cells.remove("set")
+    }
+    fn total() = 0
+  }
+}
+
+component Counter requires ledger: Ledger provides tally: Tally {
+  let seen = effect Map.new() undo seen.drop()
+  provide tally {
+    fn bump(n) {
+      var key = "first"
+      effect seen.insert(key, n) undo seen.remove(key)
+      emit ledger.add(n) compensate ledger.set(key.length())
+      key = "second"
+      return n
+    }
+  }
+}

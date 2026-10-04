@@ -123,4 +123,7 @@ built artifact.
 `GENERATED.json` records the digest inputs, the gate api semver, the frontier id
 this packaging inherits from `crates/revl-gate`, and the target it is built for.
 The frontier id is the crate's, unchanged: two gates with different ids cover
-different surfaces and their agreement means nothing.
+different surfaces and their agreement means nothing. Its last part is computed
+by `crates/revl-gate/build.rs` from that crate's sources when cargo builds it,
+so `GENERATED.json` records its shape, `selfhost-admit:<identity>`, and
+`gate-version` reports the value.
