@@ -4,12 +4,11 @@ The executable spec for slice 1 of `docs/design/541-model-in-attenuation.md`:
 the `reaches [...]` clause on `model role`, the effective-ceiling fold, and the
 one refusal it carries.
 
-These programs are written INLINE rather than dropped in `examples/` or
-`tests/fixtures/`, for the reason section 6.1 of
-`docs/design/531-model-placement.md` gives: both directories are census corpus
-roots (`tools/gate_reference_census.py` CORPUS_DIRS) and `selfhost/parser.rvl`
-does not parse `model role` at all, so an admitting fixture in either place
-would be a `false-reject` census entry the moment it landed.
+These programs are written INLINE. When this file was written the self-host
+gate did not decide the reach fold, so a corpus document would have been a
+census row the gate could not agree with. It decides it since issue #1193
+slice 2, and the corpus documents for the fold live in
+`tests/fixtures/model_reach_crossing/` (`tests/test_model_reach_crossing.py`).
 """
 
 import json

@@ -1146,7 +1146,9 @@ fn render_direct_call(node: Any, s: Scope, depth: Int) -> WExpr {
     parts = parts.push(render_expr(args[i], s, value_str(value_field(params[i], "type")), depth).wat)
     i = i + 1
   }
-  parts = parts.push(`(call $${name})`)
+  // A user `fn` is `$fn.<name>` (issue #1756): a revl name has no `.`, and none
+  // of the emitter's own helpers (`$alloc`, `$int_add`, ...) has one.
+  parts = parts.push(`(call $fn.${name})`)
   return { wat: parts.join(`${newline()}      `), ty: value_str(value_field(sig, "returns")) }
 }
 
@@ -1582,7 +1584,8 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any, functions: List
 
   var decls = sig
   for (n of localOrder) { decls = decls.push(`(local $${n} ${wd_of(r.widths, n)})`) }
-  let header = rstrip(`(func $${name} (export "${name}") ${decls.join(" ")}`)
+  // `$fn.<name>`, the spelling every call uses (issue #1756)
+  let header = rstrip(`(func $fn.${name} (export "${name}") ${decls.join(" ")}`)
   var bodystr = "nop"
   if (bodyLines.length() > 0) { bodystr = bodyLines.join(`${newline()}    `) }
   else { if (return_ty != "Unit" && return_ty != "") { bodystr = "unreachable" } }
@@ -2411,6 +2414,15 @@ fn deferred_test_markers(ir: Any) -> List[Str] {
 
 pub fn emit_wasm_src(ir: Any) -> Str {
   let functions = value_list(value_field(ir, "functions"))
+  // Issue #1756: a `fn` is exported under its own name, and this module always
+  // exports its `memory`, so a `fn memory` would export one name twice. The
+  // reference refuses that by name (`refuse_duplicate_exports`); the port names
+  // it too instead of answering with a module that does not validate.
+  for (f of functions) {
+    if (value_str(value_field(f, "name")) == "memory") {
+      return `<<UNSUPPORTED-EXPORT:memory>>${newline()}`
+    }
+  }
   // Pool the string literals first (`_collect_string_literals`): the walk order
   // is function bodies in document order, then test bodies — the corpus is
   // function-only, but the test roots are walked for faithfulness.

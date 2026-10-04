@@ -326,7 +326,9 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   each with its call-site form (`sha(<text: Str>)`, `effect open_it(<n:
   Int>)`, `emit audit(<line: Str>)`) and `callableHere` for this position: a
   `pure` extern anywhere, an `emission` one only as a permitted crossing, an
-  `acquire`/`witnessed` one only in the acquisition slot of an `effect`.
+  `acquire`/`witnessed` one only in the acquisition slot of an `effect`. In
+  that slot the hole already follows `effect`, so the form there is the bare
+  call (`open_it(<n: Int>)`).
   `mayDeclare` is false for an untrusted author (the MCP server's default,
   `--author-trust`), who may neither declare nor reach an extern (G8): the
   spec then lists every extern as not callable and offers none as a
@@ -337,7 +339,13 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   `producers` lists every way to build the expected type at this position: a
   literal (`"..."`, `0`, `[]`, `None`, a declared record or variant), a
   binding of that type, a callable service operation, extern, crossing or
-  function returning it. One case is decided outright: a bare nominal type
+  function returning it. `Unit` has no literal (revl has no unit
+  expression), so a `Unit` hole, such as an `effect`'s inverse, is built by a
+  call that returns nothing: the inverse an `acquire` extern names, applied to
+  the acquired binding, which is in scope in its own `undo`, or in an
+  emission method the crossing itself. A declaration written without a return
+  type returns `Unit`, the same as one written `-> Unit`. One case is
+  decided outright: a bare nominal type
   no declaration builds (an extern's handle type, such as `LogHandle`) with
   no producer in reach needs new host code (`needsHostCode: true`). A trusted
   author can write that extern; an untrusted one may neither declare nor
@@ -389,6 +397,12 @@ a diagnostic that describes one line at a time. With fill specs the loop is
    draw from, the services to call, and whether an emitting call is even
    permissible. Most wrong answers are unrepresentable before they are written;
 4. re-check and repeat until `holes` is empty, then admit (§4).
+
+Over MCP the same loop needs no disk: `revl_scaffold` returns the skeleton and
+every fill spec; `revl_load` of it opens a DRAFT because holes remain (compiled
+and checked, nothing booted; issue #1727); `revl_edit {hole: <line>, expr}`
+fills one hole at a time; and the edit that fills the last one boots the draft
+through the load gates. A draft never boots while a hole remains.
 
 Each fill is a bounded, local decision against a spec, rather than a whole-file
 gamble against a refusal. The token economics of the two loops are the subject

@@ -519,9 +519,20 @@ def _method_emissions(body: list, env: "Env",
             result.add("*")
         return result
 
+    # issues #1682 and #1508: a crossing through a resolved receiver (a spawn
+    # handle, an alias, a service-typed local or parameter), recorded by the
+    # body walk (`lower._resolved_crossings`): the op's declared scope,
+    # labelled `<Service>.<op>`. Not a host emission.
+    resolved_crossings = getattr(env, "resolved_crossings", None) or {}
+
     def walk(node):
         if isinstance(node, dict):
-            if node.get("step") == "emit":
+            crossing = resolved_crossings.get(id(node))
+            if crossing is not None:
+                note(crossing[0])
+                caps.update(crossing[1])
+            through_resolved = id(node.get("expr")) in resolved_crossings
+            if node.get("step") == "emit" and not through_resolved:
                 expr = node.get("expr") or {}
                 target = expr.get("target") or {}
                 if target.get("kind") == "req":

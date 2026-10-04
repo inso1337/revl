@@ -201,6 +201,51 @@ fn mangle(name: Str) -> Str {
   }
   return name
 }
+// `_method_name` (issue #1512): the one Java spelling of a service method, at
+// the interface, the provider and every call. The service table stays keyed by
+// the contract name.
+// A name made of underscores alone takes one more `_` (`_` is a Java keyword).
+fn method_name(name: Str) -> Str {
+  var rest = name
+  while (rest.length() > 0 && rest.charAt(rest.length() - 1) == "_") {
+    rest = rest.slice(0, rest.length() - 1)
+  }
+  if (name.length() > 0 && rest.length() == 0) { return name.concat("_") }
+  return mangle(name)
+}
+
+// `_method_name_table`: the contract <-> Java name switch pair the placement
+// runners translate through at the seam, emitted only when a method renamed.
+fn method_name_table(services: Any) -> List[Str] {
+  var names = []
+  for (sname of value_keys(services)) {
+    for (mname of value_keys(value_field(value_field(services, sname), "methods"))) {
+      if (method_name(mname) != mname) { names = names.push(mname) }
+    }
+  }
+  if (names.length() == 0) { return [] }
+  let renamed = list_sort(list_dedup(names))
+  var out = [
+    "// issue #1512: a service method named after a Java keyword is declared",
+    "// under its escaped spelling; the seam speaks the contract name. The",
+    "// placement runners translate through these two at the bridge.",
+    "public static String revlMethodName(String contract) {",
+    "    return switch (contract) {"]
+  for (c of renamed) { out = out.push(`        case ${json_dumps(c)} -> ${json_dumps(method_name(c))};`) }
+  out = out.push("        default -> contract;")
+  out = out.push("    };")
+  out = out.push("}")
+  out = out.push("")
+  out = out.push("public static String revlContractName(String method) {")
+  out = out.push("    return switch (method) {")
+  for (c of renamed) { out = out.push(`        case ${json_dumps(method_name(c))} -> ${json_dumps(c)};`) }
+  out = out.push("        default -> method;")
+  out = out.push("    };")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+
 // `_fn_name`: a top-level callable colliding with a Java keyword OR the emitter's
 // scaffolding names is renamed the same way, by the same injective ladder shift.
 fn fn_name(name: Str) -> Str {
@@ -660,7 +705,7 @@ fn render_call(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   if (value_is_null(callee)) {
     let tn = value_field(node, "target")
     let tr = render_expr(tn, ctx, c)
-    return { text: `${tr.text}.${mangle(value_str(value_field(node, "method")))}(${args.join(", ")})`, counter: tr.counter }
+    return { text: `${tr.text}.${method_name(value_str(value_field(node, "method")))}(${args.join(", ")})`, counter: tr.counter }
   }
   let ck = node_kind(callee)
   if (ck == "var") {
@@ -1452,12 +1497,12 @@ fn emit_service_interfaces_v3(services: Any) -> List[Str] {
       var ret = "void"
       let r = value_field(method, "returns")
       if (!value_is_null(r)) { ret = java_v3_type(r, false) }
-      out = out.push(`    ${ret} ${mname}(${params.join(", ")});`)
+      out = out.push(`    ${ret} ${method_name(mname)}(${params.join(", ")});`)
     }
     out = out.push("}")
     out = out.push("")
   }
-  return out
+  return out.concat(method_name_table(services))
 }
 
 // The v1 method-body expression surface for the simple provider path: only the
@@ -3326,8 +3371,8 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     let svc_methods = value_field(value_field(services, srv), "methods")
     for (method of provide_methods(body, key)) {
       let mn = value_str(value_field(method, "name"))
-      let mnm = mangle(mn)
-      let svc_method = value_field(svc_methods, mnm)
+      let mnm = method_name(mn)
+      let svc_method = value_field(svc_methods, mn)
       var params = []
       for (pn of value_list(value_field(method, "params"))) {
         let pname = value_str(pn)
@@ -3458,7 +3503,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
       var ret = "void"
       let r = value_field(svc_method, "returns")
       if (!value_is_null(r)) { ret = java_v3_type(r, false) ret_is_void = false }
-      out = out.push(`    public ${ret} ${mangle(mn)}(${params.join(", ")}) { ${method_body(method, ret_is_void)} }`)
+      out = out.push(`    public ${ret} ${method_name(mn)}(${params.join(", ")}) { ${method_body(method, ret_is_void)} }`)
     }
     out = out.push("}")
     out = out.push("")

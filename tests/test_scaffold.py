@@ -59,8 +59,8 @@ def test_it_provides_the_service_and_requires_the_dependency():
 def test_every_method_body_and_the_effect_value_are_holes():
     doc = scaffold_document(_flagship(), "csv_analyzer.rvl")
     expected = sorted(o["expected"] for o in doc["obligations"])
-    # the effect resource and the provide-method return
-    assert expected == ["AnalysisResource", "Str"]
+    # the effect resource, its inverse (#1846) and the provide-method return
+    assert expected == ["AnalysisResource", "Str", "Unit"]
 
 
 def test_each_obligation_carries_its_fill_spec():
@@ -102,8 +102,8 @@ def test_a_correctly_filled_hole_checks_with_one_fewer_obligation():
         "fn run(input) = input")
     assert "hole[Str]" not in filled  # the substitution landed
     ir = compile_source(filled, "csv_analyzer.rvl")
-    # the fill type-checks; only the effect-resource obligation is left
-    assert [h["type"] for h in ir.get("holes", [])] == ["AnalysisResource"]
+    # the fill type-checks; only the effect's acquisition and inverse are left
+    assert [h["type"] for h in ir.get("holes", [])] == ["AnalysisResource", "Unit"]
 
 
 # ---- 5. conservative capability: an un-injected boundary stays a hole -------
@@ -202,6 +202,6 @@ def test_cli_json_carries_skeleton_obligations_and_fill_specs():
     assert result.returncode == 0
     doc = json.loads(result.stdout)
     assert doc["admissible"] is False
-    assert doc["holeCount"] == 2
+    assert doc["holeCount"] == 3
     assert "component AnalysisProvider" in doc["source"]
     assert all("fillSpec" in o for o in doc["obligations"])

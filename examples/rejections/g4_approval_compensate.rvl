@@ -1,0 +1,21 @@
+// REJECTED, G4: an approval-required extern called in an `emit` step's
+// `compensate` slot, and the step carries no covering `with` edge.
+//
+// A compensation runs during rollback, when there is nobody to ask, so it is
+// the last place an approval could be exempted. The slot keeps its
+// bare-emission exception for the MARKER (a teardown slot has no room for
+// one); it has none for approval. The step's own `with` edge covers its
+// compensation too: `emit notify(1) compensate charge(2) with a`, where `a` is
+// minted by `let a = await approval[charge] { ... }`, is admitted.
+//
+// expected error:
+//   crossing capability `charge` requires approval, but this `emit` carries
+//     no covering `with` edge
+
+extern emission fn charge(amount: Int) -> Int requires approval = @py { return 1 }
+extern emission fn notify(n: Int) -> Int = @py { return 1 }
+service Ops { fn ping() -> Int }
+component Biller provides ops: Ops {
+  emit notify(1) compensate charge(2)
+  provide ops { fn ping() = 1 }
+}

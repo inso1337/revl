@@ -16,6 +16,7 @@ from .admit_profile import check_no_host_extern_reach as _check_no_host_extern_r
 from .admit_profile import enforce_document as _enforce_document
 from .admit_profile import enforce_document_per_root as _enforce_document_per_root
 from .admit_profile import enforce_source as _enforce_source
+from . import operator_text as _operator_text
 from .errors import RevlError
 from .holes import refuse_admission
 from .hostfile import _contained
@@ -182,8 +183,17 @@ class _ModuleLoader:
 
     def __init__(self, sources: dict[str, str] | None = None,
                  profile: AdmissionProfile | None = None,
-                 profiles: dict[str, AdmissionProfile | None] | None = None) -> None:
+                 profiles: dict[str, AdmissionProfile | None] | None = None,
+                 operator_sources: dict[str, str] | None = None) -> None:
         self._cache: dict[str, _LoadedModule] = {}
+        # issue #1715: the operator's own text of the files an in-memory source
+        # stands in for. `None` keeps every in-memory source wholly the author's
+        # (the pre-#1715 behaviour); a dict, even empty, turns the diff rule on:
+        # a module read from disk is the operator's, and an in-memory module is
+        # the author's only where it differs from the operator's text.
+        self._operator = (None if operator_sources is None else
+                          {os.path.abspath(k): v for k, v in operator_sources.items()})
+        self._trusted: dict[str, tuple] = {}
         self._stack: list[str] = []
         # Keys are normalised to abspath ONCE here. Every lookup below is by
         # abspath (`has_source`, `load`), so a relative key would never match
@@ -275,6 +285,40 @@ class _ModuleLoader:
     def has_source(self, path: str) -> bool:
         return os.path.abspath(path) in self._sources
 
+    @property
+    def diffs_operator_text(self) -> bool:
+        return self._operator is not None
+
+    def delta_for(self, abs_path: str, program: _ast.Program) -> _ast.Program:
+        """The part of `program` its author wrote (issue #1715), which is what an
+        untrusted-author profile checks. Without the diff rule that is all of
+        it. With it: nothing of a module read from disk, and of an in-memory
+        module every declaration that is not identical to the operator's text of
+        that file."""
+        if self._operator is None:
+            return program
+        if abs_path not in self._sources:
+            return _operator_text.empty_program(program)
+        operator = self._operator.get(abs_path)
+        if operator is None:
+            return program
+        if abs_path not in self._trusted:
+            self._trusted[abs_path] = (
+                _operator_text.trusted_indices(self._sources[abs_path], operator,
+                                               abs_path),
+                _operator_text.operator_placements(operator, abs_path))
+        trusted, placements = self._trusted[abs_path]
+        return _operator_text.delta_program(program, trusted, placements)
+
+    def _operator_use(self, importer_path: str, use: _ast.UseDecl) -> bool:
+        """Whether the operator's own text of the importing file names this
+        `use` path: then it is the operator's layout, not an author's probe."""
+        if self._operator is None:
+            return False
+        operator = self._operator.get(os.path.abspath(importer_path))
+        return operator is not None and use.path in _operator_text.operator_uses(
+            operator, os.path.abspath(importer_path))
+
     def _exists(self, path: str) -> bool:
         return self.has_source(path) or os.path.exists(path)
 
@@ -295,7 +339,8 @@ class _ModuleLoader:
         """
         primary = os.path.join(importer_dir, use.path)
         importer_profile = self._profile_for(os.path.abspath(importer_path))
-        if in_memory and importer_profile is not None and importer_profile.untrusted:
+        if in_memory and importer_profile is not None and importer_profile.untrusted \
+                and not self._operator_use(importer_path, use):
             self._confine_use(importer_path, use, primary)
         if self._exists(primary):
             self._note_stdlib_shadow(use.path, primary, "importer-relative")
@@ -449,12 +494,13 @@ class _ModuleLoader:
             root_profile = self._profile_for(abs_path)
             if (is_root and root_profile is not None
                     and root_profile.no_extern):
-                _check_no_extern([program], root_profile)
+                authored = self.delta_for(abs_path, program)
+                _check_no_extern([authored], root_profile)
                 # item 459 F1: an `asset` is a compile-time FILE READ the
                 # admitted source chooses the path of. Structural, before any
                 # asset is resolved or stat'd, so an untrusted author cannot
                 # use the refusal itself as a file-existence oracle.
-                _check_no_asset([program], root_profile)
+                _check_no_asset([authored], root_profile)
             # item 396: resolve external host-body files under the jail,
             # replacing each HostBodyFile node with a spliced HostBody. A
             # virtual (in-memory) module resolves ONLY through the sources map
@@ -711,7 +757,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                   replacing: tuple[str, ...] = (),
                   sources: dict[str, str] | None = None,
                   profile: AdmissionProfile | None = None,
-                  profiles: dict[str, AdmissionProfile | None] | None = None) -> dict:
+                  profiles: dict[str, AdmissionProfile | None] | None = None,
+                  operator_sources: dict[str, str] | None = None) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
 
@@ -732,6 +779,14 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     `profile` (the single-profile form) is unchanged and is the DEFAULT for any
     root not named in `profiles`; passing neither, or only `profile`, is
     byte-identical to the pre-split compiler — every root shares the one profile.
+
+    `operator_sources` (issue #1715) turns on the diff rule for `sources` that
+    stand in for an operator's file: a dict keyed by abspath of the operator's
+    own text of those files (typically the file on disk). With it, a module
+    read from disk is the operator's and the profile checks nothing of it, and
+    an in-memory module is checked only for the declarations that are not
+    identical to the operator's text (`operator_text`). `None`, the default,
+    keeps every in-memory module wholly the author's, byte-identical to before.
 
     `manifest` — the runtime-admission gate: pass a previously compiled IR
     document (or its `manifest` plus `services`) and the new files are
@@ -765,7 +820,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # Roots not named in `profiles` still resolve to `profile` via `_profile_for`
     # whether their entry is present (value == `profile`) or absent, so this is
     # byte-identical for the default and single-profile paths.
-    loader = _ModuleLoader(sources, profile, profiles=per_root_profiles)
+    loader = _ModuleLoader(sources, profile, profiles=per_root_profiles,
+                           operator_sources=operator_sources)
     # item 396: mark every root abspath before loading, so the root-scoped
     # no-extern check and body-file resolution skip apply even to a root that is
     # reached as another root's `use` dependency.
@@ -1026,10 +1082,14 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     included_host = _included_host_externs(included)
     for module in root_modules:
         root_profile = per_root_profiles.get(os.path.abspath(module.path), profile)
-        _enforce_source([module.program], root_profile)
+        authored = loader.delta_for(os.path.abspath(module.path), module.program)
+        _enforce_source([authored], root_profile)
         if root_profile is not None and root_profile.no_extern:
             _check_no_host_extern_reach(
-                [module.program], merged.fn_decls, included_host, root_profile)
+                [authored], merged.fn_decls, included_host, root_profile)
+    if loader.diffs_operator_text:
+        _enforce_authored_imports(loader, included, root_modules, merged,
+                                  included_host, profile)
     # The two genuinely whole-compile analysis flags (DESIGN §9.3 Part 3) take the
     # JOIN across roots, in the safe (over-refusing) direction. `taint_strict`
     # only ADDS taint edges, so a composition containing any taint-strict root
@@ -1052,7 +1112,10 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # profile of the ROOT that declared it, and a cross-root reach is an outward
     # reach (fail closed). A single-profile compile takes the unchanged whole-doc
     # path so it stays byte-identical.
-    if profiles is None:
+    if loader.diffs_operator_text:
+        _enforce_document_per_root(document, _authored_owners(
+            loader, root_modules, seen_components, per_root_profiles, profile))
+    elif profiles is None:
         _enforce_document(document, profile)
     else:
         # #643: carry each component's owning ROOT (its declaring root abspath),
@@ -1478,6 +1541,44 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
         for kind, part in expr.parts:
             if kind == "expr":
                 recur(part)
+
+
+def _enforce_authored_imports(loader: _ModuleLoader, included: list,
+                              root_modules: list, merged, included_host: dict,
+                              profile: AdmissionProfile | None) -> None:
+    """Issue #1715: under the diff rule, an in-memory module that is not a root
+    may stand in for an operator's imported file. The author's declarations in
+    it get the no-extern check and the host-reach sweep a root gets. Without
+    this, a root left as the operator's would call an imported function whose
+    body the author rewrote to reach host code, and nothing would sweep it,
+    because the root has nothing of the author's to start from."""
+    if profile is None or not profile.no_extern:
+        return
+    roots = {os.path.abspath(m.path) for m in root_modules}
+    for module in included:
+        abs_path = os.path.abspath(module.path)
+        if abs_path in roots or not loader.has_source(abs_path):
+            continue
+        authored = loader.delta_for(abs_path, module.program)
+        _check_no_extern([authored], profile)
+        _check_no_host_extern_reach([authored], merged.fn_decls, included_host,
+                                    profile)
+
+
+def _authored_owners(loader: _ModuleLoader, root_modules: list,
+                     seen_components: dict, per_root_profiles: dict,
+                     profile: AdmissionProfile | None) -> dict:
+    """The granted-allowlist owners under the diff rule (issue #1715): a
+    component that is the operator's keeps no profile, as at load; one the
+    author wrote or changed is checked against its root's profile."""
+    authored: set[str] = set()
+    for module in root_modules:
+        delta = loader.delta_for(os.path.abspath(module.path), module.program)
+        authored.update(comp.name for comp in delta.components)
+    return {name: (os.path.abspath(path),
+                   per_root_profiles.get(os.path.abspath(path), profile)
+                   if name in authored else None)
+            for name, path in seen_components.items()}
 
 
 def _included_host_externs(included: list[_LoadedModule]) -> dict:
