@@ -139,9 +139,13 @@ questions. Measured for this artifact: 848 programs, the same 9 false-admit
 residuals, zero false admissions, agreement on every tracked bucket.
 
 That run takes about fourteen minutes and needs a rust toolchain, so `--check`
-cannot run it. It is recorded in
-`tests/fixtures/census_crate_reproduction.json` beside the checker version it was
-taken at, and a recorded result rots, so it is not trusted blind: every run
+cannot run it. It is recorded in `tests/fixtures/census_crate_reproduction/`
+beside the checker version it was taken at: `reproduction.json` holds the
+version, the tracked buckets and the false admissions, and `programs.jsonl` the
+programs the run covered, one per line (issue #1768; the single file it replaces
+stored their count, which every corpus-moving pull request rewrote). The count
+is derived, and a census program the reproduction did not run is counted in the
+report. A recorded result rots, so it is not trusted blind: every run
 compares the recorded version against the current one, and a reproduction taken
 at a different version is published as stale and **lifts no claim**. The ladder
 rung in the report is computed from evidence that is current, never declared.
