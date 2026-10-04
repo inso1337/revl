@@ -401,7 +401,7 @@ def _call_tool(name, arguments):
     return response["result"]
 
 
-def test_mcp_advertises_every_query():
+def test_mcp_advertises_every_query(all_mcp_tools):
     listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {tool["name"] for tool in listed["result"]["tools"]}
     assert {"revl_query_emitters", "revl_query_withdraw", "revl_query_dependents",

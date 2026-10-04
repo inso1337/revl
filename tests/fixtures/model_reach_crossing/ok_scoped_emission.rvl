@@ -1,0 +1,14 @@
+// ADMITTED: the fix `model_unscoped_emission.rvl` names. `Model.complete`
+// declares `emission[model.complete]` and role `local` reaches that. The file
+// name's prefix is the expected verdict (`model_` refused under G-MODEL-PLACE,
+// `ok_` admitted); tests/test_model_reach_crossing.py holds it.
+
+model role local on_device reaches [model.complete]
+
+service Model { emission[model.complete] fn complete(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Model provides out: Answer {
+  route model on classify { * -> local }
+  provide out { fn classify(text) = emit llm.complete(text) }
+}

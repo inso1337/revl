@@ -124,10 +124,22 @@ def _align_to(offset: int, align: int) -> int:
     return (offset + align - 1) & ~(align - 1)
 
 
+#: How a type string's punctuation is spelled in a helper name. Each is a WAT
+#: identifier character that no revl type or field name contains, so the
+#: mapping is injective (issue #1756): it used to turn every non-alphanumeric
+#: character into `_`, so `List[List[A]]`'s element `List[A]` and a record
+#: named `List_A_` shared one `$__canon_lift_list_List_A_`, and one of the two
+#: was lifted with the other's layout.
+_SAN = {"[": "<", "]": ">", ",": "|", " ": ""}
+
+
 def _san(ty: str) -> str:
     """A revl type string -> a wat-identifier-safe suffix (`List[Person]` ->
-    `List_Person_`). Only used to name the per-type helper functions."""
-    return "".join(c if c.isalnum() else "_" for c in ty)
+    `List<Person>`, `Result[Int, Str]` -> `Result<Int|Str>`). Only used to name
+    the per-type helper functions. Any other character is spelled by its code
+    point between dots, which no revl name contains either."""
+    return "".join(c if c.isalnum() or c == "_" else _SAN.get(c, f".{ord(c):x}.")
+                   for c in ty)
 
 
 def _internal_wasm(ty: str | None) -> str:
@@ -659,9 +671,9 @@ class _Canon:
 
         `fn` carries `name`/`params`/`returns` in the SAME shape whether it is a
         top-level pure `fn` or a service method. `call_symbol` names the core
-        function the wrapper delegates to: for a pure `fn` it is `$<name>` (the
+        function the wrapper delegates to: for a pure `fn` it is `$fn.<name>` (the
         default); for a service method it is the named provide-method function
-        (`$__prov_<key>_<method>`), which carries the very same internal ABI a
+        (`$__prov:<key>.<method>`), which carries the very same internal ABI a
         pure `fn` does, so exactly one wrapper shape serves both.
 
         `arena` turns this wrapper into a per-call arena (item 432(e), reclaim
@@ -675,7 +687,7 @@ class _Canon:
         name = fn["name"]
         params = fn.get("params") or []
         ret = fn.get("returns")
-        callee = call_symbol or f"${name}"
+        callee = call_symbol or _emit_mod._uid("fn", name)
         export_name = f"{package}/{iface}#{_kebab_name(name)}"
 
         # flatten each param into named core params
@@ -903,12 +915,16 @@ _PROVIDE_EXPORT = _re.compile(r'\(func \(export "(provide:[^"]+)"\)')
 
 
 def _provide_symbol(export_name: str) -> str:
-    # `provide:realm/kv.get` -> `$__prov_realm_kv_get`
-    return "$__prov_" + _san(export_name[len("provide:"):])
+    # `provide:realm/kv.get` -> `$__prov:realm/kv.get`. The export path is kept
+    # as it is (`/`, `.` and `:` are WAT identifier characters), so two
+    # different exports never share a symbol. Folding it to `_` made
+    # `provide:kv.get_x` and `provide:kv_get.x` both `$__prov_kv_get_x`
+    # (issue #1756).
+    return "$__prov:" + export_name[len("provide:"):]
 
 
 def _name_provide_funcs(module: str) -> tuple[str, dict[str, str]]:
-    """Give every `provide:` export in `module` a callable `$__prov_*` symbol.
+    """Give every `provide:` export in `module` a callable `$__prov:*` symbol.
     Returns the rewritten module and a `{export_name: symbol}` map."""
     symbols: dict[str, str] = {}
 
@@ -1042,7 +1058,9 @@ def _canonical_module(core: str, canon: _Canon, exports: list[str],
     # the core emitter is what keeps `$alloc_str` (reached only from a lift
     # wrapper) and drops `$str_cp_slice` (reached from nothing) in the same
     # module -- a core-only sweep would have got both wrong.
-    return _emit_mod.prune_unreachable_funcs(_splice_canonical(core, additions))
+    module = _emit_mod.prune_unreachable_funcs(_splice_canonical(core, additions))
+    _emit_mod.refuse_duplicate_exports(module, set())
+    return module
 
 
 def _splice_canonical(core: str, additions: list[str]) -> str:
