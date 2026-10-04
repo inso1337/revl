@@ -370,6 +370,8 @@
 
 ["examples/rejections/g4_extern_config_alias_opaque.rvl", "agree-refuse/G4"]
 
+["examples/rejections/g4_extern_undo_not_declared.rvl", "agree-refuse/G4"]
+
 ["examples/rejections/g4_extern_undo_param_not_in_scope.rvl", "agree-refuse/G4"]
 
 ["examples/rejections/g4_extern_undo_self_call.rvl", "agree-refuse/G4"]
@@ -1165,6 +1167,8 @@
 ["oracle-reject:g4 emission callable passed as a value", "agree-refuse/G4"]
 
 ["oracle-reject:g4 emission not declared", "agree-refuse/G4"]
+
+["oracle-reject:g4 extern undo that is not the declared inverse", "agree-refuse/G4"]
 
 ["oracle-reject:g4 host acquire in a compensation", "agree-refuse/G4"]
 

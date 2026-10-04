@@ -2400,6 +2400,10 @@ component C requires kv: Kv {
     # issue #1859: the undo of a host acquisition is not its release
     ("g4 host undo that is not the release",
      _fixture("g4_undo_not_release"), "G4"),
+    # issue #1859 slice 3: the site undo of an extern acquire is not the
+    # inverse its declaration names
+    ("g4 extern undo that is not the declared inverse",
+     _fixture("g4_extern_undo_not_declared"), "G4"),
     ("g4 host acquire in a component-reachable fn body",
      _fixture("g4_fn_body_host_acquire"), "G4"),
     # the same rule at the two positions no checked-in fixture occupies

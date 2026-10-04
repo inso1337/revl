@@ -54,6 +54,7 @@
     "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl"
   ],
   "out-of-fragment-inverse": [
+    "examples/rejections/g4_extern_undo_not_declared.rvl",
     "examples/rejections/g4_undo_not_release.rvl"
   ]
 }

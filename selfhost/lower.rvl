@@ -3467,7 +3467,7 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
              localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str,
-             appr: ApprI, extInv: Map[Str, Str] }
+             appr: ApprI }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -3745,7 +3745,7 @@ fn ctx_appr(cx: Ctx, ap: ApprI) -> Ctx {
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere,
-           emitPos: cx.emitPos, appr: ap, extInv: cx.extInv }
+           emitPos: cx.emitPos, appr: ap }
 }
 
 fn appr_info(ts: List[Token], pg: Prog) -> ApprI {
@@ -3961,7 +3961,7 @@ fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
            // "setup" there, whose host-acquire phrase is "this position"
            acqWhere: pos == "args" && cx.emitPos == "head" ? "this position"
                                                             : cx.acqWhere,
-           emitPos: pos, appr: cx.appr, extInv: cx.extInv }
+           emitPos: pos, appr: cx.appr }
 }
 
 // Whether a marked head's arguments admit a bare emission: never under a
@@ -4180,7 +4180,7 @@ fn result_slots_hold(args: List[Expr], slots: Str, bind: Str, i: Int) -> Bool {
 fn extern_release_msg(acq: Stmt, u: Expr, cx: Ctx, seam: Bool) -> Str {
   let fnm = ext_acq_name(acq)
   if (fnm == "") { return "" }
-  let enc = match cx.extInv.lookup(fnm) { Some(v) => v, None => "" }
+  let enc = match cx.provKeySvc.lookup(ext_inv_key(fnm)) { Some(v) => v, None => "" }
   if (enc == "") { return "" }
   let bar = enc.indexOf("|")
   let inv = enc.slice(0, bar)
@@ -4892,7 +4892,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context carrying the host-acquire position phrase of the statement
@@ -4906,7 +4906,7 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: where, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
+           acqWhere: where, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context carrying a body's provision-alias map.
@@ -4918,7 +4918,7 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
+           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context carrying the local arrows one body binds (`let f = (…) =>
@@ -4932,7 +4932,7 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
+           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -4953,7 +4953,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
            acqWhere: cx.acqWhere,
-           emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr, extInv: cx.extInv }
+           emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -5083,18 +5083,26 @@ fn build_maps(pg: Prog) -> Ctx {
   let colored = async_colored(pg.fns, slots)
   var emitting: List[Str] = []
   var ai: List[Str] = []
-  var inv: Map[Str, Str] = Map.empty()
+  var pks = prov_key_svc(pg)
   var fi = 0
   while (fi < pg.fns.length()) {
     let f = pg.fns[fi]
     if (caps_of(caps, f.name).length() > 0) { emitting = emitting.push(f.name) }
     if (f.isAsyncExtern) { ai = ai.push(f.name) }
-    if (f.inv != "") { inv = inv.set(f.name, f.inv) }
+    if (f.inv != "") { pks = pks.set(ext_inv_key(f.name), f.inv) }
     fi += 1
   }
   return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai,
-                [], fn_names_of(pg.fns), "", slots, prov_key_svc(pg), inv)
+                [], fn_names_of(pg.fns), "", slots, pks)
 }
+
+// An `extern acquire`'s declared inverse rides in the same global table, under
+// `extern#<name>` (issue #1859). `extern` is a keyword, so no component can be
+// named it and the two key spaces are disjoint. It is not a field of its own
+// because `Ctx` is passed by value through the per-item descent, and one more
+// map in it overflowed the gate crate's at-the-bound stack test
+// (crates/revl-gate/tests/admit.rs `a_source_at_the_level_bound_is_still_decided`).
+fn ext_inv_key(name: Str) -> Str { return "extern#".concat(name) }
 
 // The global (component `#` key -> service) table: every component's provided
 // keys mapped to the service each supplies. A spawn-handle read `h.<key>.<op>`
@@ -5118,15 +5126,14 @@ fn prov_key_svc(pg: Prog) -> Map[Str, Str] {
 fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
           colored: List[Str], emitting: List[Str], ai: List[Str],
           scope: List[Str], fnn: List[Str], cnm: Str,
-          slots: Map[Str, List[Int]], pks: Map[Str, Str],
-          inv: Map[Str, Str]) -> Ctx {
+          slots: Map[Str, List[Int]], pks: Map[Str, Str]) -> Ctx {
   return { svcs: svcs, ambOps: Map.empty(), reqMap: rm, caps: caps,
            colored: colored,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position", emitPos: "", appr: no_appr(), extInv: inv }
+           acqWhere: "this position", emitPos: "", appr: no_appr() }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -5140,7 +5147,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The RUNNING composition's service table, off the item-346 service block's
@@ -5162,7 +5169,7 @@ fn ctx_amb_ops(cx: Ctx, ops: Map[Str, AmbSvc]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -5186,7 +5193,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position", emitPos: "", appr: base.appr, extInv: base.extInv }
+           acqWhere: "this position", emitPos: "", appr: base.appr }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its

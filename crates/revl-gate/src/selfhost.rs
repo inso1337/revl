@@ -47,6 +47,7 @@ pub struct FnD {
     cachePure: bool,
     line: i64,
     caps: Vec<String>,
+    inv: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -7526,7 +7527,11 @@ fn mk_step(p: Prog, i: i64) -> PStep {
 }
 
 fn mk_fnd(nm: String, em: bool, asy: bool, cs: Vec<String>, slots: Vec<i64>, aps: Vec<String>, bd: Vec<Stmt>, ln: i64, cps: Vec<String>) -> FnD {
-    return FnD { name: nm.clone(), isEmExtern: em, isAsyncExtern: asy, callees: cs.clone(), asyncSlots: slots.clone(), asyncParams: aps.clone(), body: bd.clone(), cachePure: false, line: ln, caps: cps.clone() };
+    return FnD { name: nm.clone(), isEmExtern: em, isAsyncExtern: asy, callees: cs.clone(), asyncSlots: slots.clone(), asyncParams: aps.clone(), body: bd.clone(), cachePure: false, line: ln, caps: cps.clone(), inv: String::from("") };
+}
+
+fn fnd_with_inv(f: FnD, inv: String) -> FnD {
+    return FnD { name: f.name.clone(), isEmExtern: f.isEmExtern, isAsyncExtern: f.isAsyncExtern, callees: f.callees.clone(), asyncSlots: f.asyncSlots.clone(), asyncParams: f.asyncParams.clone(), body: f.body.clone(), cachePure: f.cachePure, line: f.line, caps: f.caps.clone(), inv: inv.clone() };
 }
 
 fn mk_msig(nm: String, em: bool, cs: Vec<String>, asy: bool, ps: Vec<ParamN>, ret: String) -> MSig {
@@ -8287,6 +8292,7 @@ fn fn_params_i(ts: &[Token], i: i64) -> i64 {
 
 fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
+    let mut isAcq = false;
     let mut isEm = false;
     let mut isAsync = false;
     let mut isWit = false;
@@ -8295,6 +8301,9 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     while ((((((((atw(&ts, j.clone(), "emission") || atw(&ts, j.clone(), "acquire")) || atw(&ts, j.clone(), "pure")) || atw(&ts, j.clone(), "async")) || ati(&ts, j.clone(), "witnessed")) || ati(&ts, j.clone(), "deferred")) || atw(&ts, j.clone(), "idempotent")) || atk(&ts, j.clone(), "[")) || atk(&ts, j.clone(), "(")) {
         if atw(&ts, j.clone(), "emission") {
             isEm = true;
+        }
+        if atw(&ts, j.clone(), "acquire") {
+            isAcq = true;
         }
         if ati(&ts, j.clone(), "witnessed") {
             isWit = true;
@@ -8333,6 +8342,7 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
     let mut k = ret_at(ts.clone(), ps.i);
+    let inv = if isAcq { declared_inverse_at(&ts, k) } else { String::from("") };
     while ((((((((k < ts.revl_length()) && (!atw(&ts, k, "service"))) && (!atw(&ts, k, "component"))) && (!atw(&ts, k, "extern"))) && (!atw(&ts, k, "fn"))) && (!atw(&ts, k, "pub"))) && (!atw(&ts, k, "type"))) && (!atk(&ts, k, "eof"))) {
         if atk(&ts, k, "{") {
             let e = close_brace(&ts, k);
@@ -8345,7 +8355,38 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
     }
-    return mk_step(push_fn(pg.clone(), mk_fnd(nm.clone(), (isEm || isWit), isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), vec![], tkc(&ts, i).line, if (isEm || isWit) { caps } else { vec![] })), k);
+    return mk_step(push_fn(pg.clone(), fnd_with_inv(mk_fnd(nm.clone(), (isEm || isWit), isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), vec![], tkc(&ts, i).line, if (isEm || isWit) { caps } else { vec![] }), inv)), k);
+}
+
+fn declared_inverse_at(ts: &[Token], k: i64) -> String {
+    let mut u = k;
+    while (((((u < ts.revl_length()) && (!atw(ts, u, "undo"))) && (!atk(ts, u, "="))) && (!atk(ts, u, "{"))) && (!atk(ts, u, "eof"))) {
+        u = (u).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (((!atw(ts, u, "undo")) || (!atk(ts, (u).checked_add(1i64).expect("revl: Int overflow"), "ident"))) || (!atk(ts, (u).checked_add(2i64).expect("revl: Int overflow"), "("))) {
+        return String::from("");
+    }
+    return (tkc(ts, (u).checked_add(1i64).expect("revl: Int overflow")).text.revl_concat("|")).revl_concat(&inverse_slots(ts, (u).checked_add(3i64).expect("revl: Int overflow"), 0i64, String::from(""), true));
+}
+
+fn inverse_slots(ts: &[Token], i: i64, depth: i64, acc: String, fresh: bool) -> String {
+    if ((i >= ts.revl_length()) || atk(ts, i, "eof")) {
+        return acc;
+    }
+    if ((depth == 0i64) && atk(ts, i, ")")) {
+        return acc;
+    }
+    if ((depth == 0i64) && atk(ts, i, ",")) {
+        return inverse_slots(ts, (i).checked_add(1i64).expect("revl: Int overflow"), 0i64, acc.clone(), true);
+    }
+    if fresh {
+        let lone = (ati(ts, i, "result") && (atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), ",") || atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), ")")));
+        let d = if ((atk(ts, i, "(") || atk(ts, i, "[")) || atk(ts, i, "{")) { 1i64 } else { 0i64 };
+        return inverse_slots(ts, (i).checked_add(1i64).expect("revl: Int overflow"), (depth).checked_add(d).expect("revl: Int overflow"), acc.revl_concat(&if lone { String::from("R") } else { String::from("_") }), false);
+    }
+    let up = if ((atk(ts, i, "(") || atk(ts, i, "[")) || atk(ts, i, "{")) { 1i64 } else { 0i64 };
+    let down = if ((atk(ts, i, ")") || atk(ts, i, "]")) || atk(ts, i, "}")) { 1i64 } else { 0i64 };
+    return inverse_slots(ts, (i).checked_add(1i64).expect("revl: Int overflow"), ((depth).checked_add(up).expect("revl: Int overflow")).checked_sub(down).expect("revl: Int overflow"), acc.clone(), false);
 }
 
 fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
@@ -8364,7 +8405,7 @@ fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
         return PStep { pg: bad_prog(pg.clone(), String::from("unbalanced braces in fn body")), i: ts.revl_length() };
     }
     let body = p_stmts(ts.clone(), (rti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
-    return mk_step(push_fn(pg.clone(), FnD { name: nm.clone(), isEmExtern: false, isAsyncExtern: false, callees: body_callees(body.clone(), 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![] }), bend);
+    return mk_step(push_fn(pg.clone(), FnD { name: nm.clone(), isEmExtern: false, isAsyncExtern: false, callees: body_callees(body.clone(), 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![], inv: String::from("") }), bend);
 }
 
 fn mk_meths(xs: Vec<MSig>, i: i64, ok: bool) -> MethsR {
@@ -9450,7 +9491,7 @@ fn walk_stmts(ss: &[Stmt], i: i64, cx: Ctx__m2, a: Ac) -> Ac {
         return a;
     }
     let j = group_end(ss, i);
-    return walk_stmts(ss, j, cx.clone(), release_group(ss, i, appr_group(ss, i, cx.clone(), walk_span(ss, i, j, cx.clone(), a.clone()))));
+    return walk_stmts(ss, j, cx.clone(), release_group(ss, i, cx.clone(), appr_group(ss, i, cx.clone(), walk_span(ss, i, j, cx.clone(), a.clone()))));
 }
 
 fn host_acq_fn(s: Stmt) -> String {
@@ -9531,13 +9572,13 @@ fn host_release_msg(bind: &str, hf: &str, release: &str) -> String {
     return (((((((String::from("the `undo` of `let ").revl_concat(&bind)).revl_concat(" = effect ")).revl_concat(&hf)).revl_concat("(...)` must release THAT handle: write `undo ")).revl_concat(&bind)).revl_concat(".")).revl_concat(&release)).revl_concat("()`");
 }
 
-fn release_msg_at(ss: &[Stmt], i: i64) -> String {
+fn release_msg_at(ss: &[Stmt], i: i64, cx: Ctx__m2, seam: bool) -> String {
     if ((i == 0i64) || ((ss)[(i) as usize].kind != "undo")) {
         return String::from("");
     }
     let hf = host_acq_fn((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone());
     if (hf == "") {
-        return String::from("");
+        return extern_release_msg((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone(), (ss)[(i) as usize].e.clone(), cx.clone(), seam);
     }
     let release = release_of_fn(&hf);
     let bind = (ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].bind.clone();
@@ -9553,23 +9594,108 @@ fn release_msg_at(ss: &[Stmt], i: i64) -> String {
     return host_release_msg(&bind, &hf, &release);
 }
 
-fn method_release_msg(ss: &[Stmt], i: i64) -> String {
+fn method_release_msg(ss: &[Stmt], i: i64, cx: Ctx__m2) -> String {
     if (i >= ss.revl_length()) {
         return String::from("");
     }
-    let m = if ((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].bind == "") { release_msg_at(ss, i) } else { String::from("") };
+    let m = if ((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].bind == "") { release_msg_at(ss, i, cx.clone(), true) } else { String::from("") };
     if (m != "") {
         return m;
     }
-    return method_release_msg(ss, (i).checked_add(1i64).expect("revl: Int overflow"));
+    return method_release_msg(ss, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone());
 }
 
-fn release_group(ss: &[Stmt], i: i64, a: Ac) -> Ac {
+fn release_group(ss: &[Stmt], i: i64, cx: Ctx__m2, a: Ac) -> Ac {
     if (a.msg != "") {
         return a;
     }
-    let m = release_msg_at(ss, i);
+    let m = release_msg_at(ss, i, cx.clone(), false);
     return if (m == "") { a.clone() } else { ac_refuse(a.clone(), String::from("G4"), m.clone()) };
+}
+
+fn ext_acq_name(s: Stmt) -> String {
+    if (s.kind != "effect") {
+        return String::from("");
+    }
+    return match s.e.clone() {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Var(v) => v,
+    _ => String::from(""),
+} },
+    Expr::Var(v) => v,
+    _ => String::from(""),
+};
+}
+
+fn inv_has_result(slots: &str) -> bool {
+    return (slots.revl_index_of("R") >= 0i64);
+}
+
+fn ext_release_form(inv: &str, slots: &str, who: &str) -> String {
+    if (slots == "R") {
+        return (((String::from("`undo ").revl_concat(&inv)).revl_concat("(")).revl_concat(&who)).revl_concat(")`");
+    }
+    if inv_has_result(slots) {
+        return (((String::from("`undo ").revl_concat(&inv)).revl_concat("(...)` with `")).revl_concat(&who)).revl_concat("` where the declaration passes `result`");
+    }
+    return (String::from("`undo ").revl_concat(&inv)).revl_concat("(...)` as the declaration calls it");
+}
+
+fn undo_calls_inverse(u: Expr, inv: &str, slots: &str, bind: &str) -> bool {
+    return match u {
+    Expr::Call(c) => { let c = *c; ((is_var_named(c.target.clone(), inv) && (c.args.revl_length() == slots.revl_length())) && result_slots_hold(&c.args, slots, bind, 0i64)) },
+    _ => false,
+};
+}
+
+fn calls_inverse_by_arity(u: Expr, inv: &str, slots: &str) -> bool {
+    return match u {
+    Expr::Call(c) => { let c = *c; (is_var_named(c.target.clone(), inv) && (c.args.revl_length() == slots.revl_length())) },
+    _ => false,
+};
+}
+
+fn result_slots_hold(args: &[Expr], slots: &str, bind: &str, i: i64) -> bool {
+    if (i >= args.revl_length()) {
+        return true;
+    }
+    if ((slots.revl_slice(i, (i).checked_add(1i64).expect("revl: Int overflow")) == "R") && (!is_var_named((args)[(i) as usize].clone(), bind))) {
+        return false;
+    }
+    return result_slots_hold(args, slots, bind, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn extern_release_msg(acq: Stmt, u: Expr, cx: Ctx__m2, seam: bool) -> String {
+    let fnm = ext_acq_name(acq.clone());
+    if (fnm == "") {
+        return String::from("");
+    }
+    let enc = match cx.provKeySvc.get(&ext_inv_key(&fnm)).cloned() {
+    Some(v) => v,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+    if (enc == "") {
+        return String::from("");
+    }
+    let bar = enc.revl_index_of("|");
+    let inv = enc.revl_slice(0i64, bar);
+    let slots = enc.revl_slice((bar).checked_add(1i64).expect("revl: Int overflow"), enc.revl_length());
+    let bind = acq.bind;
+    if (((bind == "") && inv_has_result(&slots)) && seam) {
+        return (((((String::from("`effect ").revl_concat(&fnm)).revl_concat("(...)` in a provide method cannot name its handle, so no site `undo` can release it: declare `")).revl_concat(&fnm)).revl_concat("` `witnessed` and drop the site `undo`, and its declared `undo ")).revl_concat(&inv)).revl_concat("(...)` releases each acquisition");
+    }
+    if ((bind == "") && inv_has_result(&slots)) {
+        return ((((String::from("`effect ").revl_concat(&fnm)).revl_concat("(...)` must bind its handle so its `undo` can release it: write `let <name> = effect ")).revl_concat(&fnm)).revl_concat("(...)` with ")).revl_concat(&ext_release_form(&inv, &slots, "<name>"));
+    }
+    if undo_calls_inverse(u.clone(), &inv, &slots, &bind) {
+        return String::from("");
+    }
+    if (inv_has_result(&slots) && calls_inverse_by_arity(u.clone(), &inv, &slots)) {
+        return String::from("");
+    }
+    let head = if (bind != "") { (((String::from("let ").revl_concat(&bind)).revl_concat(" = effect ")).revl_concat(&fnm)).revl_concat("(...)") } else { (String::from("effect ").revl_concat(&fnm)).revl_concat("(...)") };
+    return ((((((String::from("the `undo` of `").revl_concat(&head)).revl_concat("` must be the inverse `")).revl_concat(&fnm)).revl_concat("` declares")).revl_concat(&if inv_has_result(&slots) { String::from(", on THAT handle") } else { String::from("") })).revl_concat(": write ")).revl_concat(&ext_release_form(&inv, &slots, &(if (bind != "") { bind.clone() } else { String::from("<name>") })));
 }
 
 fn is_fn_label(l: &str) -> bool {
@@ -10104,6 +10230,7 @@ fn build_maps(pg: Prog) -> Ctx__m2 {
     let colored = async_colored(&pg.fns, slots.clone());
     let mut emitting: Vec<String> = vec![];
     let mut ai: Vec<String> = vec![];
+    let mut pks = prov_key_svc(pg.clone());
     let mut fi = 0i64;
     while (fi < pg.fns.revl_length()) {
         let f = (pg.fns)[(fi) as usize].clone();
@@ -10113,9 +10240,16 @@ fn build_maps(pg: Prog) -> Ctx__m2 {
         if f.isAsyncExtern {
             ai.push(f.name.clone());
         }
+        if (f.inv != "") {
+            pks.insert(ext_inv_key(&f.name), f.inv.clone());
+        }
         fi = (fi).checked_add(1i64).expect("revl: Int overflow");
     }
-    return mk_ctx(svcs.clone(), std::collections::HashMap::new(), caps.clone(), colored.clone(), emitting.clone(), ai.clone(), vec![], fn_names_of(&pg.fns), String::from(""), slots.clone(), prov_key_svc(pg.clone()));
+    return mk_ctx(svcs.clone(), std::collections::HashMap::new(), caps.clone(), colored.clone(), emitting.clone(), ai.clone(), vec![], fn_names_of(&pg.fns), String::from(""), slots.clone(), pks.clone());
+}
+
+fn ext_inv_key(name: &str) -> String {
+    return String::from("extern#").revl_concat(&name);
 }
 
 fn prov_key_svc(pg: Prog) -> std::collections::HashMap<String, String> {
@@ -10283,7 +10417,7 @@ fn refusal_line(ss: &[Stmt], i: i64, cx: Ctx__m2, a: Ac) -> i64 {
     if (na.msg != "") {
         return (ss)[(i) as usize].line.clone();
     }
-    na = release_group(ss, i, na.clone());
+    na = release_group(ss, i, cx.clone(), na.clone());
     if (na.msg != "") {
         return (ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].line.clone();
     }
@@ -11447,7 +11581,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind]) -> Verd {
             if (mrv.v != "") {
                 return mrv;
             }
-            let mrel = method_release_msg(&pm.body, 1i64);
+            let mrel = method_release_msg(&pm.body, 1i64, cx.clone());
             if (mrel != "") {
                 return mk_verd(tagged("G4", &mrel), pm.line);
             }
@@ -29633,6 +29767,36 @@ fn a_requirement_key_may_not_spell_a_builtin_type() {
 fn a_builtin_type_read_as_a_value_names_the_type_rule() {
     let v = admit_src(String::from("service S { fn go(n: Int) -> List[Str] }\ncomponent C provides s: S {\n  provide s { fn go(n) = List.reverse([\"a\"]) }\n}"));
     assert!((v == "T1|`List` is a builtin type, not a value"));
+}
+
+#[test]
+fn an_extern_acquire_s_site_undo_that_is_not_its_declared_inverse_is_refused() {
+    let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern pure fn noop() -> Unit = @py { return None }\nextern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let h = effect open_h() undo noop()\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == "G4|the `undo` of `let h = effect open_h(...)` must be the inverse `open_h` declares, on THAT handle: write `undo close_h(h)`"));
+}
+
+#[test]
+fn an_extern_acquire_released_by_its_declared_inverse_is_admitted() {
+    let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let h = effect open_h() undo close_h(h)\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_unbound_extern_acquire_whose_inverse_takes_the_handle_is_refused() {
+    let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern pure fn noop() -> Unit = @py { return None }\nextern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  effect open_h() undo noop()\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == "G4|`effect open_h(...)` must bind its handle so its `undo` can release it: write `let <name> = effect open_h(...)` with `undo close_h(<name>)`"));
+}
+
+#[test]
+fn an_extern_acquire_in_a_provide_method_names_the_witnessed_spelling() {
+    let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern pure fn noop() -> Unit = @py { return None }\nextern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n) {\n      effect open_h() undo noop()\n      return n\n    }\n  }\n}"));
+    assert!((v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so no site `undo` can release it: declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"));
+}
+
+#[test]
+fn a_declared_inverse_that_takes_no_handle_pins_only_the_callee() {
+    let v = admit_src(String::from("type H = Opaque\nextern pure fn unlock() -> Unit = @py { return None }\nextern pure fn noop() -> Unit = @py { return None }\nextern acquire fn lock() -> H undo unlock() = @py { return 1 }\nservice S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  effect lock() undo noop()\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == "G4|the `undo` of `effect lock(...)` must be the inverse `lock` declares: write `undo unlock(...)` as the declaration calls it"));
 }
 
 #[test]

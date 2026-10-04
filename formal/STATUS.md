@@ -1085,7 +1085,7 @@ with corpus work that never touched this layer.
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 | `out-of-fragment-approval` | 15 | ratcheted |
-| `out-of-fragment-inverse` | 1 | ratcheted |
+| `out-of-fragment-inverse` | 2 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1116,6 +1116,7 @@ buckets are:
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl`
+- `out-of-fragment-inverse`: `examples/rejections/g4_extern_undo_not_declared.rvl`
 - `out-of-fragment-inverse`: `examples/rejections/g4_undo_not_release.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
