@@ -1,7 +1,0 @@
-{
- "checker_version": "GATE-CENSUS-1+2c538f28f6ed",
- "engine": "crate",
- "false_admissions": [],
- "note": "A recorded `tools/gate_reference_census.py --engine crate` run, read by tools/census_artifact.py. It is recorded rather than re-run because it needs cargo and takes minutes. The checker version it was taken at is recorded with it, and a reproduction taken at a different version is reported as stale and lifts no claim.",
- "tracked_buckets": {}
-}
