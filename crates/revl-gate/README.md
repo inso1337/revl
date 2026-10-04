@@ -323,13 +323,16 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:c67883ad5f4636c1"
+    // frontier "selfhost-admit:<identity>"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
 navigation surface carries its own, `SYMBOLS_API_VERSION`. `language` is
 the revl version this gate's refusals are drawn from. `frontier` identifies the
 COVERED surface: two gates with different frontier ids cover different
-languages, and their agreement carries no information. `layer` says in prose
+languages, and their agreement carries no information. `<identity>` is the
+first 16 hex digits of a sha256 that `build.rs` computes over this crate's
+`Cargo.toml`, `build.rs` and `src/**/*.rs` when cargo builds it, so it names the
+bytes compiled and no committed file stores it. `layer` says in prose
 what the gate decides. Codes are append-only; message text is not promised
 stable across versions.
