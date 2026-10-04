@@ -110,11 +110,11 @@
 
 ["function", "host-map-binding-inference-these-functions-scan-let", "_map_value_rust_type", 2, 2]
 
-["reason", "in-file-test-and-lifecycle-harness-generation-is", "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions."]
+["reason", "in-file-test-and-lifecycle-harness-generation-is", "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions. Since item 391 the pure `test` section is ported: selfhost/emit_rust.rvl emits each block as a `#[test] fn`, held to byte agreement by emit_rust_corpus/in_file_tests.rvl, so `_emit_v3_tests` keeps only its `continue` past a lifecycle test, which `_emit_v3` never hands it (it splits the lifecycle tests off first)."]
 
 ["function", "in-file-test-and-lifecycle-harness-generation-is", "_emit_v3_lifecycle_tests", 81, 81]
 
-["function", "in-file-test-and-lifecycle-harness-generation-is", "_emit_v3_tests", 32, 32]
+["function", "in-file-test-and-lifecycle-harness-generation-is", "_emit_v3_tests", 1, 1]
 
 ["function", "in-file-test-and-lifecycle-harness-generation-is", "_lifecycle_uses_advance", 1, 1]
 
@@ -300,13 +300,13 @@
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_string", 5, 5]
 
-["reason", "version-and-document-shape-guards-emit-rejects-malformed", "Version and document-shape guards: emit rejects malformed/unknown IR, _emit_v1/_emit_v2 are legacy paths outside the mirrored v3 contract, and the residual _emit_v3 statements handle empty documents plus test/lifecycle sections delegated to their explicit boundaries."]
+["reason", "version-and-document-shape-guards-emit-rejects-malformed", "Version and document-shape guards: emit rejects malformed/unknown IR, _emit_v1/_emit_v2 are legacy paths outside the mirrored v3 contract, and the residual _emit_v3 statements are the empty-document refusal and the lifecycle-test delegation (the pure test section is emitted since item 391, emit_rust_corpus/in_file_tests.rvl)."]
 
 ["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v1", 1, 1]
 
 ["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v2", 6, 6]
 
-["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v3", 7, 7]
+["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v3", 2, 2]
 
 ["function", "version-and-document-shape-guards-emit-rejects-malformed", "emit", 3, 3]
 
