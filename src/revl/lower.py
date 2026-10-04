@@ -12883,6 +12883,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 check_ir(lowered_return, decl.returns, env.type_env,
                          env.types, env.services, filename, ms.line,
                          f"`{method.name}` returns")
+                # issue #1838: `return n` from a method declared `-> Float`
+                # is a coercion site, marked as a pure fn's `return` is
+                # (docs/arithmetic.md), so every tier emits the conversion
+                _mark_widen(decl.returns, actual, lowered_return)
                 lowered_return = _inject_opt(decl.returns, actual, lowered_return)
             out.append({"step": "return", "expr": lowered_return})
 
