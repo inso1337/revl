@@ -194,6 +194,11 @@ def _bind_session_authority(args) -> int | None:
         from ..mcp.server import SESSION
 
         SESSION.approval_record_values = values
+    # issue #1697: the client asked for the whole verb list up front
+    if getattr(args, "all_tools", False):
+        from ..mcp import disclosure
+
+        disclosure.set_all_tools(True)
     return None
 
 
