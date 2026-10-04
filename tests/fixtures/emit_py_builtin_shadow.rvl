@@ -1,0 +1,30 @@
+// item 391: user identifiers that collide with a Python builtin the emitter
+// itself calls bare. `.length()` lowers to `len(...)`, so a user `fn len`
+// emitted as `def len` REBINDS the module's `len`, and every `.length()` in the
+// module then calls the user fn: `count([1, 2, 3])` answers 99, not 3, with no
+// error anywhere. The reference escapes the collider (`len` -> `len_`) at its
+// declaration and every use, and shifts the `_` ladder so the escape stays
+// injective (`len_` -> `len__`, `sorted_` -> `sorted__`). selfhost/emit_py.rvl
+// escaped Python keywords only.
+fn len(xs: List[Int]) -> Int {
+  return 99
+}
+
+fn count(xs: List[Int]) -> Int {
+  return xs.length()
+}
+
+fn bytes(n: Int) -> Int {
+  return n * 8
+}
+
+fn ladder(len_: Int, sorted_: Int) -> Int {
+  let str = len_ + sorted_
+  return str + len([len_])
+}
+
+fn total(xs: List[Int]) -> Int {
+  var sum = 0
+  for (x of xs) { sum = sum + x }
+  return sum + bytes(1) + count(xs)
+}
