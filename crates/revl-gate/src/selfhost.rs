@@ -389,6 +389,13 @@ pub struct DfsRes {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TopFn {
+    name: String,
+    line: i64,
+    ext: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CfgCaseD {
     cname: String,
     payload: String,
@@ -13070,6 +13077,70 @@ pub fn foreign_scan(src: String) -> String {
     return foreign_scan_ts(&lex_src(src.clone()));
 }
 
+fn next_fn_name(ts: &[Token], j: i64) -> i64 {
+    let mut k = j;
+    while ((((k < ts.revl_length()) && (!atw(ts, k, "fn"))) && (!atk(ts, k, "{"))) && (!atk(ts, k, "="))) {
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return k;
+}
+
+fn top_fns(ts: &[Token]) -> Vec<TopFn> {
+    let mut out: Vec<TopFn> = vec![];
+    let mut depth = 0i64;
+    let mut i = 0i64;
+    while (i < ts.revl_length()) {
+        if atk(ts, i, "{") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if atk(ts, i, "}") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            } else {
+                if ((depth == 0i64) && atw(ts, i, "extern")) {
+                    let k = next_fn_name(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+                    if (atw(ts, k, "fn") && atk(ts, (k).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                        out.push(TopFn { name: tkc(ts, (k).checked_add(1i64).expect("revl: Int overflow")).text, line: tkc(ts, i).line, ext: true });
+                        i = (k).checked_add(1i64).expect("revl: Int overflow");
+                    }
+                } else {
+                    if (((depth == 0i64) && atw(ts, i, "fn")) && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                        out.push(TopFn { name: tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, line: tkc(ts, i).line, ext: false });
+                    }
+                }
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn fn_extern_msg(name: &str, other: &str, line: i64) -> String {
+    return ((((String::from("`").revl_concat(&name)).revl_concat("` is already declared as ")).revl_concat(&other)).revl_concat(" on line ")).revl_concat(&(line).to_string());
+}
+
+fn fn_extern_scan(ts: &[Token]) -> Verd {
+    let ds = top_fns(ts);
+    let mut i = 0i64;
+    while (i < ds.revl_length()) {
+        let f = (ds)[(i) as usize].clone();
+        if (!f.ext) {
+            let mut j = 0i64;
+            while (j < ds.revl_length()) {
+                let e = (ds)[(j) as usize].clone();
+                if (e.ext && (e.name == f.name)) {
+                    if (f.line > e.line) {
+                        return mk_verd(tagged("G6", &fn_extern_msg(&f.name, "an extern", e.line)), f.line);
+                    }
+                    return mk_verd(tagged("G6", &fn_extern_msg(&f.name, "a function", f.line)), e.line);
+                }
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
 fn ends_expr_kw(w: &str) -> bool {
     if (((((w == "let") || (w == "var")) || (w == "return")) || (w == "if")) || (w == "else")) {
         return true;
@@ -18678,6 +18749,10 @@ pub fn admit_src(src: String) -> String {
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
     }
+    let fxe = fn_extern_scan(&ts);
+    if (fxe.v != "") {
+        return fxe.v;
+    }
     return pick_min(&collect_refusals(ts.clone(), pg.clone()));
 }
 
@@ -18697,6 +18772,10 @@ pub fn admit_all(src: String) -> String {
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
         return fmt_all(&(vec![mk_verd(tagged("BAD", &pg.bad), 0i64)]));
+    }
+    let fxe = fn_extern_scan(&ts);
+    if (fxe.v != "") {
+        return fmt_all(&(vec![fxe.clone()]));
     }
     return fmt_all(&collect_refusals(ts.clone(), pg.clone()));
 }
@@ -19143,6 +19222,10 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
+    }
+    let fxe = fn_extern_scan(&ts);
+    if (fxe.v != "") {
+        return fxe.v;
     }
     let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
     let drop = dropped_names(pg.comps.clone(), 0i64, man.repl.clone());

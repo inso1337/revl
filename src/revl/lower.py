@@ -2002,6 +2002,27 @@ def _duplicate_symbol_message(kind: str, name: str,
     return msg
 
 
+def _fn_extern_collision(decl, fn_file: str, ext_file: str, ext_line: int) -> RevlError:
+    """The refusal for a `fn` and an `extern fn` of one name (issue #1813), in
+    the duplicate-binding shape (`... is already declared ...`, G6), raised at
+    whichever of the two comes second. Both used to land in the IR, and which
+    one a call reached was left to the backend."""
+    name = decl.name
+    hint = ("a module `fn` and an `extern fn` share one namespace, so a call to "
+            "the name could reach either; rename one of them (issue #1813)")
+    if os.path.abspath(fn_file) != os.path.abspath(ext_file):
+        return RevlError(fn_file, decl.line,
+                         f"`{name}` is already declared as an extern in "
+                         f"{os.path.abspath(ext_file)}", hint=hint)
+    if decl.line > ext_line:
+        return RevlError(fn_file, decl.line,
+                         f"`{name}` is already declared as an extern on line "
+                         f"{ext_line}", hint=hint)
+    return RevlError(ext_file, ext_line,
+                     f"`{name}` is already declared as a function on line "
+                     f"{decl.line}", hint=hint)
+
+
 def _lower_fns(program: Program, filename: str, types: dict | None = None) -> list:
     _check_verified_totality(program, filename)
     types = types or {}
@@ -2017,6 +2038,10 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     # (roadmap 394): a same-named fn reached under two `use` spellings loads as
     # two modules, and the diagnostic must show both resolved paths.
     seen: dict[str, str] = {}
+    # issue #1813: an `extern fn` and a `fn` may not share a name either. Both
+    # land in the IR, and which one a call reaches was left to the backend.
+    externs_at = {ext.name: (program.decl_files.get(id(ext), filename), ext.line)
+                  for ext in program.externs}
     # Install the block-arm lift sink for the duration of fn-body lowering: a
     # statement-block match arm is lambda-lifted into a synthetic helper fn
     # (`_lift_block_arm`) collected here, then appended to `fns` below. `taken`
@@ -2048,6 +2073,8 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
                 _duplicate_symbol_message("function", decl.name,
                                           first_file, decl_file))
         seen[decl.name] = decl_file
+        if decl.name in externs_at:
+            raise _fn_extern_collision(decl, decl_file, *externs_at[decl.name])
         # the body sees the *marked* signature: this fn's own type parameters
         # are wildcards inside it (they are universally quantified there), while
         # a one-letter nominal type stays checked

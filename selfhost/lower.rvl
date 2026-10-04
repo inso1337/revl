@@ -8566,6 +8566,80 @@ pub fn foreign_scan(src: Str) -> Str {
   return foreign_scan_ts(lex_src(src))
 }
 
+// issue #1813: a module `fn` and an `extern fn` may not share a name. The
+// reference refuses it in `_lower_fns`, which runs before any component is
+// lowered and raises rather than collecting, so the refusal outranks every
+// composition refusal whatever its line. The gate therefore scans the
+// top-level declarations right after the parse. A declaration's line is its
+// keyword's (`extern`, `fn`), as the reference's parser records it; the
+// refusal is at whichever of the two comes second, in the duplicate-binding
+// shape (`... is already declared ...`, G6).
+type TopFn = { name: Str, line: Int, ext: Bool }
+
+// The index of the next `fn` keyword from `j` (an extern's name follows it), or
+// of the `{` or `=` that ends the search.
+fn next_fn_name(ts: List[Token], j: Int) -> Int {
+  var k = j
+  while (k < ts.length() && !atw(ts, k, "fn") && !atk(ts, k, "{")
+         && !atk(ts, k, "=")) {
+    k += 1
+  }
+  return k
+}
+
+fn top_fns(ts: List[Token]) -> List[TopFn] {
+  var out: List[TopFn] = []
+  var depth = 0
+  var i = 0
+  while (i < ts.length()) {
+    if (atk(ts, i, "{")) {
+      depth += 1
+    } else if (atk(ts, i, "}")) {
+      depth -= 1
+    } else if (depth == 0 && atw(ts, i, "extern")) {
+      let k = next_fn_name(ts, i + 1)
+      if (atw(ts, k, "fn") && atk(ts, k + 1, "ident")) {
+        out = out.push({ name: tkc(ts, k + 1).text, line: tkc(ts, i).line, ext: true })
+        i = k + 1
+      }
+    } else if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")) {
+      out = out.push({ name: tkc(ts, i + 1).text, line: tkc(ts, i).line, ext: false })
+    }
+    i += 1
+  }
+  return out
+}
+
+fn fn_extern_msg(name: Str, other: Str, line: Int) -> Str {
+  return "`".concat(name).concat("` is already declared as ").concat(other)
+    .concat(" on line ").concat(line.to_str())
+}
+
+// The first module `fn`, in declaration order, whose name an `extern fn` also
+// declares: the one the reference's fn loop reaches first.
+fn fn_extern_scan(ts: List[Token]) -> Verd {
+  let ds = top_fns(ts)
+  var i = 0
+  while (i < ds.length()) {
+    let f = ds[i]
+    if (!f.ext) {
+      var j = 0
+      while (j < ds.length()) {
+        let e = ds[j]
+        if (e.ext && e.name == f.name) {
+          if (f.line > e.line) {
+            return mk_verd(tagged("G6", fn_extern_msg(f.name, "an extern", e.line)), f.line)
+          }
+          return mk_verd(tagged("G6", fn_extern_msg(f.name, "a function", f.line)), e.line)
+        }
+        j += 1
+      }
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
 // The admission entry. "" admits; "<tag>|<message>" refuses.
 // ----------------------------------------------------------- nesting bound
 //
@@ -15351,6 +15425,9 @@ pub fn admit_src(src: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  // issue #1813: a fn and an extern of one name, refused before lowering.
+  let fxe = fn_extern_scan(ts)
+  if (fxe.v != "") { return fxe.v }
   // item 419c: collect every recoverable refusal and report the minimum by
   // `(line, seq)` — the reference's `diagnostics[0]`. A single-refusal program
   // yields exactly the wire it did before the sink existed.
@@ -15377,6 +15454,8 @@ pub fn admit_all(src: Str) -> Str {
   if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
+  let fxe = fn_extern_scan(ts)
+  if (fxe.v != "") { return fmt_all([fxe]) }
   return fmt_all(collect_refusals(ts, pg))
 }
 
@@ -16243,6 +16322,9 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  // issue #1813, as in `admit_src`.
+  let fxe = fn_extern_scan(ts)
+  if (fxe.v != "") { return fxe.v }
   // REPLACEMENT (the item-186 wave, part 1). `drop` is what this admission
   // withdraws from the running composition: the explicit `-C` rows plus every
   // running component the incoming text redeclares by name, exactly

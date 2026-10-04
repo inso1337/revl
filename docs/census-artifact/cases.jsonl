@@ -912,6 +912,10 @@
 
 ["oracle-reject:a deeper required-key crossing follows the sorted names", "agree-refuse/G4"]
 
+["oracle-reject:a fn reusing an extern's name outranks an earlier-line G1", "agree-refuse/G6"]
+
+["oracle-reject:a fn that reuses an extern's name", "agree-refuse/G6"]
+
 ["oracle-reject:a for binding over a live name", "agree-refuse/G6"]
 
 ["oracle-reject:a for loop as the only returning path", "agree-refuse/T1"]
@@ -1055,6 +1059,8 @@
 ["oracle-reject:an extern slot refusal inside a list literal", "agree-refuse/G4"]
 
 ["oracle-reject:an extern slot refusal inside a match arm", "agree-refuse/G4"]
+
+["oracle-reject:an extern that reuses a fn's name", "agree-refuse/G6"]
 
 ["oracle-reject:an if with no else", "agree-refuse/T1"]
 
