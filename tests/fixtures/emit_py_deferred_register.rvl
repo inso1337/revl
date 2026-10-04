@@ -1,0 +1,26 @@
+// item 391: the item-440 idempotency register on a deferred emission's
+// enqueue, held to byte agreement by tests/test_selfhost_emit_py.py. A `keyed`
+// register carries the key's VALUE at the call site, a bare `idempotent` the
+// `declared` claim with no key, at a provide-method site and the activation
+// body alike. (Until #1651 the self-host gate could not parse the modifier, so
+// these shapes were an inline test.)
+//
+// It sits beside emit_py_corpus/ rather than in it because
+// tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
+// is not this slice.
+
+extern emission deferred idempotent(key: msg) fn post(sink: Str, msg: Str) = @py { return }
+extern emission deferred idempotent fn notify(msg: Str) = @py { return }
+
+service Ops {
+  emission fn enqueue(sink: Str, msg: Str)
+  emission fn announce(msg: Str)
+}
+
+component Agent provides ops: Ops {
+  emit notify("boot")
+  provide ops {
+    fn enqueue(sink, msg) { emit post(sink, msg) }
+    fn announce(msg) { emit notify(msg) }
+  }
+}
