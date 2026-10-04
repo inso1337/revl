@@ -1,0 +1,17 @@
+// REFUSED (issue #1547): the record's type declared, `let r: Box = { f: twice
+// }`, `type Box = { f: (Int) -> Int }`. The file name's prefix is the expected
+// verdict (`t1_` refused, the family the census tags T1; `ok_` admitted);
+// tests/test_record_field_call_1547.py holds it.
+
+extern pure fn twice(n: Int) -> Int = @py { return n * 2 }
+type Box = { f: (Int) -> Int }
+service S { fn go(n: Int) -> Int }
+
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let r: Box = { f: twice }
+      return r.f(n)
+    }
+  }
+}

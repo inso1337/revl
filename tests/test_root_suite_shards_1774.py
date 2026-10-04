@@ -10,6 +10,7 @@ and the job's shape in ci.yml.
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
@@ -58,19 +59,100 @@ def test_a_file_without_a_weight_still_gets_a_shard():
 def test_the_recorded_weights_balance_the_full_suite():
     """Balance is a cost claim, not a safety one: a stale weight can only make
     the shards uneven. Measured weights keep the heaviest shard within 20% of
-    the mean, or, when one file alone outweighs that (a file is never split,
-    and tests/test_selfhost_lower.py measured 1520s of 3969s in CI run
-    37131968223), within 5% of that file: the other shards then share the rest
-    and the heaviest is the file's own shard."""
+    the mean, or, when one unit alone outweighs that (a family is never split:
+    tests/test_selfhost_lower.py::test_no_nesting_under_the_size_bound_exhausts_the_descent
+    is one test of about 1120s), within 5% of that unit, with the other shards
+    sharing the rest evenly."""
     weights = _shard.load_weights()
+    families = _shard.load_families()
     assert len(weights) > 500, "shard_weights.json is missing or nearly empty"
     files = _root_files()
-    loads = _shard.loads(files, weights, SHARDS)
+    loads = _shard.loads(files, weights, SHARDS, families)
     mean = sum(loads) / SHARDS
-    heaviest = max(weights.get(f, 0.0) for f in files)
+    split = _shard.split_files(files, weights, SHARDS)
+    heaviest = max([weights.get(f, 0.0) for f in files if f not in split]
+                   + [v for f in split for v in families.get(f, {}).values()])
     assert max(loads) <= max(1.2 * mean, 1.05 * heaviest), [round(x) for x in loads]
     rest = sorted(loads)[:-1]
     assert max(rest) <= 1.2 * (sum(rest) / len(rest)), [round(x) for x in loads]
+
+
+def test_splitting_the_heavy_file_lowers_the_heaviest_shard():
+    """Issue #1774's follow-up: the file-level floor was test_selfhost_lower.py
+    (1520s of 3969s). Split by family it is no longer the floor."""
+    weights, families = _shard.load_weights(), _shard.load_families()
+    files = _root_files()
+    whole = max(_shard.loads(files, weights, SHARDS))
+    split = max(_shard.loads(files, weights, SHARDS, families))
+    assert "tests/test_selfhost_lower.py" in _shard.split_files(files, weights, SHARDS)
+    assert split < 0.8 * whole, (round(whole), round(split))
+
+
+# ------------------------------------------- splitting a heavy file by family
+
+_NODES = (
+    [f"tests/test_heavy.py::test_fam_a[{i}]" for i in range(30)]
+    + [f"tests/test_heavy.py::test_fam_b[{i}]" for i in range(30)]
+    + ["tests/test_heavy.py::test_single"]
+    + [f"tests/test_heavy.py::TestKlass::test_m{i}[{j}]" for i in range(3) for j in range(4)]
+    + [f"tests/test_light_{i}.py::test_x[{j}]" for i in range(12) for j in range(3)]
+)
+_HEAVY_WEIGHTS = {"tests/test_heavy.py": 1000.0,
+                  **{f"tests/test_light_{i}.py": 20.0 for i in range(12)}}
+
+
+def test_a_plan_runs_every_test_exactly_once():
+    owner = _shard.plan(_NODES, _HEAVY_WEIGHTS, {}, SHARDS)
+    assert set(owner) == set(_NODES)
+    assert set(owner.values()) <= set(range(SHARDS))
+    shards = [{t for t, i in owner.items() if i == k} for k in range(SHARDS)]
+    assert set().union(*shards) == set(_NODES)
+    assert sum(len(s) for s in shards) == len(_NODES)
+
+
+def test_a_heavy_file_is_split_but_never_inside_a_family():
+    owner = _shard.plan(_NODES, _HEAVY_WEIGHTS, {}, SHARDS)
+    heavy = {i for t, i in owner.items() if t.startswith("tests/test_heavy.py")}
+    assert len(heavy) > 1, "the heavy file was not split"
+    by_family: dict = {}
+    for t, i in owner.items():
+        by_family.setdefault(_shard.family(t), set()).add(i)
+    assert all(len(v) == 1 for v in by_family.values()), "a family was split"
+    assert _shard.family("tests/test_heavy.py::TestKlass::test_m1[2]") == \
+        "tests/test_heavy.py::TestKlass", "a class is one family"
+    light = {}
+    for t, i in owner.items():
+        if not t.startswith("tests/test_heavy.py"):
+            light.setdefault(_shard.file_of(t), set()).add(i)
+    assert all(len(v) == 1 for v in light.values()), "a light file was split"
+
+
+def test_a_plan_does_not_depend_on_collection_order():
+    shuffled = list(_NODES)
+    random.Random(1774).shuffle(shuffled)
+    assert _shard.plan(_NODES, _HEAVY_WEIGHTS, {}, SHARDS) == \
+        _shard.plan(shuffled, _HEAVY_WEIGHTS, {}, SHARDS)
+
+
+def test_recorded_family_seconds_steer_the_split():
+    """One family that carries most of the file's time gets a shard of its own."""
+    fams = {"tests/test_heavy.py": {"tests/test_heavy.py::test_single": 900.0}}
+    _, seconds = _shard.units(_NODES, _HEAVY_WEIGHTS, fams, SHARDS)
+    assert seconds["tests/test_heavy.py::test_single"] == 900.0
+    # an unrecorded family: the file's weight by its share of collected tests
+    assert seconds["tests/test_heavy.py::test_fam_a"] == pytest.approx(1000.0 * 30 / 73)
+    owner = _shard.plan(_NODES, _HEAVY_WEIGHTS, fams, SHARDS)
+    alone = owner["tests/test_heavy.py::test_single"]
+    assert sum(_HEAVY_WEIGHTS.get(_shard.file_of(t), 0) for t, i in owner.items()
+               if i == alone and not t.startswith("tests/test_heavy.py")) == 0
+
+
+def test_a_small_or_unweighted_collection_is_never_split():
+    small = {f"tests/test_light_{i}.py": 20.0 for i in range(12)}
+    assert _shard.split_files(small, small, SHARDS) == set()
+    assert _shard.split_files({"tests/a.py", "tests/b.py"}, {}, SHARDS) == set()
+    assert _shard.split_files(set(_HEAVY_WEIGHTS), _HEAVY_WEIGHTS, 1) == set()
+
 
 
 def test_a_malformed_spec_is_refused():
@@ -91,12 +173,15 @@ def test_case(n):
 '''
 
 
-def _collect(tree: Path, shard: str | None) -> set:
+def _collect(tree: Path, shard: str | None, weights: Path | None = None) -> set:
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(
         [str(ROOT / "tests"), str(ROOT / "src"), os.environ.get("PYTHONPATH", "")]))
     env.pop(_shard.ENV, None)
+    env.pop("REVL_SHARD_WEIGHTS", None)
     if shard is not None:
         env[_shard.ENV] = shard
+    if weights is not None:
+        env["REVL_SHARD_WEIGHTS"] = str(weights)
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", str(tree), "-q", "--collect-only",
          "-p", "no:cacheprovider", "-p", "conftest", "--rootdir", str(tree)],
@@ -120,6 +205,34 @@ def test_the_shards_partition_a_real_collection(tmp_path):
         for other in parts:
             if other is not part:
                 assert not files & {n.split("::", 1)[0] for n in other}, "a file was split"
+
+
+def test_the_shards_partition_a_collection_with_a_split_file(tmp_path):
+    """End to end through conftest: a file the weights mark heavy is split
+    across shards by family, and the shards still run each test once."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "test_heavy.py").write_text(
+        "import pytest\n" + "".join(
+            f"@pytest.mark.parametrize('n', range(3))\ndef test_f{i}(n):\n    pass\n"
+            for i in range(8)), encoding="utf-8")
+    for i in range(3):
+        (tree / f"test_case_{i}.py").write_text(_CASE.format(count=2), encoding="utf-8")
+    weights = tmp_path / "weights.json"
+    weights.write_text(json.dumps({"seconds": {
+        "test_heavy.py": 800.0, **{f"test_case_{i}.py": 10.0 for i in range(3)}}}),
+        encoding="utf-8")
+    whole = _collect(tree, None)
+    parts = [_collect(tree, f"{k}/{SHARDS}", weights) for k in range(1, SHARDS + 1)]
+    assert set().union(*parts) == whole, "a test ran in no shard"
+    assert sum(len(p) for p in parts) == len(whole), "a test ran in two shards"
+    heavy = [p for p in parts if any(t.startswith("test_heavy.py") for t in p)]
+    assert len(heavy) > 1, "the heavy file was not split"
+    for p in parts:
+        for t in p:
+            for other in parts:
+                if other is not p:
+                    assert not {_shard.family(t)} & {_shard.family(o) for o in other}
 
 
 def test_a_pytest_started_by_a_test_runs_its_whole_collection():
@@ -158,6 +271,30 @@ def test_seconds_read_back_through_a_ci_timestamp_prefix():
     log = "\n".join(f"2026-10-03T14:05:16.8019169Z {line}" for line in lines)
     assert _shard.parse_seconds(log + "\nunrelated line\n") == {
         "tests/test_a.py": 60.0, "tests/test_b.py": 1.23}
+
+
+def test_a_refresh_files_family_seconds_under_their_file():
+    doc = {"//": "old", "seconds": {"tests/h.py": 5.0},
+           "families": {"tests/gone.py": {"tests/gone.py::t": 1.0}}}
+    new = _shard.refreshed(doc, {"tests/h.py": 100.0, "tests/h.py::test_a": 60.004,
+                                 "tests/h.py::TestK": 40.0}, "note",
+                           keep=lambda f: f != "tests/gone.py")
+    assert new["seconds"] == {"tests/h.py": 100.0}
+    assert new["families"] == {"tests/h.py": {"tests/h.py::TestK": 40.0,
+                                              "tests/h.py::test_a": 60.0}}
+
+
+def test_a_split_file_sums_its_seconds_over_the_shards_it_ran_in():
+    sys.path.insert(0, str(ROOT / "tools"))
+    import refresh_shard_weights  # noqa: PLC0415
+    logs = {"root-suite-affected (1)": "Z REVL_SHARD_SECONDS 30.00 tests/h.py\n"
+                                       "Z REVL_SHARD_SECONDS 30.00 tests/h.py::test_a\n",
+            "root-suite-affected (2)": "Z REVL_SHARD_SECONDS 12.50 tests/h.py\n"
+                                       "Z REVL_SHARD_SECONDS 12.50 tests/h.py::test_b\n"
+                                       "Z REVL_SHARD_SECONDS 4.00 tests/x.py\n"}
+    assert refresh_shard_weights.measure(logs) == {
+        "tests/h.py": 42.5, "tests/h.py::test_a": 30.0, "tests/h.py::test_b": 12.5,
+        "tests/x.py": 4.0}
 
 
 def test_a_refresh_overwrites_measured_files_and_drops_removed_ones():

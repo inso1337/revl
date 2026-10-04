@@ -44,22 +44,26 @@ def deferred_extern_names(ir: dict) -> set:
 def _reached_deferred_calls(ir: dict, deferred: set) -> list:
     """Every CALL SITE that emits a deferred extern, as ``(component, name)``.
 
-    Walks the component bodies and provide-method bodies for an `emit` step whose
-    expression calls a deferred extern by name — the exact shape the py emitter's
-    enqueue lowering keys off. Reachability, not declaration: a declared but
+    Walks the component bodies and provide-method bodies for a call to a
+    deferred extern by name in ANY position (an `emit` step, or a value form
+    the marker covers, issue #1457), the exact shape the py emitter's enqueue
+    lowering keys off. Reachability, not declaration: a declared but
     never-called deferred extern is not flagged."""
     reached: list = []
     seen: set = set()
 
     def _walk(node, component: str) -> None:
         if isinstance(node, dict):
-            if node.get("step") == "emit":
-                expr = node.get("expr") or {}
-                if expr.get("kind") == "fn" and expr.get("name") in deferred:
-                    mark = (component, expr["name"])
-                    if mark not in seen:
-                        seen.add(mark)
-                        reached.append(mark)
+            # every CALL of a deferred extern, in any position (issue #1457):
+            # the `emit` step, and the value forms the marker also covers, a
+            # tail `= emit d(..)`, a `let`/`return` value, an arrow body. The
+            # py tier enqueues each of them; an ownerless tier has nothing to
+            # enqueue onto, so each is refused, not only the step.
+            if node.get("kind") == "fn" and node.get("name") in deferred:
+                mark = (component, node["name"])
+                if mark not in seen:
+                    seen.add(mark)
+                    reached.append(mark)
             for value in node.values():
                 _walk(value, component)
         elif isinstance(node, list):

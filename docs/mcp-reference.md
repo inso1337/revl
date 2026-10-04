@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the verbs below, one section each (`python3 tools/docgen.py --show mcp-verb-count` counts them).
+The server has exactly the verbs below, one section each (`python3 tools/docgen.py --show mcp-verb-count` counts them). By default `tools/list` advertises the core tier and `revl_verbs` returns the rest; see "Find a verb".
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -27,8 +27,9 @@ order, and each verb on it opens its description with "Authoring loop step N of
    draft and re-run `revl_check`, or send `revl_edit {hole, expr}` once the
    composition is running.
 4. **preflight:** `revl_query_withdraw` gives the exact blast radius of replacing
-   or removing a component. `revl_edit` returns it in `blastRadius` for the
-   components it touches, and `revl_plan` shows what a swap would do.
+   or removing a component. `revl_edit`, `revl_swap` and `revl_change` return
+   it in `blastRadius` for the components they touch, and `revl_plan` shows
+   what a swap would do.
 5. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
    fail with the code and the fix.
 6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
@@ -221,6 +222,7 @@ nothing and carries no undo field.
 | `revl_live_query` | yes | no | `verb` |
 | `revl_history_emitted_between` | yes | no | `from`, `to` |
 | `revl_history_lifetime` | yes | no | `component` |
+| `revl_verbs` | yes | no | - |
 <!-- docgen:mcp-verbs end -->
 
 ---
@@ -253,6 +255,31 @@ falls back to the loaded session); `revl_swap` and `revl_edit` measure it
 against the running composition. The report reads the same class map the
 per-call decision reads, so the two cannot disagree, and it is computed whether
 or not an approval policy is on.
+
+## Find a verb
+
+`tools/list` advertises the core tier by default (issue #1697): the authoring
+loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
+`revl_query_withdraw`, `revl_check`, `revl_admit`, `revl_plan` before a swap,
+and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
+`revl_verbs`. That is about a quarter of the full list's schema size, which
+matters on every cold start. Every verb `initialize` names is in the core tier,
+and a test holds the two together. Every other verb is still served and callable by
+name. A client that wants the whole list up front starts the server with
+`revl mcp serve --all-tools`, or sets `REVL_MCP_ALL_TOOLS=1`. The core tier is
+`CORE` in `src/revl/mcp/disclosure.py`.
+
+### `revl_verbs`
+
+The discovery verb. With no arguments it returns every verb grouped by topic
+(`author`, `session`, `approve`, `grade`, `replay`, `query`, the sections of
+this page), one sentence each and no schemas, plus the names `tools/list`
+currently shows. With `topic` it returns the exact schemas of that topic's
+verbs; with `names` it returns those verbs' exact schemas. The schemas are
+the same objects the full list carries under `--all-tools`. An unknown topic or
+name is refused with `next` set to the no-argument call.
+
+- Inputs: `topic` (one of the six); `names` (verb names). Both optional.
 
 ## Author and admit
 
@@ -455,7 +482,9 @@ draft through the same gates a `revl_load` runs (the load half of the operator
 gate, a lease on a cold load, the session's admission checks, the approval
 ticket). A gate that refuses leaves the draft held, hole-free, with the reason.
 `revl_load` with no source boots the held draft (with `config`/`record` if
-given), and refuses while a hole remains. `revl_unload` discards it,
+given), and refuses while a hole remains. With no draft held it is refused by
+name: with nothing loaded its `next` is the reload of what this session last
+ran, and with a composition running it says to use `revl_edit` or `revl_swap`. `revl_unload` discards it,
 `revl_state` reports `draft: {holes}`, and `revl_source` reads from it. A draft
 never boots while a hole remains.
 
@@ -498,6 +527,9 @@ candidate leaves the running system untouched; this is the acting half of
 `revl_admit`. Called with NO source (`source`/`files`/`modules`), it re-admits
 the source the server already holds, inline or loaded from files - so an agent
 that edited server-side with `revl_edit` need not re-serialize the whole file.
+A swap that lands, inline or by name, carries `blastRadius` in the shape
+`revl_edit` gives it below, read off the composition that was running before
+the swap (issue #1704).
 
 - Inputs: `source` / `files` / `modules` (all optional); `replacing`.
 
@@ -672,8 +704,10 @@ candidate: every guarantee `pass` once admitted, the failing one with its code,
 message and fix when refused; and `gauntlet` when asked), `plan` for a withdrawal (`cascade`, `withdrawalOrder`,
 `orphanedKeys`), the `touched` symbols, and `components`: every component the
 change touched, each with `added` / `changed` / `removed`, plus `would lose a
-provider` for a refused cascade. A change that fails verification commits
-nothing, and the running composition is unchanged.
+provider` for a refused cascade. A proposal and a commit (with an intent, or
+of the held proposal) also carry `blastRadius`, as `revl_edit` does; a commit
+reads it off the composition running at commit time. A change that fails
+verification commits nothing, and the running composition is unchanged.
 
 - Inputs: one of `edit` / `replace` / `withdraw` / `add`; `gauntlet`; `commit`
   (default false: propose only); `discard`; with nothing loaded, `files` /

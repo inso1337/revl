@@ -1,0 +1,23 @@
+// REFUSED G4 (approval floor): the provision crossed directly off the spawn
+// handle in value form, `let r = emit w.pay.charge(n)`. Closed by PR #1519;
+// pinned with the issue #1509 corpus so every spelling of a provision crossing
+// is held in one place. The file name's prefix is the expected verdict (`g4_`
+// refused, `ok_` admitted); tests/test_approval_service_locals.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let r = emit w.pay.charge(n)
+      return r
+    }
+  }
+}

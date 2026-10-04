@@ -251,6 +251,7 @@ DRAFT = ("service Clock { fn now() -> Int\n fn later(n: Int) -> Int }\n"
          "}\n")
 
 
+@needs_runtime   # revl_load is a runtime verb: without cordis the gate refuses it
 def test_a_draft_is_held_canonical_with_its_hole_lines_unchanged():
     opened = _call("revl_load", {"source": DRAFT})
     assert opened.get("draft") is True, opened
