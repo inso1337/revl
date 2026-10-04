@@ -1,0 +1,25 @@
+// issue #1734, held to byte agreement by tests/test_selfhost_emit_rust.py: the
+// document's only Str builtins are inside a component, so the `RevlStrOps`
+// helper traits are emitted for the component alone (the reference walks
+// components, functions and tests; the port used to walk functions, types and
+// externs). `put` calls `concat` in a provide method; `size` reads a sized
+// `.length` field, which renders through `revl_length` too. The effect's undo
+// captures parameters only: an undo over a method-local binding is a separate
+// port gap (the IR's `undo_captures` pin), not this document's subject.
+
+service Cache {
+  fn put(k: Str, v: Str) -> Str
+  fn size(k: Str) -> Int
+}
+
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn put(k, v) {
+      effect store.insert(k, v) undo store.remove(k)
+      return k.concat("!")
+    }
+    fn size(k) = k.length
+  }
+}
