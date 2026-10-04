@@ -236,7 +236,8 @@ emitted from a firing. On the Python tier each firing registers that
 compensation the way a provide-method call does (`Frame.compensation_method`):
 it is discharged on a clean commit, runs in Phase 2 of an abort, and writes its
 WAL discharge descriptor when it registers (issue #1589). The TypeScript, go and
-rust tiers do not wire an extern-declared `compensate` at any site yet.
+rust tiers register it on every firing too (#1548, #1615, #1629). The java and
+wasm tiers refuse the `timer` step.
 
 ## Other tiers
 
