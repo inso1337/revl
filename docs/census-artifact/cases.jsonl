@@ -1740,6 +1740,8 @@
 
 ["tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/comp_str_builtin.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/comp_stream.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/comp_timer.rvl", "agree-admit"]

@@ -281,6 +281,9 @@ CORPUS = [
                              #   `<<DEFER-comp-step>>` marker and the oracle
                              #   agreed, because no corpus document had a
                              #   component body step that was not a provision.
+    "comp_str_builtin.rvl",  # issue #1734: the only Str builtins are in a component
+                             #   (`concat` in a provide method, a sized `.length`),
+                             #   so the `RevlStrOps` helper traits are emitted for it
 ]
 
 
@@ -781,6 +784,32 @@ def test_selfhosted_emitter_effectful_component_scaffold(emitted):
     # no deferred-feature marker leaked into any covered-subset output
     for src in (req, eff, und, cfg, cfe):
         assert "<<DEFER" not in src and "<<NONE>>" not in src
+
+
+# Issue #1734, the `tests` half: a document whose only Str builtin is inside an
+# in-file `test` block. The reference emits the `RevlStrOps` helper traits for
+# it (`_uses_stdlib` walks `tests`), and so must the port. The port does not
+# emit in-file tests themselves (a named `UNSUPPORTED-TEST` marker, a separate
+# surface), so this is not a byte-agreement case; what it pins is the preamble
+# decision, which the component half's corpus document cannot reach.
+TEST_ONLY_STR_SRC = """fn twice(n: Int) -> Int = n * 2
+
+test "a Str builtin only in a test" {
+  assert "ab".concat("c").length() == 3
+  assert twice(2) == 4
+}
+"""
+
+
+def test_a_str_builtin_only_in_a_test_still_emits_the_helper_traits(
+        emitted, reference, tmp_path):
+    path = tmp_path / "test_only_str.rvl"
+    path.write_text(TEST_ONLY_STR_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_rust_src"](ir)
+    assert "trait RevlStrOps {" in want and "impl RevlStrOps for str {" in want
+    assert "trait RevlStrOps {" in got and "impl RevlStrOps for str {" in got
+    assert "<<UNSUPPORTED-TEST:a Str builtin only in a test>>" in got
 
 
 def test_selfhosted_emitter_in_file_tests_pass(emitted):
