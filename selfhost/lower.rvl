@@ -4004,6 +4004,10 @@ fn field_on_name(tg: Expr, bind: Str, release: Str) -> Bool {
   }
 }
 
+fn is_hole_expr(e: Expr) -> Bool {
+  return match e { Hole(h) => true, _ => false }
+}
+
 fn is_var_named(e: Expr, n: Str) -> Bool {
   return match e { Var(v) => v == n, _ => false }
 }
@@ -4052,6 +4056,8 @@ fn release_msg_at(ss: List[Stmt], i: Int) -> Str {
   let bind = ss[i - 1].bind
   if (bind == "") { return host_unbound_msg(hf, release) }
   if (undo_releases(ss[i].e, bind, release)) { return "" }
+  // a typed hole is an unfilled obligation, judged when it is filled
+  if (is_hole_expr(ss[i].e)) { return "" }
   // a verb the family does not have, or a wrong arity, on the bound handle:
   // the reference refuses it while it lowers the undo (HOST-METHOD /
   // HOST-ARITY), before this rule is reached, and this gate does not judge
@@ -25373,4 +25379,13 @@ component C provides s: S {
   provide s { fn go(n) = List.reverse(["a"]) }
 }""")
   assert v == "T1|`List` is a builtin type, not a value"
+}
+
+test "a typed hole in a host acquisition's undo is not refused" {
+  let v = admit_src("""service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let store = effect Map.new() undo hole[Unit] "release"
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == ""
 }

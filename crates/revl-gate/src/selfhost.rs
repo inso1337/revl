@@ -9576,6 +9576,13 @@ fn field_on_name(tg: Expr, bind: &str, release: &str) -> bool {
 };
 }
 
+fn is_hole_expr(e: Expr) -> bool {
+    return match e {
+    Expr::Hole(h) => true,
+    _ => false,
+};
+}
+
 fn is_var_named(e: Expr, n: &str) -> bool {
     return match e {
     Expr::Var(v) => (v == n),
@@ -9628,6 +9635,9 @@ fn release_msg_at(ss: &[Stmt], i: i64) -> String {
         return host_unbound_msg(&hf, &release);
     }
     if undo_releases((ss)[(i) as usize].e.clone(), &bind, &release) {
+        return String::from("");
+    }
+    if is_hole_expr((ss)[(i) as usize].e.clone()) {
         return String::from("");
     }
     if off_surface_on((ss)[(i) as usize].e.clone(), &bind, &(hf.revl_slice(0i64, hf.revl_index_of(".")))) {
@@ -29746,6 +29756,12 @@ fn a_requirement_key_may_not_spell_a_builtin_type() {
 fn a_builtin_type_read_as_a_value_names_the_type_rule() {
     let v = admit_src(String::from("service S { fn go(n: Int) -> List[Str] }\ncomponent C provides s: S {\n  provide s { fn go(n) = List.reverse([\"a\"]) }\n}"));
     assert!((v == "T1|`List` is a builtin type, not a value"));
+}
+
+#[test]
+fn a_typed_hole_in_a_host_acquisition_s_undo_is_not_refused() {
+    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let store = effect Map.new() undo hole[Unit] \"release\"\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == ""));
 }
 
 #[test]

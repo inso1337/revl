@@ -101,6 +101,17 @@ def test_an_unbound_host_acquisition_in_a_provide_method_is_refused():
     assert (err.code, err.message) == ("G4", _unbound("Map.new", "drop"))
 
 
+def test_a_typed_hole_in_the_undo_is_an_obligation_not_a_refusal():
+    """A draft with a hole compiles and is refused at admission until the
+    hole is filled; the fill is then held to the release rule. The
+    `effect-undo` idiom is served for exactly this hole."""
+    ir = compile_source(_src('  let store = effect Map.new() undo hole[Unit] "release"'),
+                        "t.rvl")
+    assert ir["holes"]
+    err = _refusal(_src('  let store = effect Map.new() undo store.get("x")'))
+    assert err.message == _release("store", "Map.new", "drop")
+
+
 def test_the_g5_classification_of_the_undo_keeps_its_message():
     """The release rule runs after G5, so an emitting `undo` is still refused
     as the boundary crossing it is."""

@@ -11191,6 +11191,12 @@ def _check_host_release(step: dict, env: "Env", filename: str, line: int, *,
                  f"release (issue #1859)",
             code="G4", category="inverse")
     undo = step.get("undo")
+    if isinstance(undo, dict) and undo.get("kind") == "hole":
+        # a typed hole is an unfilled obligation, not an inverse: the draft
+        # compiles, admission refuses it until it is filled, and the fill is
+        # judged by this rule when it arrives (the `effect-undo` idiom serves
+        # `<bind>.<release>()` for exactly this hole)
+        return
     target = undo.get("target") if isinstance(undo, dict) else None
     if (isinstance(undo, dict) and undo.get("kind") == "call"
             and undo.get("method") == release and not undo.get("args")
