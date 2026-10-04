@@ -14,6 +14,7 @@ one of those trees turns this file red instead of silently skipping its job.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -124,6 +125,37 @@ def test_the_corpus_holds_the_backend_job_steps_and_the_root_tests_they_run(corp
     root_test = (ROOT / "tests" / "test_gate_crate_admit.py").read_text(encoding="utf-8")
     assert root_test in corpus
     assert "import test_selfhost_lower" in root_test
+
+
+def test_untracked_files_under_backends_are_not_read(tmp_path):
+    """Issue #1886: frontend-cordis runs backends/python/setup.sh, which
+    clones the cordis-py fork into backends/python/.cordis-py. That clone's
+    `pyproject.toml` names its own README.md, which is not this repository's
+    code reading a document. Only tracked files enter the corpus."""
+    env = dict(os.environ)
+    for name in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+        env.pop(name, None)
+    (tmp_path / "backends" / "python").mkdir(parents=True)
+    (tmp_path / "backends" / "python" / "emit.py").write_text("X = 1\n")
+    clone = tmp_path / "backends" / "python" / ".cordis-py"
+    clone.mkdir()
+    (clone / "pyproject.toml").write_text('readme = "README.md"\n')
+    (tmp_path / "backends" / "python" / "stray.py").write_text('P = "formal/x"\n')
+    for args in (["init", "-q"], ["add", "backends/python/emit.py"]):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True,
+                       env=env, capture_output=True)
+    files = sel._ci_backend_files(tmp_path)
+    assert files == [tmp_path / "backends" / "python" / "emit.py"]
+    corpus = sel.ci_backend_corpus(tmp_path)
+    assert "README.md" not in corpus and "formal/" not in corpus
+
+
+def test_without_git_the_setup_clone_is_still_skipped(tmp_path):
+    (tmp_path / "backends" / "python" / ".cordis-py").mkdir(parents=True)
+    (tmp_path / "backends" / "python" / ".cordis-py" / "pyproject.toml").write_text(
+        'readme = "README.md"\n')
+    (tmp_path / "backends" / "python" / "emit.py").write_text("X = 1\n")
+    assert sel._ci_backend_files(tmp_path) == [tmp_path / "backends" / "python" / "emit.py"]
 
 
 # ------------------------------------------------------------- the CI wiring

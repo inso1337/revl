@@ -59,7 +59,8 @@ def test_a_handle_some_extern_returns_is_fillable_where_it_may_be_called():
               "undo log_close(result) = @py { return 1 }\n" + HANDLE)
     fill = _fills(source, untrusted=False)["open the log"]
     assert fill["byThisAuthor"] is True and fill["needsHostCode"] is False
-    assert {"kind": "extern", "write": "effect log_open(<path: Str>)"} \
+    # the hole already follows `effect`, so the fill is the bare call (#1846)
+    assert {"kind": "extern", "write": "log_open(<path: Str>)"} \
         in fill["producers"]
 
 

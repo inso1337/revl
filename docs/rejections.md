@@ -549,7 +549,7 @@ method keeps its contract name at the interface, the definition and every call
 provided class carries the contract name as an alias (issue #1474). On wasm
 nothing is renamed: a method name is only ever the import field
 `(import "coeffect:<key>" "<op>" ...)`, the export string `"provide:<key>.<op>"`
-and the `$req_<key>_<op>` identifier, none of which a WAT keyword can reach.
+and the `$req.<key>.<op>` identifier (issue #1756), none of which a WAT keyword can reach.
 All 124 reserved words the frontend admits (WAT, Python, JavaScript and the
 emitter's own helper names) cross on the live cordis-wasm runtime
 (`backends/wasm/test_keyword_method_names_wasm.py`, issue #1512).

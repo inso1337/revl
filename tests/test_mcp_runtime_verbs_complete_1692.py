@@ -97,6 +97,7 @@ PLAN: dict[str, tuple[dict, dict | None]] = {
     "revl_scaffold": ({"service": "S"}, None),
     "revl_fmt": ({"source": SOURCE}, None),
     "revl_explain": ({"code": "A1"}, None),
+    "revl_verbs": ({"topic": "session"}, None),
     "revl_resolve": ({"need": "service S { fn f() -> Int }"}, None),
     "revl_canary": ({"realm": "r", "candidate": SOURCE}, None),
     "revl_query_emitters": ({"target": "S", "source": SOURCE}, None),

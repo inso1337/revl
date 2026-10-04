@@ -1,0 +1,12 @@
+// A pure `fn` named `memory`. The frontend admits it. The wasm reference
+// REFUSES it by name (issue #1756): a `fn` is exported under its own name,
+// which is its API on this tier, and the functions module already exports its
+// linear memory as `memory`, so the module would export one name twice and not
+// validate. The port answers it by name too (`<<UNSUPPORTED-EXPORT:memory>>`).
+//
+// This is not a byte-agreement case, so it cannot live in the tier's CORPUS.
+// The line-coverage gate drives the reference over it here, which is the only
+// way the raise in `backends/wasm/emit.py::refuse_duplicate_exports` runs. The
+// refusal's text is asserted by
+// backends/wasm/test_identifier_namespaces_1756.py.
+pub fn memory(n: Int) -> Int { return n + 1 }

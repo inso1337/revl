@@ -1,0 +1,15 @@
+// REFUSED G-MODEL-PLACE (item 519): `model_req_no_block.rvl` with the `route
+// model` block written. Refused before slice 2 as well; it is here so the
+// corpus holds the block and no-block forms to one verdict. The file name's
+// prefix is the expected verdict (`model_` refused under G-MODEL-PLACE, `ok_`
+// admitted); tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+service Tools { emission[model.tool] fn run(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Tools provides out: Answer {
+  route model on classify { * -> tool }
+  provide out { fn classify(text) = emit llm.run(text) }
+}

@@ -759,7 +759,7 @@ def fresh_server_session(monkeypatch):
         session.unload()
 
 
-def test_the_replay_tools_are_advertised_with_honest_annotations():
+def test_the_replay_tools_are_advertised_with_honest_annotations(all_mcp_tools):
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     for name in ("revl_timeline", "revl_inspect_step", "revl_step_back",

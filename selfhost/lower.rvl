@@ -3419,7 +3419,7 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
              scopeNames: List[Str], fnNames: List[Str], compName: Str,
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
-             provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
+             provKeySvc: Map[Str, Str], provAlias: Map[Str, Str], svcTys: List[Bind],
              localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str,
              appr: ApprI }
 
@@ -3571,74 +3571,21 @@ fn note_host_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
            ecaps: a.ecaps, areach: a.areach, aops: a.aops, avals: a.avals }
 }
 
-// ---- an `emit` through a spawn handle (issue #1261) ------------------------
+// ---- a crossing through a resolved receiver (issues #1261, #1508) ---------
 //
-// The same third arm at the other head shape. A spawn-handle provision call
-// (`emit w.<key>.<op>(…)`) is not a required-key crossing: the handle's
-// component is a separate activation, so from this method's side the crossing
-// has no key to name, and the reference notes `a host emission` for it too.
-// It also notes the unnameable capability `*`, because the step reaches no
-// emitting NAME it could have named instead (`_method_emissions`'s
-// `if not reached & env.emitting_fns`). A bare-name head does reach one, which
-// is why `note_host_emission` above contributes no capability.
-//
-// `handle_emit` recorded nothing at all, so a provide method whose only
-// crossing went through a handle carried an EMPTY reach and the G4 provider
-// bound had nothing to weigh. Two consequences, in order of weight:
-//
-//   * `Sup.run` declared `emission[net]`, spawning a `Worker` whose provision
-//     op is declared `emission[net]`, with `emit w.task.go()` in the body: the
-//     reference refuses it (the crossing is unnameable and no `emission[…]`
-//     list names `*`) and this gate raised no objection;
-//   * where the spawn-emission bound refused the same program on its own, the
-//     two engines rendered different text — the reference the body's own
-//     crossing, this gate the spawn statement's:
-//       reference:  … emits through an unnameable host boundary
-//                     (reaching `a host emission`)
-//       this gate:  … but it spawns `Worker`, which emits through `net`
-//
-// The gate's wording is not a nicer rendering of the same verdict, which is
-// why the port goes this way round rather than onto the reference: it is the
-// WEAKER one. It resolves the crossing through the spawn graph to the child's
-// own capability, and that resolution is what leaves the first program above
-// with nothing to object to. Adopting the wording would mean adopting the rule
-// that produced it. The spawn-emission bound arm is untouched and still renders
-// its own message where the body has no handle emit.
-//
-// The unit is the STEP, as it is for every other arm: `let r = emit
-// w.task.go()` binds an emit-marked VALUE, which the reference lowers through
-// its expression path rather than into an `emit` step, so it notes nothing —
-// hence the same `bind` guard `note_host_emission` carries.
-fn handle_head_ref(e: Expr, cx: Ctx) -> Bool {
-  return match e {
-    Call(c) => match c.target {
-      Field(fl) => match fl.target {
-        // `h.<key>.<op>(…)` — the direct spelling.
-        Field(inner) => match inner.target {
-          Var(h) => cx.handles.has(h),
-          _      => false,
-        },
-        // a local that ALIASES a provision (`let t = w.task`), which
-        // `alias_call` resolves to the same crossing.
-        Var(v) => cx.provAlias.has(v),
-        _      => false,
-      },
-      _ => false,
-    },
-    _ => false,
-  }
-}
-
-fn note_handle_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
-  if (s.kind != "emit" || s.bind != "") { return a }
-  if (!handle_head_ref(s.e, cx)) { return a }
-  // `union_into`, not `push`: `note` dedups on its `seen` set, so a body with
-  // two handle emissions carries the label once.
-  return { msg: a.msg, tag: a.tag,
-           labels: union_into(a.labels, ["a host emission"]),
-           ecaps: union_into(a.ecaps, ["*"]),
-           areach: a.areach, aops: a.aops, avals: a.avals }
-}
+// A provision call off a spawn handle (`w.<key>.<op>(…)`, the same through an
+// alias), and a call through any other service-typed receiver (a `let` local,
+// a receiver written in place, a method's own parameter), is read by the
+// provider upper bound at the op's DECLARED scope, labelled `<Service>.<op>`,
+// `*` for a bare op (`lower._resolved_crossings`). The scope is a fact the
+// spawned provider is held to by its own G4 provider bound, so the crossing
+// can be named by it. Issue #1261 had first given `handle_emit` its reach as
+// `a host emission` over the unnameable `*`, which refused `Sup.run` declared
+// `emission[net]` spawning a `Worker` whose op is `emission[net]`; that
+// program is now admitted, and a bound that does not cover the op's scope
+// still refuses. The evidence is added where the CALL is walked
+// (`handle_emit`, `svc_recv_note`), so a value-position crossing (`let r =
+// emit w.task.go()`) is read too, as it is in the reference.
 
 fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
@@ -3648,7 +3595,11 @@ fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   // sits ahead of `pg_write()` and behind any earlier statement's evidence.
   // The two head shapes are disjoint (a bare name, a handle provision path),
   // so the pair notes the one label at most once either way.
-  let na = note_handle_emission(s, cx, note_host_emission(s, cx, a))
+  // A step through a spawn handle or any other resolved receiver is NOT a
+  // host emission (issue #1508): `handle_emit` and `svc_recv_note` read it at
+  // the op's declared scope where the call is walked, as the reference's
+  // `_resolved_crossings` does.
+  let na = note_host_emission(s, cx, a)
   let root = acq_root_of(s)
   if (root.hit) { return walk_exprs(root.args, 0, marked, scx, na) }
   // an `emit` step's marker covers its head call alone (issue #1175); a
@@ -3697,7 +3648,7 @@ fn ctx_appr(cx: Ctx, ap: ApprI) -> Ctx {
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
-           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere,
            emitPos: cx.emitPos, appr: ap }
 }
@@ -3826,15 +3777,48 @@ fn appr_crossed(head: Expr, cx: Ctx) -> List[Str] {
   return match head {
     Call(c) => match c.target {
       Field(fl) => match fl.target {
-        Var(v) => cx.reqMap.has(v) && !cx.provAlias.has(v)
-          ? appr_req_caps(v, fl.name, cx) : [],
-        _ => [],
+        Var(v) => cx.provAlias.has(v)
+          ? appr_alias_caps(v, fl.name, cx)
+          : (cx.reqMap.has(v) ? appr_req_caps(v, fl.name, cx)
+                              : appr_local_caps(fl.target, fl.name, cx)),
+        // `h.<key>.<op>(…)` off a spawn handle: the op's declared scope, off
+        // the one resolver the marker rule uses for this carrier
+        // (`handle_msig`, the reference's `_instance_get_call`)
+        Field(inner) => match inner.target {
+          Var(h) => cx.handles.has(h) ? appr_handle_caps(h, inner.name, fl.name, cx)
+                                      : appr_local_caps(fl.target, fl.name, cx),
+          _ => appr_local_caps(fl.target, fl.name, cx),
+        },
+        _ => appr_local_caps(fl.target, fl.name, cx),
       },
       Var(n) => appr_name_caps(n, cx),
       _ => [],
     },
     _ => [],
   }
+}
+
+// A call through a service-typed local (issue #1509), off the resolver the
+// marker rule reads (`svc_recv_msig`): the op's declared scope, `*` when bare.
+fn appr_local_caps(recv: Expr, op: Str, cx: Ctx) -> List[Str] {
+  let decl = svc_recv_msig(recv, op, cx)
+  if (decl.name == "" || !decl.isEm) { return [] }
+  return decl.caps.length() > 0 ? decl.caps : ["*"]
+}
+
+fn appr_handle_caps(h: Str, key: Str, op: Str, cx: Ctx) -> List[Str] {
+  let decl = handle_msig(h, key, op, cx)
+  if (decl.name == "") { return [] }
+  return decl.caps.length() > 0 ? decl.caps : ["*"]
+}
+
+// A call through a local aliasing a spawn-handle provision (`let t = w.task`):
+// `provAlias` holds `<handle>#<key>`, the same split `alias_call` reads.
+fn appr_alias_caps(v: Str, op: Str, cx: Ctx) -> List[Str] {
+  let ref = match cx.provAlias.lookup(v) { Some(r) => r, None => "" }
+  let cut = ref.indexOf("#")
+  if (cut == 0 - 1) { return [] }
+  return appr_handle_caps(ref.slice(0, cut), ref.slice(cut + 1, ref.length()), op, cx)
 }
 
 fn appr_req_caps(key: Str, op: Str, cx: Ctx) -> List[Str] {
@@ -3888,7 +3872,84 @@ fn appr_check(head: Expr, edge: Str, cx: Ctx, a: Ac) -> Ac {
 // binding, the value form, with none.
 fn appr_group(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (a.msg != "" || ss[i].kind != "emit") { return a }
-  return appr_check(ss[i].e, ss[i].bind == "" ? ss[i].edge : "", cx, a)
+  let edge = ss[i].bind == "" ? ss[i].edge : ""
+  let ha = appr_check(ss[i].e, edge, cx, a)
+  if (ha.msg != "" || i + 1 >= ss.length() || ss[i + 1].kind != "compensate") {
+    return ha
+  }
+  // A compensation crosses too, during rollback, where there is nobody to
+  // ask: every emission in the slot meets the same floor under the step's own
+  // edge (the reference's `_compensate_crossings`, outermost first).
+  let xs = em_calls(ss[i + 1].e, cx)
+  var ca = ha
+  var k = 0
+  while (k < xs.length() && ca.msg == "") {
+    ca = appr_check(xs[k], edge, cx, ca)
+    k += 1
+  }
+  return ca
+}
+
+// Every call in `e` that crosses as an emission, outermost first and in source
+// order: a named call to an emitting name, a `req` or spawn-handle call to an
+// `emission` op. The pre-order the reference's walk over the lowered slot has.
+fn em_calls(e: Expr, cx: Ctx) -> List[Expr] {
+  return em_calls_in(e, cx, [])
+}
+
+fn em_calls_in(e: Expr, cx: Ctx, acc: List[Expr]) -> List[Expr] {
+  return match e {
+    Call(c)    => em_calls_list(c.args, 0, cx,
+                    em_calls_in(c.target, cx, is_em_call(e, cx) ? acc.push(e) : acc)),
+    Field(f)   => em_calls_in(f.target, cx, acc),
+    OptField(f) => em_calls_in(f.target, cx, acc),
+    OptCall(c) => em_calls_list(c.args, 0, cx, em_calls_in(c.target, cx, acc)),
+    Bin(b)     => em_calls_in(b.r, cx, em_calls_in(b.l, cx, acc)),
+    Un(u)      => em_calls_in(u.e, cx, acc),
+    Emit(u)    => em_calls_in(u.e, cx, acc),
+    Index(x)   => em_calls_in(x.idx, cx, em_calls_in(x.target, cx, acc)),
+    If(x)      => em_calls_in(x.els, cx, em_calls_in(x.then_, cx, em_calls_in(x.cond, cx, acc))),
+    Lst(l)     => em_calls_list(l.items, 0, cx, acc),
+    _          => acc,
+  }
+}
+
+fn em_calls_list(xs: List[Expr], i: Int, cx: Ctx, acc: List[Expr]) -> List[Expr] {
+  if (i >= xs.length()) { return acc }
+  return em_calls_list(xs, i + 1, cx, em_calls_in(xs[i], cx, acc))
+}
+
+// Whether a call node is an emission crossing (`_is_emission_call`).
+fn is_em_call(e: Expr, cx: Ctx) -> Bool {
+  return match e {
+    Call(c) => match c.target {
+      Var(n) => contains(cx.emittingNames, n),
+      Field(fl) => match fl.target {
+        Var(v) => cx.provAlias.has(v)
+          ? alias_is_em(v, fl.name, cx)
+          : cx.reqMap.has(v) && req_is_em(v, fl.name, cx),
+        Field(inner) => match inner.target {
+          Var(h) => cx.handles.has(h) && handle_msig(h, inner.name, fl.name, cx).isEm,
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn req_is_em(key: Str, op: Str, cx: Ctx) -> Bool {
+  let svcName = match cx.reqMap.lookup(key) { Some(s) => s, None => "" }
+  return find_msig(svc_of(cx, svcName), op, 0).isEm
+}
+
+fn alias_is_em(v: Str, op: Str, cx: Ctx) -> Bool {
+  let ref = match cx.provAlias.lookup(v) { Some(r) => r, None => "" }
+  let cut = ref.indexOf("#")
+  if (cut == 0 - 1) { return false }
+  return handle_msig(ref.slice(0, cut), ref.slice(cut + 1, ref.length()), op, cx).isEm
 }
 
 // ---- one `emit` marker per crossing (issue #1175) --------------------------
@@ -3909,7 +3970,7 @@ fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
            // leaving a marked head for its argument list leaves the `emit`
            // expression position too: the reference's arguments lower in
            // "setup" there, whose host-acquire phrase is "this position"
@@ -4277,22 +4338,55 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
 }
 
 fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  // a call through a service-typed local (issue #1509): judged ahead of the
+  // value walk, after the alias and handle spellings, which resolve to the
+  // provision read themselves
+  let lr = match tg {
+    Field(fl) => svc_local_first(fl, cx) ? svc_local_refusal(fl.target, fl.name, marked, cx) : "",
+    _ => "",
+  }
+  if (lr != "") { return ac_refuse(a, "G4", lr) }
+  // issue #1547: a method call on a RECORD receiver, refused with the message
+  // a `fn` body gives the same call (`lower._refuse_record_method`)
+  let rr = match tg {
+    Field(fl) => svc_local_first(fl, cx) ? record_method_refusal(fl.target, fl.name, cx) : "",
+    _ => "",
+  }
+  if (rr != "") { return ac_refuse(a, "T1", rr) }
+  let pa = match tg {
+    Field(fl) => svc_local_first(fl, cx) ? svc_recv_note(fl.target, fl.name, cx, a) : a,
+    _ => a,
+  }
   return match tg {
     Field(fl) => match fl.target {
       // a local that ALIASES a spawn-handle provision (`let t = w.task`) is
       // the provision, so `t.<op>(…)` takes the handle path and is judged as
       // `w.task.<op>(…)` is — same rule, same message, same spelling.
       Var(v)      => cx.provAlias.has(v)
-        ? alias_call(v, fl.name, args, tg, marked, cx, a)
-        : req_call(v, fl.name, args, marked, cx, a),
+        ? alias_call(v, fl.name, args, tg, marked, cx, pa)
+        : req_call(v, fl.name, args, marked, cx, pa),
       // `h.<key>.<op>(…)` — a doubly-nested field head is a candidate provision
       // read off a spawn handle. If `h` is a known handle it is the instance
       // path (checked like a `req` emission); otherwise it is walked as a value.
-      Field(inner) => handle_call(inner, fl.name, args, tg, marked, cx, a),
-      _           => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
+      Field(inner) => handle_call(inner, fl.name, args, tg, marked, cx, pa),
+      _           => walk_args(args, marked, cx, walk_expr(tg, marked, cx, pa)),
     },
-    Var(n) => fn_call(n, args, marked, cx, a),
-    _      => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
+    Var(n) => fn_call(n, args, marked, cx, pa),
+    _      => walk_args(args, marked, cx, walk_expr(tg, marked, cx, pa)),
+  }
+}
+
+// Whether a call's receiver is NOT one the alias or handle path resolves to
+// the provision read (`provAlias`, `h.<key>`), so the service-typed-local rule
+// is the one that judges it.
+fn svc_local_first(fl: FieldN, cx: Ctx) -> Bool {
+  return match fl.target {
+    Var(v) => !cx.provAlias.has(v),
+    Field(inner) => match inner.target {
+      Var(h) => !cx.handles.has(h),
+      _ => true,
+    },
+    _ => true,
   }
 }
 
@@ -4351,6 +4445,18 @@ fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
       .concat(key).concat(".").concat(op).concat("` must be marked `emit` (G4)"))
   }
   var na = a
+  // issue #1508: the provider upper bound reads the crossing at the op's
+  // declared scope, labelled `<Service>.<op>` (`lower._resolved_crossings`),
+  // in every position the crossing is written, `*` for a bare op
+  if (decl.isEm) {
+    let comp = match cx.handles.lookup(h) { Some(c) => c, None => "" }
+    let svcName = match cx.provKeySvc.lookup(comp.concat("#").concat(key)) {
+      Some(sv) => sv, None => "" }
+    na = { msg: na.msg, tag: na.tag,
+           labels: union_into(na.labels, [svcName.concat(".").concat(op)]),
+           ecaps: union_into(na.ecaps, decl.caps.length() > 0 ? decl.caps : ["*"]),
+           areach: na.areach, aops: na.aops, avals: na.avals }
+  }
   // the same arrow prune the `req` path applies: an op reached only THROUGH an
   // arrow value is the leak surface's concern, not the method's own reach.
   if (decl.isAsync && !cx.underArrow) {
@@ -4765,7 +4871,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           provAlias: cx.provAlias, svcTys: svc_shadow(cx.svcTys, names), localArrows: cx.localArrows,
            acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
@@ -4779,7 +4885,7 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
            acqWhere: where, emitPos: cx.emitPos, appr: cx.appr }
 }
 
@@ -4792,7 +4898,7 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           provAlias: al, svcTys: cx.svcTys, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context carrying the local arrows one body binds (`let f = (…) =>
@@ -4806,7 +4912,7 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -4825,7 +4931,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
            acqWhere: cx.acqWhere,
            emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr }
 }
@@ -4996,7 +5102,7 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
-           provAlias: Map.empty(), localArrows: Map.empty(),
+           provAlias: Map.empty(), svcTys: [], localArrows: Map.empty(),
            acqWhere: "this position", emitPos: "", appr: no_appr() }
 }
 
@@ -5010,7 +5116,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            scopeNames: cx.scopeNames, fnNames: union_into(cx.fnNames, names),
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
-           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
@@ -5032,7 +5138,7 @@ fn ctx_amb_ops(cx: Ctx, ops: Map[Str, AmbSvc]) -> Ctx {
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
-           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
@@ -5056,7 +5162,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnNames: base.fnNames, compName: comp.name,
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
-           provAlias: Map.empty(), localArrows: Map.empty(),
+           provAlias: Map.empty(), svcTys: [], localArrows: Map.empty(),
            acqWhere: "this position", emitPos: "", appr: base.appr }
 }
 
@@ -5139,6 +5245,193 @@ fn arrows_in(ss: List[Stmt], i: Int, m: Map[Str, ArrowN]) -> Map[Str, ArrowN] {
     _         => m,
   }
   return arrows_in(ss, i + 1, m2)
+}
+
+// SERVICE-TYPED LOCALS (issue #1509, lower.py `Env.let_locals` and
+// `_service_receiver_decl`). The static type of every `let` one body binds,
+// over a seed that types a spawn-handle read: a handle `h` bound to `spawn C`
+// is `@spawn:C`, and `field @spawn:C.<key>` is the service `C` provides at
+// `<key>`, so `infer` types `w.pay`, `if c { w.pay } else { w.pay }`,
+// `{ p: w.pay }` and `[w.pay]` exactly as the reference's `infer_ir` does
+// (`Pay`, `Pay`, `{p: Pay}`, `List[Pay]`). Scoped per body as `alias_in` is.
+fn svc_seed(cx: Ctx) -> List[Bind] {
+  var env: List[Bind] = []
+  let hs = cx.handles.keys()
+  var i = 0
+  while (i < hs.length()) {
+    let comp = match cx.handles.lookup(hs[i]) { Some(c) => c, None => "" }
+    env = tenv_put(env, hs[i], "@spawn:".concat(comp))
+    i += 1
+  }
+  // `@live` (`svc_live`): this body can hold a service value at all, so the
+  // resolver is worth asking. A body with no handle, no service-typed `let`
+  // and no service-typed parameter never pays for the receiver walk.
+  if (hs.length() > 0) { env = tenv_put(env, "@live", "1") }
+  let ks = cx.provKeySvc.keys()
+  i = 0
+  while (i < ks.length()) {
+    let cut = ks[i].indexOf("#")
+    let sv = match cx.provKeySvc.lookup(ks[i]) { Some(v) => v, None => "" }
+    if (cut != 0 - 1) {
+      env = tenv_put(env, "field @spawn:".concat(ks[i].slice(0, cut)).concat(".")
+                            .concat(ks[i].slice(cut + 1, ks[i].length())), sv)
+    }
+    i += 1
+  }
+  return env
+}
+
+fn svc_tys_in(ss: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind] {
+  if (i >= ss.length()) { return env }
+  let s = ss[i]
+  // a plain `let` parses as an `expr` statement with a binding
+  var env2 = env
+  if (s.kind == "expr" && s.bind != "") {
+    let ty = infer(s.e, env)
+    env2 = tenv_put(env, s.bind, ty)
+    if (svc_ty_mentions(ty, cx)) { env2 = tenv_put(env2, "@live", "1") }
+  }
+  return svc_tys_in(ss, i + 1, env2, cx)
+}
+
+fn svc_live(cx: Ctx) -> Bool { return tenv_get(cx.svcTys, "@live") == "1" }
+
+// A binder that is not a `let` (an arrow parameter, a match arm's payload)
+// shadows a same-named local: its type is unknown here, as the reference's
+// fresh safe name is outside `Env.let_locals`.
+fn svc_shadow(env: List[Bind], names: List[Str]) -> List[Bind] {
+  var out = env
+  var i = 0
+  while (i < names.length()) {
+    out = tenv_put(tenv_put(out, names[i], ""), "param ".concat(names[i]), "")
+    i += 1
+  }
+  return out
+}
+
+// A provide method's own parameters (issue #1682). One whose declared type
+// mentions a service is typed at that type and marked `param <name>`, so a
+// call through it is the crossing `svc_recv_msig` resolves, and the provider
+// upper bound reads it at the op's declared scope (`svc_recv_note`). Every
+// other parameter shadows a same-named local, as before.
+fn svc_param_tys(env: List[Bind], pm: ProvM, decl: MSig, cx: Ctx) -> List[Bind] {
+  var out = env
+  var i = 0
+  while (i < pm.params.length()) {
+    var ty = ""
+    if (i < pm.ps.length()) { ty = taint_strip(pm.ps[i].ty) }
+    if (ty == "" && i < decl.ps.length()) { ty = taint_strip(decl.ps[i].ty) }
+    let n = pm.params[i]
+    out = svc_ty_mentions(ty, cx)
+      ? tenv_put(tenv_put(tenv_put(out, n, ty), "param ".concat(n), "1"), "@live", "1")
+      : tenv_put(tenv_put(out, n, ""), "param ".concat(n), "")
+    i += 1
+  }
+  return out
+}
+
+// `_mentions_service`: whether a type spelling names a declared service.
+fn svc_ty_mentions(ty: Str, cx: Ctx) -> Bool {
+  var word = ""
+  var i = 0
+  while (i <= ty.length()) {
+    let ch = i < ty.length() ? ty.slice(i, i + 1) : " "
+    let alnum = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
+      || (ch >= "0" && ch <= "9") || ch == "_"
+    if (alnum) {
+      word = word.concat(ch)
+    } else {
+      if (word != "" && cx.svcs.has(word)) { return true }
+      word = ""
+    }
+    i += 1
+  }
+  return false
+}
+
+// The provider upper bound's evidence for a crossing through a service-typed
+// receiver (`lower._resolved_crossings`, issues #1682 and #1508): labelled
+// `<Service>.<op>`, crossing the op's declared scope, `*` when bare. Not a
+// host emission.
+fn svc_recv_note(recv: Expr, op: Str, cx: Ctx, a: Ac) -> Ac {
+  if (!svc_live(cx)) { return a }
+  let decl = svc_recv_msig(recv, op, cx)
+  if (decl.name == "" || !decl.isEm) { return a }
+  let label = parse_head(infer(recv, cx.svcTys)).concat(".").concat(op)
+  return { msg: a.msg, tag: a.tag, labels: union_into(a.labels, [label]),
+           ecaps: union_into(a.ecaps, decl.caps.length() > 0 ? decl.caps : ["*"]),
+           areach: a.areach, aops: a.aops, avals: a.avals }
+}
+
+fn ctx_svc(cx: Ctx, tys: List[Bind]) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, svcTys: tys, localArrows: cx.localArrows,
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+}
+
+// `_service_receiver_decl`: the op a call reaches through a receiver whose
+// static type (`infer` over `Ctx.svcTys`) is a service: a `let`-bound local, a
+// field or element read off one, or an expression written in place, `(if c {
+// w.pay } else { w.pay }).charge(n)` (issues #1509, #1681). The empty `MSig`
+// (`name == ""`) otherwise.
+//
+// `svcTys` types only what this rule decides: the `let`s of the body and the
+// spawn-handle reads. A provide method's own parameter and an arrow parameter
+// shadow to "" there, so a receiver that depends on one types "" and is left
+// alone, as the reference's `_receiver_names_decided` leaves it. A bare handle
+// types `@spawn:<C>`, which is no service.
+fn svc_recv_msig(recv: Expr, op: Str, cx: Ctx) -> MSig {
+  let none = find_msig(svc_of(cx, ""), "", 0)
+  if (!svc_live(cx)) { return none }
+  let ty = infer(recv, cx.svcTys)
+  if (ty == "" || !cx.svcs.has(parse_head(ty))) { return none }
+  return find_msig(svc_of(cx, parse_head(ty)), op, 0)
+}
+
+// `lower._is_record_type` over the gate's own typing environment: a structural
+// `{…}` record. `Ctx.svcTys` types the body's `let`s with `infer`, so a record
+// literal bound by `let`, read through a field or element, or written in place
+// types as one.
+fn gate_is_record(t: Str) -> Bool { return starts_with(ty_trim(t), "{") }
+
+fn record_method_refusal(recv: Expr, op: Str, cx: Ctx) -> Str {
+  if (is_builtin_method(op)) { return "" }
+  if (!gate_is_record(infer(recv, cx.svcTys))) { return "" }
+  return "no builtin method `".concat(op)
+    .concat("` on values — the stdlib surface is ")
+    .concat(tk_stdlib_surface()).concat(" (docs/stdlib-2.0.md)")
+}
+
+// `t.charge` / `r.p.charge` for a receiver written as names and fields, else
+// "" (`_receiver_spelling`).
+fn svc_recv_spelling(e: Expr) -> Str {
+  return match e {
+    Var(n) => n,
+    Field(f) => svc_field_spelling(svc_recv_spelling(f.target), f.name),
+    _ => "",
+  }
+}
+
+fn svc_field_spelling(base: Str, name: Str) -> Str {
+  return base == "" ? "" : base.concat(".").concat(name)
+}
+
+// The marker rule for a call through a service-typed local: an unmarked
+// emission is refused as the provision's own call is, spelled as written.
+// "" when the call is not such a crossing or is marked.
+fn svc_local_refusal(recv: Expr, op: Str, marked: Bool, cx: Ctx) -> Str {
+  if (marked) { return "" }
+  let decl = svc_recv_msig(recv, op, cx)
+  if (decl.name == "" || !decl.isEm) { return "" }
+  let sp = svc_recv_spelling(recv)
+  let spelled = sp == "" ? op : sp.concat(".").concat(op)
+  return "call to emission `".concat(spelled).concat("` must be marked `emit` (G4)")
 }
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
@@ -6619,7 +6912,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // are visible to every provide method, a method's own are not visible to the
   // next (GHSA-wg4v-r47x-52p2 residual — the arrow-parameter provision seam).
   let setupArrows = arrows_in(comp.setup, 0, Map.empty())
-  let scx = ctx_arrows(ctx_alias(cx, setupAlias), setupArrows)
+  // the service-typed locals (issue #1509) are per body too, over a seed that
+  // types every spawn-handle read
+  let setupSvcTys = svc_tys_in(comp.setup, 0, svc_seed(cx), cx)
+  let scx = ctx_svc(ctx_arrows(ctx_alias(cx, setupAlias), setupArrows), setupSvcTys)
   let sa = walk_stmts(comp.setup, 0, scx, empty_ac())
   if (sa.msg != "") {
     return mk_verd(tagged(sa.tag, sa.msg), body_line(comp.setup, scx, comp.line))
@@ -6667,9 +6963,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // is lowered.
       let sigv = a6_annotation_verdict(pv, mi, decl, gtys)
       if (sigv.v != "") { return sigv }
-      let mcx = ctx_arrows(
+      let mcx = ctx_svc(ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
-        arrows_in(pm.body, 0, setupArrows))
+        arrows_in(pm.body, 0, setupArrows)),
+        svc_tys_in(pm.body, 0, svc_param_tys(setupSvcTys, pm, decl, pcx), pcx))
       // `_check_rebind`, run by the reference DURING the body lowering: it
       // interleaves with the walk below statement by statement, so the earlier
       // SOURCE LINE wins (both are read in statement order). A walk verdict with
@@ -7708,22 +8005,139 @@ fn emit_caps_pairs(e: Expr, comp: CompD, cx: Ctx) -> List[Str] {
   }
 }
 
-fn emit_pairs_in(ss: List[Stmt], i: Int, comp: CompD, cx: Ctx,
+fn emit_pairs_in(ss: List[Stmt], i: Int, comp: CompD, cx: Ctx, nm: Bool,
                  acc: List[Str]) -> List[Str] {
   if (i >= ss.length()) { return acc }
   let s = ss[i]
-  let a2 = s.kind == "emit" ? union_into(acc, emit_caps_pairs(s.e, comp, cx)) : acc
-  return emit_pairs_in(ss, i + 1, comp, cx, a2)
+  let a2 = s.kind == "emit" && !nm
+    ? union_into(acc, emit_caps_pairs(s.e, comp, cx)) : acc
+  // issue #1562: every crossing the statement makes, in every position (the
+  // value form, an argument, a compensate slot), not only an `emit` step's
+  // head. The reference reads every crossing call node of the lowered body.
+  return emit_pairs_in(ss, i + 1, comp, cx, nm, cross_pairs_in(s.e, comp, cx, nm, a2))
 }
 
-fn own_emit_pairs(comp: CompD, cx: Ctx) -> List[Str] {
-  var out = emit_pairs_in(comp.setup, 0, comp, cx, [])
+// The crossings inside one expression, each resolved the way an `emit` step's
+// head is (`emit_caps_pairs`): a call through a requirement to an `emission`
+// op, a provision call off a spawn handle to one, or a named call to an
+// emitting extern or fn (a `witnessed` extern is marked by `effect` and stays
+// out, as it does for the marker rule).
+//
+// `nm` collects NAMES instead: the emitting extern or `fn` each named crossing
+// calls, so the model-reach fold can read the tokens that callable declares
+// (`lower.py` passes `named` to `_collect_emit_caps_pairs` for the same walk).
+fn cross_pairs_in(e: Expr, comp: CompD, cx: Ctx, nm: Bool,
+                  acc: List[Str]) -> List[Str] {
+  return match e {
+    Call(c)    => cross_pairs_list(c.args, 0, comp, cx, nm,
+                    cross_pairs_in(c.target, comp, cx, nm,
+                      is_cross_call(c, comp, cx)
+                        ? union_into(acc, nm ? cross_name(c)
+                                             : emit_caps_pairs(e, comp, cx))
+                        : acc)),
+    Field(f)   => cross_pairs_in(f.target, comp, cx, nm, acc),
+    OptField(f) => cross_pairs_in(f.target, comp, cx, nm, acc),
+    OptCall(c) => cross_pairs_list(c.args, 0, comp, cx, nm,
+                    cross_pairs_in(c.target, comp, cx, nm, acc)),
+    Bin(b)     => cross_pairs_in(b.r, comp, cx, nm, cross_pairs_in(b.l, comp, cx, nm, acc)),
+    Un(u)      => cross_pairs_in(u.e, comp, cx, nm, acc),
+    Emit(u)    => cross_pairs_in(u.e, comp, cx, nm, acc),
+    Index(x)   => cross_pairs_in(x.idx, comp, cx, nm, cross_pairs_in(x.target, comp, cx, nm, acc)),
+    If(x)      => cross_pairs_in(x.els, comp, cx, nm,
+                    cross_pairs_in(x.then_, comp, cx, nm, cross_pairs_in(x.cond, comp, cx, nm, acc))),
+    Lst(l)     => cross_pairs_list(l.items, 0, comp, cx, nm, acc),
+    Rec(r)     => cross_pairs_inits(r.fields, 0, comp, cx, nm, acc),
+    Arrow(ar)  => cross_pairs_in(ar.body, comp, cx, nm, acc),
+    Match(m)   => cross_pairs_arms(m.arms, 0, comp, cx, nm, cross_pairs_in(m.scrut, comp, cx, nm, acc)),
+    Templ(t)   => cross_pairs_parts(t.parts, 0, comp, cx, nm, acc),
+    RecUpd(r)  => cross_pairs_inits(r.upds, 0, comp, cx, nm, cross_pairs_in(r.base, comp, cx, nm, acc)),
+    _          => acc,
+  }
+}
+
+fn cross_pairs_parts(xs: List[PartN], i: Int, comp: CompD, cx: Ctx, nm: Bool,
+                     acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cross_pairs_parts(xs, i + 1, comp, cx, nm, cross_pairs_in(xs[i].e, comp, cx, nm, acc))
+}
+
+fn cross_pairs_list(xs: List[Expr], i: Int, comp: CompD, cx: Ctx, nm: Bool,
+                    acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cross_pairs_list(xs, i + 1, comp, cx, nm, cross_pairs_in(xs[i], comp, cx, nm, acc))
+}
+
+fn cross_pairs_inits(xs: List[InitN], i: Int, comp: CompD, cx: Ctx, nm: Bool,
+                     acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cross_pairs_inits(xs, i + 1, comp, cx, nm, cross_pairs_in(xs[i].value, comp, cx, nm, acc))
+}
+
+fn cross_pairs_arms(xs: List[ArmN], i: Int, comp: CompD, cx: Ctx, nm: Bool,
+                    acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cross_pairs_arms(xs, i + 1, comp, cx, nm, cross_pairs_in(xs[i].body, comp, cx, nm, acc))
+}
+
+// The emitting callable one named crossing calls (the `nm` mode above).
+fn cross_name(c: CallN) -> List[Str] {
+  return match c.target {
+    Var(n) => [n],
+    _ => [],
+  }
+}
+
+// `_is_value_crossing`: whether one call is an emission crossing.
+fn is_cross_call(c: CallN, comp: CompD, cx: Ctx) -> Bool {
+  return match c.target {
+    Var(n) => contains(cx.emittingNames, n) && !contains(cx.appr.wit, n),
+    Field(fl) => match fl.target {
+      Var(v) => req_op_is_em(v, fl.name, comp, cx),
+      Field(inner) => match inner.target {
+        Var(h) => cx.handles.has(h) && handle_msig(h, inner.name, fl.name, cx).isEm,
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn req_op_is_em(key: Str, meth: Str, comp: CompD, cx: Ctx) -> Bool {
+  let sv = req_svc_of(comp.reqMap, key, 0)
+  if (sv == "") { return false }
+  return find_msig(svc_of(cx, sv), meth, 0).isEm
+}
+
+fn own_emit_pairs(comp: CompD, base: Ctx) -> List[Str] {
+  // the per-component context: a spawn handle the component binds resolves
+  // through its own `handles`, as the marker rule resolves it
+  let cx = ctx_for(base, comp)
+  var out = emit_pairs_in(comp.setup, 0, comp, cx, false, [])
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
     var mi = 0
     while (mi < pv.methods.length()) {
-      out = emit_pairs_in(pv.methods[mi].body, 0, comp, cx, out)
+      out = emit_pairs_in(pv.methods[mi].body, 0, comp, cx, false, out)
+      mi += 1
+    }
+    pi += 1
+  }
+  return out
+}
+
+// The emitting externs and `fn`s a component crosses by name, in every
+// position (the walk above in its `nm` mode): the model-reach fold reads the
+// tokens each one declares, which its `*` fold element does not carry.
+fn own_cross_names(comp: CompD, cx: Ctx) -> List[Str] {
+  var out = emit_pairs_in(comp.setup, 0, comp, cx, true, [])
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      out = emit_pairs_in(pv.methods[mi].body, 0, comp, cx, true, out)
       mi += 1
     }
     pi += 1
@@ -12702,7 +13116,7 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
     // receiver decided in one direction or the other, because an undecided one
     // may be a host object, a `use`d module alias or a required-service handle,
     // none of which take the builtin table at all.
-    if (!tk_low_stdlib_proven(recv) && !untyped) { return "" }
+    if (!tk_low_stdlib_proven(recv) && !untyped && !gate_is_record(recv)) { return "" }
     // `revl.diagnostics.classify` reads this shape as T1, so the wire's tag is
     // T1 and not the code-less `TYPE` family.
     return tagged("T1", "no builtin method `".concat(f.name)
@@ -14074,8 +14488,47 @@ type NoLink = { done: Bool, refs: List[Verd] }
 // role written against item 512 alone; the four fields after it are read only
 // when it is true. `rpline` is the `device` token's line, because that is the
 // line the reference's own refusal points at and not the role's head.
+//
+// `rreach` is the item-519 `reaches [...]` clause, each element in the
+// canonical spelling `cap_tok_at` renders (`*` as itself). `rrdecl` is false
+// when the clause is omitted, which is NOT an empty reach: an undeclared
+// reach is the unnameable `*` (`model_route.UNDECLARED_REACH`). `rrok` is
+// false for a clause this reader cannot canonicalize, which the reference
+// refuses at parse; the reach fold then carries no verdict at all.
 type MRole = { rname: Str, rres: Str, rline: Int, rprof: Bool,
-               rdev: Str, rmem: Int, rquant: Str, rpline: Int }
+               rdev: Str, rmem: Int, rquant: Str, rpline: Int,
+               rreach: List[Str], rrdecl: Bool, rrok: Bool }
+
+// One `reaches [...]` clause, read at `i` (the `reaches` word when written).
+type MReach = { mxs: List[Str], mdecl: Bool, mok: Bool }
+
+fn model_reach_at(ts: List[Token], i: Int) -> MReach {
+  if (!(at_word(ts, i, "reaches") && atk(ts, i + 1, "["))) {
+    return { mxs: [], mdecl: false, mok: true }
+  }
+  let end = match_bracket(ts, i + 1)
+  if (end == 0 - 1) { return { mxs: [], mdecl: true, mok: false } }
+  var out: List[Str] = []
+  var ok = true
+  var j = i + 2
+  while (j < end) {
+    var x = "?"
+    if (atk(ts, j, "*")) {
+      x = "*"
+      j += 1
+    } else {
+      let r = cap_tok_at(ts, j, end)
+      x = r.s
+      j = r.i > j ? r.i : j + 1
+    }
+    // the reference refuses an unreadable token and a duplicate at parse
+    if (x == "?" || contains(out, x)) { ok = false }
+    out = out.push(x)
+    if (atk(ts, j, ",")) { j += 1 }
+    else if (j < end) { ok = false  j += 1 }
+  }
+  return { mxs: out, mdecl: true, mok: ok }
+}
 
 // `arole` is the arm's HEAD, which is the placement item 514's ceiling reads.
 // `acands` is the whole ORDERED CANDIDATE SET (item 515), head included, so a
@@ -14303,20 +14756,23 @@ fn model_roles_of(ts: List[Token]) -> List[MRole] {
 // other way is a reference PARSE refusal, and this gate carries no verdict for
 // a parse refusal: `rprof` stays false, the two profile rules below do not run,
 // and the ordinary parse refusal stands. `reaches [...]` (item 519) sits in the
-// same slot and is skipped here for the same reason its fold is not ported -
-// see the section note above `model_roles_refusal`.
+// same slot, after the profile when both are written, and is read by
+// `model_reach_at` for the reach fold below `model_place_refusal`.
 fn model_role_at(ts: List[Token], i: Int) -> MRole {
   let name = tkc(ts, i + 2).text
   let res = tkc(ts, i + 3).text
   let line = tkc(ts, i).line
   let j = i + 4
+  let rr = model_reach_at(ts, j)
   let bare = { rname: name, rres: res, rline: line, rprof: false,
-               rdev: "", rmem: 0, rquant: "", rpline: line }
+               rdev: "", rmem: 0, rquant: "", rpline: line,
+               rreach: rr.mxs, rrdecl: rr.mdecl, rrok: rr.mok }
   if (!(at_word(ts, j, "device") && atk(ts, j + 1, "ident")
         && at_word(ts, j + 2, "memory") && atk(ts, j + 3, "int")
         && at_word(ts, j + 4, "quant") && atk(ts, j + 5, "ident"))) {
     return bare
   }
+  let pr = model_reach_at(ts, j + 6)
   // The memory floor is compared as a NUMBER, so the gate's "no placement can
   // fail to meet" refusal fires on the same values the reference's does. A
   // spelling this reader cannot turn into one (a radix or separator form the
@@ -14324,10 +14780,16 @@ fn model_role_at(ts: List[Token], i: Int) -> MRole {
   // refused at a guessed value: a wrong number in a message is worse than no
   // verdict, and no verdict is the direction this gate is allowed to take.
   let mem = match tkc(ts, j + 3).text.to_int() { Some(v) => v, None => 0 - 1 }
-  if (mem == 0 - 1) { return bare }
+  if (mem == 0 - 1) {
+    // the reach after an unread profile is not read either: no reach verdict
+    return { rname: name, rres: res, rline: line, rprof: false,
+             rdev: "", rmem: 0, rquant: "", rpline: line,
+             rreach: [], rrdecl: true, rrok: false }
+  }
   return { rname: name, rres: res, rline: line, rprof: true,
            rdev: tkc(ts, j + 1).text, rmem: mem,
-           rquant: tkc(ts, j + 5).text, rpline: tkc(ts, j).line }
+           rquant: tkc(ts, j + 5).text, rpline: tkc(ts, j).line,
+           rreach: pr.mxs, rrdecl: pr.mdecl, rrok: pr.mok }
 }
 
 fn mrole_at(rs: List[MRole], n: Str, i: Int) -> Int {
@@ -14735,6 +15197,307 @@ fn model_place_refusal(ts: List[Token]) -> Verd {
     let cv = model_comp_refusal(ts, sps[i], rs, cs)
     if (cv.v != "") { return cv }
     i += 1
+  }
+  return no_verd()
+}
+
+// ======================================================= the model reach fold
+//
+// Item 519 (`lower.py::_check_model_attenuation`, issue #1193 slice 2): a
+// model role is an authority surrogate, so a component's effective ceiling is
+// what it holds together with what every role it consults can reach, and a
+// role reaching past the component is refused with both sets named.
+//
+// This was the one item-519 rule the gate declined, on the grounds that it is
+// a product over a component's HELD set and the gate had none. It has one: the
+// spawn attenuation fold above (`held_caps_pairs`, `reach_surface_pairs`,
+// `cap_covers_set`) is that product, so the reach fold is ported onto it.
+//
+// The EDGES are the roles a component's `route model` block names (every
+// candidate of an ordered set, and a council arm's member roles), then the
+// roles its crossings are PLACED on by a `model.<role>` token (item 512 slice
+// 4), read off what it holds and off the tokens every extern or `fn` it
+// crosses declares. The second kind is slice 2: without it the fold ran only
+// for a component that wrote a block, so deleting the block took a role
+// reaching past the component out of the product.
+//
+// The held set is spelled in the reference's namespace for a boundary no
+// declaration names, the SERVICE (`svc:<Service>`, item 561), where the spawn
+// fold above keys it by the wiring key. The two agree on every verdict the
+// spawn fold reaches; the reach fold PRINTS the element, so it must be the
+// reference's.
+//
+// What this does not decide it leaves alone, never refuses: a `reaches`
+// clause it cannot canonicalize, a capability list the cap order does not
+// model, or a block this gate does not read (the placement phase above has
+// refused that one already).
+
+type MEdge = { eact: Str, eorig: Str, erole: Str, ecross: Str, eline: Int }
+
+// `key:K` (the spawn fold's spelling) as the reference's `svc:<service K
+// wires>`, for every element of a held set.
+fn model_svc_ns(xs: List[Str], comp: CompD) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    let x = xs[i]
+    if (starts_with(x, "key:")) {
+      let sv = req_svc_of(comp.reqMap, x.slice(4, x.length()), 0)
+      out = union_into(out, [sv == "" ? x : "svc:".concat(sv)])
+    } else {
+      out = union_into(out, [x])
+    }
+    i += 1
+  }
+  return out
+}
+
+// `_consults_a_model`: a held boundary counts unless its declared token PROVES
+// it is some other boundary.
+fn model_consults(held: List[Str]) -> Bool {
+  var i = 0
+  while (i < held.length()) {
+    let t = cap_parse(held[i]).token
+    if (t == "*" || starts_with(t, "svc:") || t == "model"
+        || starts_with(t, "model.")) { return true }
+    i += 1
+  }
+  return false
+}
+
+// `model_route.role_of_crossing`: the declared role a `model.<tail>` token
+// names, else "".
+fn model_role_of(tok: Str, rs: List[MRole]) -> Str {
+  if (!starts_with(tok, "model.")) { return "" }
+  let head = cap_parse(tok).token
+  let tail = head.slice(6, head.length())
+  if (tail == "") { return "" }
+  return mrole_at(rs, tail, 0) == 0 - 1 ? "" : tail
+}
+
+// `_model_held_render` / `_model_held_str` (issue #1451): an unscoped emission
+// reads as what it is, in `_cap_sorted_strs` order, and names the fix.
+fn model_held_render(x: Str) -> Str {
+  if (starts_with(x, "svc:")) {
+    return "service `".concat(x.slice(4, x.length())).concat("`'s unscoped emission")
+  }
+  return "`".concat(x).concat("`")
+}
+
+fn model_render_key(x: Str) -> Str {
+  return starts_with(x, "svc:") ? x.slice(4, x.length()) : x
+}
+
+fn model_held_str(held: List[Str]) -> Str {
+  // `sorted(held, key=_cap_render)`: ordered by the rendered spelling, which a
+  // `svc:` element shares with its bare service name
+  var keys: List[Str] = []
+  var i = 0
+  while (i < held.length()) {
+    keys = union_into(keys, [model_render_key(held[i])])
+    i += 1
+  }
+  let order = sort_strs(keys)
+  var text = ""
+  var folded = ""
+  var k = 0
+  while (k < order.length()) {
+    i = 0
+    while (i < held.length()) {
+      let x = held[i]
+      if (model_render_key(x) == order[k]) {
+        if (text != "") { text = text.concat(", ") }
+        text = text.concat(model_held_render(x))
+        if (starts_with(x, "svc:")) {
+          if (folded != "") { folded = folded.concat(", ") }
+          folded = folded.concat("`").concat(order[k]).concat("`")
+        }
+      }
+      i += 1
+    }
+    k += 1
+  }
+  if (text == "") { text = "no capabilities" }
+  if (folded != "") {
+    text = text.concat(" (an unscoped emission has no token a `reaches [...]` ")
+      .concat("list can name: give the `emission` methods of ").concat(folded)
+      .concat(" a scoped capability, such as `emission[model.complete]`, ")
+      .concat("and reach that)")
+  }
+  return text
+}
+
+// The roles one arm routes through: every candidate, and a council's member
+// roles in declaration order. "?" marks an arm this fold cannot resolve.
+fn model_arm_roles(a: MArm, rs: List[MRole], cs: List[CDecl]) -> List[Str] {
+  if (a.acands.length() == 1 && mrole_at(rs, a.acands[0], 0) == 0 - 1) {
+    let ci = ccl_at(cs, a.acands[0], 0)
+    if (ci == 0 - 1) { return ["?"] }
+    var out: List[Str] = []
+    var k = 0
+    while (k < cs[ci].cmems.length()) {
+      out = out.push(cs[ci].cmems[k].crole)
+      k += 1
+    }
+    return out
+  }
+  return a.acands
+}
+
+// `_model_reach_edges`: block edges sorted by action then origin, each arm's
+// roles in order, then crossing edges for the roles no block names, sorted.
+// One edge with role "?" means this fold does not decide the component.
+fn model_edges(bs: List[MBlock], rs: List[MRole], cs: List[CDecl],
+               crossed: List[Str], line: Int) -> List[MEdge] {
+  let undecided = [{ eact: "", eorig: "", erole: "?", ecross: "", eline: 0 }]
+  var acts: List[Str] = []
+  var bi = 0
+  while (bi < bs.length()) {
+    if (!bs[bi].bok) { return undecided }
+    acts = union_into(acts, [bs[bi].bact])
+    bi += 1
+  }
+  let actOrder = sort_strs(acts)
+  var out: List[MEdge] = []
+  var named: List[Str] = []
+  var ai = 0
+  while (ai < actOrder.length()) {
+    let act = actOrder[ai]
+    var origs: List[Str] = []
+    bi = 0
+    while (bi < bs.length()) {
+      if (bs[bi].bact == act) {
+        var k = 0
+        while (k < bs[bi].barms.length()) {
+          origs = union_into(origs, [bs[bi].barms[k].aorig])
+          k += 1
+        }
+      }
+      bi += 1
+    }
+    let origOrder = sort_strs(origs)
+    var oi = 0
+    while (oi < origOrder.length()) {
+      bi = 0
+      var done = false
+      while (bi < bs.length() && !done) {
+        if (bs[bi].bact == act) {
+          let at = marm_origin_at(bs[bi].barms, origOrder[oi], 0)
+          if (at != 0 - 1) {
+            done = true
+            let a = bs[bi].barms[at]
+            let roles = model_arm_roles(a, rs, cs)
+            var k = 0
+            while (k < roles.length()) {
+              if (roles[k] == "?") { return undecided }
+              named = union_into(named, [roles[k]])
+              out = out.push({ eact: act, eorig: a.aorig, erole: roles[k],
+                               ecross: "", eline: a.aline })
+              k += 1
+            }
+          }
+        }
+        bi += 1
+      }
+      oi += 1
+    }
+    ai += 1
+  }
+  var placed: List[Str] = []
+  var i = 0
+  while (i < crossed.length()) {
+    let r = model_role_of(crossed[i], rs)
+    if (r != "" && !contains(named, r)) { placed = union_into(placed, [r]) }
+    i += 1
+  }
+  let ps = sort_strs(placed)
+  i = 0
+  while (i < ps.length()) {
+    out = out.push({ eact: "*", eorig: "*", erole: ps[i],
+                     ecross: "model.".concat(ps[i]), eline: line })
+    i += 1
+  }
+  return out
+}
+
+fn model_reach_of(r: MRole) -> List[Str] {
+  return r.rrdecl ? cap_strip_all(r.rreach) : ["*"]
+}
+
+// One component's verdict, or "" when it is admitted or not decided here.
+fn model_reach_comp(comp: CompD, cx: Ctx, own: List[Str], bs: List[MBlock],
+                    rs: List[MRole], cs: List[CDecl]) -> Verd {
+  let held = cap_strip_all(model_svc_ns(held_caps_pairs(comp, cx, own), comp))
+  if (!model_consults(held)) { return no_verd() }
+  var crossed: List[Str] = []
+  var i = 0
+  while (i < held.length()) {
+    crossed = union_into(crossed, [cap_parse(held[i]).token])
+    i += 1
+  }
+  let names = own_cross_names(comp, cx)
+  i = 0
+  while (i < names.length()) {
+    crossed = union_into(crossed, caps_of(cx.appr.vcaps, names[i]))
+    i += 1
+  }
+  let es = model_edges(bs, rs, cs, crossed, comp.line)
+  if (es.length() > 0 && es[0].erole == "?") { return no_verd() }
+  i = 0
+  while (i < es.length()) {
+    let e = es[i]
+    let r = rs[mrole_at(rs, e.erole, 0)]
+    let extra = sort_strs(cap_covers_set(held, model_reach_of(r)))
+    if (extra.length() > 0) {
+      let lead = e.ecross == ""
+        ? "`".concat(comp.name).concat("` routes `").concat(e.eact)
+            .concat("` (").concat(e.eorig).concat(") through model role `")
+            .concat(r.rname).concat("`")
+        : "`".concat(comp.name).concat("` crosses `").concat(e.ecross)
+            .concat("`, placed on model role `").concat(r.rname).concat("`")
+      return mverd(lead.concat(", which reaches ").concat(cap_offending_join(extra))
+        .concat(", but `").concat(comp.name).concat("` holds only ")
+        .concat(model_held_str(held))
+        .concat(" - a component's effective ceiling is the pair's, so a model ")
+        .concat("may not reach past the component that consults it (G-MODEL-PLACE)"),
+        e.eline)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// The whole fold, run where `check_and_lower` collects it: after the spawn
+// attenuation, over the components the component loop did not poison, the
+// first refusal only (the reference raises once).
+fn model_reach_refusal(ts: List[Token], pg: Prog, base: Ctx,
+                       poisoned: List[Str]) -> Verd {
+  let rs = model_roles_of(ts)
+  if (rs.length() == 0) { return no_verd() }
+  var i = 0
+  while (i < rs.length()) {
+    if (!rs[i].rrok) { return no_verd() }
+    i += 1
+  }
+  if (!svc_caps_modelled(pg.svcs, 0)) { return no_verd() }
+  let cs = model_councils_of(ts)
+  let sps = model_comp_spans(ts)
+  let own = reach_surface_pairs(pg.comps, base)
+  var ci = 0
+  while (ci < pg.comps.length()) {
+    let comp = pg.comps[ci]
+    if (!contains(poisoned, comp.name)) {
+      var bs: List[MBlock] = []
+      var si = 0
+      while (si < sps.length()) {
+        if (sps[si].sname == comp.name) { bs = model_blocks_in(ts, sps[si].slo, sps[si].shi) }
+        si += 1
+      }
+      let v = model_reach_comp(comp, ctx_for(base, comp), surf_get(own, comp.name),
+                               bs, rs, cs)
+      if (v.v != "") { return v }
+    }
+    ci += 1
   }
   return no_verd()
 }
@@ -15494,6 +16257,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // order (`_check_spawn_emission_bounds`, `_check_spawn_attenuation`, `_link`).
   let sv = check_spawn(pg, base)
   if (sv.v != "") { refs = refs.push(sv) }
+  // the MODEL REACH fold (item 519, slice 2 of issue #1193): collected right
+  // after the spawn attenuation, which is where `check_and_lower` collects
+  // `_check_model_attenuation`, over the components the loop did not poison.
+  let mrv = model_reach_refusal(ts, pg, base, poisoned)
+  if (mrv.v != "") { refs = refs.push(mrv) }
   // item 350: AT MOST ONE `boot` component. The reference decides this in
   // `_link`, ahead of the G2 provision-conflict scan, so the gate collects it
   // at the head of the link, anchored at the SECOND boot component's line
@@ -22598,6 +23366,22 @@ test "the approval floor is keyed by token and reaches every marked crossing (it
   assert admit_src("""extern emission fn charge(n: Int) -> Int requires approval = @py { return 1 } service O { fn ping() -> Int } component C provides o: O { emit charge(1) provide o { fn ping() = 1 } }""") == "G4|crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge"
 }
 
+// The floor reaches the two carriers it did not see: a `compensate` slot (a
+// compensation runs during rollback with nobody to ask, so it is judged under
+// the step's own `with` edge) and a crossing through a spawn handle (its token
+// is the op's declared scope, off `handle_msig`).
+test "the approval floor reaches a compensation and a spawn-handle crossing (item 246)" {
+  let ex = "extern emission fn charge(n: Int) -> Int requires approval = @py { return 1 } extern emission fn notify(n: Int) -> Int = @py { return 1 } service O { fn ping() -> Int } "
+  let cmsg = "G4|crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge"
+  assert admit_src(ex.concat("component C provides o: O { emit notify(1) compensate charge(2) provide o { fn ping() = 1 } }")) == cmsg
+  assert admit_src(ex.concat("component C provides o: O { let a = await approval[charge] { reason: \"r\" } emit notify(1) compensate charge(2) with a provide o { fn ping() = 1 } }")) == ""
+  let wk = "extern emission[pay] fn charge(n: Int) -> Int requires approval = @py { return 1 } service Pay { emission[pay] fn run(n: Int) -> Int } component Worker provides task: Pay { let a = await approval[pay] { reason: \"c\" } provide task { fn run(n) { emit charge(n) with a return 1 } } } service Sup { emission fn go(n: Int) -> Int } "
+  let pmsg = "G4|crossing capability `pay` requires approval, but this `emit` carries no covering `with` edge"
+  assert admit_src(wk.concat("component Supervisor provides sup: Sup { let w = effect spawn Worker with { } undo w.dispose() emit w.task.run(1) provide sup { fn go(n) = 0 } }")) == pmsg
+  assert admit_src(wk.concat("component Supervisor provides sup: Sup { let w = effect spawn Worker with { } undo w.dispose() let b = await approval[pay] { reason: \"p\" } emit w.task.run(1) with b provide sup { fn go(n) = 0 } }")) == ""
+  assert admit_src(wk.concat("component Supervisor provides sup: Sup { provide sup { fn go(n) { let w = effect spawn Worker with { } undo w.dispose() let t = w.task let r = emit t.run(n) return r } } }")) == pmsg
+}
+
 // An arrow's body is not in the enclosing `emit`'s argument list: it runs when
 // the arrow is called. The inline spelling and its two `let` twins are the same
 // crossings in the same order and all three admit; before `ctx_under_arrow`
@@ -25335,6 +26119,281 @@ component Classifier provides out: Answer {
   route model on classify { confidential -> cloud }
   provide out { fn classify(text) = text }
 }""") == "COUNCIL|model council `Release` declares 1 member"
+}
+
+// ---- item 519, the reach fold (issue #1193 slice 2, issue #1451) ----------
+
+test "a crossing placed on a role is folded with no route model block" {
+  // the fail-open slice 2 closes: the same program with
+  // `route model on classify { * -> tool }` was refused, and with the block
+  // deleted it was admitted
+  let v = admit_src("""model role tool on_device reaches [shell.exec]
+service Tools { emission[model.tool] fn run(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+component Classifier requires llm: Tools provides out: Answer {
+  provide out { fn classify(text) = emit llm.run(text) }
+}""")
+  assert v == "MODEL|`Classifier` crosses `model.tool`, placed on model role `tool`, which reaches `shell.exec`, but `Classifier` holds only `model.tool` - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"
+}
+
+test "a role reaching no further than its component is admitted with no block" {
+  let v = admit_src("""model role tool on_device reaches [model.tool]
+service Tools { emission[model.tool] fn run(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+component Classifier requires llm: Tools provides out: Answer {
+  provide out { fn classify(text) = emit llm.run(text) }
+}""")
+  assert v == ""
+}
+
+test "an unscoped emission is named as one, with the fix" {
+  // issue #1451: the held element of a bare `emission` is its service's, and
+  // printed as the bare name it read as the token `reaches [Model]` names
+  let v = admit_src("""model role local on_device reaches [Model]
+service Model { emission fn complete(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+component Classifier requires llm: Model provides out: Answer {
+  route model on classify { * -> local }
+  provide out { fn classify(text) = emit llm.complete(text) }
+}""")
+  assert v == "MODEL|`Classifier` routes `classify` (*) through model role `local`, which reaches `Model`, but `Classifier` holds only service `Model`'s unscoped emission (an unscoped emission has no token a `reaches [...]` list can name: give the `emission` methods of `Model` a scoped capability, such as `emission[model.complete]`, and reach that) - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"
+}
+
+// ---- issue #1509: crossings through service-typed locals -------------------
+
+test "a crossing through a record field holding a provision must be marked" {
+  // admitted unmarked before: the field hid the provision from the marker rule
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let r = { p: w.pay }
+      let x = r.p.charge(n)
+      return x
+    }
+  }
+}""")
+  assert v == "G4|call to emission `r.p.charge` must be marked `emit` (G4)"
+}
+
+test "an if-bound provision local meets the approval floor" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = if (n > 0) { w.pay } else { w.pay }
+      emit t.charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"
+}
+
+test "an if-bound provision local crossed with an approval edge is admitted" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  let a = await approval[production.payment] { reason: "pay" }
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = if (n > 0) { w.pay } else { w.pay }
+      emit t.charge(n) with a
+      return 0
+    }
+  }
+}""")
+  assert v == ""
+}
+
+// ---- issue #1681: a service-typed receiver written in place ----------------
+
+test "a crossing through an if written in place must be marked" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let x = (if (n > 0) { w.pay } else { w.pay }).charge(n)
+      return x
+    }
+  }
+}""")
+  assert v == "G4|call to emission `charge` must be marked `emit` (G4)"
+}
+
+test "a marked crossing through a list literal read in place meets the floor" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      emit [w.pay][0].charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"
+}
+
+test "a step through an if-bound provision local meets a scoped upper bound" {
+  // issue #1508: read at the op's declared scope, which `audit.log` misses
+  let v = admit_src("""service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission[audit.log] fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = if (n > 0) { w.pay } else { w.pay }
+      emit t.charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"
+}
+
+// ---- issue #1682: a provide method's own service-typed parameter ----------
+
+test "a call through a service-typed method parameter must be marked" {
+  let v = admit_src("""service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(p: Pay, n: Int) -> Int }
+component Register provides till: Till {
+  provide till {
+    fn go(p, n) {
+      let x = p.charge(n)
+      return x
+    }
+  }
+}""")
+  assert v == "G4|call to emission `p.charge` must be marked `emit` (G4)"
+}
+
+test "a crossing through a service-typed parameter fits the declared bound" {
+  let v = admit_src("""service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission[audit.log] fn go(p: Pay, n: Int) -> Int }
+component Register provides till: Till {
+  provide till {
+    fn go(p, n) {
+      emit p.charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"
+}
+
+test "a crossing through a service-typed parameter inside its bound is admitted" {
+  let v = admit_src("""service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission[production.payment] fn go(p: Pay, n: Int) -> Int }
+component Register provides till: Till {
+  provide till {
+    fn go(p, n) {
+      emit p.charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == ""
+}
+
+// ---- issue #1508: a spawn-handle crossing at the op's declared scope ------
+
+test "a spawn-handle step under a bound covering the op's scope is admitted" {
+  let v = admit_src("""service Task { emission[net] fn go() -> Int }
+service Sup { emission[net] fn run() -> Int }
+component Worker provides task: Task {
+  provide task { fn go() = 0 }
+}
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn run() {
+      let w = effect spawn Worker with { } undo w.dispose()
+      emit w.task.go()
+      return 0
+    }
+  }
+}""")
+  assert v == ""
+}
+
+test "a spawn-handle value under a bound missing the op's scope is refused" {
+  let v = admit_src("""service Task { emission[net] fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker provides task: Task {
+  provide task { fn go() = 0 }
+}
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn run() {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let r = emit w.task.go()
+      return r
+    }
+  }
+}""")
+  assert v == "G4|`Sup.run` is declared `emission[db]`, but this implementation emits through `net` (reaching `Task.go`)"
+}
+
+// ---- issue #1547: a method call on a record in a component body -----------
+
+test "a call through a record field in a provide method is refused" {
+  let v = admit_src("""extern pure fn twice(n: Int) -> Int = @py { return n * 2 }
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let r = { f: twice }
+      return r.f(n)
+    }
+  }
+}""")
+  assert v == "T1|no builtin method `f` on values — the stdlib surface is ".concat(tk_stdlib_surface()).concat(" (docs/stdlib-2.0.md)")
+}
+
+test "the function read off a record field and bound is admitted" {
+  let v = admit_src("""extern pure fn twice(n: Int) -> Int = @py { return n * 2 }
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let r = { f: twice }
+      let g = r.f
+      return g(n)
+    }
+  }
+}""")
+  assert v == ""
 }
 
 test "a host acquisition's undo that is not its release is refused" {

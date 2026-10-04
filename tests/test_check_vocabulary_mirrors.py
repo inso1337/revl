@@ -50,7 +50,7 @@ def test_the_three_instances_issue_1285_was_filed_for_are_in_the_inventory():
     tool, sites, _, _ = _state()
     found = {site for cls in tool.classes(sites) for site in cls["sites"]}
     # 1: the type-to-schema mappings (issue #1272).
-    assert "src/revl/mcp/schema.py::_JSON_TYPES" in found
+    assert "src/revl/type_schema.py::_JSON_TYPES" in found
     assert "src/revl/export_openapi.py::_SCALARS" in found
     # 2: the IR path normalizations (issue #1276). RESOLVED, and this is the
     # shape the resolution takes, so the assertion is the inverse one. Both

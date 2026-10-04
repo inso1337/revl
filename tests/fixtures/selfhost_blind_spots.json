@@ -174,6 +174,9 @@
         "stage=take",
         "step=stream-iter",
         "subscribe=<true>"
+      ],
+      "Issue #1511: an extern of `class=emission` that declares `compensate` is registered at every crossing in a component through `RevlDeclared`. selfhost/emit_java.rvl does not port the registration, so a corpus document declaring one would make the byte-agreement oracle diverge; the runtime proof is backends/java/test_declared_compensate_java.py.": [
+        "class=emission"
       ]
     }
   },

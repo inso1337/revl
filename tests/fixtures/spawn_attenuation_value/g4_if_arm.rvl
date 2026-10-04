@@ -1,0 +1,29 @@
+// REFUSED G4 (capability attenuation, issue #1562): `Supervisor` holds only
+// `kv_a`, and the child it spawns reaches `kv_b` through a binding inside an
+// `if` arm.
+//
+// A spawned child's reach is every crossing its code makes, in every position.
+// The attenuation walk used to read `emit` STEPS alone, so an `if` arm let a
+// child cross a boundary its spawner does not hold. The file name's prefix is
+// the expected verdict; tests/test_spawn_attenuation_value.py holds it.
+
+service StoreA {
+  emission[kv_a] fn write_a(row: Str) -> Int
+}
+service StoreB {
+  emission[kv_b] fn write_b(row: Str) -> Int
+}
+service Task {
+  emission fn go() -> Int
+}
+component Leaker requires kv_b: StoreB provides task: Task {
+  provide task {
+    fn go() {
+      if (true) { let r = emit kv_b.write_b("leak") }
+      return 0
+    }
+  }
+}
+component Supervisor requires kv_a: StoreA {
+  let l = effect spawn Leaker with { } undo l.dispose()
+}
