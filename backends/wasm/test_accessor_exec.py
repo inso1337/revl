@@ -124,7 +124,7 @@ def test_accessor_reads_the_instances_own_provision():
     instance's provision — w1 -> 100, w2 -> 200 — and never the sibling's."""
     mod, rt, sup = _driver()
     # BOTH reads are driven by the emitted `provide:ctl.*` WAT, which calls the
-    # `$inst_Worker_counter_value` import with each handle. w1 (id 1) resolves in
+    # `$inst.Worker.counter.value` import with each handle. w1 (id 1) resolves in
     # w1's own realm; w2 (id 2) in w2's — no crossing.
     assert rt.call(sup, "provide:ctl.read_a") == 100
     assert rt.call(sup, "provide:ctl.read_b") == 200

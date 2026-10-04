@@ -309,7 +309,7 @@ def _attest_the_entry(registry: Path, key: bytes, *, legacy: bool = False) -> Pa
     attestation where a publish actually puts it.
 
     That is `<entry>/evidence/attestation.json`, the path
-    `registry.build_evidence` writes. This helper used to write
+    `registry_evidence.build_evidence` writes. This helper used to write
     `<entry>/attestation.json` — the same path the tier used to read — so the
     attestation tier tested green against a location nothing publishes to,
     while being structurally dead for every real entry. `legacy=True` writes the
@@ -372,7 +372,7 @@ def test_attestation_present_but_no_key_is_cannot_verify(registry, monkeypatch):
 
 def test_the_attestation_tier_finds_what_build_evidence_publishes(registry,
                                                                   monkeypatch):
-    """The F6 regression. `registry.build_evidence` writes the attestation to
+    """The F6 regression. `registry_evidence.build_evidence` writes the attestation to
     `<entry>/evidence/attestation.json`; the tier read `<entry>/attestation.json`,
     a path nothing writes. So for every entry the real publish path produces the
     tier was structurally DEAD — it could only ever say "no recorded
@@ -382,8 +382,9 @@ def test_the_attestation_tier_finds_what_build_evidence_publishes(registry,
     key = b"published-evidence-key"
     monkeypatch.setenv(attest.KEY_ENV, "published-evidence-key")
     from revl import registry as R_registry
+    from revl import registry_evidence
 
-    R_registry.build_evidence(str(registry), key=key, signer="revl-ci")
+    registry_evidence.build_evidence(str(registry), key=key, signer="revl-ci")
     published = (_entry(registry) / R_registry.EVIDENCE_DIRNAME
                  / R_registry.EVIDENCE_ATTESTATION)
     assert published.exists(), "build_evidence must publish here"
@@ -403,8 +404,9 @@ def test_a_forged_bound_dossier_is_an_attestation_mismatch(registry, monkeypatch
     key = b"published-evidence-key"
     monkeypatch.setenv(attest.KEY_ENV, "published-evidence-key")
     from revl import registry as R_registry
+    from revl import registry_evidence
 
-    R_registry.build_evidence(str(registry), key=key, signer="revl-ci")
+    registry_evidence.build_evidence(str(registry), key=key, signer="revl-ci")
     capabilities = (_entry(registry) / R_registry.EVIDENCE_DIRNAME
                     / R_registry.EVIDENCE_CAPABILITIES)
     capabilities.write_text(json.dumps(

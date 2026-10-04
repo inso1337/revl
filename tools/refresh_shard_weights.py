@@ -43,11 +43,15 @@ def run_logs(repo: str, run: str) -> dict:
 
 
 def measure(logs: dict) -> dict:
-    measured = {}
+    """key -> seconds over every log. A split file runs in several shards, so
+    its seconds (and any family's, should one ever span two) are summed."""
+    measured: dict = {}
     for name in sorted(logs):
         found = _shard.parse_seconds(logs[name])
-        print(f"{name}: {len(found)} file(s), {sum(found.values()):.0f}s")
-        measured.update(found)
+        files = {k: v for k, v in found.items() if "::" not in k}
+        print(f"{name}: {len(files)} file(s), {sum(files.values()):.0f}s")
+        for key, value in found.items():
+            measured[key] = measured.get(key, 0.0) + value
     return measured
 
 
@@ -71,13 +75,15 @@ def main(argv=None) -> int:
         return 1
 
     doc = json.loads(_shard.WEIGHTS.read_text(encoding="utf-8"))
-    note = (f"Issue #1774: per-file seconds that balance REVL_TEST_SHARD (tests/_shard.py). "
-            f"{len(measured)} files were timed in {origin} (setup + call + teardown); a file "
+    timed = len([k for k in measured if "::" not in k])
+    note = (f"Issue #1774: per-file seconds that balance REVL_TEST_SHARD (tests/_shard.py), "
+            f"and per-family seconds for the files it splits. "
+            f"{timed} files were timed in {origin} (setup + call + teardown); a file "
             f"it did not time keeps its earlier weight. Only shard balance depends on these "
             f"numbers, never which tests run. Refresh: tools/refresh_shard_weights.py --run <id>.")
     new = _shard.refreshed(doc, measured, note, keep=lambda f: (ROOT / f).is_file())
     files = list(new["seconds"])
-    loads = _shard.loads(files, new["seconds"], 4)
+    loads = _shard.loads(files, new["seconds"], 4, new.get("families", {}))
     print("predicted shard seconds: " + ", ".join(f"{x:.0f}" for x in loads))
     if args.write:
         _shard.WEIGHTS.write_text(json.dumps(new, indent=1) + "\n", encoding="utf-8")

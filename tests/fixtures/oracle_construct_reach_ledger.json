@@ -82,6 +82,7 @@
   "emit_java": [
     "case=Err",
     "case=Ok",
+    "class=emission",
     "class=witnessed",
     "interp_type=Float",
     "kind=arrow",
