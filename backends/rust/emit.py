@@ -1847,19 +1847,19 @@ def _as_fn_call(node):
 
 
 def _emit_compensations(step: dict, compensated: dict | None) -> list:
-    """The compensations an `emit` step registers, in order: the site-spelled
-    `compensate` clause, then the emitted extern's own declared one (item 254,
-    issue #1592), the order the py reference registers them in. An extern is
-    matched as a `fn`-kind call naming it."""
-    out = []
+    """The compensation an `emit` step registers: one per crossing (issue
+    #1902). A site-spelled `compensate` clause REPLACES the emitted extern's
+    own declared one (item 254, issue #1592); the declared one is the default
+    only when the site spells none. The rule the py reference keeps. An extern
+    is matched as a `fn`-kind call naming it."""
     if step.get("compensate") is not None:
-        out.append(step["compensate"])
+        return [step["compensate"]]
     expr = step.get("expr")
     if compensated and isinstance(expr, dict) and expr.get("kind") == "fn":
         ext = compensated.get(expr.get("name"))
         if ext is not None:
-            out.append(_as_fn_call(ext["compensate"]))
-    return out
+            return [_as_fn_call(ext["compensate"])]
+    return []
 
 
 def _reaches_declared(node, compensated: dict | None) -> bool:
@@ -5679,8 +5679,9 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
-        # the site-spelled clause, then the extern's own declared one (item
-        # 254, issue #1592), each registered after the fire.
+        # one compensation per crossing, registered after the fire: the
+        # site-spelled clause, else the extern's own declared one (item 254,
+        # issues #1592 and #1902).
         for compensate_node in _emit_compensations(step, env.compensated):
             _emit_activation_compensation(env, compensate_node, out, indent)
     elif kind == "timer":

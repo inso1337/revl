@@ -3219,9 +3219,10 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))}${call_kwarg(value_field(step, "compensate"), "")})`))
     }
     // item 254: the reversal an emission extern declares on itself, registered
-    // as the same Phase-2 compensation a site-spelled one is.
+    // as the same Phase-2 compensation a site-spelled one is. One per crossing
+    // (issue #1902): a site-spelled `compensate` replaces it.
     let ext_comp = compensated_extern(value_field(step, "expr"), externs)
-    if (!value_is_null(ext_comp)) {
+    if (!value_is_null(ext_comp) && value_is_null(value_field(step, "compensate"))) {
       out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(ext_comp, "compensate"))}${call_kwarg(value_field(ext_comp, "compensate"), "")})`))
     }
     out = out.push("")

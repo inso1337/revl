@@ -93,6 +93,7 @@ _IMPORT_ALIAS = {
     "estop_gated": "_revl_estop_gated",
     "declare_secret_types": "_revl_declare_secret_types",
     "declared_crossing": "_revl_declared_crossing",
+    "site_compensation": "_revl_site_compensation",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -2059,7 +2060,11 @@ class _ComponentEmitter:
                 out.add(indent, "yield _revl_frame.compensation(lambda: "
                                  f"{self._expr(step.get('compensate'), where)}"
                                  f"{self._compensation_call(step.get('compensate'), where)})")
-            ext_comp = self._compensated_extern(step.get("expr"))
+            # issue #1902: one compensation per crossing. A site-spelled
+            # `compensate` REPLACES the extern's declared one; the declared one
+            # is the default only when the site spells none.
+            ext_comp = (self._compensated_extern(step.get("expr"))
+                        if step.get("compensate") is None else None)
             if ext_comp is not None:
                 # item 254: the emitted extern DECLARES its own `compensate` (the
                 # extern owns the reversal, so no site spelling is required — the
@@ -2493,6 +2498,12 @@ class _ComponentEmitter:
         if ext is None or ext.get("name") in self._decorated:
             return None
         return ext
+
+    def _decorated_crossing(self, expr: Any) -> bool:
+        """Whether `expr` is a call to an extern `declared_crossing` decorates
+        (a computer-use crossing), which registers its own compensation."""
+        return (isinstance(expr, dict) and expr.get("kind") == "fn"
+                and expr.get("name") in self._decorated)
 
     def _method_compensation(self, ext_comp: dict, where: str) -> str:
         """The compensation an extern declares, registered at a provide-method
@@ -3058,19 +3069,28 @@ class _ComponentEmitter:
                 # guarded and residue-collected. Fire the emission first, then
                 # register — the sync spelling of the activation body's
                 # `<fire>; yield _revl_frame.compensation(...)`.
-                out.add(indent, self._emit_fire(step, where))
-                out.add(indent,
-                        "_revl_frame.compensation_method("
-                        f"{_inverse_lambda(step, 'compensate')}: "
+                site = (f"{_inverse_lambda(step, 'compensate')}: "
                         f"{self._inverse_expr(step.get('compensate'), where)}"
-                        f"{_named_call_kwarg(step.get('compensate'), lambda a: self._inverse_expr(a, where))})")
+                        f"{_named_call_kwarg(step.get('compensate'), lambda a: self._inverse_expr(a, where))}")
+                if (self._decorated_crossing(step.get("expr"))
+                        and self._compensated_extern(step.get("expr")) is not None):
+                    # issue #1902: a decorated crossing registers its extern's
+                    # declared compensation itself (`declared_crossing`), so
+                    # the site-spelled one is handed to it and REPLACES the
+                    # declared one: one registrar and one entry per crossing.
+                    self.uses.add("site_compensation")
+                    out.add(indent, f"with {_runtime_ref('site_compensation')}({site}):")
+                    out.add(indent + 1, self._emit_fire(step, where))
+                else:
+                    out.add(indent, self._emit_fire(step, where))
+                    out.add(indent, f"_revl_frame.compensation_method({site})")
             else:
                 out.add(indent, self._emit_fire(step, where))
             ext_comp = self._method_compensated_extern(step.get("expr"))
-            if deferred is None and ext_comp is not None:
-                # item 254 / #1592: the extern DECLARES its own `compensate`.
-                # Registered after the fire and after a site-spelled one, the
-                # order the activation body (and the timer site, #1590) uses.
+            if deferred is None and ext_comp is not None and step.get("compensate") is None:
+                # item 254 / #1592: the extern DECLARES its own `compensate`,
+                # registered after the fire. A site-spelled one replaces it
+                # (issue #1902), as at the activation body.
                 out.add(indent, self._method_compensation(ext_comp, where))
         elif kind == "return":
             if step.get("expr") is None:

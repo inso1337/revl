@@ -1886,8 +1886,9 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             env.declared_skip = step.get("expr")
             out.append("%s%s" % (pad, _expr(step["expr"], env)))
             env.declared_skip = None
-            # the site-spelled clause, then the extern's own declared one
-            # (item 254, issue #1592), each registered after the fire.
+            # one compensation per crossing, registered after the fire: the
+            # site-spelled clause, else the extern's own declared one (item
+            # 254, issues #1592 and #1902).
             for comp_node in _emit_compensations(step):
                 compensate_call = _expr(comp_node, env)
                 key, method = _call_descriptor(comp_node)
@@ -2724,20 +2725,20 @@ def _as_fn_call(node):
 
 
 def _emit_compensations(step) -> list:
-    """The compensations an `emit` step registers, in order: the site-spelled
-    `compensate` clause, then the emitted extern's own declared one (item 254,
-    issue #1592). The order the py reference registers them in. An extern is
-    matched as a `fn`-kind call naming it (backends/python/emit.py
+    """The compensation an `emit` step registers: one per crossing (issue
+    #1902). A site-spelled `compensate` clause REPLACES the emitted extern's
+    own declared one (item 254, issue #1592); the declared one is the default
+    only when the site spells none. The rule the py reference keeps. An extern
+    is matched as a `fn`-kind call naming it (backends/python/emit.py
     `_compensated_extern`)."""
-    out = []
     if step.get("compensate") is not None:
-        out.append(step["compensate"])
+        return [step["compensate"]]
     expr = step.get("expr")
     if _COMPENSATED_EXTERNS and isinstance(expr, dict) and expr.get("kind") == "fn":
         ext = _COMPENSATED_EXTERNS.get(expr.get("name"))
         if ext is not None:
-            out.append(_as_fn_call(ext["compensate"]))
-    return out
+            return [_as_fn_call(ext["compensate"])]
+    return []
 
 
 def _timer_has_compensate(step) -> bool:
@@ -3377,9 +3378,10 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # `runCompensationPhase` drains the queue, best-effort and bounded,
         # via the goroutine-abandon pattern (go's per-tier obligation).
         emit_call = _expr(step["expr"], env)
-        # the site-spelled clause, then the emitted extern's own declared one
-        # (item 254, issue #1592): one entry each, in that order, as the py
-        # reference registers them. The emission fires inside the first.
+        # one compensation per crossing: the site-spelled clause, else the
+        # emitted extern's own declared one (item 254, issues #1592 and
+        # #1902), as the py reference registers it. The emission fires inside
+        # it.
         compensations = _emit_compensations(step)
         for index, comp_node in enumerate(compensations):
             compensate_call = _expr(comp_node, env)
