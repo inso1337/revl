@@ -553,9 +553,10 @@ async def _invoke(ctx, exports: dict, req: dict, module=None) -> dict:
             return {"ok": False,
                     "error": f"method {method!r} is not exported for key {key!r} "
                              f"(exported: {listed})"}
-        result = getattr(service, method)(*args)
+        within = _served_within(req)
+        result = _call_served(service, method, args, within)
         if inspect.isawaitable(result):
-            result = await result
+            result = await _await_served(result, within)
         return {"ok": True, "value": _encode_value(result)}
     except Exception as exc:  # marshal the failure across the seam
         # ...with the caller's own argument values scrubbed out of it first
@@ -563,6 +564,18 @@ async def _invoke(ctx, exports: dict, req: dict, module=None) -> dict:
         # the consumer, and `_process_runner` logs it, so this ONE funnel is
         # what those two sinks inherit.
         return {"ok": False, "error": seam_failure(exc, args)}
+
+
+async def _await_served(awaitable, within: dict | None):
+    replay = _sys.modules.get("replay")
+    enclosing = getattr(replay, "_ENCLOSING", None)
+    if within is None or enclosing is None:
+        return await awaitable
+    token = enclosing.set(within)
+    try:
+        return await awaitable
+    finally:
+        enclosing.reset(token)
 
 
 def peer_identity(writer) -> str | None:
@@ -764,6 +777,53 @@ async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=Non
 # ---------------------------------------------------------------------------
 
 
+#: issue #1889: this process's name in a placement run, set by
+#: `_process_runner`. A call it sends while it is inside a recorded crossing
+#: carries that crossing, named by this process, so the provider's records of
+#: its answer can name the crossing they were made inside (`replay.Step.within`).
+CALLER_PROCESS: str | None = None
+
+
+def _enclosing_crossing() -> dict | None:
+    """The recorded crossing this call is made inside, named by this process,
+    or None (no recorder, no enclosing crossing, or not a placement process)."""
+    replay = _sys.modules.get("replay")
+    enclosing = getattr(replay, "_ENCLOSING", None)
+    ref = enclosing.get() if enclosing is not None else None
+    if CALLER_PROCESS is None or not isinstance(ref, dict) \
+            or ref.get("seq") is None or ref.get("process") is not None:
+        return None
+    return {**ref, "process": CALLER_PROCESS}
+
+
+def _served_within(req: dict) -> dict | None:
+    """A request's caller crossing, when it is well formed: a placement
+    process name and an integer seq. Anything else is ignored."""
+    within = req.get("within")
+    if not isinstance(within, dict):
+        return None
+    if not isinstance(within.get("process"), str) \
+            or not isinstance(within.get("seq"), int) \
+            or isinstance(within.get("seq"), bool):
+        return None
+    return {k: within.get(k) for k in ("seq", "component", "label", "process")}
+
+
+def _call_served(service, method: str, args, within: dict | None):
+    """`getattr(service, method)(*args)`, with the caller's crossing as the
+    enclosing one while it runs, so every record the method makes carries
+    it (issue #1889)."""
+    replay = _sys.modules.get("replay")
+    enclosing = getattr(replay, "_ENCLOSING", None)
+    if within is None or enclosing is None:
+        return getattr(service, method)(*args)
+    token = enclosing.set(within)
+    try:
+        return getattr(service, method)(*args)
+    finally:
+        enclosing.reset(token)
+
+
 class _Client:
     """One RPC connection plus one idle monitor connection. Provided methods
     are called synchronously in cordis-py, so the RPC round-trip is blocking;
@@ -832,6 +892,9 @@ class _Client:
         # in the encoder. Args and returns now both fail closed.
         encoded_args = _encode_value(list(args))
         request = {"key": key, "method": method, "args": encoded_args}
+        within = _enclosing_crossing()
+        if within is not None:
+            request["within"] = within
         if self._correlation is not None:
             envelope = self._correlation
             request["correlation"] = (envelope(key, method)

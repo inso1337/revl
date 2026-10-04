@@ -859,6 +859,9 @@ async def run(spec: dict, spec_path=None) -> None:
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
+    # issue #1889: a call this process sends from inside a recorded crossing
+    # names the crossing by this process, so its provider's records can too
+    bridge.CALLER_PROCESS = name
 
     # item 443: arm the operator E-Stop BEFORE the composition is compiled, let
     # alone activated. Armed here, every crossing this process ever makes is
