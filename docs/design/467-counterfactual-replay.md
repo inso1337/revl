@@ -185,3 +185,41 @@ the design of the WAL; the second is a filed gap in it.
 - **Reading the incident's own trace.** The WAL is the record of crossing order
   and that is all this slice needs; a JSONL causal trace holds a different set of
   facts and a different question.
+
+## Slice 2: substituting an agent action (issue #1752)
+
+Slice 1 regrades a recorded WAL under another policy. The question a harness
+driving an agent through `revl_act` (issue #1708) asks is a different one: what
+would the gate have decided had the agent acted differently at step k? The
+answer lives in `revl.mcp.counterfactual_act`, reached through
+`Session.counterfactual` and the `revl_counterfactual` MCP verb.
+
+- **The record is the session, not a WAL.** The session keeps each action's
+  call in memory beside its receipt, and the ticket approvals minted between
+  actions keyed by how many actions preceded them. The call's arguments are the
+  caller's own and are never written to the manifest or the WAL.
+- **Both arms are decided by the gate's pure parts.** `ClassMap.classify_call`
+  gives the class, and `ClassMap.build_ticket` gives the ticket hash a
+  class-(c) call would be keyed by. The recorded approvals are replayed at the
+  positions they were minted and spent once per identical call, as the live
+  ledger spends them. An insert or a drop moves the later approvals with the
+  calls around them.
+- **Zero live effects, by shape again.** The module imports only
+  `revl.mcp.approval`'s digest helper and takes the class map and plain data.
+  It never calls the session, so nothing can fire, and a test patches the
+  session's `call` and `_run` to fail and still gets a report.
+- **The determinism check is the recorded arm.** Its recompute is compared with
+  the receipts the live gate wrote. A step it does not reproduce (a standing
+  grant, a distilled rule, a quorum, a revoked ticket) is reported, so a
+  divergence is never read off an arm that did not reproduce the recording.
+- **Bounds:**
+  - a reach is the static closure, so a listed crossing may not fire for this
+    data;
+  - no result value or data-dependent path is computed;
+  - ttl is not simulated;
+  - a log that spans a swap is refused, because its early actions were decided
+    under a class map that is no longer live.
+
+The live half, re-executing both arms against a forked workspace, is still item
+250's deferred executor.
+

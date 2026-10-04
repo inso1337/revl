@@ -14,8 +14,8 @@ compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
-dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
-profile  pool  attest  dash  repair  bundle  emit  verify  deploy
+dev  recover  act  estop  slo  branch  compare  replay  why  metrics
+trace  profile  pool  attest  dash  repair  bundle  emit  verify  deploy
 deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -1036,6 +1036,32 @@ when a teardown is legitimately long rather than wedged.
 `run --record` opens the replay REPL (`:timeline`, `:back`, `:forward`,
 `:inspect`, `:bisect`; see [replay.md](replay.md)).
 
+### `revl act`
+
+The agent tool loop in one call per action (issue #1708), the CLI form of the
+`revl_act` MCP verb ([mcp-reference.md](mcp-reference.md#revl_act)). Boots the
+composition in FILES under the approval gate with recording on, then reads
+proposed actions from stdin, one JSON object per line:
+
+    {"key": "ops", "method": "stash", "args": ["/srv/out/report.txt"]}
+
+and prints one JSON result per line: the action's `class`, `outcome`
+(`executed`, `deferred` or `ticket`), `receipt` and `residue`, exactly as
+`revl_act` returns them. At end of input it prints the commit manifest, which
+lists every action under `actions`.
+
+- `--commit` - confirm the manifest at end of input: flush the deferred actions
+  and keep the witnessed ones. Without it the session is aborted: nothing
+  deferred fires and the witnessed actions are undone.
+- `--wal FILE` - the session's write-ahead log (default: a file in the per-user
+  approval WAL directory).
+
+`revl act` has no operator, so it cannot approve a ticket: a class-(c) action
+stays a ticket and never fires. To approve one, run the loop over
+`revl mcp serve` instead ([harness-gate-guide.md](harness-gate-guide.md)). Exit
+status: `0` when every line was acted on, `1` when a line was malformed or
+refused or the composition did not boot.
+
 ### `revl recover`
 
 Crash recovery: read a `revl run --wal` write-ahead log and roll forward
@@ -1850,6 +1876,18 @@ the server whose verbs are documented in [mcp-reference.md](mcp-reference.md).
   its `mcp` sandbox bounds admitted agent code, and `leases enforced` refuses a
   swap that would replace a component another operator leases (item 61). Omit
   for advisory-only leases.
+- `--approval-policy {auto, advisory, off}` - the effect-class approval gate (item 246,
+  [harness-gate-guide.md](harness-gate-guide.md)). `auto` is the default:
+  - class (a) witnessed crossings with an inverse proceed;
+  - class (b) deferred emissions wait for commit;
+  - class (c) emissions return a ticket and fire nothing;
+  - the identity that raised a ticket cannot approve it (issue #1706), so with
+    no operator profile the session raises tickets but cannot answer them.
+
+  `advisory` runs the same gate but lets the raiser approve its own ticket, so
+  the prompt is advisory; this is what `auto` meant before issue #1706, and the
+  server says so at startup. `off` turns the gate off, the default before issue
+  #1706, and says so with a startup warning.
 - `--http HOST:PORT` - serve MCP 2026-07-28 Streamable HTTP at
   `http(s)://HOST:PORT/mcp` instead of stdio, one operator per request
   ([mcp-http-transport.md](mcp-http-transport.md)). Needs `--operator-profile`

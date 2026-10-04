@@ -18,6 +18,7 @@ call — between tool calls the composition is simply idle.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import hashlib
 import sys
@@ -382,6 +383,10 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     # so restoring it would hand a failed load a fresh budget every time.
     "_tickets", "_ticket_rounds", "_ticket_refusals", "_ledger", "_grants",
     "_grants_consumed",
+    # issue #1706: who raised each ticket. A ticket the failed load raised
+    # stays answerable, so its raiser has to stay known, or the raiser could
+    # approve it.
+    "_ticket_proposers",
     # issue #1781: the per-id spend index rides with the spends it numbers
     "_spend_uses",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
@@ -702,6 +707,27 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #1708: the receipts `act` records, one per proposed action, in
+        # order. The commit manifest lists them; teardown drops them
+        self._actions: list = []
+        # issue #1752: what a counterfactual needs beside the receipts, kept in
+        # memory only: each action's call (its own caller's arguments, never
+        # written to the manifest or the WAL), and the ticket approvals minted
+        # between actions, keyed by how many actions preceded them
+        self._act_calls: list = []
+        self._act_approvals: dict = {}
+        self._act_grants = 0
+        # issue #1706: separation of duties for a single-approver ticket. When
+        # set, the identity that raised a ticket (`_operator_token()` at the
+        # asking) cannot approve it: with no operator profile both are the
+        # session itself, so the session can raise tickets but never answer
+        # them. `revl mcp serve` sets it whenever its gate is on; a quorum
+        # ticket already refuses its proposer (`_cast_vote`).
+        self.approval_separation = False
+        # issue #1706: ticket hash -> every identity that has raised it. A
+        # ticket hash repeats whenever the same call is asked again, so each
+        # asker is kept, not only the latest
+        self._ticket_proposers: dict = {}
         # issue #1781: how many times each approval `requestId` has been spent
         # in this session. Every `approval-consumed` and `approval-emission`
         # record the session writes carries `use`, the 1-based index from here,
@@ -1876,6 +1902,7 @@ class Session:
         self._surface_epoch += 1
         self._tickets = {}
         self._ticket_refusals = {}
+        self._ticket_proposers = {}
         # item 251 Slice 2: re-materialize the distilled rules against the new
         # generation. The H1 review bind (`_auto_reviewed`) persists across the
         # swap, so a component the swap moves INTO a rule's glob that was not in the
@@ -3649,7 +3676,12 @@ class Session:
         self._require()
         if self._owner is None:
             raise SessionError("no session owner is registered — nothing to commit")
-        return self._owner.manifest()
+        manifest = self._owner.manifest()
+        if self._actions:
+            # issue #1708: every action `act` took this session, by outcome. The
+            # hash binds the gate target, not this list, so it is unchanged
+            manifest["actions"] = [dict(a) for a in self._actions]
+        return manifest
 
     def commit_confirm(self, manifest_hash: str) -> dict:
         """Execute the approved commit — step 2 (Decision 3/4). The durable
@@ -4259,6 +4291,7 @@ class Session:
         # 6. mint the branch identity over the (now rewound) shared workspace.
         branch = Session()
         branch.approval_policy = self.approval_policy
+        branch.approval_separation = self.approval_separation
         # the durability posture rides with the policy: a fork must not become a
         # session where an approved caller value is recorded that the parent's
         # operator had withheld.
@@ -4462,6 +4495,10 @@ class Session:
         # issue #1738: the commit session ends here; keep its prompt tally.
         self._loop_axes.close_owner(self._owner)
         self._owner = None
+        self._actions = []
+        self._act_calls = []
+        self._act_approvals = {}
+        self._act_grants = 0
         self.ir = None
         self.previous = None
         self.origin = None
@@ -4490,6 +4527,7 @@ class Session:
         self._class_map = None
         self._tickets = {}
         self._ticket_refusals = {}
+        self._ticket_proposers = {}
         self._ticket_rounds = {}   # indexes `_ledger`; dies with it
         self._ledger = []
         self._grants = []
@@ -5139,6 +5177,158 @@ class Session:
         if self._cache_inval_tokens:
             self._fire_cache_invalidations(key, method)
         return {"result": render(result), "trace": driver.drain_events()}
+
+    # -- issue #1708: the one-call tool-loop entry point ---------------------
+
+    def act(self, key: str, method: str, args: list | None = None) -> dict:
+        """Run one proposed agent action through the gate in one call (issue
+        #1708): classify it, then execute it (class none/(a), or (c) under a
+        standing approval), defer it (class (b)), or ticket it (an unapproved
+        class (c), nothing fired). Every outcome is recorded as a receipt in
+        `self._actions`, which the commit manifest lists.
+
+        Returns `{class, outcome, receipt, residue}`. An unapproved class (c)
+        raises `ApprovalRequired` with `receipt` set on it, so every surface
+        shapes the ticket two-step as it does for `call`. `residue` names the
+        crossings this action fired that no inverse can take back: an abort or a
+        rewind leaves them behind."""
+        self._require()
+        if self.approval_policy is None or self._class_map is None:
+            raise SessionError(
+                "acting needs the approval gate, which classifies the action: "
+                "serve with `--approval-policy auto` (issue #1708). Use "
+                "revl_call to invoke an operation with no gate")
+        reach = self._class_map.classify_call(key, method)
+        receipt = {"seq": len(self._actions), "key": key, "method": method,
+                   "argsDigest": _cache_args_digest(args),
+                   "class": reach["class"] if reach is not None else None}
+        before = self._act_marks()
+        call = {"key": key, "method": method, "args": copy.deepcopy(args or []),
+                "generation": self._generation}
+        acted = True
+        try:
+            out = self.call(key, method, args)
+        except (ApprovalRequired, ApprovalRefused) as exc:
+            self._act_held(receipt, exc)
+            raise
+        except SessionError:
+            acted = False              # refused before anything ran
+            raise
+        except Exception as exc:       # the operation raised after the gate
+            self._act_raised(receipt, exc, before, reach)
+            raise
+        finally:
+            if acted:
+                self._act_calls.append(call)
+        return self._act_done(receipt, before, reach, out)
+
+    def counterfactual(self, at: int, *, replace: dict | None = None,
+                       insert: dict | None = None, drop: bool = False) -> dict:
+        """What the gate would have decided had the agent acted differently at
+        action `at` (issue #1752): one action replaced, inserted or dropped,
+        both arms decided by the gate's pure parts over this session's `act`
+        log, and the divergence between them. Nothing runs and the session is
+        not touched (`revl.mcp.counterfactual_act`)."""
+        from . import counterfactual_act as _cf  # noqa: PLC0415
+        self._require()
+        if self._class_map is None or not self._act_calls:
+            raise SessionError(
+                "a counterfactual is asked of this session's revl_act log, and "
+                "there is none: act through revl_act under the approval gate "
+                "first (issue #1752)")
+        if any(c["generation"] != self._generation for c in self._act_calls):
+            raise SessionError(
+                "the composition was swapped after some of these actions, so "
+                "they were decided under a class map that is no longer live; "
+                "a counterfactual across a swap is not supported (issue #1752)")
+        calls = [{k: c[k] for k in ("key", "method", "args")}
+                 for c in self._act_calls]
+        try:
+            out = _cf.report(self._class_map, calls, self._actions,
+                             self._act_approvals, at,
+                             record_values=self.approval_record_values,
+                             replace=replace, insert=insert, drop=drop)
+        except _cf.CounterfactualActError as error:
+            raise SessionError(str(error)) from None
+        out["standingGrantsMinted"] = self._act_grants
+        return out
+
+    def _act_held(self, receipt: dict, exc) -> None:
+        """Record a class-(c) action the gate held: a ticket, or an operator's
+        no. Nothing fired. The receipt rides on a ticket's exception, so the
+        surface that shapes the two-step can return it."""
+        refused = isinstance(exc, ApprovalRefused)
+        receipt.update(outcome="refused" if refused else "ticket",
+                       ticket=exc.ticket.get("hash"))
+        self._actions.append(receipt)
+        exc.receipt = dict(receipt)
+
+    def _act_raised(self, receipt: dict, exc: Exception, before: dict,
+                    reach: dict | None) -> None:
+        receipt.update(outcome="raised", error=f"{type(exc).__name__}: {exc}",
+                       **self._act_evidence(before))
+        receipt["residue"] = self._act_residue(
+            reach, "irreversible: may have fired before the call raised")
+        self._actions.append(receipt)
+
+    def _act_done(self, receipt: dict, before: dict, reach: dict | None,
+                  out: dict) -> dict:
+        outcome = "deferred" if receipt["class"] == "b" else "executed"
+        residue = self._act_residue(reach) if outcome == "executed" else []
+        receipt.update(outcome=outcome, **self._act_evidence(before),
+                       residue=residue)
+        self._actions.append(receipt)
+        return {"class": receipt["class"], "outcome": outcome,
+                "receipt": dict(receipt), "residue": residue,
+                "result": out["result"], "trace": out["trace"]}
+
+    def _act_marks(self) -> dict:
+        """What the gate holds before an action: the witnessed entries' ids and
+        the length of the deferral queue."""
+        owner = self._owner
+        if owner is None:
+            return {"witnessed": set(), "deferred": 0}
+        effects = owner.witness_snapshot(self._generation).effects
+        return {"witnessed": {e.id for e in effects},
+                "deferred": len(owner.manifest()["deferred"])}
+
+    def _act_evidence(self, before: dict) -> dict:
+        """The receipt's evidence: each witnessed entry the action registered,
+        named with its inverse and the WAL record it is durable in, and each
+        crossing it queued for commit."""
+        owner = self._owner
+        if owner is None:
+            return {"witnessed": [], "deferred": []}
+        witnessed = [
+            {"id": e.id, "inverse": e.method, "walSeq": e.seq,
+             "revision": e.revision, "status": e.status}
+            for e in owner.witness_snapshot(self._generation).effects
+            if e.id not in before["witnessed"]]
+        deferred = [{"group": d["group"], "receiver": d.get("receiver"),
+                     "method": d.get("method")}
+                    for d in owner.manifest()["deferred"][before["deferred"]:]]
+        return {"witnessed": witnessed, "deferred": deferred}
+
+    @staticmethod
+    def _act_residue(reach: dict | None,
+                     reason: str = "irreversible: fired with no checked "
+                                   "inverse") -> list:
+        """The class-(c) crossings an executed action fired: the ones no inverse
+        takes back."""
+        if reach is None:
+            return []
+        residue = []
+        for crossing in reach.get("crossings") or ():
+            if crossing.get("actionClass") != "c":
+                continue
+            name = crossing.get("name") or (
+                f"{crossing.get('key')}.{crossing.get('method')}"
+                if crossing.get("kind") == "emission"
+                else crossing.get("capability"))
+            residue.append({"crossing": name, "kind": crossing.get("kind"),
+                            "component": crossing.get("component"),
+                            "reason": reason})
+        return residue
 
     # -- item 310: the seam-method cache entry store ------------------------
 
@@ -6217,6 +6407,7 @@ class Session:
                 raise SessionError(
                     f"cannot decide `{ticket.get('component')}`: {shortfall}")
         self._tickets[h] = ticket
+        self._ticket_proposers.setdefault(h, set()).add(self._operator_token())
         if self._spendable_entry_for_ticket(h) is None \
                 and not self._quorum_pending(h):
             self._ticket_rounds[h] = self._ticket_rounds.get(h, 0) + 1
@@ -7276,6 +7467,8 @@ class Session:
         if wal is not None:
             wal.record_approval_granted(granted)
         self._approval_records.append({"record": "approval-granted", **granted})
+        # issue #1752: where this yes stands among the session's actions
+        self._act_approvals.setdefault(len(self._actions), []).append(ticket_hash)
         return entry
 
     @staticmethod
@@ -7361,10 +7554,39 @@ class Session:
                     f"be approved")
             if existing is not None:
                 return self._ticket_response(existing)
+            self._refuse_self_approval(ticket_hash)
             self._mint_ticket_entry(ticket)
             return self._ticket_response(ticket)
         return self._cast_vote(ticket, rule, vote=vote, as_token=as_token,
                                as_secret=as_secret, as_proof=as_proof)
+
+    def _refuse_self_approval(self, ticket_hash: str) -> None:
+        """Issue #1706: under `approval_separation`, the identity that raised a
+        ticket cannot be the one that approves it. The identity is the bound
+        operator's token, which over `revl mcp serve --http` is the
+        authenticated caller of each request; with no operator profile it is the
+        session itself, which therefore can never answer its own ticket."""
+        if not self.approval_separation:
+            return
+        approver = self._operator_token()
+        raisers = self._ticket_proposers.get(ticket_hash)
+        if raisers is None:
+            # every ticket is issued through `_issue_ticket`, which names its
+            # raiser; one that is not named cannot be shown to be someone else's
+            raise SessionError(
+                f"ticket {ticket_hash} has no recorded raiser, so it cannot be "
+                f"shown that this identity did not raise it (issue #1706). "
+                f"Re-issue the call for a fresh ticket")
+        if approver not in raisers:
+            return
+        who = f"operator `{approver}`" if approver else \
+            "this session (no operator profile is bound)"
+        raise SessionError(
+            f"ticket {ticket_hash} was raised by {who}, and the identity that "
+            f"raised a ticket cannot approve it (issue #1706, separation of "
+            f"duties). Approval needs a separate operator identity: serve with "
+            f"`--http HOST:PORT --operator-profile PROFILE` and approve as an "
+            f"operator granted `approve` (docs/harness-gate-guide.md)")
 
     # -- item 344: session-scoped standing capability grants ----------------
 
@@ -7989,8 +8211,41 @@ class Session:
         SATISFIED decision for that very ticket (`_decision_authorizes_grant`),
         and never off anything an operator sent. This verb passes no `decision`,
         so the public mint can never take that route."""
-        return self._mint_grant(ticket_hash=ticket_hash, capability=capability,
-                                uses=uses, ttl_ms=ttl_ms)
+        self._refuse_self_grant(ticket_hash)
+        grant = self._mint_grant(ticket_hash=ticket_hash, capability=capability,
+                                 uses=uses, ttl_ms=ttl_ms)
+        self._act_grants += 1    # issue #1752: a counterfactual does not model it
+        return grant
+
+    def _refuse_self_grant(self, ticket_hash: str | None) -> None:
+        """Issue #1706: under `approval_separation` a standing grant is the
+        same yes as an approval, so it follows the same rule. A grant named
+        from a ticket cannot be minted by the identity that raised that ticket,
+        and a proactive grant cannot be minted with no operator profile bound:
+        the only identity then is the session whose crossings it would admit."""
+        if not self.approval_separation:
+            return
+        if ticket_hash is not None:
+            self._refuse_self_approval(ticket_hash)
+            return
+        operator = getattr(self, "operator", None)
+        if operator is not None and any(
+                g.allow and g.covers_verb("call")
+                for g in getattr(operator, "grants", ())):
+            raise SessionError(
+                f"operator `{operator.token}` may make calls, so a standing "
+                f"grant it mints proactively would approve its own class-(c) "
+                f"crossings (issue #1706, separation of duties). Mint it as an "
+                f"operator granted `approve` but not `call`, or name the ticket "
+                f"`hash` another operator raised")
+        if not self._operator_token():
+            raise SessionError(
+                "no operator profile is bound, so a standing grant minted here "
+                "would let this session approve its own class-(c) crossings "
+                "(issue #1706, separation of duties). Mint it as a separate "
+                "operator: serve with `--http HOST:PORT --operator-profile "
+                "PROFILE` and grant `approve` to that operator "
+                "(docs/harness-gate-guide.md)")
 
     def _mint_grant(self, *, ticket_hash: str | None = None,
                     capability: str | None = None, uses: int | None = None,
