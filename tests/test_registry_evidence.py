@@ -23,6 +23,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from revl import registry  # noqa: E402
+from revl import registry_evidence  # noqa: E402
 from revl import attest  # noqa: E402
 from revl.compiler import compile_files  # noqa: E402
 
@@ -165,7 +166,7 @@ def test_published_component_carries_the_evidence_bundle(tmp_path):
     comps = os.path.join(reg, "components")
     _write(os.path.join(comps, "db_x"), "db_x", _DB_BODY % "DbX")
     registry.build_index(reg)
-    registry.build_evidence(reg, key=KEY, now=NOW, signer="revl-ci",
+    registry_evidence.build_evidence(reg, key=KEY, now=NOW, signer="revl-ci",
                             publisher="revl-ci")
     ev = os.path.join(comps, "db_x", registry.EVIDENCE_DIRNAME)
     # capabilities + provenance + attestation are reproducible with no runtime.

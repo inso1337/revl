@@ -42,9 +42,10 @@ PER_ANCHOR_LIMIT = 16
 SIDECAR = os.path.join(".revl", "knowledge")
 TRAILER = re.compile(r"^\[(k_[0-9a-f]{12})\]$")
 
-#: what rides with a body: "evidence" (operator notes, and untrusted ones that
-#: carry evidence; the default), "all", or "operator" (operator notes only)
-RIDE_POLICY = "evidence"
+#: the ride policy and `served` live in `revl.knowledge`, outside `revl.mcp`, so
+#: the registry serves a shipped record by the same rule (issue #1780)
+RIDE_POLICY = _k.RIDE_POLICY
+served = _k.served
 
 
 class NoteError(ValueError):
@@ -338,24 +339,6 @@ def refresh(session, vs: dict) -> None:
 
 
 # ---------------------------------------------------------------- serving
-
-def served(note: dict) -> dict:
-    """A note as it rides: its body only if the ride policy allows it."""
-    shown = {k: note[k] for k in ("id", "kind", "anchor", "author", "status",
-                                  "evidence", "supersedes", "supersededBy",
-                                  "vendored")
-             if note.get(k) is not None}
-    untrusted = note["author"].get("trust") == "untrusted"
-    allowed = (RIDE_POLICY == "all"
-               or (not untrusted)
-               or (RIDE_POLICY == "evidence" and note.get("evidence")))
-    if allowed:
-        shown["body"] = note["body"]
-    else:
-        shown["bodyWithheld"] = ("an untrusted note without evidence: read it "
-                                 "with revl_knowledge {op: query, id}")
-    return shown
-
 
 def concerning(session, symbols: list[str]) -> list[dict]:
     out = []

@@ -302,14 +302,24 @@ def _emission_census() -> tuple[list[str], list[str]]:
 def test_refusing_a_bare_emission_outright_is_not_an_available_arm():
     """The third arm issue #1265 lists, costed on the corpus rather than
     argued. Bare is not a legacy spelling being phased out; it is the majority
-    one, and most of it is in `bench/results`, which holds RECORDED MODEL
-    OUTPUTS. A recorded output is evidence about what a model wrote against the
-    language as it was: refusing to compile one destroys the thing it records.
-    """
+    one, and a large share of it is in `bench/results`, which holds RECORDED
+    MODEL OUTPUTS. A recorded output is evidence about what a model wrote
+    against the language as it was: refusing to compile one destroys the thing
+    it records.
+
+    The second assertion used to read "most of it" (`recorded > bare // 2`).
+    That was a measurement, and the corpus moved under it: the fixture
+    corpora of issues #1509, #1681, #1682, #1457 and #1508 add bare emission
+    methods that are not recordings, so on the tree this landed with bare was
+    651, declared 273 and recorded 296 (main before it: 585, 160, 296). The
+    argument never rested on the majority: one recorded output a refusal
+    would break is enough to close the arm, and the recorded share is still
+    over two fifths, which is what the bound now pins."""
     bare, declared = _emission_census()
     assert len(bare) > len(declared), (len(bare), len(declared))
     recorded = [b for b in bare if b.startswith("bench/results/")]
-    assert len(recorded) > len(bare) // 2, (len(recorded), len(bare))
+    assert recorded, "no recorded output spells a bare emission any more"
+    assert len(recorded) * 5 > len(bare) * 2, (len(recorded), len(bare))
 
 
 def test_the_formal_corpus_carries_the_undeclared_corner():

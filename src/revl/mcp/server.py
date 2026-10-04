@@ -102,6 +102,7 @@ from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
 from . import ambient as _ambient
+from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
 from .session import NothingLoaded, Session, SessionError
@@ -931,9 +932,10 @@ def _tool_load(arguments: dict) -> dict:
     under a name another operator leases is refused, as a swap replacing it is
     (`leases.FENCED` says why a cold load is fenced too)."""
     source, files, modules = _candidate_of(arguments)
-    if source is None and not files and _draft.pending(SESSION) is not None \
-            and not SESSION.loaded:
-        return _draft.boot_held(SESSION, arguments, _boot_draft)
+    if source is None and not files:
+        if _draft.pending(SESSION) is not None and not SESSION.loaded:
+            return _draft.boot_held(SESSION, arguments, _boot_draft)
+        return _nothing_to_load()
     try:
         ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
@@ -949,6 +951,21 @@ def _tool_load(arguments: dict) -> dict:
             return _refused_by_lease(refusal)
     return _boot(ir, source, modules, arguments.get("config"),
                  bool(arguments.get("record")), _origin(arguments))
+
+
+def _nothing_to_load() -> dict:
+    """`revl_load` with neither `source` nor `files` and no draft to boot
+    (issue #1851): a refusal that says which, not the compiler's ValueError."""
+    if SESSION.loaded:
+        return _session_error(
+            "a composition is already running and no draft is held, so "
+            "`revl_load {}` has nothing to boot. Change what runs with revl_edit "
+            "or revl_swap, or revl_unload first to load something else",
+            loaded=True)
+    return _session_error(
+        "revl_load needs `source` (inline .rvl text) or `files` (.rvl paths); "
+        "with neither it boots a held draft, and none is held",
+        next=_remedy.load_next())
 
 
 def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
@@ -1080,6 +1097,9 @@ def _tool_swap(arguments: dict) -> dict:
         return rejected
     authored = _authored_host_bodies(full, source, modules)
     running = SESSION.ir
+    # issue #1704: the same preflight revl_edit carries, read off the
+    # composition running before the swap
+    radius = _authoring_loop.blast_radius(running, full)
     try:
         state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
@@ -1091,7 +1111,7 @@ def _tool_swap(arguments: dict) -> dict:
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
     return _with_touched({"ok": True, "admitted": True, "swapped": True,
-                          **_summary(full), **state,
+                          "blastRadius": radius, **_summary(full), **state,
                           **_effect_classes.report(full, running, against=True)},
                          before)
 
@@ -1179,12 +1199,13 @@ def _swap_server_side(replacing: tuple) -> dict:
                             "composition on its own")
         return rejected
     running = SESSION.ir
+    radius = _authoring_loop.blast_radius(running, full)  # issue #1704
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs))
     except SessionError as error:
         return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,
-            "fromServerSide": True, **_summary(full), **state,
+            "fromServerSide": True, "blastRadius": radius, **_summary(full), **state,
             **_effect_classes.report(full, running, against=True)}
 
 
@@ -3094,7 +3115,9 @@ TOOLS = [
                        "generation, need not re-serialize the whole file. The answer "
                        "carries `effectClassChanges` against the running composition and "
                        "an `effectClassWarnings` entry for every operation whose effect "
-                       "class rose, naming the crossing that raised it.",
+                       "class rose, naming the crossing that raised it. A swap that "
+                       "lands carries `blastRadius`, as revl_edit does: the "
+                       "revl_query_withdraw cascade for every component it touched.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT,
@@ -3285,6 +3308,9 @@ TOOLS = [
                        "a provider, and without `cascade: true` admission refuses "
                        "it). Returns `committed`, `verified`, the `plan`, the "
                        "`touched` symbols and every `component` the change touched. "
+                       "A proposal and a commit both carry `blastRadius`, as "
+                       "revl_edit does: the revl_query_withdraw cascade for every "
+                       "component the change touches. "
                        "A failed verification commits nothing and says why.",
         "inputSchema": {
             "type": "object",
@@ -4617,6 +4643,52 @@ _SESSION_QUERY_HANDLERS = {
 for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
     TOOLS.append({**_schema, "handler": _SESSION_QUERY_HANDLERS[_schema["name"]]})
 
+
+def _tool_verbs(arguments: dict) -> dict:
+    """Discovery (issue #1697): with no arguments, every verb by topic, each
+    with one sentence and no schema; with `topic` or `names`, those verbs'
+    exact advertised schemas. Every verb is callable by name either way."""
+    names = list(arguments.get("names") or [])
+    topic = arguments.get("topic")
+    if topic is None and not names:
+        return {"ok": True, "listed": [t["name"] for t in _disclosure.listed(_ADVERTISED)],
+                "topics": _disclosure.index(_ADVERTISED)}
+    if topic is not None:
+        verbs = _disclosure.topic_names(topic)
+        if verbs is None:
+            return _session_error(
+                f"no topic {topic!r}; the topics are "
+                f"{', '.join(_disclosure.TOPICS)}",
+                next=_remedy.call(_disclosure.DISCOVERY, {}))
+        names = list(verbs) + [n for n in names if n not in verbs]
+    found, unknown = _disclosure.schemas(_ADVERTISED, names)
+    if unknown:
+        return _session_error(
+            f"no verb named {', '.join(map(repr, unknown))}",
+            next=_remedy.call(_disclosure.DISCOVERY, {}))
+    return {"ok": True, "tools": found}
+
+
+TOOLS.append({
+    "name": _disclosure.DISCOVERY,
+    "description": "Find a verb. tools/list shows the core verbs; this returns "
+                   "the rest. With no arguments: every verb grouped by topic, "
+                   "one sentence each. With `topic` or `names`: those verbs' "
+                   "exact schemas. Any verb can be called by name, listed or "
+                   "not.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string", "enum": list(_disclosure.TOPICS),
+                      "description": "a topic from the no-argument answer"},
+            "names": {"type": "array", "items": {"type": "string"},
+                      "description": "verb names whose schemas to return"},
+        },
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    "handler": _tool_verbs,
+})
+
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
 
@@ -4640,6 +4712,18 @@ def set_runtime_available(available: bool | None) -> None:
 
 # issue #1704: the authoring loop, in order, with the exact verbs
 _INSTRUCTIONS = _authoring_loop.INSTRUCTIONS
+_TIERED_INSTRUCTIONS = ("tools/list shows the core verbs only; call revl_verbs "
+                        "to see every other verb by topic and get its schema. "
+                        "Any verb can be called by name.")
+
+
+def _instructions() -> str:
+    parts = [_INSTRUCTIONS]
+    if not _disclosure.all_tools():
+        parts.append(_TIERED_INSTRUCTIONS)
+    if not runtime_available():
+        parts.append(_runtime_gate.announcement())
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------- protocol
@@ -4654,11 +4738,11 @@ def handle(message: dict) -> dict | None:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": _INSTRUCTIONS if runtime_available()
-                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
+            "instructions": _instructions(),
         }
     elif method == "tools/list":
-        result = {"tools": _ADVERTISED}
+        # issue #1697: the core tier unless the client asked for every verb
+        result = {"tools": _disclosure.listed(_ADVERTISED)}
     elif method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")

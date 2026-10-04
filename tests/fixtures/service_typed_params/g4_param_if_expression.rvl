@@ -1,0 +1,20 @@
+// REFUSED G4 (marker rule, issue #1682): the parameter read through an `if`
+// written in place, `(if (n > 0) { p } else { p }).charge(n)`, unmarked. The
+// file name's prefix is the expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_service_typed_params.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay {
+  emission[production.payment] fn charge(cents: Int) -> Int
+  fn status() -> Int
+}
+service Till { emission fn go(p: Pay, n: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn go(p, n) {
+      let x = (if (n > 0) { p } else { p }).charge(n)
+      return x
+    }
+  }
+}

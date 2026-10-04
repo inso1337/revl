@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import registry  # noqa: E402
+from revl import registry_evidence  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 from revl.mcp import notes as notes_mod  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
@@ -180,7 +181,7 @@ def test_a_signed_shipped_trap_arrives_as_the_publishers(tmp_path):
     registry.publish_release(reg, "greeter", GREETER, description="greets",
                              tags=["greet"], knowledge=[_trap()])
     key = b"publisher-secret"
-    registry.build_evidence(reg, key=key, signer="publisher")
+    registry_evidence.build_evidence(reg, key=key, signer="publisher")
     att = json.loads((reg / "components" / "greeter" / "evidence" /
                       "attestation.json").read_text())
     assert "knowledge" in att["evidence_bindings"]

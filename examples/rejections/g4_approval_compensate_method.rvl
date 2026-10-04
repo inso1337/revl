@@ -1,0 +1,14 @@
+// REJECTED, G4: the same compensation crossing in a provide method, with a
+// capability-scoped extern. The requirement is the scope's (`pay`), and the
+// step carries no `with` edge that could cover it.
+//
+// expected error:
+//   crossing capability `pay` requires approval, but this `emit` carries no
+//     covering `with` edge
+
+extern emission[pay] fn charge(amount: Int) -> Int requires approval = @py { return 1 }
+extern emission fn notify(n: Int) -> Int = @py { return 1 }
+service Ops { emission fn ping() -> Int }
+component Biller provides ops: Ops {
+  provide ops { fn ping() { emit notify(1) compensate charge(2) return 1 } }
+}

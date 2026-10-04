@@ -1,0 +1,24 @@
+// REFUSED G4 (provider upper bound, issue #1508): the twin of
+// `ok_upper_bound_if_inline.rvl` with `Till.go` declared `emission[audit.log]`,
+// which does not cover the op's declared scope `production.payment`. The file
+// name's prefix is the expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_service_receiver_expressions.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission[audit.log] fn go(n: Int) -> Int }
+
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+
+component Register provides till: Till {
+  let a = await approval[production.payment] { reason: "pay" }
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      emit (if (n > 0) { w.pay } else { w.pay }).charge(n) with a
+      return 0
+    }
+  }
+}

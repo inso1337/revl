@@ -21,10 +21,9 @@ counted as agreeing. The ts `--once` runner also stops treating a faulting
 activation as fatal, so the ts tier is measured at all (it was skipped).
 
 The pure tests need no runtime. The executed ones are gated on each tier's
-toolchain, and a tier that still drops the declared compensation is an
-`xfail`. java's is strict: when its lane fixes it, the test XPASSes, fails,
-and the marker has to come off. go's and rust's are not strict while their
-fixes (#1615, #1629) are open, so either merge order keeps main green.
+toolchain only: every compiled tier now registers the declared compensation
+(ts #1548, go #1615, rust #1629, java #1558), so none carries an `xfail`
+marker, and a tier that drops it again fails here.
 """
 
 import importlib.util
@@ -257,24 +256,6 @@ def _needs(tier: str):
     return pytest.mark.skipif(reason is not None, reason=f"{tier}: {reason}")
 
 
-# The fix for each of these tiers is its own PR. java's marker is strict: it
-# fails as soon as the fix lands and has to come off with it. go's and rust's
-# are NOT strict (`strict=False`) while #1615 (go) and #1629 (rust) are open:
-# those PRs fix exactly these cases, and either merge order must leave main
-# green. A strict marker would turn red on main the moment one of them landed
-# after this file. Remove the go and rust markers once both have landed.
-_FIX_IN_FLIGHT = {"go": "#1615", "rust": "#1629"}
-
-
-def _still_drops(tier: str):
-    fix = _FIX_IN_FLIGHT.get(tier)
-    return pytest.mark.xfail(
-        strict=fix is None,
-        reason=(f"issue #1511: the {tier} tier does not register an "
-                "extern-declared compensation; remove this marker with the fix"
-                + (f" ({fix}, not strict until it lands)" if fix else "")))
-
-
 @needs_cordis
 def test_the_py_tier_runs_every_declared_compensation_newest_first():
     record = fault_mod._py_tier_sweep(_declared())
@@ -287,9 +268,9 @@ def test_the_py_tier_runs_every_declared_compensation_newest_first():
 
 @pytest.mark.parametrize("tier", [
     pytest.param("ts", marks=[_needs("ts")]),
-    pytest.param("go", marks=[_needs("go"), _still_drops("go")]),
-    pytest.param("java", marks=[_needs("java"), _still_drops("java")]),
-    pytest.param("rust", marks=[_needs("rust"), _still_drops("rust")]),
+    pytest.param("go", marks=[_needs("go")]),
+    pytest.param("java", marks=[_needs("java")]),
+    pytest.param("rust", marks=[_needs("rust")]),
 ])
 def test_a_compiled_tier_runs_every_declared_compensation(tier):
     record = fault_mod._compiled_tier_sweep(tier, _declared(), {}, [], None)

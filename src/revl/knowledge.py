@@ -179,7 +179,7 @@ def anchor_of(text: str, name: str, block: Block, decls: list,
     """(symbol path or None for the file, first line, last line) of what a
     block describes. `decls` are the file's top-level declarations and `nodes`
     a cache of their parsed nodes."""
-    from .mcp import nested  # noqa: PLC0415 — the symbol model is there
+    from . import nested  # noqa: PLC0415
 
     line = _first_code_line(text, block.last)
     if line is None:
@@ -222,7 +222,7 @@ def fingerprint(text: str, name: str, first: int, last: int) -> str:
 def index_text(path: str, text: str, report: dict | None, known_codes) -> list[dict]:
     """Every comment block of one file as an index entry. `report` is the
     structured diagnostic of compiling it, or None when it compiled clean."""
-    from .mcp import symbols  # noqa: PLC0415
+    from . import symbols  # noqa: PLC0415
 
     try:
         decls = symbols.declarations(text, path)
@@ -288,5 +288,36 @@ def counts(entries: list[dict]) -> dict:
     return out
 
 
+
+# ---------------------------------------------------------------- serving a record
+#
+# Knowledge slice 3 (issue #1754): what rides with a body, for a session note
+# and for a record a registry entry ships (#1762). Here rather than in
+# `revl.mcp.notes` so the registry, which is on the compile graph, serves by
+# the same rule without importing the server (issue #1780).
+
+#: what rides with a body: "evidence" (operator notes, and untrusted ones that
+#: carry evidence; the default), "all", or "operator" (operator notes only)
+RIDE_POLICY = "evidence"
+
+
+def served(note: dict) -> dict:
+    """A note as it rides: its body only if the ride policy allows it."""
+    shown = {k: note[k] for k in ("id", "kind", "anchor", "author", "status",
+                                  "evidence", "supersedes", "supersededBy",
+                                  "vendored")
+             if note.get(k) is not None}
+    untrusted = note["author"].get("trust") == "untrusted"
+    allowed = (RIDE_POLICY == "all"
+               or (not untrusted)
+               or (RIDE_POLICY == "evidence" and note.get("evidence")))
+    if allowed:
+        shown["body"] = note["body"]
+    else:
+        shown["bodyWithheld"] = ("an untrusted note without evidence: read it "
+                                 "with revl_knowledge {op: query, id}")
+    return shown
+
+
 __all__ = ["Block", "comment_blocks", "classify", "reproduces", "recheck",
-           "anchor_of", "fingerprint", "index_text", "merge", "public", "counts"]
+           "anchor_of", "fingerprint", "index_text", "merge", "public", "counts", "RIDE_POLICY", "served"]

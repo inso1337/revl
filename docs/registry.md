@@ -67,7 +67,7 @@ registry/
   index.json                   # GENERATED — never hand-edited
 ```
 
-The evidence bundle is assembled by `registry.build_evidence` (the publish
+The evidence bundle is assembled by `registry_evidence.build_evidence` (the publish
 path, run after `build_index`) from the **existing producers' verbatim output**
 - it re-implements no evidence. A missing facet is `unavailable`, never faked;
 the runtime-tested facets (`fault-sweep`, `inverse-roundtrip`) are written when

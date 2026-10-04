@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import registry  # noqa: E402
+from revl import registry_evidence  # noqa: E402
 from revl.mcp import notes as notes_mod  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
@@ -98,7 +99,7 @@ def _add(proj: Path) -> dict:
 
 
 def _sign(reg: Path, monkeypatch) -> None:
-    registry.build_evidence(reg, key=KEY.encode(), signer="publisher")
+    registry_evidence.build_evidence(reg, key=KEY.encode(), signer="publisher")
     monkeypatch.setenv("REVL_ATTEST_KEY", KEY)
 
 
