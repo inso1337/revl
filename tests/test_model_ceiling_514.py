@@ -394,11 +394,22 @@ def test_a_confidential_parameter_of_the_action_is_placed_too():
 def test_an_admitted_program_is_byte_identical_to_one_with_no_route_block():
     """Item 512 contributes nothing to the IR and item 514 contributes nothing
     either: it only ever refuses. An admitted program's document must therefore
-    equal the same program with the roles and the block deleted."""
+    equal the same program with the roles and the block deleted.
+
+    Except for one manifest row that is item 519's and not 512's or 514's: the
+    component crosses a `model.*` boundary and routes through a role, so the
+    attenuation product records the pair (`manifest["model_reach"]`). This
+    program's crossing is a `let` value, which the product did not read until
+    issue #1193 slice 2 made its held set read every crossing in every
+    position; the statement form `emit prompt(...)` always produced the row.
+    The row is checked and removed, and the rest must be byte-identical."""
     import json
 
     with_route = compile_source(_CONTROL, "ceiling.rvl")
     without = compile_source(_UNROUTED, "ceiling.rvl")
+    reach = with_route["manifest"].pop("model_reach")
+    assert [(r["component"], r["role"], r["reach_declared"]) for r in reach] \
+        == [("Summarizer", "local", False)]
     assert json.dumps(with_route, sort_keys=True) == json.dumps(
         without, sort_keys=True)
 

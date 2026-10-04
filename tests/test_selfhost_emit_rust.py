@@ -285,6 +285,13 @@ CORPUS = [
                              #   a std `Result` (return and argument, the canonical
                              #   `{"$kind","$value"}`), a List and a record through
                              #   serde, an `Opt[Float]` return
+    "comp_str_builtin.rvl",  # issue #1734: the only Str builtins are in a component
+                             #   (`concat` in a provide method, a sized `.length`),
+                             #   so the `RevlStrOps` helper traits are emitted for it
+    "in_file_tests.rvl",     # item 391: in-file `test` blocks as `#[test] fn`s, the
+                             #   slug rules (snake, sanitised, digit prefix, bumped
+                             #   against functions and each other), an empty body,
+                             #   and #1734's tests half (a Str builtin only in a test)
     "by_value_reuse.rvl",    # item 391: the by-value reuse analysis: the
                              #   reused-name set, the reuse clones (scrutinee,
                              #   list element, branch tail, `let`, iterable),
@@ -804,6 +811,33 @@ def test_selfhosted_emitter_effectful_component_scaffold(emitted):
         assert "<<DEFER" not in src and "<<NONE>>" not in src
 
 
+# Issue #1734, the `tests` half: a document whose only Str builtin is inside an
+# in-file `test` block. The reference emits the `RevlStrOps` helper traits for
+# it (`_uses_stdlib` walks `tests`), and so must the port. The port does not
+# emit in-file tests themselves (a named `UNSUPPORTED-TEST` marker, a separate
+# surface), so this is not a byte-agreement case; what it pins is the preamble
+# decision, which the component half's corpus document cannot reach.
+TEST_ONLY_STR_SRC = """fn twice(n: Int) -> Int = n * 2
+
+test "a Str builtin only in a test" {
+  assert "ab".concat("c").length() == 3
+  assert twice(2) == 4
+}
+"""
+
+
+def test_a_str_builtin_only_in_a_test_still_emits_the_helper_traits(
+        emitted, reference, tmp_path):
+    path = tmp_path / "test_only_str.rvl"
+    path.write_text(TEST_ONLY_STR_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_rust_src"](ir)
+    assert "trait RevlStrOps {" in want and "impl RevlStrOps for str {" in want
+    assert "trait RevlStrOps {" in got and "impl RevlStrOps for str {" in got
+    # the port emits in-file tests (item 391), so the whole document agrees
+    assert got == want
+
+
 def test_selfhosted_emitter_in_file_tests_pass(emitted):
     """The .rvl file's own `test` blocks run under the python backend."""
     tests = emitted.get("REVL_TESTS")
@@ -951,10 +985,11 @@ def test_the_rust_emitter_builds_as_rust(reference, tmp_path):
 # carries a test section) and is counted as mirrored by
 # tools/selfhost_coverage.py.
 #
-# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
-# every self-host slice, and all six ports used to emit NOTHING for it. Each now
-# emits one named marker per test, per section.
-IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
+# In-file `test` / `fault test` / `lifecycle test` emission was deferred out of
+# every self-host slice, and all six ports used to emit NOTHING for it; each then
+# emitted one named marker per test, per section. This port now emits a plain
+# `test` block (item 391, the corpus document in_file_tests.rvl holds it to byte
+# agreement), so what stays marked here is the lifecycle and fault sections.
 
 LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
 component P provides p: Ping {
@@ -978,8 +1013,6 @@ fault test "probe" for P {
 """
 
 @pytest.mark.parametrize("source, reference_token, port_token", [
-    pytest.param(IN_FILE_TEST_SRC, "fn probe() {",
-                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
     pytest.param(LIFECYCLE_TEST_SRC, "fn revl_lifecycle_probe() {",
                  "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
 ])

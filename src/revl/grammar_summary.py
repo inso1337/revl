@@ -18,24 +18,31 @@ is not packaged, unlike `backends/`/`stdlib/`; see pyproject.toml).
 
 from __future__ import annotations
 
-PROSE_GRAMMAR = """\
-revl 2.0 — surface summary (full spec: docs/syntax-2.0.md)
-
+#: The code half of `PROSE_GRAMMAR`: one complete program that compiles as
+#: written (tests/test_served_examples_compile_1846.py), so no example an
+#: agent copies from `revl_grammar` can be a form the compiler refuses.
+PROSE_EXAMPLE = """\
 service S { fn f(a: Str) -> Int          // checked operation
             emission fn g(a: Str) -> Int // crosses the boundary
             emission[db] fn p(a: Str)    // ... only through `db`
             async fn h() -> Str }
+service T { fn m(a: Str) -> Int }
+
+// an acquire extern names its inverse over `result`
+extern pure fn conn_close(c: Conn) = @py { return None }
+extern acquire fn conn_open(url: Str) -> Conn undo conn_close(result) = @py { return 1 }
 
 component C requires k: S provides j: T {
-  config { field: Int = 3 }
+  config { url: Str = "db://local" }
   isolate k in realm("tenant")        // optional realm placement (prelude)
-  let r = effect acquire() undo r.release()
+  let c = effect conn_open(config.url) undo conn_close(c)
   await Job.run("work")               // iteration boundary (divert point)
   emit k.g("x") compensate k.g("undo")
   fail "reason"                       // deliberate L-Raise
-  provide j { fn m(a) = pure_fn(a) }
+  provide j { fn m(a) = size(a) }
 }
 
+fn size(a: Str) -> Int = a.length
 type Row = { id: Int, name: Str }      // record
 type Outcome = Ok(Row) | NotFound      // ADT; match is exhaustive
 pub fn f(xs: List[Row]) -> Int {       // pure stratum (TS-subset exprs)
@@ -45,7 +52,12 @@ pub fn f(xs: List[Row]) -> Int {       // pure stratum (TS-subset exprs)
 }
 extern pure fn sha(d: Bytes) -> Str = @ts { ... } = @py { ... }
 test "name" { assert f([]) == 0 }
+"""
 
+PROSE_GRAMMAR = """\
+revl 2.0 — surface summary (full spec: docs/syntax-2.0.md)
+
+""" + PROSE_EXAMPLE + """
 Rules that reject code: mutation needs `undo` or `emit` (G4); reads must be
 declared (G1); no cycles or duplicate providers (G2/G3); teardown cannot
 register effects (G5); expressions are pure (G6); `null` has no type —

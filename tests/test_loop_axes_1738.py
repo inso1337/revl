@@ -194,12 +194,29 @@ def test_the_axes_are_reported_before_anything_is_loaded(mcp):
 
 @needs_cordis
 def test_an_edit_with_no_query_first_is_not_preflighted(mcp):
+    """`revl_ship {apply: true}` swaps without carrying `blastRadius`, so with
+    no query first it is an edit nobody preflighted."""
     tmp_path, paths = mcp
     assert _call("revl_load", {"files": [str(paths["base"])]})["ok"]
-    assert _call("revl_swap", {"files": [str(paths["edited"])],
-                               "replacing": ["EchoBox"]}).get("swapped") is True
+    shipped = _call("revl_ship", {"files": [str(paths["edited"])],
+                                  "replacing": ["EchoBox"], "apply": True})
+    assert shipped["shipped"] is True, shipped
     axes = _call("revl_state", {})["loopAxes"]
     assert axes["preflightCoverage"] == {"numerator": 0, "denominator": 1, "value": 0.0}
+
+
+@needs_cordis
+def test_a_swap_with_no_query_first_is_preflighted_by_its_own_cascade(mcp):
+    """#1704: a landed `revl_swap` carries `blastRadius` as `revl_edit` does,
+    so the agent had the preflight answer without asking for it first."""
+    tmp_path, paths = mcp
+    assert _call("revl_load", {"files": [str(paths["base"])]})["ok"]
+    swapped = _call("revl_swap", {"files": [str(paths["edited"])],
+                                  "replacing": ["EchoBox"]})
+    assert swapped.get("swapped") is True, swapped
+    assert "EchoBox" in swapped["blastRadius"]["touched"], swapped["blastRadius"]
+    axes = _call("revl_state", {})["loopAxes"]
+    assert axes["preflightCoverage"] == {"numerator": 1, "denominator": 1, "value": 1.0}
 
 
 # No host code, so it loads from inline source under the default trust.

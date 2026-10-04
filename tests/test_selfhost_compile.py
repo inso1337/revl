@@ -495,6 +495,68 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # module loses its `Stream` import. The `Map`/`Pool`/`Job` host calls
         # in services_host.rvl go through the native chain byte-exact.
         "services_host_stream.rvl",
+        # item 391: the placement shapes selfhost/emit_py.rvl used to drop. The
+        # EMITTER half is byte-exact on the reference IR; the native IR producer
+        # drops three things the reference IR carries: the `routes` entry of a
+        # routed require (so no router, no `realm_label`, and the key back in
+        # the inject gate), every operation declared with a `commutative` or
+        # `idempotent` modifier (the Ledger service comes out empty), and the
+        # `undo_captures` pin on a method-body effect.
+        "../emit_py_placement.rvl",
+        # item 391: two more EMITTER-exact documents the native IR producer
+        # reproduces wrongly. emit_py_builtin_shadow.rvl: the reference frontend
+        # escapes a parameter named `len_` to `len__` (and every read of it) and
+        # leaves a call of the user's `fn len` as `len`. The native IR escapes
+        # the reads but not the parameter, and escapes the call, so the native
+        # chain emits `def ladder(len__, sorted__)` over a body that reads
+        # `len___` and calls `len__`. stdlib/fs.rvl: the native IR drops the
+        # extern's host `refs`, so the module loses its `import inspect` /
+        # `_REVL_REFS` header.
+        "../emit_py_builtin_shadow.rvl",
+        "../../../stdlib/fs.rvl",
+        # item 391: the in-file test sections. selfhost/emit_py.rvl emits all
+        # three byte-exact from the reference IR; the native IR producer
+        # carries no `tests` or `fault_tests` section at all, so the native
+        # chain emits each of these documents without its REVL_TESTS /
+        # lifecycle harness / REVL_FAULT_TESTS trailer and without the imports
+        # that trailer pulls in.
+        "../../../examples/regressions/fuzz_go_e6afacd3.rvl",
+        "../../../examples/uxprobe2_jobs.rvl",
+        "../../../backends/go/scenarios/advance.rvl",
+        "../../../examples/model_store_sqlite.rvl",
+        "../../../examples/uxprobe2_fault.rvl",
+        "../emit_py_test_sections.rvl",
+        # item 391: the await-seed slice. Both are emitter-exact from the
+        # reference IR. async_timer.rvl carries lifecycle tests (the native IR
+        # has no `tests` section). emit_py_async_shapes.rvl reaches the
+        # frontend's sync instance of a fn with an async-typed parameter
+        # (`drive_revl_sync`) and the async-coloured timer flag, neither of
+        # which the native IR producer emits, so the native chain also loses
+        # the `extern_emit` and `asyncio` imports.
+        "../../../examples/async_timer.rvl",
+        "../emit_py_async_shapes.rvl",
+        # item 391: the stream slice. All five are emitter-exact from the
+        # reference IR. The native IR producer drops the body's stream steps
+        # (the `Stream.source()` acquisition, as in services_host_stream.rvl,
+        # the `Pool.open` one beside it, and the `subscribe` that reads the
+        # source), so the native chain emits a sync body with no `Stream`
+        # import. stream_event_130.rvl also comes out as `ir_version 1` where
+        # the reference IR of a typed-event handler carries 3.
+        "streams.rvl",
+        "../../../backends/go/testdata/stream_130.rvl",
+        "../../../backends/go/testdata/stream_event_130.rvl",
+        "../../../backends/rust/scenarios/stream.rvl",
+        "../emit_rust_corpus/comp_stream.rvl",
+        # issue #1646 follow-up: emitter-exact; the native IR producer drops
+        # the body's stream steps, as for the stream slice's documents above.
+        "../emit_py_stream_builtin_bind.rvl",
+        # item 391: the validated slice. Both are emitter-exact from the
+        # reference IR. The native IR producer drops every operation declared
+        # `validated`, as it drops a `commutative` or `idempotent` one (see
+        # emit_py_placement.rvl above), so the service comes out empty: no
+        # grammar registry, no validate seam, and the call renders raw.
+        "../emit_ts_refusals/validated_emission_operation.rvl",
+        "../emit_py_validated_shapes.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at
@@ -593,6 +655,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../backends/go/testdata/opt_gaps_280.rvl",
         # ... and on the issue #1631 erased-Result document
         "../../../backends/go/testdata/result_erased_1631.rvl",
+        # issue #106, the combined path's first slice: the same `tests` section
+        # gap, and issue #1823, a provide method that calls a function-valued
+        # parameter (`f(f(n))`), whose whole `provide` block lower.rvl drops.
+        # The other combined documents are byte-exact through the native chain.
+        "comp_provide_pure.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -631,7 +698,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # shrinks instead of quietly keeping a waiver nobody rereads.
         "comp_stream.rvl",
         # (`bridge_types.rvl`, item 391's bridge marshalling document, left with
-        # issue #1818 too: `fn weight(name) = None` dropped the component body.)
+        # issue #1818: `fn weight(name) = None` dropped the component body.)
+        # item 391: in-file `test` blocks. Emitter-exact from the reference IR;
+        # the native IR producer carries no `tests` section, so the native chain
+        # emits the functions and drops every `#[test] fn`.
+        "in_file_tests.rvl",
         # item 391: the by-value reuse document. Emitter-exact from the
         # reference IR; the native IR producer does not type the result of a
         # call to a `let`-bound arrow (`i = bump(i) + 1`), so it writes the `+`

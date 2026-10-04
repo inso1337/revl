@@ -593,6 +593,51 @@ def test_native_ir_preserves_idempotent_service_methods(lower_to_ir, modifiers):
     assert native["ir_version"] == reference["ir_version"] == 3
 
 
+@pytest.mark.parametrize("service,method", [
+    ("fn twice(f: (Int) -> Int, n: Int) -> Int", "fn twice(f, n) = f(f(n))"),
+    ("fn apply(f: (Int) -> Int, n: Int) -> Int", "fn apply(f, n) = f(n)"),
+    # a module fn of the same name is the callee the reference reads first
+    ("fn go(f: (Int) -> Int, n: Int) -> Int", "fn go(f, n) = f(n)"),
+])
+def test_native_ir_lowers_a_call_on_a_function_valued_parameter(
+        lower_to_ir, service, method):
+    """Issue #1823: `f(n)` on a provide method's function-valued parameter made
+    `cir_fncall` refuse (no module callable named `f`), and a failed method
+    drops the WHOLE component `body`, so the native chain emitted the component
+    with no provision. The reference lowers the callee as an expression: a
+    `call` on the parameter's `name` node."""
+    prelude = "fn f(x: Int) -> Int { return x } " if method.startswith("fn go") else ""
+    source = (f"{prelude}service M {{ {service} }} "
+              f"component C provides m: M {{ provide m {{ {method} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
+@pytest.mark.parametrize("returns,body", [
+    ("Shape", "Dot"),
+    ("Shape", "b ? Circle(1) : Dot"),
+    ("Int", "area(Dot)"),
+    ("Int", "match (b ? Dot : Circle(2)) { Dot => 0, Circle(r) => r }"),
+    # the payload case already lowered, kept as the control
+    ("Shape", "Circle(1)"),
+])
+def test_native_ir_lowers_a_nullary_case_in_a_component(lower_to_ir, returns, body):
+    """Issue #1840: a nullary user case used as a value (`Dot`) made
+    `cir_expr`'s `Var` arm refuse, so the whole component `body` was dropped.
+    The reference reads a nullary user case ahead of the scope and writes the
+    `adt` node with no args, the node the module-fn path writes."""
+    source = ("type Shape = Dot | Circle(Int) "
+              "fn area(s: Shape) -> Int { return match s { Dot => 0, Circle(r) => r } } "
+              f"service S {{ fn w(b: Bool) -> {returns} }} "
+              f"component C provides s: S {{ provide s {{ fn w(b) = {body} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
 @pytest.mark.parametrize("returns,body", [
     ("Opt[Int]", "None"),
     ("Opt[Int]", "Some(1)"),

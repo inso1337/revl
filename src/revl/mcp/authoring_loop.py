@@ -11,8 +11,8 @@ the three pieces that make them the default reach:
 * `self_check`, which turns one compile into a pass/fail line for every
   guarantee G1 to G9, with the code and the fix on a failure, so `revl_check`
   answers "does this hold?" in one call;
-* `blast_radius`, which `revl_edit` folds into its response so a change
-  arrives with its cascade instead of needing a separate preflight call.
+* `blast_radius`, which `revl_edit`, `revl_swap` and `revl_change` fold into
+  their responses so a change arrives with its cascade instead of needing a separate preflight call.
 """
 
 from __future__ import annotations
@@ -33,9 +33,9 @@ LOOP = (
      "your draft and re-run revl_check, or send revl_edit {hole, expr} once "
      "the composition is running; each fill is compiled"),
     ("preflight", "revl_query_withdraw",
-     "the exact blast radius of replacing or removing a component; revl_edit "
-     "returns it for the components it touches, and revl_plan shows what a "
-     "swap would do"),
+     "the exact blast radius of replacing or removing a component; revl_edit, "
+     "revl_swap and revl_change return it for the components they touch, and "
+     "revl_plan shows what a swap would do"),
     ("check", "revl_check",
      "`selfCheck` lists every guarantee G1-G9 as pass or fail, with the code "
      "and the fix (revl_explain <code> for more)"),
