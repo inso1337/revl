@@ -207,10 +207,7 @@ def _classify(e: RevlError) -> str:
             # ---- item 515: the device profile and the candidate set --------
             # Seven more sentences the gate now spells byte for byte, added on
             # the same terms as every marker above: a marker here is a CLAIM
-            # of byte agreement, so only a ported refusal gets one. Item 519's
-            # reach fold is deliberately absent - it is a capability product
-            # over a component's HELD set, the gate has none, and it stays
-            # out for the same reason the item-514 value side does.
+            # of byte agreement, so only a ported refusal gets one.
             or m.startswith("unknown device class `")
             or (m.startswith("model role `") and " declares `memory " in m)
             or m.endswith(") places the origin on any available role")
@@ -220,7 +217,16 @@ def _classify(e: RevlError) -> str:
             or (m.startswith("the candidates for `")
                 and " do not agree on residence: " in m)
             or m.endswith(" declare no device profile, so the candidate set "
-                          "cannot be ordered")):
+                          "cannot be ordered")
+            # ---- item 519: the reach fold ----------------------------------
+            # Both edge kinds (a role the `route model` block names, and the
+            # role a crossing is placed on, issue #1193 slice 2) end in this
+            # one sentence. The gate folds the role's reach against the held
+            # set its spawn attenuation already builds, and spells the refusal
+            # byte for byte, the unscoped-emission rendering of issue #1451
+            # included.
+            or m.endswith(" a model may not reach past the component that "
+                          "consults it (G-MODEL-PLACE)")):
         return "MODEL"
     # ---- item 516: the model COUNCIL declaration ---------------------------
     # `selfhost/lower.rvl`'s model-council section decides `model council` and
@@ -713,6 +719,24 @@ component Mailer provides ops: Ops {{
 """
 
 ACCEPTED_PROGRAMS = [
+    # Issue #1508: a spawn-handle crossing is read by the provider bound at the
+    # op's declared scope, a fact the spawned provider is held to by its own
+    # bound. `Task.go` is `emission[net]` and `Sup.run` declares
+    # `emission[net]`, so it fits (it was refused as an unnameable host
+    # boundary before).
+    ("a spawn-handle emit under a bound covering the op's scope", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission[net] fn go() -> Int }
+service Sup { emission[net] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+"""),
     # ---- the qualified test heads (item 391) -------------------------------
     # `lifecycle` (syntax-2.0 §7.1), `fault` (docs/fault-tests.md) and `prop`
     # (roadmap item 37) are CONTEXTUAL keywords qualifying `test`. They lex as
@@ -1769,20 +1793,20 @@ component Supervisor requires net: Kv provides sup: Sup {
 # `expected error` of a checked-in rejection fixture.
 REJECTED_PROGRAMS = [
     # ---- issue #1813: a module fn and an extern fn of one name --------------
-    # The reference refuses it while lowering fns, before any component, so the
-    # second case's earlier-line G1 does not outrank it; the third puts the
-    # extern second, and the refusal moves to the extern's line.
+    # The reference checks it once the program is otherwise admitted, so the
+    # second case's G1 is what both sides report; the third puts the extern
+    # second, and the refusal moves to the extern's line.
     ("a fn that reuses an extern's name", """extern pure fn f(x: Int) -> Int = @py { return x }
 fn f(x: Int) -> Int { return x + 1 }
 fn g() -> Int { return f(1) }
 """, "G6"),
-    ("a fn reusing an extern's name outranks an earlier-line G1", """service S { fn g() -> Int }
+    ("any other refusal outranks a fn reusing an extern's name", """service S { fn g() -> Int }
 component C provides s: S {
   provide s { fn g() = db.get() }
 }
 extern pure fn f(x: Int) -> Int = @py { return x }
 fn f(x: Int) -> Int { return x + 1 }
-""", "G6"),
+""", "G1"),
     ("an extern that reuses a fn's name", """fn f(x: Int) -> Int { return x + 1 }
 pub extern pure fn f(x: Int) -> Int = @py { return x }
 """, "G6"),
@@ -3498,14 +3522,14 @@ component Supervisor requires net: Kv provides sup: Sup {
                            return 0 } }
 }
 """, "G4"),
-    # The one the reach gap ADMITTED: the supervisor's bound names the very key
-    # the child emits through, so the spawn-emission bound is satisfied and only
-    # the body's own crossing is left to refuse it. No `emission[...]` list can
-    # name `*`, so the reference refuses; the gate saw an empty reach.
-    ("a spawn-handle emit under a bound naming the child's key", """
+    # Issue #1508: the provider bound reads a handle crossing at the op's
+    # DECLARED scope, `net` here, which `Sup.run`'s `emission[db]` does not
+    # cover. (The same program with `Sup.run` declared `emission[net]` is
+    # admitted; it is in ACCEPTED_PROGRAMS.)
+    ("a spawn-handle emit under a bound that misses the op's scope", """
 service Kv { emission fn write(row: Str) -> Int }
 service Task { emission[net] fn go() -> Int }
-service Sup { emission[net] fn run() -> Int }
+service Sup { emission[db] fn run() -> Int }
 component Worker requires net: Kv provides task: Task {
   provide task { fn go() { emit net.write("x")  return 0 } }
 }
@@ -3549,11 +3573,10 @@ component Supervisor requires net: Kv provides sup: Sup {
                            return 0 } }
 }
 """, "G4"),
-    # Control 2: `let r = emit w.task.go()` binds an emit-marked VALUE, which
-    # the reference lowers through its expression path and never builds an
-    # `emit` step from, so neither engine notes the label and the spawn-bound
-    # verdict is the whole answer. This is the control a fix that labelled every
-    # handle call rather than every emit STEP would fail.
+    # Control 2: `let r = emit w.task.go()` binds an emit-marked VALUE. Since
+    # issue #1508 both engines read it at the op's declared scope wherever it
+    # is written (`*` here, a bare op), so the body's own crossing refuses it,
+    # exactly as the step form above.
     ("an emit-marked binding through a handle notes no label", """
 service Kv { emission fn write(row: Str) -> Int }
 service Task { emission fn go() -> Int }

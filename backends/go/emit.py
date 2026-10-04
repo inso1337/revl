@@ -800,6 +800,44 @@ def _v3_comp_construct(node, env: _Env) -> str:
     return "%s{Value: %s}" % (struct, args[0])
 
 
+def _comp_arm_binding(st, pattern) -> str | None:
+    """The surface type a match arm's `bind` takes: the case payload for a
+    user-variant or Opt/Result case, the scrutinee itself for `_`."""
+    if pattern == "_":
+        return st
+    if isinstance(st, str) and st.startswith("Opt[") and st.endswith("]"):
+        return st[4:-1] if pattern == "Some" else None
+    if isinstance(st, str) and st.startswith("Result[") and st.endswith("]"):
+        parts = _v3_split_generic(st[7:-1])
+        if len(parts) == 2:
+            return parts[0] if pattern == "Ok" else parts[1] if pattern == "Err" \
+                else None
+        return None
+    adt = st if (isinstance(st, str) and st in _V3_TYPES) \
+        else _v3_case_layout().get(pattern, (None, None))[0]
+    return _v3_case_payload(adt, pattern) if adt in _V3_TYPES else None
+
+
+def _comp_infer_match(node, env: _Env):
+    """The value type of a component-body `match`: its first arm whose body
+    infers one (issue #1834)."""
+    st = _comp_infer(node.get("scrutinee"), env)
+    for arm in node.get("arms") or []:
+        bind = arm.get("bind")
+        saved = dict(env.var_types)
+        try:
+            if bind and bind != "_":
+                bound = _comp_arm_binding(st, arm.get("pattern"))
+                if bound:
+                    env.var_types[bind] = bound
+            found = _comp_infer(arm.get("body"), env)
+        finally:
+            env.var_types = saved
+        if found:
+            return found
+    return None
+
+
 def _go_comp_match(node, env: _Env, expected) -> str:
     """A `match` in a component/method body (v3 typed-core placement).
 
@@ -828,7 +866,20 @@ def _go_comp_match(node, env: _Env, expected) -> str:
     scrutinee = _expr(scrut_node, env, st)
     layout = _v3_case_layout()
     lines = ["func() %s {" % exp_t]
-    lines.append("\tswitch _m := %s.(type) {" % scrutinee)
+    # issue #1834: a scrutinee that is not a bare identifier, such as a case
+    # constructed in place (`match Circle(n) { .. }`), renders to a concrete
+    # composite literal. `.(type)` needs an interface operand, and the literal's
+    # `{` would be read as the switch body, so bind it to an interface-typed
+    # temp first, as the pure tier does (item 313).
+    if isinstance(scrut_node, dict) and scrut_node.get("kind") in ("var", "name"):
+        operand = scrutinee
+    else:
+        iface = st if (isinstance(st, str) and st in _V3_TYPES) else next(
+            (layout[a.get("pattern")][0] for a in arms
+             if a.get("pattern") in layout), None)
+        lines.append("\tvar _s %s = %s" % (_go_type(iface) or "any", scrutinee))
+        operand = "_s"
+    lines.append("\tswitch _m := %s.(type) {" % operand)
     has_wild = False
     saved_types = dict(env.var_types)
     try:
@@ -1131,8 +1182,10 @@ def _comp_infer(node, env: _Env):
         # lowered to `revlListLen` on a string (issue #1356).
         return _CONFIG_TYPES.get(node.get("field"))
     if k == "match":
-        # a match's value type is its scrutinee's
-        return _comp_infer(node.get("scrutinee"), env)
+        # a match's value is one of its arms', never its scrutinee's (issue
+        # #1834): the first arm whose body infers a type, with the arm's binding
+        # in scope, the way `_go_comp_match` picks its result type
+        return _comp_infer_match(node, env)
     if k == "field":
         tt = _comp_infer(node.get("target"), env)
         if isinstance(tt, str) and tt in _V3_TYPES \

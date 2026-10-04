@@ -7,7 +7,8 @@ later one won. That is how a second `camel` in selfhost/emit_go.rvl compiled
 silently while the emitted python called the first.
 
 The refusal is in the duplicate-binding shape ("... is already declared ...",
-G6), at whichever declaration comes second. The self-host gate refuses it with
+G6), at whichever declaration comes second, and only for a program nothing
+else refuses: every existing diagnostic keeps its place. The self-host gate refuses it with
 the same sentence (tests/test_selfhost_lower.py REJECTED_PROGRAMS).
 """
 
@@ -45,12 +46,16 @@ def test_an_extern_after_the_fn_is_refused_at_the_extern():
     assert d["line"] == 2
 
 
-def test_it_outranks_an_earlier_line_composition_refusal():
+def test_any_other_refusal_keeps_its_diagnostic():
+    """Checked once the program is otherwise admitted, so a refusal the
+    program already draws (here an undeclared `db`, G1) is the one reported,
+    as it was before this rule existed."""
     source = ("service S { fn g() -> Int }\n"
               "component C provides s: S {\n"
               "  provide s { fn g() = db.get() }\n"
               "}\n" + EXTERN + FN)
-    assert _refusal(source)["line"] == 6
+    d = _refusal(source)
+    assert (d["code"], d["line"]) == ("G1", 3)
 
 
 def test_each_module_keeps_its_own_namespace(tmp_path):
