@@ -438,11 +438,17 @@ def _depth_delta(pieces: list[_Piece]) -> int:
     return delta
 
 
-def format_source(source: str, filename: str = "<source>") -> str:
+def format_source(source: str, filename: str = "<source>", *,
+                  comments: bool = True) -> str:
     """Return the canonical formatting of *source*.
 
     The formatting is a pure, deterministic function of the token stream, so
     it is idempotent: `format_source(format_source(x)) == format_source(x)`.
+
+    `comments=False` drops every comment, and a line that held only a comment
+    with it, so what is left is the code alone in canonical form (issue #1714:
+    a symbol read without its prose). Comments are trivia to the lexer, so the
+    token stream, and therefore the IR, is the same either way.
     """
     pieces = _scan(source, filename)
 
@@ -458,20 +464,22 @@ def format_source(source: str, filename: str = "<source>") -> str:
     depth = 0
     for line in lines:
         code = [p for p in line if p.kind != _COMMENT]
-        comments = [p for p in line if p.kind == _COMMENT]
+        notes = [p for p in line if p.kind == _COMMENT] if comments else []
+        if not code and not notes and len(code) != len(line):
+            continue  # a comment-only line, dropped with its comment
 
-        if not code and not comments:
+        if not code and not notes:
             rendered.append("")  # blank line (collapsed below)
             continue
 
         indent_level = depth - _leading_closers(code)
         if code:
             text = _render_line(code, indent_level)
-            if comments:  # trailing comment on a code line
-                text = text + "  " + comments[0].text
+            if notes:  # trailing comment on a code line
+                text = text + "  " + notes[0].text
             rendered.append(text)
         else:  # comment-only line, indented at the current depth
-            rendered.append(_INDENT * max(depth, 0) + comments[0].text)
+            rendered.append(_INDENT * max(depth, 0) + notes[0].text)
 
         depth += _depth_delta(code)
         if depth < 0:
