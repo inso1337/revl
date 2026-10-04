@@ -646,7 +646,10 @@ built artifact.
 `GENERATED.json` records the digest inputs, the gate api semver, the frontier id
 this packaging inherits from `crates/revl-gate`, and the target it is built for.
 The frontier id is the crate's, unchanged: two gates with different ids cover
-different surfaces and their agreement means nothing.
+different surfaces and their agreement means nothing. Its last part is computed
+by `crates/revl-gate/build.rs` from that crate's sources when cargo builds it,
+so `GENERATED.json` records its shape, `selfhost-admit:<identity>`, and
+`gate-version` reports the value.
 """
 
 
@@ -677,7 +680,8 @@ def render_generated_json(digest: str, meta: dict) -> str:
         "digest_inputs": list(DIGEST_INPUTS),
         "source_digest": digest,
         # inherited from the rust crate, never restated: the wasm gate decides
-        # exactly what that crate decides
+        # exactly what that crate decides. The id itself is computed by that
+        # crate's build.rs and is not stored in either GENERATED.json (#1768).
         "frontier": meta["frontier"],
         "language_version": meta["language_version"],
         "covered_layer": meta["covered_layer"],

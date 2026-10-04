@@ -521,7 +521,9 @@ def test_the_admission_mirror_matches_the_rust(census):
     assert "Int" in tables["scalars"] and "Opt" not in tables["scalars"]
     for name in tables["scalars"]:
         assert f'    "{name}",' in admission_rs
-    assert generator.admission_surface_id(generator.source_digest()) in admission_rs
+    # the surface id is computed by build.rs from the crate sources (#1768)
+    assert ('concat!("admission-interface:", env!("REVL_GATE_IDENTITY"))'
+            in admission_rs)
 
 
 def test_the_frontier_mirror_matches_the_rust(census):
