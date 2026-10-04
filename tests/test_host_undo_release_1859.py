@@ -114,8 +114,7 @@ def test_the_g5_classification_of_the_undo_keeps_its_message():
 
 # ---- issue #1847: the three-step chain --------------------------------------
 
-_BUILTIN = ("`List` is a builtin type, not a value: a builtin method is called "
-            "on a value of the type, never on the type")
+_BUILTIN = "`List` is a builtin type, not a value"
 
 
 def test_a_builtin_in_an_undo_names_the_rule_not_a_requirement():

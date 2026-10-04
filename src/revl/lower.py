@@ -11141,13 +11141,12 @@ def _refuse_builtin_type_value(name: str, env: "Env", filename: str,
                 "computes a new value and releases nothing, so it is never an "
                 "inverse (docs/rejections.md#g4--inverse-or-emit)")
     else:
-        hint = (f"call the method on a value of the type (`xs.<method>()`); "
-                f"revl has no methods on a builtin type itself "
-                f"(docs/stdlib-2.0.md)")
+        hint = (f"a builtin method is called on a value of the type "
+                f"(`xs.<method>()`), never on the type, and a builtin type is "
+                f"not a function to call (docs/stdlib-2.0.md)")
     raise RevlError(
         filename, line,
-        f"`{name}` is a builtin type, not a value: a builtin method is called "
-        f"on a value of the type, never on the type",
+        f"`{name}` is a builtin type, not a value",
         hint=hint, code="T1", category="type-mismatch")
 
 

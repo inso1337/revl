@@ -1999,13 +1999,15 @@ component Logger provides log: Log {
     # requirement" G1 refusal a bare `nope()` does. The gate's `type_ctors` used
     # to collect every Upper-cased name a `type` declaration mentioned, admitting
     # this whole family; it now follows the same alias/variant split.
+    # issue #1847: a builtin type head names the type rule (T1, "is a builtin
+    # type, not a value"), not the "add `requires`" G1 it drew before
     ("g1 bare call of a builtin type aliased single-case",
      """type Alias = Int
 service S { fn go() -> Int }
 component C provides s: S {
   provide s { fn go() { let x = Int("1")   return 0 } }
 }
-""", "G1"),
+""", "T1"),
     # G1 bare CALL head: a single-case type application (`type Rows = List[Row]`)
     # is an alias RHS too, so its head `List` is not a constructor.
     ("g1 bare call of a type-application alias head",
@@ -2014,7 +2016,7 @@ service S { fn go() -> Int }
 component C provides s: S {
   provide s { fn go() { let x = List(1)   return 0 } }
 }
-""", "G1"),
+""", "T1"),
     # The accepting twin: in a MULTI-case variant the same builtin name IS a
     # registered case, so `Str("a")` resolves and both admit. (Held in the
     # ACCEPTED corpus below so a future over-eager fix cannot silently start
