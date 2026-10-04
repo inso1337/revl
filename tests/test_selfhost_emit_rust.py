@@ -284,6 +284,10 @@ CORPUS = [
     "comp_str_builtin.rvl",  # issue #1734: the only Str builtins are in a component
                              #   (`concat` in a provide method, a sized `.length`),
                              #   so the `RevlStrOps` helper traits are emitted for it
+    "in_file_tests.rvl",     # item 391: in-file `test` blocks as `#[test] fn`s, the
+                             #   slug rules (snake, sanitised, digit prefix, bumped
+                             #   against functions and each other), an empty body,
+                             #   and #1734's tests half (a Str builtin only in a test)
 ]
 
 
@@ -809,7 +813,8 @@ def test_a_str_builtin_only_in_a_test_still_emits_the_helper_traits(
     want, got = reference.emit(ir), emitted["emit_rust_src"](ir)
     assert "trait RevlStrOps {" in want and "impl RevlStrOps for str {" in want
     assert "trait RevlStrOps {" in got and "impl RevlStrOps for str {" in got
-    assert "<<UNSUPPORTED-TEST:a Str builtin only in a test>>" in got
+    # the port emits in-file tests (item 391), so the whole document agrees
+    assert got == want
 
 
 def test_selfhosted_emitter_in_file_tests_pass(emitted):
@@ -959,10 +964,11 @@ def test_the_rust_emitter_builds_as_rust(reference, tmp_path):
 # carries a test section) and is counted as mirrored by
 # tools/selfhost_coverage.py.
 #
-# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
-# every self-host slice, and all six ports used to emit NOTHING for it. Each now
-# emits one named marker per test, per section.
-IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
+# In-file `test` / `fault test` / `lifecycle test` emission was deferred out of
+# every self-host slice, and all six ports used to emit NOTHING for it; each then
+# emitted one named marker per test, per section. This port now emits a plain
+# `test` block (item 391, the corpus document in_file_tests.rvl holds it to byte
+# agreement), so what stays marked here is the lifecycle and fault sections.
 
 LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
 component P provides p: Ping {
@@ -986,8 +992,6 @@ fault test "probe" for P {
 """
 
 @pytest.mark.parametrize("source, reference_token, port_token", [
-    pytest.param(IN_FILE_TEST_SRC, "fn probe() {",
-                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
     pytest.param(LIFECYCLE_TEST_SRC, "fn revl_lifecycle_probe() {",
                  "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
 ])
