@@ -217,3 +217,80 @@ def test_cli_identical_reports_no_change(tmp_path, capsys):
     before.write_text(BASE)
     assert main(["diff", str(before), str(before)]) == 0
     assert "no structural change" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# Realms (issue #1848): a provider is matched to the consumers in its realm.  #
+# --------------------------------------------------------------------------- #
+
+def _two_realms(*, with_b_provider: bool = True, b_offset: int = 2) -> str:
+    """Realm `a`: DbA and one consumer. Realm `b`: DbB and three consumers.
+    Both providers provide the same key, `db`."""
+    provider_b = (f'component DbB provides db: Db {{\n'
+                  f'  isolate db in realm("b")\n'
+                  f'  provide db {{ fn get(k) = k + {b_offset} }}\n}}\n'
+                  if with_b_provider else "")
+    users_b = "".join(
+        f"service U{i} {{ fn go(k: Int) -> Int }}\n"
+        f"component UserB{i} requires db: Db provides u{i}: U{i} {{\n"
+        f'  isolate db in realm("b")\n'
+        f"  provide u{i} {{ fn go(k) = db.get(k) }}\n}}\n" for i in range(3))
+    return ("service Db { fn get(k: Int) -> Int }\n"
+            "service UA { fn go(k: Int) -> Int }\n"
+            "component DbA provides db: Db {\n"
+            '  isolate db in realm("a")\n'
+            "  provide db { fn get(k) = k + 1 }\n}\n"
+            "component UserA requires db: Db provides ua: UA {\n"
+            '  isolate db in realm("a")\n'
+            "  provide ua { fn go(k) = db.get(k) }\n}\n"
+            + provider_b + users_b)
+
+
+def test_removing_one_realms_provider_breaks_exactly_that_realms_consumers():
+    """Realm `a` still provides `db`, so a realm-blind diff read realm `b`'s
+    three consumers as satisfied and reported no break. They are broken, and
+    they are exactly the cascade `revl_query` reports for withdrawing DbB."""
+    from revl.query import withdrawal
+
+    before = compile_source(_two_realms())
+    after = compile_source(_two_realms(with_b_provider=False))
+    delta = diff(before, after)
+    broken = sorted(e["component"] for e in delta["requires"]["broken"])
+    assert broken == ["UserB0", "UserB1", "UserB2"]
+    assert all(e["realm"] == "b" for e in delta["requires"]["broken"])
+    assert broken == sorted(c["component"] for c in withdrawal(before, "DbB")["cascade"])
+    assert delta["providers"]["removed"] == [
+        {"key": "db", "realm": "b", "service": "Db", "component": "DbB"}]
+    assert "key `db` in realm `b` is no longer provided (was `Db`)" in delta["guarantees"]
+
+
+def test_the_other_realms_provider_is_not_reported_changed():
+    """Keyed by key alone, the second provider overwrote the first, so removing
+    DbB read as `db` changing from DbB to DbA. Realm `a` did not change."""
+    before = compile_source(_two_realms())
+    after = compile_source(_two_realms(with_b_provider=False))
+    assert diff(before, after)["providers"]["changed"] == []
+
+
+def test_two_realms_with_no_change_diff_to_empty():
+    ir = compile_source(_two_realms())
+    delta = diff(ir, ir)
+    assert delta["changed"] is False
+    assert delta["requires"]["broken"] == []
+
+
+def test_a_single_realm_delta_carries_no_realm_field():
+    """The shared realm is the default: a single-realm composition's delta has
+    the shape it always had, with no `realm` key on any record."""
+    src = ("service Db { fn get(k: Int) -> Int }\n"
+           "service U { fn go(k: Int) -> Int }\n"
+           "component Db1 provides db: Db { provide db { fn get(k) = k } }\n"
+           "component User requires db: Db provides u: U {\n"
+           "  provide u { fn go(k) = db.get(k) } }\n")
+    before = compile_source(src)
+    after = compile_source(src.replace(
+        "component Db1 provides db: Db { provide db { fn get(k) = k } }\n", ""))
+    delta = diff(before, after)
+    assert delta["requires"]["broken"] == [{"component": "User", "key": "db"}]
+    assert delta["providers"]["removed"] == [
+        {"key": "db", "service": "Db", "component": "Db1"}]

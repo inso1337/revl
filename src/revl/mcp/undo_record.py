@@ -20,9 +20,12 @@ leaves the session byte for byte where it was. Each reason is in
 `IRREVERSIBLE` below.
 
 The reversible verbs are the ones that move the composition between
-generations (`load`, `swap`, `edit`, `undo`, `rollback`, `restore`,
+generations (`load`, `swap`, `edit`, `change`, `undo`, `rollback`, `restore`,
 `unload`, and the composed `ship`/`repair` when they apply), plus a fresh
-lease claim, whose inverse is the release. The inverse of a generation move
+lease claim, whose inverse is the release. A committed `revl_change` is a
+generation move like an edit, undone by `revl_undo` to the generation before
+it; a speculative one leaves the running generation unchanged and says so.
+`revl_export` writes disk, not the session, and is in `IRREVERSIBLE`. The inverse of a generation move
 is a gated change itself: `revl_undo` re-admits the earlier generation's
 sources through the same gate a swap runs (docs/generation-history.md), so an
 undo never bypasses admission.
@@ -35,7 +38,7 @@ from dataclasses import dataclass, field
 #: Mutating verbs that move the composition between generations.
 GENERATION_VERBS = frozenset({
     "revl_load", "revl_swap", "revl_edit", "revl_undo", "revl_rollback",
-    "revl_restore", "revl_unload", "revl_ship", "revl_repair",
+    "revl_restore", "revl_unload", "revl_ship", "revl_repair", "revl_change",
 })
 
 #: Mutating verbs with no exact inverse, and why. A response from one of these
@@ -68,6 +71,10 @@ IRREVERSIBLE = {
                       "them forward re-runs them rather than restoring them",
     "revl_replay_forward": "a forward replay re-runs recorded steps; there is "
                            "no call that un-runs them",
+    "revl_export": "an export writes the held source over the files on disk "
+                   "and keeps no copy of what it replaced, so no call puts "
+                   "the earlier disk contents back; the session itself is "
+                   "unchanged",
 }
 
 #: Why a lease action other than a fresh claim has no exact inverse.

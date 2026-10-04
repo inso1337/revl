@@ -1,0 +1,16 @@
+{
+  "name": "revl-bench-mcp-host",
+  "private": true,
+  "version": "0.0.1",
+  "description": "FRAMEWORK-BENCH-1 third host: @modelcontextprotocol/sdk at a pinned version, with a residue probe",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.6.5"
+  },
+  "scripts": {
+    "test": "node test.mjs",
+    "probe": "node probe.mjs"
+  }
+}
