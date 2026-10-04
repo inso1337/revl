@@ -24,16 +24,11 @@ RIDE_LIMIT = 8
 
 
 def _buffers(vs: dict) -> list[tuple[str, str]]:
-    out = []
-    if vs.get("source") is not None:
-        out.append(("source", vs["source"]))
-    for path in vs.get("files") or []:
-        text = (vs.get("files_content") or {}).get(path)
-        if text is not None:
-            out.append((path, text))
-    for key, text in (vs.get("modules") or {}).items():
-        out.append((key, text))
-    return out
+    """`(name, text)` of every buffer of a working set, as the symbol model
+    enumerates them (one definition of the working-set keys)."""
+    from . import symbols  # noqa: PLC0415
+
+    return [(buffer[1], text) for buffer, text in symbols.buffers(vs)]
 
 
 def index_of(vs: dict, report: dict | None) -> list[dict]:

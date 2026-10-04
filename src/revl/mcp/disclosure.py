@@ -46,7 +46,8 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
         "revl_fmt", "revl_explain", "revl_idiom")),
     "session": ("load, call, change and tear down the running composition; "
                 "commit, roll back, lease, snapshot", (
-        "revl_load", "revl_call", "revl_state", "revl_swap", "revl_edit",
+        "revl_load", "revl_call", "revl_act", "revl_counterfactual",
+        "revl_state", "revl_swap", "revl_edit",
         "revl_unload", "revl_commit", "revl_commit_confirm", "revl_abort",
         "revl_rollback", "revl_undo", "revl_lease", "revl_snapshot",
         "revl_restore", "revl_source", "revl_change", "revl_export")),

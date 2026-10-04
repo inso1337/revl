@@ -220,6 +220,7 @@ def test_initialize_and_tools_list(all_mcp_tools):
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     assert set(tools) == {"revl_check", "revl_admit", "revl_plan", "revl_audit",
                           "revl_tools", "revl_grammar", "revl_idiom", "revl_load", "revl_call",
+                          "revl_act", "revl_counterfactual",
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
                           # symbol-addressed reads (issue #1714)
                           "revl_source",

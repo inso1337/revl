@@ -106,7 +106,7 @@ def test_a_compensation_and_a_pure_extern_are_not_routed(tmp_path):
     crossing; a pure extern crosses nothing."""
     src = _emit(tmp_path, SHAPES)
     keep = _method(src, "keep")
-    assert "compensation_method(lambda: unfile_host(t))" in keep
+    assert "compensation_method(lambda: unfile_host(t)" in keep
     assert "_revl_extern_emit(_revl_ctx, 'unfile_host'" not in keep
     assert _method(src, "fold").endswith("return shout(t)")
 

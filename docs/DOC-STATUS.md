@@ -125,7 +125,7 @@ was corrected by hand and had drifted back within a day.
 | fault-tests.md | needs-work | 71 |  |
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
-| fmt.md | needs-work | 14 |  |
+| fmt.md | needs-work | 12 |  |
 | frontend-assets.md | needs-work | 13 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
@@ -196,7 +196,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-str.md | current | 16 |  |
 | stdlib-value.md | current | 26 |  |
 | stdlib-version.md | needs-work | 11 |  |
-| strings.md | needs-work | 43 |  |
+| strings.md | needs-work | 39 |  |
 | swap.md | needs-work | 19 |  |
 | syntax-2.0.md | needs-work | 10 |  |
 | tee-attestation-root.md | current | 0 |  |

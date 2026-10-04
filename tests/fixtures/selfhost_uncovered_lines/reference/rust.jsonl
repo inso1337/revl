@@ -24,25 +24,11 @@
 
 ["function", "backends-rust-emit-py-v3-strip-index-clone", "_v3_strip_index_clone", 1, 1]
 
-["reason", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "Canonical ABI bridge boundary: the residuals serialize and deserialize non-scalar Value/Result payloads and emit the RPC proxy. Scalar and scalar-Option bridge paths are covered; opaque, collection, record, and Result serde remain deliberately unported."]
+["reason", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "Canonical ABI bridge boundary: the proxy and dispatch marshalling (`_bridge_arg_ser`/`_arg_extract`/`_ret_deser`/`_ret_ser`, the hand-encoded `Result` and `_bridge_serde_ok`) is ported since item 391 and held to byte agreement by emit_rust_corpus/bridge_types.rvl. What is left: `_split_result`'s final `return None`, reached only by a `Result<...>` with no top-level comma, which no well-formed type produces; and `_emit_bridge`'s config-default field line, which needs a bridged provider that declares a `config` default."]
 
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_bridge_arg_extract", 6, 6]
+["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_emit_bridge", 1, 1]
 
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_bridge_arg_ser", 5, 5]
-
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_bridge_ret_deser", 6, 6]
-
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_bridge_ret_ser", 7, 7]
-
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_bridge_serde_ok", 1, 1]
-
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_emit_bridge", 4, 4]
-
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_result_ok_err", 2, 2]
-
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_result_to_json", 1, 1]
-
-["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_split_result", 12, 12]
+["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_split_result", 1, 1]
 
 ["reason", "component-construction-fallbacks-residuals-cover-absent-malf", "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls."]
 
@@ -214,11 +200,11 @@
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_v3_spawn", 14, 14]
 
-["reason", "record-variant-context-invariants-the-remaining-branches-dia", "Record/variant context invariants: the remaining branches diagnose duplicate or ambiguous record shapes and constructors, malformed pattern arity, and recursive boxing edges. The self-host Rust slice supports the covered unique non-recursive records and ADTs but deliberately does not mirror recursive boxing."]
+["reason", "record-variant-context-invariants-the-remaining-branches-dia", "Record/variant context invariants: the remaining branches diagnose duplicate or ambiguous record shapes and constructors, malformed pattern arity, and recursive boxing edges. The self-host Rust slice supports the covered unique non-recursive records and ADTs but deliberately does not mirror recursive boxing. emit_rust_corpus/bridge_types.rvl (item 391) reaches 2 more of `_V3Ctx._disambiguate_record`'s statements."]
 
 ["function", "record-variant-context-invariants-the-remaining-branches-dia", "_V3Ctx.__init__", 1, 1]
 
-["function", "record-variant-context-invariants-the-remaining-branches-dia", "_V3Ctx._disambiguate_record", 7, 7]
+["function", "record-variant-context-invariants-the-remaining-branches-dia", "_V3Ctx._disambiguate_record", 5, 5]
 
 ["function", "record-variant-context-invariants-the-remaining-branches-dia", "_V3Ctx._same_shape", 2, 2]
 
@@ -252,7 +238,7 @@
 
 ["reason", "render-expr-residuals-in-two-families-no-mirrored", "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`). (3) issue #919: the two `return` statements that unbox a recursive STRUCT-field read — `f\"(*{place}.{field}).clone()\"` at the by-value-reuse site and `f\"(*{target}.{field})\"` at the value site. Their guards (`_boxed_field_read`) run on every field read, so the tests execute; only the returns wait on a document with a recursive struct-field edge. A corpus document cannot supply one for the same reason as (2): the port carries no boxing pass, so the reference would emit a deref the port does not. The read half of the pass is recorded under the recursive-struct-field-boxing reason (`_boxed_field_read`, `_inline_cycle_target`). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1734 reaches the component-position property `.length` (a `field` node marked `sized_length`, rendered through `revl_length`) with emit_rust_corpus/comp_str_builtin.rvl, so that return no longer counts here."]
 
-["function", "render-expr-residuals-in-two-families-no-mirrored", "_render_expr", 53, 53]
+["function", "render-expr-residuals-in-two-families-no-mirrored", "_render_expr", 52, 52]
 
 ["reason", "standalone-transport-boundary-the-oracle-imports-emit-direct", "Standalone transport boundary: the oracle imports emit directly, so module execution, argparse/stdin/file output, and separately requested Cargo manifest generation are not entered."]
 
@@ -272,7 +258,7 @@
 
 ["function", "stream-runtime-boundary-these-paths-recognize-subscribe-merg", "_stream_stage_arrow", 1, 1]
 
-["reason", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered."]
+["reason", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `_rust_type`'s statements."]
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_arg_ref_name", 2, 2]
 
@@ -292,7 +278,7 @@
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_fn_type", 1, 1]
 
-["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_type", 2, 2]
+["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_type", 1, 1]
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_v3_lit", 3, 3]
 
@@ -340,7 +326,7 @@
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_bodies_have_witnessed", 1, 1]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_body_lines", 39, 39]
+["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_body_lines", 38, 38]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_step_is_witnessed_effect", 2, 2]
 

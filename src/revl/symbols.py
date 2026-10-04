@@ -23,6 +23,7 @@ never be swallowed into a neighbour's span and then overwritten by an edit.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .errors import RevlError
@@ -291,7 +292,8 @@ def render(text: str, comments: bool, name: str) -> str:
         return text
     from .formatter import format_source  # noqa: PLC0415
 
-    return format_source(text, name, comments=False)
+    # a display of the held text: keep its line structure (issue #1700)
+    return format_source(text, name, comments=False, split_members=False)
 
 
 def _names_in(text: str, name: str) -> set[str]:
@@ -373,6 +375,152 @@ def _replace_member(buffer, text: str, found: Nested, replacement: str):
         raise SymbolError(str(error)) from None
     return buffer, new_text, {"form": "symbol", "symbol": found.path,
                               "kind": found.member.kind, "line": found.first}
+
+
+# ---------------------------------------------------------------- body only
+
+#: A body line that starts one of these is a statement, so the body is a block.
+_STATEMENT_START = re.compile(r"(let|var|return)\b")
+
+
+#: How a body fragment is put in canonical form before it is stored (issue
+#: #1700). The MCP server installs `revl.mcp.symbols.canonical`, the formatter
+#: behind its IR-equivalence gate; without it, as on the compile graph (issue
+#: #1780), a fragment is stored as written.
+def CANONICALISE(fragment: str) -> str:  # noqa: N802 - a hook, replaced at import
+    return fragment
+
+
+def fn_header(text: str) -> str | None:
+    """The header of a fn or method declaration (`fn name(params) -> T`, up to
+    but not including its `=` or `{`), or None when `text` does not start with
+    one. Brackets and string literals are skipped, so a default value or an
+    arrow return type cannot end the header early."""
+    start = text.find("fn ")
+    if start < 0 or text[:start].strip():
+        return None
+    paren = text.find("(", start)
+    if paren < 0:
+        return None
+    depth, i, quote = 0, paren, None
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif depth == 0 and ch in "={" and not text.startswith("=>", i):
+            return text[:i].rstrip()
+        i += 1
+    return None
+
+
+def _framed(header: str, body: str) -> str:
+    """The declaration `header` gets with `body`: `= expr` for an expression, a
+    block for statements (a line that starts with let, var or return)."""
+    lines = body.strip("\n").split("\n")
+    if any(_STATEMENT_START.match(line.strip()) for line in lines):
+        inner = "\n".join(("  " + line) if line.strip() else line for line in lines)
+        return f"{header} {{\n{inner}\n}}\n"
+    return f"{header} = {body.strip()}\n"
+
+
+def replace_body(vs: dict, symbol: str, body: str) -> tuple[tuple[str, str], str, dict]:
+    """Replace only the BODY of a method or fn (issue #1700): the server keeps
+    the declared header (name, parameters, return type), so the agent writes the
+    decision and not the frame. The rest is `replace`'s own path, including the
+    proof that only that member changed."""
+    try:
+        buffer, text, decl, found = locate(vs, symbol)
+    except SymbolError:
+        added = _new_method(vs, symbol, body)
+        if added is None:
+            raise
+        return added
+    lines = text.split("\n")
+    if found is not None:
+        kind, name = found.member.kind, found.path
+        own = "\n".join(lines[found.first - 1:found.last]).strip()
+    else:
+        kind, name = decl.kind, decl.name
+        own = isolate(text, decl, buffer[1]).strip()
+    header = fn_header(own) if kind in ("method", "fn") else None
+    if header is None:
+        raise SymbolError(
+            f"`body` replaces the body of a method or fn, and `{name}` is a "
+            f"{kind}; send its whole text as `replacement` instead")
+    new_body = CANONICALISE(body).rstrip("\n")
+    replacement = _framed(header, new_body)
+    buffer, new_text, echo = replace(vs, symbol, replacement)
+    echo = {**echo, "form": "body", "header": header}
+    if new_body != body.strip("\n"):
+        echo["canonical"] = new_body
+    return buffer, new_text, echo
+
+
+def _new_method(vs: dict, symbol: str, body: str):
+    """`Comp.key.op` with a body, when `op` is not yet defined in the provide
+    block `Comp.key`: the server writes the method's frame from the service
+    declaration (`fn op(<params>)`) and puts the body in it (issue #1700). None
+    when `symbol` is not such a path, so the caller reports the original
+    error."""
+    top_symbol, rest = _top_and_rest(symbol)
+    if len(rest) != 2:
+        return None
+    key, op = rest
+    try:
+        buffer, text, decl, found = locate(vs, f"{top_symbol}.{key}")
+    except SymbolError:
+        return None
+    if found is None or found.member.kind != "provision":
+        return None
+    if found.first == found.last:
+        raise SymbolError(
+            f"the provide block `{found.path}` is on one line, so a method cannot "
+            f"be added to it by symbol; lay it out one member per line first "
+            f"(revl_fmt does)")
+    params = _service_params(vs, decl.name, key, op)
+    if params is None:
+        raise SymbolError(
+            f"`{decl.name}` provides `{key}` as a service with no operation "
+            f"`{op}`, so there is no signature to write the method from")
+    header = f"fn {op}({', '.join(params)})"
+    lines = text.split("\n")
+    closing = lines[found.last - 1]
+    indent = closing[:len(closing) - len(closing.lstrip())] + "  "
+    framed = _framed(header, CANONICALISE(body).rstrip("\n")).rstrip("\n")
+    member = [indent + line if line.strip() else line for line in framed.split("\n")]
+    new_text = "\n".join(lines[:found.last - 1] + member + lines[found.last - 1:])
+    return buffer, new_text, {"form": "body", "symbol": f"{found.path}.{op}",
+                              "kind": "method", "line": found.last,
+                              "header": header, "frame": "from the service"}
+
+
+def _service_params(vs: dict, component: str, key: str, op: str) -> list | None:
+    """The parameter names the service `component` provides at `key` declares
+    for `op`, read from every buffer of the working set."""
+    services: dict = {}
+    provided = None
+    for (_kind, name), text in buffers(vs):
+        try:
+            program = Parser(text, name).parse()
+        except RevlError:
+            continue
+        services.update({svc.name: svc for svc in program.services})
+        for comp in program.components:
+            if comp.name == component:
+                provided = next((svc for k, svc, _line in comp.provides
+                                 if k == key), provided)
+    method = (services.get(provided).methods.get(op)
+              if provided in services else None)
+    return [name for name, _type in method.params] if method is not None else None
 
 
 def remove(vs: dict, symbol: str) -> tuple[tuple[str, str], str, dict]:

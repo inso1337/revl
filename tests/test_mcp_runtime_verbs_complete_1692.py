@@ -56,6 +56,8 @@ PLAN: dict[str, tuple[dict, dict | None]] = {
     "revl_tools": ({"source": SOURCE}, None),
     "revl_load": ({"source": SOURCE, "record": True}, None),
     "revl_call": ({"key": "s", "method": "f", "args": []}, None),
+    "revl_act": ({"key": "s", "method": "f", "args": []}, None),
+    "revl_counterfactual": ({"at": 0, "drop": True}, None),
     "revl_swap": ({"source": SOURCE2}, None),
     "revl_edit": ({"edits": [{"op": "replace", "find": "= 1", "with": "= 2"}]}, None),
     "revl_change": ({"edit": {"edits": [{"anchor": "= 1", "replacement": "= 2"}]},

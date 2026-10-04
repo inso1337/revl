@@ -129,7 +129,29 @@ CORPUS = [
     # or parameter, or the other operand of an `==`), and a call through a
     # function value types its payload
     "../../../backends/go/testdata/result_erased_1631.rvl",
+    # issue #106: the v3 COMBINED path's first slice (`_emit_v3_combined`). A
+    # top-level declaration beside components whose provide methods are single
+    # `return`s or empty bodies, with or without `requires`: the pure tier, the
+    # fixed host runtime, the service interfaces and keys, the component
+    # constructors with their required services, the provide impls and the
+    # load helpers, in one package. Keep these last: COMBINED_CORPUS below is
+    # the tail of this list from the first of them.
+    "comp_provide_pure.rvl",
+    "../emit_rust_corpus/service.rvl",
+    "../emit_rust_corpus/requires.rvl",
+    "../emit_rust_corpus/services_multi.rvl",
+    "../emit_ts_corpus/components_mixed.rvl",
+    # ... and realm placement on the same slice: `isolate <key> in realm(..)`
+    # (the `_revlRealm` interner and a child load context) and `intercept
+    # <key> with { .. }` (its metadata as a Go literal)
+    "../emit_rust_corpus/comp_realm_isolate.rvl",
+    "../emit_java_corpus/comp_realm_intercept.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl",
+    "../emit_ts_corpus/realm_isolate.rvl",
 ]
+
+# The combined-path documents, which import stc-go and are built against it.
+COMBINED_CORPUS = CORPUS[CORPUS.index("comp_provide_pure.rvl"):]
 
 
 def _load_reference_emit():
@@ -391,12 +413,16 @@ def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_pat
     a declaration beside an observable component, where both sides emit the
     function and only the reference emits the component. The planted token must
     be refused by name; the honest form (the reference's component, absent from
-    the port) still passes.
+    the port) still passes. The component carries a config field because a
+    provide-only one is on the combined slice the port carries now (issue #106).
     """
     path = tmp_path / "planted.rvl"
     path.write_text("fn f() -> Int { return 1 }\n"
                     "service S { fn g() -> Int }\n"
-                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+                    "component C provides s: S {\n"
+                    "  config { n: Int = 1 }\n"
+                    "  provide s { fn g() = 1 }\n"
+                    "}\n")
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)
     assert "func f()" in want and "func f()" in got, (
@@ -462,14 +488,49 @@ def test_an_observable_component_on_the_pure_path_is_named_by_the_port(emitted,
     genuinely incidental component, below.
     """
     path = tmp_path / "observable.rvl"
+    # A config field is past the combined path's ported slice (issue #106,
+    # COMBINED_CORPUS), so this component is still one the port names.
     path.write_text("fn f() -> Int { return 1 }\n"
                     "service S { fn g() -> Int }\n"
-                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+                    "component C provides s: S {\n"
+                    "  config { n: Int = 1 }\n"
+                    "  provide s { fn g() = 1 }\n"
+                    "}\n")
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)
     assert 'Name: "C",' in want, "the reference carries the component"
     assert "func f() int64 {" in want, "and the declaration it was routed for"
     assert_boundary_witness(want, got, "stc.Component", "<<UNSUPPORTED-COMPONENT:C>>")
+
+
+def test_the_combined_slice_carries_a_provide_only_component(emitted, reference,
+                                                             tmp_path):
+    """The same shape inside the ported slice is carried byte-for-byte now."""
+    path = tmp_path / "carried.rvl"
+    path.write_text("fn f() -> Int { return 1 }\n"
+                    "service S { fn g() -> Int }\n"
+                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert 'Name: "C",' in got and "<<UNSUPPORTED" not in got
+    assert got == want
+
+
+@pytest.mark.parametrize("rel", COMBINED_CORPUS)
+def test_the_combined_corpus_builds_against_stc_go(emitted, rel):
+    """The combined module imports stc-go, so it is built the way the carried
+    set is (tools/validate.py), not with the module-less `go test` above."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import validate  # noqa: PLC0415
+
+    validator = validate.VALIDATORS["go"]
+    reason = validator.unavailable()
+    if reason:
+        pytest.skip("go toolchain unavailable: %s" % reason)
+    ir = compile_files([str(CORPUS_DIR / rel)])
+    results = validator.check([(rel, emitted["emit_go_src"](ir))])
+    status, detail = results[rel]
+    assert status == validate.OK, detail
 
 
 def test_an_incidental_component_on_the_pure_path_is_not_marked(emitted, reference,

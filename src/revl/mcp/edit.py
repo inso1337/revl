@@ -97,9 +97,11 @@ def virtual_source(session) -> dict:
     Two shapes. An inline composition is ``{source, modules}``. A composition
     loaded from `files` is ``{files, files_content, modules}``: one buffer per
     loaded file, keyed by the path it was loaded under (issue #1690). Its text is
-    the text the session last swapped in when an edit has run, and otherwise the
-    file as it is on disk now. Disk is never written: the edited text lives on
-    the session, and `revl_snapshot` carries it.
+    the text the session holds: read at load (issue #1842), and the text it last
+    swapped in once an edit has run. Disk is read only for an origin that holds
+    no text for a file (one restored from an older snapshot). Disk is never
+    written: the edited text lives on the session, and `revl_snapshot` carries
+    it.
     """
     draft = getattr(session, "draft", None)
     if draft is not None:
@@ -140,6 +142,19 @@ def _match_file(files: list, target: str) -> str | None:
     return None
 
 
+def _suffix_matches(files: list, target: str) -> list[str]:
+    """The loaded files whose path ends with `target` on a segment boundary: a
+    basename (`plain.rvl`) or any trailing path (`app/plain.rvl`). Buffers are
+    keyed by the full path they were loaded under, so this is what lets a
+    caller name one the way it names a file. An absolute `target` is a path,
+    not a suffix, and matches nothing here."""
+    wanted = target.replace(os.sep, "/").strip("/")
+    if not wanted or os.path.isabs(target):
+        return []
+    return [path for path in files
+            if ("/" + path.replace(os.sep, "/")).endswith("/" + wanted)]
+
+
 def _editable(vs: dict) -> list[str]:
     names = ["source"] if vs.get("source") is not None else []
     return names + list(vs.get("files") or []) + sorted(vs.get("modules") or {})
@@ -165,6 +180,13 @@ def _resolve_buffer(vs: dict, target: str | None) -> tuple[str, str]:
         return "file", path
     if target in (vs.get("modules") or {}):
         return "module", target
+    suffixed = _suffix_matches(files, target)
+    if len(suffixed) == 1:
+        return "file", suffixed[0]
+    if suffixed:
+        raise EditError(
+            f"`target` {target!r} names {len(suffixed)} loaded files; give "
+            f"enough of the path to pick one: {', '.join(suffixed)}")
     raise EditError(
         f"no server-side source buffer named {target!r}; "
         f"editable buffers: {', '.join(_editable(vs)) or 'none'}")
@@ -271,10 +293,15 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
         if "expr" not in edit:
             raise EditError("a hole edit needs `expr` (the fill expression)")
         start, end = _hole_span(text, int(edit["hole"]))
-        expr = str(edit["expr"])
-        return text[:start] + expr + text[end:], {
-            "form": "hole", "line": int(edit["hole"]),
-            "replaced": text[start:end], "expr": expr}
+        sent = str(edit["expr"])
+        # issue #1700: a terse fill is stored as `revl fmt` writes it
+        from .symbols import canonical  # noqa: PLC0415 - symbols imports edit
+        expr = canonical(sent).rstrip("\n") if "\n" not in sent.strip() else sent
+        echo = {"form": "hole", "line": int(edit["hole"]),
+                "replaced": text[start:end], "expr": expr}
+        if expr != sent:
+            echo["canonical"] = expr
+        return text[:start] + expr + text[end:], echo
 
     if "anchor" in edit:
         anchor = str(edit["anchor"])
@@ -283,7 +310,7 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
         replacement = str(edit.get("replacement", ""))
         occurrences = text.count(anchor)
         if occurrences == 0:
-            raise EditError(f"anchor {anchor!r} does not occur in the buffer")
+            return _token_anchor(text, anchor, replacement, edit.get("count"))
         count = edit.get("count")
         if count is None:
             new_text = text.replace(anchor, replacement)
@@ -326,6 +353,9 @@ def _apply_to_buffers(vs: dict, edits: list, default_target) \
     for edit in edits:
         if isinstance(edit, dict) and "symbol" in edit:
             buffer, text, echo = _apply_symbol(vs, edit)
+        elif isinstance(edit, dict) and "append" in edit:
+            buffer, text, echo = _apply_append(
+                vs, edit, edit.get("target", default_target))
         else:
             target = edit.get("target", default_target) \
                 if isinstance(edit, dict) else default_target
@@ -337,7 +367,64 @@ def _apply_to_buffers(vs: dict, edits: list, default_target) \
         applied.append(echo)
         if buffer not in touched:
             touched.append(buffer)
+    applied += _complete_touched(vs, touched)
     return applied, touched
+
+
+def _complete_touched(vs: dict, touched: list) -> list[dict]:
+    """Complete terse punctuation in every buffer the edits left unparsable
+    (issue #1700): newline-separated match arms and an `if` without
+    parentheses. A buffer that parses, or that completion cannot make parse,
+    is left as it is, and the compile reports it. Each completion is echoed."""
+    from .complete import complete  # noqa: PLC0415
+
+    out = []
+    for buffer in touched:
+        text, inserted = complete(_get_text(vs, buffer), buffer[1])
+        if inserted:
+            _set_text(vs, buffer, text)
+            echo = {"form": "completed", "inserted": inserted}
+            if buffer[0] != "source":
+                echo["target"] = buffer[1]
+            out.append(echo)
+    return out
+
+
+def _apply_append(vs: dict, edit: dict, target) -> tuple[tuple[str, str], str, dict]:
+    """``{append, target?}``: add new top-level declarations at the end of a
+    buffer (issue #1695, `revl_change {add}`). Position independent, like
+    `symbol` and `anchor`, so no offset is needed. A name that is already
+    declared in any buffer is refused: replacing it is `{symbol, replacement}`."""
+    from . import symbols  # noqa: PLC0415
+
+    added = edit.get("append")
+    if not isinstance(added, str) or not added.strip():
+        raise EditError("an append edit needs `append`, the declarations to add")
+    buffer = _resolve_buffer(vs, target)
+    try:
+        new_decls = symbols.declarations(added, "<added>")
+        existing = {decl.name: key for key, text in symbols.buffers(vs)
+                    for decl in symbols.declarations(text, key[1])}
+    except symbols.SymbolError as error:
+        raise EditError(str(error)) from None
+    if not new_decls:
+        raise EditError("the text to add declares nothing (a component, service, "
+                        "type or fn)")
+    taken = [d.name for d in new_decls if d.name in existing]
+    if taken:
+        raise EditError(
+            f"{', '.join(taken)} is already declared; to change it, replace it "
+            f"by name ({{replace: {{component, source}}}} in revl_change, or "
+            f"{{symbol, replacement}} in revl_edit)")
+    text = _get_text(vs, buffer)
+    stored = symbols.canonical(added)     # issue #1700: stored as revl fmt writes it
+    body = stored if stored.endswith("\n") else stored + "\n"
+    joint = "" if not text or text.endswith("\n\n") else \
+        ("\n" if text.endswith("\n") else "\n\n")
+    echo = {"form": "append", "declared": [d.name for d in new_decls]}
+    if stored.strip() != added.strip():
+        echo["canonical"] = stored.rstrip("\n")
+    return buffer, text + joint + body, echo
 
 
 def _apply_symbol(vs: dict, edit: dict) -> tuple[tuple[str, str], str, dict]:
@@ -346,16 +433,27 @@ def _apply_symbol(vs: dict, edit: dict) -> tuple[tuple[str, str], str, dict]:
     from . import symbols  # noqa: PLC0415
 
     removing = edit.get("remove") is True
-    if not removing and not isinstance(edit.get("replacement"), str):
-        raise EditError("a symbol edit needs `replacement`, the declaration's "
-                        "new text, or `remove: true`")
+    body = edit.get("body")
+    if not removing and not isinstance(edit.get("replacement"), str) \
+            and not isinstance(body, str):
+        raise EditError("a symbol edit needs `replacement` (the declaration's "
+                        "new text), `body` (a method's or fn's new body only), "
+                        "or `remove: true`")
     symbol = edit["symbol"]
     if edit.get("target") and ":" not in str(symbol):
         symbol = f"{edit['target']}:{symbol}"
     try:
         if removing:
             return symbols.remove(vs, symbol)
-        return symbols.replace(vs, symbol, edit["replacement"])
+        if isinstance(body, str):
+            return symbols.replace_body(vs, symbol, body)
+        # issue #1700: terse text is accepted and stored as `revl fmt` writes it
+        sent = edit["replacement"]
+        stored = symbols.canonical(sent)
+        buffer, text, echo = symbols.replace(vs, symbol, stored)
+        if stored.strip() != sent.strip():
+            echo = {**echo, "canonical": stored.rstrip("\n")}
+        return buffer, text, echo
     except symbols.SymbolError as error:
         raise EditError(str(error)) from None
 
@@ -441,6 +539,49 @@ def check_imports(vs: dict, touched: list[tuple[str, str]]) -> None:
             f"refused: the patched source's {named} leaves the "
             "operator-sanctioned root(s) — an import an edit writes may not name "
             "an absolute path or a file outside them; nothing was compiled")
+
+
+def _token_anchor(text: str, anchor: str, replacement: str, count):
+    """An anchor that does not occur verbatim, matched by its tokens instead
+    (issue #1700). The server may hold a canonical rewrite of what an agent
+    sent, so an anchor copied from the sent text differs only in whitespace.
+    Tokens and comments must match exactly, in order; only the whitespace
+    between them may differ. Refused, as before, when nothing matches."""
+    spans = token_spans(text, anchor)
+    if not spans:
+        raise EditError(f"anchor {anchor!r} does not occur in the buffer, "
+                        f"not even with its whitespace ignored")
+    if count is not None:
+        spans = spans[:int(count)]
+    new_text = text
+    for start, end in reversed(spans):
+        new_text = new_text[:start] + replacement + new_text[end:]
+    return new_text, {"form": "anchor", "anchor": anchor,
+                      "replacement": replacement, "sites": len(spans),
+                      "matched": "tokens"}
+
+
+def token_spans(text: str, anchor: str) -> list[tuple[int, int]]:
+    """The non-overlapping spans of `text` whose tokens and comments are
+    `anchor`'s, whitespace aside."""
+    from ..formatter import FormatError, _scan  # noqa: PLC0415
+
+    try:
+        hay = [p for p in _scan(text, "<buffer>") if p.kind != "newline"]
+        needle = [(p.kind, p.text) for p in _scan(anchor, "<anchor>")
+                  if p.kind != "newline"]
+    except (FormatError, RevlError):
+        return []
+    if not needle:
+        return []
+    out, i, m = [], 0, len(needle)
+    while i + m <= len(hay):
+        if all((hay[i + k].kind, hay[i + k].text) == needle[k] for k in range(m)):
+            out.append((hay[i].start, hay[i + m - 1].end))
+            i += m
+        else:
+            i += 1
+    return out
 
 
 def _apply_edits(text: str, edits: list) -> tuple[str, list[dict]]:
