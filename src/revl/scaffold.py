@@ -276,12 +276,16 @@ def build_skeleton(spec: Spec) -> str:
 
     if spec.effect:
         lines.append("")
-        lines.append("  // The acquire/undo scaffolding is real; the resource"
-                     " it yields is an obligation.")
+        # Both halves are obligations. The inverse depends on what the
+        # acquisition turns out to be (the inverse an `acquire` extern declares
+        # over its `result`, or a builtin's own release), so writing one here
+        # would be inventing a call that need not exist (issue #1846).
+        lines.append("  // The acquire/undo pairing is real; the resource and its"
+                     " release are obligations.")
         lines.append(f"  let resource = effect hole[{spec.resource_type}] "
-                     f"\"acquire the resource {spec.component} manages; the undo"
-                     " must fully release it (no residue)\"")
-        lines.append("                 undo resource.release()")
+                     f"\"acquire the resource {spec.component} manages\"")
+        lines.append("                 undo hole[Unit] \"release `resource` fully"
+                     " (no residue): the inverse its acquisition declares\"")
 
     lines.append("")
     lines.append(f"  provide {spec.provides} {{")
