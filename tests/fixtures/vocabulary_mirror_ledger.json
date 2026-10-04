@@ -257,7 +257,7 @@
     {
       "sites": [
         "src/revl/fault.py::_drive_roundtrip",
-        "src/revl/fault.py::_prune_dependents",
+        "src/revl/fault.py::subset_composition",
         "src/revl/run_go.py::_load_order",
         "src/revl/run_java.py::_load_order",
         "src/revl/run_rust.py::_load_order",
@@ -270,7 +270,7 @@
         "manifest",
         "name"
       ],
-      "note": "The manifest load-order fields. The five `_load_order` bodies are per-backend copies of one another, which is the copy-paste form of this defect: a manifest field added for one runtime and not the others changes load order on five tiers unevenly."
+      "note": "The manifest load-order fields. The five `_load_order` bodies are per-backend copies of one another, which is the copy-paste form of this defect: a manifest field added for one runtime and not the others changes load order on five tiers unevenly. `fault.subset_composition` is the one place a composition is cut down to some of its components: `fault._prune_dependents` and `recover_binding._sub_composition` (a placement process's share, issue #1477) both call it rather than re-spelling the fields."
     },
     {
       "sites": [
