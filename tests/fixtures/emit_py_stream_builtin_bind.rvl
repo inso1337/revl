@@ -1,0 +1,18 @@
+// issue #1646, held to byte agreement by tests/test_selfhost_emit_py.py: an
+// `every ... in` item named after a Python builtin. The item is renamed once,
+// exactly as every read of it in the loop body is (`len` -> `len_`); a second
+// rename once bound it as one name while the body read another.
+//
+// It sits beside emit_py_corpus/ rather than in it because
+// tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
+// is not this slice.
+
+service Sink { emission fn put(x: Str) }
+
+component Reader requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every len in sub {
+    emit sink.put(len)
+  }
+}

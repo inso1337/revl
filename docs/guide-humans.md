@@ -476,7 +476,7 @@ easiest place to overclaim:
 
 <!-- docgen:mcp-test-count begin -->
 The `mcp serve` tool surface, its annotations and its structured rejections
-are gated by `tests/test_mcp.py` (47 tests).
+are gated by `tests/test_mcp.py`.
 <!-- docgen:mcp-test-count end -->
 
 ## Backends

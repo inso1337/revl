@@ -1,0 +1,43 @@
+// A value-position emission in a provide-method body: `return emit f(x)` and
+// `let r = emit f(x)`. The `emit` marker leaves no trace on the IR node (it is
+// a plain `fn` call node), so the reference `_is_value_emission` reads the
+// extern's class and fires an `emission` extern through the recording seam
+// (`_revl_extern_emit`), exactly as an `emit` step is fired. Rendered as a bare
+// call, the crossing never reached the recorder and the WAL never saw it, so a
+// recover could not compensate it.
+//
+//   file   - `return emit file_host(t)`, the whole return value.
+//   bind   - `let r = emit file_host(t)`, then a later reassignment `r = emit`.
+//   fold   - a pure extern in a `return`, not routed.
+//
+// No `emit` STATEMENT appears here on purpose: the `from runtime import` line
+// must pull in `extern_emit` for the value emissions alone. A value emission
+// inside a method `if` arm renders through the same `method_step` recursion,
+// and is kept out of this document because selfhost/lower.rvl does not lower
+// method control flow yet (services_control_flow.rvl in LOWER_GAP_DOCS), and
+// this document is held byte-exact through the fully-native chain too.
+
+extern emission fn file_host(t: Str) -> Str = @py {
+    return 'id-' + t
+}
+extern pure fn shout(t: Str) -> Str = @py {
+    return t.upper()
+}
+
+service Tickets {
+  emission fn file(t: Str) -> Str
+  emission fn bind(t: Str) -> Str
+  fn fold(t: Str) -> Str
+}
+
+component Desk provides tickets: Tickets {
+  provide tickets {
+    fn file(t) { return emit file_host(t) }
+    fn bind(t) {
+      var r = emit file_host(t)
+      r = emit file_host(r)
+      return r
+    }
+    fn fold(t) { return shout(t) }
+  }
+}

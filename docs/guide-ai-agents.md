@@ -295,8 +295,8 @@ is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 never has to touch the filesystem. This is your primary interface.
 
 <!-- docgen:agents-mcp-count begin -->
-The complete advertised verb set is 58 verbs, from
-`src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what
+The complete advertised verb set, from
+`src/revl/mcp/server.py` and `query_tools.py`, is grouped below by what
 you reach for; each verb's exact inputs and outputs are in
 [mcp-reference.md](mcp-reference.md).
 <!-- docgen:agents-mcp-count end -->
@@ -315,7 +315,10 @@ you reach for; each verb's exact inputs and outputs are in
 | `revl_act` | one call per action through the approval gate: its class, and executed (a), deferred to commit (b) or ticketed (c), with a receipt the commit manifest lists | [mcp-reference.md](mcp-reference.md#revl_act) |
 | `revl_counterfactual` | replace, insert or drop one action of the `revl_act` log and see how the gate's decisions would differ, with nothing run | [mcp-reference.md](mcp-reference.md#revl_counterfactual) |
 | `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-reference.md](mcp-reference.md#revl_load) |
-| `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor), you send the change, not the file | [mcp-reference.md](mcp-reference.md#revl_edit) |
+| `revl_export` | write the committed (held) source to disk, on request: disk is an export, never a side effect | [mcp-reference.md](mcp-reference.md#revl_export) |
+| `revl_change` | **propose, verify, commit**: speculative by default (nothing swaps until `commit: true`), one call for a whole change: `{edit}`, `{replace: {component, source}}` or `{withdraw}`; loads if needed, plans (the withdrawal cascade), verifies (admission, gates, optional gauntlet) and commits only if all pass, naming every component touched | [mcp-reference.md](mcp-reference.md#revl_change) |
+| `revl_source` | read **one declaration** by symbol (`NotesHttp`, `<file>:Name`, `<file>:<line>`), optionally with the declarations it names and without comments, instead of the whole file | [mcp-reference.md](mcp-reference.md#revl_source) |
+| `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor / symbol), you send the change, not the file | [mcp-reference.md](mcp-reference.md#revl_edit) |
 | `revl_swap` · `revl_rollback` · `revl_undo` · `revl_unload` | replace a generation, undo the last swap, return to an earlier generation through the gate, tear down + prove no residue (R4) | [mcp-reference.md](mcp-reference.md#revl_swap) · [generation-history.md](generation-history.md) |
 | `revl_gauntlet` · `revl_quarantine` | grade a candidate (proved / tested / claimed), or prove an untrusted one in the wasm sandbox | [gauntlet.md](gauntlet.md) · [quarantine-tier.md](quarantine-tier.md) |
 | `revl_repair` · `revl_canary` | run the repair loop within policy, or canary a successor onto one realm slice and decide on evidence | [repair-loop.md](repair-loop.md) · [verified-canary.md](verified-canary.md) |

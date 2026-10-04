@@ -232,6 +232,23 @@ per-capability count read structurally off the step list:
   contributes `*` at multiplicity 1 per syntactic call site, and marks the
   capability set with `*` (we can count the call sites, but not name the
   boundary; see §5.1 for why this does not let a body under-report).
+- **An emitting arrow is counted where it RUNS, once per invocation, never
+  once per literal (issue #1757).**
+  - A `let`, `var` or assignment that binds an arrow counts nothing there.
+    Each direct call of the bound name contributes the arrow body's count, so
+    two calls are two crossings. A name bound to several arrows (two methods,
+    a reassigned `var`) costs the worst of them.
+  - An arrow argument to a top-level fn, whether a literal or a bound name,
+    contributes its body's count times the number of direct invocations of
+    the receiving parameter on one path of that fn (path-max: an `if`/`match`
+    takes the worse branch). A data argument is evaluated once, as before.
+  - Anything that hides the number of runs makes the arrow's capabilities
+    `unbounded` with that reason: an alias, a field or element read, storage
+    in a record or list, a pass to another fn, an invocation inside another
+    arrow, an unknown or recursive callee the loop recognizer did not
+    certify, or a callee that invokes its parameters inside a `while`/`for`.
+  - An early `return` inside an `if` with no `else` is over-approximated as
+    falling through, which only raises a ceiling.
 
 This is a bottom-up evaluation over the call graph condensation (SCCs). A
 non-looping body is one whose reachable SCCs are all singletons with no
