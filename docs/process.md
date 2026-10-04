@@ -284,8 +284,9 @@ the same `tools/affected_tests.py` selection. When it is the full root suite
 file with `REVL_TEST_SHARD=k/4`, balanced by the per-file seconds in
 `tests/shard_weights.json`. A file heavier than half an even shard is split
 further, by test family (a test function with all its parametrizations, or a
-test class): `tests/test_selfhost_lower.py` is one, and its single nesting test
-of about 19 minutes is now the floor of the slowest shard. A smaller selection
+test class). It was built for `tests/test_selfhost_lower.py`, whose nesting
+test took about 19 minutes until issue #1861 made it about 26 seconds; no file
+is heavy enough to split on the current weights. A smaller selection
 runs whole in shard 1. The
 shards run every selected test exactly once, which
 `tests/test_root_suite_shards_1774.py` pins. A stale weight only makes the
