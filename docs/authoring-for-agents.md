@@ -132,7 +132,8 @@ in full at [`revl_scaffold`](mcp-reference.md#revl_scaffold),
 [`revl_explain`](mcp-reference.md#revl_explain).
 
 <!-- docgen:authoring-mcp-count begin -->
-`revl mcp serve` advertises the verbs listed in full in
+`revl mcp serve` lists its core tier by default and `revl_verbs`
+finds the rest; every verb is listed in full in
 [mcp-reference.md](mcp-reference.md).
 <!-- docgen:authoring-mcp-count end -->
 

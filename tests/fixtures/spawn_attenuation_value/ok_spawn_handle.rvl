@@ -1,0 +1,34 @@
+// ADMITTED: the same child as `g4_spawn_handle.rvl`, but `Supervisor` crosses
+// its own spawn handle in value position, so it holds every boundary the child
+// reaches. The file name's prefix is the expected verdict;
+// tests/test_spawn_attenuation_value.py holds it.
+
+service StoreA {
+  emission[kv_a] fn write_a(row: Str) -> Int
+}
+service Task {
+  emission fn go() -> Int
+}
+component Worker provides task: Task {
+  provide task {
+    fn go() = 0
+  }
+}
+component Leaker provides task: Task {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide task {
+    fn go() {
+      let r = emit w.task.go()
+      return r
+    }
+  }
+}
+component Supervisor requires kv_a: StoreA provides task: Task {
+  let l = effect spawn Leaker with { } undo l.dispose()
+  provide task {
+    fn go() {
+      let r = emit l.task.go()
+      return r
+    }
+  }
+}

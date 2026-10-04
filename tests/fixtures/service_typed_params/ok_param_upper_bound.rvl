@@ -1,0 +1,21 @@
+// ADMITTED: `g4_param_upper_bound.rvl` with `Till.go` declared
+// `emission[production.payment]`, which covers the crossing. The file name's
+// prefix is the expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_service_typed_params.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay {
+  emission[production.payment] fn charge(cents: Int) -> Int
+  fn status() -> Int
+}
+service Till { emission[production.payment] fn go(p: Pay, n: Int) -> Int }
+
+component Register provides till: Till {
+  let a = await approval[production.payment] { reason: "pay" }
+  provide till {
+    fn go(p, n) {
+      emit p.charge(n) with a
+      return 0
+    }
+  }
+}

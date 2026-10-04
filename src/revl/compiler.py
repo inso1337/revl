@@ -194,7 +194,7 @@ class _ModuleLoader:
         # the author's only where it differs from the operator's text.
         self._operator = (None if operator_sources is None else
                           {os.path.abspath(k): v for k, v in operator_sources.items()})
-        self._trusted: dict[str, dict] = {}
+        self._trusted: dict[str, tuple] = {}
         self._stack: list[str] = []
         # Keys are normalised to abspath ONCE here. Every lookup below is by
         # abspath (`has_source`, `load`), so a relative key would never match
@@ -304,9 +304,12 @@ class _ModuleLoader:
         if operator is None:
             return program
         if abs_path not in self._trusted:
-            self._trusted[abs_path] = _operator_text.trusted_indices(
-                self._sources[abs_path], operator, abs_path)
-        return _operator_text.delta_program(program, self._trusted[abs_path])
+            self._trusted[abs_path] = (
+                _operator_text.trusted_indices(self._sources[abs_path], operator,
+                                               abs_path),
+                _operator_text.operator_placements(operator, abs_path))
+        trusted, placements = self._trusted[abs_path]
+        return _operator_text.delta_program(program, trusted, placements)
 
     def _operator_use(self, importer_path: str, use: _ast.UseDecl) -> bool:
         """Whether the operator's own text of the importing file names this

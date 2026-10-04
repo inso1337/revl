@@ -21,7 +21,7 @@ the same `route` IR entry `revl serve --http` and `revl export client` read.
 
 This module carries revl's SECOND type-to-schema mapping (issue #1272,
 docs/design/1272-two-type-to-schema-mappings.md). The first is
-`json_schema_for` in `mcp/schema.py`, which renders one self-contained
+`json_schema_for` in `type_schema.py`, which renders one self-contained
 validation fragment; this one renders an OpenAPI DOCUMENT, so it names its
 schemas as `$ref`s into `components/schemas`, treats a bare-`Opt` record field
 as absent rather than null, and REFUSES a type it cannot render exactly instead

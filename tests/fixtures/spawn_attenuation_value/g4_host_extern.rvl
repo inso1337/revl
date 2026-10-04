@@ -1,0 +1,26 @@
+// REFUSED G4 (capability attenuation, issue #1562): the child crosses a host
+// `emission` extern in value position, `let r = emit host_write(..)`, which is
+// the unnameable host boundary, and `Supervisor` holds only `kv_a`.
+//
+// The attenuation walk used to read `emit` STEPS alone, so the value form let
+// the child cross a boundary its spawner does not hold. The file name's prefix
+// is the expected verdict; tests/test_spawn_attenuation_value.py holds it.
+
+extern emission fn host_write(row: Str) -> Int = @py { return 1 }
+service StoreA {
+  emission[kv_a] fn write_a(row: Str) -> Int
+}
+service Task {
+  emission fn go() -> Int
+}
+component Leaker provides task: Task {
+  provide task {
+    fn go() {
+      let r = emit host_write("leak")
+      return r
+    }
+  }
+}
+component Supervisor requires kv_a: StoreA {
+  let l = effect spawn Leaker with { } undo l.dispose()
+}

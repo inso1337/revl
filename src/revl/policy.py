@@ -49,7 +49,7 @@ import json
 import re
 import warnings
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
 from . import cap_order
@@ -1669,47 +1669,10 @@ def _clause_verdict(facet: str, threshold: str, assessment, bundle,
     return ClauseVerdict(facet, threshold, status, False, standing, "")
 
 
-def _recompute_component(ir: dict, name: str, published,
-                         *, gauntlet_dossier) -> tuple:
-    """Item 290 §4, slice 3 (`--recompute`): run the operator's OWN local
-    producers against the component in hand and return
-    ``(bundle, recomputed_facets)``.
-
-    The producers are the shipped entry points, reused verbatim (never
-    re-derived here): `fault.sweep_dossier` (the per-component fault sweep),
-    `fault.roundtrip_dossier` (the composition's inverse round-trip), and the
-    caller-supplied cold `mcp.gauntlet.run` dossier. Operator-run evidence needs
-    no attestation root — the operator produced it — so the facets it yields are
-    marked `recomputed` (§6.3: rooted by construction). A producer whose runtime
-    is absent is honestly skipped (never faked): that facet is left as the
-    PUBLISHED bundle carried it and stays out of `recomputed_facets`, so the
-    report keeps marking it `published`.
-    """
-    from . import fault  # noqa: PLC0415 — lazy: the runtime-tested producers
-    from . import registry as reg  # noqa: PLC0415
-    fields: dict = {}
-    recomputed: set = set()
-    try:
-        fields["fault_sweep"] = fault.sweep_dossier(ir, only=name)
-        recomputed.add("fault-sweep")
-    except (ModuleNotFoundError, ImportError):
-        pass  # cordis-py absent: honestly unavailable, never faked
-    try:
-        fields["inverse_roundtrip"] = fault.roundtrip_dossier(ir)
-        recomputed.add("inverse-roundtrip")
-    except (ModuleNotFoundError, ImportError):
-        pass
-    if gauntlet_dossier is not None:
-        fields["gauntlet"] = gauntlet_dossier
-        recomputed.add("gauntlet")
-    base = published if published is not None else reg.EvidenceBundle()
-    return replace(base, **fields), frozenset(recomputed)
-
-
 def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                   *, evidence, origins, trusted_publishers, key,
                   evidence_ir, recompute=False, recompute_ir=None,
-                  recompute_gauntlet=None) -> dict:
+                  recompute_gauntlet=None, recompute_producer=None) -> dict:
     """The single comparison site: every evidence rule against every component,
     every clause verdict (pass and fail). `evaluate` turns failing clauses into
     violations; `revl policy evaluate` renders the whole thing. Register rules
@@ -1741,7 +1704,11 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
         bundle = evidence.get(name)
         recomputed_facets: frozenset = frozenset()
         if recompute and recompute_ir is not None and name in recompute_ir:
-            bundle, recomputed_facets = _recompute_component(
+            if recompute_producer is None:
+                raise ValueError(
+                    "recompute needs `recompute_producer`: pass "
+                    "revl.evidence_recompute.recompute_component")
+            bundle, recomputed_facets = recompute_producer(
                 recompute_ir[name], name, bundle,
                 gauntlet_dossier=recompute_gauntlet)
         assessment = None
@@ -2046,6 +2013,7 @@ def evaluate(policy: Policy, audit: dict,
              evidence_ir: dict | None = None,
              recompute: bool = False, recompute_ir: dict | None = None,
              recompute_gauntlet: dict | None = None,
+             recompute_producer=None,
              profile=None) \
         -> list[Violation]:
     """Evaluate `policy` against an audit graph — the whole gate decision.
@@ -2066,7 +2034,10 @@ def evaluate(policy: Policy, audit: dict,
     against each component and OVERLAY the published evidence before grading, so
     the gate and `revl policy evaluate` threshold the freshly recomputed facts;
     `recompute_gauntlet` is the caller-supplied cold gauntlet dossier. All three
-    default off, so an ordinary evaluation is byte-identical to before.
+    default off, so an ordinary evaluation is byte-identical to before. The
+    producer that runs the program is passed in as `recompute_producer`
+    (`revl.evidence_recompute.recompute_component`), so this module, which the
+    compiler imports, never imports the runtime (issue #1780).
     """
     mcp_components = frozenset(mcp_components or ())
     manifest = audit.get("manifest") or {}
@@ -2162,7 +2133,8 @@ def evaluate(policy: Policy, audit: dict,
             policy, audit, mcp_components, evidence=evidence, origins=origins,
             trusted_publishers=trusted_publishers, key=key,
             evidence_ir=evidence_ir, recompute=recompute,
-            recompute_ir=recompute_ir, recompute_gauntlet=recompute_gauntlet)
+            recompute_ir=recompute_ir, recompute_gauntlet=recompute_gauntlet,
+            recompute_producer=recompute_producer)
         violations.extend(_evidence_violations(policy, reports, manifest,
                                                profile))
         violations.extend(_register_violations(policy, reports, manifest))
@@ -2633,6 +2605,7 @@ def explain(policy: Policy, audit: dict,
             evidence_ir: dict | None = None,
             recompute: bool = False, recompute_ir: dict | None = None,
             recompute_gauntlet: dict | None = None,
+            recompute_producer=None,
             component: str | None = None) -> dict:
     """The `revl policy evaluate` dry-run: run the SAME `evaluate` (the gate's
     refusal set is authoritative), plus the per-clause reports for the explain
@@ -2648,13 +2621,15 @@ def explain(policy: Policy, audit: dict,
         policy, audit, mcp_components, evidence=evidence, origins=origins,
         trusted_publishers=trusted_publishers, key=key, evidence_ir=evidence_ir,
         recompute=recompute, recompute_ir=recompute_ir,
-        recompute_gauntlet=recompute_gauntlet)
+        recompute_gauntlet=recompute_gauntlet,
+        recompute_producer=recompute_producer)
     reports = _rule_reports(
         policy, audit, mcp_components, evidence=evidence, origins=origins,
         trusted_publishers=trusted_publishers, key=key,
         evidence_ir=evidence_ir, recompute=recompute,
         recompute_ir=recompute_ir,
-        recompute_gauntlet=recompute_gauntlet) if (
+        recompute_gauntlet=recompute_gauntlet,
+        recompute_producer=recompute_producer) if (
             policy.evidence_rules or policy.register_rules) else {}
     refused = {v.component for v in violations}
     inert = _inert_evidence_selectors(policy, reports) if reports else []
