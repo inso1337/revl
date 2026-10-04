@@ -926,6 +926,8 @@
 
 "oracle-reject:a deeper required-key crossing follows the sorted names"
 
+"oracle-reject:a fn that reuses an extern's name"
+
 "oracle-reject:a for binding over a live name"
 
 "oracle-reject:a for loop as the only returning path"
@@ -1070,6 +1072,8 @@
 
 "oracle-reject:an extern slot refusal inside a match arm"
 
+"oracle-reject:an extern that reuses a fn's name"
+
 "oracle-reject:an if with no else"
 
 "oracle-reject:an if/else with only one returning arm"
@@ -1105,6 +1109,8 @@
 "oracle-reject:an unmarked emission left of an undeclared name is still G4"
 
 "oracle-reject:an unmarked emission left of an undeclared name is still G4"
+
+"oracle-reject:any other refusal outranks a fn reusing an extern's name"
 
 "oracle-reject:assignment to a name nothing bound"
 
