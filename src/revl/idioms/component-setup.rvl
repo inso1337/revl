@@ -1,0 +1,12 @@
+// idiom: component-setup
+// summary: a statement of a component body, which runs when the component activates
+// rule: G6: a component body records effects; a plain `let x = value` has no effect to record and is refused
+// rule: G4: an activation crossing is written `emit <key>.<operation>(...)`
+// fill: "ready"
+// type: Str
+
+service Log { emission fn write(msg: Str) }
+
+component Greeter requires log: Log {
+  emit log.write("ready")
+}

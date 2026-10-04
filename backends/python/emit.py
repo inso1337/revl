@@ -1296,6 +1296,14 @@ class _ComponentEmitter:
         # awaiting call site settles — so the await-seed must NOT fire inside an
         # arrow, only in the method body's own statement/return/expression spots.
         self._in_arrow = False
+        # issue #1603: are we rendering a provide-method body's VALUE positions
+        # (a `return`, a `let`, a condition)? A call of an `emission` extern
+        # there is a `return emit f(x)` / `let r = emit f(x)`: the `emit`
+        # marker leaves no trace on the IR node, so the extern's class is what
+        # says it crosses. It fires through the recording seam, as an `emit`
+        # step does, or the WAL never sees it. Off while a compensation or an
+        # undo renders: those run at abort, not as the method's own crossing.
+        self._route_value_emissions = False
         # v2: realm placements and intercept metadata (docs/design-v2-realms.md)
         self.isolate = component.get("isolate") or {}
         self.intercept = component.get("intercept") or {}
@@ -1671,6 +1679,8 @@ class _ComponentEmitter:
                 extra += f", replay={_replay_kwarg(expr['replay'])}"
             return f"Stream.subscribe({stream}, {policy!r}, _revl_ctx{extra})"
         if kind == "fn":
+            if self._is_value_emission(expr):
+                return self._value_emission_fire(expr, where)
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             deferred = self.deferred.get(name) if self.deferred else None
@@ -2333,6 +2343,40 @@ class _ComponentEmitter:
             return f"(await {call})"
         return call
 
+    def _value_emission_fire(self, expr: dict, where: str) -> str:
+        """A provide-method value emission, fired through the recording seam
+        (#1603). When its extern DECLARES a `compensate` (item 254, #1592), the
+        compensation registers on the frame right after the fire and before the
+        rest of the expression, as an `emit` statement registers it:
+        `(<fire>, _revl_frame.compensation_method(lambda: <comp>))[0]` keeps
+        the emission's value. A fire that raises registers nothing."""
+        fire = self._extern_emit_fire(expr, where)
+        ext_comp = self._compensated_extern(expr)
+        if ext_comp is None:
+            return fire
+        comp = self._inverse_expr(ext_comp["compensate"], where)
+        return f"({fire}, _revl_frame.compensation_method(lambda: {comp}))[0]"
+
+    def _inverse_expr(self, expr: Any, where: str) -> str:
+        """`_expr` for an undo or a compensation inside a provide-method body:
+        it runs at abort, so a value-position emission in it is not routed."""
+        prev = self._route_value_emissions
+        self._route_value_emissions = False
+        try:
+            return self._expr(expr, where)
+        finally:
+            self._route_value_emissions = prev
+
+    def _is_value_emission(self, expr: dict) -> bool:
+        """A value-position call of an `emission` extern inside a provide-method
+        body (`return emit f(x)`, `let r = emit f(x)`), see
+        `_route_value_emissions`. A deferred emission is an `emit` step only."""
+        if not self._route_value_emissions:
+            return False
+        name = expr.get("name")
+        decl = self._extern_by_name.get(name) or {}
+        return decl.get("class") == "emission" and name not in (self.deferred or {})
+
     def _emission_fire(self, expr: dict, where: str) -> str:
         """The Python expression that FIRES an emission expression: a DIRECT
         host-extern crossing (`_emission_shape` == "extern", the one emission
@@ -2524,7 +2568,7 @@ class _ComponentEmitter:
         (it is the component's activation frame the method closes over)."""
         self._counter += 1
         tmp = f"_revl_wit{self._counter}"
-        undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
+        undo = self._inverse_expr(ext["undo"], where)  # e.g. `restore(result)`
         out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
         out.add(indent, f"if isinstance({tmp}, Ok):")
         # TODO(309-slice3): thread the idempotency register (item 309) into the
@@ -2847,11 +2891,13 @@ class _ComponentEmitter:
         self.analyze_model_flow(body, mwhere)
         prev_async = self._in_async
         self._in_async = method_is_async
+        self._route_value_emissions = True
         try:
             for step in body:
                 self._method_step(out, indent + 1, provide_name, name, step, mwhere, method_is_async)
         finally:
             self._in_async = prev_async
+            self._route_value_emissions = False
 
     def _method_step(
         self,
@@ -2907,7 +2953,7 @@ class _ComponentEmitter:
                 # "every failure is recorded, never silently dropped").
                 out.add(indent + 1,
                         f"yield _revl_frame._guard({_inverse_lambda(step, 'undo')}: "
-                        f"{self._expr(step.get('undo'), where)})")
+                        f"{self._inverse_expr(step.get('undo'), where)})")
                 out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))
@@ -2927,7 +2973,7 @@ class _ComponentEmitter:
                         f"outside the effect context.")
                 bind = _ident(step.get("bind"), f"{where}: bind")
                 acquire = self._expr(acquire_node, where)
-                undo = self._expr(step.get("undo"), where)
+                undo = self._inverse_expr(step.get("undo"), where)
                 head = _inverse_lambda(step, "undo", bind)
                 if _is_map_cas(step.get("acquire")):
                     # result-guarded undo (item 397): the accumulator entry
@@ -2964,9 +3010,17 @@ class _ComponentEmitter:
                 out.add(indent,
                         "_revl_frame.compensation_method("
                         f"{_inverse_lambda(step, 'compensate')}: "
-                        f"{self._expr(step.get('compensate'), where)})")
+                        f"{self._inverse_expr(step.get('compensate'), where)})")
             else:
                 out.add(indent, self._emit_fire(step, where))
+            ext_comp = self._compensated_extern(step.get("expr"))
+            if deferred is None and ext_comp is not None:
+                # item 254 / #1592: the extern DECLARES its own `compensate`.
+                # Registered after the fire and after a site-spelled one, the
+                # order the activation body (and the timer site, #1590) uses.
+                out.add(indent,
+                        "_revl_frame.compensation_method(lambda: "
+                        f"{self._inverse_expr(ext_comp['compensate'], where)})")
         elif kind == "return":
             if step.get("expr") is None:
                 out.add(indent, "return")

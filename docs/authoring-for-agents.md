@@ -60,7 +60,12 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    as `emit db.put(<k: Str>, <v: Str>)`. If it needs host code, `externs`
    says where the declaration goes (the top level of the file, never at the
    hole) and whether you may write one at all: an untrusted author may not.
-   `grammarCategory` names the syntactic slot the fill must be (today
+   Before filling, read `fillable`: a hole with `byThisAuthor: false` (also
+   listed under the response's `unfillable`) needs host code this author can
+   never write, so stop and ask the operator rather than spend effort on it.
+   `idiom` is the smallest admitted example of the construct the hole stands
+   in (`construct`), with the rules that make it correct: read it before
+   writing the fill. `grammarCategory` names the syntactic slot the fill must be (today
    `expression` for every hole); pass it as `category` to `revl_grammar`
    with a `format` to hold a constrained decoder to that slot. Fill one hole against its spec, re-check,
    repeat. This is the step that turns generate-whole/refuse/regenerate into
@@ -127,7 +132,7 @@ in full at [`revl_scaffold`](mcp-reference.md#revl_scaffold),
 [`revl_explain`](mcp-reference.md#revl_explain).
 
 <!-- docgen:authoring-mcp-count begin -->
-`revl mcp serve` advertises 55 verbs in total; the full list is in
+`revl mcp serve` advertises the verbs listed in full in
 [mcp-reference.md](mcp-reference.md).
 <!-- docgen:authoring-mcp-count end -->
 

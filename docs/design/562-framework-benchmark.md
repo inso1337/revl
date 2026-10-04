@@ -382,6 +382,90 @@ reproduce, because nothing in this repository has reproduced it on any machine
 state. An idle-machine measurement is a named remaining gate, emitted
 automatically whenever the accounted fraction is below 0.8.
 
+### 6.5 Third pass: the framework host runs, and one run feeds all three
+
+The second pass named `@modelcontextprotocol/sdk` 1.30.0 and left every one of
+its cells `not-run`, blocked on two things: a harness that loads a generated
+tool pack, unloads it and reads what is left, and a generation pass in MCP form.
+This pass builds both, and a row that takes all three hosts from one run.
+
+#### The harness
+
+`bench/mcp_host/probe.mjs` builds one `McpServer` at the version
+`bench/mcp_host/package-lock.json` pins (integrity hashes included), connects a
+`Client` over the SDK's in-memory transport, and installs and unloads the pack N
+times on that one server. It reads four categories, and it reads each one from
+something public rather than from the SDK's private fields:
+
+- **registry**: what the `Client` can list over the protocol;
+- **resources**: `host.Pool` / `host.Map` / `host.Job` handles still open, from
+  the same `liveResources` set the TypeScript backend's own no-residue check
+  reads, so both probe-scored hosts acquire the same resources and are checked
+  against the same set;
+- **listeners**: listeners on `process`;
+- **timers**: timers created and neither fired nor cleared.
+
+Two measurement decisions were forced by first attempts that got them wrong.
+Timers were first read from `process.getActiveResourcesInfo()`, which omits a
+timer that was `unref()`ed; the leaky-timer fixture used exactly that and read
+as clean. The probe now wraps the global timer functions for its own lifetime.
+And a registration made from a zero-delay timeout was reported as a live timer
+as well as a registry leak on the last cycle, depending on scheduling. A
+snapshot now waits `SETTLE_MS` for near-due work before it reads, so a
+zero-delay callback is not a leaked timer and a timeout still pending after that
+window is.
+
+#### The unload convention, and why it is not the SDK's
+
+`remove()` on a registration handle deletes the entry and notifies clients. It
+calls nothing on the handler, so a tool that took something at registration has
+no callback in which to give it back. Scored under `remove()` alone, every pack
+that acquires a resource leaks by construction, which is the result section 5
+refused to accept as a column: a number that says nothing about the runtime
+comparison.
+
+So the probe calls `remove()` on every handle the pack obtained while `install`
+ran, and then the function `install` returned, if it returned one. That return
+convention is this benchmark's. It is the least a host that loads tool packs
+while serving has to offer, the prompt states it to the model exactly as the
+raw-ts prompt states Cordis's lifecycle, and `bench/hosts.json` says in the
+host's own record that it is ours.
+
+One more adjustment is the SDK's and is also stated: a capability cannot be
+registered once a transport is connected, so the probe opens tools, resources
+and prompts before connecting, through one registration of each that it removes
+again.
+
+`bench/mcp_host/test.mjs` holds the probe to one fixture per category plus a
+clean one, and requires each leaky fixture to leak exactly its own category, so
+a probe that reported everything clean or everything leaking fails.
+
+#### One run, three hosts
+
+`bench/run.py --variants v2,raw-ts,mcp` generates all three hosts from one model
+in one run. `raw-ts` and `mcp` share one code path, generated once and probe-scored;
+`v2` keeps the compile-and-retry loop.
+
+`framework_bench.py --three-host-from <label>` builds the row from that single
+run directory and refuses to mix corpora. It counts only briefs every host
+answered, drops a brief from every host when one host's answer came from the
+reasoning channel (scoring a draft on one side of a comparison is how it comes
+out flattering by accident), re-scores revl's attempts against the current
+checker under the same no-self-score guard the admits column uses, and names the
+model the run's own records name. The count it leads with is the refused one:
+briefs revl did not admit that another host loaded and ran.
+
+#### What this pass did not do
+
+It did not run the pinned model. When this pass was built, the local endpoint was
+serving the same weights under a different tag and different sampling
+parameters to two other live sessions, with about a quarter of the machine's
+memory free. Loading the pinned tag would have evicted that model from under
+them, and running beside it would have measured their load as much as this
+model. So the row is `not-run`, and the report prints the one command that
+fills it. A pinned run over all thirty briefs is up to 150 generations at
+roughly nine minutes each on a contended machine.
+
 ## 7. Files
 
 - `bench/hosts.json`: the registry an outsider edits: hosts, pinned model, task
@@ -394,11 +478,18 @@ automatically whenever the accounted fraction is below 0.8.
 - `bench/framework_unload_survey.py`: the third host's selection evidence, as
   falsifiable claims checked against published artifacts.
 - `bench/injection_escape.py`: the injection-escape column.
+- `bench/mcp_host/`: the third host, pinned by `package-lock.json`, with its
+  residue probe (`probe.mjs`), its self-check (`test.mjs`) and one fixture per
+  leak category.
+- `bench/score_mcp.py`: scores and re-scores the mcp host's packs.
+- `bench/prompts/mcp.md`: the mcp host's prompt, which states the unload
+  convention.
 - `bench/framework_bench.py`: assembles the report, emits EVAL-REPORT-1 JSON
   plus the markdown table, and validates itself with
   `tools/check_eval_report.py` under `--check`.
 - `bench/results/framework-bench/`: the committed artifacts, raw beside the
-  summary.
+  summary. Since issue #1768 `report.{json,md}` there is a snapshot that does
+  not freeze the refused column, which is recomputed on every build.
 - `tests/test_framework_bench.py`: the tests.
 
 Nothing is published outside this repository. Publication is a named remaining
