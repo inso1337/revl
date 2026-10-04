@@ -115,6 +115,7 @@
     "subscribe=<true>"
   ],
   "emit_py": [
+    "key=<activation>",
     "kind=__rendered__",
     "kind=hole",
     "kind=lease-acquire",

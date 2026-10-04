@@ -175,6 +175,8 @@ CORPUS = [
     "../../../bench/results/rerun-deepseek-v4-pro-20260826/06-audit-logger/v2/attempt-1.rvl",
     "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
     "../../../bench/results/rerun-deepseek-v4-pro-20260826/17-billing-ledger/v2/attempt-1.rvl",
+    # ... and `Any` and a Result parameter in a component signature (issue #1892)
+    "comp_provide_any_result.rvl",
 ]
 
 # The combined-path documents, which import stc-go and are built against it.

@@ -96,6 +96,13 @@ class WALIntegrityError(RuntimeError):
     """
 
 
+class PlacementIndexNotAWAL(WALIntegrityError):
+    """The file is a placement run's index (`revl run --placement --wal`),
+    not a WAL (issue #1477). Read as a WAL it has no records, and a reader
+    would report a crashed placement as clean. `revl recover --wal` reads the
+    index itself and recovers every process WAL it names."""
+
+
 #: The single sentence recovery is allowed to claim. Deliberately narrow. Kept
 #: byte-identical to ``replay.WAL_GUARANTEE`` (pinned by a test) because it is
 #: written verbatim into every WAL header, py or non-py.
@@ -191,6 +198,22 @@ def __getattr__(name: str):
 #: writer names it and this reader indexes it, and a drift would leave every
 #: decision invisible to `revl compare` while the WAL still carried it.
 RECORD_MODEL_DECISION = "model-decision"
+
+
+def settled_descriptor_seqs(records: list) -> set:
+    """The `discharge-descriptor` seqs the log itself settles: a `discharge`
+    record's ``discharged`` (the commit path) and an `aborted` record's
+    ``replayed`` (the runtime's abort path, which `revl recover` replays
+    through). The same two records `runtime._settled_seqs` reads, so a reader
+    of what is still owed agrees with the replay that settled it."""
+    settled: set = set()
+    for record in records:
+        kind = record.get("record")
+        if kind == "discharge":
+            settled.update(record.get("discharged") or [])
+        elif kind == "aborted":
+            settled.update(record.get("replayed") or [])
+    return settled
 
 
 def model_decisions(records: list) -> dict:
@@ -320,6 +343,14 @@ def read_wal(path: str) -> dict:
                     "to read past it would silently drop committed records."
                 ) from None
             kind = entry.get("record")
+            if kind == "placement-index":
+                names = ", ".join(p.get("wal", "?")
+                                  for p in entry.get("processes") or [])
+                raise PlacementIndexNotAWAL(
+                    f"{path} is the index of a placement run, not a WAL: each "
+                    f"process wrote its own ({names}). `revl recover --wal "
+                    f"{path}` recovers all of them; read one process's WAL by "
+                    f"its own path.")
             if kind == "header":
                 header = entry
                 _check_version(header, path)

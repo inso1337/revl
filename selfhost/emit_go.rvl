@@ -3390,6 +3390,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   var comp_strconv = false
   var comp_ovf32 = false
   var comp_teardown = false
+  var comp_result = false
   var fnlines = []
   for (l of marked_lines) { fnlines = fnlines.push(strip_marks(l)) }
   var body = type_lines.concat(ext.lines).concat(fnlines)
@@ -3404,6 +3405,9 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
     comp_strconv = has_text(comp_lines, "strconv.Format")
     comp_ovf32 = has_text(comp_lines, "revlToI32(")
     comp_teardown = has_text(comp_lines, "newRevlFrame()")
+    // issue #1892: a component signature that takes a Result names
+    // `RevlResult[` with no `Result[` in the pure sections; the struct form
+    comp_result = has_text(comp_lines, "RevlResult[")
     body = body.concat(comp_lines)
   }
   let rendered = fnlines.join(newline())
@@ -3428,6 +3432,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
     if (ir_text_has(sec, ["Result[", "checked_div_", "checked_mod"])) { used_result = true }
   }
   if (used_map) { used_opt = true }
+  if (comp_result) { used_result = true }
   // The pure path also reads the rendered body for a Some/None/Ok/Err built
   // without `Opt[`/`Result[` spelled in the IR; the combined one does not.
   if (!combined && (has_text(body, "RevlOpt[") || has_text(body, "RevlSome[") || has_text(body, "RevlNone["))) { used_opt = true }
@@ -3561,6 +3566,13 @@ fn comp_go_type(tv: Any, types: Any) -> Str {
   if (t == "Int32") { return "int32" }
   if (t == "Float") { return "float64" }
   if (t == "Bool") { return "bool" }
+  // issue #1892: `Any` erases to Go's `any`, and a Result parameter is the
+  // package's `RevlResult[T, E]` (return position spreads in `comp_go_return`)
+  if (t == "Any") { return "any" }
+  if (t.startsWith("Result[") && t.endsWith("]")) {
+    let oe = split_top(t.slice(7, t.length() - 1), ",")
+    return `RevlResult[${comp_go_type(oe[0], types)}, ${comp_go_type(oe[1], types)}]`
+  }
   if (t.startsWith("List[") && t.endsWith("]")) { return "[]".concat(comp_go_type(t.slice(5, t.length() - 1), types)) }
   if (t.startsWith("Opt[") && t.endsWith("]")) { return "*".concat(comp_go_type(t.slice(4, t.length() - 1), types)) }
   if (t.startsWith("Map[") && t.endsWith("]")) {

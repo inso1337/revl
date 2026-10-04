@@ -83,16 +83,24 @@ something else gets its own word, `read-not-bound-to-this-step`, because the
 alternative is one word covering two outcomes, which is the defect the residue
 states above exist to fix.
 
-WHAT THIS MODULE DOES NOT DO. It performs nothing. There is no runtime
-transaction and no phase scheduler; the phases below are a COMPILE-TIME
-ELIGIBILITY decision (which phases a step of a given class may occupy) and a
-static plan read off the lowered IR. `compensation_run` (slice 3, issue #1369)
-COMPUTES a LIFO run - its order, its membership and each step's outcome, keyed
-on the step the transaction failed at - and the compensating crossings are
-performed by the computer-use substrate, roadmap item 539, upstream
-`inso1337/revl-harness#11`, which is what performs the actuations too. Saying
-so here is the point of section 3 of the slice-1 design: an implied guarantee
-revl does not enforce is worse than no phase list at all.
+WHAT THIS MODULE DOES NOT DO. It performs nothing. There is no phase
+scheduler; the phases below are a COMPILE-TIME ELIGIBILITY decision (which
+phases a step of a given class may occupy) and a static plan read off the
+lowered IR. `compensation_run` (slice 3, issue #1369) COMPUTES a LIFO run - its
+order, its membership and each step's outcome, keyed on the step the
+transaction failed at. Saying so here is the point of section 3 of the slice-1
+design: an implied guarantee revl does not enforce is worse than no phase list
+at all.
+
+WHERE THE RUN IS PERFORMED. On the python reference tier, and only there. The
+emitter wraps every provide method `plans` returns in
+`Frame.ui_transaction` (`backends/python/runtime.py`), which runs the call's
+registered compensations newest first when the call fails, and
+`tests/test_ui_transaction_runtime_1369.py` compares that run against
+`compensation_run` on the same program. The compensating host bodies are the
+substrate's (roadmap item 539, upstream `inso1337/revl-harness#11`), exactly
+as the actuations are; the order and the membership are revl's. The other five
+tiers have no unit.
 
 WHAT STAYS OPEN, so a reader of this module does not infer it closed. The
 CHECK-TO-USE RACE (issue #1371) is not closed here. Item 521 slice 4 carries a
@@ -303,9 +311,9 @@ def revert_report(steps) -> dict:
 
     `compensateOrder` is the LIFO order the compensations WOULD run in - the
     reverse of the step order, restricted to the steps that have one. It is a
-    plan, not an execution: nothing in revl runs it (item 539 owns the
-    substrate), and calling it an order rather than a result is the honest
-    word for a static artifact."""
+    plan, not an execution: what a failure runs is the failure-keyed
+    `compensation_run`, never this order, and calling it an order rather than
+    a result is the honest word for a static artifact."""
     buckets: dict[str, list] = {state: [] for state in WEAKEST_FIRST}
     ordered: list[tuple[str, str, str]] = []
     unclassified: list[str] = []
@@ -398,15 +406,17 @@ def _claim(buckets: dict[str, list]) -> str:
 #     it did before it. No run of any compensation set changes that, and this
 #     function does not print a word that suggests otherwise.
 #
-# WHAT THIS RUNS. Nothing. revl computes the run - the order, the membership
-# and the per-step outcome - and the compensating CROSSINGS are performed by
-# the computer-use substrate (roadmap item 539, upstream
+# WHAT THIS RUNS. Nothing: it computes the run - the order, the membership and
+# the per-step outcome. The python reference tier performs the same run when a
+# call fails (`Frame.ui_transaction`), and the compensating CROSSINGS are the
+# substrate's host bodies (roadmap item 539, upstream
 # `inso1337/revl-harness#11`), exactly as the actuations are. `performedBy`
-# says so in the artifact rather than only here. One consequence is stated and
-# not engineered away: a compensation that is performed and FAILS has no word
-# in the five-state vocabulary above (it was registered, so not
-# `unregistered`; it did not put the state back, so not `restored`), and this
-# module does not invent one for an execution it does not witness.
+# says so in the artifact rather than only here. A compensation performed there
+# that FAILS is recorded as `compensation-residue` in the teardown contract's
+# merged residue schema. It still has no word in the five-state vocabulary
+# above (it was registered, so not `unregistered`; it did not put the state
+# back, so not `restored`), and this module does not invent one for an
+# execution it does not witness.
 
 #: The sentence the run's artifact carries about who performs it.
 PERFORMED_BY = ("revl computes this run - its order, its membership and its "

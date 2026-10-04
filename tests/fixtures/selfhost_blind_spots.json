@@ -181,6 +181,9 @@
       ],
       "Internal reference-only pseudo-node, not frontend syntax: emit.py::_RenderedBody wraps already rendered component match arms with kind=__rendered__; emit_py.rvl::cmatch_branch passes expression strings directly. emit_py_corpus/branches.rvl::block_match covers the corresponding source behavior.": [
         "kind=__rendered__"
+      ],
+      "UI transaction unit boundary (item 522): emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and _emit_externs decorates each such extern with `declared_crossing` (`ui=True`). emit_py.rvl::emit_externs/method_step carries no UI transaction unit at all. tests/test_ui_transaction_runtime_1369.py reproduces the family; a corpus document would need a computer-use capability the port cannot emit.": [
+        "key=<activation>"
       ]
     }
   },

@@ -1794,6 +1794,8 @@
 
 "tests/fixtures/emit_rust_corpus/comp_host_map_undo_local.rvl"
 
+"tests/fixtures/emit_rust_corpus/comp_let_binds_param_undo.rvl"
+
 "tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl"
 
 "tests/fixtures/emit_rust_corpus/comp_str_builtin.rvl"
