@@ -41,12 +41,20 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-for _path in (ROOT / "src", HERE):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+# tests/ is APPENDED, so its modules resolve only names nothing earlier on
+# sys.path provides; `_load_by_path` is the one wanted here.
+if str(ROOT / "tests") not in sys.path:
+    sys.path.append(str(ROOT / "tests"))
 
-import javac_gate  # noqa: E402
-from emit import emit  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
+
+# By path, under names nothing else binds to another file: every backend
+# directory has an `emit.py`, so this tier's emitter is never the bare `emit`
+# (issue #1449).
+javac_gate = load_by_path("javac_gate", HERE / "javac_gate.py")
+emit = load_by_path("revl_java_emit_kw", HERE / "emit.py").emit
 
 from revl.compiler import compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
@@ -120,7 +128,12 @@ def test_every_admitted_name_emits(name):
 
 
 @needs_jdk
-def test_every_admitted_name_is_provided_and_called_end_to_end():
+def test_every_admitted_name_is_provided_and_called_end_to_end(monkeypatch):
+    # The in-repo stubs, even where real cordis4j classes are present (CI):
+    # with REVL_CORDIS4J_CLASSES set, `revl test --backend java` compiles the
+    # plugin against those classes but leaves them off the runner's classpath,
+    # so the JVM fails with NoClassDefFoundError before any name is called.
+    monkeypatch.setenv("REVL_CORDIS4J_CLASSES", "")
     status, message = RUNNERS["java"](compile_source(_program(ADMITTED), "kw.rvl"))
     assert status == "pass", message
 
