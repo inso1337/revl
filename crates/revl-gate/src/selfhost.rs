@@ -5794,6 +5794,20 @@ fn method_undo_clones(comp: Value, method: Value, indent: i64) -> Vec<String> {
     return out;
 }
 
+fn bare_param(node: Value, method: Value) -> String {
+    let k = node_kind(node.clone());
+    let mut out = String::from("");
+    if ((k == "var") || (k == "name")) {
+        let ident = ref_ident(node.clone());
+        for p in value_list(value_field(method.clone(), String::from("params"))) {
+            if (value_str(p.clone()) == ident) {
+                out = ident.clone();
+            }
+        }
+    }
+    return out;
+}
+
 fn ref_ident(node: Value) -> String {
     let mut ident = value_str(value_field(node.clone(), String::from("id")));
     if (ident == "") {
@@ -5942,16 +5956,25 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                 if ((kind == "let") || (kind == "assign")) {
                     let nm = value_str(value_field(step.clone(), String::from("name")));
                     let inferred = provide_let_type(value_field(step.clone(), String::from("value")), c.clone(), comp.clone(), services.clone());
+                    let param = bare_param(value_field(step.clone(), String::from("value")), method.clone());
                     if (kind == "let") {
                         let cshadow = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(nm.clone(), mangle(nm.clone())); c });
+                        let mut cvalue = cshadow.clone();
+                        if (param != "") {
+                            cvalue = set_rn(cshadow.clone(), { let mut c = cshadow.rn.clone(); c.insert(param.clone(), format!("{}.clone()", param)); c });
+                        }
                         let mut mut_ = String::from("");
                         if value_bool(value_field(step.clone(), String::from("mutable"))) {
                             mut_ = String::from("mut ");
                         }
-                        out.push(format!("{}let {}{} = {};", pad, mut_, mangle(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cshadow.clone())));
+                        out.push(format!("{}let {}{} = {};", pad, mut_, mangle(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cvalue.clone())));
                         c = cshadow.clone();
                     } else {
-                        out.push(format!("{}{} = {};", pad, mangle(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), c.clone())));
+                        let mut cvalue = c.clone();
+                        if (param != "") {
+                            cvalue = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(param.clone(), format!("{}.clone()", param)); c });
+                        }
+                        out.push(format!("{}{} = {};", pad, mangle(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cvalue.clone())));
                     }
                     if (inferred != "") {
                         c = set_vt(c.clone(), nm.clone(), inferred.clone());
