@@ -48,13 +48,14 @@ CONVERSE_FIXTURE = "examples/rejections/a9_provides_without_block.rvl"
 ROUTED = "tests/formal_corpus/a9_routes_installs_key.rvl"
 
 #: Every route the corpus carries, as (file, component, key). The formal
-#: fixture above is the one this module is about; the ts emitter corpus
-#: carries a second routed component of the same shape (#106). A new `PR`
-#: row anywhere else is either a new routed fixture (add it here) or an
-#: export that invents a route.
+#: fixture above is the one this module is about; the ts and py self-host
+#: emitter corpora each carry a routed component of the same shape (#106). A
+#: new `PR` row anywhere else is either a new routed fixture (add it here) or
+#: an export that invents a route.
 ROUTES = sorted([
     (ROUTED, "RoundRobin", "worker"),
     ("tests/fixtures/emit_ts_corpus/routed_timers.rvl", "Balancer", "worker"),
+    ("tests/fixtures/emit_py_placement.rvl", "Router", "worker"),
 ])
 
 #: An admitted provider with a block under a declared key.
