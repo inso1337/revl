@@ -2022,6 +2022,41 @@ def _duplicate_symbol_message(kind: str, name: str,
     return msg
 
 
+def _fn_extern_collision(decl, fn_file: str, ext_file: str, ext_line: int) -> RevlError:
+    """The refusal for a `fn` and an `extern fn` of one name (issue #1813), in
+    the duplicate-binding shape (`... is already declared ...`, G6), raised at
+    whichever of the two comes second. Both used to land in the IR, and which
+    one a call reached was left to the backend."""
+    name = decl.name
+    hint = ("a module `fn` and an `extern fn` share one namespace, so a call to "
+            "the name could reach either; rename one of them (issue #1813)")
+    if os.path.abspath(fn_file) != os.path.abspath(ext_file):
+        return RevlError(fn_file, decl.line,
+                         f"`{name}` is already declared as an extern in "
+                         f"{os.path.abspath(ext_file)}", hint=hint)
+    if decl.line > ext_line:
+        return RevlError(fn_file, decl.line,
+                         f"`{name}` is already declared as an extern on line "
+                         f"{ext_line}", hint=hint)
+    return RevlError(ext_file, ext_line,
+                     f"`{name}` is already declared as a function on line "
+                     f"{decl.line}", hint=hint)
+
+
+def _check_fn_extern_collisions(program: Program) -> None:
+    """Issue #1813: an `extern fn` and a module `fn` may not share a name. Both
+    used to land in the IR, and which one a call reached was left to the
+    backend. Checked once the program has otherwise been admitted, so every
+    other refusal, a G4 over a call that reaches the extern included, keeps
+    the diagnostic it had (tests/test_identifier_normalization.py)."""
+    externs_at = {ext.name: (program.decl_files.get(id(ext), program.filename),
+                             ext.line) for ext in program.externs}
+    for decl in program.fn_decls:
+        if decl.name in externs_at:
+            raise _fn_extern_collision(decl, decl.source or program.filename,
+                                       *externs_at[decl.name])
+
+
 def _lower_fns(program: Program, filename: str, types: dict | None = None) -> list:
     _check_verified_totality(program, filename)
     types = types or {}
@@ -8131,7 +8166,9 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     """
     with recursion_headroom():
         try:
-            return _check_and_lower(program, ambient, taint_strict, untrusted)
+            ir = _check_and_lower(program, ambient, taint_strict, untrusted)
+            _check_fn_extern_collisions(program)
+            return ir
         except RecursionError:
             raise RevlError(
                 program.filename, 0,
