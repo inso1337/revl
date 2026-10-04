@@ -455,7 +455,9 @@ draft through the same gates a `revl_load` runs (the load half of the operator
 gate, a lease on a cold load, the session's admission checks, the approval
 ticket). A gate that refuses leaves the draft held, hole-free, with the reason.
 `revl_load` with no source boots the held draft (with `config`/`record` if
-given), and refuses while a hole remains. `revl_unload` discards it,
+given), and refuses while a hole remains. With no draft held it is refused by
+name: with nothing loaded its `next` is the reload of what this session last
+ran, and with a composition running it says to use `revl_edit` or `revl_swap`. `revl_unload` discards it,
 `revl_state` reports `draft: {holes}`, and `revl_source` reads from it. A draft
 never boots while a hole remains.
 
