@@ -8994,62 +8994,108 @@ fn match_bracket(ts: List[Token], i: Int) -> Int {
   return 0 - 1
 }
 
-// `f(k=v)` — a depth-1 `=` between a call's parens. `=` never appears in a
-// revl expression, and a record update's `=` sits inside `{}` (depth 2+).
-fn kwarg_at(ts: List[Token], i: Int) -> Bool {
-  let end = match_bracket(ts, i)
-  if (end == 0 - 1) { return false }
-  var depth = 0
-  var j = i
-  while (j < end) {
-    let k = tkc(ts, j).kind
-    if (k == "(" || k == "[" || k == "{") { depth += 1 }
-    if (k == ")" || k == "]" || k == "}") { depth -= 1 }
-    if (depth == 1 && k == "=") { return true }
+// What the three bracket checks below read about each opener, computed in
+// ONE pass over the stream (issue #1861). Each check used to find the matching
+// bracket and rescan the span for every opener it was asked about, which is
+// quadratic in the nesting depth: `g(g(g(...)))` grown to the source size
+// bound took minutes in the Python twin, and the crate pays the same shape.
+//
+// The result is flat, four slots per token: at `4 * i` the index
+// `match_bracket(ts, i)` returns (-1 when `i` is not an opener or is never
+// closed), then 1 or 0 for whether a token sitting DIRECTLY inside the bracket
+// (depth 1 from it) makes `kwarg_at` (`=`), `tuple_at` (`,`) or `slice_at`
+// (a `:` with no open `?` before it) fire. A flat `List[Int]` rather than a
+// map so the checks can take it by reference in every tier.
+//
+// The open brackets are a stack kept as append-only frames (`opener`,
+// `parent`), so a pop is O(1). A closer with nothing open is skipped, which is
+// what the depth counter in `match_bracket` does to a stray closer before the
+// opener it starts from; like that counter, any closer closes any opener. The
+// per-opener rows live in a map while the pass runs (keyed by the opener's
+// index) and are laid out flat at the end.
+fn bracket_facts(ts: List[Token]) -> List[Int] {
+  // opener index -> [close, eq, comma, slice, open `?` count]
+  var rows: Map[Str, List[Int]] = Map.empty()
+  var opener: List[Int] = []
+  var parent: List[Int] = []
+  var cur = 0 - 1
+  var j = 0
+  let n = ts.length()
+  while (j < n) {
+    let k = ts[j].kind
+    if (k == "(" || k == "[" || k == "{") {
+      rows = rows.set(j.to_str(), [0 - 1, 0, 0, 0, 0])
+      opener = opener.push(j)
+      parent = parent.push(cur)
+      cur = opener.length() - 1
+    } else if (cur != 0 - 1 && (k == ")" || k == "]" || k == "}"
+                                || k == "=" || k == "," || k == "?" || k == ":")) {
+      let key = opener[cur].to_str()
+      let f = match rows.lookup(key) { Some(v) => v, None => [0 - 1, 0, 0, 0, 0] }
+      if (k == ")" || k == "]" || k == "}") {
+        rows = rows.set(key, [j, f[1], f[2], f[3], f[4]])
+        cur = parent[cur]
+      } else if (k == "=") {
+        rows = rows.set(key, [f[0], 1, f[2], f[3], f[4]])
+      } else if (k == ",") {
+        rows = rows.set(key, [f[0], f[1], 1, f[3], f[4]])
+      } else if (k == "?") {
+        rows = rows.set(key, [f[0], f[1], f[2], f[3], f[4] + 1])
+      } else if (f[4] == 0) {
+        rows = rows.set(key, [f[0], f[1], f[2], 1, f[4]])
+      } else {
+        rows = rows.set(key, [f[0], f[1], f[2], f[3], f[4] - 1])
+      }
+    }
     j += 1
   }
-  return false
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) {
+    let f = match rows.lookup(i.to_str()) { Some(v) => v, None => [0 - 1, 0, 0, 0, 0] }
+    out = out.push(f[0])
+    out = out.push(f[0] == 0 - 1 ? 0 : f[1])
+    out = out.push(f[0] == 0 - 1 ? 0 : f[2])
+    out = out.push(f[0] == 0 - 1 ? 0 : f[3])
+    i += 1
+  }
+  return out
+}
+
+// The `bracket_facts` closer of the opener at `i`, -1 when it has none.
+fn bracket_close(facts: List[Int], i: Int) -> Int {
+  if (i < 0 || 4 * i >= facts.length()) { return 0 - 1 }
+  return facts[4 * i]
+}
+
+// Slot `slot` (1 `=`, 2 `,`, 3 slice `:`) of the opener at `i`: 0 when it is
+// never closed, so every check is false then, as it was when `match_bracket`
+// returned -1.
+fn bracket_fact(facts: List[Int], i: Int, slot: Int) -> Int {
+  if (bracket_close(facts, i) == 0 - 1) { return 0 }
+  return facts[4 * i + slot]
+}
+
+// `f(k=v)` — a depth-1 `=` between a call's parens. `=` never appears in a
+// revl expression, and a record update's `=` sits inside `{}` (depth 2+).
+fn kwarg_at(facts: List[Int], i: Int) -> Bool {
+  return bracket_fact(facts, i, 1) == 1
 }
 
 // `xs[a:b]` — a depth-1 `:` between index brackets that is NOT the `:` of a
 // ternary (`?` opens one) and not inside a nested record/call.
-fn slice_at(ts: List[Token], i: Int) -> Bool {
-  let end = match_bracket(ts, i)
-  if (end == 0 - 1) { return false }
-  var depth = 0
-  var q = 0
-  var j = i
-  while (j < end) {
-    let k = tkc(ts, j).kind
-    if (k == "(" || k == "[" || k == "{") { depth += 1 }
-    if (k == ")" || k == "]" || k == "}") { depth -= 1 }
-    if (depth == 1 && k == "?") { q += 1 }
-    if (depth == 1 && k == ":") {
-      if (q == 0) { return true }
-      q -= 1
-    }
-    j += 1
-  }
-  return false
+fn slice_at(facts: List[Int], i: Int) -> Bool {
+  return bracket_fact(facts, i, 3) == 1
 }
 
 // `(a, b)` in VALUE position — a depth-1 comma inside a GROUPING paren whose
 // close is not followed by `=>`/`:` (an arrow parameter list).
-fn tuple_at(ts: List[Token], i: Int) -> Bool {
-  let end = match_bracket(ts, i)
+fn tuple_at(ts: List[Token], facts: List[Int], i: Int) -> Bool {
+  let end = bracket_close(facts, i)
   if (end == 0 - 1) { return false }
   let closer = tkc(ts, end + 1)
   if (closer.kind == "=>" || closer.kind == ":") { return false }
-  var depth = 0
-  var j = i
-  while (j < end) {
-    let k = tkc(ts, j).kind
-    if (k == "(" || k == "[" || k == "{") { depth += 1 }
-    if (k == ")" || k == "]" || k == "}") { depth -= 1 }
-    if (depth == 1 && k == ",") { return true }
-    j += 1
-  }
-  return false
+  return bracket_fact(facts, i, 2) == 1
 }
 
 // A grouping `(` opened where a VALUE is expected: after `let x =` / `var x =`
@@ -9109,8 +9155,9 @@ fn foreign_name_at(ts: List[Token], i: Int, bound: List[Str]) -> Str {
   return prev.kind == "}" && nxt.kind == "(" ? foreign_name_msg(n) : ""
 }
 
-// The syntactic (parser-half) redirect at `i`, "" when none fires.
-fn foreign_form_at(ts: List[Token], i: Int) -> Str {
+// The syntactic (parser-half) redirect at `i`, "" when none fires. `facts` is
+// `bracket_facts(ts)`.
+fn foreign_form_at(ts: List[Token], facts: List[Int], i: Int) -> Str {
   let t = tkc(ts, i)
   let nxt = tkc(ts, i + 1)
   // `i++` — `++` strands a `+` in operand position, and revl has no unary `+`,
@@ -9143,16 +9190,16 @@ fn foreign_form_at(ts: List[Token], i: Int) -> Str {
   let pv = tkl(ts, i - 1)
   if (t.kind == "ident" && nxt.kind == "("
       && !(pv.kind == "kw" && pv.text == "fn")
-      && kwarg_at(ts, i + 1)) {
+      && kwarg_at(facts, i + 1)) {
     return "revl has no keyword arguments — `f(k=v)` is not a call"
   }
-  if (t.kind == "[" && ends_expr(pv) && slice_at(ts, i)) {
+  if (t.kind == "[" && ends_expr(pv) && slice_at(facts, i)) {
     return "revl has no slice syntax `xs[a:b]`"
   }
   if (t.kind == "{" && nxt.kind == "string" && atk(ts, i + 2, ":")) {
     return "revl records use identifier keys, not string keys like `{\"k\": v}`"
   }
-  if (t.kind == "(" && value_paren(ts, i) && tuple_at(ts, i)) {
+  if (t.kind == "(" && value_paren(ts, i) && tuple_at(ts, facts, i)) {
     return "revl has no tuples — `(a, b)` is not a value"
   }
   return ""
@@ -9163,6 +9210,7 @@ fn foreign_form_at(ts: List[Token], i: Int) -> Str {
 // reference's own report order (its parser walks the source once).
 fn foreign_scan_ts(ts: List[Token]) -> Str {
   let bound = bound_idents(ts)
+  let facts = bracket_facts(ts)
   var i = 0
   while (i < ts.length()) {
     // A lex failure makes every position downstream meaningless — an `error`
@@ -9174,10 +9222,10 @@ fn foreign_scan_ts(ts: List[Token]) -> Str {
     // is not a call. Skip the whole capability list rather than mistake it for
     // a Python keyword argument.
     if (atw(ts, i, "emission") && atk(ts, i + 1, "[")) {
-      let e = match_bracket(ts, i + 1)
+      let e = bracket_close(facts, i + 1)
       if (e != 0 - 1) { i = e + 1 } else { i += 1 }
     } else {
-      let f = foreign_form_at(ts, i)
+      let f = foreign_form_at(ts, facts, i)
       if (f != "") { return f }
       let n = foreign_name_at(ts, i, bound)
       if (n != "") { return n }

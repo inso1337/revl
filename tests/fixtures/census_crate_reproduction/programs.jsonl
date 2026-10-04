@@ -1504,6 +1504,8 @@
 
 "tests/fixtures/emit_go_corpus/calls.rvl"
 
+"tests/fixtures/emit_go_corpus/comp_provide_pure.rvl"
+
 "tests/fixtures/emit_go_corpus/control.rvl"
 
 "tests/fixtures/emit_go_corpus/extern_config.rvl"
@@ -1788,6 +1790,8 @@
 
 "tests/fixtures/emit_rust_corpus/branch_edges.rvl"
 
+"tests/fixtures/emit_rust_corpus/bridge_types.rvl"
+
 "tests/fixtures/emit_rust_corpus/calls.rvl"
 
 "tests/fixtures/emit_rust_corpus/checked_div.rvl"
@@ -1799,6 +1803,8 @@
 "tests/fixtures/emit_rust_corpus/comp_host_map.rvl"
 
 "tests/fixtures/emit_rust_corpus/comp_host_map_undo_local.rvl"
+
+"tests/fixtures/emit_rust_corpus/comp_let_binds_param_undo.rvl"
 
 "tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl"
 

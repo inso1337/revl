@@ -51,7 +51,10 @@ def remember(session) -> None:
     global _LAST_ORIGIN
     origin = getattr(session, "origin", None)
     if origin:
-        _LAST_ORIGIN = dict(origin)
+        # only what `revl_load` takes: a files origin also holds each file's
+        # text (`files_content`, issue #1842), which is not a load argument
+        _LAST_ORIGIN = {key: origin[key] for key in ("source", "files", "modules")
+                        if key in origin}
 
 
 def forget() -> None:
@@ -67,49 +70,6 @@ def load_next() -> dict:
         return call("revl_load", dict(_LAST_ORIGIN))
     return call("revl_load", {}, ready=False,
                 needs="`source` (inline .rvl text) or `files` (.rvl paths)")
-
-
-def swap_files_next(origin: dict | None, replacing: tuple = ()) -> dict | None:
-    """`revl_swap` with the files a files-loaded composition came from: the
-    re-admission a name-only swap cannot do, because the session holds no
-    inline source to re-admit."""
-    files = (origin or {}).get("files")
-    if not files:
-        return None
-    return call("revl_swap", _with_replacing({"files": list(files)}, replacing))
-
-
-def edit_as_swap(session, arguments: dict, admits) -> dict | None:
-    """The patch `revl_edit` could not apply to a files-loaded composition,
-    applied to the loaded file's text and offered as `revl_swap` with inline
-    `source`. After that swap the session holds inline source, so the next
-    `revl_edit` patches it directly.
-
-    Offered for one root file only: re-sending a multi-file composition inline
-    would need its imports re-keyed, which is exactly what `revl_edit` itself
-    should learn to do. `admits(arguments)` is the admission probe the server
-    runs (None, or the reason the call would be refused); it decides `ready`.
-    A patch that does not apply raises the same `EditError` revl_edit would."""
-    from . import edit as _edit  # noqa: PLC0415 - edit imports the session
-    files = (session.origin or {}).get("files") or []
-    if len(files) != 1 or arguments.get("target") not in (None, "source"):
-        return None
-    with open(files[0], encoding="utf-8") as handle:
-        text = handle.read()
-    patched, _applied = _edit._apply_edits(text, arguments.get("edits") or [])
-    swap_args = _with_replacing({"source": patched},
-                                tuple(arguments.get("replacing") or ()))
-    problem = admits(swap_args)
-    if problem is None:
-        return call("revl_swap", swap_args)
-    return call("revl_swap", swap_args, ready=False,
-                needs=f"a patch that admits (this one is refused: {problem})")
-
-
-def _with_replacing(arguments: dict, replacing: tuple) -> dict:
-    if replacing:
-        arguments["replacing"] = list(replacing)
-    return arguments
 
 
 def for_error(error: BaseException) -> dict | list | None:

@@ -82,14 +82,11 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | Refusal | `next` |
 | ------- | ------ |
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
-| `revl_edit` on a composition loaded from one file, when the session no longer holds its buffer | `revl_swap` with your patch applied to that file's text as inline `source`. `ready` only if that swap would admit. The file on disk is not changed |
-| `revl_swap` with no source, when the session no longer holds a files-loaded composition's buffers | `revl_swap` with those `files` |
-
-A files-loaded composition does not reach either of the last two in the
-ordinary course: each loaded file is a buffer, so `revl_edit` patches it and a
-name-only `revl_swap` re-admits it (issue #1690). They answer only a session
-whose held working set has lost the files.
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
+
+A composition loaded from `files` is edited and swapped by name directly, and
+the server holds its text from the load on (issue #1842), so neither needs a
+remedy.
 
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and
@@ -172,6 +169,8 @@ nothing and carries no undo field.
 | `revl_tools` | yes | no | - (source) |
 | `revl_load` | no | no | - (source) |
 | `revl_call` | no | no | `key`, `method` |
+| `revl_act` | no | no | `key`, `method` |
+| `revl_counterfactual` | yes | no | `at` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` (source) |
 | `revl_export` | no | yes | - |
@@ -491,7 +490,9 @@ never boots while a hole remains.
 - Inputs: `source` / `files` / `modules`; `config` (per-component config
   tables); `record` (record the effect accumulator so the composition can be
   stepped backwards - must be set at load, recording is installed before
-  activation). With a draft held and no source: boots the draft.
+  activation). With a draft held and no source: boots the draft. With the
+  approval gate on (the `revl mcp serve` default since issue #1706) an
+  omitted `record` records, and `record: false` is refused.
 
 ### `revl_call`
 
@@ -506,6 +507,59 @@ component you just loaded. Returns the result and the trace it produced.
   realm. A key isolated into two or more realms has no single provider, and the
   call is refused with every provider and its realm named. The approval ticket
   for the call carries the realm of the provider it reached.
+
+### `revl_act`
+
+One call per agent action through the approval gate (issue #1708). Takes the
+proposed action, classifies it by its checked effect class, and does what the
+class allows:
+
+- class (a), a `witnessed` crossing with a registered inverse: executes. The
+  receipt's `witnessed` entries name the inverse and the WAL record (`walSeq`)
+  the crossing is durable in;
+- class (b), a `deferred` emission: queued for the commit, nothing fired yet.
+  The receipt's `deferred` entries name the commit-manifest group;
+- class (c), any other emission: returns the `revl_call` ticket two-step
+  (`approvalRequired`, `ticket`) and fires nothing. Once an operator approves
+  the ticket, the identical re-issue executes.
+
+Returns `class`, `outcome` (`executed`, `deferred` or `ticket`; `refused` after
+an operator's no, `raised` when the operation itself raised), `receipt`, and
+`residue`: the crossings this action fired that no inverse can take back. Every
+receipt is kept, and `revl_commit`'s manifest lists them under `actions`.
+
+- Inputs: `key` (provided key, required), `method` (operation name, required),
+  `args` (positional arguments).
+- Needs the approval gate on (`revl mcp serve --approval-policy auto`); without
+  it the call is refused, because there is no class to report.
+- The CLI form is `revl act FILES` ([commands-reference.md](commands-reference.md#revl-act)).
+
+### `revl_counterfactual`
+
+What would the gate have decided if the agent had acted differently at one
+action (issue #1752)? Takes this session's `revl_act` log, varies the action at
+`at`, and decides both arms with the gate's own rules. It runs nothing and the
+session is unchanged: no host body fires and the commit manifest's hash stays
+the same.
+
+- Inputs: `at` (the receipt `seq` to vary, required) and exactly one of
+  `replace` (`{key, method, args}` to run instead), `insert` (`{key, method,
+  args}` to add before `at`; `at` may be one past the last action) or `drop:
+  true`.
+- Each arm lists, per action, its `class`, `outcome` (`executed`, `deferred`,
+  `ticket`), ticket hash, witnessed crossings with their inverse, deferred
+  externs and residue. A class-(c) action executes only where an approval the
+  session minted for its exact ticket hash is still unspent at that point. The
+  approvals sit where they were minted, and each is spent once.
+- `divergence` names the first step whose decision differs and every
+  downstream step whose decision changes; `delta` compares the two arms'
+  tickets, residue, deferred externs, witnessed count and unused approvals.
+- `reproducesRecording` is false when the recorded arm's recompute does not
+  match a receipt, with each step in `notReproduced`: a standing grant, a
+  distilled rule or a revoked ticket the slice does not simulate. Read a
+  divergence only off an arm that reproduces the recording.
+- `liveEffects` is always 0 and `bounds` lists what a gate-level recompute
+  cannot see (static reach, no result values, no ttl).
 
 ### `revl_state`
 
@@ -582,7 +636,9 @@ components, where the top-level `touched` above names symbols:
   replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}`,
   each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
   inline source or the one loaded file, a loaded file's path, or an in-memory
-  module); `replacing`; with nothing loaded, `files` / `source` / `modules` /
+  module. A loaded file can also be named by its basename or a trailing part
+  of its path when that matches exactly one loaded file; one matching several
+  is refused, listing them); `replacing`; with nothing loaded, `files` / `source` / `modules` /
   `config` to load first.
 
 ### `revl_change`
@@ -856,6 +912,15 @@ recorded row reads `unbounded`. The field lands after the ticket `hash`, so the
 hash is unchanged. Under the boundary-policy line `approvals require bounded
 crossings` (off by default), a call whose capability is `unbounded` is refused
 by name instead of ticketed.
+
+Under `revl mcp serve` (the gate is on by default since issue #1706, and
+unless it is served `--approval-policy advisory`) the identity that raised a
+ticket cannot approve it, nor mint a standing grant from
+it, and a proactive `capability` grant is refused with no operator profile bound
+or to an operator that may itself `call`. A stdio session with no profile can
+therefore raise tickets but not answer them: a human approves as a separate
+operator over `--http` with `--operator-profile`
+([harness-gate-guide.md](harness-gate-guide.md)).
 
 When the crossing's approval rule demands a QUORUM (`capability payments.refund
 requires approval require 2 of {finance.oncall, fraud.oncall, cs.lead}`), a bare
