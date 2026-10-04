@@ -195,6 +195,12 @@ def ship(
                  + (" and swapped in" if apply else
                     " — pass `apply: true` to swap it in without another round-trip")),
     }
+    # issue #1707: each provided operation's effect class and the class the
+    # candidate changes, as admission measured them against the running
+    # composition, at the top where an agent reads first.
+    for field in ("effectClasses", "effectClassChanges", "effectClassWarnings"):
+        if field in admitted:
+            consolidated[field] = admitted[field]
     if apply and swapped_result is not None:
         consolidated["swap"] = {k: v for k, v in swapped_result.items()
                                 if k not in ("ok", "note")}

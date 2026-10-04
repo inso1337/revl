@@ -2300,7 +2300,7 @@ fn by_value_field_clone(arg_node: Value, rendered: &str, ctx_: Ctx__m1) -> Strin
         chain.push(value_str(value_field(cur.clone(), String::from("name"))));
         cur = value_field(cur.clone(), String::from("target"));
     }
-    let root_ = ref_ident(cur.clone());
+    let root_ = ref_node_ident(cur.clone());
     if ((root_ == "") || (!ctx_.mu.contains_key(&root_))) {
         return String::from("");
     }
@@ -2372,7 +2372,7 @@ fn by_value_reuse(arg_node: Value, rendered: String, ctx_: Ctx__m1) -> String {
     return by_value_tail(arg_node.clone(), rendered.clone(), ctx_.clone());
 }
 
-fn ref_ident(node: Value) -> String {
+fn ref_node_ident(node: Value) -> String {
     let k = node_kind(node.clone());
     if (((k != "var") && (k != "name")) && (k != "req")) {
         return String::from("");
@@ -2387,7 +2387,7 @@ fn ref_ident(node: Value) -> String {
 fn subtree_refs(node: Value) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     if (value_kind(node.clone()) == "record") {
-        let id = ref_ident(node.clone());
+        let id = ref_node_ident(node.clone());
         if (id != "") {
             out.push(id.clone());
         }
@@ -2517,13 +2517,13 @@ fn reused_names(body: Vec<Value>) -> std::collections::HashMap<String, String> {
 fn movable_walk(node: Value, depth: i64, total: std::collections::HashMap<String, i64>, mu: std::collections::HashMap<String, String>, st: MovSt) -> MovSt {
     let mut s = st;
     if (value_kind(node.clone()) == "record") {
-        let id = ref_ident(node.clone());
+        let id = ref_node_ident(node.clone());
         if (id != "") {
             s = MovSt { seen: { let mut c = s.seen.clone(); c.insert(id.clone(), ((s.seen.get(&id).cloned()).unwrap_or_else(|| 0i64)).checked_add(1i64).expect("revl: Int overflow")); c }, ord: s.ord, mov: s.mov.clone() };
         }
         let step = value_str(value_field(node.clone(), String::from("step")));
         if (step == "for") {
-            let name = ref_ident(value_field(node.clone(), String::from("iterable")));
+            let name = ref_node_ident(value_field(node.clone(), String::from("iterable")));
             let mut mov = s.mov;
             if ((((name != "") && mu.contains_key(&name)) && (depth == 0i64)) && (((s.seen.get(&name).cloned()).unwrap_or_else(|| 0i64)).checked_add(1i64).expect("revl: Int overflow") == (total.get(&name).cloned()).unwrap_or_else(|| 0i64))) {
                 mov.push(s.ord);
@@ -6328,6 +6328,68 @@ fn method_undo_clones(comp: Value, method: Value, indent: i64) -> Vec<String> {
     return out;
 }
 
+fn ref_ident(node: Value) -> String {
+    let mut ident = value_str(value_field(node.clone(), String::from("id")));
+    if (ident == "") {
+        ident = value_str(value_field(node.clone(), String::from("name")));
+    }
+    return ident;
+}
+
+fn expr_var_names(node: Value, acc: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
+    let mut m = acc;
+    if (value_kind(node.clone()) == "record") {
+        let k = node_kind(node.clone());
+        if (((k == "var") || (k == "name")) || (k == "req")) {
+            let ident = ref_ident(node.clone());
+            if (ident != "") {
+                m.insert(ident.clone(), String::from("1"));
+            }
+        }
+    }
+    for child in value_children(node.clone()) {
+        m = expr_var_names(child.clone(), m.clone());
+    }
+    return m;
+}
+
+fn acquire_moved_locals(node: Value, vt: std::collections::HashMap<String, String>, acc: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
+    let mut m = acc;
+    if (value_kind(node.clone()) == "record") {
+        if ((node_kind(node.clone()) == "call") && value_is_null(value_field(node.clone(), String::from("callee")))) {
+            let recv = ref_ident(value_field(node.clone(), String::from("target")));
+            let mth = value_str(value_field(node.clone(), String::from("method")));
+            if ((map_get(vt.clone(), recv.clone()).revl_starts_with("Map[") && (mth != "get")) && (mth != "remove")) {
+                for arg in value_list(value_field(node.clone(), String::from("args"))) {
+                    let ak = node_kind(arg.clone());
+                    if ((ak == "var") || (ak == "name")) {
+                        let ident = ref_ident(arg.clone());
+                        if (ident != "") {
+                            m.insert(ident.clone(), String::from("1"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for child in value_children(node.clone()) {
+        m = acquire_moved_locals(child.clone(), vt.clone(), m.clone());
+    }
+    return m;
+}
+
+fn undo_reclone_locals(acq: Value, undonode: Value, body_locals: std::collections::HashMap<String, String>, vt: std::collections::HashMap<String, String>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let refs = expr_var_names(undonode.clone(), std::collections::HashMap::new());
+    let moved = acquire_moved_locals(acq.clone(), vt.clone(), std::collections::HashMap::new());
+    for local in { let mut ks: std::vec::Vec<String> = body_locals.keys().cloned().collect(); ks.sort(); ks } {
+        if (refs.contains_key(&local) && moved.contains_key(&local)) {
+            out.push(local.clone());
+        }
+    }
+    return list_sort(out.clone());
+}
+
 fn provide_let_type(value: Value, ctx_: Ctx__m1, comp: Value, services: Value) -> String {
     let inferred = v3_infer_type(value.clone(), ctx_.clone());
     if (inferred != "") {
@@ -6366,6 +6428,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
     let mut c = set_rn(ctx_.clone(), scope.clone());
     let mut out: Vec<String> = vec![];
     let mut index = 0i64;
+    let mut body_locals = std::collections::HashMap::new();
     for step in value_list(value_field(method.clone(), String::from("body"))) {
         let kind = value_str(value_field(step.clone(), String::from("step")));
         if (kind == "return") {
@@ -6377,7 +6440,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
             }
         } else {
             if ((kind == "effect") || (kind == "emit")) {
-                let undoR = method_undo_rename(comp.clone(), method.clone());
+                let mut undoR = method_undo_rename(comp.clone(), method.clone());
                 let mut acqR = scope.clone();
                 for p in value_list(value_field(method.clone(), String::from("params"))) {
                     let pn = value_str(p.clone());
@@ -6388,6 +6451,10 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                     let cnode = value_field(step.clone(), String::from("compensate"));
                     if (!value_is_null(cnode.clone())) {
                         out.extend((method_undo_clones(comp.clone(), method.clone(), indent)).iter().cloned());
+                        for local in undo_reclone_locals(value_field(step.clone(), String::from("expr")), cnode.clone(), body_locals.clone(), c.vt.clone()) {
+                            out.push(format!("{}let {}_undo = {}.clone();", pad, local, local));
+                            undoR.insert(local.clone(), format!("{}_undo", local));
+                        }
                         out.push(format!("{}let _revl_teardown = revl_teardown_of(&self.ctx);", pad));
                         out.extend((compensation_registration(cnode.clone(), c.clone(), undoR.clone(), format!("{}.{}.compensate.{}", name, mnm, num_str(Value::new(serde_json::Value::from(index)))), "self.ctx", false, indent)).iter().cloned());
                     }
@@ -6398,9 +6465,14 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                         acqnode = value_field(step.clone(), String::from("expr"));
                     }
                     out.extend((method_undo_clones(comp.clone(), method.clone(), indent)).iter().cloned());
+                    let undonode = value_field(step.clone(), String::from("undo"));
+                    for local in undo_reclone_locals(acqnode.clone(), undonode.clone(), body_locals.clone(), c.vt.clone()) {
+                        out.push(format!("{}let {}_undo = {}.clone();", pad, local, local));
+                        undoR.insert(local.clone(), format!("{}_undo", local));
+                    }
                     let acq = render_expr(acqnode.clone(), set_rn(c.clone(), acqR.clone()));
                     out.push(format!("{}let _ = {};", pad, acq));
-                    let undox = render_expr(value_field(step.clone(), String::from("undo")), set_rn(c.clone(), undoR.clone()));
+                    let undox = render_expr(undonode.clone(), set_rn(c.clone(), undoR.clone()));
                     out.push(format!("{}let _ = self.ctx.effect({}, move || {{ {}; Ok(()) }});", pad, label, undox));
                 }
             } else {
@@ -6420,6 +6492,9 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                     }
                     if (inferred != "") {
                         c = set_vt(c.clone(), nm.clone(), inferred.clone());
+                    }
+                    if ((kind == "let") && (nm != "")) {
+                        body_locals.insert(nm.clone(), String::from("1"));
                     }
                 } else {
                     if (((((kind == "if") || (kind == "while")) || (kind == "for")) || (kind == "break")) || (kind == "continue")) {
@@ -6614,31 +6689,6 @@ fn declared_compensate_marker(ir: Value) -> Vec<String> {
         }
     }
     return vec![];
-}
-
-fn expr_var_names(node: Value) -> Vec<String> {
-    let mut acc: Vec<String> = vec![];
-    if (value_kind(node.clone()) == "record") {
-        let k = node_kind(node.clone());
-        if (((k == "var") || (k == "name")) || (k == "req")) {
-            let mut ident = value_str(value_field(node.clone(), String::from("id")));
-            if (ident == "") {
-                ident = value_str(value_field(node.clone(), String::from("name")));
-            }
-            if (ident != "") {
-                acc.push(ident.clone());
-            }
-        }
-        for key in value_keys(node.clone()) {
-            acc.extend((expr_var_names(value_field(node.clone(), key.clone()))).iter().cloned());
-        }
-    }
-    if (value_kind(node.clone()) == "list") {
-        for item in value_list(node.clone()) {
-            acc.extend((expr_var_names(item.clone())).iter().cloned());
-        }
-    }
-    return acc;
 }
 
 fn step_let_binds(steps: Vec<Value>) -> Vec<String> {
@@ -6903,7 +6953,7 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
                 out.push(format!("{}let {}_comp = {}.clone();", pad, req, req));
                 cR.insert(req.clone(), format!("{}_comp", req));
             }
-            for local in sorted_common(expr_var_names(cnode.clone()), abinds.clone()) {
+            for local in sorted_common({ let mut ks: std::vec::Vec<String> = expr_var_names(cnode.clone(), std::collections::HashMap::new()).keys().cloned().collect(); ks.sort(); ks }, abinds.clone()) {
                 out.push(format!("{}let {}_comp = {}.clone();", pad, local, local));
                 cR.insert(local.clone(), format!("{}_comp", local));
             }

@@ -1,0 +1,26 @@
+{
+ "engine": "selfhost",
+ "issued_admissions": [
+  "admission:comment_only",
+  "admission:empty_composition",
+  "admission:interface_empty_service",
+  "admission:interface_one_service",
+  "admission:interface_scalar_alias",
+  "admission:interface_two_services"
+ ],
+ "mechanism": {
+  "bucket": "false-admission",
+  "check_fails_against_a_baseline_that_lists_it": true,
+  "check_message": "FALSE ADMISSION (issued admission the reference refuses) false-admission: census-artifact-probe:synthetic-false-admission",
+  "committed_baseline_never_baselined_keys": [],
+  "holds": true,
+  "never_baselined": [
+   "false-admission"
+  ],
+  "probe_case": "census-artifact-probe:synthetic-false-admission",
+  "record_refuses_to_write_it": true
+ },
+ "note": "The measured facts of a census run that are neither a per-case verdict (cases.jsonl) nor a pinned file (pins.jsonl). Written by `python3 tools/census_artifact.py --write`; every count, digest and claim in the report is computed from these three files and the checkout when it is rendered, and none is stored. On a merge conflict, run that command again.",
+ "reference_faults": [],
+ "schema": "GATE-CENSUS-RECORDS-1"
+}
