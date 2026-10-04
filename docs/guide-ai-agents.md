@@ -295,14 +295,17 @@ is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 never has to touch the filesystem. This is your primary interface.
 
 <!-- docgen:agents-mcp-count begin -->
-The complete advertised verb set, from
-`src/revl/mcp/server.py` and `query_tools.py`, is grouped below by what
-you reach for; each verb's exact inputs and outputs are in
+The complete verb set comes from
+`src/revl/mcp/server.py` and `query_tools.py`. `tools/list` shows the
+core tier by default; call `revl_verbs` for any other verb's
+schema, or call it by name. It is grouped below by what you reach for;
+each verb's exact inputs and outputs are in
 [mcp-reference.md](mcp-reference.md).
 <!-- docgen:agents-mcp-count end -->
 
 | verb(s) | use | detail |
 |---|---|---|
+| `revl_verbs` | find a verb `tools/list` does not show: every verb by topic, then the schemas of a topic or of named verbs | [mcp-reference.md](mcp-reference.md#revl_verbs) |
 | `revl_scaffold` | start from a typed, holed skeleton instead of a whole invented component; every hole comes back with its `fillSpec` | [scaffold.md](scaffold.md) |
 | `revl_check` | does this compile? structured diagnostics — code, guarantee, and the `fix` rewrite — **and open holes' `fillSpec`** if not | [mcp-reference.md](mcp-reference.md#revl_check) |
 | `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |

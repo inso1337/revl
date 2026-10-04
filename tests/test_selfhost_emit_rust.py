@@ -281,6 +281,10 @@ CORPUS = [
                              #   `<<DEFER-comp-step>>` marker and the oracle
                              #   agreed, because no corpus document had a
                              #   component body step that was not a provision.
+    "bridge_types.rvl",      # item 391: the bridge's marshalling beyond the scalars:
+                             #   a std `Result` (return and argument, the canonical
+                             #   `{"$kind","$value"}`), a List and a record through
+                             #   serde, an `Opt[Float]` return
     "comp_str_builtin.rvl",  # issue #1734: the only Str builtins are in a component
                              #   (`concat` in a provide method, a sized `.length`),
                              #   so the `RevlStrOps` helper traits are emitted for it

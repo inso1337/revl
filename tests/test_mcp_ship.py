@@ -52,7 +52,7 @@ component Watcher requires cache: Cache provides log: Log {
 
 # ------------------------------------------------------- the wired verb (dry run)
 
-def test_ship_is_listed_and_not_read_only():
+def test_ship_is_listed_and_not_read_only(all_mcp_tools):
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     assert "revl_ship" in tools

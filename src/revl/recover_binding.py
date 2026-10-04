@@ -146,18 +146,9 @@ def _provider_closure(ir: dict, keys: set) -> list:
 
 def _sub_composition(ir: dict, names: list) -> dict:
     """``ir`` restricted to the components in ``names``."""
+    from .fault import subset_composition  # noqa: PLC0415 - one subsetter
     keep = set(names)
-    sub = dict(ir)
-    sub["components"] = [c for c in ir.get("components") or []
-                         if c["name"] in keep]
-    manifest = dict(ir.get("manifest") or {})
-    if "components" in manifest:
-        manifest["components"] = [c for c in manifest["components"]
-                                  if c.get("name") in keep]
-    if "loadOrder" in manifest:
-        manifest["loadOrder"] = [n for n in manifest["loadOrder"] if n in keep]
-    sub["manifest"] = manifest
-    return sub
+    return subset_composition(ir, lambda name: name in keep)
 
 
 class CompositionWorld(World):

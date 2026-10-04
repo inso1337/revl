@@ -1,0 +1,24 @@
+// ADMITTED: an arrow whose parameter is service-typed, never applied to a
+// provision. What flows into a parameter is decided at the application, so the
+// parameter is not a service-typed LOCAL and neither rule fires here
+// (GHSA-wg4v-r47x-52p2 residual, issue #1509). The file name's prefix is the
+// expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_approval_service_locals.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (p: Pay, k: Int) => emit p.charge(k)
+      return 0
+    }
+  }
+}

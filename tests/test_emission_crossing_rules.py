@@ -15,6 +15,9 @@ Three rules, one owner, because they read the same functions in `lower.py`
 3. **The nested crossing.** `emit log_line(charge(1))` with `charge` requiring
    approval. Closed by the marker rule inside `emit` arguments (issue #1427);
    pinned here so the approval consequence has a test of its own.
+4. **The compensate slot and spawn handles.** A compensation meets the floor
+   under its step's `with` edge; a spawn-handle crossing resolves its token
+   through `_instance_get_call`.
 
 docs/design/1437-emit-marks-every-crossing.md records the decisions.
 """
@@ -298,6 +301,108 @@ def test_the_rejection_documents_state_their_verdict(name, message):
     header = " ".join(line.lstrip("/ ").strip() for line in text.splitlines()
                       if line.startswith("//"))
     assert message in header
+
+
+# ------------------------------------ 4. the compensate slot and spawn handles
+#
+# The two carriers the floor did not see. A `compensate` slot keeps its
+# bare-emission exception for the MARKER, but a compensation runs during
+# rollback with nobody to ask, so it meets the approval floor under the step's
+# own `with` edge. A spawn-handle crossing's token is the op's declared scope,
+# resolved by `_instance_get_call`, the resolver the marker rule already uses.
+
+_COMP_EXTERNS = (
+    "extern emission fn charge(amount: Int) -> Int requires approval "
+    "= @py { return 1 }\n"
+    "extern emission fn notify(n: Int) -> Int = @py { return 1 }\n")
+
+
+def test_a_compensation_crossing_meets_the_floor():
+    err = _refusal(_activation(_COMP_EXTERNS, "  emit notify(1) compensate charge(2)\n"))
+    assert err.code == "G4"
+    assert err.message == _approval("charge")
+    assert "compensate" in err.hint
+
+
+def test_a_compensation_nested_in_a_plain_call_meets_the_floor():
+    body = "  emit notify(1) compensate twice(charge(2))\n"
+    extra = "extern pure fn twice(n: Int) -> Int = @py { return n * 2 }\n"
+    assert _refusal(_activation(_COMP_EXTERNS, body, extra=extra)).message \
+        == _approval("charge")
+
+
+def test_the_steps_edge_covers_its_compensation():
+    body = ('  let a = await approval[charge] { reason: "refund" }\n'
+            "  emit notify(1) compensate charge(2) with a\n")
+    assert compile_source(_activation(_COMP_EXTERNS, body), "t.rvl")
+
+
+def test_an_edge_for_the_head_does_not_cover_another_compensation_token():
+    externs = ("extern emission[pay] fn charge(amount: Int) -> Int requires "
+               "approval = @py { return 1 }\n"
+               "extern emission[mail] fn notify(n: Int) -> Int requires "
+               "approval = @py { return 1 }\n")
+    body = ('  let a = await approval[mail] { reason: "send" }\n'
+            "  emit notify(1) compensate charge(2) with a\n")
+    assert _refusal(_activation(externs, body)).message == _approval("pay")
+
+
+def test_a_compensation_with_no_approval_requirement_is_unchanged():
+    plain = ("extern emission fn charge(amount: Int) -> Int = @py { return 1 }\n"
+             "extern emission fn notify(n: Int) -> Int = @py { return 1 }\n")
+    assert compile_source(_activation(plain, "  emit notify(1) compensate charge(2)\n"),
+                          "t.rvl")
+
+
+_WORKER = (
+    "extern emission[pay] fn charge(amount: Int) -> Int requires approval "
+    "= @py { return 1 }\n"
+    "service Pay { emission[pay] fn run(n: Int) -> Int }\n"
+    "component Worker provides task: Pay {\n"
+    '  let a = await approval[pay] { reason: "child" }\n'
+    "  provide task { fn run(n) { emit charge(n) with a return 1 } }\n}\n")
+
+
+def _supervisor(body: str, method: str = "fn go(n) = 0") -> str:
+    return (_WORKER + "service Sup { emission fn go(n: Int) -> Int }\n"
+            + "component Supervisor provides sup: Sup {\n" + body
+            + "  provide sup { " + method + " }\n}\n")
+
+
+def test_a_spawn_handle_crossing_meets_the_floor():
+    body = "  let w = effect spawn Worker with { } undo w.dispose()\n  emit w.task.run(1)\n"
+    err = _refusal(_supervisor(body))
+    assert err.code == "G4"
+    assert err.message == _approval("pay")
+
+
+def test_a_spawn_handle_crossing_is_admitted_with_a_covering_edge():
+    body = ("  let w = effect spawn Worker with { } undo w.dispose()\n"
+            '  let b = await approval[pay] { reason: "parent" }\n'
+            "  emit w.task.run(1) with b\n")
+    assert compile_source(_supervisor(body), "t.rvl")
+
+
+@pytest.mark.parametrize("method", [
+    "fn go(n) { let w = effect spawn Worker with { } undo w.dispose()  "
+    "emit w.task.run(n)  return 0 }",
+    "fn go(n) { let w = effect spawn Worker with { } undo w.dispose()  "
+    "let t = w.task  let r = emit t.run(n)  return r }",
+], ids=["direct", "alias"])
+def test_a_spawn_handle_crossing_in_a_provide_method_meets_the_floor(method):
+    assert _refusal(_supervisor("", method=method)).message == _approval("pay")
+
+
+@pytest.mark.parametrize("name,message", [
+    ("g4_approval_compensate", _approval("charge")),
+    ("g4_approval_compensate_method", _approval("pay")),
+    ("g4_approval_compensate_other_edge", _approval("pay")),
+    ("g4_approval_spawn_handle", _approval("pay")),
+    ("g4_approval_spawn_handle_method", _approval("pay")),
+    ("g4_approval_spawn_handle_alias", _approval("pay")),
+])
+def test_the_followup_rejection_documents_state_their_verdict(name, message):
+    test_the_rejection_documents_state_their_verdict(name, message)
 
 
 # ------------------------------------------------ issue #1613's reproducers

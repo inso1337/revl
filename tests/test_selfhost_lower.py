@@ -74,6 +74,7 @@ import importlib.util
 import random
 import re
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -207,10 +208,7 @@ def _classify(e: RevlError) -> str:
             # ---- item 515: the device profile and the candidate set --------
             # Seven more sentences the gate now spells byte for byte, added on
             # the same terms as every marker above: a marker here is a CLAIM
-            # of byte agreement, so only a ported refusal gets one. Item 519's
-            # reach fold is deliberately absent - it is a capability product
-            # over a component's HELD set, the gate has none, and it stays
-            # out for the same reason the item-514 value side does.
+            # of byte agreement, so only a ported refusal gets one.
             or m.startswith("unknown device class `")
             or (m.startswith("model role `") and " declares `memory " in m)
             or m.endswith(") places the origin on any available role")
@@ -220,7 +218,16 @@ def _classify(e: RevlError) -> str:
             or (m.startswith("the candidates for `")
                 and " do not agree on residence: " in m)
             or m.endswith(" declare no device profile, so the candidate set "
-                          "cannot be ordered")):
+                          "cannot be ordered")
+            # ---- item 519: the reach fold ----------------------------------
+            # Both edge kinds (a role the `route model` block names, and the
+            # role a crossing is placed on, issue #1193 slice 2) end in this
+            # one sentence. The gate folds the role's reach against the held
+            # set its spawn attenuation already builds, and spells the refusal
+            # byte for byte, the unscoped-emission rendering of issue #1451
+            # included.
+            or m.endswith(" a model may not reach past the component that "
+                          "consults it (G-MODEL-PLACE)")):
         return "MODEL"
     # ---- item 516: the model COUNCIL declaration ---------------------------
     # `selfhost/lower.rvl`'s model-council section decides `model council` and
@@ -710,6 +717,24 @@ component Mailer provides ops: Ops {{
 """
 
 ACCEPTED_PROGRAMS = [
+    # Issue #1508: a spawn-handle crossing is read by the provider bound at the
+    # op's declared scope, a fact the spawned provider is held to by its own
+    # bound. `Task.go` is `emission[net]` and `Sup.run` declares
+    # `emission[net]`, so it fits (it was refused as an unnameable host
+    # boundary before).
+    ("a spawn-handle emit under a bound covering the op's scope", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission[net] fn go() -> Int }
+service Sup { emission[net] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+"""),
     # ---- the qualified test heads (item 391) -------------------------------
     # `lifecycle` (syntax-2.0 §7.1), `fault` (docs/fault-tests.md) and `prop`
     # (roadmap item 37) are CONTEXTUAL keywords qualifying `test`. They lex as
@@ -3477,14 +3502,14 @@ component Supervisor requires net: Kv provides sup: Sup {
                            return 0 } }
 }
 """, "G4"),
-    # The one the reach gap ADMITTED: the supervisor's bound names the very key
-    # the child emits through, so the spawn-emission bound is satisfied and only
-    # the body's own crossing is left to refuse it. No `emission[...]` list can
-    # name `*`, so the reference refuses; the gate saw an empty reach.
-    ("a spawn-handle emit under a bound naming the child's key", """
+    # Issue #1508: the provider bound reads a handle crossing at the op's
+    # DECLARED scope, `net` here, which `Sup.run`'s `emission[db]` does not
+    # cover. (The same program with `Sup.run` declared `emission[net]` is
+    # admitted; it is in ACCEPTED_PROGRAMS.)
+    ("a spawn-handle emit under a bound that misses the op's scope", """
 service Kv { emission fn write(row: Str) -> Int }
 service Task { emission[net] fn go() -> Int }
-service Sup { emission[net] fn run() -> Int }
+service Sup { emission[db] fn run() -> Int }
 component Worker requires net: Kv provides task: Task {
   provide task { fn go() { emit net.write("x")  return 0 } }
 }
@@ -3528,11 +3553,10 @@ component Supervisor requires net: Kv provides sup: Sup {
                            return 0 } }
 }
 """, "G4"),
-    # Control 2: `let r = emit w.task.go()` binds an emit-marked VALUE, which
-    # the reference lowers through its expression path and never builds an
-    # `emit` step from, so neither engine notes the label and the spawn-bound
-    # verdict is the whole answer. This is the control a fix that labelled every
-    # handle call rather than every emit STEP would fail.
+    # Control 2: `let r = emit w.task.go()` binds an emit-marked VALUE. Since
+    # issue #1508 both engines read it at the op's declared scope wherever it
+    # is written (`*` here, a bare op), so the body's own crossing refuses it,
+    # exactly as the step form above.
     ("an emit-marked binding through a handle notes no label", """
 service Kv { emission fn write(row: Str) -> Int }
 service Task { emission fn go() -> Int }
@@ -4337,6 +4361,21 @@ def test_ordinary_nesting_is_not_refused_by_the_bound(admit, shape):
     with _frames(_FRAME_BUDGET):
         for depth in (1, 2, 5, 20, 40):
             assert admit(_NESTED[shape](depth)) != _TOO_DEEP, (shape, depth)
+
+
+def test_a_deep_call_nest_is_decided_without_a_quadratic_scan(admit):
+    """Issue #1861: the foreign-form scan rescanned every call's whole span for
+    a `k=v` argument, so `g(g(g(...)))` cost O(depth^2) before the bound could
+    refuse it: 37s at depth 5076 here, 48s in the crate, and most of the
+    descent fuzz below. The bracket facts are now computed in one pass. At
+    depth 20000 (60 KB) this takes under a second; the old scan took minutes,
+    so the generous limit fails only on a return of the quadratic shape."""
+    src = _NESTED["calls"](20000)
+    with _frames(_FRAME_BUDGET):
+        start = time.monotonic()
+        assert admit(src) == _TOO_DEEP
+        elapsed = time.monotonic() - start
+    assert elapsed < 30, f"{elapsed:.1f}s for 20000 nested calls: the scan is quadratic again"
 
 
 def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):

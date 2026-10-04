@@ -1695,6 +1695,15 @@ class _ComponentEmitter:
                 return self._value_emission_fire(expr, where)
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+            deferred = self.deferred.get(name) if self.deferred else None
+            if deferred is not None:
+                # issue #1457: a call to a `deferred` emission carries its
+                # `emit` marker (the compiler refuses every other route), and
+                # it is enqueued wherever that marker appears: a step, a tail
+                # `= emit d(..)`, a `let`/`return` value, an arrow body. The
+                # enqueue evaluates to None, the Unit a deferred emission
+                # returns, so the value positions keep their meaning.
+                return self._deferred_enqueue(expr, deferred, where)
             # item 92: a call to a colored (async def) module fn returns a
             # coroutine — await it inside an async method body. item 115: an
             # async extern is likewise an `async def`, so await its call too
@@ -2457,12 +2466,17 @@ class _ComponentEmitter:
         `_revl_frame.enqueue_deferred` refuses if no session owner is registered:
         on the py tier the driver is always the owner, and the five ownerless
         tiers refuse a deferred call at emit (Decision 2's tier gate, Slice 2)."""
-        expr = step.get("expr")
+        out.add(indent, self._deferred_enqueue(step.get("expr"), ext, where))
+
+    def _deferred_enqueue(self, expr: dict, ext: dict, where: str) -> str:
+        """The enqueue of one deferred emission call, as an EXPRESSION (issue
+        #1457): the step above and every value position render the same text.
+        `fire` is the plain host call the flush runs, rendered here directly so
+        it is not itself turned into an enqueue."""
         method = expr.get("name")
         args = [self._expr(arg, where) for arg in expr.get("args") or []]
-        fire = self._expr(expr, where)
-        out.add(indent,
-                f"_revl_frame.enqueue_deferred({method!r}, {method!r}, "
+        fire = f"{_ident(method, f'{where}: function')}({', '.join(args)})"
+        return (f"_revl_frame.enqueue_deferred({method!r}, {method!r}, "
                 f"[{', '.join(args)}], lambda: {fire}"
                 f"{_deferred_register_kwargs(ext, args)})")
 
@@ -4678,8 +4692,11 @@ def _revl_unreleased(events):
     """Host resources acquired during the test and never released (R1)."""
     live = {}
     for event in events:
-        tag, _, verb = event.split(" ", 1)[0].rpartition(".")
-        if not tag:
+        head, _, rest = event.partition(" ")
+        tag, _, verb = head.rpartition(".")
+        if not tag or rest.startswith("refused"):
+            # `pool.open refused <url>`: the acquisition raised and acquired
+            # nothing, so there is nothing to release (issue #1859)
             continue
         if verb in _REVL_ACQUIRE:
             live[tag] = verb
