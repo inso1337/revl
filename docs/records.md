@@ -71,6 +71,14 @@ out of a `Never` position into any other, and nothing flows in. So
 `let a = { h: "x" }` still flows into a `C = { h: Str }` position exactly as a
 named `C` value would, while a shape that disagrees is refused at the boundary.
 
+The nominal record is always the one the boundary's own declaration names, in
+the module that declares it. A service operation imported with
+`use "./lib.rvl" { Store }` carries the public types its signature names (and
+the types those name in turn), so `store.put({ ref: r, qty: q })` unifies with
+`lib.rvl`'s `Item` without the caller importing `Item`, exactly as a literal
+passed to an imported `fn` does. A caller's own private type of the same name
+is renamed apart and does not stand in for it (issue #1899).
+
 ## 4. Block-bodied match arms
 
 An arm body may be a statement block:

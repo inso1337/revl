@@ -59,9 +59,10 @@ def test_a_file_without_a_weight_still_gets_a_shard():
 def test_the_recorded_weights_balance_the_full_suite():
     """Balance is a cost claim, not a safety one: a stale weight can only make
     the shards uneven. Measured weights keep the heaviest shard within 20% of
-    the mean, or, when one unit alone outweighs that (a family is never split:
+    the mean, or, when one unit alone outweighs that (a family is never split;
+    before issue #1861 one test of
     tests/test_selfhost_lower.py::test_no_nesting_under_the_size_bound_exhausts_the_descent
-    is one test of about 1120s), within 5% of that unit, with the other shards
+    measured about 1120s), within 5% of that unit, with the other shards
     sharing the rest evenly."""
     weights = _shard.load_weights()
     families = _shard.load_families()
@@ -77,15 +78,17 @@ def test_the_recorded_weights_balance_the_full_suite():
     assert max(rest) <= 1.2 * (sum(rest) / len(rest)), [round(x) for x in loads]
 
 
-def test_splitting_the_heavy_file_lowers_the_heaviest_shard():
-    """Issue #1774's follow-up: the file-level floor was test_selfhost_lower.py
-    (1520s of 3969s). Split by family it is no longer the floor."""
+def test_a_split_file_never_raises_the_heaviest_shard():
+    """When the recorded weights split a file, the split must not make the
+    heaviest shard worse than packing that file whole. Since issue #1861 no file
+    is heavy enough to split (test_selfhost_lower.py measured 114s in CI run
+    37231772801, down from 1520s), so on today's weights the two predictions are
+    the same; the splitting itself is pinned on synthetic weights below."""
     weights, families = _shard.load_weights(), _shard.load_families()
     files = _root_files()
     whole = max(_shard.loads(files, weights, SHARDS))
     split = max(_shard.loads(files, weights, SHARDS, families))
-    assert "tests/test_selfhost_lower.py" in _shard.split_files(files, weights, SHARDS)
-    assert split < 0.8 * whole, (round(whole), round(split))
+    assert split <= whole + 1e-6, (round(whole), round(split))
 
 
 # ------------------------------------------- splitting a heavy file by family

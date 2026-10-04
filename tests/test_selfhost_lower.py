@@ -74,6 +74,7 @@ import importlib.util
 import random
 import re
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -4371,6 +4372,21 @@ def test_ordinary_nesting_is_not_refused_by_the_bound(admit, shape):
     with _frames(_FRAME_BUDGET):
         for depth in (1, 2, 5, 20, 40):
             assert admit(_NESTED[shape](depth)) != _TOO_DEEP, (shape, depth)
+
+
+def test_a_deep_call_nest_is_decided_without_a_quadratic_scan(admit):
+    """Issue #1861: the foreign-form scan rescanned every call's whole span for
+    a `k=v` argument, so `g(g(g(...)))` cost O(depth^2) before the bound could
+    refuse it: 37s at depth 5076 here, 48s in the crate, and most of the
+    descent fuzz below. The bracket facts are now computed in one pass. At
+    depth 20000 (60 KB) this takes under a second; the old scan took minutes,
+    so the generous limit fails only on a return of the quadratic shape."""
+    src = _NESTED["calls"](20000)
+    with _frames(_FRAME_BUDGET):
+        start = time.monotonic()
+        assert admit(src) == _TOO_DEEP
+        elapsed = time.monotonic() - start
+    assert elapsed < 30, f"{elapsed:.1f}s for 20000 nested calls: the scan is quadratic again"
 
 
 def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):

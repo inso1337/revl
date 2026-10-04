@@ -1,0 +1,31 @@
+// A provide-method body `let` that binds a PARAMETER, followed by an `effect`
+// with an `undo` (issue #1723). Both rust emitters wrote `let key = k;`,
+// which moves `k`, and the `effect` step then clones every parameter into
+// `<p>_undo` (`let k_undo = k.clone();`), a read of the moved value (E0382).
+// The `let` now clones a bare parameter (`let key = k.clone();`), and so does
+// an assignment (`slot = v`). A `let` of a body LOCAL stays a move
+// (`let copy = key`): only a parameter is read again by the undo clones.
+service Cache {
+  fn put(k: Str, v: Str) -> Str
+  fn again(k: Str) -> Str
+}
+
+component Slots provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn put(k, v) {
+      let key = k
+      var slot = "none"
+      slot = v
+      effect store.insert(key, slot) undo store.remove(key)
+      return v
+    }
+    fn again(k) {
+      let local = "x"
+      let copy = local
+      effect store.insert(copy, k) undo store.remove(copy)
+      return k
+    }
+  }
+}
