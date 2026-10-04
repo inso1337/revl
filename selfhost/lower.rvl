@@ -17567,9 +17567,7 @@ fn cir_expr(e: Expr, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     FloatLit(v) => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
     BoolLit(v)  => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
     StrLit(v)   => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(jstr(v)).concat("}")),
-    Var(n)      => scope_has(sc, n)
-      ? mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
-      : mk_irres(false, ""),
+    Var(n)      => cir_var(n, sc, hostSc, cx),
     Bin(b)      => cir_bin(b, sc, hostSc, cx),
     Un(u)       => cir_un(u, sc, hostSc, cx),
     If(f)       => cir_if_expr(f, sc, hostSc, cx),
@@ -17770,9 +17768,56 @@ fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: C
     // ExprVar-callee arm) -> `{"kind": "fn", "name", "args"}`.
     Var(nm) => tagged_case_adt(cx.cases, nm) != ""
       ? cir_adt(tagged_case_adt(cx.cases, nm), nm, args, sc, hostSc, cx)
-      : cir_fncall(nm, args, sc, hostSc, cx),
+      : (cir_calls_a_value(nm, sc, cx)
+          ? cir_value_call(nm, args, sc, hostSc, cx)
+          : cir_fncall(nm, args, sc, hostSc, cx)),
     _ => mk_irres(false, ""),
   }
+}
+
+// A bare name in a component position. The reference's ExprVar arms
+// (`_lower_component_pure_expr`) read a nullary USER case first, ahead of the
+// scope: `Dot` of `type Shape = Dot | Circle(Int)` is an `adt` with no args,
+// the node the fn path writes (`lir_expr`). The built-in `Opt`/`Result` cases
+// are not this shape. A scoped name is a `name` node. Anything else refuses.
+// Before issue #1840 a nullary case refused here, and a refused provide method
+// fails `cir_body`, so `ir_component` dropped the whole component `body`.
+fn cir_var(n: Str, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  if (cir_nullary_case(n, cx)) {
+    return cir_adt(tagged_case_adt(cx.cases, n), n, [], sc, hostSc, cx)
+  }
+  if (scope_has(sc, n)) {
+    return mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
+  }
+  return mk_irres(false, "")
+}
+
+fn cir_nullary_case(n: Str, cx: CCtx) -> Bool {
+  let adt = tagged_case_adt(cx.cases, n)
+  return adt != "" && tenv_get(cx.cases, "payload ".concat(n)) == ""
+    && !adt.startsWith("Result") && !adt.startsWith("Opt")
+}
+
+// Is `nm(...)` a call on a scoped VALUE, a function-valued parameter or local?
+// The reference reads a constructor and a module callable first
+// (`_BUILTIN_CONSTRUCTORS`, `callables`), and only then lowers the callee as
+// an expression, so a scoped name that is neither is the generic tail's
+// `call` on a `name` node (issue #1823).
+fn cir_calls_a_value(nm: Str, sc: List[Bind], cx: CCtx) -> Bool {
+  if (nm == "Some" || nm == "None" || nm == "Ok" || nm == "Err") { return false }
+  return scope_has(sc, nm) && bind_lookup(cx.fns, nm, 0) == ""
+}
+
+// `f(a)` where `f` is a scoped value: the reference's generic call tail,
+// `{"kind": "call", "callee": <the callee lowered as an expression>, "args"}`.
+// Before issue #1823 this refused in `cir_fncall` (no module callable named
+// `f`), and the whole component `body` was dropped with it.
+fn cir_value_call(nm: Str, args: List[Expr], sc: List[Bind], hostSc: List[Str],
+                  cx: CCtx) -> IrRes {
+  let a = cir_args(args, 0, sc, hostSc, cx, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"call\", \"callee\": {\"kind\": \"name\", \"id\": "
+    .concat(jstr(nm)).concat("}, \"args\": [").concat(a.js).concat("]}"))
 }
 
 // A tagged-ADT construction in a component position (`Started(n)`), the same

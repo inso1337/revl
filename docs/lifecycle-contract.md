@@ -121,6 +121,17 @@ that released cleanly reports:
 - `noResidue == True` (no host resource left held, no introspection delta), and
 - `Session.teardown_disposition()["attempt"] == "released"`.
 
+`noResidue` is the conjunction of the teardown report's `checks`: the four
+introspection counters (`registry`, `provisions`, `effects`, `listeners`) and
+`hostResources` (issue #1859). The counters see each disposer RUN; they cannot
+see whether it released what it guarded, so a release that raised, or an undo
+that is not the acquire's release, used to read clean. `hostResources` pairs
+every host-stub `new`/`open` in the session's host trace with its
+`drop`/`close`, and `detail.unreleased` names each one left held, for example
+`pool#3 (open() with no close())`. When a session has no host trace to pair,
+the report carries `unverified: ["hostResources"]` and `noResidue` is false: a
+check that did not run never reads as passed.
+
 `teardown_disposition()` is the read-only inspector for this transition. Its
 `attempt` field is one of `none` (never armed), `in-flight` (requested, still
 running), `released` (completed clean, ownership dropped), `unresolved`

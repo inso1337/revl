@@ -303,3 +303,141 @@ def test_a_ts_typed_event_handler_runs_under_plain_node():
     assert lines["schema_body"] == '["o1"]'
     assert lines["schema_faulted"] == "faulted"
     assert lines["schema_pending"] == "0"
+
+
+# §4.5's last-n `replay(<n>)` runs under plain node too: item 130 (roadmap
+# #81). This is the ts end of backends/python/tests/test_stream_runtime.py's
+# replay cases, driven through the exact `host.Stream.source({ replay: n })` /
+# `subscribe(…, { replay: k })` calls the emitter now emits. What the driver
+# pins is the reference's answer and not a plausible one: the provider holds
+# the last n items whether or not anyone listens, a late subscriber receives
+# the last k of them oldest first and before any live item, the backlog rides
+# the provider's own forward path (so it takes the chain, the buffer and the
+# overflow policy exactly as a live item does), and a declaration nobody asks
+# for changes nothing. The durable cursor is refused by name at emit time and
+# never reaches this runtime.
+_REPLAY_DRIVER = textwrap.dedent("""
+    import { Stream, host, StreamFaulted, hostLog } from './runtime.ts'
+
+    const log: string[] = []
+
+    async function take(sub: any, n: number): Promise<unknown[]> {
+      const out: unknown[] = []
+      for (let i = 0; i < n; i++) out.push(await sub.next())
+      return out
+    }
+
+    async function main(): Promise<void> {
+      // (1) a late subscriber receives the last k held items, then live ones.
+      {
+        hostLog.length = 0
+        const src = host.Stream.source({ replay: 3 })
+        for (const v of ['a', 'b', 'c', 'd']) src.emit(v)   // nobody listening
+        const sub = host.Stream.subscribe(src, 'error', null, { replay: 3 })
+        log.push('late=' + JSON.stringify(await take(sub, 3)))
+        src.emit('e')
+        log.push('live_after=' + JSON.stringify(await take(sub, 1)))
+        log.push('replay_trace=' + JSON.stringify(
+          hostLog.filter((e) => e.startsWith('stream.replay'))))
+        sub.close()
+        src.close()
+        log.push('late_pending=' + Stream.pending())
+      }
+
+      // (2) the control: no declaration, no backlog. The same timing sees only
+      //     what was emitted after `subscribe`.
+      {
+        const src = host.Stream.source()
+        for (const v of ['a', 'b', 'c', 'd']) src.emit(v)
+        const sub = host.Stream.subscribe(src, 'error', null)
+        src.emit('e')
+        log.push('control=' + JSON.stringify(await take(sub, 1)))
+        sub.close()
+        src.close()
+      }
+
+      // (3) a request smaller than the declaration takes the NEWEST k.
+      {
+        const src = host.Stream.source({ replay: 4 })
+        for (const v of [1, 2, 3, 4, 5]) src.emit(v)   // 1 trimmed: holds 2..5
+        const sub = host.Stream.subscribe(src, 'error', null, { replay: 2 })
+        log.push('newest=' + JSON.stringify(await take(sub, 2)))
+        sub.close()
+        src.close()
+      }
+
+      // (4) a replayed item takes the declared buffer and policy: a backlog
+      //     bigger than the buffer is ordinary `error`-policy overflow.
+      {
+        const src = host.Stream.source({ replay: 6 })
+        for (let i = 0; i < 6; i++) src.emit(i)
+        const sub = host.Stream.subscribe(src, 'error', null,
+          { capacity: 2, replay: 6 })
+        const got = await take(sub, 2)
+        let reason = ''
+        try {
+          await sub.next()
+        } catch (e) {
+          reason = (e as StreamFaulted).reason
+        }
+        log.push('overflow=' + JSON.stringify(got) + ',' + reason)
+        sub.close()
+        src.close()
+      }
+
+      // (5) the backlog rides the combinator chain, like a live item.
+      {
+        const src = host.Stream.source({ replay: 4 })
+        for (const v of [1, 2, 3, 4]) src.emit(v)
+        const sub = host.Stream.subscribe(src, 'error', null, {
+          stages: [['filter', (x: any) => x % 2 === 0]],
+          replay: 4,
+        })
+        log.push('chain=' + JSON.stringify(await take(sub, 2)))
+        sub.close()
+        src.close()
+      }
+
+      // (6) a declaration with no consumer request replays nothing.
+      {
+        const src = host.Stream.source({ replay: 4 })
+        src.emit('old')
+        const sub = host.Stream.subscribe(src, 'error', null)
+        src.emit('new')
+        log.push('unrequested=' + JSON.stringify(await take(sub, 1)))
+        sub.close()
+        src.close()
+      }
+
+      log.push('pending=' + Stream.pending())
+    }
+
+    main().then(
+      () => { process.stdout.write(log.join('\\n') + '\\n') },
+      (e) => { console.error(e); process.exit(1) },
+    )
+""").lstrip()
+
+
+def test_a_ts_last_n_replay_runs_under_plain_node():
+    lines = _run_driver(_REPLAY_DRIVER)
+    # the provider held the last three while nobody listened; the late
+    # subscriber received them oldest first, and a live item followed
+    assert lines["late"] == '["b","c","d"]'
+    assert lines["live_after"] == '["e"]'
+    assert lines["replay_trace"] == (
+        '["stream.replay b","stream.replay c","stream.replay d"]'), (
+        "each replayed item is traced, as on the py reference")
+    assert lines["late_pending"] == "0"
+    # the non-vacuity control: the same timing with no declaration sees nothing
+    # of what was emitted before `subscribe`
+    assert lines["control"] == '["e"]'
+    # a smaller request takes the newest items, from a bounded backlog
+    assert lines["newest"] == "[4,5]"
+    # the backlog took the buffer and the `error` policy like a live item
+    assert lines["overflow"] == "[0,1],overflow"
+    # ... and the combinator chain
+    assert lines["chain"] == "[2,4]"
+    # a declaration alone changes nothing a consumer sees
+    assert lines["unrequested"] == '["new"]'
+    assert lines["pending"] == "0"

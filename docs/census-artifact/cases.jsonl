@@ -1554,6 +1554,10 @@
 
 ["tests/fixtures/emit_java_refusals/validated_emission_operation.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_async_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_builtin_shadow.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_py_corpus/adt.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_py_corpus/adt_inference.rvl", "agree-admit"]
@@ -1666,6 +1670,8 @@
 
 ["tests/fixtures/emit_py_corpus/services_timers.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_corpus/services_value_emission.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_py_corpus/shadowing_near_misses.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_py_corpus/streams.rvl", "agree-admit"]
@@ -1690,6 +1696,24 @@
 
 ["tests/fixtures/emit_py_corpus/witnessed_secret_unused.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_deferred_register.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_deferred_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_map_remove_nested.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_placement.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_spawn_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_stream_builtin_bind.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_test_sections.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_timer_compensate.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_validated_shapes.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/arith.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/bitwise.rvl", "agree-admit"]
@@ -1709,6 +1733,8 @@
 ["tests/fixtures/emit_rust_corpus/comp_body_steps.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/comp_host_map.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_host_map_undo_local.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl", "agree-admit"]
 
@@ -1921,6 +1947,8 @@
 ["tests/fixtures/emit_wasm_refusals/compound_required_call.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_refusals/secret_fed_plain_witness.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl", "agree-admit"]
 
