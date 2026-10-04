@@ -128,12 +128,9 @@ def test_every_admitted_name_emits(name):
 
 
 @needs_jdk
-def test_every_admitted_name_is_provided_and_called_end_to_end(monkeypatch):
-    # The in-repo stubs, even where real cordis4j classes are present (CI):
-    # with REVL_CORDIS4J_CLASSES set, `revl test --backend java` compiles the
-    # plugin against those classes but leaves them off the runner's classpath,
-    # so the JVM fails with NoClassDefFoundError before any name is called.
-    monkeypatch.setenv("REVL_CORDIS4J_CLASSES", "")
+def test_every_admitted_name_is_provided_and_called_end_to_end():
+    # Runs on the real cordis4j classes where REVL_CORDIS4J_CLASSES is set
+    # (CI's backend-java job) and on the in-repo stubs otherwise (issue #1888).
     status, message = RUNNERS["java"](compile_source(_program(ADMITTED), "kw.rvl"))
     assert status == "pass", message
 
@@ -143,7 +140,7 @@ def test_the_java_spelling_is_one_function_at_every_site():
     assert "long class_(long x);" in code                     # the interface
     assert "public long class_(long x) {" in code             # the provider
     assert "this.s.class_(x)" in code                         # a required-service call
-    assert "_revlRoot.get(S.class).class_(41L)" in code       # a lifecycle `call`
+    assert '_revlRoot.get(ServiceKey.of(S.class, "s")).class_(41L)' in code  # a lifecycle `call`
     assert 'case "class" -> "class_";' in code                # the seam's table
     assert 'case "class_" -> "class";' in code
 

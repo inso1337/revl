@@ -3841,9 +3841,14 @@ def _v3_lifecycle_step(step: dict, ctx: _V3Ctx, where: str,
         if method is None:  # pragma: no cover — the lowerer rejects it
             raise EmitError(f"{where}: unknown method {step['method']!r}")
         args = ", ".join(_expr(arg, ctx) for arg in step.get("args") or [])
-        # `get` throws when the key is not ACTIVE (R2) — the resolution IS the
-        # liveness check, the same read RunOnce's UP proof performs.
-        call = (f"_revlRoot.get({_ident(service, 'service')}.class)"
+        # `get` throws when the key is not ACTIVE (R2) - the resolution IS the
+        # liveness check, the same read RunOnce's UP proof performs. It reads
+        # the provision by its KEY, as the provider registered it
+        # (`ServiceKey.of(<Svc>.class, "<key>")`): real cordis4j does not
+        # answer a type-only `get(<Svc>.class)` for a keyed provision, which
+        # only the in-repo stubs did (issue #1888).
+        call = (f"_revlRoot.get(ServiceKey.of({_ident(service, 'service')}.class, "
+                f"{_string(key)}))"
                 f".{_method_name(step['method'])}({args})")
         bind = step.get("bind")
         if bind is None:
