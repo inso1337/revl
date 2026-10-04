@@ -295,9 +295,9 @@ is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 never has to touch the filesystem. This is your primary interface.
 
 <!-- docgen:agents-mcp-count begin -->
-The complete verb set is 60 verbs, from
+The complete verb set comes from
 `src/revl/mcp/server.py` and `query_tools.py`. `tools/list` shows the
-14 core verbs by default; call `revl_verbs` for any other verb's
+core tier by default; call `revl_verbs` for any other verb's
 schema, or call it by name. It is grouped below by what you reach for;
 each verb's exact inputs and outputs are in
 [mcp-reference.md](mcp-reference.md).
