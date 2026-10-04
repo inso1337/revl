@@ -114,6 +114,7 @@ import re
 from .. import idioms, source_grammar
 from ..diagnostics import GUARANTEES
 from ..holes import EMITTABLE_SECTIONS
+from ..lower import _GENERATABLE_PRIMITIVES
 from ..resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS
 
 #: The fillSpec shape this module writes. Version 1 had no `version` key.
@@ -336,11 +337,21 @@ def _externs(externs: list, calls: list[dict], position: str,
     }
 
 
-#: A literal of each primitive, for `fillable.producers`. `Unit` has none:
-#: revl has no unit expression (`()` does not parse), so a `Unit` hole is
-#: filled by a call that returns nothing (#1846).
-_LITERALS = {"Str": '"..."', "Int": "0", "Int32": "0", "Float": "0.0",
-             "F64": "0.0", "Num": "0", "Bool": "false"}
+def _primitive_literal(name: str) -> str:
+    if name == "Str":
+        return '"..."'
+    if name == "Bool":
+        return "false"
+    return "0.0" if name in ("Float", "F64") else "0"
+
+
+#: A literal of each primitive, for `fillable.producers`: the primitives a
+#: value can be generated for, so the vocabulary is the compiler's own
+#: (`lower._GENERATABLE_PRIMITIVES`). `Unit` is not one: revl has no unit
+#: expression (`()` does not parse), so a `Unit` hole is filled by a call that
+#: returns nothing (#1846).
+_LITERALS = {name: _primitive_literal(name)
+             for name in sorted(_GENERATABLE_PRIMITIVES)}
 
 
 def _type_head(t: str) -> str:
