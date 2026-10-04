@@ -1,0 +1,48 @@
+// item 391 (#106), held to byte agreement by tests/test_selfhost_emit_rust.py:
+// in-file `test` blocks as `#[test] fn`s. selfhost/emit_rust.rvl wrote a named
+// `UNSUPPORTED-TEST` marker for each before.
+//
+//   - the slug: `_snake` of the name with every other character replaced by
+//     `_`, `test_` in front of one that starts with a digit;
+//   - a slug equal to a function's name, and two names that snake to the same
+//     slug (`Twice`, `twice`), are bumped (`_1`, `_2`): tests share the module
+//     namespace with the functions;
+//   - an empty test body;
+//   - issue #1734's tests half: the document's only Str builtins are inside a
+//     test, and the `RevlStrOps` helper traits are emitted for them.
+//
+// The bodies read each binding once: a reused binding takes a clone in the
+// reference's by-value analysis, which the port does not carry for function
+// bodies either.
+
+fn twice(n: Int) -> Int {
+  return n * 2
+}
+
+fn add(a: Int, b: Int) -> Int {
+  return a + b
+}
+
+test "Twice" {
+  assert twice(2) == 4
+}
+
+test "twice" {
+  assert twice(3) == 6
+}
+
+test "2 plus 2, as a sum!" {
+  assert add(2, 2) == 4
+}
+
+test "AddKeepsOrder" {
+  let x = add(1, 2)
+  assert x == 3
+}
+
+test "nothing to check" {
+}
+
+test "a Str builtin only in a test" {
+  assert "ab".concat("c").length() == 3
+}

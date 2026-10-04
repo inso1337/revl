@@ -17,7 +17,10 @@
 
 /// The identifier `gate_version().frontier` reports. Two gates with different
 /// ids cover different surfaces and their agreement means nothing.
-pub const FRONTIER_ID: &str = "selfhost-admit:25d50d24a6789233";
+/// Computed when the crate is built: `build.rs` hashes the crate's own sources
+/// (`Cargo.toml`, `build.rs`, `src/**/*.rs`), so the id names the bytes that
+/// were compiled and no committed file carries it (issue #1768).
+pub const FRONTIER_ID: &str = concat!("selfhost-admit:", env!("REVL_GATE_IDENTITY"));
 
 /// Sources above this many bytes are refused rather than decided: the emitted
 /// parser/checker are deeply recursive and a stack exhaustion ABORTS, which no
