@@ -6829,7 +6829,9 @@ fn stdlib_node_in(v: Value) -> bool {
 fn deferred_test_markers(ir: Value) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for t in value_list(value_field(ir.clone(), String::from("tests"))) {
-        out.push(format!("<<UNSUPPORTED-TEST:{}>>", value_str(value_field(t.clone(), String::from("name")))));
+        if value_bool(value_field(t.clone(), String::from("lifecycle"))) {
+            out.push(format!("<<UNSUPPORTED-TEST:{}>>", value_str(value_field(t.clone(), String::from("name")))));
+        }
     }
     for t in value_list(value_field(ir.clone(), String::from("fault_tests"))) {
         out.push(format!("<<UNSUPPORTED-FAULT-TEST:{}>>", value_str(value_field(t.clone(), String::from("name")))));
@@ -6872,6 +6874,7 @@ pub fn emit_rust_src(ir: Value) -> String {
     if (functions.revl_length() > 0i64) {
         out.extend((emit_v3_functions(functions.clone(), fr.clone(), tables.clone())).iter().cloned());
     }
+    out.extend((emit_v3_tests(value_list(value_field(ir.clone(), String::from("tests"))), functions.clone(), externs.clone(), fr.clone(), tables.clone())).iter().cloned());
     let services = value_field(ir.clone(), String::from("services"));
     out.extend((emit_service_traits(services.clone(), tables.tn.clone())).iter().cloned());
     out.extend((emit_host_stubs(ir.clone())).iter().cloned());
@@ -6895,6 +6898,60 @@ pub fn emit_rust_src(ir: Value) -> String {
         out.extend((test_markers).iter().cloned());
     }
     return rstrip__m1(&(out.revl_join(&newline()))).revl_concat(&newline());
+}
+
+fn emit_v3_tests(tests: Vec<Value>, functions: Vec<Value>, externs: Vec<Value>, fr: std::collections::HashMap<String, String>, tables: TypeTables) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut used: Vec<String> = vec![];
+    for f in functions.clone() {
+        used.push(mangle(value_str(value_field(f.clone(), String::from("name")))));
+    }
+    for e in externs {
+        used.push(mangle(value_str(value_field(e.clone(), String::from("name")))));
+    }
+    let borrow = compute_str_param_borrows(functions.clone());
+    let list_borrow = compute_list_param_borrows(functions.clone());
+    for t in tests {
+        if (!value_bool(value_field(t.clone(), String::from("lifecycle")))) {
+            let name = unique_slug(test_slug(value_str(value_field(t.clone(), String::from("name")))), used.clone());
+            used.push(name.clone());
+            out.push(String::from("#[test]"));
+            out.push(format!("fn {}() {{", name));
+            let body = value_list(value_field(t.clone(), String::from("body")));
+            if (body.revl_length() == 0i64) {
+                out.push(String::from("    // (empty test body)"));
+            } else {
+                let ctx_ = Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new() };
+                out.extend((emit_stmts(body.clone(), ctx_.clone(), 1i64).lines).iter().cloned());
+            }
+            out.push(String::from("}"));
+            out.push(String::from(""));
+        }
+    }
+    return out;
+}
+
+fn test_slug(raw: String) -> String {
+    let base = snake(if (raw == "") { String::from("test") } else { raw.clone() });
+    let keep = String::from("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_");
+    let mut slug = String::from("");
+    let mut i = 0i64;
+    while (i < base.revl_length()) {
+        let ch = { base.chars().nth((i) as usize).unwrap().to_string() };
+        slug.push_str(&(if (keep.revl_index_of(&ch) >= 0i64) { ch.clone() } else { String::from("_") }));
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return if ((slug == "") || (String::from("0123456789").revl_index_of(&{ slug.chars().nth((0i64) as usize).unwrap().to_string() }) >= 0i64)) { String::from("test_").revl_concat(&slug) } else { slug.clone() };
+}
+
+fn unique_slug(base: String, used: Vec<String>) -> String {
+    let mut name = base.clone();
+    let mut counter = 0i64;
+    while list_contains(used.clone(), name.clone()) {
+        counter = (counter).checked_add(1i64).expect("revl: Int overflow");
+        name = format!("{}_{}", base, counter);
+    }
+    return name;
 }
 
 fn tkc(ts: &[Token], i: i64) -> Token {
