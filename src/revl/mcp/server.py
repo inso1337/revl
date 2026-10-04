@@ -1024,6 +1024,9 @@ def _tool_swap(arguments: dict) -> dict:
         return rejected
     authored = _authored_host_bodies(full, source, modules)
     running = SESSION.ir
+    # issue #1704: the same preflight revl_edit carries, read off the
+    # composition running before the swap
+    radius = _authoring_loop.blast_radius(running, full)
     try:
         state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
@@ -1035,7 +1038,7 @@ def _tool_swap(arguments: dict) -> dict:
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
     return _with_touched({"ok": True, "admitted": True, "swapped": True,
-                          **_summary(full), **state,
+                          "blastRadius": radius, **_summary(full), **state,
                           **_effect_classes.report(full, running, against=True)},
                          before)
 
@@ -1117,12 +1120,13 @@ def _swap_server_side(replacing: tuple) -> dict:
                             "composition on its own")
         return rejected
     running = SESSION.ir
+    radius = _authoring_loop.blast_radius(running, full)  # issue #1704
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs))
     except SessionError as error:
         return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,
-            "fromServerSide": True, **_summary(full), **state,
+            "fromServerSide": True, "blastRadius": radius, **_summary(full), **state,
             **_effect_classes.report(full, running, against=True)}
 
 
@@ -2944,7 +2948,9 @@ TOOLS = [
                        "generation, need not re-serialize the whole file. The answer "
                        "carries `effectClassChanges` against the running composition and "
                        "an `effectClassWarnings` entry for every operation whose effect "
-                       "class rose, naming the crossing that raised it.",
+                       "class rose, naming the crossing that raised it. A swap that "
+                       "lands carries `blastRadius`, as revl_edit does: the "
+                       "revl_query_withdraw cascade for every component it touched.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT,
@@ -3091,6 +3097,9 @@ TOOLS = [
                        "a provider, and without `cascade: true` admission refuses "
                        "it). Returns `committed`, `verified`, the `plan`, the "
                        "`touched` symbols and every `component` the change touched. "
+                       "A proposal and a commit both carry `blastRadius`, as "
+                       "revl_edit does: the revl_query_withdraw cascade for every "
+                       "component the change touches. "
                        "A failed verification commits nothing and says why.",
         "inputSchema": {
             "type": "object",
