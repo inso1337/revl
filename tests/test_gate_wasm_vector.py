@@ -199,7 +199,12 @@ def test_the_version_surface_reports_the_crate_frontier_and_the_wasm_tier(compon
     from revl.gate import GATE_API_VERSION
 
     assert version["api"] == GATE_API_VERSION
-    assert version["frontier"] == crate["frontier"]
+    # The crate's identity is computed by its build.rs (issue #1768), so the
+    # component must report exactly what the generator computes from the
+    # crate's committed sources.
+    probe = _crate_generator()
+    assert version["frontier"] == probe.frontier_id(probe.crate_identity())
+    assert crate["frontier"] == "selfhost-admit:<identity>"
     assert version["language"] == crate["language_version"]
     assert version["layer"] == crate["covered_layer"]
     assert version["tier"] == "wasm"
