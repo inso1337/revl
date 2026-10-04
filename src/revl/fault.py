@@ -185,9 +185,13 @@ def _unreleased_host_resources(events: list) -> list:
     """
     live: dict = {}
     for event in events:
-        head = event.split(" ", 1)[0]
+        head, _, rest = event.partition(" ")
         tag, _, verb = head.rpartition(".")
         if not tag:
+            continue
+        if rest.startswith("refused"):
+            # `pool.open refused <url>`: the acquisition raised, so nothing
+            # was acquired and there is nothing to release (issue #1859)
             continue
         if verb in _ACQUIRE_VERBS:
             live[tag] = verb

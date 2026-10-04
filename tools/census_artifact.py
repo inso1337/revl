@@ -349,6 +349,7 @@ REPORT_INPUTS = (
 # so the audit hook never sees it. Pinned by glob; `build_gate_crate.py
 # --check` is what ties it to `selfhost/lower.rvl`.
 GATE_CRATE_GLOBS = ("crates/revl-gate/Cargo.toml",
+                    "crates/revl-gate/build.rs",
                     "crates/revl-gate/src/**/*.rs")
 
 # One stack of open sets, fed by one audit hook. An audit hook cannot be

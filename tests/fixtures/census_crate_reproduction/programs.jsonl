@@ -1550,6 +1550,10 @@
 
 "tests/fixtures/emit_java_refusals/validated_emission_operation.rvl"
 
+"tests/fixtures/emit_py_async_shapes.rvl"
+
+"tests/fixtures/emit_py_builtin_shadow.rvl"
+
 "tests/fixtures/emit_py_corpus/adt.rvl"
 
 "tests/fixtures/emit_py_corpus/adt_inference.rvl"
@@ -1662,6 +1666,8 @@
 
 "tests/fixtures/emit_py_corpus/services_timers.rvl"
 
+"tests/fixtures/emit_py_corpus/services_value_emission.rvl"
+
 "tests/fixtures/emit_py_corpus/shadowing_near_misses.rvl"
 
 "tests/fixtures/emit_py_corpus/streams.rvl"
@@ -1686,6 +1692,24 @@
 
 "tests/fixtures/emit_py_corpus/witnessed_secret_unused.rvl"
 
+"tests/fixtures/emit_py_deferred_register.rvl"
+
+"tests/fixtures/emit_py_deferred_shapes.rvl"
+
+"tests/fixtures/emit_py_map_remove_nested.rvl"
+
+"tests/fixtures/emit_py_placement.rvl"
+
+"tests/fixtures/emit_py_spawn_shapes.rvl"
+
+"tests/fixtures/emit_py_stream_builtin_bind.rvl"
+
+"tests/fixtures/emit_py_test_sections.rvl"
+
+"tests/fixtures/emit_py_timer_compensate.rvl"
+
+"tests/fixtures/emit_py_validated_shapes.rvl"
+
 "tests/fixtures/emit_rust_corpus/arith.rvl"
 
 "tests/fixtures/emit_rust_corpus/bitwise.rvl"
@@ -1706,7 +1730,11 @@
 
 "tests/fixtures/emit_rust_corpus/comp_host_map.rvl"
 
+"tests/fixtures/emit_rust_corpus/comp_host_map_undo_local.rvl"
+
 "tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl"
+
+"tests/fixtures/emit_rust_corpus/comp_str_builtin.rvl"
 
 "tests/fixtures/emit_rust_corpus/comp_stream.rvl"
 
@@ -1727,6 +1755,8 @@
 "tests/fixtures/emit_rust_corpus/externs.rvl"
 
 "tests/fixtures/emit_rust_corpus/float_pub.rvl"
+
+"tests/fixtures/emit_rust_corpus/in_file_tests.rvl"
 
 "tests/fixtures/emit_rust_corpus/lengths.rvl"
 
