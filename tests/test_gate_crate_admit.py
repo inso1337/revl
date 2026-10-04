@@ -1493,7 +1493,14 @@ def test_the_consumer_reads_the_frontier_the_crate_was_generated_with(consumer):
     assert run.returncode == 0, run.stderr
     reported = json.loads(run.stdout.strip())
     meta = json.loads((CRATE / "GENERATED.json").read_text(encoding="utf-8"))
-    assert reported["frontier"] == meta["frontier"]
+    # build.rs computes the identity when cargo builds the crate (issue
+    # #1768); the generator computes it the same way. This is the assertion
+    # that holds the two equal, on a real cargo build.
+    generator = load_by_path("revl_build_gate_crate_identity",
+                             ROOT / "tools" / "build_gate_crate.py")
+    assert reported["frontier"] == generator.frontier_id(
+        generator.crate_identity(CRATE))
+    assert meta["frontier"] == "selfhost-admit:<identity>"
     assert reported["api"] == meta["gate_api_version"]
     assert reported["language"] == meta["language_version"]
     assert reported["layer"] == meta["covered_layer"]
