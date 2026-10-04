@@ -1,0 +1,117 @@
+// item 391: the async shapes the tree's async documents leave out, held to
+// byte agreement by tests/test_selfhost_emit_py.py. selfhost/emit_py.rvl refused
+// every coloured fn and async operation by name before it carried the
+// reference's await-seed (item 92).
+//
+//   drive      - a call through an async-typed parameter is awaited (lift's
+//                call reaches the frontend's sync instance of it instead);
+//   Agent      - an async arrow whose body is statically sync goes through
+//                `_revl_as_async`, and the module then carries that wrapper;
+//   pick       - an awaited match: an arm that calls a coloured fn with its bind
+//                renders the comprehension binder (a lambda is a sync frame);
+//                a bind named after one of the emitter's walrus temps keeps
+//                the tuple spelling;
+//   Relay      - async provide operations: an `await` statement, an awaited
+//                async host-extern emission, an awaited coloured-fn call, and
+//                an awaited match over an async operation's result;
+//   Ticker     - an async-coloured timer whose body mixes a sync emission (run
+//                inline) with an async one (spawned into the in-flight window),
+//                in a document with no lifecycle test;
+//   keep       - an async arrow handed to a fn that never calls it: the
+//                coroutine scan over the match arm holding it prunes the arrow;
+//   pair       - a two-name list pattern, the destructuring shape the tree's
+//                destructure documents leave out.
+//
+// It sits beside emit_py_corpus/ rather than in it because
+// tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
+// is not this slice.
+
+extern emission async fn host_get(path: Str) -> Str = @py {
+    return path
+}
+
+fn drive(cb: (Str) -> Async[Str], path: Str) -> Str {
+  let body = cb(path)
+  return body
+}
+
+pub fn lift(path: Str) -> Str {
+  return drive(y => y + "!", path)
+}
+
+fn fetch(path: Str) -> Str {
+  return host_get(path)
+}
+
+fn pick(o: Opt[Str], p: Opt[Str], q: Opt[Str], r: Opt[Str]) -> Str {
+  let a = match o {
+    Some(v) => fetch(v) + ".",
+    None => "none"
+  }
+  let b = match p {
+    Some(_bi) => fetch(_bi) + ".",
+    None => "none"
+  }
+  let c = match q {
+    Some(_ov12) => fetch(_ov12) + ".",
+    None => "none"
+  }
+  let d = match r {
+    Some(_ovx) => fetch(_ovx) + ".",
+    None => "none"
+  }
+  let e = match o {
+    Some(v) => keep(m => m, v),
+    None => "none"
+  }
+  return a + b + c + d + e
+}
+
+fn keep(cb: (Str) -> Async[Str], v: Str) -> Str {
+  return v
+}
+
+service Relay {
+  emission async fn send(path: Str) -> Str
+  fn note(path: Str) -> Str
+}
+
+component Relayer provides relay: Relay {
+  provide relay {
+    async fn send(path) {
+      await emit fetch(path)
+      emit host_get(path)
+      let got = emit fetch(path)
+      return match got.length() > 0 ? Some(got) : None {
+        Some(g) => emit fetch(g),
+        None => "empty"
+      }
+    }
+    fn note(path) = path
+  }
+}
+
+service Sink { emission fn write(v: Str) -> Int }
+
+component Ticker requires relay: Relay, sink: Sink {
+  every 5s {
+    emit sink.write("tick")
+    emit relay.send("tick")
+  }
+}
+
+service Runner { emission async fn run(prompt: Str) -> Str }
+
+fn agent_loop(current: Str, complete: (Str) -> Async[Str]) -> Str {
+  let resp = complete(current)
+  return resp
+}
+
+component Agent provides runner: Runner {
+  provide runner { async fn run(prompt) = agent_loop(prompt, msgs => "mock") }
+}
+
+fn pair(xs: List[Int]) -> Int {
+  let [first, second] = xs
+  return first + second
+}

@@ -29,6 +29,14 @@ cd "$(dirname "$0")/.." # formal/
 python3 scripts/layering_gate.py
 python3 scripts/nonvacuity_gate.py
 
+# elan installs lake in ~/.elan/bin and adds that to PATH only from a shell
+# profile, so a shell that never sourced it has elan installed and no lake on
+# PATH. Look there before calling the toolchain missing (issue #1864).
+if ! command -v lake >/dev/null 2>&1 && [ -x "$HOME/.elan/bin/lake" ]; then
+  PATH="$HOME/.elan/bin:$PATH"
+  export PATH
+fi
+
 if ! command -v lake >/dev/null 2>&1; then
   echo "SKIP (loud): elan/lake not installed — the formal proofs were NOT checked"
   exit 0
