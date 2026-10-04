@@ -183,6 +183,13 @@ def build_spec(*, service: str, provides: str | None = None,
                          emits=bool(spec.wired_roots()))]
     spec.methods = parsed
 
+    for m in spec.methods:
+        if m.returns == "Unit" and not m.emits:
+            raise ScaffoldError(
+                f"`{m.name}` returns `Unit` and is pure, so it computes nothing "
+                "a caller can see and no fill can be written for it (revl has "
+                "no unit value): give it the return type it computes, or "
+                "declare it with --emits so its body is the crossing it makes")
     if any(m.emits for m in spec.methods) and not spec.wired_roots():
         raise ScaffoldError(
             "an emission method needs a capability whose boundary is injected: "
@@ -206,10 +213,11 @@ def _split_body(method: Method, names: str, bound: list[str]) -> str:
     split follows the bound the scaffold declares rather than their (not yet
     written) operations, and each step takes the method's return type."""
     lines = [f"    fn {method.name}({names}) {{"]
+    # a `Unit` step has no pure value, so each step there is its crossing
+    otherwise = "" if method.returns == "Unit" else ", if any; a pure value otherwise"
     for token in bound:
         lines.append(f"      let {step_name(token)} = hole[{method.returns}] "
-                     f"\"the crossing through {token}, if any; a pure value "
-                     f"otherwise\"")
+                     f"\"the crossing through {token}{otherwise}\"")
     lines.append(f"      return hole[{method.returns}] \"the result of "
                  f"{method.name}, from the steps above\"")
     lines.append("    }")
@@ -225,7 +233,12 @@ def _provide_body(method: Method, unwired: list[str],
     if method.emits and len(bound or []) >= 2:
         return _split_body(method, names, list(bound))
     note = ""
-    if method.emits:
+    if method.emits and method.returns == "Unit":
+        # a `Unit` has no literal: the fill is the crossing itself, an `emit`
+        # of an operation that returns nothing (#1857)
+        note = (" (the fill is the crossing: `emit` an operation of the declared"
+                " boundary that returns nothing, declared on its service first)")
+    elif method.emits:
         note = " (a fill here may emit through the declared boundary)"
     elif unwired:
         note = (f" — the spec named capability {', '.join(unwired)} but injected"

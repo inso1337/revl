@@ -109,6 +109,13 @@ language: the generator never grants authority the spec did not ask for.
 * **An emission with nowhere to go is refused.** `--emits` with no wired
   capability would force a bare `emission` ("any boundary"). The generator
   refuses rather than write it.
+* **A method that returns `Unit` is a crossing or nothing.** revl has no unit
+  value, so a `Unit` hole is filled only by a call that returns nothing. An
+  `--emits` method returning `Unit` gets a hole whose fill is the crossing:
+  declare the operation on the stub service, then `emit` it (its fill spec
+  lists it once declared). A pure `--methods` entry returning `Unit` computes
+  nothing a caller can see, so it is refused with that reason instead of
+  being written as a hole nothing can fill (issue #1857).
 
 ## `--json`: the skeleton and its remaining work in one response
 
