@@ -51,6 +51,7 @@ is never imported.
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 import itertools
 import json
@@ -403,7 +404,7 @@ class Step:
     __slots__ = ("index", "kind", "label", "effect", "file", "lineno", "source",
                  "detail", "origin", "undo", "undone", "undone_by", "crossed",
                  "compensation", "note", "error", "scope", "undo_idempotent",
-                 "inverse_op")
+                 "inverse_op", "within", "wal_seq")
 
     def __init__(self, index: int, kind: str, label: str, effect: Optional[str],
                  origin: dict, file=None, lineno=None, source=None,
@@ -421,6 +422,14 @@ class Step:
         self.undo: Optional[Callable] = None
         self.undone = False
         self.undone_by: Optional[str] = None
+        # issue #1609: the required-service crossing this step was recorded
+        # INSIDE (`_ENCLOSING`), as `{"seq", "component", "label"}`, or None.
+        # A provider body's own emission made while answering a caller's
+        # `emit svc.op(...)` is the same physical crossing the caller's record
+        # already describes; recovery counts it there, once.
+        self.within: Optional[dict] = _ENCLOSING.get()
+        # the WAL seq this step was written at, once it is (None without a WAL)
+        self.wal_seq: Optional[int] = None
         self.crossed = False          # an emission the unwind stepped over
         self.compensation: Optional[int] = None  # index of its compensation
         self.error: Optional[str] = None
@@ -551,7 +560,7 @@ class Timeline:
 
     def _wal_append(self, step: Step) -> None:
         if self._wal is not None:
-            self._wal.append_step(step, self.component)
+            step.wal_seq = self._wal.append_step(step, self.component)["seq"]
 
     # -- recording ---------------------------------------------------------
 
@@ -1373,16 +1382,49 @@ class _ServiceProxy:
             while frame is not None and \
                     "_revl_transparent_frame" in frame.f_code.co_varnames:
                 frame = frame.f_back
-            timeline.record_emission(
+            step = timeline.record_emission(
                 key, name, args, service,
                 (frame.f_code.co_filename, frame.f_lineno)
                 if frame is not None else (None, None))
-            return attr(*args, **kwargs)
+            return _call_within(_crossing_ref(timeline, step), attr, args, kwargs)
 
         return emission
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
         return f"<recording {self._key}: {self._service}>"
+
+
+#: issue #1609: the required-service crossing being answered right now. Set by
+#: `_ServiceProxy` around the provider's method, so a step the provider records
+#: while answering it carries `within` (see `Step.within`). A ContextVar, so an
+#: `async fn` operation awaited later still sees the crossing it belongs to.
+_ENCLOSING: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "revl_enclosing_crossing", default=None)
+
+
+def _crossing_ref(timeline: "Timeline", step: Step) -> dict:
+    return {"seq": step.wal_seq, "component": timeline.component, "label": step.label}
+
+
+def _call_within(ref: dict, fn: Callable, args: tuple, kwargs: dict) -> Any:
+    """``fn(*args, **kwargs)`` with ``ref`` as the enclosing crossing, for the
+    synchronous body and, when it returns an awaitable, for the awaited one."""
+    token = _ENCLOSING.set(ref)
+    try:
+        result = fn(*args, **kwargs)
+    finally:
+        _ENCLOSING.reset(token)
+    if inspect.isawaitable(result):
+        return _await_within(ref, result)
+    return result
+
+
+async def _await_within(ref: dict, awaitable: Any) -> Any:
+    token = _ENCLOSING.set(ref)
+    try:
+        return await awaitable
+    finally:
+        _ENCLOSING.reset(token)
 
 
 class _SpawnRecorder:
@@ -1996,6 +2038,9 @@ def _wal_record(step: "Step", component: str, seq: int,
         **({"compensated": True} if step.compensation is not None else {}),
         **({"undoIdempotent": step.undo_idempotent}
            if step.undo_idempotent is not None else {}),
+        # issue #1609: absent unless the step was recorded inside another
+        # component's required-service crossing
+        **({"within": step.within} if step.within is not None else {}),
     }
 
 
@@ -2445,14 +2490,38 @@ class WriteAheadLog:
         self._write(record)
         return record
 
-    def record_approval_consumed(self, request_id: str) -> dict:
-        """Append the single-use SPEND, durably, BEFORE the extern body runs
-        (item 246, Decision 3: consume-before-fire). A crash between this record
-        and the emission leaves consumed-but-unfired — an owed action that needs a
-        FRESH approval, which is fail-closed: the world saw at most one fire on
-        this yes. The later emission record names the same ``requestId``; the
-        audit joins the spend and the emission on it."""
+    def record_approval_consumed(self, request_id: str, *,
+                                 use: int | None = None) -> dict:
+        """Append one SPEND, durably, BEFORE the authorized crossing runs (item
+        246, Decision 3: consume-before-fire). A crash between this record and
+        the fire leaves consumed-but-unfired, which is fail-closed: a fresh
+        approval is needed, and the world saw at most one fire on this spend.
+
+        ``use`` (issue #1781) is the 1-based index of this spend for
+        ``requestId`` in the session. The session's per-call path (ticket
+        approvals, item-344 standing grants, item-251 distilled rules) and the
+        activation gate's two-phase spend always pass it, so one multi-use
+        grant's spends are told apart by ``(requestId, use)``. The runtime path
+        for an approval threaded into an emission spends a single-use entry and
+        writes no ``use``.
+
+        What follows on the record:
+
+        * after the session's per-call path, an ``approval-emission`` with the
+          same ``requestId`` and ``use`` once the crossing RETURNED. A spend
+          with no such emission was either never fired or raised mid-crossing,
+          and a reader must treat it as owed or ambiguous, never as fired;
+        * after the runtime path, an ``approval-emission`` with the same
+          ``requestId`` (no ``use``) once the threaded crossing fired;
+        * after an activation-gate spend, no ``approval-emission``: that
+          crossing is part of the activation body, which ``activation-complete``
+          records.
+
+        ``revl recover`` does not read these records (src/revl/wal.py); they are
+        the audit trail."""
         record = {"record": "approval-consumed", "requestId": request_id}
+        if use is not None:
+            record["use"] = use
         self._write(record)
         return record
 
@@ -2644,15 +2713,24 @@ class WriteAheadLog:
         return record
 
     def record_approval_emission(self, request_id: str, capability: str,
-                                 component: str) -> dict:
-        """Append the ``approval-emission`` record AFTER a typed-approval crossing
-        fires (item 246, Decision 3), naming the same ``requestId`` the spend
-        did. The audit joins the ``approval-consumed`` spend and this emission on
-        ``requestId``: a spend with no matching emission is a visible owed action
-        (crossing unverified), never a silent gap. Consumes no seq — it names a
-        fact about a fire that already happened."""
+                                 component: str, *,
+                                 use: int | None = None) -> dict:
+        """Append the ``approval-emission`` record AFTER an approved crossing
+        fired (item 246, Decision 3), naming the same ``requestId`` (and, from
+        the session's per-call path, the same ``use``, issue #1781) as the
+        ``approval-consumed`` spend that authorized it. Written by the runtime
+        path for an approval threaded into an emission, and by ``Session.call``
+        once a crossing a ticket approval, standing grant or distilled rule
+        covered has returned.
+
+        The join is on ``(requestId, use)``, or on ``requestId`` alone for the
+        runtime path's single-use spends. A spend with no matching emission is
+        an owed or ambiguous crossing, never a silent gap. Consumes no seq: it
+        names a fact about a fire that already happened."""
         record = {"record": "approval-emission", "requestId": request_id,
                   "capability": capability, "component": component}
+        if use is not None:
+            record["use"] = use
         self._write(record)
         return record
 

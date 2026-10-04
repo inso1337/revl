@@ -278,6 +278,23 @@ The seven required checks (`lint` and the six `backend-*` jobs) are among
 them, and on a pull request `root-suite-affected` is the job that collects the
 root suite.
 
+`root-suite-affected` runs as four shards (issue #1774). Each shard computes
+the same `tools/affected_tests.py` selection. When it is the full root suite
+(about 70 minutes as one job), or 40 or more files, the shards split it by test
+file with `REVL_TEST_SHARD=k/4`, balanced by the per-file seconds in
+`tests/shard_weights.json`. A file heavier than half an even shard is split
+further, by test family (a test function with all its parametrizations, or a
+test class): `tests/test_selfhost_lower.py` is one, and its single nesting test
+of about 19 minutes is now the floor of the slowest shard. A smaller selection
+runs whole in shard 1. The
+shards run every selected test exactly once, which
+`tests/test_root_suite_shards_1774.py` pins. A stale weight only makes the
+shards uneven. A sharded run ends by printing `REVL_SHARD_SECONDS <seconds> <file>`
+for each file it ran, and `<file>::<family>` lines for a split file;
+`python tools/refresh_shard_weights.py --run <run id> --write`
+reads those lines from a FULL run's four job logs into the weights file. To run one
+shard locally: `REVL_TEST_SHARD=2/4 pytest tests/ -q`.
+
 The heavy jobs never run on a pull request (issue #1678): `frontend` (the
 3.11/3.12/3.13 matrix), `frontend-cordis`, `conformance`, `formal`,
 `temporal-exit`, `sandbox-container` and `sandbox-microvm`. They run on the
@@ -290,9 +307,25 @@ as a `workflow_call`, so the PyPI publish gates on the full matrix too.
 schedule, and on `workflow_dispatch`. It deliberately does NOT run on
 `pull_request`: six language lanes per PR made it roughly half the queue on a
 repo whose runner concurrency is the throughput limit, and the required `ci`
-workflow was queuing behind scans of code that had not landed. Everything that
-reaches main is still scanned. What a PR loses is the pre-merge signal; dispatch
-a scan by hand against the branch when a change warrants one.
+workflow was queuing behind scans of code that had not landed. All code that
+reaches main is still scanned, by its own push or a later one. What a PR loses
+is the pre-merge signal; dispatch a scan by hand against the branch when a
+change warrants one.
+
+Issue #1817 trims three things:
+
+- `root-suite-affected` runs on pull requests only. On every other event
+  `frontend` runs the whole root suite, and its 3.12 leg is exactly this job's
+  FULL selection.
+- The six `backend-*` jobs skip on a pull request when every changed path is
+  one no backend job can observe, per `tools/affected_tests.py --ci-backends`.
+  That means documentation, a few trees no backend file reads (`formal/`,
+  `site/`, `dogfood/` and others), and top-level `tests/` or `tools/` files that
+  no backend file, backend job step or backend-run root test names. Anything
+  else, including any `src/revl/` change, runs all six. Main and the merge queue
+  always run all six. A skipped backend job reports `skipping`.
+- CodeQL on main is grouped by ref, so a burst of merges is scanned once at the
+  newest commit, and a documentation-only push is not scanned.
 
 ## What CI does not cover
 
@@ -367,6 +400,81 @@ What is still not covered is the publish job's own runtime environment, its
 `pypi` environment and the Trusted Publishing OIDC handshake. Those exist only
 on a tag build and cannot be rehearsed without publishing. Run
 `gh workflow run "release dry run"` and read it green before pushing a tag.
+
+## Merging main into a PR branch
+
+Update an open PR by merging `origin/main` into it, never by rebasing and
+force-pushing. The merge usually stops on files nobody writes: the gate
+crates, the derived grammar, the census artifact and its crate reproduction,
+the generated block of `formal/STATUS.md`, the conformance matrix and the
+docgen blocks. Never hand-merge one. Resolve them all with one command
+(issue #1784):
+
+    git merge origin/main
+    python3 tools/regen_generated.py
+    git commit
+
+`tools/regen_generated.py` walks the conflicted paths and, for each file it
+knows a generator for, reruns that generator on the merged tree, in the order
+the generators read each other's output:
+1. both gate crates;
+2. the grammar;
+3. provenance;
+4. the census, with its crate reproduction (`cargo`, about fourteen minutes);
+5. `formal/STATUS.md` (a real `lake build`);
+6. the conformance matrix;
+7. the coverage ledger, once it is per half and tier (issue #1768);
+8. docgen.
+
+It then runs every generator's own check, and stages what it resolved.
+
+- **Wholly generated files** are taken from main and regenerated.
+- **Partly generated files** (a doc with a docgen block, `formal/STATUS.md`,
+  the README matrix) are regenerated in all three versions, base, yours and
+  main's, then merged with `git merge-file`. Prose from both sides survives, and
+  a real prose conflict is left marked for you, with the generated region
+  already fresh.
+- **The coverage ledger** (`tests/fixtures/selfhost_uncovered_lines/`) is
+  handed to `tools/selfhost_line_coverage.py --write` as it stands, because
+  that tool reads through conflict markers and re-measures every count. It
+  never writes a budget. When its `--check` names a function whose budget no
+  longer matches, set that budget by hand in the merge commit; the tool
+  prints this step.
+- **Hand-maintained ratchets are never resolved for you.** The tool prints the
+  conflict and the rule. This applies to `selfhost_blind_spots.json` and
+  `oracle_construct_reach_ledger.json`, and to the single-file
+  `selfhost_uncovered_lines.json` ledger while main still has it.
+- **A layout move on main** (the census records, the per-tier ledger) gives
+  every branch cut before it one modify/delete conflict on the old file. The
+  tool takes main's side, the deletion or the hand-written page that replaced
+  the file, and regenerates the new layout. It recognises the move by a path
+  only the new layout has, present on main and absent from the merge base;
+  the moves are listed in its `TRANSITIONS`.
+- **`bench/results/` is left alone** unless you pass `--bench`, which takes
+  main's side, including a file main deleted.
+- **A step whose tool is missing** (`lake`, `cargo`) is skipped with a loud
+  banner, and the files it owns are left as they were. The run then exits 1,
+  because a file nothing checked is not a passing one; pass `--allow-skip` on
+  a machine that cannot install the tool. Before giving up, the tool looks in
+  `~/.elan/bin` for `lake` and `~/.cargo/bin` for `cargo`, so a shell that never
+  sourced their profiles still finds them; `formal/scripts/run_gate.sh` looks in
+  `~/.elan/bin` too. `--fast` skips the crate census on purpose, and that skip
+  does not fail the run.
+- **Provenance has no default generation** for your branch's new census
+  documents. Pass `--provenance-generation N` when its manifest conflicts, or
+  when its check names an UNDECLARED document this branch added:
+  `--only provenance --provenance-generation N`. The census reads the
+  manifest, so the tool reruns the census after it.
+
+The tool calls each generator by its command line and never reads a generated
+file, so a change to a generated layout needs no change to the tool. Only a
+renamed generator or a moved output does, and both live in its `REGISTRY`
+and `TRANSITIONS`,
+which `tests/test_regen_generated.py` checks against the tree. `--list`
+prints what it knows; `--all` and `--only NAME` regenerate outside a
+conflict. It exits 0 when every conflict it owns is resolved and every check
+passes, and 1 when a check fails, a conflict is left for a human, or a
+generator was skipped for a missing tool without `--allow-skip`.
 
 ## Merging
 

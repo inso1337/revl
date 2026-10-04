@@ -26,6 +26,7 @@ selector picked it too. Appended rather than inserted, so the resolution order
 of everything that already resolved is unchanged.
 """
 
+import functools
 import importlib.util
 import os
 import sys
@@ -123,6 +124,102 @@ for _name in REPOSITORY_LOCAL_GIT_ENV + HOOK_COMMIT_IDENTITY_ENV:
     os.environ.pop(_name, None)
 del _name
 
+# Issue #1771: the suite wrote approval WALs into the developer's real state
+# directory (`~/Library/Application Support/revl/approval-wal/`, or the XDG
+# one), 71 files for three test files and tens of thousands over time.
+# `revl.wal.default_wal_dir()` resolves `$REVL_WAL_DIR` first, so it defaults
+# here to a directory owned by this test session, set before any test module
+# is imported so every child process inherits it too. A caller who already set
+# it keeps theirs. Tests that assert the platform default `delenv` it and
+# point `HOME` at their own `tmp_path` (tests/test_wal_integrity.py,
+# tests/test_doctor.py); tests/test_wal_dir_isolated_1771.py pins both halves.
+#
+# Only the process that made the directory removes it: a pytest a test starts
+# inherits `REVL_WAL_DIR` and must not delete its parent's.
+_OWNED_WAL_DIR = None
+if not os.environ.get("REVL_WAL_DIR"):
+    import tempfile as _tempfile
+
+    _OWNED_WAL_DIR = _tempfile.mkdtemp(prefix="revl-test-wal-")
+    os.environ["REVL_WAL_DIR"] = _OWNED_WAL_DIR
+    del _tempfile
+
+
+def pytest_unconfigure(config):
+    if _OWNED_WAL_DIR is not None:
+        import shutil  # noqa: PLC0415
+        shutil.rmtree(_OWNED_WAL_DIR, ignore_errors=True)
+
+
+# Issue #1774: `REVL_TEST_SHARD=k/N` runs only the test files tests/_shard.py
+# assigns to shard k, so CI can split a long run across N jobs. Every shard
+# computes the same assignment from the same collection, so together they run
+# each collected test exactly once (tests/test_root_suite_shards_1774.py).
+
+@functools.cache
+def _shard_module():
+    spec = importlib.util.spec_from_file_location(
+        "revl_tests_shard", Path(__file__).with_name("_shard.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Read once and removed from the environment: a pytest that a test starts
+# (several do, against fixture trees) must run its whole collection, not a
+# shard of it.
+_SHARD_SPEC = os.environ.pop("REVL_TEST_SHARD", "")
+# The weights file, for a test that exercises splitting against weights of its
+# own; tests/shard_weights.json when unset. Removed for the same reason.
+_SHARD_WEIGHTS = os.environ.pop("REVL_SHARD_WEIGHTS", "") or None
+# The files this run split into test families, timed per family below.
+_SHARD_SPLIT: set = set()
+
+
+def pytest_collection_modifyitems(config, items):
+    spec = _SHARD_SPEC
+    if not spec:
+        return
+    shard = _shard_module()
+    k, n = shard.parse(spec)
+    nodeids = [item.nodeid for item in items]
+    weights = shard.load_weights(_SHARD_WEIGHTS)
+    owner = shard.plan(nodeids, weights, shard.load_families(_SHARD_WEIGHTS), n)
+    _SHARD_SPLIT.update(shard.split_files({shard.file_of(t) for t in nodeids}, weights, n))
+    keep = [item for item in items if owner[item.nodeid] == k - 1]
+    drop = [item for item in items if owner[item.nodeid] != k - 1]
+    items[:] = keep
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+    files = {shard.file_of(item.nodeid) for item in keep}
+    split = f", split by family: {' '.join(sorted(_SHARD_SPLIT))}" if _SHARD_SPLIT else ""
+    print(f"\nREVL_TEST_SHARD {k}/{n}: {len(files)} file(s), {len(keep)} test(s) "
+          f"of {len(keep) + len(drop)} collected{split}")
+
+
+# A sharded run times each file it runs (and each family of a file it split)
+# and prints the totals at the end, so
+# tests/shard_weights.json can be refreshed from CI's own durations
+# (tools/refresh_shard_weights.py). An unsharded run prints nothing extra.
+_SHARD_SECONDS: dict = {}
+
+
+def pytest_runtest_logreport(report):
+    if _SHARD_SPEC:
+        name = report.nodeid.split("::", 1)[0]
+        _SHARD_SECONDS[name] = _SHARD_SECONDS.get(name, 0.0) + report.duration
+        if name in _SHARD_SPLIT:
+            fam = _shard_module().family(report.nodeid)
+            _SHARD_SECONDS[fam] = _SHARD_SECONDS.get(fam, 0.0) + report.duration
+
+
+def pytest_terminal_summary(terminalreporter):
+    if _SHARD_SPEC and _SHARD_SECONDS:
+        terminalreporter.write_line("")
+        for line in _shard_module().seconds_lines(_SHARD_SECONDS):
+            terminalreporter.write_line(line)
+
+
 def pytest_configure(config):
     # tools/hooks/pre-commit runs with pytest-timeout's `--timeout=60`. A test
     # that is slow by nature (not re-deriving anything a session could share)
@@ -193,6 +290,42 @@ def pytest_runtest_makereport(item, call):
     return report
 
 
+# Issue #1720: a test file that leaves file descriptors open.
+#
+# The root suite is one process, so what one file leaves open every later file
+# inherits; the leaks were silent until #1716 hit FD_SETSIZE. Each file's
+# descriptor count is checked against tests/_fd_budget.py when the file ends,
+# and an overrun errors that file's last test by name. The anchor that this
+# check is not vacuous is tests/test_fd_budget_1720.py.
+
+def _fd_budget():
+    spec = importlib.util.spec_from_file_location(
+        "revl_tests_fd_budget", Path(__file__).with_name("_fd_budget.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_FD = _fd_budget()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _descriptor_budget(request):
+    if not _FD.available():
+        yield
+        return
+    before = _FD.open_fds()
+    yield
+    rel = Path(str(request.node.path)).resolve()
+    try:
+        name = rel.relative_to(_ROOT).as_posix()
+    except ValueError:
+        name = rel.as_posix()
+    message = _FD.verdict(name, _FD.leaked(before))
+    if message is not None:
+        pytest.fail(message, pytrace=False)
+
+
 def _reset_cordis_globals() -> None:
     """Drop the process-wide runtime state one test can leave for the next.
 
@@ -223,6 +356,21 @@ def _reset_cordis_globals() -> None:
     set_clock = getattr(timer, "set_clock", None)
     if callable(set_clock):
         set_clock(None)
+
+    # issue #1720: a test that leaves a session loaded leaves it bound as the
+    # admit/reflect bridge target, the runtime's session owner and its trace
+    # sink, so it (with its event loop and open log) outlives the test. A test
+    # run alone starts with all of them unbound.
+    clear_owner = getattr(runtime, "clear_session_owner", None)
+    if callable(clear_owner):
+        clear_owner()
+    set_trace = getattr(runtime, "set_trace", None)
+    if callable(set_trace):
+        set_trace(None)   # the loaded driver's host-event sink
+    for bridge in ("revl.mcp.admit_bridge", "revl.mcp.reflect_bridge"):
+        bind = getattr(sys.modules.get(bridge), "bind", None)
+        if callable(bind):
+            bind(None)
 
 
 @pytest.fixture(autouse=True)
@@ -312,3 +460,16 @@ def _isolate_import_state():
         sys.path[:] = path_before
         for name in _generation_modules() - generations_before:
             del sys.modules[name]
+
+
+@pytest.fixture
+def all_mcp_tools():
+    """`tools/list` advertises every MCP verb for this test. Since issue #1697
+    the default is the core tier plus `revl_verbs`, so a test that checks a
+    verb's advertised schema by name reads the full list through this."""
+    from revl.mcp import disclosure
+
+    before = disclosure.all_tools()
+    disclosure.set_all_tools(True)
+    yield
+    disclosure.set_all_tools(before)

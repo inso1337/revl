@@ -75,7 +75,10 @@ from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import fillspec
+from . import draft as _draft
+from . import proposal as _proposal
 from . import edit as _edit
+from . import effect_classes as _effect_classes
 from . import leases as _leases
 from . import operator as _operator
 from ..errors import RevlError
@@ -85,16 +88,22 @@ from . import quorum as _quorum
 from . import repair as _repair
 from . import runtime_gate as _runtime_gate
 from . import ship as _ship
+from . import undo_record as _undo_record
 from . import deploy as _mcp_deploy
-from .persist import RestoreError
+from .persist import RestoreError, admitted_name as _admitted_name
 from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
                        _canon as _approval_canon)
 from .. import query as Q
+from ..plan import _merge_resulting_ir
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
-from .session import Session, SessionError
+from . import ambient as _ambient
+from . import disclosure as _disclosure
+from . import remedy as _remedy
+from . import repeat as _repeat
+from .session import NothingLoaded, Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -321,6 +330,27 @@ def _collect_module_keys(node, out: set) -> None:
     elif isinstance(node, list):
         for item in node:
             _collect_module_keys(item, out)
+
+
+def _operator_text_of(in_memory: dict, providers: dict) -> dict:
+    """The operator's own text of each file an in-memory source stands in for
+    (issue #1715): the file on disk, read only inside the sanctioned roots. A
+    path outside them has no operator text, so everything sent for it stays the
+    author's; reading it would make the trust decision an oracle on a file the
+    jail exists to keep closed. An operator-sanctioned provider is the
+    operator's text by configuration."""
+    roots = _file_roots()
+    operator: dict = {os.path.abspath(p): text for p, text in providers.items()}
+    for path in in_memory:
+        if path in operator or not _within_roots(path, roots) \
+                or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                operator[path] = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+    return operator
 
 
 def _jail_refusal(arguments: dict) -> dict | None:
@@ -571,7 +601,10 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
         if files:
             return compile_files(list(files), manifest=manifest,
                                  replacing=replacing, profile=prof,
-                                 sources=in_memory or None)
+                                 sources=in_memory or None,
+                                 operator_sources=(
+                                     _operator_text_of(in_memory, providers)
+                                     if prof is not None else None))
         raise ValueError("provide `source` or `files`")
 
     if providers and profile is not None:
@@ -650,13 +683,22 @@ def _boundary_of(ir: dict) -> dict:
 # ---------------------------------------------------------------- tools
 
 SESSION = Session()
+# issue #1703: the session's reversible changes, newest last. Every successful
+# mutating call that has an exact inverse pushes its `undo` here, and
+# `revl_step_back` with no arguments runs the last one.
+UNDO_STACK = _undo_record.UndoStack()
 
 
-def _session_error(message: str, **extra) -> dict:
-    return {"ok": False, "diagnostics": [{
-        "severity": "error", "code": "REVL", "category": "session",
+def _session_error(message: str | BaseException, category: str = "session",
+                   **extra) -> dict:
+    """A session refusal. `message` is the prose, or the exception that
+    refused. Its next call, when it has one (issue #1691), is resolved and
+    attached by `remedy`, which also names it at the end of the message."""
+    message, remedy = _remedy.resolve(message, extra)
+    return _remedy.attach({"ok": False, "diagnostics": [{
+        "severity": "error", "code": "REVL", "category": category,
         "message": message,
-    }], **extra}
+    }], **extra}, remedy)
 
 
 # -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---
@@ -765,7 +807,7 @@ def _tool_lease(arguments: dict) -> dict:
         else:
             book.claim(component, holder, arguments.get("ttl"))
     except _leases.LeaseError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     events = book.drain_events()
     _record_lease_trace(events)
     payload = {
@@ -817,27 +859,83 @@ def _tool_load(arguments: dict) -> dict:
     Under a policy that enforces leases, a load that would boot a component
     under a name another operator leases is refused, as a swap replacing it is
     (`leases.FENCED` says why a cold load is fenced too)."""
-    if not SESSION.loaded:   # a load over a running composition is refused below
-        refusal = _leases.check(SESSION, "load", arguments)
-        if refusal is not None:
-            return _refused_by_lease(refusal)
     source, files, modules = _candidate_of(arguments)
+    if source is None and not files:
+        if _draft.pending(SESSION) is not None and not SESSION.loaded:
+            return _draft.boot_held(SESSION, arguments, _boot_draft)
+        return _nothing_to_load()
     try:
         ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
         return report(error)
+    if not SESSION.loaded and _draft.has_holes(ir):
+        # issue #1727: a holed candidate opens a draft rather than failing.
+        # Nothing boots, so nothing a lease fences happens yet: the lease is
+        # checked when the draft boots (`_boot_draft`)
+        return _draft.open_draft(SESSION, arguments, ir)
+    if not SESSION.loaded:   # a load over a running composition is refused below
+        refusal = _leases.check(SESSION, "load", arguments)
+        if refusal is not None:
+            return _refused_by_lease(refusal)
+    return _boot(ir, source, modules, arguments.get("config"),
+                 bool(arguments.get("record")), _origin(arguments))
+
+
+def _nothing_to_load() -> dict:
+    """`revl_load` with neither `source` nor `files` and no draft to boot
+    (issue #1851): a refusal that says which, not the compiler's ValueError."""
+    if SESSION.loaded:
+        return _session_error(
+            "a composition is already running and no draft is held, so "
+            "`revl_load {}` has nothing to boot. Change what runs with revl_edit "
+            "or revl_swap, or revl_unload first to load something else",
+            loaded=True)
+    return _session_error(
+        "revl_load needs `source` (inline .rvl text) or `files` (.rvl paths); "
+        "with neither it boots a held draft, and none is held",
+        next=_remedy.load_next())
+
+
+def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
+    """Boot a compiled composition: `Session.load`, then record what it
+    authored. Shared by `revl_load` and a draft that has no holes left."""
     authored = _authored_host_bodies(ir, source, modules)
     try:
-        state = SESSION.load(ir, arguments.get("config"),
-                             record=bool(arguments.get("record")),
-                             origin=_origin(arguments))
+        state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, **_summary(ir), **state}
+    _draft.discard(SESSION)
+    return {"ok": True, **_summary(ir), **state, **_effect_classes.report(ir)}
+
+
+def _boot_draft(vs: dict, config, record, verify=None) -> dict:
+    """Boot a hole-free draft through every gate `revl_load` runs (issue
+    #1727): the load half of the operator gate, a lease on a cold load, the
+    compile, and `Session.load`. Refused, the draft stays held."""
+    candidate = _edit.candidate_arguments(vs)
+    decision = _operator.decide(SESSION, "revl_load", candidate)
+    if decision.gated and not decision.allowed:
+        return _draft.still_a_draft(_refused_by_operator(decision))
+    refusal = _leases.check(SESSION, "load", candidate)
+    if refusal is not None:
+        return _draft.still_a_draft(_refused_by_lease(refusal))
+    try:
+        ir = _edit.compile_virtual(vs)
+    except RevlError as error:
+        return _draft.still_a_draft(report(error))
+    refused = verify(candidate) if verify is not None else None
+    if refused is not None:
+        return _draft.still_a_draft(refused)
+    modules = _edit.file_modules(vs) if vs.get("files") else vs.get("modules")
+    booted = _boot(ir, vs.get("source"), modules, config, bool(record),
+                   _edit._origin_from(vs))
+    if not booted.get("ok"):
+        return _draft.still_a_draft(booted)
+    return {**booted, "draft": False, "booted": True, "loaded": True}
 
 
 def _tool_call(arguments: dict) -> dict:
@@ -848,7 +946,7 @@ def _tool_call(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.call(key, method, arguments.get("args") or [])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired:
         # item 246: the class-(c) ticket two-step is a RESULT, shaped by
         # `handle`. Re-raised past the catch-all below, which used to swallow it
@@ -872,7 +970,7 @@ def _tool_swap(arguments: dict) -> dict:
     source is still accepted, unchanged.
     """
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — call revl_load first")
+        return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     replacing = tuple(arguments.get("replacing") or ())
 
     # component leases (item 61): under a policy that enforces leases, refuse a
@@ -895,8 +993,9 @@ def _tool_swap(arguments: dict) -> dict:
         return quarantined
 
     inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
+    before = _edit.running_source(SESSION)
     if not inline:
-        return _swap_server_side(replacing)
+        return _with_touched(_swap_server_side(replacing), before)
 
     # issue #1446: like `revl_load` (#1444), a swap that does not succeed
     # changes nothing, so the candidate's host bodies are recorded only once it
@@ -925,27 +1024,85 @@ def _tool_swap(arguments: dict) -> dict:
                             "its own — pass the full source set to swap")
         return rejected
     authored = _authored_host_bodies(full, source, modules)
+    running = SESSION.ir
+    # issue #1704: the same preflight revl_edit carries, read off the
+    # composition running before the swap
+    radius = _authoring_loop.blast_radius(running, full)
     try:
         state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired as exc:
         # the candidate's own host bodies: a yes admits the candidate, so its
         # ticket names the candidate's host code, never the running one's
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
+    return _with_touched({"ok": True, "admitted": True, "swapped": True,
+                          "blastRadius": radius, **_summary(full), **state,
+                          **_effect_classes.report(full, running, against=True)},
+                         before)
+
+
+def _with_touched(result: dict, before: dict) -> dict:
+    """A swap that landed reports the top-level symbols it added, changed or
+    removed against what was running (issue #1714)."""
+    if result.get("swapped"):
+        result["touched"] = _edit._touched(before, _edit.running_source(SESSION))
+    return result
+
+
+def _tool_source(arguments: dict) -> dict:
+    """One declaration of the server-side source, by symbol (issue #1714).
+
+    Reads what the session holds (inline source, modules, or the loaded files
+    as last swapped in), or, with nothing loaded, the `files`/`source` given."""
+    from . import symbols as _symbols  # noqa: PLC0415
+
+    symbol = arguments.get("symbol")
+    if not symbol:
+        return _session_error("`symbol` is required: a declaration name, "
+                              "`<buffer>:Name`, or `<buffer>:<line>`")
+    try:
+        vs = _source_set(arguments)
+        result = _symbols.read(vs, symbol,
+                               deps="deps" in (arguments.get("with") or []),
+                               comments=arguments.get("comments", True) is not False)
+    except (_symbols.SymbolError, _edit.EditError) as error:
+        return _session_error(str(error))
+    return {"ok": True, **result}
+
+
+def _source_set(arguments: dict) -> dict:
+    if arguments.get("proposal") is True:
+        held = _proposal.base(SESSION)
+        if held is None:
+            raise _edit.EditError("nothing is proposed: `proposal: true` reads "
+                                  "the caller's speculative working copy")
+        return held
+    if SESSION.loaded:
+        return _edit.running_source(SESSION)
+    if _draft.pending(SESSION) is not None and arguments.get("source") is None \
+            and not arguments.get("files"):
+        return _draft.pending(SESSION)["vs"]
+    if arguments.get("source") is not None:
+        return {"source": arguments["source"],
+                "modules": dict(arguments.get("modules") or {})}
+    if arguments.get("files"):
+        return _edit._files_source({"files": list(arguments["files"]),
+                                    "modules": arguments.get("modules")})
+    raise _edit.EditError("nothing is loaded: load a composition, or pass "
+                          "`files` or `source` to read from")
 
 
 def _swap_server_side(replacing: tuple) -> dict:
     """Swap the source the session already holds — no inline source resent."""
     vs = _edit.virtual_source(SESSION)
-    if vs.get("source") is None:
+    if vs.get("source") is None and not vs.get("files"):
         return _session_error(
-            "no server-side source to swap by name — this composition was not "
-            "loaded from inline source, so there is nothing the session can "
-            "re-admit without you passing `source`/`files`")
+            "no server-side source to swap by name — there is nothing the "
+            "session can re-admit without you passing `source`/`files`",
+            next=_remedy.swap_files_next(SESSION.origin, replacing))
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
@@ -963,30 +1120,270 @@ def _swap_server_side(replacing: tuple) -> dict:
         rejected["note"] = ("the server-side source admits but is not a complete "
                             "composition on its own")
         return rejected
+    running = SESSION.ir
+    radius = _authoring_loop.blast_radius(running, full)  # issue #1704
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,
-            "fromServerSide": True, **_summary(full), **state}
+            "fromServerSide": True, "blastRadius": radius, **_summary(full), **state,
+            **_effect_classes.report(full, running, against=True)}
 
 
-def _tool_edit(arguments: dict) -> dict:
+def _tool_edit(arguments: dict, verify=None) -> dict:
     """Patch the server-side source of the running composition and re-admit —
-    deltas, not documents (roadmap item 50, docs/mcp-bridge.md)."""
+    deltas, not documents (roadmap item 50, docs/mcp-bridge.md).
+
+    With nothing loaded, a call that carries `files` or `source` loads it first,
+    through `revl_load` itself, then edits it (issue #1690): an agent never has
+    to learn that the edit verb needs a load verb before it."""
+    carried = any(arguments.get(k) is not None for k in ("source", "files"))
+    if not carried and not SESSION.loaded and _draft.pending(SESSION) is not None:
+        return _edit_draft(arguments, verify)
+    if carried and SESSION.loaded:
+        return _session_error(
+            "a composition is already loaded: revl_edit patches it, so omit "
+            "`files`/`source` (or revl_unload first to load another)",
+            edited=False, swapped=False)
+    loaded = None
+    if carried:
+        load_arguments = {k: arguments[k] for k in
+                          ("source", "files", "modules", "config", "record")
+                          if k in arguments}
+        # the load half answers to the load gate: the call was gated as an edit
+        decision = _operator.decide(SESSION, "revl_load", load_arguments)
+        if decision.gated and not decision.allowed:
+            return {**_refused_by_operator(decision), "loaded": False,
+                    "edited": False, "swapped": False}
+        loaded = _tool_load(load_arguments)
+        if not loaded.get("ok"):
+            return {**loaded, "loaded": False, "edited": False, "swapped": False}
+        if loaded.get("draft"):
+            return _edit_draft(arguments, verify)
+    result = _edit_loaded(arguments, verify)
+    return {**result, "loaded": True} if loaded is not None else result
+
+
+def _tool_change(arguments: dict) -> dict:
+    """One intent-shaped call for the whole change loop (issue #1695): load if
+    needed, plan, apply to a working copy, verify (admission, the gates, and
+    with `gauntlet: true` the gauntlet), and commit only if all of it passed.
+    Every intent is carried out as `revl_edit` edits, so the jail, the trust
+    rule, the gates and the draft handling are revl_edit's own."""
+    from . import change as _change  # noqa: PLC0415
+
+    commit = arguments.get("commit") is True
+    if arguments.get("discard") is True:
+        dropped = _proposal.discard(SESSION)
+        return {"ok": True, "discarded": dropped, "committed": False,
+                "note": ("the proposal was dropped; the running composition "
+                         "never saw it") if dropped else "nothing was proposed"}
+    if commit and not any(arguments.get(name) is not None
+                          for name in _change.INTENTS):
+        return _commit_held(arguments)
     try:
-        return _edit.apply_edit(SESSION, arguments)
+        intent = _change.intent_of(arguments)
+        plan = None
+        if intent == "withdraw":
+            component, _ = _change._withdraw_spec(arguments["withdraw"])
+            plan = _change.cascade_of(_change.running_ir(SESSION), component)
+        edit_arguments = {**_change.edit_arguments(intent, arguments, plan),
+                          "commit": commit}
+    except _change.ChangeError as error:
+        return _session_error(str(error), committed=False)
+    verifier = (_change.gauntlet_verifier(SESSION)
+                if arguments.get("gauntlet") is True else None)
+    refused = (_change.cascade_refusal(arguments, plan)
+               if intent == "withdraw" else None)
+    result = refused or _tool_edit(edit_arguments, verify=verifier)
+    return _change.shape(intent, result, plan,
+                         _change.withdrawn_names(edit_arguments), verifier)
+
+
+def _tool_export(arguments: dict) -> dict:
+    """Write the running composition's held source to disk, on request (issue
+    #1696). The held source is the source of truth; this is its one way out.
+    A files-loaded composition writes each loaded file whose held text differs
+    from disk back to its own path. An inline one writes to `path`, and its
+    in-memory modules beside it, refusing to overwrite unless `overwrite`.
+    Every path must be inside the sanctioned roots, checked before anything is
+    written, so a refusal writes nothing."""
+    if not SESSION.loaded:
+        return _session_error("nothing is loaded: revl_export writes the held "
+                              "source of a running composition")
+    held = _edit.running_source(SESSION)
+    try:
+        plan = _export_plan(held, arguments)
     except _edit.EditError as error:
-        return _session_error(str(error), edited=False, swapped=False)
+        return _session_error(str(error), written=[])
+    for path, text in plan:
+        _write_atomic(path, text)
+    return {"ok": True, "written": [p for p, _ in plan],
+            "note": "the held source was written to disk"
+                    if plan else "the disk already holds the held source"}
+
+
+def _export_plan(held: dict, arguments: dict) -> list[tuple[str, str]]:
+    roots = _file_roots()
+    if held.get("files"):
+        targets = [(path, held["files_content"].get(path)) for path in held["files"]]
+        targets = [(p, t) for p, t in targets
+                   if t is not None and t != _edit._read_disk(p)]
+    else:
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path:
+            raise _edit.EditError("this composition was loaded from inline source: "
+                                  "name the file to write in `path`")
+        base_dir = os.path.dirname(os.path.abspath(path))
+        targets = [(os.path.abspath(path), held["source"])] + [
+            (os.path.normpath(os.path.join(base_dir, key)), text)
+            for key, text in (held.get("modules") or {}).items()]
+        if arguments.get("overwrite") is not True:
+            existing = [p for p, _ in targets if os.path.exists(p)]
+            if existing:
+                raise _edit.EditError(
+                    f"refused: {', '.join(existing)} already exists; pass "
+                    "`overwrite: true` to replace it")
+    outside = [p for p, _ in targets if not _within_roots(p, roots)]
+    if outside:
+        raise _edit.EditError(
+            f"refused: {', '.join(outside)} is outside the operator-sanctioned "
+            "root(s); nothing was written")
+    return targets
+
+
+def _write_atomic(path: str, text: str) -> None:
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temporary = os.path.join(directory, f".{os.path.basename(path)}.revl-export")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.replace(temporary, path)
+
+
+def _commit_held(arguments: dict) -> dict:
+    """`revl_change {commit: true}` with no intent: commit what is held. A
+    held draft boots (once hole-free); otherwise the caller's proposal is
+    re-verified against the running composition and swapped in."""
+    from . import change as _change  # noqa: PLC0415
+
+    verifier = (_change.gauntlet_verifier(SESSION)
+                if arguments.get("gauntlet") is True else None)
+    if not SESSION.loaded and _draft.pending(SESSION) is not None:
+        result = _draft.boot_held(
+            SESSION, arguments,
+            lambda vs, config, record: _boot_draft(vs, config, record,
+                                                   verify=verifier))
+    else:
+        result = _proposal.commit(SESSION, verify=verifier)
+    return _change.shape("commit", result, None, [], verifier)
+
+
+def _edit_draft(arguments: dict, verify=None) -> dict:
+    commit = arguments.get("commit", True) is not False
+
+    def boot(vs, config, record):
+        if not commit:  # issue #1696: a speculative change does not boot it
+            return {"ok": True, "draft": True, "booted": False, "loaded": False,
+                    "holeCount": 0, "speculative": True,
+                    "note": "the draft is hole-free and compiles; commit it "
+                            "(revl_change {commit: true}) to boot it"}
+        return _boot_draft(vs, config, record, verify=verify)
+    try:
+        return _draft.edit_draft(SESSION, arguments, boot)
+    except _edit.EditError as error:
+        return _session_error(str(error), edited=False, swapped=False, draft=True)
+
+
+def _edit_loaded(arguments: dict, verify=None) -> dict:
+    """Edit the running composition: speculatively, into the caller's proposal
+    (`commit: false`, issue #1696), or committed. Either way a held proposal
+    is what the edit builds on, and a commit is refused if it went stale."""
+    commit = arguments.get("commit", True) is not False
+    base = _proposal.base(SESSION)
+    if commit and base is not None and _proposal.stale(SESSION):
+        return _session_error(_proposal.stale(SESSION), edited=False,
+                              swapped=False)
+    if commit and base is not None:
+        held = _proposal.held(SESSION)["replacing"]
+        arguments = {**arguments, "replacing": held + [
+            name for name in arguments.get("replacing") or () if name not in held]}
+    running = _edit.running_source(SESSION)
+    try:
+        result = _edit.apply_edit(SESSION, arguments, verify=verify,
+                                  commit=commit, base=base)
+        if commit and result.get("swapped"):
+            if base is not None:  # what the commit changed, against what ran
+                result["touched"] = _edit._touched(
+                    running, _edit.running_source(SESSION))
+            _proposal.discard(SESSION)
+        return _proposal.keep(SESSION, result, arguments.get("replacing") or ())
+    except _edit.EditError as error:
+        return _edit_refusal(error, arguments)
     except SessionError as error:
-        return _session_error(str(error))
+        if not SESSION.loaded:
+            return _session_error(NothingLoaded(str(error)))
+        return _session_error(error)
+
+
+def _edit_refusal(error, arguments: dict) -> dict:
+    """A `revl_edit` refusal. When the composition was loaded from files, so
+    there is no inline buffer to patch, the refusal carries the patch applied
+    to the file as a ready `revl_swap` (issue #1691)."""
+    if not _files_loaded_without_buffer(arguments):
+        return _session_error(error, edited=False, swapped=False)
+    try:
+        nxt = _remedy.edit_as_swap(SESSION, arguments, _swap_would_refuse)
+    except _edit.EditError as patch_error:
+        return _session_error(patch_error, edited=False, swapped=False)
+    except OSError:
+        nxt = None
+    if nxt is None:
+        return _session_error(error, edited=False, swapped=False)
+    name = os.path.basename(str(SESSION.origin["files"][0]))
+    return _session_error(
+        f"this composition was loaded from files ({name}), and revl_edit "
+        f"patches only inline source, so there is no buffer to patch. `next` "
+        f"is your patch applied to {name} as a revl_swap with inline `source`; "
+        f"after it, revl_edit patches that source directly",
+        next=nxt, edited=False, swapped=False)
+
+
+def _files_loaded_without_buffer(arguments: dict) -> bool:
+    """Whether the session lost a files-loaded composition's buffers. Since
+    issue #1690 each loaded file IS a buffer revl_edit patches, so this holds
+    only when the held working set carries neither inline source nor files."""
+    if arguments.get("target") not in (None, "source"):
+        return False
+    vs = _edit.virtual_source(SESSION)
+    return (vs.get("source") is None and not vs.get("files")
+            and bool((SESSION.origin or {}).get("files")))
+
+
+def _swap_would_refuse(arguments: dict) -> str | None:
+    """Whether `revl_swap(arguments)` would refuse before swapping: the
+    authoring gate, admission against the running composition, then the whole
+    composition on its own. None when it would not; else the first reason."""
+    gate = _authoring_refusal(arguments)
+    if gate is not None:
+        return gate["diagnostics"][0]["message"]
+    source, files, modules = _candidate_of(arguments)
+    replacing = tuple(arguments.get("replacing") or ())
+    try:
+        compile_under_authoring(source, files, modules=modules,
+                                manifest=SESSION.ir, replacing=replacing)
+        compile_under_authoring(source, files, modules=modules)
+    except RevlError as error:
+        return report(error)["diagnostics"][0]["message"]
+    return None
 
 
 def _tool_rollback(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.rollback()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_undo(arguments: dict) -> dict:
@@ -1003,11 +1400,11 @@ def _tool_undo(arguments: dict) -> dict:
     boundary crossings no undo can un-emit — rides along either way
     (docs/generation-history.md)."""
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — call revl_load first")
+        return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     try:
         result = SESSION.undo(arguments.get("to"))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the
     # diagnostic, matching how revl_restore reports a rejected re-admission.
     if result.get("refused"):
@@ -1024,10 +1421,13 @@ def _tool_unload(arguments: dict) -> dict:
         refusal = _leases.check(SESSION, "unload", arguments)
         if refusal is not None:
             return _refused_by_lease(refusal)
+    elif _draft.discard(SESSION):
+        return {"ok": True, "discardedDraft": True,
+                "note": "the held draft was discarded; nothing was running"}
     try:
         return {"ok": True, **SESSION.unload()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_commit(_arguments: dict) -> dict:
@@ -1037,7 +1437,7 @@ def _tool_commit(_arguments: dict) -> dict:
     try:
         return {"ok": True, "manifest": SESSION.commit()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_commit_confirm(arguments: dict) -> dict:
@@ -1057,7 +1457,7 @@ def _tool_commit_confirm(arguments: dict) -> dict:
     try:
         result = SESSION.commit_confirm(manifest_hash)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     if result.get("refused"):
         return {"ok": False, **result}
     return {"ok": True, **result}
@@ -1078,7 +1478,7 @@ def _tool_fork(arguments: dict) -> dict:
     except SessionError as error:
         # a refused fork (a KIND_OPAQUE tail, a non-idempotent span, a committed
         # boundary below k) is a RESULT the caller reads, not a crash
-        return _session_error(str(error), refused=True)
+        return _session_error(error, refused=True)
 
 
 def _tool_fork_confirm(arguments: dict) -> dict:
@@ -1094,7 +1494,7 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     try:
         result = SESSION.fork_confirm(fork_hash)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     if result.get("refused"):
         return {"ok": False, **{k: v for k, v in result.items()
                                 if k != "branchSession"}}
@@ -1256,7 +1656,7 @@ def _tool_approve(arguments: dict) -> dict:
                 ticket_hash=ticket_hash, capability=capability,
                 uses=uses, ttl_ms=ttl_ms)}
         except SessionError as error:
-            return _session_error(str(error))
+            return _session_error(error)
     if not ticket_hash:
         return _session_error("provide `hash` — the ticket hash from the "
                               "approvalRequired response — or a `capability` "
@@ -1266,7 +1666,7 @@ def _tool_approve(arguments: dict) -> dict:
             ticket_hash, vote=vote or "approve", as_token=as_token,
             as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_revoke(arguments: dict) -> dict:
@@ -1298,9 +1698,9 @@ def _tool_revoke(arguments: dict) -> dict:
         return {"ok": True, **SESSION.revoke_standing_grant(
             capability=capability, request_id=request_id)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_escalate(arguments: dict) -> dict:
@@ -1321,9 +1721,9 @@ def _tool_escalate(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.escalate(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_override(arguments: dict) -> dict:
@@ -1346,9 +1746,9 @@ def _tool_override(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.override(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_quorum(arguments: dict) -> dict:
@@ -1364,9 +1764,9 @@ def _tool_quorum(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.decision_report(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_distillation_offers(_arguments: dict) -> dict:
@@ -1376,7 +1776,7 @@ def _tool_distillation_offers(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.distillation_offers()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_apply_distillation(arguments: dict) -> dict:
@@ -1391,7 +1791,7 @@ def _tool_apply_distillation(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.apply_distillation(offer_id)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_revoke_distillation(arguments: dict) -> dict:
@@ -1405,7 +1805,7 @@ def _tool_revoke_distillation(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.revoke_distillation(rule)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_abort(arguments: dict) -> dict:
@@ -1420,7 +1820,7 @@ def _tool_abort(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.abort()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_estop(arguments: dict) -> dict:
@@ -1436,7 +1836,7 @@ def _tool_estop(arguments: dict) -> dict:
             arguments.get("operator") or getattr(
                 getattr(SESSION, "operator", None), "token", None))}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_estop_report(_arguments: dict) -> dict:
@@ -1444,11 +1844,19 @@ def _tool_estop_report(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.estop_report()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_state(_arguments: dict) -> dict:
-    return {"ok": True, **SESSION.state(drain=True)}
+    state = {"ok": True, **SESSION.state(drain=True)}
+    held = _draft.pending(SESSION)
+    if held is not None and not SESSION.loaded:
+        try:
+            holes = len(_draft.collect_holes(_edit.compile_virtual(held["vs"])))
+        except RevlError:
+            holes = None
+        state["draft"] = {"holes": holes}
+    return state
 
 
 def _tool_gauntlet(arguments: dict) -> dict:
@@ -1524,7 +1932,7 @@ def _tool_snapshot(_arguments: dict) -> dict:
     try:
         return {"ok": True, "snapshot": SESSION.snapshot()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _restore_authoring_refusal(snap) -> dict | None:
@@ -1543,7 +1951,7 @@ def _restore_authoring_refusal(snap) -> dict | None:
     try:
         source = sources.get("source")
         if source is not None:
-            compile_source(source, "<snapshot>.rvl",
+            compile_source(source, _admitted_name(snap),
                            modules=sources.get("modules") or None, profile=profile)
         elif sources.get("files"):
             virtual = {os.path.abspath(path): text for path, text
@@ -1603,7 +2011,7 @@ def _tool_restore(arguments: dict) -> dict:
                 "message": str(error)}]
         return payload
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 # -- backwards replay (docs/replay.md) ------------------------------------
@@ -1612,7 +2020,7 @@ def _tool_timeline(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.timeline(arguments.get("component"))}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_inspect_step(arguments: dict) -> dict:
@@ -1622,12 +2030,16 @@ def _tool_inspect_step(arguments: dict) -> dict:
         return {"ok": True, **SESSION.inspect_step(arguments.get("component"),
                                                    arguments["at"])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_step_back(arguments: dict) -> dict:
+    if not arguments:
+        return _step_back_last_change()
     if "to" not in arguments:
-        return _session_error("`to` is required (-1 unwinds everything recorded)")
+        return _session_error("`to` is required (-1 unwinds everything recorded); "
+                              "with no arguments at all, step_back reverts the "
+                              "last change this session made")
     try:
         return {"ok": True, **SESSION.step_back(arguments.get("component"),
                                                 arguments["to"],
@@ -1635,7 +2047,38 @@ def _tool_step_back(arguments: dict) -> dict:
     except SessionError as error:
         # a refused unwind is a *result*, not a crash: it means the range
         # contains an emission that cannot be undone
-        return _session_error(str(error), refused=True)
+        return _session_error(error, refused=True)
+
+
+def _step_back_last_change() -> dict:
+    """`revl_step_back` with no arguments (issue #1703): revert the last
+    reversible change this session made, by running the exact undo that
+    change's response carried. The undo goes through the same gates as any
+    call, and is not itself pushed on the stack, so a second step back reverts
+    the change before it. The answer names what was reverted and carries the
+    call that would redo it."""
+    entry = UNDO_STACK.last()
+    if entry is None:
+        return _session_error(
+            "nothing to step back: this session has made no change with an exact "
+            "undo (a response with `undo: null` says why it has none)",
+            refused=True, undoDepth=0)
+    undo = entry["undo"]
+    result = _call_tool(undo["tool"], dict(undo["arguments"]), record=False)
+    if not result.get("ok"):
+        return {"ok": False, "steppedBack": False, "change": _change_of(entry),
+                "via": undo, "result": result, "undoDepth": UNDO_STACK.depth}
+    UNDO_STACK.pop()
+    return {"ok": True, "steppedBack": True, "change": _change_of(entry),
+            "via": undo, "result": result,
+            "redo": {"tool": entry["tool"], "arguments": entry["arguments"]},
+            "undo": None,
+            "undoReason": "a step back is reverted by its `redo` call",
+            "undoDepth": UNDO_STACK.depth}
+
+
+def _change_of(entry: dict) -> dict:
+    return {"tool": entry["tool"], "arguments": entry["arguments"]}
 
 
 def _tool_replay_bisect(arguments: dict) -> dict:
@@ -1648,7 +2091,7 @@ def _tool_replay_bisect(arguments: dict) -> dict:
         return {"ok": True, **SESSION.bisect(arguments.get("component"),
                                              predicate)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_replay_forward(arguments: dict) -> dict:
@@ -1658,7 +2101,7 @@ def _tool_replay_forward(arguments: dict) -> dict:
         return {"ok": True, **SESSION.replay_forward(arguments.get("component"),
                                                      arguments["from"])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 # -- verified canary (docs/verified-canary.md, roadmap item 59) ------------
@@ -1696,8 +2139,9 @@ def _tool_live_query(arguments: dict) -> dict:
     """The five query verbs, answered against the LIVE session's post-swap
     state instead of a compiled-from-source IR (query.live_query)."""
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — a live query answers against "
-                              "the running composition; call revl_load first")
+        return _session_error(NothingLoaded(
+            "nothing is loaded — a live query answers against the running "
+            "composition; call revl_load first"))
     verb = arguments.get("verb")
     if verb not in Q._VERB_FN:
         return _session_error(f"unknown verb {verb!r}; one of "
@@ -1732,7 +2176,7 @@ def _tool_history_emitted_between(arguments: dict) -> dict:
         try:
             timeline = SESSION.timeline(None)
         except SessionError as error:
-            return _session_error(str(error))
+            return _session_error(error)
     return Q.emitted_between(timeline, frm, to, arguments.get("component"))
 
 
@@ -1782,9 +2226,14 @@ def _tool_check(arguments: dict) -> dict:
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
-    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": holes,
-            "selfCheck": _authoring_loop.self_check(None, holes)}
+    result = {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
+              "holes": holes, **_effect_classes.report(ir),
+              "selfCheck": _authoring_loop.self_check(None, holes)}
+    blocked = fillspec.unfillable(holes)
+    if blocked:
+        # flagged, not handed out: holes this author can never fill
+        result["unfillable"] = blocked
+    return result
 
 
 def _untrusted_author() -> bool:
@@ -1830,6 +2279,8 @@ def _tool_admit(arguments: dict) -> dict:
                 "G2/G3 hold across both and no interface drifted",
         **_summary(ir),
         "boundary": _boundary_of(ir),
+        **_effect_classes.report(_merge_resulting_ir(running, ir, set(replacing)),
+                                 running, against=True),
     }
 
 
@@ -1858,7 +2309,13 @@ def _tool_plan(arguments: dict) -> dict:
         manifest=running,
         modules=arguments.get("modules"),
         replacing=tuple(arguments.get("replacing") or ()),
+        include_ir=True,
     )
+    # issue #1707: the class diff reads the resulting composition; the IR
+    # itself is not part of a plan's answer.
+    resulting = result.pop("resultingIR", None)
+    if resulting is not None:
+        result.update(_effect_classes.report(resulting, running, against=True))
     # component leases (item 61): advise — never block — when this swap would
     # replace a component another operator leases. Surfaced so an agent sees
     # the race before it swaps; the plan itself is unchanged.
@@ -2105,6 +2562,24 @@ _GRAMMAR_FORMATS = _source_grammar.FORMATS
 _GRAMMAR_CATEGORIES = tuple(_source_grammar.CATEGORIES)
 
 
+def _tool_idiom(arguments: dict) -> dict:
+    """revl_idiom (issue #1701): the minimal admitted example of one construct
+    with the rules that make it correct, by name; with no `name`, the list of
+    idioms. A hole's fillSpec already carries the idiom of its construct, so
+    this is for asking about a construct before there is a hole in it."""
+    from .. import idioms  # noqa: PLC0415 - reads the idiom files on first use
+
+    name = arguments.get("name")
+    if name is None:
+        return {"ok": True, "idioms": [
+            {"name": n, "summary": idioms.get(n)["summary"]} for n in idioms.names()]}
+    entry = idioms.get(str(name))
+    if entry is None:
+        return _session_error(
+            f"no idiom named {name!r}; the idioms are {', '.join(idioms.names())}")
+    return {"ok": True, "idiom": idioms.served(entry)}
+
+
 def _tool_grammar(arguments: dict) -> dict:
     """revl_grammar: the prose summary by default; with `format`, the grammar
     of revl source derived from the parser (issue #1661, the MCP twin of
@@ -2161,7 +2636,7 @@ def _tool_scaffold(arguments: dict) -> dict:
             resource_type=arguments.get("resource"),
         )
     except ScaffoldError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     filename = arguments.get("filename") or f"{spec.component}.rvl"
     return scaffold_document(spec, filename, untrusted=_untrusted_author())
 
@@ -2242,7 +2717,9 @@ TOOLS = [
                        "each with file, line, expected type and message) on success, "
                        "or structured diagnostics (code, guarantee, expected/actual, "
                        "fix hint) on rejection. A draft with holes compiles; it is "
-                       "refused at admission until every hole is filled.",
+                       "refused at admission until every hole is filled. "
+                       "`effectClasses` gives each provided operation's effect class "
+                       "(a/b/c) and the crossings that set it.",
         "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
@@ -2469,7 +2946,12 @@ TOOLS = [
                        "NONE of those and swap re-admits the source the server already "
                        "holds for the running composition — so an agent that edited "
                        "server-side with revl_edit, or wants to re-admit the running "
-                       "generation, need not re-serialize the whole file.",
+                       "generation, need not re-serialize the whole file. The answer "
+                       "carries `effectClassChanges` against the running composition and "
+                       "an `effectClassWarnings` entry for every operation whose effect "
+                       "class rose, naming the crossing that raised it. A swap that "
+                       "lands carries `blastRadius`, as revl_edit does: the "
+                       "revl_query_withdraw cascade for every component it touched.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT,
@@ -2499,7 +2981,16 @@ TOOLS = [
                        "hot-swapped in; one that still has open holes advances the "
                        "server-side source (so the next edit builds on it) but swaps "
                        "nothing. Returns the admission verdict / holes / diagnostic — "
-                       "never the whole source.",
+                       "never the whole source. A composition loaded from `files` is "
+                       "edited too: each loaded file is a buffer named by its path, an "
+                       "edit's own `target` lets one call change several files (a `use` "
+                       "between edited files resolves to the edited text), and the disk "
+                       "is never written. With nothing loaded, pass `files` or `source` "
+                       "and this loads it first, then edits it. {symbol, replacement} "
+                       "replaces one top-level declaration by name (read it first with "
+                       "revl_source). A response that edited lists the `touched` "
+                       "symbols, plus `effectClassChanges` and `effectClassWarnings` "
+                       "against the running composition, as revl_swap does.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2526,19 +3017,163 @@ TOOLS = [
                             "count": {"type": "integer",
                                       "description": "max anchor sites to replace "
                                                      "(omit for all)"},
+                            "target": {"type": "string",
+                                       "description": "this edit's buffer, when it is "
+                                                      "not the call's `target`"},
+                            "symbol": {"type": "string",
+                                       "description": "with `replacement`: replace the "
+                                                      "whole top-level declaration "
+                                                      "this names (as revl_source "
+                                                      "addresses it)"},
                         },
                     },
                 },
                 "target": {"type": "string",
                            "description": "which server-side buffer to edit: omit for the "
-                                          "main inline source, or name an in-memory module"},
+                                          "main inline source (or the one loaded file), "
+                                          "name a loaded file by its path, or name an "
+                                          "in-memory module"},
                 "replacing": {"type": "array", "items": {"type": "string"},
                               "description": "components withdrawn in this admission"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: load these files first, "
+                                         "then edit them"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: load this source first, "
+                                          "then edit it"},
+                "modules": {"type": "object",
+                            "description": "in-memory `use` modules for that load"},
+                "config": {"type": "object",
+                           "description": "config for that load, as revl_load takes it"},
+                "commit": {"type": "boolean",
+                           "description": "false: propose and verify only, into "
+                                          "your proposal (revl_change commits it). "
+                                          "Default true: swap once admitted"},
             },
             "required": ["edits"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_edit,
+    },
+    {
+        "name": "revl_export",
+        "description": "Write the running composition's HELD source to disk, on "
+                       "request: the held source is the source of truth and disk "
+                       "is an export (docs/design/1696-speculation.md). A "
+                       "composition loaded from files writes each file whose held "
+                       "text differs back to its own path; one loaded from inline "
+                       "source writes to `path` (and its modules beside it), "
+                       "refusing to overwrite unless `overwrite: true`. Every path "
+                       "must be inside the sanctioned roots, or nothing is written. "
+                       "Never writes a proposal: commit it first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "inline composition: the file to write"},
+                "overwrite": {"type": "boolean",
+                              "description": "replace an existing file at `path`"},
+            },
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_export,
+    },
+    {
+        "name": "revl_change",
+        "description": "Make one change in ONE call. SPECULATIVE BY DEFAULT "
+                       "(docs/design/1696-speculation.md): the change is applied "
+                       "to your proposal and verified, and nothing swaps until "
+                       "you commit (`commit: true`, now or later with no intent) "
+                       "or drop it (`discard: true`). Name the intent and the "
+                       "server loads (if `files`/`source` are given and nothing is "
+                       "loaded), plans, applies it to a working copy, verifies it "
+                       "(admission against the running composition, the lease and "
+                       "quarantine gates, and with `gauntlet: true` an isolated "
+                       "boot and unload), and commits (hot swap, or boots a "
+                       "draft) only if everything passed. Intents: {edit: {target?, "
+                       "edits}} (revl_edit's patch); {replace: {component, source}} "
+                       "(one declaration by name); {withdraw: \"Name\"} or "
+                       "{withdraw: {component, cascade: true}} (remove a component; "
+                       "the plan reports the cascade of dependents that would lose "
+                       "a provider, and without `cascade: true` admission refuses "
+                       "it). Returns `committed`, `verified`, the `plan`, the "
+                       "`touched` symbols and every `component` the change touched. "
+                       "A proposal and a commit both carry `blastRadius`, as "
+                       "revl_edit does: the revl_query_withdraw cascade for every "
+                       "component the change touches. "
+                       "A failed verification commits nothing and says why.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "edit": {"type": "object",
+                         "description": "{target?, edits}: as revl_edit takes them"},
+                "replace": {"type": "object",
+                            "description": "{component, source}: the declaration's "
+                                           "name and its whole new text"},
+                "withdraw": {"description": "a component name, or {component, "
+                                            "cascade?: true}"},
+                "gauntlet": {"type": "boolean",
+                             "description": "also grade the candidate in the "
+                                            "gauntlet's isolated session before "
+                                            "committing"},
+                "commit": {"type": "boolean",
+                           "description": "true: commit (swap in) after verifying. "
+                                          "Default false: propose and verify only. "
+                                          "With no intent: commit the held "
+                                          "proposal (or boot a held draft)"},
+                "discard": {"type": "boolean",
+                            "description": "true: drop the held proposal"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: load these first"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: load this first"},
+                "modules": {"type": "object",
+                            "description": "in-memory `use` modules for that load"},
+                "config": {"type": "object",
+                           "description": "config for that load"},
+            },
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_change,
+    },
+    {
+        "name": "revl_source",
+        "description": "Read ONE declaration of the server-side source by symbol, "
+                       "instead of the whole file. `symbol` is a top-level "
+                       "declaration's name (a component, service, type, fn, "
+                       "extern...), `<buffer>:Name` when the name is not unique, or "
+                       "`<buffer>:<line>` for the declaration containing that line; a "
+                       "buffer is a loaded file's path, an in-memory module's key, or "
+                       "`source`. `with: [\"deps\"]` adds the declarations it names "
+                       "(its services, the functions and types it uses), and "
+                       "`comments: false` returns the code alone in canonical form. "
+                       "Reads the running composition, or, with nothing loaded, "
+                       "`files`/`source`. Pairs with revl_edit's {symbol, "
+                       "replacement} edit.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string",
+                           "description": "`Name`, `<buffer>:Name` or "
+                                          "`<buffer>:<line>`"},
+                "with": {"type": "array", "items": {"type": "string",
+                                                    "enum": ["deps"]},
+                         "description": "`deps`: also the declarations it names"},
+                "comments": {"type": "boolean",
+                             "description": "false: code only, canonical "
+                                            "(default true: verbatim)"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: files to read from"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: source to read from"},
+                "proposal": {"type": "boolean",
+                             "description": "true: read your speculative proposal "
+                                            "instead of the running source"},
+            },
+            "required": ["symbol"],
+        },
+        "annotations": {"readOnlyHint": True},
+        "handler": _tool_source,
     },
     {
         "name": "revl_gauntlet",
@@ -3407,23 +4042,28 @@ TOOLS = [
     },
     {
         "name": "revl_step_back",
-        "description": "Unwind the accumulator to step k by running the registered "
-                       "inverses from the top down, newest first — leaving the "
-                       "component LIVE, not torn down. Refuses if the range crosses "
-                       "an emission with no `compensate` (an emission cannot be "
-                       "undone); `force` crosses anyway and reports what was crossed. "
-                       "The guarantee is 'the inverses ran in order', never 'state "
-                       "was restored'.",
+        "description": "With NO arguments: revert the last change this session "
+                       "made, by running the exact `undo` that change's response "
+                       "carried (issue #1703); each further call reverts the "
+                       "change before it, and the answer carries the `redo` call. "
+                       "With `to`: unwind the accumulator to step k by running the "
+                       "registered inverses from the top down, newest first — "
+                       "leaving the component LIVE, not torn down. Refuses if the "
+                       "range crosses an emission with no `compensate` (an "
+                       "emission cannot be undone); `force` crosses anyway and "
+                       "reports what was crossed. The guarantee is 'the inverses "
+                       "ran in order', never 'state was restored'.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "component": {"type": "string"},
                 "to": {"type": "integer",
-                       "description": "unwind down to this step; -1 unwinds everything"},
+                       "description": "unwind down to this step; -1 unwinds "
+                                      "everything. Omit every argument to revert "
+                                      "the last change instead"},
                 "force": {"type": "boolean",
                           "description": "cross uncompensated emissions anyway"},
             },
-            "required": ["to"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_step_back,
@@ -3494,6 +4134,26 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_grammar,
+    },
+    {
+        "name": "revl_idiom",
+        "description": "The minimal admitted example of one construct (a "
+                       "provide method, an emission method, an effect's "
+                       "acquisition or inverse, a spawn, a subscription, ...) "
+                       "with the one or two rules that make it correct. Every "
+                       "hole's fillSpec already carries the idiom of its "
+                       "construct; ask by `name` for any other, or omit it for "
+                       "the list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "the idiom (construct) name, e.g. "
+                                        "`emission-method`; omit to list them"},
+            },
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_idiom,
     },
 ]
 
@@ -3767,6 +4427,52 @@ _SESSION_QUERY_HANDLERS = {
 for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
     TOOLS.append({**_schema, "handler": _SESSION_QUERY_HANDLERS[_schema["name"]]})
 
+
+def _tool_verbs(arguments: dict) -> dict:
+    """Discovery (issue #1697): with no arguments, every verb by topic, each
+    with one sentence and no schema; with `topic` or `names`, those verbs'
+    exact advertised schemas. Every verb is callable by name either way."""
+    names = list(arguments.get("names") or [])
+    topic = arguments.get("topic")
+    if topic is None and not names:
+        return {"ok": True, "listed": [t["name"] for t in _disclosure.listed(_ADVERTISED)],
+                "topics": _disclosure.index(_ADVERTISED)}
+    if topic is not None:
+        verbs = _disclosure.topic_names(topic)
+        if verbs is None:
+            return _session_error(
+                f"no topic {topic!r}; the topics are "
+                f"{', '.join(_disclosure.TOPICS)}",
+                next=_remedy.call(_disclosure.DISCOVERY, {}))
+        names = list(verbs) + [n for n in names if n not in verbs]
+    found, unknown = _disclosure.schemas(_ADVERTISED, names)
+    if unknown:
+        return _session_error(
+            f"no verb named {', '.join(map(repr, unknown))}",
+            next=_remedy.call(_disclosure.DISCOVERY, {}))
+    return {"ok": True, "tools": found}
+
+
+TOOLS.append({
+    "name": _disclosure.DISCOVERY,
+    "description": "Find a verb. tools/list shows the core verbs; this returns "
+                   "the rest. With no arguments: every verb grouped by topic, "
+                   "one sentence each. With `topic` or `names`: those verbs' "
+                   "exact schemas. Any verb can be called by name, listed or "
+                   "not.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string", "enum": list(_disclosure.TOPICS),
+                      "description": "a topic from the no-argument answer"},
+            "names": {"type": "array", "items": {"type": "string"},
+                      "description": "verb names whose schemas to return"},
+        },
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    "handler": _tool_verbs,
+})
+
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
 
@@ -3790,6 +4496,18 @@ def set_runtime_available(available: bool | None) -> None:
 
 # issue #1704: the authoring loop, in order, with the exact verbs
 _INSTRUCTIONS = _authoring_loop.INSTRUCTIONS
+_TIERED_INSTRUCTIONS = ("tools/list shows the core verbs only; call revl_verbs "
+                        "to see every other verb by topic and get its schema. "
+                        "Any verb can be called by name.")
+
+
+def _instructions() -> str:
+    parts = [_INSTRUCTIONS]
+    if not _disclosure.all_tools():
+        parts.append(_TIERED_INSTRUCTIONS)
+    if not runtime_available():
+        parts.append(_runtime_gate.announcement())
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------- protocol
@@ -3804,64 +4522,23 @@ def handle(message: dict) -> dict | None:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": _INSTRUCTIONS if runtime_available()
-                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
+            "instructions": _instructions(),
         }
     elif method == "tools/list":
-        result = {"tools": _ADVERTISED}
+        # issue #1697: the core tier unless the client asked for every verb
+        result = {"tools": _disclosure.listed(_ADVERTISED)}
     elif method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")
-        handler = _HANDLERS.get(name)
-        if handler is None:
+        if _HANDLERS.get(name) is None:
             return _error(request_id, -32602, f"unknown tool: {name}")
-        arguments = params.get("arguments") or {}
-        # the path jail and the authoring gate run BEFORE the operator gate and
-        # before any handler: a refusal here has read nothing, compiled nothing
-        # and run nothing, so neither can be used as an oracle.
-        payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
-        # operator capabilities (roadmap item 55): gate a mutating management
-        # verb against the session's bound operator before it can run. No
-        # profile bound -> ungated, today's behaviour unchanged. Skipped when the
-        # call is already refused, so a refused path is never even resolved
-        # against an operator's grants.
-        decision = None if payload is not None \
-            else _operator.decide(SESSION, name, arguments)
-        if payload is not None:
-            pass                    # refused above; the handler never runs
-        elif decision.gated and not decision.allowed:
-            payload = _refused_by_operator(decision)
-        elif not runtime_available() and _runtime_gate.is_refused(name, arguments):
-            # issue #1692: a verb that needs a live composition, on an
-            # interpreter that cannot boot one, refuses by name with the fix in
-            # `next`, instead of failing on an import error or on "nothing is
-            # loaded". After the operator gate: "you may not" outranks "this
-            # server cannot".
-            payload = _runtime_gate.refusal(name)
-        else:
-            ir_before = getattr(SESSION, "ir", None)
-            try:
-                payload = handler(arguments)
-                _remember_live_host_bodies()
-            except ApprovalRequired as exc:
-                # item 246: a class-(c) crossing the decision inside Session.call
-                # (or the activation gate in load/swap) refused. This is a result,
-                # not an error — shape the ticket two-step. Caught before the
-                # generic handler so it never reads as an internal fault.
-                payload = _approval_required(exc)
-            except Exception as exc:  # a tool failure is a result, not a transport error
-                payload = {"ok": False, "diagnostics": [{
-                    "severity": "error", "code": "REVL", "category": "internal",
-                    "message": f"{type(exc).__name__}: {exc}",
-                }]}
-            if decision.gated and decision.allowed:
-                _stamp_authority(payload, decision)
-            # issue #1738: the loop axes read every call that reached a handler
-            # (preflight queries, composition edits, and refusals before and at
-            # run time).
-            record_tool_call = getattr(SESSION, "record_tool_call", None)
-            if record_tool_call is not None:
-                record_tool_call(name, arguments, payload, ir_before)
+        payload = _call_tool(name, params.get("arguments") or {})
+        # issue #1693: every response, success or refusal, says what the
+        # session holds now; issue #1694: a refusal of the same call as the
+        # refusal just before it says so instead of repeating byte for byte
+        state = _ambient.footer(SESSION)
+        payload = _repeat.observe(name, params.get("arguments") or {}, payload, state)
+        payload = _ambient.stamp(payload, state)
         result = {
             "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),
@@ -3879,6 +4556,99 @@ def handle(message: dict) -> dict | None:
     if request_id is None:
         return None
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
+    """One gated tool call -> its payload. `handle` runs it for `tools/call`;
+    `revl_step_back` with no arguments runs an undo through it, so the undo
+    passes the same jail, authoring and operator gates any call does. With
+    `record`, a successful mutating call's exact undo is attached to the
+    payload and pushed on the session's undo stack (issue #1703)."""
+    # the path jail and the authoring gate run BEFORE the operator gate and
+    # before any handler: a refusal here has read nothing, compiled nothing
+    # and run nothing, so neither can be used as an oracle.
+    payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
+    if payload is not None:
+        return payload
+    # operator capabilities (roadmap item 55): gate a mutating management
+    # verb against the session's bound operator before it can run. No
+    # profile bound -> ungated, today's behaviour unchanged. Skipped when the
+    # call is already refused, so a refused path is never even resolved
+    # against an operator's grants.
+    decision = _operator.decide(SESSION, name, arguments)
+    if decision.gated and not decision.allowed:
+        return _refused_by_operator(decision)
+    if not runtime_available() and _runtime_gate.is_refused(name, arguments):
+        # issue #1692: a verb that needs a live composition, on an
+        # interpreter that cannot boot one, refuses by name with the fix in
+        # `next`, instead of failing on an import error or on "nothing is
+        # loaded". After the operator gate: "you may not" outranks "this
+        # server cannot".
+        return _runtime_gate.refusal(name)
+    pre = _capture_undo_state(name, arguments)
+    ir_before = getattr(SESSION, "ir", None)
+    payload = _run_handler(name, arguments)
+    if decision.gated and decision.allowed:
+        _stamp_authority(payload, decision)
+    if payload.get("ok"):
+        _attach_undo(name, arguments, pre, payload, record)
+    # issue #1738: the loop axes read every call that reached a handler
+    # (preflight queries, composition edits, and refusals before and at
+    # run time).
+    record_tool_call = getattr(SESSION, "record_tool_call", None)
+    if record_tool_call is not None:
+        record_tool_call(name, arguments, payload, ir_before)
+    return payload
+
+
+def _capture_undo_state(name: str, arguments: dict):
+    """The pre-call state an undo is derived from; a failure to read it never
+    stops the call (the undo then names why it is missing)."""
+    try:
+        return _undo_record.capture(SESSION, name, arguments)
+    except Exception:  # noqa: BLE001 - see `_attach_undo`
+        return None
+
+
+def _run_handler(name: str, arguments: dict) -> dict:
+    """The handler itself; a failure is a result, never a transport error."""
+    try:
+        payload = _HANDLERS[name](arguments)
+        _remember_live_host_bodies()
+        _remedy.remember(SESSION)   # issue #1691: what a later reload offers
+        return payload
+    except ApprovalRequired as exc:
+        # item 246: a class-(c) crossing the decision inside Session.call
+        # (or the activation gate in load/swap) refused. This is a result,
+        # not an error — shape the ticket two-step. Caught before the
+        # generic handler so it never reads as an internal fault.
+        return _approval_required(exc)
+    except Exception as exc:  # a tool failure is a result, not a transport error
+        return _session_error(f"{type(exc).__name__}: {exc}", category="internal")
+
+
+def _attach_undo(name: str, arguments: dict, pre, payload: dict,
+                 record: bool) -> None:
+    """Issue #1703: a successful mutating call answers with the one call that
+    reverts it (`undo: {tool, arguments}`), or `undo: null` with the reason
+    when no exact inverse exists. A reversible change is pushed on the undo
+    stack `revl_step_back` with no arguments pops; an undo run BY that step
+    back is not (`record=False`), so repeated step backs walk further back
+    instead of toggling."""
+    if "undo" in payload:          # the handler answered for itself (step back)
+        return
+    try:
+        fields = _undo_record.describe(SESSION, name, arguments, pre)
+    except Exception as exc:  # noqa: BLE001 - an undo is advice; the call stands
+        fields = {"undo": None,
+                  "undoReason": f"the undo could not be derived "
+                                f"({type(exc).__name__}: {exc})"}
+    if fields is None:
+        return
+    payload.update(fields)
+    if record and fields.get("undo") is not None:
+        UNDO_STACK.record(name, arguments, fields["undo"])
+    payload["undoDepth"] = UNDO_STACK.depth
 
 
 def _error(request_id, code: int, message: str) -> dict:

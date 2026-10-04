@@ -27,6 +27,9 @@ The shape added to every obligation in `revl_check` is::
       "version": 2,
       "expected": "Str",
       "grammarCategory": "expression",
+      "construct": "provide-method",
+      "idiom": {"name": "provide-method", "rules": ["G4: ..."],
+                "fill": "db.get(key)", "example": "..."},
       "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                      "reason": "..."},
       "crossing": {"permitted": false, "required": false, "form": null,
@@ -66,6 +69,28 @@ default) may neither declare nor reach an extern (`AdmissionProfile.
 untrusted_author`, G8), and the spec says so instead of offering a call the
 compile would refuse.
 
+`fillable` (additive) says whether THIS author can fill the hole at all. It
+lists the `producers` of the expected type at this position (a literal, a
+binding, a callable service operation, extern, crossing or function), and
+decides one case outright: a type no declaration and no literal can build
+(a nominal handle such as an extern's `LogHandle`) with no producer in reach
+needs new host code, so it is `needsHostCode`, and for an untrusted author,
+who may not declare or reach an extern (G8), it is not fillable at all
+(`byThisAuthor: false`). Everything else is reported, never guessed: a `Str`
+that "must be a hash" is fillable by a literal as far as types can say, so
+the spec lists its producers and stays honest about what it cannot decide.
+
+`split` (additive, issue #1660) decomposes a hole whose obligation is more
+than one sentence. When a hole is a provide-method's WHOLE body and its
+`crossing.calls` span two or more capability tokens, the hole carries
+`split`: one `let <token>_step = hole[T] "..."` statement per token, each
+naming only that token's crossings, then a result hole. `revl scaffold`
+writes that decomposition directly. Inside such a body, a hole bound by
+`let <token>_step = ...` lists only `<token>`'s calls, so every part states
+its obligation in one sentence. A hole is never split by operation (two
+operations through one boundary are one sentence) and never in a pure
+position (it has nothing to cross).
+
 `grammarCategory` (issue #1664, additive too, so still version 2) is the
 syntactic category a fill is a document of, a key of
 `revl.source_grammar.CATEGORIES`, so a client can pass it to `revl grammar
@@ -73,13 +98,24 @@ syntactic category a fill is a document of, a key of
 decoder to the hole's slot. It is read off the grammar derived from the parser
 (`source_grammar.hole_category`), not a table: the narrowest category every
 parse of the `hole` keyword passes through.
+
+`construct` and `idiom` (issue #1701, additive) name where the hole stands
+(`CONSTRUCTS`: a plain or an emission provide method, a component body
+statement, the acquisition or the inverse of an `effect`, a function, a test)
+and serve that construct's minimal admitted example with the one or two rules
+that make it correct (`revl.idioms`), so an agent sees the smallest correct
+instance of exactly the construct it is filling.
 """
 
 from __future__ import annotations
 
-from .. import source_grammar
+import re
+
+from .. import idioms, source_grammar
 from ..diagnostics import GUARANTEES
 from ..holes import EMITTABLE_SECTIONS
+from ..lower import _GENERATABLE_PRIMITIVES
+from ..resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS
 
 #: The fillSpec shape this module writes. Version 1 had no `version` key.
 FILL_SPEC_VERSION = 2
@@ -248,14 +284,17 @@ UNTRUSTED_EXTERNS = (
     "new host code cannot be written by this author")
 
 
-def _extern_write(ext: dict) -> str:
+def _extern_write(ext: dict, position: str = "pure") -> str:
+    """How a call of `ext` is written at a hole in `position`. In the
+    acquisition slot of an `effect` the hole already follows `effect`, so the
+    fill is the bare call: `effect effect open()` does not parse (#1846)."""
     args = ", ".join(f"<{p['name']}: {p['type']}>"
                      for p in ext.get("params", []))
     call = f"{ext['name']}({args})"
     cls = ext.get("class")
     if cls == "emission":
         return f"emit {call}"
-    if cls in ("acquire", "witnessed"):
+    if cls in ("acquire", "witnessed") and position != "effect-acquire":
         return f"effect {call}"
     return call
 
@@ -274,7 +313,7 @@ def _externs(externs: list, calls: list[dict], position: str,
     declared = []
     for ext in externs or []:
         cls = ext.get("class")
-        write = _extern_write(ext)
+        write = _extern_write(ext, position)
         if untrusted:
             here = False
         elif cls == "pure":
@@ -296,6 +335,175 @@ def _externs(externs: list, calls: list[dict], position: str,
             "a trusted author may declare an extern; the declaration goes at "
             "the top level of the file, not at this hole"),
     }
+
+
+def _primitive_literal(name: str) -> str:
+    if name == "Str":
+        return '"..."'
+    if name == "Bool":
+        return "false"
+    return "0.0" if name in ("Float", "F64") else "0"
+
+
+#: A literal of each primitive, for `fillable.producers`: the primitives a
+#: value can be generated for, so the vocabulary is the compiler's own
+#: (`lower._GENERATABLE_PRIMITIVES`). `Unit` is not one: revl has no unit
+#: expression (`()` does not parse), so a `Unit` hole is filled by a call that
+#: returns nothing (#1846).
+_LITERALS = {name: _primitive_literal(name)
+             for name in sorted(_GENERATABLE_PRIMITIVES)}
+
+
+def _type_head(t: str) -> str:
+    return t.split("[", 1)[0].strip()
+
+
+def _declared_return(returns: str | None) -> str:
+    """A declaration's return type: one declared without a return type
+    returns `Unit`, the same as one that writes `-> Unit` (#1857)."""
+    return returns or "Unit"
+
+
+def _returns_of(signature: str | None) -> str | None:
+    """A rendered signature's return type; one with no `->` returns `Unit`."""
+    if not signature:
+        return None
+    if "->" not in signature:
+        return "Unit"
+    return signature.rsplit("->", 1)[1].strip()
+
+
+def _literal(expected: str, types: dict) -> str | None:
+    """A literal that builds `expected`, or None when none does. A declared
+    record or variant is built by its literal or a constructor, a builtin
+    carrier by its empty form."""
+    head = _type_head(expected)
+    if expected in _LITERALS:
+        return _LITERALS[expected]
+    if head == "Opt":
+        return "None"
+    if head == "List":
+        return "[]"
+    if head in _STRUCTURAL_HEADS:
+        return f"a `{head}` value"
+    decl = types.get(head)
+    if decl is not None:
+        if decl.get("kind") == "record":
+            fields = ", ".join(f"{k}: ..." for k in decl.get("fields") or {})
+            return "{ " + fields + " }"
+        cases = [c["name"] for c in decl.get("cases") or []]
+        return " | ".join(cases) if cases else f"a `{head}` value"
+    return None
+
+
+def _is_handle(expected: str, types: dict) -> bool:
+    """A bare nominal name no declaration builds: an extern's handle type
+    (item 308 R0). Only this case is decided; any other type with no
+    producer stays undecided rather than guessed."""
+    if "[" in expected or expected in PRIMITIVE_TYPE_NAMES:
+        return False
+    return expected not in types and expected.isidentifier()
+
+
+def _fillable(expected: str | None, visible: list[dict],
+              reachable: list[dict], calls: list[dict], externs: dict,
+              functions: dict, types: dict, untrusted: bool) -> dict:
+    """Whether this author can fill the hole, and from what."""
+    if not expected:
+        return {"byThisAuthor": True, "decided": False,
+                "needsHostCode": False, "producers": [],
+                "reason": "the hole's type is not known here"}
+    producers: list[dict] = []
+    literal = _literal(expected, types)
+    if literal is not None:
+        producers.append({"kind": "literal", "write": literal})
+    for b in visible:
+        if b.get("type") == expected:
+            producers.append({"kind": "binding", "write": b["name"]})
+    for e in reachable:
+        if e.get("callableHere") and not e.get("emission") \
+                and _returns_of(e.get("signature")) == expected:
+            producers.append({"kind": "service",
+                              "write": f"{e['instance']}.{e['signature']}"})
+    for c in calls:
+        if _declared_return(c.get("returns")) == expected:
+            producers.append({"kind": "crossing", "write": c["write"]})
+    for ext in externs.get("declared") or []:
+        if ext.get("callableHere") and _returns_of(ext["signature"]) == expected:
+            producers.append({"kind": "extern", "write": ext["write"]})
+    for name, fn in sorted(functions.items()):
+        if _declared_return(fn.get("returns")) == expected:
+            params = ", ".join(f"<{p['name']}: {p['type']}>"
+                               for p in fn.get("params", []))
+            producers.append({"kind": "function", "write": f"{name}({params})"})
+    if producers:
+        return {"byThisAuthor": True, "decided": True, "needsHostCode": False,
+                "producers": producers,
+                "reason": f"a `{expected}` can be built from the producers "
+                          f"listed"}
+    if not _is_handle(expected, types):
+        return {"byThisAuthor": True, "decided": False,
+                "needsHostCode": False, "producers": [],
+                "reason": f"nothing in reach produces a `{expected}`, and "
+                          f"its type does not decide whether a fill exists"}
+    if untrusted:
+        return {"byThisAuthor": False, "decided": True, "needsHostCode": True,
+                "producers": [],
+                "reason": f"`{expected}` is a handle no declaration builds, "
+                          f"and nothing in reach returns one: a fill needs "
+                          f"new host code, which this author may neither "
+                          f"declare nor reach (untrusted-author profile, G8). "
+                          f"Ask the operator to grant a service that returns "
+                          f"a `{expected}`, or to trust this author with host "
+                          f"code"}
+    return {"byThisAuthor": True, "decided": True, "needsHostCode": True,
+            "producers": [],
+            "reason": f"`{expected}` is a handle no declaration builds, and "
+                      f"nothing in reach returns one: a fill needs new host "
+                      f"code, an extern returning `{expected}` declared at "
+                      f"the top level of the file (see `externs`)"}
+
+
+def step_name(token: str) -> str:
+    """The binding a split statement hole for capability `token` is written
+    under: `db_step`, `net_edge_step` for a dotted `net.edge`."""
+    if token == "*":
+        return "unbounded_step"
+    return re.sub(r"[^A-Za-z0-9_]", "_", token) + "_step"
+
+
+def _tokens_of(calls: list[dict]) -> list[str]:
+    return sorted({t for c in calls for t in c.get("capabilities") or ()})
+
+
+def _split(expected: str | None, method: str | None,
+           calls: list[dict]) -> list[dict] | None:
+    """The decomposition of a whole-body hole whose crossings span two or
+    more capability tokens, or None when there is nothing to split. One
+    statement hole per token, then the result."""
+    tokens = _tokens_of(calls)
+    if len(tokens) < 2:
+        return None
+    parts = []
+    for token in tokens:
+        own = [c for c in calls if token in (c.get("capabilities") or ())]
+        typ = (own[0].get("returns") if len(own) == 1 and own[0].get("returns")
+               else expected) or expected
+        forms = ", ".join(c["write"] for c in own)
+        parts.append({
+            "token": token,
+            "calls": own,
+            "write": (f'let {step_name(token)} = hole[{typ}] "the crossing '
+                      f'through {token}, if any ({forms}); a pure value '
+                      f'otherwise"'),
+        })
+    parts.append({
+        "token": None,
+        "calls": [],
+        "write": (f'return hole[{expected}] "the result of '
+                  f'{method or "the method"}, from the steps above"'),
+    })
+    return parts
 
 
 def _crossing(capability: dict, calls: list[dict]) -> dict:
@@ -373,6 +581,33 @@ def _capability(emission: bool, capabilities, in_method: bool,
     }
 
 
+#: Every construct a fillSpec names, one per hole position (issue #1701). Each
+#: has an idiom in `revl.idioms` of the same name.
+CONSTRUCTS = ("provide-method", "emission-method", "component-setup",
+              "effect-acquire", "effect-undo", "function", "test")
+
+
+def _construct(position: str | None, capability: dict) -> str:
+    """The construct a hole stands in: where it is, and for a provide method
+    whether its operation may cross the boundary."""
+    if position == "method":
+        return ("emission-method" if capability.get("permitsCrossing")
+                else "provide-method")
+    construct = {"setup": "component-setup"}.get(position, position)
+    if construct not in CONSTRUCTS:
+        raise ValueError(f"fillspec: a hole at position {position!r} names no construct")
+    return construct
+
+
+def _idiom(construct: str) -> dict:
+    """The served idiom for `construct`: the rules and the minimal admitted
+    example (`revl.idioms`)."""
+    entry = idioms.get(construct)
+    if entry is None:
+        raise ValueError(f"fillspec: no idiom for construct {construct!r}")
+    return idioms.served(entry)
+
+
 def _obligation(hole: dict, fill_spec: dict) -> dict:
     """One obligation, in the same shape `diagnostics.obligations` produces,
     with the `fillSpec` added. Base fields stay byte-identical so an agent that
@@ -402,8 +637,12 @@ def _walk_body(body, services, functions, bindings, capability,
     for stmt in body or []:
         step = stmt.get("step")
         if step == "let":
+            value_scope = dict(bindings)
+            token = (bindings.get("@step_tokens") or {}).get(stmt.get("name"))
+            if token is not None:
+                value_scope["@only_token"] = token
             _collect_exprs(stmt.get("value"), services, functions,
-                           dict(bindings), capability, collected)
+                           value_scope, capability, collected)
             bindings[stmt["name"]] = _expr_type(
                 stmt.get("value"), services, functions, bindings)
         elif step == "return":
@@ -433,19 +672,37 @@ def _collect_exprs(node, services, functions, bindings, capability,
             calls = _crossing_calls(
                 bindings.get("@requires") or {}, services, externs,
                 capability, bindings.get("@carry") or {}, untrusted)
+            only = bindings.get("@only_token")
+            if only is not None:
+                # a split statement hole: its own token's crossings only
+                calls = [c for c in calls
+                         if only in (c.get("capabilities") or ())]
+            reachable = _callable_here(bindings.get("@reachable", []), calls)
+            extern_block = _externs(externs, calls,
+                                    bindings.get("@position") or "pure",
+                                    untrusted)
+            construct = _construct(bindings.get("@position"), capability)
             collected.append((node, {
                 "version": FILL_SPEC_VERSION,
                 "expected": node.get("type"),
                 "grammarCategory": source_grammar.hole_category(),
+                "construct": construct,
+                "idiom": _idiom(construct),
                 "capability": capability,
                 "crossing": _crossing(capability, calls),
                 "bindings": visible,
-                "reachableServices": _callable_here(
-                    bindings.get("@reachable", []), calls),
-                "externs": _externs(externs, calls,
-                                    bindings.get("@position") or "pure",
-                                    untrusted),
+                "reachableServices": reachable,
+                "externs": extern_block,
+                "fillable": _fillable(
+                    node.get("type"), visible, reachable, calls,
+                    extern_block, functions, bindings.get("@types") or {},
+                    untrusted),
             }))
+            if bindings.get("@whole_body"):
+                parts = _split(node.get("type"), bindings.get("@method"),
+                               calls)
+                if parts is not None:
+                    collected[-1][1]["split"] = parts
             return
         # `step` bodies nested in an expression are rare, but a statement dict
         # threaded here (see `_walk_body` else-branch) should still recurse.
@@ -466,7 +723,7 @@ def _collect_exprs(node, services, functions, bindings, capability,
 
 
 def _position_context(component, services, externs,
-                      untrusted: bool = False) -> dict:
+                      untrusted: bool = False, types: dict | None = None) -> dict:
     """The internal (`@`-prefixed) entries every scope inside `component`
     carries: its reachable service table, its `requires` and `carrying(...)`
     maps, and the program's externs, which the crossing calls are read off."""
@@ -476,14 +733,16 @@ def _position_context(component, services, externs,
         "@carry": component.get("carry") or {},
         "@externs": externs,
         "@untrusted": untrusted,
+        "@types": types or {},
     }
 
 
 def _method_scope(component, method, service_decl, services, functions,
-                  externs, untrusted: bool = False):
+                  externs, untrusted: bool = False, types: dict | None = None):
     """The binding scope a provide-method's body opens with: the component's
     config fields and the method's parameters, each with a declared type."""
-    bindings: dict = _position_context(component, services, externs, untrusted)
+    bindings: dict = _position_context(component, services, externs, untrusted,
+                                       types)
     bindings["@position"] = "method"
     for field in component.get("config", []) or []:
         bindings[field["name"]] = field.get("type")
@@ -496,6 +755,37 @@ def _method_scope(component, method, service_decl, services, functions,
     for i, pname in enumerate(method.get("params", [])):
         bindings[pname] = decl_params[i]["type"] if i < len(decl_params) else None
     return bindings
+
+
+def unfillable(obligations: list[dict]) -> list[dict]:
+    """The obligations THIS author cannot fill, `{line, expected, reason}`
+    each. Empty when every hole is fillable or undecided."""
+    out = []
+    for ob in obligations:
+        fill = (ob.get("fillSpec") or {}).get("fillable") or {}
+        if fill.get("byThisAuthor") is False:
+            out.append({"line": ob.get("line"), "expected": ob.get("expected"),
+                        "reason": fill.get("reason")})
+    return out
+
+
+def _mark_split_body(scope: dict, method: dict, capability: dict,
+                     services: dict, externs: list, untrusted: bool) -> None:
+    """Mark a provide-method's scope for the split rule (issue #1660): its
+    whole-body hole, if its body is one, and the `<token>_step` names whose
+    holes carry only that token's crossings. Both apply only when the
+    method's crossings span two or more capability tokens."""
+    calls = _crossing_calls(scope.get("@requires") or {}, services, externs,
+                            capability, scope.get("@carry") or {}, untrusted)
+    tokens = _tokens_of(calls)
+    if len(tokens) < 2:
+        return
+    scope["@method"] = method.get("name")
+    body = method.get("body") or []
+    if (len(body) == 1 and body[0].get("step") == "return"
+            and (body[0].get("expr") or {}).get("kind") == "hole"):
+        scope["@whole_body"] = True
+    scope["@step_tokens"] = {step_name(t): t for t in tokens}
 
 
 def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
@@ -511,13 +801,14 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
     services = ir.get("services") or {}
     functions = {f["name"]: f for f in (ir.get("functions") or [])}
     externs = ir.get("externs") or []
+    types = ir.get("types") or {}
     collected: list = []
 
     # Components: provide-methods (may be emission positions) and component-level
     # setup `let`/effect (always a pure position).
     for component in ir.get("components") or []:
         setup_scope: dict = _position_context(component, services, externs,
-                                              untrusted)
+                                              untrusted, types)
         setup_scope["@position"] = "setup"
         for field in component.get("config", []) or []:
             setup_scope[field["name"]] = field.get("type")
@@ -538,7 +829,9 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                         if not decl.get("emission") else "")
                     scope = _method_scope(
                         component, method, decl, services, functions, externs,
-                        untrusted)
+                        untrusted, types)
+                    _mark_split_body(scope, method, capability, services,
+                                     externs, untrusted)
                     _walk_body(method.get("body"), services, functions,
                                scope, capability, collected)
             elif stmt.get("step") == "let":
@@ -552,9 +845,23 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                 acquire_scope = {**setup_scope, "@position": "effect-acquire"}
                 _collect_exprs(stmt.get("acquire"), services, functions,
                                acquire_scope, pure, collected)
-                rest = {k: v for k, v in stmt.items() if k != "acquire"}
+                # the inverse names the acquired value, so its own binding is
+                # in scope there (`let c = effect open() undo close(c)`), and
+                # in every setup position after the statement
+                bound = stmt.get("bind")
+                callables = {**{e["name"]: e for e in externs}, **functions}
+                acquired = _expr_type(stmt.get("acquire"), services, callables,
+                                      setup_scope)
+                undo_scope = {**setup_scope, "@position": "effect-undo"}
+                if bound:
+                    undo_scope[bound] = acquired
+                _collect_exprs(stmt.get("undo"), services, functions,
+                               undo_scope, pure, collected)
+                rest = {k: v for k, v in stmt.items() if k not in ("acquire", "undo")}
                 _collect_exprs(rest, services, functions, dict(setup_scope),
                                pure, collected)
+                if bound:
+                    setup_scope[bound] = acquired
             else:
                 _collect_exprs(stmt, services, functions, dict(setup_scope),
                                pure, collected)
@@ -564,7 +871,7 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
     pure_fn = _capability(False, None, in_method=False,
                           reason="a function body — pure, no emission")
     for fn in ir.get("functions") or []:
-        scope = {"@reachable": [], "@externs": externs,
+        scope = {"@reachable": [], "@externs": externs, "@types": types,
                  "@untrusted": untrusted, "@position": "function"}
         for p in fn.get("params", []):
             scope[p["name"]] = p.get("type")
@@ -573,7 +880,7 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
     for section in ("tests",):
         for item in ir.get(section) or []:
             _walk_body(item.get("body"), services, functions,
-                       {"@reachable": [], "@externs": externs,
+                       {"@reachable": [], "@externs": externs, "@types": types,
                         "@untrusted": untrusted, "@position": "test"},
                        pure_fn, collected)
 
@@ -581,6 +888,6 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
     return [_obligation(hole, spec) for hole, spec in collected]
 
 
-__all__ = ["enrich", "EMITTABLE_SECTIONS", "FILL_SPEC_VERSION",
+__all__ = ["enrich", "CONSTRUCTS", "EMITTABLE_SECTIONS", "FILL_SPEC_VERSION",
            "CROSSING_FORM", "CROSSING_RULE", "EXTERN_PLACEMENT",
-           "EXTERN_TEMPLATE", "UNTRUSTED_EXTERNS"]
+           "EXTERN_TEMPLATE", "UNTRUSTED_EXTERNS", "unfillable", "step_name"]

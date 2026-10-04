@@ -1,0 +1,131 @@
+["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_wasm_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry"]
+
+["function", "deferred-in-file-test-section-marked-rather-than", "deferred_test_markers", 2, 2]
+
+["reason", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "Generated Python substitutes these tiny RVL helper bodies at production call sites; their retained definitions are not called by emit_src. Remaining named calls are confined to the RVL file's own unit tests. This includes the executed preamble/layout logic, not an absent backend feature."]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "align4", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "align8", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "helper_preamble", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "i64_hi", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "i64_lo", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "iabs", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "is_bool_op", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "is_list_type", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "list_elem", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "no_loop", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "printable", 1, 1]
+
+["function", "generated-python-substitutes-these-tiny-rvl-helper-bodies", "wty", 3, 3]
+
+["reason", "only-non-generic-and-unrecognized-generic-negative-layout", "Only non-generic and unrecognized-generic negative layout lookups remain. Valid tagged declarations resolve their layouts; bare Some covers the empty-expected-type return."]
+
+["function", "only-non-generic-and-unrecognized-generic-negative-layout", "tagged_layout", 2, 2]
+
+["reason", "only-unsupported-literal-kind-markers-and-the-unknown", "Only unsupported literal/kind markers and the unknown Some-payload default Int remain. Supported payloads have an inferable type; bare Some now covers expected-free payload inference."]
+
+["function", "only-unsupported-literal-kind-markers-and-the-unknown", "render_inner", 3, 3]
+
+["reason", "remaining-aliases-are-frontend-normalized-to-before-canonica", "Remaining ===/!== aliases are frontend-normalized to ==/!= before canonical typed IR reaches the emitters."]
+
+["function", "remaining-aliases-are-frontend-normalized-to-before-canonica", "cmp_suffix", 2, 2]
+
+["reason", "remaining-empty-defer-return-handles-methods-outside-the", "Remaining empty/defer return handles methods outside the port's implemented builtin set, including explicitly deferred checked division and indexOf/split/join, or invalid receiver/method combinations."]
+
+["function", "remaining-empty-defer-return-handles-methods-outside-the", "builtin_type", 1, 1]
+
+["function", "remaining-empty-defer-return-handles-methods-outside-the", "render_builtin", 1, 1]
+
+["reason", "remaining-empty-name-fallback-finds-no-matching-declared", "Remaining empty-name fallback finds no matching declared record layout; anonymous record fallback is explicitly deferred by the WASM oracle."]
+
+["function", "remaining-empty-name-fallback-finds-no-matching-declared", "record_type_of", 1, 1]
+
+["reason", "remaining-fallback-handles-a-constructor-case-absent-from", "Remaining fallback handles a constructor case absent from its tagged layout; accepted typed constructors carry a matching declared/builtin case."]
+
+["function", "remaining-fallback-handles-a-constructor-case-absent-from", "payload_present", 1, 1]
+
+["function", "remaining-fallback-handles-a-constructor-case-absent-from", "payload_ty_of", 1, 1]
+
+["function", "remaining-fallback-handles-a-constructor-case-absent-from", "tag_of", 1, 1]
+
+["reason", "remaining-fallbacks-reject-unsupported-operators-types-integ", "Remaining fallbacks reject unsupported operators/types; integer / compatibility exists but current source / produces Float and is rejected by the WASM reference."]
+
+["function", "remaining-fallbacks-reject-unsupported-operators-types-integ", "bin_instr", 3, 3]
+
+["reason", "remaining-false-return-is-a-missing-declared-type", "Remaining false return is a missing declared type lookup; valid record allocations have a declaration or hit the separately deferred anonymous-record path."]
+
+["function", "remaining-false-return-is-a-missing-declared-type", "is_record_type", 1, 1]
+
+["reason", "remaining-false-returns-handle-empty-bodies-if-without", "Remaining false returns handle empty bodies, if without else and nondiverging final statements. Only non-Unit result functions invoke this query; frontend return checking rejects such fall-through typed bodies."]
+
+["function", "remaining-false-returns-handle-empty-bodies-if-without", "diverges", 3, 3]
+
+["reason", "remaining-guards-reject-malformed-emitted-constant-text-miss", "Remaining guards reject malformed emitted constant text: missing closing parenthesis, empty/sign-only numeral, or nondigit. Valid renderer-produced integer constants satisfy this parser."]
+
+["function", "remaining-guards-reject-malformed-emitted-constant-text-miss", "const_numeral", 3, 3]
+
+["reason", "remaining-list-int-fallback-is-for-an-empty", "Remaining List[Int] fallback is for an empty literal without inferred/expected element type; canonical frontend empty lists require a type context."]
+
+["function", "remaining-list-int-fallback-is-for-an-empty", "list_type_of", 1, 1]
+
+["reason", "remaining-literal-pool-loop-visits-in-file-tests", "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does"]
+
+["function", "remaining-literal-pool-loop-visits-in-file-tests", "emit_wasm_src", 2, 2]
+
+["reason", "remaining-marker-defers-tagged-payload-reads-constructing-op", "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing."]
+
+["function", "remaining-marker-defers-tagged-payload-reads-constructing-op", "render_bin", 1, 1]
+
+["reason", "remaining-marker-rejects-unequal-or-missing-branch-result", "Remaining marker rejects unequal or missing branch result types; typed value conditionals are supported and exercised."]
+
+["function", "remaining-marker-rejects-unequal-or-missing-branch-result", "render_if", 1, 1]
+
+["reason", "remaining-marker-reports-unsupported-steps-outside-the-pure", "Remaining marker reports unsupported steps outside the pure module statement set; component/effect steps require the absent runtime ABI."]
+
+["function", "remaining-marker-reports-unsupported-steps-outside-the-pure", "emit_stmt", 1, 1]
+
+["reason", "remaining-markers-reject-an-unknown-callee-or-wrong", "Remaining markers reject an unknown callee or wrong arity; source direct calls are checked against declarations."]
+
+["function", "remaining-markers-reject-an-unknown-callee-or-wrong", "render_direct_call", 2, 2]
+
+["reason", "remaining-no-signature-record-handles-an-unknown-callee", "Remaining no-signature record handles an unknown callee; frontend direct calls resolve a declared function."]
+
+["function", "remaining-no-signature-record-handles-an-unknown-callee", "function_sig", 1, 1]
+
+["reason", "remaining-null-fallback-is-a-record-literal-missing", "Remaining null fallback is a record literal missing a declared field; frontend record checking rejects that source shape."]
+
+["function", "remaining-null-fallback-is-a-record-literal-missing", "rec_lit_value", 1, 1]
+
+["reason", "remaining-str-bytes-index-and-invalid-receiver-branches", "Remaining Str/Bytes-index and invalid receiver branches cannot come from current List-only source indexing; expected-free ADT inference is now covered."]
+
+["function", "remaining-str-bytes-index-and-invalid-receiver-branches", "infer_val_ty", 2, 2]
+
+["reason", "remaining-str-indexing-compatibility-path-is-unreachable-fro", "Remaining Str indexing compatibility path is unreachable from today's frontend, which rejects Str [...] and directs callers to charAt."]
+
+["function", "remaining-str-indexing-compatibility-path-is-unreachable-fro", "render_index", 2, 2]
+
+["reason", "remaining-widening-int-branch-is-intercepted-by-infer", "Remaining widening=Int branch is intercepted by infer_val_ty before delegation; other fallbacks are unsupported literal/unary/kind and Float operand paths rejected by reference validation."]
+
+["function", "remaining-widening-int-branch-is-intercepted-by-infer", "infer_ty", 5, 5]
+
+["reason", "the-noninteger-operand-guard-rejects-unsupported-folding-typ", "The noninteger operand guard rejects unsupported folding types. The Int32 bounds assignments require two emitted i32.const operands, but source integer literals are Int and to_int32 emits a checked narrowing call; the existing Int32 addition corpus therefore exits at const_numeral failure before these assignments. This is unreachable from the current source-to-WAT path, not missing Int32 arithmetic support."]
+
+["function", "the-noninteger-operand-guard-rejects-unsupported-folding-typ", "fold_const", 3, 3]
+
+["reason", "the-remaining-fallback-emits-unreachable-only-for-an", "The remaining fallback emits unreachable only for an empty non-Unit body, which frontend return checking rejects. Empty Unit source is covered and emits nop."]
+
+["function", "the-remaining-fallback-emits-unreachable-only-for-an", "emit_function", 1, 1]
+
+["reason", "the-remaining-loop-strips-trailing-whitespace-canonical-asse", "The remaining loop strips trailing whitespace. Canonical assembled function output ends at its last instruction; the covered empty Unit case emits nop, not trailing whitespace."]
+
+["function", "the-remaining-loop-strips-trailing-whitespace-canonical-asse", "rstrip", 1, 1]

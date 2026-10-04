@@ -20,7 +20,16 @@ hold three separate things, and only one of them is about the tool:
 
   3. THE REPORT DOES NOT OVER-CLAIM. It is an `EVAL-REPORT-1` document and
      `tools/check_eval_report.py` decides that, so that checker is run on the
-     committed bytes rather than trusted to have been run once.
+     report the committed records render rather than trusted to have been run
+     once.
+
+Since issue #1768 the repository commits the RECORDS of a run
+(`docs/census-artifact/`), one record per line and nothing derived, and the
+report is rendered from them. So `committed` below is the report the committed
+records render, with no census run, and section 6 holds the layout: sorted
+records, no stored aggregate, a report that is the same whether it is built
+from a run or from the records, and two independent changes that merge under
+git's ordinary line merge.
 
 The census run itself is expensive (one self-host build, one pass over ~850
 programs), so it happens once per module.
@@ -62,12 +71,13 @@ def checker():
 
 @pytest.fixture(scope="module")
 def committed(artifact):
-    return json.loads(artifact.REPORT_JSON.read_text(encoding="utf-8"))
+    """The report the committed records render, with no census run."""
+    return artifact.report_from_records()
 
 
 @pytest.fixture(scope="module")
-def committed_md(artifact):
-    return artifact.REPORT_MD.read_text(encoding="utf-8")
+def committed_md(artifact, committed):
+    return artifact.render_markdown(committed)
 
 
 @pytest.fixture(scope="module")
@@ -95,7 +105,7 @@ def test_the_published_residuals_are_exactly_the_baselined_ones(
     recorded = {k: sorted(v) for k, v in baseline.get("buckets", {}).items()
                 if k.split("/", 1)[0] == census.HARD}
     assert {k: sorted(v) for k, v in published.items()} == recorded, (
-        "docs/census-artifact.json names a different false-admit allowance "
+        "docs/census-artifact/ renders a different false-admit allowance "
         "than tools/gate_reference_census_baseline.json records. Regenerate: "
         "python3 tools/census_artifact.py --write")
 
@@ -109,8 +119,8 @@ def test_every_residual_is_named_in_the_markdown(committed, committed_md):
     assert named or committed["census"]["false_admit_allowance"]["total"] == 0
     for case_id in named:
         assert case_id in committed_md, (
-            f"{case_id} is in the allowance but not named in "
-            f"docs/census-artifact.md")
+            f"{case_id} is in the allowance but not named in the rendered "
+            f"markdown")
 
 
 def test_the_markdown_states_n_and_the_checker_version(committed, committed_md):
@@ -292,9 +302,9 @@ def test_a_stale_reproduction_lifts_no_claim(artifact, committed):
 
 def test_the_reproduction_fixture_matches_what_was_published(artifact,
                                                              committed):
-    recorded = json.loads(
-        artifact.CRATE_REPRODUCTION.read_text(encoding="utf-8"))
+    recorded = artifact.load_reproduction()
     rep = committed["census"]["reproduction"]
+    assert recorded["n"] == rep["n"] == len(recorded["programs"])
     assert recorded["engine"] == "crate"
     assert recorded["checker_version"] == rep["recorded_at_checker_version"]
     assert recorded["false_admissions"] == rep["crate_false_admissions"]
@@ -794,7 +804,7 @@ def test_the_diff_filter_names_every_kind_of_input(artifact):
               "tools/gate_reference_census_baseline.json", "examples/a.rvl",
               "tests/fixtures/brand_new.rvl", "crates/revl-gate/src/admission.rs",
               "crates/revl-gate/Cargo.toml", "tools/census_artifact.py",
-              "docs/census-artifact.json", "selfhost/lower.rvl"]
+              "docs/census-artifact/cases.jsonl", "selfhost/lower.rvl"]
     assert artifact.moved_inputs(inputs, committed) == inputs
 
 
@@ -824,3 +834,372 @@ def test_the_committed_reference_pins_are_what_the_run_opened(committed):
     # The MCP HTTP face is never imported by a census run. Under the old glob
     # it was pinned anyway, so a change to it made the artifact stale.
     assert "src/revl/mcp/http_face.py" not in reference
+
+
+# --- 6. the committed layout merges (issue #1768) -----------------------------
+#
+# The repository commits the records of a run, not the report. Every aggregate
+# the old `docs/census-artifact.{json,md}` stored (the run id and the compiler
+# digest six times each, `n`, the bucket table, the claims, every number in
+# the markdown, and the sha256 of every pinned file and program) changed on
+# every pull request that moved the corpus or a module the census opens, so
+# after each landing almost every open pull request conflicted in it. The
+# records carry nothing derived, so two pull requests conflict there only when
+# both moved the same program's verdict.
+
+from _merge_tree import git_has_merge_tree, merge  # noqa: E402
+
+_needs_merge_tree = pytest.mark.skipif(
+    not git_has_merge_tree(), reason="git merge-tree --write-tree needs git 2.38")
+
+
+@pytest.fixture(scope="module")
+def records(artifact):
+    return artifact.load_records()
+
+
+@pytest.fixture(scope="module")
+def sources(census):
+    _reference, oracle = census._reference()
+    return census.load_corpus(oracle)
+
+
+def _texts(artifact, records) -> dict[str, str]:
+    """The record files for unhydrated `records`, as `--write` writes them."""
+    measured = {"case_rows": [[cid, "", b] for cid, b in records["cases"]],
+                "pins": {g: {rel: "" for rel in records["pins"][g]}
+                         for g in artifact.VERDICT_PIN_GROUPS},
+                "engine": records["facts"]["engine"],
+                "issued_admissions": records["facts"]["issued_admissions"],
+                "reference_faults": records["facts"]["reference_faults"]}
+    texts = artifact.record_texts(measured, records["facts"]["mechanism"])
+    return {f"docs/census-artifact/{name}": text
+            for name, text in texts.items()}
+
+
+def _old_layout(artifact, census, records, sources) -> dict[str, str]:
+    """The same run as the pre-#1768 layout committed it: the whole rendered
+    report, digests included, as JSON beside its markdown."""
+    provenance = _load("tools/corpus_provenance.py", "artifact_test_provenance")
+    hydrated = artifact.hydrate(records, artifact.corpus_sources(sources))
+    report = artifact.build_report(
+        census, provenance, artifact.measured_from_records(hydrated),
+        artifact._read_crate(None), probe=records["facts"]["mechanism"])
+    return {"docs/census-artifact.json": artifact._serialise(report),
+            "docs/census-artifact.md": artifact.render_markdown(report)}
+
+
+def _with(records, *, add=(), bucket=None):
+    """A copy of `records` with programs added or a program's verdict moved,
+    as a pull request would leave them."""
+    out = json.loads(json.dumps(records))
+    out["cases"] += [list(row) for row in add]
+    out["cases"].sort(key=lambda row: row[0])
+    for index, name in (bucket or {}).items():
+        out["cases"][index][1] = name
+    return out
+
+
+def test_the_committed_records_are_sorted_one_per_line_and_canonical(
+        artifact, records):
+    """Sorted, one record per line, a blank line between records, and byte
+    for byte what `--write` produces from them. A hand-merged or reordered
+    file fails here before CI's `--verify --strict` names it too."""
+    for rel, text in _texts(artifact, records).items():
+        assert (ROOT / rel).read_text(encoding="utf-8") == text, (
+            f"{rel} is not in canonical record form; regenerate it: "
+            f"python3 tools/census_artifact.py --write")
+    for name in (artifact.CASES_RECORDS, artifact.PINS_RECORDS):
+        lines = (artifact.RECORDS / name).read_text().split("\n")
+        assert all(line == "" for line in lines[1::2]), (
+            f"{name}: records are not separated by a blank line")
+        assert all(line.startswith("[") for line in lines[0:-1:2])
+    ids = [row[0] for row in records["cases"]]
+    assert ids == sorted(ids)
+    for group in artifact.VERDICT_PIN_GROUPS:
+        assert records["pins"][group] == sorted(records["pins"][group])
+
+
+def test_the_records_store_no_aggregate_and_no_digest(artifact, records,
+                                                      committed):
+    """The values that used to churn are rendered, never stored: no count,
+    no identity, and no sha256 of a file the checkout already has."""
+    import re  # noqa: PLC0415
+    c = committed["census"]
+    stored = "".join((artifact.RECORDS / name).read_text()
+                     for name in artifact.RECORD_FILES)
+    for derived in (c["run"], c["compiler_tree_digest"], c["checker_version"],
+                    committed["claims"][0]["text"]):
+        assert derived not in stored, f"{derived!r} is stored in the records"
+    assert not re.search(r"[0-9a-f]{64}", stored), "a sha256 is stored"
+    assert set(records["facts"]) == {
+        "schema", "note", "engine", "issued_admissions", "reference_faults",
+        "mechanism"}
+
+
+def test_a_report_rendered_from_records_is_the_report_a_run_builds(
+        artifact, census):
+    """The derivability the layout rests on, driven with a synthetic run:
+    whatever `build_report` reads from a measurement survives the trip
+    through the record files and the checkout unchanged, so rendering the
+    committed records is rendering the run that wrote them."""
+    provenance = _load("tools/corpus_provenance.py", "artifact_test_prov2")
+    cases = [("examples/b.rvl", "b"), ("oracle-reject:twice", "t"),
+             ("examples/a.rvl", "a"), ("oracle-reject:twice", "t"),
+             ("admission:one", "o")]
+    pinned = {"decides_verdicts": ["tools/gate_reference_census.py"],
+              "reference": ["src/revl/compiler.py"],
+              "report_inputs": ["tests/fixtures/corpus_provenance.json"]}
+    measured = {
+        "cases": cases, "details": {}, "engine": "selfhost",
+        "buckets": {"agree-admit": ["examples/b.rvl", "admission:one"],
+                    "agree-refuse/G1": ["oracle-reject:twice",
+                                        "oracle-reject:twice"],
+                    "agree-refuse/G4": ["examples/a.rvl"]},
+        "issued_admissions": ["admission:one"], "reference_faults": [],
+        "n_distinct": 4, "repeated_case_ids": ["oracle-reject:twice"],
+        "pins": {"note": artifact.PINS_NOTE,
+                 **{g: {rel: artifact._sha(rel) for rel in rels}
+                    for g, rels in pinned.items()}},
+    }
+    measured["case_rows"] = artifact.case_rows(measured)
+    probe = artifact.probe_never_baselined(census)
+    fresh = artifact.build_report(census, provenance, measured, None,
+                                  probe=probe)
+    texts = artifact.record_texts(measured, probe)
+    parsed = {
+        "cases": [json.loads(x) for x in texts["cases.jsonl"].split("\n") if x],
+        "pins": {g: [] for g in artifact.VERDICT_PIN_GROUPS},
+        "facts": json.loads(texts["facts.json"]),
+    }
+    for line in texts["pins.jsonl"].split("\n"):
+        if line:
+            group, rel = json.loads(line)
+            parsed["pins"][group].append(rel)
+    hydrated = artifact.hydrate(parsed, artifact.corpus_sources(cases))
+    rendered = artifact.build_report(
+        census, provenance, artifact.measured_from_records(hydrated), None,
+        probe=parsed["facts"]["mechanism"])
+    assert rendered == fresh
+
+
+def test_records_that_name_an_absent_input_render_nothing(artifact, records):
+    """A records file that pins a file the tree lacks, or carries a program
+    the corpus lacks, describes another checkout; rendering it would name
+    inputs the run did not have."""
+    gone = json.loads(json.dumps(records))
+    gone["pins"]["reference"].append("src/revl/not_a_module.py")
+    with pytest.raises(artifact.StaleRecords):
+        artifact.hydrate(gone, {})
+    extra = {"cases": [["examples/nowhere.rvl", "agree-admit"]],
+             "pins": {g: [] for g in artifact.VERDICT_PIN_GROUPS},
+             "facts": records["facts"]}
+    with pytest.raises(artifact.StaleRecords):
+        artifact.hydrate(extra, {})
+
+
+@_needs_merge_tree
+def test_two_independent_census_changes_merge_in_the_new_layout_only(
+        artifact, census, records, sources):
+    """The exit test of issue #1768, on the records as committed today.
+
+    Two pull requests, built the way the conflicting ones in the issue were:
+    each adds a program to the corpus and edits a different module the census
+    opens. In the records each adds one line, at different places, and they
+    merge. In the layout they replace, the same two changes collide on the
+    run id, `n`, the bucket counts and the claims, and conflict in both
+    files."""
+    left = _with(records, add=[("examples/zz_merge_probe_left.rvl",
+                                "agree-admit")])
+    right = _with(records, add=[("tests/fixtures/aa_merge_probe_right.rvl",
+                                 "agree-refuse/G4")])
+    clean, conflicted = merge(_texts(artifact, records),
+                              _texts(artifact, left), _texts(artifact, right))
+    assert clean, f"the records conflict on independent changes: {conflicted}"
+
+    def old(recs, extra):
+        src = list(sources) + [(cid, cid) for cid, _ in extra]
+        return _old_layout(artifact, census, recs, src)
+
+    left_add = [("examples/zz_merge_probe_left.rvl", "agree-admit")]
+    right_add = [("tests/fixtures/aa_merge_probe_right.rvl", "agree-refuse/G4")]
+    clean_old, conflicted_old = merge(old(records, []), old(left, left_add),
+                                      old(right, right_add))
+    assert not clean_old and set(conflicted_old) == {
+        "docs/census-artifact.json", "docs/census-artifact.md"}, (
+        "the old layout merged, so this test no longer measures the defect")
+
+
+@_needs_merge_tree
+def test_neighbouring_verdicts_merge_and_the_same_verdict_conflicts(
+        artifact, records):
+    """The blank line between records is what lets two pull requests that
+    move the verdicts of neighbouring programs merge; moving the same
+    program's verdict two ways is a real conflict and stays one."""
+    base = _texts(artifact, records)
+    left = _with(records, bucket={10: "agree-refuse/G1"})
+    right = _with(records, bucket={11: "agree-refuse/G4"})
+    clean, conflicted = merge(base, _texts(artifact, left),
+                              _texts(artifact, right))
+    assert clean, conflicted
+    clean, conflicted = merge(
+        base, _texts(artifact, left),
+        _texts(artifact, _with(records, bucket={10: "agree-refuse/T1"})))
+    assert not clean and conflicted == ["docs/census-artifact/cases.jsonl"]
+
+
+def test_a_forgotten_regeneration_still_fails_the_strict_check(
+        artifact, records, sources, tmp_path):
+    """The currency check is exactly as strict on the records as it was on
+    the report. A pull request that adds a program, moves a verdict or makes
+    the run read a new file, and does not regenerate, fails `--strict`."""
+    by_id = artifact.corpus_sources(sources)
+    committed = artifact.published_from_records(artifact.hydrate(records, by_id))
+
+    def local(recs, extra=()):
+        src = dict(by_id)
+        for cid, text in extra:
+            src[cid] = [text]
+        hydrated = artifact.hydrate(recs, src)
+        return {"pins": artifact.published_from_records(hydrated)["pins"],
+                "cases": hydrated["cases"],
+                "mechanism_holds": records["facts"]["mechanism"]["holds"]}
+
+    added = _with(records, add=[("examples/zz_unrecorded.rvl", "agree-admit")])
+    result = artifact.judge(committed,
+                            local(added, [("examples/zz_unrecorded.rvl", "x")]))
+    assert artifact.current_problems(result) == [
+        "1 program in the corpus is not in the committed artifact"]
+
+    moved = _with(records, bucket={0: "agree-refuse/G1"})
+    result = artifact.judge(committed, local(moved))
+    assert result["verdict"] == "refuted"
+    assert artifact.current_problems(result)
+
+    opened = json.loads(json.dumps(records))
+    opened["pins"]["decides_verdicts"].append("tools/corpus_provenance.py")
+    result = artifact.judge(committed, local(opened))
+    assert result["unpinned_inputs"] == ["tools/corpus_provenance.py"]
+    assert artifact.current_problems(result) == [
+        "the verdict is different-inputs, not reproduced"]
+
+    for name in artifact.RECORD_FILES:
+        (tmp_path / name).write_text(
+            (artifact.RECORDS / name).read_text(encoding="utf-8"),
+            encoding="utf-8")
+    fresh = {name.split("/")[-1]: text
+             for name, text in _texts(artifact, added).items()}
+    problems = artifact.record_problems(fresh, tmp_path)
+    assert problems and all("cases.jsonl" in p for p in problems)
+
+
+def test_verify_reads_the_records_directory(artifact, tmp_path):
+    """`--verify` defaults to the records; an unreadable directory is
+    unusable input (exit 2) before any census runs."""
+    (tmp_path / "cases.jsonl").write_text("not json\n")
+    code, text = artifact.verify(tmp_path)
+    assert code == 2 and "cannot read the records" in text
+
+
+# --- the crate reproduction stores no count (issue #1768) ---------------------
+#
+# `tests/fixtures/census_crate_reproduction.json` stored `n`, the number of
+# programs the crate run covered. It was the one line every corpus-moving pull
+# request that re-recorded rewrote, so any two of them conflicted on it. The
+# directory that replaces it records WHICH programs the run covered, one per
+# line, and the count is derived.
+
+
+def _reproduction(programs, version="GATE-CENSUS-1+aaaaaaaaaaaa"):
+    return {"note": "n", "engine": "crate", "checker_version": version,
+            "tracked_buckets": {}, "false_admissions": [],
+            "programs": sorted(programs)}
+
+
+def _repro_files(artifact, recorded) -> dict[str, str]:
+    return {f"tests/fixtures/census_crate_reproduction/{name}": text
+            for name, text in artifact.reproduction_texts(recorded).items()}
+
+
+def test_the_committed_reproduction_is_canonical_and_stores_no_count(artifact):
+    recorded = artifact.load_reproduction()
+    assert recorded is not None and recorded["programs"]
+    facts = json.loads((artifact.CRATE_REPRODUCTION
+                        / artifact.REPRODUCTION_FACTS).read_text())
+    assert "n" not in facts and "programs" not in facts
+    for rel, text in _repro_files(artifact, recorded).items():
+        assert (ROOT / rel).read_text(encoding="utf-8") == text, (
+            f"{rel} is not in canonical form; re-record it")
+    assert recorded["programs"] == sorted(recorded["programs"])
+
+
+def test_trim_records_the_programs_and_derives_the_count(artifact, census,
+                                                         tmp_path):
+    raw = {"engine": "crate",
+           "buckets": {"agree-admit": ["b.rvl", "a.rvl"],
+                       "agree-refuse/G1": ["oracle-reject:twice",
+                                           "oracle-reject:twice"],
+                       "false-admit/T1": ["c.rvl"]}}
+    recorded = artifact.trim_reproduction(census, raw)
+    assert recorded["programs"] == ["a.rvl", "b.rvl", "c.rvl",
+                                    "oracle-reject:twice",
+                                    "oracle-reject:twice"]
+    assert recorded["tracked_buckets"] == {"false-admit/T1": ["c.rvl"]}
+    assert "n" not in recorded
+    for name, text in artifact.reproduction_texts(recorded).items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    loaded = artifact.load_reproduction(tmp_path)
+    assert loaded["n"] == 5 and loaded["programs"] == recorded["programs"]
+
+
+@_needs_merge_tree
+def test_two_re_recordings_that_add_programs_merge(artifact):
+    """The exit test for this file. Two pull requests each add a program and
+    re-record the crate run at the same checker version. In the directory
+    each adds one line and they merge; in the single file both rewrite `n`
+    and conflict."""
+    base = [f"examples/p{i:03d}.rvl" for i in range(0, 40, 2)]
+    left = base + ["examples/p011.rvl"]
+    right = base + ["examples/p031.rvl", "examples/p033.rvl"]
+    clean, conflicted = merge(_repro_files(artifact, _reproduction(base)),
+                              _repro_files(artifact, _reproduction(left)),
+                              _repro_files(artifact, _reproduction(right)))
+    assert clean, conflicted
+
+    def old(programs):
+        recorded = _reproduction(programs)
+        recorded["n"] = len(recorded.pop("programs"))
+        return {"tests/fixtures/census_crate_reproduction.json":
+                json.dumps(recorded, indent=1, sort_keys=True) + "\n"}
+
+    clean, conflicted = merge(old(base), old(left), old(right))
+    assert not clean and conflicted == [
+        "tests/fixtures/census_crate_reproduction.json"]
+
+
+def test_the_reproduction_check_is_as_strict_and_names_what_it_missed(
+        artifact, census, records, sources):
+    """A reproduction recorded at another checker version still lifts no
+    claim, whatever it covered, and one at the current version over fewer
+    programs than the census now runs is reported with the gap counted."""
+    provenance = _load("tools/corpus_provenance.py", "artifact_test_prov3")
+    hydrated = artifact.hydrate(records, artifact.corpus_sources(sources))
+    measured = artifact.measured_from_records(hydrated)
+    version, _ = artifact.checker_version()
+    ids = sorted({row[0] for row in measured["case_rows"]})
+
+    def report(recorded):
+        loaded = dict(recorded, n=len(recorded["programs"]))
+        return artifact.build_report(census, provenance, measured, loaded,
+                                     probe=records["facts"]["mechanism"])
+
+    stale = report(_reproduction(ids))
+    assert stale["census"]["reproduction"]["is_current"] is False
+    assert all(c["rung"] != "demonstrated" for c in stale["claims"])
+
+    short = report(_reproduction(ids[3:], version))
+    rep = short["census"]["reproduction"]
+    assert rep["is_current"] is True
+    assert rep["census_programs_not_in_reproduction"] == 3
+    assert ("census programs this run read that the reproduction did not: "
+            "**3**") in artifact.render_markdown(short)

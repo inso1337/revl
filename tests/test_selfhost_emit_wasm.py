@@ -100,6 +100,8 @@ from _boundary_witness import assert_boundary_witness  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_wasm_corpus"
 CORPUS = [
+    "helper_named_fns.rvl",  # issue #1756: user fns named `int_add`, `alloc`,
+                             # `str_concat` beside the helpers of those names
     "scratch_names.rvl",
     "widening.rvl",
     "residuals.rvl",
@@ -231,14 +233,14 @@ def test_selfhosted_emitter_output_scaffold(emitted):
     assert '(memory (export "memory") 1)' in src
     assert "(global $__hp (mut i32) (i32.const 0))" in src
     assert "(func $int_add" in src          # the checked-arithmetic preamble
-    assert '(func $i64ops (export "i64ops")' in src
+    assert '(func $fn.i64ops (export "i64ops")' in src
     assert "(call $int_add)" in src         # `a + b` lowered through the helper
     assert src.endswith(")\n")
 
 
 @pytest.mark.parametrize("rel", [
     "widening.rvl", "folding.rvl", "variants.rvl", "scratch_names.rvl", "residuals.rvl",
-    "shortcircuit.rvl",
+    "shortcircuit.rvl", "helper_named_fns.rvl",
 ])
 def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
     compiler = shutil.which("wat2wasm")
@@ -329,7 +331,7 @@ def test_fn_type_param_refused(emitted, reference):
     # could not tell a named refusal from silence, which is what the port
     # actually produced. It now pins the marker.
     pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
-                 "$revl_test_probe", "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
+                 "$fn.revl_test_probe", "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
 ])
 def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
                                          reference_token, port_token):
@@ -354,12 +356,26 @@ def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_pat
     path.write_text('fn f() -> Bool { return true }\ntest "probe" { assert f() }')
     ir = compile_files([str(path)])
     want, got = reference.emit(ir)["functions"], emitted["emit_wasm_src"](ir)
-    assert "$f" in want and "$f" in got, (
+    assert "$fn.f" in want and "$fn.f" in got, (
         "the plant is only a proof while it is text BOTH sides emit"
     )
     with pytest.raises(AssertionError, match="text the REFERENCE also emits"):
-        assert_boundary_witness(want, got, "$revl_test_probe", "$f")
-    assert_boundary_witness(want, got, "$revl_test_probe", None)
+        assert_boundary_witness(want, got, "$fn.revl_test_probe", "$fn.f")
+    assert_boundary_witness(want, got, "$fn.revl_test_probe", None)
+
+
+FN_NAMED_MEMORY = ROOT / "tests" / "fixtures" / "emit_wasm_refusals" / "fn_named_memory.rvl"
+
+
+def test_a_fn_named_memory_is_refused_by_name_on_both_sides(emitted, reference):
+    """Issue #1756: a `fn` is exported under its own name and the functions
+    module exports its `memory`, so a `fn memory` would export one name twice.
+    The reference refuses it by name; the port must not answer it with a module
+    that does not validate, so it names the refusal too."""
+    ir = compile_files([str(FN_NAMED_MEMORY)])
+    with pytest.raises(reference.EmitError, match="fn `memory` would export wasm name 'memory'"):
+        reference.emit(ir)
+    assert emitted["emit_wasm_src"](ir) == "<<UNSUPPORTED-EXPORT:memory>>\n"
 
 
 STREAM_130 = ROOT / "backends" / "go" / "testdata" / "stream_130.rvl"
@@ -454,7 +470,7 @@ def test_reference_refuses_a_bodyless_extern_by_name(reference, tmp_path, body, 
     above, and it cannot be a CORPUS document: the corpus is documents the
     reference EMITS and holds byte-identical against the port, while every input
     reaching this arm raises. That is why the arm is carried in
-    tests/fixtures/selfhost_uncovered_lines.json, and this test is what keeps it
+    tests/fixtures/selfhost_uncovered_lines/, and this test is what keeps it
     honest in the meantime."""
     path = tmp_path / "bodyless.rvl"
     path.write_text("extern pure fn peek(p: Str) -> Str = @py { return p }\n" + body)

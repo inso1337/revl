@@ -144,6 +144,14 @@ public final class RunStream130 {
         theIterationFormRunsTheBodyPerItemAndEndsOnClosed();
         theCombinatorChainFiltersMapsAndEndsOnTake();
         theCombinatorChainUnwindsOffTheOneBracket();
+        aLateSubscriberReceivesTheHeldBacklogThenLiveItems();
+        withoutADeclarationThereIsNoBacklog();
+        aSmallerRequestTakesTheNewestItems();
+        aBacklogTakesTheBufferAndThePolicy();
+        theBacklogRidesTheCombinatorChain();
+        aDeclarationAloneReplaysNothing();
+        aLiveEmitNeverOvertakesTheBacklog();
+        theEmittedReplayedComponentRunsAndClosesItsBracket();
         System.out.println("STREAM_130_OK");
     }
 
@@ -556,6 +564,217 @@ public final class RunStream130 {
         markAt(scenario, "stream.stage close take");
         markAt(scenario, "stream.stage close map");
         markAt(scenario, "stream.stage close filter");
+        expectNoResidue(scenario);
+    }
+
+    // §4.5: the provider-declared last-n backlog (`replay(<n>)`).
+    //
+    // Each case mirrors the py reference's own case in
+    // backends/python/tests/test_stream_runtime.py: the provider holds its newest
+    // n items whether or not anyone listens, a late subscriber receives the newest
+    // k of them oldest first and BEFORE any live item, and the backlog rides the
+    // provider's own forward path, so it takes the chain, the buffer and the
+    // overflow policy exactly as a live item does. The durable `replay(from: …)`
+    // cursor is refused by name at emit time and never reaches this runtime.
+
+    private static java.util.List<Object> take(revl.Components.Subscription sub, int n) {
+        java.util.List<Object> out = new java.util.ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            out.add(sub.next());
+        }
+        return out;
+    }
+
+    private static java.util.List<String> replayMarks() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String mark : revl.Components.Stream.marks()) {
+            if (mark.startsWith("stream.replay")) {
+                out.add(mark);
+            }
+        }
+        return out;
+    }
+
+    private static void emitAll(revl.Components.Stream src, String... items) {
+        for (String item : items) {
+            src.emit(item);
+        }
+    }
+
+    private static void aLateSubscriberReceivesTheHeldBacklogThenLiveItems() {
+        String scenario = "replay: late subscriber";
+        fresh();
+        revl.Components.Stream src = revl.Components.Stream.source(3);
+        emitAll(src, "a", "b", "c", "d"); // nobody is listening yet
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribeReplay(src, 3, "error", 0);
+        expect(scenario, take(sub, 3).equals(java.util.List.of("b", "c", "d")),
+            "the backlog is not the last three held items, oldest first");
+        src.emit("e");
+        expect(scenario, "e".equals(sub.next()), "live items must follow the backlog");
+        expect(scenario, replayMarks().equals(java.util.List.of(
+                "stream.replay b", "stream.replay c", "stream.replay d")),
+            "each replayed item is traced: " + replayMarks());
+        sub.close();
+        src.close();
+        expectNoResidue(scenario);
+    }
+
+    // The non-vacuity control: the same timing with no declaration sees nothing
+    // of what was emitted before `subscribe`, which is §4.5's default.
+    private static void withoutADeclarationThereIsNoBacklog() {
+        String scenario = "replay: control";
+        fresh();
+        revl.Components.Stream src = revl.Components.Stream.source();
+        emitAll(src, "a", "b", "c", "d");
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribe(src, "error", 0);
+        src.emit("e");
+        expect(scenario, "e".equals(sub.next()), "an undeclared provider replayed");
+        expect(scenario, replayMarks().isEmpty(), "an undeclared provider replayed");
+        sub.close();
+        src.close();
+    }
+
+    private static void aSmallerRequestTakesTheNewestItems() {
+        String scenario = "replay: newest";
+        fresh();
+        revl.Components.Stream src = revl.Components.Stream.source(4);
+        emitAll(src, "1", "2", "3", "4", "5"); // the bounded backlog trims "1"
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribeReplay(src, 2, "error", 0);
+        expect(scenario, take(sub, 2).equals(java.util.List.of("4", "5")),
+            "a smaller request must take the newest items");
+        sub.close();
+        src.close();
+    }
+
+    // A replayed item is delivered through the provider's own forward path, so a
+    // backlog larger than the buffer is ordinary `error`-policy overflow.
+    private static void aBacklogTakesTheBufferAndThePolicy() {
+        String scenario = "replay: buffer and policy";
+        fresh();
+        revl.Components.Stream src = revl.Components.Stream.source(6);
+        emitAll(src, "0", "1", "2", "3", "4", "5");
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribeReplay(src, 6, "error", 2);
+        expect(scenario, take(sub, 2).equals(java.util.List.of("0", "1")),
+            "the buffered prefix of the backlog was lost");
+        boolean faulted = false;
+        try {
+            sub.next();
+        } catch (CordisException expected) {
+            faulted = expected.getMessage().contains("overflow");
+        }
+        expect(scenario, faulted, "a backlog past the buffer did not fault");
+        sub.close();
+        src.close();
+        expectNoResidue(scenario);
+    }
+
+    private static void theBacklogRidesTheCombinatorChain() {
+        String scenario = "replay: chain";
+        fresh();
+        revl.Components.Stream src = revl.Components.Stream.source(4);
+        emitAll(src, "1", "2", "3", "4");
+        revl.Components.Stream chain = revl.Components.Stream.filter(
+            src, x -> x.equals("2") || x.equals("4"));
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribeReplay(chain, 4, "error", 0);
+        expect(scenario, take(sub, 2).equals(java.util.List.of("2", "4")),
+            "the backlog did not ride the filter");
+        sub.close();
+        src.close();
+        expectNoResidue(scenario);
+    }
+
+    private static void aDeclarationAloneReplaysNothing() {
+        String scenario = "replay: unrequested";
+        fresh();
+        revl.Components.Stream src = revl.Components.Stream.source(4);
+        src.emit("old");
+        revl.Components.Subscription sub =
+            revl.Components.Stream.subscribe(src, "error", 0);
+        src.emit("new");
+        expect(scenario, "new".equals(sub.next()),
+            "a declaration nobody asked for replayed");
+        sub.close();
+        src.close();
+    }
+
+    // The one ordering the single-threaded reference cannot exhibit. Live
+    // emissions racing a late subscriber land either BEFORE the subscribe (inside
+    // the held backlog) or AFTER the whole backlog, never in the middle of it and
+    // never twice: the consumer sees one contiguous run of the provider's
+    // sequence.
+    private static void aLiveEmitNeverOvertakesTheBacklog() throws Exception {
+        String scenario = "replay: live emit vs backlog";
+        final int held = 48;
+        final int live = 4000;
+        for (int round = 0; round < 10; round++) {
+            fresh();
+            revl.Components.Stream src = revl.Components.Stream.source(held);
+            for (int i = 0; i < held; i++) {
+                src.emit(Integer.toString(i));
+            }
+            java.util.concurrent.CountDownLatch started =
+                new java.util.concurrent.CountDownLatch(1);
+            Thread feeder = new Thread(() -> {
+                for (int i = held; i < held + live; i++) {
+                    src.emit(Integer.toString(i));
+                    if (i == held) {
+                        started.countDown();
+                    }
+                }
+            }, "replay-feeder");
+            feeder.start();
+            started.await();
+            revl.Components.Subscription sub = revl.Components.Stream.subscribeReplay(
+                src, held, "error", 2 * (held + live));
+            feeder.join();
+            src.close();
+            java.util.List<Integer> got = new java.util.ArrayList<>();
+            while (true) {
+                Object v = sub.next();
+                if (revl.Components.Stream.isClosed(v)) {
+                    break;
+                }
+                got.add(Integer.parseInt((String) v));
+            }
+            expect(scenario, got.size() >= held, "round " + round + ": " + got.size());
+            for (int i = 1; i < got.size(); i++) {
+                if (got.get(i) != got.get(i - 1) + 1) {
+                    fail(scenario, "round " + round + ": a live item overtook the "
+                        + "backlog or was delivered twice at index " + i);
+                }
+            }
+            expect(scenario, got.get(got.size() - 1) == held + live - 1,
+                "round " + round + ": the last live item is missing");
+            sub.close();
+        }
+    }
+
+    // The emitted `Replayed` component compiles against this runtime, runs its
+    // loop over the declared provider, and still tears down with no residue. The
+    // component is appended to scenarios/stream_130.rvl by the Python driver
+    // (test_stream_exec_java_130.py `_REPLAYED`) rather than written in the
+    // document, which is a gate/reference census case.
+    private static void theEmittedReplayedComponentRunsAndClosesItsBracket()
+            throws Exception {
+        String scenario = "replay: emitted component";
+        Context ctx = fresh();
+        Activation run = new Activation("replayed-activation",
+            () -> new revl.Components.ReplayedPlugin().apply(ctx));
+        await(scenario, "the subscription", () -> marked("stream.subscribe"));
+        revl.Components.Stream provider = revl.Components.Stream.providers().get(0);
+        provider.emit("x");
+        provider.emit("y");
+        await(scenario, "both items", () -> DELIVERED.size() == 2);
+        provider.close();
+        await(scenario, "the loop to end", run::done);
+        expect(scenario, run.failure == null, "the activation failed: " + run.failure);
+        expectDelivered(scenario, "x", "y");
+        run.disposable.dispose();
         expectNoResidue(scenario);
     }
 }

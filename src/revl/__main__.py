@@ -270,11 +270,18 @@ def _run_policy(args) -> int:
     mcp_components = (frozenset(audit.get("boundary") or {})
                      if "*" in scope else frozenset(scope))
 
+    # the producer that RUNS the program under --recompute (issue #1780: it is
+    # passed in, so revl.policy never imports the runtime)
+    recompute_producer = None
+    if recompute:
+        from .evidence_recompute import recompute_component as recompute_producer  # noqa: PLC0415
+
     result = explain(policy, audit, mcp_components, evidence=evidence,
                      origins=origins, trusted_publishers=trusted, key=key,
                      evidence_ir=evidence_ir, recompute=recompute,
                      recompute_ir=recompute_ir,
                      recompute_gauntlet=recompute_gauntlet,
+                     recompute_producer=recompute_producer,
                      component=args.component)
     if args.json:
         print(json.dumps(result, indent=2))
@@ -911,6 +918,35 @@ def _run_emit(args) -> int:
     return 0
 
 
+def _run_idiom(args) -> int:
+    """`revl idiom [NAME] [--json]`: the minimal admitted example of one
+    construct and the rules that make it correct (issue #1701,
+    `revl.idioms`); with no name, the list."""
+    import json  # noqa: PLC0415
+
+    from . import idioms  # noqa: PLC0415 - reads the idiom files on first use
+
+    if args.name is None:
+        rows = [{"name": n, "summary": idioms.get(n)["summary"]} for n in idioms.names()]
+        if args.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            width = max(len(r["name"]) for r in rows)
+            for row in rows:
+                print(f"{row['name']:<{width}}  {row['summary']}")
+        return 0
+    entry = idioms.get(args.name)
+    if entry is None:
+        print(f"error: no idiom named {args.name!r}; the idioms are "
+              f"{', '.join(idioms.names())}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(idioms.served(entry), indent=2))
+    else:
+        sys.stdout.write(idioms.render(entry))
+    return 0
+
+
 def _run_grammar(args) -> int:
     """`revl grammar` — the language surface small enough to carry in a prompt.
 
@@ -1292,6 +1328,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_explain(args)
     if args.command == "grammar":
         return _run_grammar(args)
+    if args.command == "idiom":
+        return _run_idiom(args)
     if args.command == "adapt":
         from .cli.adapt import _run_adapt
         return _run_adapt(args)

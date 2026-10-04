@@ -22,9 +22,42 @@ WHY IT IS A GENERATOR AND NOT A DOCUMENT
 ----------------------------------------
 A published table with a hand-transcribed number is a mirror that rots against
 what it mirrors, and this repository has been bitten by that shape repeatedly.
-So `docs/census-artifact.md` and `docs/census-artifact.json` are OUTPUT. Every
-count, every named residual and every fraction in them comes from a run. Editing
-either file by hand is a defect `--check` reports.
+So every count, every named residual and every fraction in the report comes
+from a run. Nothing in it is typed by hand.
+
+WHAT IS COMMITTED, AND WHAT IS RENDERED (issue #1768)
+------------------------------------------------------
+The repository commits the RECORDS of a run, not the report. They live in
+`docs/census-artifact/`:
+
+  * `cases.jsonl` - one `[case id, bucket]` row per program run, sorted by
+    case id;
+  * `pins.jsonl`  - one `[group, file]` row per file a verdict or the report
+    depends on, sorted;
+  * `facts.json`  - the handful of measured facts that are neither a row nor a
+    pin: the engine, the admissions the gate issued, the reference faults and
+    the driven `NEVER_BASELINED` probe.
+
+One record per line, a blank line between records, and nothing derived. The
+sha256 of each program and of each pinned file, the counts, the bucket table,
+`n`, the run id, the compiler digest, the checker version, the claims and the
+markdown are all functions of the records and the checkout, so they are
+computed when the report is rendered and never stored. A digest is a property
+of the tree; storing one meant every pull request that edited a pinned module
+rewrote its line even when no verdict moved.
+A stored aggregate is a line every pull request that moves the corpus rewrites,
+so two independent pull requests used to conflict on it after every landing.
+Records merge under git's ordinary line merge unless two pull requests move the
+same program's verdict, which is a real conflict.
+
+The report itself, `EVAL-REPORT-1` JSON or markdown, is rendered on demand:
+
+    python3 tools/census_artifact.py                    # markdown, fresh run
+    python3 tools/census_artifact.py --json             # JSON, fresh run
+    python3 tools/census_artifact.py --from-records     # markdown, no run
+
+`docs/census-artifact.md` is a hand-written page about the artifact and holds
+no number.
 
 WHAT IT REFUSES TO DO
 ---------------------
@@ -46,10 +79,11 @@ NO WALL CLOCK, NO COMMIT SHA
 ----------------------------
 Nothing in the artifact is a timestamp or a git commit, so `--check` measures
 staleness of the NUMBERS rather than of the calendar. Identity is by content
-digest instead: `compiler_commit` names a sha256 over `src/revl/**/*.py` and
-`run` names a sha256 over the corpus the run actually read. Both are stronger
-than a commit sha, because a commit that moved neither does not move them and an
-outsider can recompute both from a checkout.
+digest instead: `compiler_commit` names a sha256 over the pinned
+`src/revl/**/*.py` modules (file name and sha256 of each) and `run` names a
+sha256 over the `(case id, sha256 of the source)` rows of the corpus the run
+actually read. Both are stronger than a commit sha, because a commit that moved
+neither does not move them, and both are recomputable from the records alone.
 
 Every file name that goes into a digest is REPO-RELATIVE. An absolute name makes
 the digest depend on the directory the clone happens to sit in, which is the one
@@ -59,7 +93,9 @@ for; `tests/test_census_artifact.py` holds that property from a second checkout.
 USAGE
 -----
     python3 tools/census_artifact.py                     # render to stdout
-    python3 tools/census_artifact.py --write             # write both files
+    python3 tools/census_artifact.py --json              # the report as JSON
+    python3 tools/census_artifact.py --from-records      # render the records
+    python3 tools/census_artifact.py --write             # write the records
     python3 tools/census_artifact.py --check             # fail if they drifted
     python3 tools/census_artifact.py --verify [REPORT]   # judge a published copy
     python3 tools/census_artifact.py --verify --strict   # CI: is the committed copy current
@@ -72,8 +108,13 @@ THE REPRODUCTION, AND WHY IT IS RECORDED RATHER THAN RE-RUN
 questions the fast engine answers. It takes about fourteen minutes and needs a
 rust toolchain, so `--check` cannot run it and neither can a CI job that is
 allowed to be cheap. The result is recorded instead, in
-`tests/fixtures/census_crate_reproduction.json`, beside the CHECKER VERSION it
-was taken at.
+`tests/fixtures/census_crate_reproduction/`, beside the CHECKER VERSION it was
+taken at: `reproduction.json` holds the version, the tracked buckets and the
+false admissions, and `programs.jsonl` the programs the run covered, one per
+line, sorted. The count is derived from that list rather than stored, because a
+stored count was the one line every corpus-moving pull request rewrote, so two
+of them always conflicted on it (issue #1768). A program the census now runs
+and the recorded reproduction did not is counted and reported.
 
 A recorded result rots, so it is not trusted blind: every run compares the
 recorded checker version against the current one, and a reproduction taken at a
@@ -110,8 +151,18 @@ artifact in the same diff:
 
     python3 tools/census_artifact.py --write
 
-`--check` is then green too, because the artifact's bytes are a function of
-exactly those inputs (issue #1572).
+`--check` is then green too, because the records' bytes are a function of
+exactly those inputs (issue #1572). `--strict` compares the record files byte
+for byte against a fresh run as well, so a record that is out of order, edited
+by hand or left behind by a conflict resolution fails it.
+
+RESOLVING A MERGE CONFLICT IN THE RECORDS
+-----------------------------------------
+Two pull requests conflict in `docs/census-artifact/` only when both moved the
+verdict of the same program, added programs at the same place, or changed which
+files the run reads. Resolve by regenerating, never by hand:
+
+    python3 tools/census_artifact.py --write
 """
 
 from __future__ import annotations
@@ -127,12 +178,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-REPORT_JSON = ROOT / "docs" / "census-artifact.json"
-REPORT_MD = ROOT / "docs" / "census-artifact.md"
+# The committed records of a run (issue #1768). The report is rendered from
+# them and is not committed; see "WHAT IS COMMITTED, AND WHAT IS RENDERED".
+RECORDS = ROOT / "docs" / "census-artifact"
+CASES_RECORDS = "cases.jsonl"
+PINS_RECORDS = "pins.jsonl"
+FACTS_RECORDS = "facts.json"
+RECORD_FILES = (CASES_RECORDS, PINS_RECORDS, FACTS_RECORDS)
+RECORDS_SCHEMA = "GATE-CENSUS-RECORDS-1"
+
+# The pin groups `pins.jsonl` carries, in file order: `build_pins`'s groups.
+VERDICT_PIN_GROUPS = ("decides_verdicts", "reference", "report_inputs")
 
 # The recorded `--engine crate` reproduction. In tests/fixtures/ rather than in
-# docs/ because it is an input to the artifact, not part of it.
-CRATE_REPRODUCTION = ROOT / "tests" / "fixtures" / "census_crate_reproduction.json"
+# docs/ because it is an input to the artifact, not part of it. A directory
+# since issue #1768: the facts in one file, the covered programs one per line.
+CRATE_REPRODUCTION = ROOT / "tests" / "fixtures" / "census_crate_reproduction"
+REPRODUCTION_FACTS = "reproduction.json"
+REPRODUCTION_PROGRAMS = "programs.jsonl"
 
 # The frozen schemas this artifact is written against. `EVAL-REPORT-1` is
 # `docs/design/478-eval-honesty-protocol.md`'s, validated by
@@ -233,19 +296,25 @@ def checker_version() -> tuple[str, dict[str, str]]:
     return f"{CENSUS_SCHEMA}+{whole[:12]}", per_file
 
 
-def reference_digest(reference) -> str:
-    """sha256 over the reference modules the census run opened, repo-relative
-    names in sorted order (`build_pins`'s `reference` group)."""
-    return _digest([ROOT / rel for rel in sorted(reference)])
-
-
-def corpus_digest(cases) -> str:
-    """sha256 over the corpus this run actually read, ids and bytes both."""
+def reference_digest(reference: dict[str, str]) -> str:
+    """sha256 over the reference modules the census run opened: each one's
+    repo-relative name and sha256, in sorted order (`build_pins`'s `reference`
+    group). Computed from the pins rather than from the files, so it is a
+    function of the committed records and is never stored beside them."""
     h = hashlib.sha256()
-    for case_id, source in sorted(cases):
-        blob = source.encode("utf-8", "surrogatepass")
-        h.update(f"{case_id}:{len(blob)}\n".encode())
-        h.update(blob)
+    for rel in sorted(reference):
+        h.update(f"{rel}:{reference[rel]}\n".encode())
+    return h.hexdigest()
+
+
+def corpus_digest(rows) -> str:
+    """sha256 over the corpus this run actually read: every `[case id, sha256
+    of the source, bucket]` row's id and source digest, sorted, a repeated id
+    once per occurrence. Each id is length-prefixed, because ids contain `:`."""
+    h = hashlib.sha256()
+    for case_id, sha in sorted((row[0], row[1]) for row in rows):
+        h.update(f"{len(case_id)}:{case_id}:{sha}\n".encode(
+            "utf-8", "surrogatepass"))
     return h.hexdigest()
 
 
@@ -272,13 +341,15 @@ def corpus_digest(cases) -> str:
 REPORT_INPUTS = (
     "tools/gate_reference_census_baseline.json",
     "tests/fixtures/corpus_provenance.json",
-    "tests/fixtures/census_crate_reproduction.json",
+    "tests/fixtures/census_crate_reproduction/reproduction.json",
+    "tests/fixtures/census_crate_reproduction/programs.jsonl",
 )
 
 # The shipped gate, which the crate engine builds with cargo in a subprocess,
 # so the audit hook never sees it. Pinned by glob; `build_gate_crate.py
 # --check` is what ties it to `selfhost/lower.rvl`.
 GATE_CRATE_GLOBS = ("crates/revl-gate/Cargo.toml",
+                    "crates/revl-gate/build.rs",
                     "crates/revl-gate/src/**/*.rs")
 
 # One stack of open sets, fed by one audit hook. An audit hook cannot be
@@ -337,12 +408,16 @@ def _is_reference(rel: str) -> bool:
 
 
 def case_rows(measured: dict) -> list[list[str]]:
-    """`[case id, sha256 of its source, bucket]` for every program, in run order.
+    """`[case id, sha256 of its source, bucket]` for every program, sorted by
+    case id.
 
     The verifier compares verdicts case by case, so a reader whose corpus has
     grown can still check every published case whose bytes did not change. A
     repeated case id carries the same source both times, so it is assigned the
-    buckets it landed in, in order.
+    buckets it landed in, in order, and the sort is stable so those rows keep
+    run order between themselves. Sorted rather than in run order so that two
+    pull requests adding different programs insert rows at different places
+    in `cases.jsonl` (issue #1768).
     """
     pending: dict[str, list[str]] = {}
     for name, ids in measured["buckets"].items():
@@ -353,7 +428,18 @@ def case_rows(measured: dict) -> list[list[str]]:
         digest = hashlib.sha256(
             source.encode("utf-8", "surrogatepass")).hexdigest()
         rows.append([case_id, digest, pending[case_id].pop(0)])
-    return rows
+    return sorted(rows, key=lambda row: row[0])
+
+
+PINS_NOTE = (
+    "Every file the published verdicts depend on, by sha256. "
+    "`decides_verdicts` is MEASURED: it is the set of files under the "
+    "checkout that the census run opened, recorded by an audit hook, "
+    "minus the corpus (pinned per case in `cases`) and the reference "
+    "(pinned here per file). A file that decides a verdict cannot be "
+    "left out of this list by forgetting to name it, and "
+    "`tools/census_artifact.py --verify` measures it again on the "
+    "reader's side.")
 
 
 def build_pins(measured: dict, reads: set[str]) -> dict:
@@ -386,15 +472,7 @@ def build_pins(measured: dict, reads: set[str]) -> dict:
                     if p.is_file()})
     report_inputs = sorted(set(REPORT_INPUTS) | set(crate))
     return {
-        "note": (
-            "Every file the published verdicts depend on, by sha256. "
-            "`decides_verdicts` is MEASURED: it is the set of files under the "
-            "checkout that the census run opened, recorded by an audit hook, "
-            "minus the corpus (pinned per case in `cases`) and the reference "
-            "(pinned here per file). A file that decides a verdict cannot be "
-            "left out of this list by forgetting to name it, and "
-            "`tools/census_artifact.py --verify` measures it again on the "
-            "reader's side."),
+        "note": PINS_NOTE,
         "decides_verdicts": {rel: _sha(rel) for rel in deciding},
         "reference": {rel: _sha(rel) for rel in reference},
         "report_inputs": {rel: _sha(rel) for rel in report_inputs},
@@ -483,7 +561,8 @@ def measure(census, engine_name: str) -> dict:
 
     return {"cases": cases, "buckets": buckets, "details": details,
             "issued_admissions": sorted(issued), "engine": engine_name,
-            "n_distinct": len(seen), "repeated_case_ids": repeated}
+            "n_distinct": len(seen), "repeated_case_ids": repeated,
+            "reference_faults": reference_faults(details, buckets, cases)}
 
 
 def reference_faults(details: dict, buckets: dict, cases) -> list[str]:
@@ -601,19 +680,26 @@ def allowance(census, buckets: dict[str, list[str]]) -> dict:
 
 
 def build_report(census, provenance, measured: dict,
-                 crate: dict | None = None) -> dict:
-    """The artifact, in `EVAL-REPORT-1` shape with a `GATE-CENSUS-1` section."""
+                 crate: dict | None = None, *, probe: dict | None = None,
+                 checker: tuple[str, dict[str, str]] | None = None) -> dict:
+    """The artifact, in `EVAL-REPORT-1` shape with a `GATE-CENSUS-1` section.
+
+    Everything it reads from `measured` is in the committed records
+    (`measured_from_records` rebuilds it), so the report a fresh run builds
+    and the report the records render are the same report. `probe` and
+    `checker` are the recorded probe and checker digests when rendering from
+    records; a fresh run drives the probe and reads the checkout."""
     buckets = measured["buckets"]
-    details = measured["details"]
-    cases = measured["cases"]
-    version, per_file = checker_version()
-    run_id = f"census-{measured['engine']}-{corpus_digest(cases)[:12]}"
+    rows = measured["case_rows"]
+    version, per_file = checker if checker is not None else checker_version()
+    run_id = f"census-{measured['engine']}-{corpus_digest(rows)[:12]}"
     compiler = (f"src/revl@sha256:"
                 f"{reference_digest(measured['pins']['reference'])[:12]}")
 
-    probe = probe_never_baselined(census)
+    if probe is None:
+        probe = probe_never_baselined(census)
     admissions = census.false_admissions(buckets)
-    faults = reference_faults(details, buckets, cases)
+    faults = list(measured["reference_faults"])
     admits = sorted(buckets.get("agree-admit", []))
 
     # The recorded reproduction: the REAL rust crate, on a different toolchain,
@@ -635,6 +721,10 @@ def build_report(census, provenance, measured: dict,
             "current_checker_version": version,
             "is_current": current,
             "n": crate.get("n"),
+            "census_programs_not_in_reproduction": (
+                None if crate.get("programs") is None else len(
+                    {row[0] for row in measured["case_rows"]}
+                    - set(crate["programs"]))),
             "tracked_buckets_agree": theirs == ours,
             "crate_tracked_buckets": {k: len(v) for k, v in sorted(theirs.items())},
             "crate_false_admissions": sorted(crate.get("false_admissions", [])),
@@ -835,8 +925,9 @@ def build_report(census, provenance, measured: dict,
             "pins": measured.get("pins"),
             "cases": measured.get("case_rows"),
             "cases_note": (
-                "One row per program run, in run order: case id, sha256 of "
-                "the source bytes, bucket. `tools/census_artifact.py --verify` "
+                "One row per program run, sorted by case id (a repeated id "
+                "keeps run order): case id, sha256 of the source bytes, "
+                "bucket. `tools/census_artifact.py --verify` "
                 "re-runs the census and compares these rows one by one, so a "
                 "published verdict is checkable on its own and not only as "
                 "part of a bucket count."),
@@ -898,10 +989,14 @@ def render_markdown(report: dict) -> str:
 
     w("# The gate/reference census")
     w("")
-    w("GENERATED FILE. Every number below comes from a run of")
-    w("`tools/census_artifact.py`, which is the only thing that writes it. Do not")
-    w("edit it by hand: `python3 tools/census_artifact.py --check` reports the")
-    w("edit as drift. Regenerate with `python3 tools/census_artifact.py --write`.")
+    w("RENDERED REPORT. Every number below comes from a run of")
+    w("`tools/census_artifact.py`, which is the only thing that writes it. The")
+    w("repository commits the records of the run (`docs/census-artifact/`), not")
+    w("this report: `python3 tools/census_artifact.py --from-records` renders it")
+    w("from them, and `python3 tools/census_artifact.py` renders it from a fresh")
+    w("run. `python3 tools/census_artifact.py --check` fails when the committed")
+    w("records drifted; regenerate them with")
+    w("`python3 tools/census_artifact.py --write`.")
     w("")
     w("## What is being measured")
     w("")
@@ -928,8 +1023,9 @@ def render_markdown(report: dict) -> str:
         for case_id in c["repeated_case_ids"]:
             w(f"- `{case_id}`")
         w("")
-    w("Neither identity is a commit or a clock. `run` is a sha256 over the corpus")
-    w("this run read; the checker version is a sha256 over five named files the")
+    w("Neither identity is a commit or a clock. `run` is a sha256 over the")
+    w("`(case id, sha256 of the source)` rows of the corpus this run read; the")
+    w("checker version is a sha256 over five named files the")
     w("crate reproduction is keyed on. Neither is the complete list of what")
     w("decides a verdict: that list is measured, not named, and is pinned file by")
     w("file in `census.pins` (see \"Verifying a published copy\" below). Every")
@@ -1097,7 +1193,7 @@ def render_markdown(report: dict) -> str:
     rep = c["reproduction"]
     if rep is None:
         w("This run carries no recorded reproduction, so every claim in")
-        w("`docs/census-artifact.json` stands at `measured` and no higher.")
+        w("this report stands at `measured` and no higher.")
     else:
         w("The fast engine is a python mirror of the native gate's guards, so it")
         w("could in principle be wrong in the same direction as the thing it")
@@ -1106,6 +1202,9 @@ def render_markdown(report: dict) -> str:
         w("and minutes rather than seconds.")
         w("")
         w(f"- programs: **{rep['n']}**")
+        if rep.get("census_programs_not_in_reproduction") is not None:
+            w("- census programs this run read that the reproduction did not: "
+              f"**{rep['census_programs_not_in_reproduction']}**")
         w("- tracked buckets agree: "
           f"**{'yes' if rep['tracked_buckets_agree'] else 'NO'}**")
         w(f"- crate `{fa['bucket']}` members: "
@@ -1133,9 +1232,10 @@ def render_markdown(report: dict) -> str:
     w("")
     w("### Checking the numbers in this file rather than trusting them")
     w("")
-    w("`--check` re-runs the census and compares every number here against it,")
-    w("so a passing `--check` in your own clone is the whole verification: the")
-    w("table is yours, not ours. It exits 1 and names each field that moved.")
+    w("`--check` re-runs the census and compares the committed records, which")
+    w("every number here is computed from, against it, so a passing `--check`")
+    w("in your own clone is the whole verification: the table is yours, not")
+    w("ours. It exits 1 and names each record file that moved.")
     w("Nothing in the digests depends on where you cloned to, so the values")
     w("below are the values you should get.")
     w("")
@@ -1145,13 +1245,14 @@ def render_markdown(report: dict) -> str:
       "`load_corpus` in `tools/gate_reference_census.py` |")
     w(f"| programs run, {c['n']} | the length of the same list, repeats "
       "included |")
-    w(f"| run `{c['run']}` | sha256 over every `(case id, source)` the run "
-      "read, ids repo-relative |")
+    w(f"| run `{c['run']}` | sha256 over every `(case id, sha256 of the "
+      "source)` row the run read, ids repo-relative |")
     w(f"| checker version `{c['checker_version']}` | sha256 over the "
       f"{len(c['checker_sources'])} files in `census.checker_sources`, each "
       "listed there with its own sha256 |")
-    w(f"| `{c['compiler_tree_digest']}` | sha256 over the `" + REFERENCE_GLOB
-      + "` modules the run opened, listed in `census.pins.reference` |")
+    w(f"| `{c['compiler_tree_digest']}` | sha256 over the name and sha256 of "
+      "each `" + REFERENCE_GLOB
+      + "` module the run opened, listed in `census.pins.reference` |")
     w("| every bucket count | `tools/gate_reference_census.py --json out.json` "
       "|")
     w(f"| the false-admit allowance | `{alw['baseline_file']}`, which is in "
@@ -1174,16 +1275,230 @@ def render_markdown(report: dict) -> str:
     w("")
     w("## Schema")
     w("")
-    w("`docs/census-artifact.json` is the machine copy. It is an `EVAL-REPORT-1`")
-    w("document under the frozen eval-honesty protocol")
+    w("`python3 tools/census_artifact.py --json` prints the machine copy. It is")
+    w("an `EVAL-REPORT-1` document under the frozen eval-honesty protocol")
     w("(`docs/design/478-eval-honesty-protocol.md`) and")
-    w("`python3 tools/check_eval_report.py docs/census-artifact.json` passes on")
-    w("it, which is a statement about over-claiming and not about correctness:")
+    w("`tools/check_eval_report.py` passes on it, which is a statement about")
+    w("over-claiming and not about correctness:")
     w("every public claim in it names the rung its own evidence reaches. The")
     w(f"census results live in its `census` section under `{c['schema']}`, which")
     w("that checker does not read.")
     w("")
     return "\n".join(out)
+
+
+# ------------------------------------------------------------- the records
+#
+# What the repository commits (issue #1768). One record per line, a blank line
+# between records, sorted, and nothing that is a function of something else:
+# not of other records, and not of the checkout. A file's sha256 is a property
+# of the tree it sits in, so the records name WHICH files the verdicts depend
+# on and WHICH bucket each program landed in, and the digests are computed
+# when the report is rendered. A pull request that edits a pinned module or a
+# program without moving a verdict therefore leaves the records alone, and two
+# pull requests conflict here only when both moved the same program's verdict
+# or added programs at the same place. The blank line is what keeps an edit to
+# one record from touching its neighbour's hunk.
+
+FACTS_NOTE = (
+    "The measured facts of a census run that are neither a per-case verdict "
+    "(cases.jsonl) nor a pinned file (pins.jsonl). Written by "
+    "`python3 tools/census_artifact.py --write`; every count, digest and claim "
+    "in the report is computed from these three files and the checkout when it "
+    "is rendered, and none is stored. On a merge conflict, run that command "
+    "again.")
+
+
+def _record_text(records) -> str:
+    """One JSON array per line, separated by a blank line."""
+    return "\n\n".join(json.dumps(r) for r in records) + "\n"
+
+
+def record_texts(measured: dict, mechanism: dict) -> dict[str, str]:
+    """`{file name: bytes}` for `docs/census-artifact/`, from one measurement."""
+    pins = [[group, rel] for group in VERDICT_PIN_GROUPS
+            for rel in sorted(measured["pins"][group])]
+    facts = {
+        "schema": RECORDS_SCHEMA,
+        "note": FACTS_NOTE,
+        "engine": measured["engine"],
+        "issued_admissions": sorted(measured["issued_admissions"]),
+        "reference_faults": sorted(measured["reference_faults"]),
+        "mechanism": mechanism,
+    }
+    rows = sorted(([row[0], row[2]] for row in measured["case_rows"]),
+                  key=lambda row: row[0])
+    return {
+        CASES_RECORDS: _record_text(rows),
+        PINS_RECORDS: _record_text(pins),
+        FACTS_RECORDS: json.dumps(facts, indent=1, sort_keys=True) + "\n",
+    }
+
+
+def _read_records(path: Path, width: int) -> list[list[str]]:
+    rows = []
+    for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if (not isinstance(row, list) or len(row) != width
+                or not all(isinstance(x, str) for x in row)):
+            raise ValueError(f"{path.name}:{lineno}: not a {width}-field record")
+        rows.append(row)
+    return rows
+
+
+def load_records(base: Path = RECORDS) -> dict:
+    """The committed records, parsed: `cases` as `[case id, bucket]` rows,
+    `pins` as `{group: [file, ...]}`, `facts` as written. Raises
+    `OSError`/`ValueError` on a file that is absent or not in the record
+    format, so a caller decides whether that is unusable input (`--verify`)
+    or every path moving (the filter)."""
+    base = Path(base)
+    cases = _read_records(base / CASES_RECORDS, 2)
+    pins: dict[str, list[str]] = {g: [] for g in VERDICT_PIN_GROUPS}
+    for group, rel in _read_records(base / PINS_RECORDS, 2):
+        if group not in pins:
+            raise ValueError(f"{PINS_RECORDS}: unknown pin group {group!r}")
+        if rel in pins[group]:
+            raise ValueError(f"{PINS_RECORDS}: {group} pins {rel} twice")
+        pins[group].append(rel)
+    facts = json.loads((base / FACTS_RECORDS).read_text(encoding="utf-8"))
+    if not isinstance(facts, dict) or facts.get("schema") != RECORDS_SCHEMA:
+        raise ValueError(f"{FACTS_RECORDS} is not a {RECORDS_SCHEMA} file")
+    return {"cases": cases, "pins": pins, "facts": facts}
+
+
+class StaleRecords(Exception):
+    """The committed records do not describe this checkout."""
+
+
+def hydrate(records: dict, sources: dict[str, list[str]]) -> dict:
+    """The records with the digests the checkout supplies: every pinned file's
+    sha256 read from the tree, and every program's from `sources` (case id to
+    its source text, once per occurrence, in run order). Raises
+    `StaleRecords` when a pinned file is gone or a recorded program is not in
+    the corpus, because a report rendered over either would name inputs the
+    run did not have."""
+    pins: dict[str, dict[str, str]] = {}
+    for group in VERDICT_PIN_GROUPS:
+        pins[group] = {}
+        for rel in records["pins"][group]:
+            if not (ROOT / rel).is_file():
+                raise StaleRecords(f"{rel} is pinned and not in the tree")
+            pins[group][rel] = _sha(rel)
+    taken: dict[str, int] = {}
+    rows = []
+    for case_id, bucket in records["cases"]:
+        index = taken.get(case_id, 0)
+        taken[case_id] = index + 1
+        here = sources.get(case_id, [])
+        if index >= len(here):
+            raise StaleRecords(f"{case_id} is recorded and not in the corpus")
+        rows.append([case_id, hashlib.sha256(
+            here[index].encode("utf-8", "surrogatepass")).hexdigest(), bucket])
+    return {"cases": rows, "pins": pins, "facts": records["facts"]}
+
+
+def corpus_sources(cases) -> dict[str, list[str]]:
+    """`{case id: [source, ...]}` from a `load_corpus` list, run order kept."""
+    out: dict[str, list[str]] = {}
+    for case_id, source in cases:
+        out.setdefault(case_id, []).append(source)
+    return out
+
+
+def measured_from_records(records: dict) -> dict:
+    """The part of a `measure_pinned` result `build_report` reads, rebuilt
+    from HYDRATED records (`hydrate`). Every aggregate is recomputed here."""
+    rows = [list(r) for r in records["cases"]]
+    buckets: dict[str, list[str]] = {}
+    seen: dict[str, int] = {}
+    for case_id, _sha, bucket in rows:
+        buckets.setdefault(bucket, []).append(case_id)
+        seen[case_id] = seen.get(case_id, 0) + 1
+    facts = records["facts"]
+    return {
+        "buckets": buckets,
+        "case_rows": rows,
+        "engine": facts["engine"],
+        "issued_admissions": list(facts["issued_admissions"]),
+        "reference_faults": list(facts["reference_faults"]),
+        "n_distinct": len(seen),
+        "repeated_case_ids": sorted(c for c, n in seen.items() if n > 1),
+        "pins": {"note": PINS_NOTE,
+                 **{g: dict(records["pins"][g]) for g in VERDICT_PIN_GROUPS}},
+    }
+
+
+def published_from_records(records: dict) -> dict:
+    """HYDRATED records as the `census` section `judge` reads."""
+    rows = [list(r) for r in records["cases"]]
+    counts: dict[str, int] = {}
+    for _, _, bucket in rows:
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return {
+        "schema": CENSUS_SCHEMA,
+        "cases": rows,
+        "buckets": [{"bucket": k, "count": v} for k, v in sorted(counts.items())],
+        "false_admission": {
+            "members": sorted({cid for cid, _, b in rows
+                               if b == "false-admission"}),
+            "mechanism": records["facts"]["mechanism"],
+        },
+        "pins": {g: dict(records["pins"][g]) for g in VERDICT_PIN_GROUPS},
+    }
+
+
+def filter_view(records: dict) -> dict:
+    """Unhydrated records as `moved_inputs` reads them: which files are
+    pinned and which programs are carried."""
+    return {"census": {
+        "cases": [[cid, "", bucket] for cid, bucket in records["cases"]],
+        "pins": {g: {rel: "" for rel in records["pins"][g]}
+                 for g in VERDICT_PIN_GROUPS},
+    }}
+
+
+def report_from_records(base: Path = RECORDS,
+                        crate_json: Path | None = None) -> dict:
+    """The full report, rendered from the committed records with no census
+    run. The digests come from the checkout, so the checkout has to be the one
+    the records describe; `--verify --strict` is what holds that on main."""
+    records = load_records(base)
+    census = _load("tools/gate_reference_census.py", "artifact_records_census")
+    _reference, oracle = census._reference()
+    try:
+        hydrated = hydrate(records, corpus_sources(census.load_corpus(oracle)))
+    except StaleRecords as exc:
+        raise SystemExit(
+            f"census_artifact: the committed records do not describe this "
+            f"checkout ({exc}); regenerate them: "
+            f"python3 tools/census_artifact.py --write") from None
+    provenance = _load("tools/corpus_provenance.py",
+                       "artifact_records_provenance")
+    return build_report(census, provenance, measured_from_records(hydrated),
+                        _read_crate(crate_json),
+                        probe=records["facts"]["mechanism"])
+
+
+def record_problems(fresh: dict[str, str], base: Path = RECORDS) -> list[str]:
+    """Each committed record file that is not byte for byte what `fresh`
+    says. Pure apart from reading `base`."""
+    problems = []
+    for name in RECORD_FILES:
+        path = Path(base) / name
+        rel = (path.relative_to(ROOT).as_posix()
+               if path.is_relative_to(ROOT) else path.name)
+        if not path.is_file():
+            problems.append(f"{rel} does not exist")
+        elif path.read_text(encoding="utf-8") != fresh[name]:
+            problems.append(
+                f"{rel} differs from a fresh run; it was hand-edited, merged "
+                f"by hand, or the corpus, the checker or the baseline moved "
+                f"under it")
+    return problems
 
 
 # ------------------------------------------------------------ the verifier
@@ -1346,8 +1661,8 @@ def judge(published: dict, local: dict) -> dict:
 # The files that are inputs of the artifact whatever its pins say: the tool, the
 # artifact itself (a hand edit is a change the gate must see), and the declared
 # lists above.
-OWN_FILES = ("tools/census_artifact.py", "docs/census-artifact.json",
-             "docs/census-artifact.md")
+OWN_FILES = ("tools/census_artifact.py",
+             *(f"docs/census-artifact/{name}" for name in RECORD_FILES))
 
 
 def current_problems(result: dict) -> list[str]:
@@ -1396,9 +1711,10 @@ def moved_inputs(paths, committed: dict | None) -> list[str]:
     An input is a file the committed artifact pins (a deciding file, a
     reference module, a report input), a program it carries, a file in the
     declared lists, a gate crate source, or a `.rvl` under a census directory,
-    which is how a NEW program enters the corpus. `committed` is the parsed
-    `docs/census-artifact.json`; None (absent or unreadable) makes every path
-    an input, so a broken artifact cannot switch its own gate off."""
+    which is how a NEW program enters the corpus. `committed` is
+    `filter_view(load_records())` for the committed records;
+    None (absent or unreadable) makes every path an input, so a broken
+    artifact cannot switch its own gate off."""
     import re  # noqa: PLC0415
     paths = [p.strip() for p in paths if p.strip()]
     if committed is None:
@@ -1479,32 +1795,74 @@ def render_verdict(result: dict) -> str:
     return "\n".join(out)
 
 
-def verify(path: Path, engine: str = "selfhost",
-           strict: bool = False) -> tuple[int, str]:
-    """Re-measure this checkout and judge the published file at `path`.
-
-    `strict` is the repository's gate on its own committed copy: on top of the
-    reader's verdict it fails on anything `current_problems` names."""
+def _published(path: Path, sources: dict[str, list[str]] | None = None
+               ) -> tuple[dict | None, str]:
+    """`(census section, error)` for a published copy at `path`: the records
+    directory (hydrated from this checkout and `sources`), or a rendered
+    `EVAL-REPORT-1` JSON report."""
+    path = Path(path)
+    if path.is_dir():
+        try:
+            records = load_records(path)
+            if sources is None:
+                return {"schema": CENSUS_SCHEMA}, ""
+            return published_from_records(hydrate(records, sources)), ""
+        except StaleRecords as exc:
+            return {"schema": CENSUS_SCHEMA, "stale": str(exc)}, ""
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return None, f"census verify: cannot read the records in {path}: {exc}"
     try:
-        bundle = json.loads(Path(path).read_text(encoding="utf-8"))
+        bundle = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return 2, f"census verify: cannot read {path}: {exc}"
+        return None, f"census verify: cannot read {path}: {exc}"
     published = bundle.get("census") or {}
     if published.get("schema") != CENSUS_SCHEMA:
-        return 2, (f"census verify: {path} carries no {CENSUS_SCHEMA} "
-                   f"section")
+        return None, (f"census verify: {path} carries no {CENSUS_SCHEMA} "
+                      f"section")
     if not published.get("pins") or not published.get("cases"):
-        return 2, (f"census verify: {path} predates per-case rows and pins, "
-                   f"so there is nothing to verify it against; regenerate it "
-                   f"with --write")
+        return None, (f"census verify: {path} predates per-case rows and pins, "
+                      f"so there is nothing to verify it against; regenerate "
+                      f"it with --write")
+    return published, ""
+
+
+def verify(path: Path, engine: str = "selfhost",
+           strict: bool = False) -> tuple[int, str]:
+    """Re-measure this checkout and judge the published copy at `path`, the
+    committed records directory or a rendered JSON report.
+
+    The records carry no digest, so for them the pins and the source digests
+    are this checkout's: what is judged is the SET of pinned files and every
+    program's bucket. `strict` is the repository's gate on its own committed
+    copy: on top of the reader's verdict it fails on anything
+    `current_problems` names and, for a records directory, on any record file
+    that is not byte for byte what this run writes."""
+    published, error = _published(path)
+    if published is None:
+        return 2, error
     census, measured = measure_pinned(engine)
+    probe = probe_never_baselined(census)
+    if Path(path).is_dir():
+        published, error = _published(path, corpus_sources(measured["cases"]))
     local = {"pins": measured["pins"], "cases": measured["case_rows"],
-             "mechanism_holds": probe_never_baselined(census)["holds"]}
-    result = judge(published, local)
-    text = render_verdict(result)
+             "mechanism_holds": probe["holds"]}
+    if published.get("stale"):
+        result, text = None, (f"census verify: the committed records name an "
+                              f"input this run did not read: "
+                              f"{published['stale']}")
+        problems = [published["stale"]]
+        code = 3
+    else:
+        result = judge(published, local)
+        text = render_verdict(result)
+        if not strict:
+            return result["exit"], text
+        problems = current_problems(result)
+        code = result["exit"] or 3
     if not strict:
-        return result["exit"], text
-    problems = current_problems(result)
+        return code, text
+    if Path(path).is_dir():
+        problems += record_problems(record_texts(measured, probe), Path(path))
     if not problems:
         return 0, text + "\ncensus verify --strict: the committed artifact is current."
     lines = [text, "census verify --strict: the committed artifact is NOT "
@@ -1512,7 +1870,7 @@ def verify(path: Path, engine: str = "selfhost",
     lines += [f"  {p}" for p in problems]
     lines.append("  regenerate it in this pull request: "
                  "python3 tools/census_artifact.py --write")
-    return result["exit"] or 3, "\n".join(lines)
+    return code, "\n".join(lines)
 
 
 def render_verify_section(c: dict, w) -> None:
@@ -1587,10 +1945,11 @@ def render_verify_section(c: dict, w) -> None:
 def trim_reproduction(census, raw: dict) -> dict:
     """A raw `--engine crate --json` census, reduced to what is recorded.
 
-    Only the tracked buckets and the census size: the untracked buckets are
-    where the two engines are ALLOWED to be described differently, and
-    recording them would make the fixture churn on changes that cannot hide a
-    divergence.
+    Only the tracked buckets and the programs the run covered: the untracked
+    buckets are where the two engines are ALLOWED to be described
+    differently, and recording them would make the fixture churn on changes
+    that cannot hide a divergence. The programs are a sorted list, a
+    repeated case id once per run of it, and the count is derived from them.
     """
     if raw.get("engine") != "crate":
         raise SystemExit(
@@ -1608,25 +1967,65 @@ def trim_reproduction(census, raw: dict) -> dict:
                  "stale and lifts no claim."),
         "engine": "crate",
         "checker_version": version,
-        "n": sum(len(v) for v in buckets.values()),
         "tracked_buckets": {k: sorted(v) for k, v in sorted(buckets.items())
                             if k.split("/", 1)[0] in census.TRACKED},
         "false_admissions": sorted(buckets.get(census.ADMISSION, [])),
+        "programs": sorted(cid for ids in buckets.values() for cid in ids),
     }
 
 
-def generate(engine: str, crate_json: Path | None) -> tuple[dict, str]:
+def reproduction_texts(recorded: dict) -> dict[str, str]:
+    """`{file name: bytes}` for `tests/fixtures/census_crate_reproduction/`."""
+    # `n` is derived on load and `programs` has its own file; neither is a fact.
+    facts = {k: v for k, v in recorded.items() if k not in ("programs", "n")}
+    return {
+        REPRODUCTION_FACTS: json.dumps(facts, indent=1, sort_keys=True) + "\n",
+        REPRODUCTION_PROGRAMS: _record_text(sorted(recorded["programs"])),
+    }
+
+
+def load_reproduction(base: Path = CRATE_REPRODUCTION) -> dict | None:
+    """The recorded reproduction, with `n` derived from its program list.
+    None when nothing is recorded."""
+    base = Path(base)
+    facts_path = base / REPRODUCTION_FACTS
+    if not facts_path.is_file():
+        return None
+    recorded = json.loads(facts_path.read_text(encoding="utf-8"))
+    programs = []
+    for lineno, line in enumerate(
+            (base / REPRODUCTION_PROGRAMS).read_text(encoding="utf-8")
+            .splitlines(), 1):
+        if not line.strip():
+            continue
+        case_id = json.loads(line)
+        if not isinstance(case_id, str):
+            raise ValueError(f"{REPRODUCTION_PROGRAMS}:{lineno}: not a case id")
+        programs.append(case_id)
+    recorded["programs"] = programs
+    recorded["n"] = len(programs)
+    return recorded
+
+
+def _read_crate(crate_json: Path | None) -> dict | None:
+    """The recorded crate reproduction, or `crate_json` in its place."""
+    if crate_json is None:
+        return load_reproduction()
+    return json.loads(Path(crate_json).read_text(encoding="utf-8"))
+
+
+def generate(engine: str,
+             crate_json: Path | None) -> tuple[dict, dict[str, str]]:
+    """`(report, record texts)` from one fresh census run."""
     # The measurement goes FIRST, before anything else is imported, so every
     # file it depends on is opened inside the recording.
     census, measured = measure_pinned(engine)
     provenance = _load("tools/corpus_provenance.py", "artifact_provenance")
-    crate = None
-    path = crate_json if crate_json is not None else (
-        CRATE_REPRODUCTION if CRATE_REPRODUCTION.is_file() else None)
-    if path is not None:
-        crate = json.loads(Path(path).read_text(encoding="utf-8"))
-    report = build_report(census, provenance, measured, crate)
-    return report, render_markdown(report)
+    probe = probe_never_baselined(census)
+    checker = checker_version()
+    report = build_report(census, provenance, measured, _read_crate(crate_json),
+                          probe=probe, checker=checker)
+    return report, record_texts(measured, probe)
 
 
 def measure_pinned(engine: str):
@@ -1661,25 +2060,33 @@ def main(argv: list[str]) -> int:
                          "the recorded reproduction")
     ap.add_argument("--record-reproduction", action="store_true",
                     help="trim --crate-json into "
-                         "tests/fixtures/census_crate_reproduction.json "
+                         "tests/fixtures/census_crate_reproduction/ "
                          "and stop")
     ap.add_argument("--write", action="store_true",
-                    help="write docs/census-artifact.{md,json}")
+                    help="write the records in docs/census-artifact/")
     ap.add_argument("--check", action="store_true",
-                    help="fail when the committed artifact has drifted")
-    ap.add_argument("--verify", nargs="?", const=str(REPORT_JSON),
+                    help="fail when the committed records have drifted")
+    ap.add_argument("--json", action="store_true",
+                    help="print the report as EVAL-REPORT-1 JSON instead of "
+                         "markdown")
+    ap.add_argument("--from-records", action="store_true",
+                    help="render the report from the committed records "
+                         "instead of a fresh census run")
+    ap.add_argument("--verify", nargs="?", const=str(RECORDS),
                     metavar="REPORT",
-                    help="re-run the census here and judge a published "
-                         "census-artifact.json against it, pin by pin and case "
-                         "by case (default: the committed one). Exit 0 "
+                    help="re-run the census here and judge a published copy "
+                         "(a rendered census-artifact.json, or a records "
+                         "directory) against it, pin by pin and case by case "
+                         "(default: the committed records). Exit 0 "
                          "reproduced, 1 refuted, 2 unusable input, 3 not a "
                          "full check (inputs differ, or programs were edited "
                          "or removed)")
     ap.add_argument("--strict", action="store_true",
-                    help="with --verify: also fail unless the file is CURRENT, "
-                         "a full reproduction with no program missing from it "
-                         "and no report input moved. The CI gate on the "
-                         "committed copy (issue #1572)")
+                    help="with --verify: also fail unless the copy is CURRENT, "
+                         "a full reproduction with no program missing from it, "
+                         "no report input moved and, for the records, every "
+                         "record file byte-identical to a fresh run. The CI "
+                         "gate on the committed copy (issue #1572)")
     ap.add_argument("--moved-inputs", action="store_true",
                     help="read changed repo-relative paths on stdin, print the "
                          "ones that are inputs of the committed artifact. Exit "
@@ -1689,8 +2096,8 @@ def main(argv: list[str]) -> int:
 
     if args.moved_inputs:
         try:
-            committed = json.loads(REPORT_JSON.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            committed = filter_view(load_records())
+        except (OSError, ValueError, KeyError, TypeError):
             committed = None
         moved = moved_inputs(sys.stdin.read().splitlines(), committed)
         for rel in moved:
@@ -1707,49 +2114,53 @@ def main(argv: list[str]) -> int:
 
     if args.write and args.check:
         ap.error("--write and --check are opposites; pick one")
+    if args.from_records and (args.write or args.check):
+        ap.error("--from-records renders the committed records; it writes "
+                 "and checks nothing")
 
     if args.record_reproduction:
         if args.crate_json is None:
             ap.error("--record-reproduction needs --crate-json")
         census = _load("tools/gate_reference_census.py", "artifact_census")
         raw = json.loads(args.crate_json.read_text(encoding="utf-8"))
-        CRATE_REPRODUCTION.write_text(
-            json.dumps(trim_reproduction(census, raw), indent=1,
-                       sort_keys=True) + "\n", encoding="utf-8")
-        print(f"recorded {CRATE_REPRODUCTION.relative_to(ROOT)}")
+        CRATE_REPRODUCTION.mkdir(parents=True, exist_ok=True)
+        for name, text in reproduction_texts(
+                trim_reproduction(census, raw)).items():
+            (CRATE_REPRODUCTION / name).write_text(text, encoding="utf-8")
+        print(f"recorded {CRATE_REPRODUCTION.relative_to(ROOT)}/")
         return 0
 
-    report, markdown = generate(args.engine, args.crate_json)
-    payload = _serialise(report)
+    if args.from_records:
+        report = report_from_records(RECORDS, args.crate_json)
+        print(_serialise(report) if args.json else render_markdown(report),
+              end="" if args.json else "\n")
+        return 0
+
+    report, records = generate(args.engine, args.crate_json)
 
     if args.write:
-        REPORT_JSON.write_text(payload, encoding="utf-8")
-        REPORT_MD.write_text(markdown, encoding="utf-8")
-        print(f"wrote {REPORT_JSON.relative_to(ROOT)}")
-        print(f"wrote {REPORT_MD.relative_to(ROOT)}")
+        RECORDS.mkdir(parents=True, exist_ok=True)
+        for name in RECORD_FILES:
+            (RECORDS / name).write_text(records[name], encoding="utf-8")
+            print(f"wrote {(RECORDS / name).relative_to(ROOT)}")
         return 0
 
     if args.check:
-        drift = []
-        for path, fresh in ((REPORT_JSON, payload), (REPORT_MD, markdown)):
-            rel = path.relative_to(ROOT)
-            if not path.is_file():
-                drift.append(f"{rel} does not exist")
-                continue
-            if path.read_text(encoding="utf-8") != fresh:
-                drift.append(
-                    f"{rel} differs from a fresh run; it was hand-edited, or "
-                    f"the corpus, the checker or the baseline moved under it")
+        drift = record_problems(records)
         if drift:
             print("census artifact FAILED:")
             for line in drift:
                 print(f"  {line}")
             print("  regenerate: python3 tools/census_artifact.py --write")
             return 1
-        print("census artifact: docs/census-artifact.{md,json} are current.")
+        print("census artifact: the records in docs/census-artifact/ are "
+              "current.")
         return 0
 
-    print(markdown)
+    if args.json:
+        print(_serialise(report), end="")
+    else:
+        print(render_markdown(report))
     return 0
 
 

@@ -18,6 +18,8 @@ those readings comes out of an artifact in the tree:
 
   * `formal/STATUS.md`, the honest per-guarantee map and the sections that
     record what the layer does not cover;
+  * `formal/harness/diff_corpus.py --census-json`, the differential
+    oracle's census, computed by the run that measures it;
   * `formal/scripts/nonvacuity.tsv`, the non-vacuity registry, one row per
     registered theorem, which is where a `contentless` finding is written
     down;
@@ -80,6 +82,7 @@ import hmac
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from . import attest
@@ -456,33 +459,92 @@ def gate_theorems(text: str) -> tuple[list[str], list[str]]:
 
 
 # --- reading the oracle's evidence ----------------------------------------- #
-_CENSUS_SHAPE = re.compile(
-    r"(\d+)\s*\.rvl files?[^0-9]*?(\d+)\s*components?[^0-9]*?(\d+)\s*statements?")
-_CENSUS_VERDICTS = re.compile(
-    r"(\d+)\s*verdicts? compared.*?(\d+)\s*agree[,\s]+(\d+)\s*mismatches?",
-    re.DOTALL)
+#: The harness whose run IS the oracle census, relative to the formal package.
+ORACLE_HARNESS = Path("harness") / "diff_corpus.py"
 _INJECTION_HEADER = ("injection", "caught by", "result")
 _SWEEP_SENTENCE = re.compile(
     r"Perturbing\s+the shipped side one invariant at a time")
 _SWEEP_ITEM = re.compile(r"([^,;]+?\(\s*(\d+)\s*(?:mismatches?)?\))")
+_CENSUS_KEYS = ("files", "components", "statements", "verdicts_compared")
 
 
-def oracle_census(text: str, *, source: str) -> dict:
+#: Census runs already made in this process, keyed by `_census_key`.
+_CENSUS_RUNS: dict[tuple[str, str, str], dict] = {}
+
+
+def _census_key(harness: Path) -> tuple[str, str, str] | None:
+    """What a census run is a function of: the harness, the commit of the
+    tree it sits in, and that tree's uncommitted state. None outside a git
+    work tree, where every request runs the harness again."""
+    real = harness.resolve()
+    try:
+        head = subprocess.run(["git", "-C", str(real.parent), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=30)
+        dirty = subprocess.run(
+            ["git", "-C", str(real.parent), "status", "--porcelain", "-uall"],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if head.returncode or dirty.returncode:
+        return None
+    return (str(real), head.stdout.strip(),
+            hashlib.sha256(dirty.stdout.encode()).hexdigest())
+
+
+def _run_census(harness: Path) -> dict | None:
+    try:
+        run = subprocess.run([sys.executable, str(harness), "--census-json"],
+                             capture_output=True, text=True, timeout=600)
+        return json.loads(run.stdout) if run.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def oracle_census(root: Path, *, source: str) -> dict:
     """The differential oracle's census: what the row compares, and how many
     of those comparisons agree. Numbers a reader can check against the
-    harness's own output rather than a claim that something was checked."""
-    shape = _CENSUS_SHAPE.search(text)
-    verdicts = _CENSUS_VERDICTS.search(text)
-    if shape is None or verdicts is None:
+    harness's own output rather than a claim that something was checked.
+
+    They are COMPUTED by the harness that produces them
+    (`formal/harness/diff_corpus.py --census-json`), not read out of a
+    document. Until issue #1768 they were parsed from the census paragraph
+    the harness rendered into `formal/STATUS.md`; that block no longer stores
+    counts that move with the corpus, because every pull request that added a
+    `.rvl` rewrote them and conflicted with every other one. Asking the run
+    is the stronger reading of the two: a stale document could hold a count
+    the corpus no longer produces, and a run cannot.
+
+    `verdicts_agree` and `mismatches` are what the formal gate enforces:
+    `make formal` (`formal/scripts/run_gate.sh`, on every push to main) fails
+    on any mismatch, which is the same backing the rendered "N agree, 0
+    mismatches" had, since `--write-status` rendered it from the reference
+    side alone. A run that extracts nothing, or a package with no harness
+    beside it, is a refusal rather than a zero."""
+    harness = Path(root) / ORACLE_HARNESS
+    if not harness.is_file():
         raise CertError(
             f"{source} carries no readable oracle census, so the certificate "
-            "cannot report what the proved model was compared against")
-    files, components, statements = (int(value) for value in shape.groups())
-    compared, agree, mismatches = (int(value) for value in verdicts.groups())
+            "cannot report what the proved model was compared against "
+            f"(no {_relative(root, harness)} beside the formal package)")
+    key = _census_key(harness)
+    census = _CENSUS_RUNS.get(key) if key is not None else None
+    if census is None:
+        census = _run_census(harness)
+        if key is not None and census is not None:
+            _CENSUS_RUNS[key] = census
+    if (not isinstance(census, dict)
+            or not all(type(census.get(k)) is int and census[k] > 0
+                       for k in _CENSUS_KEYS)):
+        raise CertError(
+            f"{source} carries no readable oracle census, so the certificate "
+            "cannot report what the proved model was compared against "
+            f"({_relative(root, harness)} --census-json produced none)")
+    compared = census["verdicts_compared"]
     return {
-        "files": files, "components": components, "statements": statements,
-        "verdicts_compared": compared, "verdicts_agree": agree,
-        "mismatches": mismatches,
+        "files": census["files"], "components": census["components"],
+        "statements": census["statements"],
+        "verdicts_compared": compared, "verdicts_agree": compared,
+        "mismatches": 0,
     }
 
 
@@ -729,7 +791,7 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
                   if code not in covered]
 
     unstatable = unstatable_gap(status_text)
-    census = oracle_census(status_text, source=status_source)
+    census = oracle_census(root, source=_relative(root, root / ORACLE_HARNESS))
     injections = injection_proofs(status_text, source=status_source)
     sweep = injection_sweep(status_text)
     model = proof_model(root)
@@ -798,12 +860,14 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
            if model["dependencies"] else ", no dependencies"),
         "formal/lean-toolchain and formal/lake-manifest.json"))
     requirements.append(_requirement(
-        REQ_ORACLE, "formal/harness/diff_corpus.py", status_source,
+        REQ_ORACLE, "formal/harness/diff_corpus.py",
+        _relative(root, root / ORACLE_HARNESS),
         f"{census['files']} files, {census['components']} components, "
         f"{census['statements']} statements; {census['verdicts_compared']} "
         f"verdicts compared, {census['verdicts_agree']} agree, "
         f"{census['mismatches']} mismatches",
-        "the census paragraph in " + status_source))
+        "computed by `formal/harness/diff_corpus.py --census-json`; the "
+        "agreement is the formal gate's, which fails on any mismatch"))
     for row in injections:
         requirements.append(_requirement(
             REQ_INJECTION, row["injection"], status_source,

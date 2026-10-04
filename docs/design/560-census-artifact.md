@@ -34,11 +34,42 @@ A published table whose numbers were typed by a person is a mirror, and a mirror
 rots against the thing it mirrors. This repository has hit that shape enough
 times to stop arguing about it.
 
-So `docs/census-artifact.md` and `docs/census-artifact.json` are OUTPUT.
-`tools/census_artifact.py` is the only thing that writes them, every count and
-every named residual comes from a run, and `--check` reports a hand edit as
-drift. The file says so in its first paragraph, where a person about to edit it
-will see it.
+So the report is OUTPUT. `tools/census_artifact.py` is the only thing that
+writes it, every count and every named residual comes from a run, and `--check`
+reports a hand edit as drift.
+
+### Records, not the report (issue #1768)
+
+The repository first committed the rendered report, `docs/census-artifact.json`
+and `docs/census-artifact.md`. Every pull request that added a program or
+touched a module the census opens rewrote the same lines of both: the run id and
+the compiler digest six times each, `n`, the bucket counts, the claims and most
+of the markdown. Each landing therefore put nearly every other open pull request
+in conflict there, and resolving it meant another census run that the next
+landing undid.
+
+What is committed now is the records of the run, in `docs/census-artifact/`:
+`cases.jsonl` (one `[case id, bucket]` row per program, sorted by case id),
+`pins.jsonl` (one `[group, file]` row per pinned file, sorted) and `facts.json`
+(the engine, the issued admissions, the reference faults and the driven probe).
+One record per line, a blank line between records, nothing derived. Not even the
+digests are stored: the sha256 of a program or of a pinned file is a property of
+the checkout, and storing it meant every pull request that edited a pinned
+module rewrote its line even when no verdict moved. Every aggregate is a function
+of the records and the checkout: `run` is a sha256 over the `(case id, source
+sha256)` rows and the compiler digest one over the `(module, sha256)` reference
+pins, so both are computed when the report is rendered, and a published copy
+(`--json`) still pins every input by digest. `--from-records` renders it with no
+census run, and `test_a_report_rendered_from_records_is_the_report_a_run_builds`
+holds that the report is the same either way. `docs/census-artifact.md` is now a
+hand-written page with no number in it.
+
+Two pull requests now conflict in the records only when both moved the verdict
+of the same program, added programs at the same place, or changed which files the
+run reads, and the resolution is
+the same command as the regeneration: `python3 tools/census_artifact.py
+--write`. `--verify --strict` also compares each record file byte for byte
+against the run, so a reordered or hand-merged file fails it.
 
 ## The mechanism is driven, not asserted
 
@@ -108,9 +139,13 @@ questions. Measured for this artifact: 848 programs, the same 9 false-admit
 residuals, zero false admissions, agreement on every tracked bucket.
 
 That run takes about fourteen minutes and needs a rust toolchain, so `--check`
-cannot run it. It is recorded in
-`tests/fixtures/census_crate_reproduction.json` beside the checker version it was
-taken at, and a recorded result rots, so it is not trusted blind: every run
+cannot run it. It is recorded in `tests/fixtures/census_crate_reproduction/`
+beside the checker version it was taken at: `reproduction.json` holds the
+version, the tracked buckets and the false admissions, and `programs.jsonl` the
+programs the run covered, one per line (issue #1768; the single file it replaces
+stored their count, which every corpus-moving pull request rewrote). The count
+is derived, and a census program the reproduction did not run is counted in the
+report. A recorded result rots, so it is not trusted blind: every run
 compares the recorded version against the current one, and a reproduction taken
 at a different version is published as stale and **lifts no claim**. The ladder
 rung in the report is computed from evidence that is current, never declared.
@@ -127,7 +162,7 @@ that sentence would over-claim, and
 
 ## The honesty protocol
 
-`docs/census-artifact.json` is an `EVAL-REPORT-1` document under the frozen
+The report (`python3 tools/census_artifact.py --json`) is an `EVAL-REPORT-1` document under the frozen
 protocol in `docs/design/478-eval-honesty-protocol.md`, and
 `tools/check_eval_report.py` passes on it. That checker decides three things:
 `noSelfScore`, that every brief names a gate from the frozen set, and that no

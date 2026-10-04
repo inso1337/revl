@@ -10,8 +10,8 @@ The verb set, in the order the parser declares it:
 
 <!-- docgen:cli-verbs begin -->
 ```text
-compile  explain  grammar  adapt  doctor  scaffold  composition  layer
-audit  goal  policy  simulate  diff  changelog  version  contract
+compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
+layer  audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
 dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
@@ -136,6 +136,29 @@ the built-in guarantee/fix table (`src/revl/diagnostics.py`).
 ```bash
 revl explain G4
 revl explain t3 --json
+```
+
+### `revl idiom`
+
+Print the minimal admitted example of one construct and the one or two rules
+that make it correct (issue #1701). No sources; it reads the idiom files under
+`src/revl/idioms/`. Each hole's `fillSpec` carries the idiom of its construct
+already; this command is for reading one by name.
+
+- `NAME` - an idiom: one per construct a fillSpec names (`provide-method`,
+  `emission-method`, `component-setup`, `effect-acquire`, `effect-undo`,
+  `function`, `test`) and a few served by name only (`spawn`, `subscribe`,
+  `match`, `timer`). With no name, the list.
+- `--json` - the entry as `{name, summary, rules, fill, example}`.
+
+Every idiom compiles, admits for an untrusted author, and, with its `fill`
+replaced by a hole, yields a fillSpec naming that same construct
+(`tests/test_idioms_1701.py`). An unknown name exits 2.
+
+```bash
+revl idiom                      # the list
+revl idiom emission-method      # one idiom, as text
+revl idiom effect-undo --json
 ```
 
 ### `revl grammar`
@@ -947,7 +970,9 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   - `--peer-addr HOST:PORT` - where that member's `revl pool serve` is
     listening. The address is how to REACH the peer; its identity is the key it
     signs with, so an address nobody vouched for reaches a peer whose receipts
-    then fail to verify.
+    then fail to verify. A non-loopback address needs the `revl[crypto]` extra
+    for constant-time signing and exits 2 naming it, before the ledger is
+    touched, when it is missing (issue #1460).
   - `--dispatch-identity PATH` - the operator's PRIVATE identity file, which
     signs the task. The peer holds only its public half.
   - `--attest-identity PATH` - the private identity file that attests the
@@ -1421,6 +1446,8 @@ for the key lifecycle and what the signature binds.
   - `--peer-addr HOST:PORT` - where that member's `pool serve` listens. Needs
     exactly one `--peer`. Without it the address of the member's last verified
     contact is used, and a member never contacted is refused on `no-address`.
+    Probing a non-loopback address needs the `revl[crypto]` extra and exits 2
+    naming it, before anything is signed, sent or recorded (issue #1460).
   - `--dispatch-identity PATH` - the operator's private identity file, the one
     `run --pool private` signs tasks with.
   - `--timeout SECONDS` - per member (default 10).
@@ -1458,7 +1485,12 @@ for the key lifecycle and what the signature binds.
     security: every record on it is signed, so nothing can be forged
     undetected, and nothing on it is secret - the artifact source crosses in
     the clear. A confidential cross-machine channel is roadmap item 118's mTLS
-    work, which this is a caller of rather than a second copy of.
+    work, which this is a caller of rather than a second copy of. A
+    non-loopback bind also needs the `revl[crypto]` extra
+    (`pip install 'revl[crypto]'`) and exits 2 naming it before binding,
+    because the peer signs a receipt for every task a remote party sends and
+    the pure-Python signer's timing leaks its key (issue #1460; see
+    [tee-attestation-root.md](tee-attestation-root.md)).
   - `--workdir DIR` - where artifacts are written and run (default: a fresh
     temporary directory removed on exit).
   - `--timeout SECONDS` - how long one artifact may run (default 300).
@@ -1813,6 +1845,10 @@ the server whose verbs are documented in [mcp-reference.md](mcp-reference.md).
   reads identical twice this far apart (default: `1000`). Requests other than
   `revl_estop` are refused while it settles. `0` removes the protection against
   adopting a half-written file; write the profile atomically either way.
+- `--all-tools` - advertise every verb in `tools/list`. Without it, `tools/list`
+  shows the core tier plus `revl_verbs`, which returns any other verb's schema;
+  every verb is callable by name either way. `REVL_MCP_ALL_TOOLS=1` does the
+  same (issue #1697, [mcp-reference.md](mcp-reference.md#find-a-verb)).
 
 `revl mcp schema FILES` - project provided services to MCP tool definitions
 (the `revl -> MCP` direction, annotations derived from the checker).

@@ -268,6 +268,47 @@ def test_drift_loss_implicates_providers_and_call_sites(mesh):
     assert set(result["impacted"]) == {"Store", "Api"}
 
 
+# Issue #1849: the top-level answer follows the change asked about.
+_SIX_FIND_CALLERS = """
+service Store { fn find(k: Str) -> Opt[Str] }
+component Mem provides store: Store {
+  let m = effect Map.new() undo m.drop()
+  provide store { fn find(k) = m.get(k) }
+}
+""" + "".join(f"""
+service U{i} {{ fn go(k: Str) -> Opt[Str] }}
+component User{i} requires store: Store provides u{i}: U{i} {{
+  provide u{i} {{ fn go(k) = store.find(k) }}
+}}""" for i in range(6))
+
+
+def test_a_gain_scopes_the_top_level_call_sites_and_impacted_to_it():
+    """Gaining `count` on a service whose `find` has six callers: no call site
+    calls `count`, so the top-level `callSites` is empty and `impacted` is the
+    provider that must implement it. It used to be the six `find` sites and
+    every caller (a roll-up over the existing methods)."""
+    result = query.drift(compile_source(_SIX_FIND_CALLERS), "Store", gains=["count"])
+    assert result["callSites"] == []
+    assert result["impacted"] == ["Mem"]
+    assert result["callSitesScope"] == ["count"]
+    # the roll-up is still there, under its own name
+    assert len(result["existingCallSites"]) == 6
+    assert {s["method"] for s in result["existingCallSites"]} == {"find"}
+
+
+def test_a_loss_scopes_the_call_sites_to_the_lost_method():
+    result = query.drift(compile_source(_SIX_FIND_CALLERS), "Store", losses=["find"])
+    assert len(result["callSites"]) == 6
+    assert result["impacted"] == ["Mem"] + [f"User{i}" for i in range(6)]
+
+
+def test_no_gains_or_losses_keeps_the_roll_up():
+    result = query.drift(compile_source(_SIX_FIND_CALLERS), "Store")
+    assert len(result["callSites"]) == 6
+    assert result["callSitesScope"] == "all declared methods"
+    assert result["callSites"] == result["existingCallSites"]
+
+
 def test_drift_of_an_undeclared_method_is_a_no_op(mesh):
     loss = query.drift(mesh, "Kv", losses=["nope"])["losses"][0]
     assert loss["known"] is False
@@ -360,7 +401,7 @@ def _call_tool(name, arguments):
     return response["result"]
 
 
-def test_mcp_advertises_every_query():
+def test_mcp_advertises_every_query(all_mcp_tools):
     listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {tool["name"] for tool in listed["result"]["tools"]}
     assert {"revl_query_emitters", "revl_query_withdraw", "revl_query_dependents",
