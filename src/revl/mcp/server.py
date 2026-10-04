@@ -104,7 +104,7 @@ from . import ambient as _ambient
 from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
-from .session import NothingLoaded, Session, SessionError
+from .session import ApprovalRefused, NothingLoaded, Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -835,12 +835,23 @@ def _tool_lease(arguments: dict) -> dict:
 
 def _origin(arguments: dict) -> dict:
     """The admission inputs of a load/swap, kept so the composition can later
-    be snapshotted for re-admission (docs/persistence.md)."""
+    be snapshotted for re-admission (docs/persistence.md).
+
+    A `files` load also records each file's text as `files_content` (issue
+    #1842). The held source is the truth and disk only an export (#1696), so
+    from here on the session edits, swaps by name and snapshots this text: a
+    change made on disk afterwards is not picked up, and a file deleted after
+    the load stops mattering. Callers take it just before the compile, so it
+    is the text that compile read."""
     origin = {}
     for key in ("source", "files", "modules"):
         value = arguments.get(key)
         if value is not None:
             origin[key] = value
+    if origin.get("files") and origin.get("source") is None:
+        held = {path: _edit._read_disk(path) for path in origin["files"]}
+        origin["files_content"] = {p: text for p, text in held.items()
+                                   if text is not None}
     return origin
 
 
@@ -880,6 +891,7 @@ def _tool_load(arguments: dict) -> dict:
     completed = canon if canon is not None and canon.get("completed") else None
     arguments = sent
     source, files, modules = _candidate_of(sent)
+    origin = _origin(arguments)
     try:
         ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
@@ -899,7 +911,17 @@ def _tool_load(arguments: dict) -> dict:
             return _refused_by_lease(refusal)
     return _canonical.attach(
         _boot(ir, source, modules, arguments.get("config"),
-              bool(arguments.get("record")), _origin(arguments)), completed)
+              _load_records(arguments.get("record")), origin), completed)
+
+
+def _load_records(requested) -> bool:
+    """Whether a load records (issue #1706). The gate is on by default and
+    its spend must be durable, so a load that does not say records under the
+    gate; an explicit `record: false` under the gate is still refused by
+    `Session.load`. With no gate, an omitted `record` stays off."""
+    if requested is None:
+        return SESSION.approval_policy is not None
+    return bool(requested)
 
 
 def _nothing_to_load() -> dict:
@@ -952,7 +974,7 @@ def _boot_draft(vs: dict, config, record, verify=None) -> dict:
     if refused is not None:
         return _draft.still_a_draft(refused)
     modules = _edit.file_modules(vs) if vs.get("files") else vs.get("modules")
-    booted = _boot(ir, vs.get("source"), modules, config, bool(record),
+    booted = _boot(ir, vs.get("source"), modules, config, _load_records(record),
                    _edit._origin_from(vs))
     if not booted.get("ok"):
         return _draft.still_a_draft(booted)
@@ -977,6 +999,47 @@ def _tool_call(arguments: dict) -> dict:
     except Exception as exc:  # the callee raised — that is a result, not a crash
         return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
                               trace=SESSION.state().get("trace", []))
+
+
+def _tool_act(arguments: dict) -> dict:
+    """One call per agent action (issue #1708): classify the proposed action,
+    then execute it (class (a), or (c) already approved), defer it to commit
+    (class (b)), or ticket it (class (c), nothing fired), and record a receipt
+    the commit manifest lists. Returns `{class, outcome, receipt, residue}`; a
+    ticket comes back in the same two-step shape `revl_call` uses, with those
+    fields beside it."""
+    key, method = arguments.get("key"), arguments.get("method")
+    if not key or not method:
+        return _session_error("`key` and `method` are required")
+    try:
+        return {"ok": True, **SESSION.act(key, method, arguments.get("args") or [])}
+    except ApprovalRefused as error:
+        return _session_error(str(error), outcome="refused",
+                              ticket=error.ticket.get("hash"))
+    except SessionError as error:
+        return _session_error(str(error))
+    except ApprovalRequired as exc:
+        payload = _approval_required(exc)
+        receipt = getattr(exc, "receipt", None) or {}
+        return {**payload, "class": receipt.get("class", "c"),
+                "outcome": "ticket", "receipt": receipt, "residue": []}
+    except Exception as exc:  # the callee raised: a result, not a crash
+        return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
+                              outcome="raised",
+                              trace=SESSION.state().get("trace", []))
+
+
+def _tool_counterfactual(arguments: dict) -> dict:
+    """What the gate would have decided had the agent acted differently at one
+    action (issue #1752): replace, insert or drop it in this session's revl_act
+    log, decide both arms with the gate's pure parts, and report the
+    divergence. Runs nothing and changes nothing."""
+    try:
+        return {"ok": True, **SESSION.counterfactual(
+            arguments.get("at"), replace=arguments.get("replace"),
+            insert=arguments.get("insert"), drop=bool(arguments.get("drop")))}
+    except SessionError as error:
+        return _session_error(str(error))
 
 
 def _tool_swap(arguments: dict) -> dict:
@@ -1041,6 +1104,7 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
 
     # admitted: recompile the whole composition so the swap is a full
     # generation (the same shape `revl run --watch` reloads)
+    origin = _origin(stored)   # issue #1700: the held source is canonical
     try:
         full = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
@@ -1057,7 +1121,7 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # composition running before the swap
     radius = _authoring_loop.blast_radius(running, full)
     try:
-        state = SESSION.swap(full, origin=_origin(stored))
+        state = SESSION.swap(full, origin=origin)
     except SessionError as error:
         return _session_error(error)
     except ApprovalRequired as exc:
@@ -1129,8 +1193,7 @@ def _swap_server_side(replacing: tuple) -> dict:
     if vs.get("source") is None and not vs.get("files"):
         return _session_error(
             "no server-side source to swap by name — there is nothing the "
-            "session can re-admit without you passing `source`/`files`",
-            next=_remedy.swap_files_next(SESSION.origin, replacing))
+            "session can re-admit without you passing `source`/`files`")
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
@@ -1364,63 +1427,11 @@ def _edit_loaded(arguments: dict, verify=None) -> dict:
             _proposal.discard(SESSION)
         return _proposal.keep(SESSION, result, arguments.get("replacing") or ())
     except _edit.EditError as error:
-        return _edit_refusal(error, arguments)
+        return _session_error(error, edited=False, swapped=False)
     except SessionError as error:
         if not SESSION.loaded:
             return _session_error(NothingLoaded(str(error)))
         return _session_error(error)
-
-
-def _edit_refusal(error, arguments: dict) -> dict:
-    """A `revl_edit` refusal. When the composition was loaded from files, so
-    there is no inline buffer to patch, the refusal carries the patch applied
-    to the file as a ready `revl_swap` (issue #1691)."""
-    if not _files_loaded_without_buffer(arguments):
-        return _session_error(error, edited=False, swapped=False)
-    try:
-        nxt = _remedy.edit_as_swap(SESSION, arguments, _swap_would_refuse)
-    except _edit.EditError as patch_error:
-        return _session_error(patch_error, edited=False, swapped=False)
-    except OSError:
-        nxt = None
-    if nxt is None:
-        return _session_error(error, edited=False, swapped=False)
-    name = os.path.basename(str(SESSION.origin["files"][0]))
-    return _session_error(
-        f"this composition was loaded from files ({name}), and revl_edit "
-        f"patches only inline source, so there is no buffer to patch. `next` "
-        f"is your patch applied to {name} as a revl_swap with inline `source`; "
-        f"after it, revl_edit patches that source directly",
-        next=nxt, edited=False, swapped=False)
-
-
-def _files_loaded_without_buffer(arguments: dict) -> bool:
-    """Whether the session lost a files-loaded composition's buffers. Since
-    issue #1690 each loaded file IS a buffer revl_edit patches, so this holds
-    only when the held working set carries neither inline source nor files."""
-    if arguments.get("target") not in (None, "source"):
-        return False
-    vs = _edit.virtual_source(SESSION)
-    return (vs.get("source") is None and not vs.get("files")
-            and bool((SESSION.origin or {}).get("files")))
-
-
-def _swap_would_refuse(arguments: dict) -> str | None:
-    """Whether `revl_swap(arguments)` would refuse before swapping: the
-    authoring gate, admission against the running composition, then the whole
-    composition on its own. None when it would not; else the first reason."""
-    gate = _authoring_refusal(arguments)
-    if gate is not None:
-        return gate["diagnostics"][0]["message"]
-    source, files, modules = _candidate_of(arguments)
-    replacing = tuple(arguments.get("replacing") or ())
-    try:
-        compile_under_authoring(source, files, modules=modules,
-                                manifest=SESSION.ir, replacing=replacing)
-        compile_under_authoring(source, files, modules=modules)
-    except RevlError as error:
-        return report(error)["diagnostics"][0]["message"]
-    return None
 
 
 def _tool_rollback(_arguments: dict) -> dict:
@@ -1654,6 +1665,23 @@ def _host_code_fields(bodies: list) -> dict:
             f"`--author-trust trusted`; the default refuses agent-authored "
             f"host code outright."),
     }
+
+def _approval_instructions() -> str:
+    """The `initialize` instructions' sentence on the approval gate (issue
+    #1706), true of this session's mode."""
+    if SESSION.approval_policy is None:
+        return ("No approval gate is configured: a class-(c) crossing fires "
+                "when called.")
+    text = ("The approval gate is on: a witnessed crossing with an inverse "
+            "proceeds, a deferred emission waits for commit, and any other "
+            "emission returns approvalRequired with a ticket and fires nothing. "
+            "Relay the ticket to a human and re-issue the identical call once "
+            "it is approved.")
+    if getattr(SESSION, "approval_separation", False):
+        text += (" You cannot approve a ticket you raised: revl_approve must "
+                 "come from a separate operator identity.")
+    return text
+
 
 def _tool_approve(arguments: dict) -> dict:
     """Say YES to a class-(c) crossing (item 246 / roadmap item 344). Two shapes,
@@ -2989,6 +3017,61 @@ TOOLS = [
         "handler": _tool_call,
     },
     {
+        "name": "revl_act",
+        "description": "One call per agent action through the approval gate "
+                       "(issue #1708). Classifies the proposed action by its "
+                       "checked effect class, then: class (a) (witnessed, with an "
+                       "inverse) executes; class (b) (deferred) is queued for "
+                       "revl_commit; class (c) (any other emission) returns a "
+                       "ticket and fires nothing until an operator approves it, "
+                       "after which the identical re-issue executes. Returns "
+                       "`class`, `outcome` (executed, deferred or ticket), the "
+                       "`receipt` recorded for the commit manifest and the "
+                       "`residue` (crossings fired that no inverse can take "
+                       "back). Needs the approval gate on.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "provided key, e.g. `ops`"},
+                "method": {"type": "string", "description": "operation name"},
+                "args": {"type": "array", "description": "positional arguments"},
+            },
+            "required": ["key", "method"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_act,
+    },
+    {
+        "name": "revl_counterfactual",
+        "description": "What would the gate have decided if the agent had acted "
+                       "differently (issue #1752)? Takes this session's revl_act "
+                       "log, replaces, inserts or drops the action at `at`, and "
+                       "decides both arms with the gate's own rules: each "
+                       "action's class, whether it executes, defers or tickets, "
+                       "which recorded approvals still cover what, and the "
+                       "irreversible residue. Reports where the arms diverge and "
+                       "whether the recorded arm reproduces the recording. "
+                       "Nothing is run and the session is unchanged.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "at": {"type": "integer",
+                       "description": "the action index (receipt `seq`) to vary"},
+                "replace": {"type": "object",
+                            "description": "the action to run instead: "
+                                           "`{key, method, args}`"},
+                "insert": {"type": "object",
+                           "description": "an action to add before `at`: "
+                                          "`{key, method, args}`"},
+                "drop": {"type": "boolean",
+                         "description": "leave the action at `at` out"},
+            },
+            "required": ["at"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_counterfactual,
+    },
+    {
         "name": "revl_swap",
         "description": "Admit a candidate against the RUNNING composition and hot-swap "
                        "it in. A rejected candidate leaves the running system untouched. "
@@ -3097,7 +3180,9 @@ TOOLS = [
                 "target": {"type": "string",
                            "description": "which server-side buffer to edit: omit for the "
                                           "main inline source (or the one loaded file), "
-                                          "name a loaded file by its path, or name an "
+                                          "name a loaded file by its path (or by a "
+                                          "basename or trailing path that matches "
+                                          "exactly one loaded file), or name an "
                                           "in-memory module"},
                 "replacing": {"type": "array", "items": {"type": "string"},
                               "description": "components withdrawn in this admission"},
@@ -3220,7 +3305,8 @@ TOOLS = [
                        "declaration's name (a component, service, type, fn, "
                        "extern...), `<buffer>:Name` when the name is not unique, or "
                        "`<buffer>:<line>` for the declaration containing that line; a "
-                       "buffer is a loaded file's path, an in-memory module's key, or "
+                       "buffer is a loaded file's path (or a basename or trailing path "
+                       "naming exactly one), an in-memory module's key, or "
                        "`source`. `with: [\"deps\"]` adds the declarations it names "
                        "(its services, the functions and types it uses), and "
                        "`comments: false` returns the code alone in canonical form. "
@@ -4579,7 +4665,7 @@ _TIERED_INSTRUCTIONS = ("tools/list shows the core verbs only; call revl_verbs "
 
 
 def _instructions() -> str:
-    parts = [_INSTRUCTIONS]
+    parts = [_INSTRUCTIONS, _approval_instructions()]   # issue #1706
     if not _disclosure.all_tools():
         parts.append(_TIERED_INSTRUCTIONS)
     if not runtime_available():

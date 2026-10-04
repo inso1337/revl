@@ -97,9 +97,11 @@ def virtual_source(session) -> dict:
     Two shapes. An inline composition is ``{source, modules}``. A composition
     loaded from `files` is ``{files, files_content, modules}``: one buffer per
     loaded file, keyed by the path it was loaded under (issue #1690). Its text is
-    the text the session last swapped in when an edit has run, and otherwise the
-    file as it is on disk now. Disk is never written: the edited text lives on
-    the session, and `revl_snapshot` carries it.
+    the text the session holds: read at load (issue #1842), and the text it last
+    swapped in once an edit has run. Disk is read only for an origin that holds
+    no text for a file (one restored from an older snapshot). Disk is never
+    written: the edited text lives on the session, and `revl_snapshot` carries
+    it.
     """
     draft = getattr(session, "draft", None)
     if draft is not None:
@@ -140,6 +142,19 @@ def _match_file(files: list, target: str) -> str | None:
     return None
 
 
+def _suffix_matches(files: list, target: str) -> list[str]:
+    """The loaded files whose path ends with `target` on a segment boundary: a
+    basename (`plain.rvl`) or any trailing path (`app/plain.rvl`). Buffers are
+    keyed by the full path they were loaded under, so this is what lets a
+    caller name one the way it names a file. An absolute `target` is a path,
+    not a suffix, and matches nothing here."""
+    wanted = target.replace(os.sep, "/").strip("/")
+    if not wanted or os.path.isabs(target):
+        return []
+    return [path for path in files
+            if ("/" + path.replace(os.sep, "/")).endswith("/" + wanted)]
+
+
 def _editable(vs: dict) -> list[str]:
     names = ["source"] if vs.get("source") is not None else []
     return names + list(vs.get("files") or []) + sorted(vs.get("modules") or {})
@@ -165,6 +180,13 @@ def _resolve_buffer(vs: dict, target: str | None) -> tuple[str, str]:
         return "file", path
     if target in (vs.get("modules") or {}):
         return "module", target
+    suffixed = _suffix_matches(files, target)
+    if len(suffixed) == 1:
+        return "file", suffixed[0]
+    if suffixed:
+        raise EditError(
+            f"`target` {target!r} names {len(suffixed)} loaded files; give "
+            f"enough of the path to pick one: {', '.join(suffixed)}")
     raise EditError(
         f"no server-side source buffer named {target!r}; "
         f"editable buffers: {', '.join(_editable(vs)) or 'none'}")

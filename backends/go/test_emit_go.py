@@ -1808,3 +1808,54 @@ def test_go_build_accepts_a_match_in_an_inferred_position():
 
     _go_build(emit.emit(compile_source(_MATCH_TYPE_SRC, "m.rvl")),
               "match-type-from-arms")
+
+
+# --- issue #1892: `Any` and a Result parameter in a component signature
+#
+# `_go_type`, which renders the service-trait and provide-method signatures,
+# had no arm for `Any` and none for a `Result[T, E]` in value position. Both
+# fell through to `_camel`, so the interface said `Settle(r Result[Int, Str])`
+# and `Raw(v Any) Any`, and the package did not build (`undefined: Result`,
+# `undefined: Any`). The same document shape, once with a top-level `type` (the
+# combined renderer) and once components-only (the stc-go component path).
+
+_SIGNATURE_SERVICE = """
+service Shelf {
+  fn settle(r: Result[Int, Str]) -> Int
+  fn blob() -> Any
+  fn raw(v: Any) -> Any
+  fn raws() -> List[Any]
+}
+
+component Store provides shelf: Shelf {
+  provide shelf {
+    fn settle(r) = 1
+    fn blob() = "x"
+    fn raw(v) = v
+    fn raws() = []
+  }
+}
+"""
+
+_SIGNATURE_DOCS = {
+    "combined": "type Note = { title: Str, size: Int }\n" + _SIGNATURE_SERVICE,
+    "components-only": _SIGNATURE_SERVICE,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SIGNATURE_DOCS))
+def test_a_component_signature_spells_any_and_a_result_parameter_in_go(shape):
+    from revl import compile_source  # noqa: PLC0415
+
+    src = emit.emit(compile_source(_SIGNATURE_DOCS[shape], f"sig_{shape}.rvl"))
+    assert "Result[Int, Str]" not in src and " Any" not in src
+    assert "Settle(r RevlResult[" in src
+    assert "Raw(v any) any" in src and "Raws() []any" in src
+
+
+@pytest.mark.parametrize("shape", sorted(_SIGNATURE_DOCS))
+def test_go_build_accepts_any_and_a_result_parameter_in_a_component_signature(shape):
+    from revl import compile_source  # noqa: PLC0415
+
+    _go_build(emit.emit(compile_source(_SIGNATURE_DOCS[shape], f"sig_{shape}.rvl")),
+              f"signature-any-result-{shape}")

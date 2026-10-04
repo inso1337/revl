@@ -151,6 +151,9 @@ TOOL_VERB = {
     # variants share one capability so profiles do not need implementation
     # details such as the two-step fork protocol.
     "revl_call": "call",
+    # issue #1708: one gated action is a call; its ticket is answered by
+    # `approve`, like `revl_call`'s
+    "revl_act": "call",
     "revl_lease": "lease",
     "revl_fork": "fork",
     "revl_fork_confirm": "fork",

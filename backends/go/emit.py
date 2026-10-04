@@ -214,6 +214,21 @@ def _go_type(t) -> str:
         return _PRIM[t]
     if t.startswith("List[") and t.endswith("]"):
         return "[]" + _go_type(t[5:-1])
+    if t == "Any":
+        # issue #1892: revl's `Any` wildcard erases to Go's `any`, as it does
+        # in `_go_v3_type`. It used to fall through to `_camel`, which printed
+        # the surface spelling into a service signature (`Raw(v Any) Any`) and
+        # the package did not build (`undefined: Any`).
+        return "any"
+    if t.startswith("Result[") and t.endswith("]"):
+        # issue #1892: a Result in value (parameter) position is the package's
+        # `RevlResult[T, E]`, as `_go_v3_type` spells it. Return position
+        # spreads to `(T, E, bool)` in `_go_return` and never reaches here.
+        # Printing the surface spelling (`Settle(r Result[Int, Str])`) did not
+        # build (`undefined: Result`). The rendered `RevlResult[` is what pulls
+        # a Result preamble into the package.
+        ok, err = _v3_split_generic(t[7:-1])
+        return "RevlResult[%s, %s]" % (_go_type(ok), _go_type(err))
     if t.startswith("Opt[") and t.endswith("]"):
         # Value/parameter position: Opt lowers to a pointer `*T` (nil == None),
         # which carries the presence bit a bare `T` cannot. The (T, bool) tuple
@@ -11314,7 +11329,12 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         # `@go` body hand-constructs RevlOk/RevlErr, and `_emit_witnessed_step`
         # asserts on them.
         out.append(_COMP_RESULT_PREAMBLE)
-    elif used_result:
+    elif used_result or "RevlResult[" in body_blob:
+        # issue #1892: a component signature that takes a Result renders the
+        # type (`_go_type`) without the IR's `types`/`functions` spelling one,
+        # so the rendered body decides here too. Nothing in that body
+        # constructs a sealed `RevlOk`/`RevlErr`, so the struct form is the
+        # one that agrees with the pure tier beside it.
         out.append(_V3_RESULT_PREAMBLE)
     if used_map or _COMP_NEEDS_MAP:
         out.append(_V3_MAP_PREAMBLE)

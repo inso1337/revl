@@ -242,6 +242,10 @@ CORPUS = [
                              #   re-reads the moved body local `key`: the
                              #   `let key_undo = key.clone();` pre-clone (item
                              #   114, `_undo_reclone_locals`)
+    "comp_let_binds_param_undo.rvl",  # issue #1723: `let key = k` before an
+                             #   `effect ... undo` clones the parameter
+                             #   (`let key = k.clone();`), as does `slot = v`;
+                             #   a `let` of a body local stays a move
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm
@@ -281,6 +285,10 @@ CORPUS = [
                              #   `<<DEFER-comp-step>>` marker and the oracle
                              #   agreed, because no corpus document had a
                              #   component body step that was not a provision.
+    "bridge_types.rvl",      # item 391: the bridge's marshalling beyond the scalars:
+                             #   a std `Result` (return and argument, the canonical
+                             #   `{"$kind","$value"}`), a List and a record through
+                             #   serde, an `Opt[Float]` return
     "comp_str_builtin.rvl",  # issue #1734: the only Str builtins are in a component
                              #   (`concat` in a provide method, a sized `.length`),
                              #   so the `RevlStrOps` helper traits are emitted for it

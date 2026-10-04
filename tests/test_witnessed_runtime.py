@@ -253,7 +253,9 @@ def test_witnessed_call_site_emits_ok_conditional_transactional():
     # same shape the from-source path above emits), which is what the recorder
     # reads when it stamps the step's scope for the scope-gated fork rewind.
     assert ("_revl_frame.transactional((lambda result: unstash(result)), "
-            "_revl_wit1.value, scope={'caps': ['fs']})") in body
+            "_revl_wit1.value, scope={'caps': ['fs']}, "
+            "call={'receiver': None, 'method': 'unstash', "
+            "'args': (lambda result: [result])(_revl_wit1.value)})") in body
     # it is NOT a bracket: no `yield lambda:` disposer for the witnessed step
     # (the only yields are the transactional one and the frame drain).
     assert "yield lambda:" not in body
@@ -628,8 +630,8 @@ def test_a_failed_compensation_lands_as_residue_and_abort_still_succeeds(target,
 def test_compensate_call_site_emits_through_frame_compensation():
     emit = _emit_backend()
     body = emit.emit(_comp_ir(_compensated_component("CompClean", abort=False)))
-    assert ("yield _revl_frame.compensation(lambda: offset('go'))" in body
-            or "yield _revl_frame.compensation(lambda: offset(\"go\"))" in body)
+    assert ("yield _revl_frame.compensation(lambda: offset('go'), "
+            "call={'receiver': None, 'method': 'offset', 'args': ['go']})") in body
     # not a bare disposer: no plain `yield lambda:` for the compensate step
     # (the witnessed step's own transactional yield is also absent here,
     # since `stash`'s registration itself is `_revl_frame.transactional`,
