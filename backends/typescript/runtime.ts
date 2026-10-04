@@ -1629,11 +1629,20 @@ export class StreamSource implements StreamDownstream {
   private _stateName: 'open' | 'closed' | 'faulted' = 'open'
   private _reason: string | null = null
   readonly _kind: string
+  /** item 130 §4.5: how many items this provider DECLARED it holds
+   *  (`replay(<n>)`), 0 for the default of no backlog. The durable
+   *  `replay(from: …)` cursor is the py reference tier's and never reaches
+   *  this runtime: the emitter refuses it by name. */
+  readonly _replayCount: number
+  /** The last `_replayCount` emitted items, oldest first. BOUNDED by the
+   *  declaration, like every other stream buffer (§4.4). */
+  _backlog: unknown[] = []
 
-  constructor(kind = 'source', up: StreamSource[] = []) {
+  constructor(kind = 'source', up: StreamSource[] = [], replayCount = 0) {
     this._kind = kind
     this._up = [...up]
     this._pending = this._up.length
+    this._replayCount = replayCount
     Stream._sources.push(this)
     record(`stream.${kind} open`)
   }
@@ -1654,9 +1663,22 @@ export class StreamSource implements StreamDownstream {
    *  silent loss (§4.4). */
   emit(item: unknown): boolean {
     if (this._stateName !== 'open') return false
+    // §4.5: the declared backlog is recorded BEFORE delivery and whether or not
+    // anyone is listening, since a consumer that subscribes LATER is the case
+    // replay exists for. A no-op on a provider that declared none.
+    this._hold(item)
     const accepted = this._forward(item)
     record(accepted ? `stream.emit ${item}` : `stream.emit ${item} refused`)
     return accepted
+  }
+
+  /** Record one emitted item in the declared last-n backlog (item 130 §4.5),
+   *  trimming it to the declaration. Mirrors the py reference's
+   *  `StreamSource._hold`. */
+  _hold(item: unknown): void {
+    if (this._replayCount <= 0) return
+    this._backlog.push(item)
+    while (this._backlog.length > this._replayCount) this._backlog.shift()
   }
 
   _forward(item: unknown): boolean {
@@ -2241,8 +2263,11 @@ export const Stream = {
   _subs: [] as Subscription[],
   _stages: [] as StreamStage[],
 
-  source(): StreamSource {
-    return new StreamSource()
+  /** Open a provider. `opts.replay` is its §4.5 `replay(<n>)` declaration,
+   *  passed only when DECLARED, so a replay-free source still emits the exact
+   *  zero-argument call. */
+  source(opts: { replay?: number } = {}): StreamSource {
+    return new StreamSource('source', [], opts.replay ?? 0)
   },
 
   /** True for the `Closed` terminal a `next` returned (Slice 4). `Faulted` is
@@ -2280,17 +2305,32 @@ export const Stream = {
       stages?: Array<[string, unknown]>
       capacity?: number
       drainMs?: number | null
+      replay?: number
     } = {},
   ): Subscription {
     let upstream: StreamSource | StreamStage = source
     for (const [kind, arg] of opts.stages ?? []) {
       upstream = new StreamStage(upstream, kind, arg)
     }
-    return new Subscription(
+    const sub = new Subscription(
       upstream, policy, ctx,
       opts.capacity ?? STREAM_DEFAULT_CAPACITY,
       opts.drainMs ?? null,
     )
+    // §4.5: the last-n backlog this consumer asked for and the provider
+    // declared, delivered through the PROVIDER's own forward path before any
+    // live item. So a replayed item takes the chain, the declared buffer and
+    // the overflow policy exactly as a live one does, and a backlog larger than
+    // the buffer is ordinary backpressure rather than a special case. Mirrors
+    // the py reference's `Stream.subscribe` statement for statement.
+    const want = opts.replay ?? 0
+    if (want > 0) {
+      for (const item of source._backlog.slice(-want)) {
+        record(`stream.replay ${item}`)
+        source._forward(item)
+      }
+    }
+    return sub
   },
 
   pending(): number {

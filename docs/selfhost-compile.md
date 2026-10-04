@@ -75,16 +75,16 @@ Measured over each tier's own emitter corpus, the enumerated document list
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     59 |                   59 (100%) |             53 (89.8%) |
+| py   |     60 |                   60 (100%) |             54 (90.0%) |
 | ts   |     76 |                   76 (100%) |             60 (78.9%) |
 | go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
-| rust |     43 |                   43 (100%) |             41 (95.3%) |
+| rust |     44 |                   44 (100%) |             42 (95.5%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **296** | **296 (100%)** | **269 (90.9%)** |
+| **total** | **298** | **298 (100%)** | **271 (90.9%)** |
 
-Every one of the 296 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 269 of
+Every one of the 298 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 271 of
 them survive the **fully-native** chain, so all 27 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
@@ -309,7 +309,7 @@ What Stage 4 still needs after this is no longer an emit gap:
   tier is missing;
 * `selfhost/emit_rust.rvl` does not mirror `_coerce_any_arg`, so no byte-agreement
   corpus document can reach the four crossings above without flipping the oracle
-  red. They stay recorded in `tests/fixtures/selfhost_uncovered_lines.json` with
+  red. They stay recorded in `tests/fixtures/selfhost_uncovered_lines/` with
   that reason, which is the same shape the boxing coercion already carried.
 
 ## Files

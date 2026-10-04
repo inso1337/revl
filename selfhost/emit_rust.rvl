@@ -56,8 +56,8 @@
 //     `req`/`config`/`fn` expression kinds and the `target`/`method` call form).
 //     Still DEFERRED and REPORTED (each fires a `<<DEFER-*>>` marker): timers /
 //     routers (`routes`), `await`/`spawn`, `isolate`/`intercept`/realms, host
-//     `let-effect` binds (`Pool`/`Map`/`Job`) and the item-114 host-Map
-//     undo-reclone, body-level `effect`/`timer`/`fail`/`if` steps, the `host`/
+//     `let-effect` binds (`Pool`/`Map`/`Job`), body-level
+//     `effect`/`timer`/`fail`/`if` steps, the `host`/
 //     `format` component-dialect kinds, and the non-scalar bridge marshalling
 //     (Result/serde/`Vec<Value>`/opaque-`Value`). These stay ENTANGLED with the
 //     erasure surface below;
@@ -1037,7 +1037,7 @@ fn by_value_field_clone(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
     chain = chain.push(value_str(value_field(cur, "name")))
     cur = value_field(cur, "target")
   }
-  let root = ref_ident(cur)
+  let root = ref_node_ident(cur)
   if (root == "" || !ctx.mu.has(root)) { return "" }
   var ty = map_get(ctx.vt, root)
   var i = chain.length() - 1
@@ -1097,8 +1097,9 @@ fn by_value_reuse(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
 // `_body_multi_use`, `_loop_repeated_reads` and `_movable_for_iterables`: run
 // once per module fn over its body, before it renders.
 
-// The identifier a reference node (`var`/`name`/`req`) names, else "".
-fn ref_ident(node: Any) -> Str {
+// The identifier a reference node (`var`/`name`/`req`) names, else "" for any
+// other node (`ref_ident` below answers for a node its caller already checked).
+fn ref_node_ident(node: Any) -> Str {
   let k = node_kind(node)
   if (k != "var" && k != "name" && k != "req") { return "" }
   let idv = value_str(value_field(node, "id"))
@@ -1110,7 +1111,7 @@ fn ref_ident(node: Any) -> Str {
 fn subtree_refs(node: Any) -> List[Str] {
   var out: List[Str] = []
   if (value_kind(node) == "record") {
-    let id = ref_ident(node)
+    let id = ref_node_ident(node)
     if (id != "") { out = out.push(id) }
     for (k of value_keys(node)) { out = out.concat(subtree_refs(value_field(node, k))) }
   }
@@ -1211,11 +1212,11 @@ type MovSt = { seen: Map[Str, Int], ord: Int, mov: List[Int] }
 fn movable_walk(node: Any, depth: Int, total: Map[Str, Int], mu: Map[Str, Str], st: MovSt) -> MovSt {
   var s = st
   if (value_kind(node) == "record") {
-    let id = ref_ident(node)
+    let id = ref_node_ident(node)
     if (id != "") { s = { seen: s.seen.set(id, (s.seen.lookup(id) ?? 0) + 1), ord: s.ord, mov: s.mov } }
     let step = value_str(value_field(node, "step"))
     if (step == "for") {
-      let name = ref_ident(value_field(node, "iterable"))
+      let name = ref_node_ident(value_field(node, "iterable"))
       var mov = s.mov
       if (name != "" && mu.has(name) && depth == 0
           && (s.seen.lookup(name) ?? 0) + 1 == (total.lookup(name) ?? 0)) {
@@ -4846,6 +4847,62 @@ fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
   return out
 }
+// The identifier a `var`/`name`/`req` node names (`id`, falling back to `name`).
+fn ref_ident(node: Any) -> Str {
+  var ident = value_str(value_field(node, "id"))
+  if (ident == "") { ident = value_str(value_field(node, "name")) }
+  return ident
+}
+// `_expr_var_names`: every bare variable name an IR subtree references, so the
+// undo's reads can be matched against the acquire's moves (item 114).
+fn expr_var_names(node: Any, acc: Map[Str, Str]) -> Map[Str, Str] {
+  var m = acc
+  if (value_kind(node) == "record") {
+    let k = node_kind(node)
+    if (k == "var" || k == "name" || k == "req") {
+      let ident = ref_ident(node)
+      if (ident != "") { m = m.set(ident, "1") }
+    }
+  }
+  for (child of value_children(node)) { m = expr_var_names(child, m) }
+  return m
+}
+// `_acquire_moved_locals`: the bare-identifier arguments a host-Map method
+// takes by value (`insert(key, value)`; `get`/`remove` borrow the key). Every
+// other acquire argument is already cloned at the call site.
+fn acquire_moved_locals(node: Any, vt: Map[Str, Str], acc: Map[Str, Str]) -> Map[Str, Str] {
+  var m = acc
+  if (value_kind(node) == "record") {
+    if (node_kind(node) == "call" && value_is_null(value_field(node, "callee"))) {
+      let recv = ref_ident(value_field(node, "target"))
+      let mth = value_str(value_field(node, "method"))
+      if (map_get(vt, recv).startsWith("Map[") && mth != "get" && mth != "remove") {
+        for (arg of value_list(value_field(node, "args"))) {
+          let ak = node_kind(arg)
+          if (ak == "var" || ak == "name") {
+            let ident = ref_ident(arg)
+            if (ident != "") { m = m.set(ident, "1") }
+          }
+        }
+      }
+    }
+  }
+  for (child of value_children(node)) { m = acquire_moved_locals(child, vt, m) }
+  return m
+}
+// `_undo_reclone_locals`, sorted: the method-body locals the undo reads AND the
+// acquire consumes by value. The `move` undo closure would find those already
+// moved (E0382), so each is pre-cloned into `<local>_undo` before the acquire.
+fn undo_reclone_locals(acq: Any, undonode: Any, body_locals: Map[Str, Str], vt: Map[Str, Str]) -> List[Str] {
+  // Only reached for a step that registers an undo, so `undonode` is never null.
+  var out = []
+  let refs = expr_var_names(undonode, Map.empty())
+  let moved = acquire_moved_locals(acq, vt, Map.empty())
+  for (local of body_locals.keys()) {
+    if (refs.has(local) && moved.has(local)) { out = out.push(local) }
+  }
+  return list_sort(out)
+}
 // `_provide_let_type`: `_v3_infer_type` extended with the one source that only
 // exists in a provide body — a required-service method call's declared return
 // (`let answer = model.complete(seed)`), so a later by-value use of the local
@@ -4876,8 +4933,9 @@ fn reqs_map(comp: Any) -> Map[Str, Str] {
 
 // `_method_body_lines`: lower effect/emit/return/let/assign steps in an
 // effectful provide-method body. Effect registration is fire-and-forget through
-// `self.ctx.effect(..)`. The host-Map reclone (item 114) is DEFERRED — the
-// subset declares no host `Map`, so `_undo_reclone_locals` is always empty.
+// `self.ctx.effect(..)`. Ahead of each undo, a method-body local the undo reads
+// and a host-Map acquire moves (`insert(key, ..)`) is pre-cloned into
+// `<local>_undo` (item 114, `_undo_reclone_locals`).
 // Returns the lines AND the threaded ctx (its `vt` carries let-inferred types).
 fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: Int) -> Sout {
   let pad = ind(indent)
@@ -4887,6 +4945,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
   var c = set_rn(ctx, scope)
   var out = []
   var index = 0
+  var body_locals: Map[Str, Str] = Map.empty()
   for (step of value_list(value_field(method, "body"))) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "return") {
@@ -4895,7 +4954,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
       else { out = out.push(`${pad}return ${render_expr(e, c)};`) }
     } else {
       if (kind == "effect" || kind == "emit") {
-        let undoR = method_undo_rename(comp, method)
+        var undoR = method_undo_rename(comp, method)
         var acqR = scope
         for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
         if (kind == "emit") {
@@ -4907,7 +4966,10 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           let cnode = value_field(step, "compensate")
           if (!value_is_null(cnode)) {
             out = out.concat(method_undo_clones(comp, method, indent))
-            // host-Map reclone (item 114): DEFERRED — no host Map in subset.
+            for (local of undo_reclone_locals(value_field(step, "expr"), cnode, body_locals, c.vt)) {
+              out = out.push(`${pad}let ${local}_undo = ${local}.clone();`)
+              undoR = undoR.set(local, `${local}_undo`)
+            }
             out = out.push(`${pad}let _revl_teardown = revl_teardown_of(&self.ctx);`)
             out = out.concat(compensation_registration(cnode, c, undoR, `${name}.${mnm}.compensate.${num_str(index)}`, "self.ctx", false, indent))
           }
@@ -4916,10 +4978,14 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           var acqnode = value_field(step, "acquire")
           if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
           out = out.concat(method_undo_clones(comp, method, indent))
-          // host-Map reclone (item 114): DEFERRED — no host Map in subset.
+          let undonode = value_field(step, "undo")
+          for (local of undo_reclone_locals(acqnode, undonode, body_locals, c.vt)) {
+            out = out.push(`${pad}let ${local}_undo = ${local}.clone();`)
+            undoR = undoR.set(local, `${local}_undo`)
+          }
           let acq = render_expr(acqnode, set_rn(c, acqR))
           out = out.push(`${pad}let _ = ${acq};`)
-          let undox = render_expr(value_field(step, "undo"), set_rn(c, undoR))
+          let undox = render_expr(undonode, set_rn(c, undoR))
           out = out.push(`${pad}let _ = self.ctx.effect(${label}, move || { ${undox}; Ok(()) });`)
         }
       } else {
@@ -4936,6 +5002,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
             out = out.push(`${pad}${mangle(nm)} = ${render_expr(value_field(step, "value"), c)};`)
           }
           if (inferred != "") { c = set_vt(c, nm, inferred) }
+          if (kind == "let" && nm != "") { body_locals = body_locals.set(nm, "1") }
         } else {
           out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
         }
@@ -5154,26 +5221,6 @@ fn declared_compensate_marker(ir: Any) -> List[Str] {
         && !value_is_null(value_field(ext, "compensate"))) { return ["<<DEFER-declared-compensate>>"] }
   }
   return []
-}
-
-// `_expr_var_names`: every bare variable a compensate expression reads (a
-// `var`, `name` or `req` node), so exactly those activation binds are cloned
-// into its `move` closure.
-fn expr_var_names(node: Any) -> List[Str] {
-  var acc: List[Str] = []
-  if (value_kind(node) == "record") {
-    let k = node_kind(node)
-    if (k == "var" || k == "name" || k == "req") {
-      var ident = value_str(value_field(node, "id"))
-      if (ident == "") { ident = value_str(value_field(node, "name")) }
-      if (ident != "") { acc = acc.push(ident) }
-    }
-    for (key of value_keys(node)) { acc = acc.concat(expr_var_names(value_field(node, key))) }
-  }
-  if (value_kind(node) == "list") {
-    for (item of value_list(node)) { acc = acc.concat(expr_var_names(item)) }
-  }
-  return acc
 }
 
 // The activation `let-effect` binds a run of steps adds, in emission order
@@ -5540,7 +5587,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
         out = out.push(`${pad}let ${req}_comp = ${req}.clone();`)
         cR = cR.set(req, `${req}_comp`)
       }
-      for (local of sorted_common(expr_var_names(cnode), abinds)) {
+      for (local of sorted_common(expr_var_names(cnode, Map.empty()).keys(), abinds)) {
         out = out.push(`${pad}let ${local}_comp = ${local}.clone();`)
         cR = cR.set(local, `${local}_comp`)
       }

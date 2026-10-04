@@ -105,28 +105,44 @@ Two different boundaries exist, and they have different widths.
 ### Plain component services (`provide` / `requires` coeffects)
 
 A service operation's declared param/return type crosses at the width of its
-type: a scalar is an `i64`/`i32` **value**, a compound type an **`i32` pointer
-into the calling module's memory** (the module exports `memory`, so a host —
-or the cordis-wasm runtime — can read the result). This is the *same* canonical
-ABI the value model uses, and it applies to v1/v2 components as much as v3:
-the boundary is `_boundary_wty`, and its gate is `_check_type`. In practice:
+type: a scalar is an `i64`/`i32` **value**, a compound type an **`i32`
+pointer**. Which memory that pointer names decides what is lowerable:
 
-- **Int, Bool, Str, Bytes, List, record, variant, Opt, Result** params and
-  returns: supported (compound ones by pointer).
-- **Float, Map, function types**: refused with the named `_check_type`
-  diagnostic above.
+- **A provider's export** (`provide:<key>.<op>`): **Int, Bool, Str, Bytes,
+  List, record, variant, Opt, Result** params and returns, compound ones by
+  pointer into the provider's own memory. The module exports `memory`, so a
+  HOST that calls the export reads a compound result out of the right memory.
+- **A consumer's required call to a key another component of the same
+  composition provides**: **Int and Bool only.** That provider is another
+  cordis-wasm instance with its own linear memory, and the runtime forwards
+  the call's arguments and result as the integers they are, so a compound
+  value would arrive as an address in the wrong memory. Measured before this
+  was refused (issue #1601): a three-element list arrived with length 0, an
+  index into it trapped in `$list_slot`, and a `Str` read correctly only when
+  both modules happened to pool the same literal at the same offset. Refused
+  by name: `` <key>.<op>: param 0 is 'Str', and only scalar (Int/Bool) values
+  cross a service another component provides on this tier ``. The routed
+  require and the spawn instance accessor draw the same line for the same
+  reason.
+- **A consumer's required call to a key no component provides**: the host's.
+  cordis-wasm hands a host-provided coeffect the calling fiber, so the host
+  reads a compound argument out of the caller's memory, which is the right
+  one. Compound values stay allowed here.
+- **Float, Map, function types**: refused everywhere with the named
+  `_check_type` diagnostic above.
 - **Unit** (void op): no slot.
 - A value whose wasm width disagrees with the declared type (a `List` returned
   from an `Int`-declared op) is refused rather than silently re-typed:
   `` a List value cannot cross this tier's scalar service boundary — the
   operation is declared Int; compound values stay inside the module ``.
 
-> **History / why the FR-11 premise is stale.** The original substrate README
-> said "non-Int component services" were refused ("the component tier carries
-> scalars only"). The v3 value-model wave (docs/strings.md) widened the
-> boundary: the linear-memory representation means a Str/List/record-returning
-> service now lowers on the component tier too. The remaining hard refusals on
-> this boundary are exactly `Float`/`Map`/function types.
+> **History.** The original substrate README said "non-Int component
+> services" were refused. The v3 value-model wave (docs/strings.md) widened
+> both directions of the boundary to compound types by pointer. That holds
+> wherever the host is the other side, and it did not hold between two of the
+> composition's own modules, which issue #1601 narrowed back to scalars.
+> Carrying a compound value between instances needs the runtime to copy it
+> from one memory into the other, which cordis-wasm does not do.
 
 ### Instance accessors (`spawn` handles) and the config channel
 
@@ -160,6 +176,34 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 | `await` outside `Job.run(name)` | `` `await` on this tier supports only `Job.run(name)` `` — the runtime's async host op (A1) |
 | `match`/variants | ✅ now supported (tagged-union cells); the old "no tagged unions in core Wasm" README row is stale |
 | non-scalar config *fields* | scalar-only, same reason as the boundary |
+| a witnessed extern that takes a `Secret[...]` parameter and returns an Ok witness not declared confidential | `` witnessed extern `x` takes the declared confidential parameter `p` ... (issue #1577) ``, see below |
+
+### Declared secrets and the host sinks (issue #1577)
+
+The other tiers register every declared `Secret[T]`, and every leaf of a
+declared container, at the door it enters through, and scrub host text against
+that registry. This tier has no registry and no funnel, so the question is
+which host sinks can see a module value at all. Measured on the live runtime:
+
+| sink | what reaches it |
+|---|---|
+| `[run] …` lines from `run_harness.py` | compile-time names (component, provision key), fiber states, counts |
+| `PASS`/`FAIL`/`SUMMARY` from `lifecycle_harness.py` | test names and step errors; calls cross Int/Bool only |
+| the runtime's `rt.log` (trap text, `trace`) | nothing: neither harness prints it |
+| `[run] HALTED` (`lifecycle.static_estop_line`) | the compile-time `revl:teardown` index |
+| the record-mode durable WAL (`REVL_WAL`) | **the Ok witness of an activation-registered witnessed effect, read out of module memory verbatim** |
+
+The WAL is the one sink that carries module bytes, so it is where a leaf
+leaked: a witnessed extern taking `v: Secret[Str]` that hands `v` back as a
+plain `Result[Str, E]` witness wrote the bytes of a `Secret[List[Str]]` element
+into the WAL file, and the `Secret[Str]` scalar too. The emitter refuses that
+shape by name, in every mode. Declaring the witness position confidential
+(`Result[Secret[W], E]`, or `Secret[...]` on the inverse's parameter) emits,
+and the record frames `<redacted:secret>`. The doors themselves: a `config`
+field is refused for every shape, a provide-method parameter emits but its
+witness is parked in `$__mw_head` and never framed, and `Secret[Map[...]]` is
+refused everywhere because `Map` does not lower. Pinned by
+`backends/wasm/test_secret_leaf_sinks_1577.py`.
 
 ## Witnessed-effects teardown (item 243 Slice 2b)
 
