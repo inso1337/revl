@@ -566,6 +566,41 @@ def _fork_retired(wal: dict, frozen: dict) -> dict:
     }
 
 
+def _split_nested(effects: list, records: list) -> tuple:
+    """``(own, nested)``: ``effects`` without, and with, the emissions a
+    provider recorded INSIDE another component's required-service crossing
+    (issue #1609, `replay.Step.within`).
+
+    `emit tickets.file("T1") compensate tickets.withdraw("T1")` is one physical
+    crossing. The caller records it (`tickets.file`), and the provider records
+    the host emission its method makes to answer it (`file_host`). Both
+    describe the same effect in the world, and the caller's record is the one
+    the compensation names. So the nested record is not a second residue: it is
+    counted with the crossing it was made inside, which is offset, settled or
+    residue as that crossing is. Only an emission nests this way, and only when
+    the enclosing record is in this same WAL: across a placement seam the two
+    are in different process WALs, and neither is folded."""
+    seqs = {r.get("seq") for r in records if r.get("record") == "effect"}
+    own, nested = [], []
+    for record in effects:
+        enclosing = (record.get("within") or {}).get("seq")
+        if (record.get("boundary") or {}).get("class") == "emission" \
+                and enclosing is not None and enclosing in seqs:
+            nested.append(record)
+        else:
+            own.append(record)
+    return own, nested
+
+
+def _nested_entries(nested: list) -> list:
+    return [{"component": r.get("component"), "label": r.get("label"),
+             "seq": r.get("seq"), "within": r.get("within"),
+             "why": (f"made inside {(r.get('within') or {}).get('label')} "
+                     f"(seq {(r.get('within') or {}).get('seq')}), the same "
+                     f"crossing; counted there")}
+            for r in nested]
+
+
 def _steady_state_residue(steady: list) -> dict:
     """Classify the boundary crossings a run committed AFTER the
     ``activation-complete`` marker with no ``run-complete`` shutdown marker
@@ -775,7 +810,9 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
          if tail[i].get("record") == "run-complete"), -1)
     steady = [r for r in tail[last_run_complete + 1:]
               if r.get("record") == "effect"]
+    steady, steady_nested = _split_nested(steady, records)
     steady_residue = _steady_state_residue(steady)
+    steady_residue["nested"] = _nested_entries(steady_nested)
     # issue #1017: the activation marker is not a flush receipt. Cross-check the
     # deferral queue the WAL already enumerates against its `flushed` records
     # before this verdict is allowed to say `clean`. Empty in both directions on
@@ -2076,7 +2113,8 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
     with a durable discharge record (a COMMITTED transaction is NOT rolled back),
     Phase 2 re-issues owed compensations through :meth:`World.apply_compensation`
     (which records, never clears)."""
-    effects = [r for r in wal["records"] if r.get("record") == "effect"]
+    committed = [r for r in wal["records"] if r.get("record") == "effect"]
+    effects, nested = _split_nested(committed, wal["records"])
     descriptors = [r for r in wal["records"]
                    if r.get("record") == "discharge-descriptor"]
     discharged: set = set()
@@ -2497,10 +2535,12 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                         if getattr(world, "replays_descriptors", False) else
                         "were re-attempted best-effort; ")
                      + "deferred emissions were dropped, never fired."),
-        "committedEffects": len(effects),
+        "committedEffects": len(committed),
         "torn": wal.get("torn", False),
         "ran": ran,
         "moot": moot,
+        # issue #1609: emissions made inside another crossing, counted there
+        "nested": _nested_entries(nested),
         "unreconstructible": unreconstructible,
         # issue #1369: emissions whose compensation descriptor is settled, and
         # compensation records the descriptor lane reports instead
@@ -2588,6 +2628,11 @@ def _guarantee() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _nested_lines(nested: Optional[list]) -> list:
+    return [f"  nested   {entry['label'] or '(effect)':<22} {entry['why']}"
+            for entry in nested or []]
+
+
 def render(report: dict) -> str:
     # issue #1477: a model run says so on its second line and on every line
     # that reports a call against the world, so none of them reads as an effect
@@ -2644,6 +2689,7 @@ def render(report: dict) -> str:
         for entry in steady.get("moot") or []:
             lines.append(f"  moot     {entry['label'] or '(effect)':<22} "
                          f"steady-state in-process crossing (memory gone)")
+        lines.extend(_nested_lines(steady.get("nested")))
         # issue #1017: the deferral cross-check. Both lists are empty on a WAL
         # with no `deferred-emission`, so a deferral-free roll-forward renders
         # byte-identically.
@@ -2672,6 +2718,7 @@ def render(report: dict) -> str:
             lines.append(f"  ran      {entry['label']:<22} {call}{tag}")
         for entry in report.get("moot") or []:
             lines.append(f"  moot     {entry['label']:<22} in-process (memory gone)")
+        lines.extend(_nested_lines(report.get("nested")))
         for entry in report.get("unreconstructible") or []:
             lines.append(f"  RESIDUE  {entry['label']:<22} closure-only — still out: "
                          f"{entry['still_out']}")

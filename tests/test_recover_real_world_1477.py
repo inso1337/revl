@@ -542,7 +542,9 @@ def test_two_runs_reusing_one_wal_recover_only_with_their_own_compositions(tmp_p
         "offset('b')", "tickets.withdraw('T-b')"]
     assert all("opening 2 of this log" in r["error"]["message"] for r in other)
     assert report["binding"]["otherGenerations"] == [
-        "generation 1 (opening 2 of this log, from seq 9)"]
+        # seq 10, not 9: since #1603 the first run's value-position emission
+        # is recorded too, one more effect record before the second opening
+        "generation 1 (opening 2 of this log, from seq 10)"]
 
     proc, report = recover_with("b.rvl")
     assert log.read_text(encoding="utf-8").splitlines()[len(crashed):] == [

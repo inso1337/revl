@@ -1228,8 +1228,13 @@ def _is_map_cas(acquire: Any) -> bool:
 class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, externs: list | None = None,
                  plan_groups: list | None = None,
-                 scopes: dict | None = None) -> None:
+                 scopes: dict | None = None,
+                 decorated: set | None = None) -> None:
         self.ir = component
+        # the externs `declared_crossing` decorates (computer-use crossings):
+        # they register their own compensation, so a provide-method site does
+        # not write the explicit line for them (`_method_compensated_extern`)
+        self._decorated: set = set(decorated or ())
         self.services = services
         # item 522 slice 3 (issue #1369): the `(provide key, method)` pairs of
         # this component that run in a call scope, mapped to `ui_transaction`
@@ -1303,6 +1308,14 @@ class _ComponentEmitter:
         # awaiting call site settles — so the await-seed must NOT fire inside an
         # arrow, only in the method body's own statement/return/expression spots.
         self._in_arrow = False
+        # issue #1603: are we rendering a provide-method body's VALUE positions
+        # (a `return`, a `let`, a condition)? A call of an `emission` extern
+        # there is a `return emit f(x)` / `let r = emit f(x)`: the `emit`
+        # marker leaves no trace on the IR node, so the extern's class is what
+        # says it crosses. It fires through the recording seam, as an `emit`
+        # step does, or the WAL never sees it. Off while a compensation or an
+        # undo renders: those run at abort, not as the method's own crossing.
+        self._route_value_emissions = False
         # v2: realm placements and intercept metadata (docs/design-v2-realms.md)
         self.isolate = component.get("isolate") or {}
         self.intercept = component.get("intercept") or {}
@@ -1678,6 +1691,8 @@ class _ComponentEmitter:
                 extra += f", replay={_replay_kwarg(expr['replay'])}"
             return f"Stream.subscribe({stream}, {policy!r}, _revl_ctx{extra})"
         if kind == "fn":
+            if self._is_value_emission(expr):
+                return self._value_emission_fire(expr, where)
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             # item 92: a call to a colored (async def) module fn returns a
@@ -2334,6 +2349,39 @@ class _ComponentEmitter:
             return f"(await {call})"
         return call
 
+    def _value_emission_fire(self, expr: dict, where: str) -> str:
+        """A provide-method value emission, fired through the recording seam
+        (#1603). When its extern DECLARES a `compensate` (item 254, #1592), the
+        compensation registers on the frame right after the fire and before the
+        rest of the expression, as an `emit` statement registers it:
+        `(<fire>, _revl_frame.compensation_method(lambda: <comp>))[0]` keeps
+        the emission's value. A fire that raises registers nothing."""
+        fire = self._extern_emit_fire(expr, where)
+        ext_comp = self._method_compensated_extern(expr)
+        if ext_comp is None:
+            return fire
+        return f"({fire}, {self._method_compensation(ext_comp, where)})[0]"
+
+    def _inverse_expr(self, expr: Any, where: str) -> str:
+        """`_expr` for an undo or a compensation inside a provide-method body:
+        it runs at abort, so a value-position emission in it is not routed."""
+        prev = self._route_value_emissions
+        self._route_value_emissions = False
+        try:
+            return self._expr(expr, where)
+        finally:
+            self._route_value_emissions = prev
+
+    def _is_value_emission(self, expr: dict) -> bool:
+        """A value-position call of an `emission` extern inside a provide-method
+        body (`return emit f(x)`, `let r = emit f(x)`), see
+        `_route_value_emissions`. A deferred emission is an `emit` step only."""
+        if not self._route_value_emissions:
+            return False
+        name = expr.get("name")
+        decl = self._extern_by_name.get(name) or {}
+        return decl.get("class") == "emission" and name not in (self.deferred or {})
+
     def _emission_fire(self, expr: dict, where: str) -> str:
         """The Python expression that FIRES an emission expression: a DIRECT
         host-extern crossing (`_emission_shape` == "extern", the one emission
@@ -2422,6 +2470,24 @@ class _ComponentEmitter:
                            witness: Optional[str] = None) -> str:
         """`, call={...}` for a registration site: see `_named_call_kwarg`."""
         return _named_call_kwarg(node, lambda a: self._expr(a, where), witness)
+
+    def _method_compensated_extern(self, expr: Any) -> Optional[dict]:
+        """`_compensated_extern` at a provide-method site: None for a
+        decorated (computer-use) extern, whose `declared_crossing` registers
+        the compensation itself, so the crossing registers exactly once."""
+        ext = self._compensated_extern(expr)
+        if ext is None or ext.get("name") in self._decorated:
+            return None
+        return ext
+
+    def _method_compensation(self, ext_comp: dict, where: str) -> str:
+        """The compensation an extern declares, registered at a provide-method
+        site: the thunk and the named call a fresh process re-issues
+        (`_named_call_kwarg`), both rendered as an inverse."""
+        comp = ext_comp["compensate"]
+        return (f"_revl_frame.compensation_method(lambda: "
+                f"{self._inverse_expr(comp, where)}"
+                f"{_named_call_kwarg(comp, lambda a: self._inverse_expr(a, where))})")
 
     def _compensated_extern(self, expr: Any) -> Optional[dict]:
         """The emission extern (one DECLARING a `compensate`) an `emit` step's
@@ -2526,7 +2592,7 @@ class _ComponentEmitter:
         (it is the component's activation frame the method closes over)."""
         self._counter += 1
         tmp = f"_revl_wit{self._counter}"
-        undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
+        undo = self._inverse_expr(ext["undo"], where)  # e.g. `restore(result)`
         out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
         out.add(indent, f"if isinstance({tmp}, Ok):")
         # TODO(309-slice3): thread the idempotency register (item 309) into the
@@ -2863,11 +2929,13 @@ class _ComponentEmitter:
             out.add(indent + 1, f"with _revl_frame.{scope}("
                                 f"{provide_name + '.' + name!r}):")
             body_indent = indent + 2
+        self._route_value_emissions = True
         try:
             for step in body:
                 self._method_step(out, body_indent, provide_name, name, step, mwhere, method_is_async)
         finally:
             self._in_async = prev_async
+            self._route_value_emissions = False
 
     def _method_step(
         self,
@@ -2923,7 +2991,7 @@ class _ComponentEmitter:
                 # "every failure is recorded, never silently dropped").
                 out.add(indent + 1,
                         f"yield _revl_frame._guard({_inverse_lambda(step, 'undo')}: "
-                        f"{self._expr(step.get('undo'), where)})")
+                        f"{self._inverse_expr(step.get('undo'), where)})")
                 out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))
@@ -2943,7 +3011,7 @@ class _ComponentEmitter:
                         f"outside the effect context.")
                 bind = _ident(step.get("bind"), f"{where}: bind")
                 acquire = self._expr(acquire_node, where)
-                undo = self._expr(step.get("undo"), where)
+                undo = self._inverse_expr(step.get("undo"), where)
                 head = _inverse_lambda(step, "undo", bind)
                 if _is_map_cas(step.get("acquire")):
                     # result-guarded undo (item 397): the accumulator entry
@@ -2980,10 +3048,16 @@ class _ComponentEmitter:
                 out.add(indent,
                         "_revl_frame.compensation_method("
                         f"{_inverse_lambda(step, 'compensate')}: "
-                        f"{self._expr(step.get('compensate'), where)}"
-                        f"{self._compensation_call(step.get('compensate'), where)})")
+                        f"{self._inverse_expr(step.get('compensate'), where)}"
+                        f"{_named_call_kwarg(step.get('compensate'), lambda a: self._inverse_expr(a, where))})")
             else:
                 out.add(indent, self._emit_fire(step, where))
+            ext_comp = self._method_compensated_extern(step.get("expr"))
+            if deferred is None and ext_comp is not None:
+                # item 254 / #1592: the extern DECLARES its own `compensate`.
+                # Registered after the fire and after a site-spelled one, the
+                # order the activation body (and the timer site, #1590) uses.
+                out.add(indent, self._method_compensation(ext_comp, where))
         elif kind == "return":
             if step.get("expr") is None:
                 out.add(indent, "return")
@@ -4435,10 +4509,12 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         # top import would run the referenced module at artifact LOAD, outside
         # every classification/approval/witness gate; the thunk keeps host
         # execution where an inline body's execution is (design §"Emit, py").
-        # An extern that declares `compensate` (item 254) or a computer-use
-        # capability (item 522) is decorated, so the call scope a provide
-        # method runs in can register the declared compensation wherever the
-        # crossing is written (a statement, a `let`, a `return`, an argument),
+        # A computer-use extern (item 522) is decorated, so the UI transaction
+        # unit a provide method runs in can register its declared compensation
+        # wherever the crossing is written (a statement, a `let`, a `return`,
+        # an argument), and a raising crossing still registers its own. Any
+        # other extern that declares `compensate` registers at its site instead
+        # (`_method_compensation`), so each crossing registers once,
         # through the same `Frame.compensation_method` a site-spelled
         # `emit ... compensate ...` uses. The slot runs with no variables in
         # scope (lower refuses one that names a parameter), so it is a closed
@@ -5389,16 +5465,17 @@ def _crossing_facts(ir: dict) -> tuple[dict, dict]:
     and the provide methods that run in a call scope, as
     `{component: {(key, method): "ui_transaction" | "call_scope"}}`.
 
-    An extern is decorated when it declares `compensate` (item 254) or a
-    computer-use capability (item 522). A method gets a scope when its body can
-    reach one of them; a computer-use method's scope is its UI transaction unit.
-    A document with neither kind of extern gets `({}, {})` and is emitted
-    byte-identically."""
+    Only a computer-use extern (item 522) is decorated, and a method gets a
+    scope when its body can reach one; a computer-use method's scope is its UI
+    transaction unit. An extern that declares `compensate` and is NOT a
+    computer-use crossing registers its compensation where it is crossed
+    instead, through the explicit `compensation_method` line a provide-method
+    `emit` step and a value-position emission write (#1592, #1603). One
+    registrar per crossing: a decorated extern skips the explicit line, so a
+    crossing never registers twice. A document with no computer-use extern gets
+    `({}, {})` and is emitted byte-identically."""
     ui_externs, units = _ui_transaction_facts(ir)
-    declared = {ext.get("name") for ext in ir.get("externs") or []
-                if ext.get("class") == "emission"
-                and ext.get("compensate") is not None}
-    crossings = {name: name in ui_externs for name in declared | ui_externs}
+    crossings = {name: True for name in ui_externs}
     if not crossings:
         return {}, {}
     scopes: dict = {}
@@ -5616,7 +5693,7 @@ def emit(ir: dict) -> str:
     emitters = [
         _ComponentEmitter(component, services, externs,
                           plan_groups.get(component.get("name")),
-                          scopes.get(component.get("name")))
+                          scopes.get(component.get("name")), set(crossings))
         for component in components
     ]
     bodies = [emitter.emit() for emitter in emitters]

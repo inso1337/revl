@@ -210,12 +210,17 @@ def test_the_call_scope_is_reset_after_every_call(log):
     session.unload()
 
 
-def test_the_emitted_method_runs_in_a_call_scope():
+def test_a_non_ui_extern_registers_at_its_site_with_its_named_call():
+    """One registrar per crossing (the #1591/#1616 merge): a compensate-
+    declaring extern that is not a computer-use crossing is not decorated and
+    its method runs in no call scope. It registers at the site, with the named
+    call a fresh process re-issues."""
     from _backend_import import backend_emitter
     code = backend_emitter("python").emit(compile_source(
         _method_program(_declared("let"), POSITIONS["let"]), "d.rvl"))
-    assert "with _revl_frame.call_scope('ops.run'):" in code
-    assert ("@_revl_declared_crossing('put_let', lambda: undo_let(), "
+    assert "call_scope(" not in code
+    assert "_revl_declared_crossing" not in code
+    assert ("_revl_frame.compensation_method(lambda: undo_let(), "
             "call={'receiver': None, 'method': 'undo_let', 'args': []})") in code
 
 

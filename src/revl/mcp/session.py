@@ -561,11 +561,16 @@ def _capturing_driver_class():
     class _CapturingDriver(_Driver):
         def __init__(self, *args, **kwargs):
             self.events: list[dict] = []
+            # issue #1859: every host-stub event of the driver's life, never
+            # drained, so teardown can pair each acquire with its release
+            self.host_events: list[str] = []
             super().__init__(*args, **kwargs)
 
         def _log(self, channel: str, subject: str, detail: str = "") -> None:
             self.events.append({"channel": channel, "subject": subject,
                                 "detail": detail})
+            if channel == "host":
+                self.host_events.append(f"{subject} {detail}".rstrip())
 
         def drain_events(self) -> list[dict]:
             events, self.events = self.events, []
@@ -976,7 +981,19 @@ class Session:
             # close its loop when it is collected rather than leave that to
             # the loop's own finalizer and its ResourceWarning (issue #1720)
             weakref.finalize(self, _close_abandoned_loop, self._loop)
+        self._own_host_trace()
         return self._loop.run_until_complete(coro)
+
+    def _own_host_trace(self) -> None:
+        """Route the host stubs' trace to THIS session's driver while it runs
+        (issue #1859). The trace is one process-wide callback, and each driver
+        installs its own at boot, so with two sessions loaded the later one
+        would otherwise receive the earlier one's releases, and the earlier
+        one's teardown would read its own released resources as unreleased."""
+        driver = self._driver
+        on_host = getattr(driver, "_on_host", None)
+        if on_host is not None:
+            driver.runtime.set_trace(on_host)
 
     def _close_loop(self) -> None:
         """Close the event loop a torn-down session ran on (issue #1720).
@@ -3424,6 +3441,7 @@ class Session:
         def _drive() -> None:
             driver._settlement_ledger = ledger
             try:
+                self._own_host_trace()             # issue #1859
                 self._loop.run_until_complete(driver._dispose_all(self.ir))
                 disposal["returned"] = True
             except asyncio.CancelledError:
@@ -4362,9 +4380,33 @@ class Session:
             "disposables": driver.root.fiber._disposables.length,
             "disposablesBaseline": driver._baseline_disposables,
         }
+        unverified = self._check_host_resources(driver, checks, detail)
         driver.runtime.set_trace(None)
-        return {"noResidue": all(checks.values()), "checks": checks,
-                "detail": detail, "trace": driver.drain_events()}
+        report = {"noResidue": all(checks.values()) and not unverified,
+                  "checks": checks, "detail": detail,
+                  "trace": driver.drain_events()}
+        if unverified:
+            report["unverified"] = unverified
+        return report
+
+    @staticmethod
+    def _check_host_resources(driver, checks: dict, detail: dict) -> list:
+        """Issue #1859: the four counters above see the disposer RUN, not the
+        resource RELEASED. An undo that is not the acquire's release, or a
+        release that raised, still drains the effect stack. The host trace
+        pairs each `new`/`open` with its `drop`/`close`
+        (`fault._unreleased_host_resources`, the lifecycle `no_residue`
+        rule), so it is the fifth check. With no host trace the check cannot
+        run: it is returned as unverified, and `noResidue` is never true on a
+        check that did not run."""
+        events = getattr(driver, "host_events", None)
+        if events is None:
+            return ["hostResources"]
+        from ..fault import _unreleased_host_resources  # noqa: PLC0415
+        unreleased = _unreleased_host_resources(events)
+        checks["hostResources"] = not unreleased
+        detail["unreleased"] = unreleased
+        return []
 
     def _commit_wal(self, driver) -> None:
         """Stamp `activation-complete` and close the session's WAL (the recorder
@@ -5742,6 +5784,7 @@ class Session:
         from .approval import ApprovalRequired  # noqa: PLC0415
         ticket = self._class_map.build_ticket(
             reach, args, record_values=self.approval_record_values)
+        self._refuse_unbounded_approval(ticket)   # issue #1755, opt-in
         # issue #1553: an operator's NO to this question refuses the re-issue it
         # was holding, once, before anything could cover it
         refusal = self._ticket_refusals.pop(ticket["hash"], None)
@@ -5781,6 +5824,28 @@ class Session:
             return
         self._issue_ticket(ticket)
         raise ApprovalRequired(ticket)
+
+    def _refuse_unbounded_approval(self, ticket: dict) -> None:
+        """Under `approvals require bounded crossings` (issue #1755, off by
+        default), refuse a call whose class-(c) capability has an `unbounded`
+        item-260 ceiling in the crossing component, before anything is spent or
+        ticketed: no approval, single or standing, can be sized for a count the
+        analysis cannot bound."""
+        policy = getattr(self, "sandbox", None)
+        if policy is None or not getattr(policy, "approvals_bounded", False):
+            return
+        from .approval_ceilings import first_unbounded  # noqa: PLC0415
+        hit = first_unbounded(ticket.get("ceilings") or {})
+        if hit is None:
+            return
+        capability, reason = hit
+        raise SessionError(
+            f"`{ticket.get('key')}.{ticket.get('method')}` reaches capability "
+            f"`{capability}`, which needs approval, and its crossing count is "
+            f"unbounded: {reason}. The policy says `approvals require bounded "
+            f"crossings`, so the call is refused rather than ticketed (issue "
+            f"#1755). Bound the loop that crosses it (docs/expressible-"
+            f"iteration.md), or drop that policy line")
 
     def _enforce_activation_gate(self, ir: dict, class_map=None,
                                  components: set | None = None,

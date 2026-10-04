@@ -159,6 +159,20 @@ def crashed(tmp_path):
     return state
 
 
+# Issue #1889: desk's `file_host`, the emission Desk makes while answering
+# Agent's cross-process `tickets.file`, is recorded since #1603 and is
+# residue until the placement runner links a served call's records to the
+# caller's crossing. It is one physical crossing, offset in agent's WAL, but
+# nothing in desk's WAL proves that, so recover reports it and exits 1.
+DESK_RESIDUE = "Desk:file_host:('file_host', 'file_host', ('T1',))"
+
+
+def _desk_residue(report: dict) -> list:
+    """The unreconstructible records desk's report still holds (#1889)."""
+    desk = next(p["report"] for p in report["processes"] if p["process"] == "desk")
+    return [u["still_out"] for u in desk.get("unreconstructible", [])]
+
+
 def _recover(state, *extra: str) -> tuple:
     proc = _revl(["recover", "--wal", "run.wal", "--composition", "app.rvl",
                   "--json", *extra], state["dir"], state["log"])
@@ -195,7 +209,9 @@ def test_a_placement_crash_leaves_an_index_and_one_uncommitted_wal_per_process(c
 def test_a_real_recover_of_a_placement_crash_performs_both_processes_and_is_clean(crashed):
     proc, report = _recover(crashed)
 
-    assert proc.returncode == 0, proc.stderr[-3000:]
+    # #1889: desk's cross-process `file_host` is residue, so recover exits 1
+    assert proc.returncode == 1, proc.stderr[-3000:]
+    assert _desk_residue(report) == [DESK_RESIDUE]
     # the outside world: every compensation ran once, consumers first and
     # newest first, the cross-process one through the desk's `tickets`
     assert _world(crashed) == ["note:clerk", "note:agent", "file:T1",
@@ -204,9 +220,8 @@ def test_a_real_recover_of_a_placement_crash_performs_both_processes_and_is_clea
     assert report["world"] == "real" and report["worldCalls"] == 3
     assert report["placement"]["order"] == ["agent", "desk"]
     assert report["placement"]["committed"] is False
-    assert report["residue"] == {
-        "clean": True, "outstanding": [],
-        "proof": report["residue"]["proof"]}
+    assert report["residue"]["clean"] is False
+    assert [r["process"] for r in report["residue"]["outstanding"]] == ["desk"]
     by_name = {p["process"]: p for p in report["processes"]}
     agent, desk = by_name["agent"]["report"], by_name["desk"]["report"]
     assert agent["verdict"] == desk["verdict"] == "rolled-back"
@@ -229,7 +244,7 @@ def test_a_real_recover_of_a_placement_crash_performs_both_processes_and_is_clea
         assert sorted(aborted["replayed"]) == sorted(
             d["seq"] for d in _descriptors(crashed[name]).values())
     assert "process agent: CLEAN" in report["residue"]["proof"]
-    assert "process desk: CLEAN" in report["residue"]["proof"]
+    assert "process desk: RESIDUE" in report["residue"]["proof"]   # #1889
 
 
 @needs_cordis
@@ -240,10 +255,13 @@ def test_a_second_real_recover_of_the_placement_does_nothing(crashed):
 
     proc, report = _recover(crashed)
 
-    assert proc.returncode == 0, proc.stderr[-3000:]
+    # #1889: the same desk residue, and nothing else: the second run calls
+    # nothing and changes no WAL
+    assert proc.returncode == 1, proc.stderr[-3000:]
+    assert _desk_residue(report) == [DESK_RESIDUE]
     assert _world(crashed) == world
     assert {n: crashed[n].read_bytes() for n in wals} == wals
-    assert report["worldCalls"] == 0 and report["residue"]["clean"] is True
+    assert report["worldCalls"] == 0
     for result in report["processes"]:
         assert result["report"]["compensationsRan"] == []
         assert result["report"]["binding"]["booted"] == []
@@ -254,7 +272,7 @@ def test_a_second_real_recover_of_the_placement_does_nothing(crashed):
 def test_the_text_verdict_names_each_process(crashed):
     proc = _revl(["recover", "--wal", "run.wal", "--composition", "app.rvl"],
                  crashed["dir"], crashed["log"])
-    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert proc.returncode == 1, proc.stderr[-3000:]   # #1889: desk's file_host
     assert "verdict: PLACEMENT (2 processes, recovered in the order agent, desk)" \
         in proc.stdout
     assert "== process agent [Agent]" in proc.stdout

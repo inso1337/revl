@@ -1,10 +1,20 @@
+["reason", "a-value-emission-nested-inside-a-larger-provide-method", "A value emission NESTED inside a larger provide-method expression (`return \"x\" + emit f(t)`): the reference fires it through `_revl_extern_emit` wherever it sits in the method body (`_route_value_emissions`), while this port routes only the whole-value shapes (`return emit f(x)`, `let r = emit f(x)`, an assignment, a branch condition) that services_value_emission.rvl covers, because `cexpr` carries no emitter state to route a nested call with. `reaches_value_emission` finds the nested call and `method_value` renders `<<UNSUPPORTED-NESTED-VALUE-EMISSION>>` instead of the bare call the WAL would never see, so the divergence is loud. A corpus document with the nested shape would turn the byte oracle red rather than close the gap; porting it (threading the routing state through `cexpr`) is what deletes this entry."]
+
+["function", "a-value-emission-nested-inside-a-larger-provide-method", "method_value", 1, 1]
+
+["function", "a-value-emission-nested-inside-a-larger-provide-method", "reaches_value_emission", 2, 2]
+
 ["reason", "activation-body-step-residuals-non-witnessed-setup-iteration", "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures."]
 
 ["function", "activation-body-step-residuals-non-witnessed-setup-iteration", "body_step", 8, 8]
 
-["reason", "component-cexpr-residuals-do-rejects-non-let-steps", "Component cexpr residuals: do rejects non-let steps and wraps empty tail; bare None/Some map to None/identity; single-argument Some call returns its argument; ADT argument loop constructs positional payloads; final unknown-kind marker captures named host/format/spawn/instance/stream runtime boundaries. branches.rvl covers nonempty do, optional and ordinary records; declarations/construction are supported, not deferred wholesale."]
+["reason", "async-arrow-marker-item-391-async-arrow-names", "Async-arrow marker (item 391): async_arrow names an async arrow whose body awaits internally (`<<UNSUPPORTED-ARROW:async-mixed>>`), the shape the reference refuses with an EmitError, so no agreeing document reaches it."]
 
-["function", "component-cexpr-residuals-do-rejects-non-let-steps", "cexpr", 8, 8]
+["function", "async-arrow-marker-item-391-async-arrow-names", "async_arrow", 1, 1]
+
+["reason", "component-cexpr-residuals-do-rejects-non-let-steps", "Component cexpr residuals: do rejects non-let steps and wraps empty tail; bare None/Some map to None/identity; single-argument Some call returns its argument; ADT argument loop constructs positional payloads; final unknown-kind marker names a construct the port has no arm for, a replay-declaring `Stream.source()` or replay-requesting `subscribe` (item 130 §4.5) among them. No corpus document reaches it, and none can hold a replay clause while the self-host gate refuses it. The #957 `Map` subscript arm mirrors the reference's component `_expr` arm, which no corpus document reaches on either side: a component-body subscript lowers through the list path today. branches.rvl covers nonempty do, optional and ordinary records; declarations/construction are supported, not deferred wholesale."]
+
+["function", "component-cexpr-residuals-do-rejects-non-let-steps", "cexpr", 7, 7]
 
 ["reason", "conditional-capability-discovery-branches-body-has-secret-pa", "Conditional capability discovery branches: body_has_secret_param/body_has_timer/body_has_receiver_secret_witness return true when nested if branches contain a provide/timer/witnessed effect. Source activation guards permit only fail/nested guard, not conditional provision/timers/effects (negative boundary tests pin that rule). Top-level secret provides and both timer modes are covered by secrets and services_timers; the top-level and provide-method receiver-position registrations are covered by witnessed_secret. The recursion is kept rather than dropped because the reference's `_body_step` descends `if` the same way, so the port's import gate has to ask the question at every step the emit site can reach."]
 
@@ -13,10 +23,6 @@
 ["function", "conditional-capability-discovery-branches-body-has-secret-pa", "body_has_secret_param", 2, 2]
 
 ["function", "conditional-capability-discovery-branches-body-has-secret-pa", "body_has_timer", 2, 2]
-
-["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_py_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry"]
-
-["function", "deferred-in-file-test-section-marked-rather-than", "deferred_test_markers", 2, 2]
 
 ["reason", "empty-interpolation-fallback-interp-fstring-emits-the-empty", "Empty interpolation fallback: interp_fstring emits the empty literal for an empty parts list. Empty source strings lower lit instead; both implementations agree on this legacy shape, and strings/float_interp cover nonempty interpolation."]
 
@@ -28,9 +34,13 @@
 
 ["function", "empty-provide-class-and-timer-body-pass-statements", "timer_emit", 1, 1]
 
-["reason", "extern-formatting-residuals-emit-externs-selects-async-def", "Extern formatting residuals: emit_externs selects async def (retained async boundary) and emits pass for empty dedented bodies, identical to reference. Verbatim sync multiline/dedent bodies are covered by externs.rvl; async_module_local.rvl pins why a declaration alone is not full await support."]
+["reason", "extern-formatting-residuals-emit-externs-selects-async-def", "Extern residuals: emit_externs emits `pass` for an empty body, identical to the reference (the `async def` selection is exercised by async_colour.rvl since item 391); it refuses a bodiless `@py ref` extern by name; and it writes the capability-bound secret store (`secrets_block`) and each bound extern's `_revl_secret` local, byte-identical to the reference but reachable by no census-directory document, because the self-host gate refuses a top-level `secret ... for` declaration. tests/test_selfhost_emit_py.py pins the secret agreement and the ref refusal from inline sources. Verbatim sync bodies and the extern config helper are covered by externs.rvl and extern_config.rvl."]
 
-["function", "extern-formatting-residuals-emit-externs-selects-async-def", "emit_externs", 2, 2]
+["function", "extern-formatting-residuals-emit-externs-selects-async-def", "emit_externs", 5, 5]
+
+["reason", "extern-residuals-emit-externs-emits-pass-for-an", "Extern residuals: emit_externs emits `pass` for an empty body, identical to the reference (the `async def` selection is exercised by async_colour.rvl since item 391); it refuses a bodiless `@py ref` extern by name; and it writes the capability-bound secret store (`secrets_block`) and each bound extern's `_revl_secret` local, byte-identical to the reference but reachable by no census-directory document, because the self-host gate refuses a top-level `secret ... for` declaration. tests/test_selfhost_emit_py.py pins the secret agreement and the ref refusal from inline sources. Verbatim sync bodies and the extern config helper are covered by externs.rvl and extern_config.rvl."]
+
+["function", "extern-residuals-emit-externs-emits-pass-for-an", "secrets_block", 2, 2]
 
 ["reason", "fn-stmt-final-marker-and-return-unknown-step", "fn_stmt final marker and return: unknown step includes the existing deferred let_pattern surface, or invalid IR steps. All declared supported statement kinds now have literal corpus inputs, including assert, bare expr and empty returns/loops in branches.rvl."]
 
@@ -70,6 +80,10 @@
 
 ["function", "legacy-invalid-comparison-spelling-paths-is-cmp-op", "py_bin_op", 5, 5]
 
+["reason", "lifecycle-step-marker-item-391-lifecycle-step-answers", "Lifecycle-step marker (item 391): lifecycle_step answers a step kind it does not know with `<<UNSUPPORTED-LIFECYCLE-STEP:...>>`. The frontend emits only the seven kinds it renders, so no document reaches it; the reference's matching branch is a `# pragma: no cover` raise."]
+
+["function", "lifecycle-step-marker-item-391-lifecycle-step-answers", "lifecycle_step", 1, 1]
+
 ["reason", "line-s-empty-text-return-is-bypassed-by", "line's empty-text return is bypassed by callers which append blank lines directly; reference _Lines.add has the same empty-line spelling. This formatter branch does not represent omitted source behavior."]
 
 ["function", "line-s-empty-text-return-is-bypassed-by", "line", 1, 1]
@@ -90,19 +104,23 @@
 
 ["function", "match-source-bookkeeping-two-statements-of-arm-body", "arm_body_is_bind", 2, 2]
 
-["reason", "method-let-effect-lookup-acquire-sequence-is-source", "Method let-effect lookup/acquire sequence is source-bound to spawn or result-declared host verbs; witnessed provide binds are frontend-refused, pinned in tests. Ordinary unbound witnessed/adopt/compensation are covered. Final method marker covers deferred await and invalid nested/unknown steps, not supported return/effect rendering."]
+["reason", "method-let-effect-lookup-acquire-sequence-is-source", "Method-step residuals: the witnessed provide bind is frontend-refused, pinned in tests; and the final marker for await and invalid nested/unknown steps. Ordinary and `Map.cas` let-effect acquisitions, pinned inverses, adopt, compensation and a deferred emission are covered."]
 
-["function", "method-let-effect-lookup-acquire-sequence-is-source", "method_step", 11, 11]
+["function", "method-let-effect-lookup-acquire-sequence-is-source", "method_step", 2, 2]
 
 ["reason", "module-expr-inner-residuals-bare-some-identity-legacy", "Module expr_inner residuals: bare Some identity, legacy field.sized_length branch and explicit unsupported-kind marker. Module .length currently lowers kind=len while component .length reaches field.sized_length (both in branches.rvl). Some-call construction is covered separately; no claim that all historical IR shapes are source-reachable."]
 
 ["function", "module-expr-inner-residuals-bare-some-identity-legacy", "expr_inner", 4, 4]
 
-["reason", "module-host-root-discovery-ir-uses-host-root", "Module host-root discovery: ir_uses_host_root's tests subtree is the retained test-harness boundary. All four roots reach the sorted runtime import: Map/Pool from the module corpus, Job and Stream from the component host calls in services_host.rvl. emit_py_src's one uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does"]
-
-["function", "module-host-root-discovery-ir-uses-host-root", "emit_py_src", 1, 1]
+["reason", "module-host-root-discovery-ir-uses-host-root", "Module host-root discovery: ir_uses_host_root's tests subtree, which only a test body that names a host root reaches, and no corpus document does. All four roots reach the sorted runtime import: Map/Pool from the module corpus, Job and Stream from the component host calls in services_host.rvl."]
 
 ["function", "module-host-root-discovery-ir-uses-host-root", "ir_uses_host_root", 1, 1]
+
+["reason", "named-refusals-that-replaced-silent-drops-item-391", "Named refusals that replaced silent drops (item 391): two adjacent awaited emits the reference may fan out from its item-259 plan (`body_may_fan_out`, `component_body`). Both statements run only on a document the port refuses, and a refused document has no reference bytes to agree with, so no corpus document can reach it; the refusal is pinned in tests/test_selfhost_emit_py.py instead."]
+
+["function", "named-refusals-that-replaced-silent-drops-item-391", "body_may_fan_out", 1, 1]
+
+["function", "named-refusals-that-replaced-silent-drops-item-391", "component_body", 1, 1]
 
 ["reason", "owned-map-set-computed-key-order-inplace-stmts", "Owned Map.set computed-key order: inplace_stmts emits _revl_key then the assignment when the key is not trivial. Reference _py_inplace_stmts emits the same sequence. in_place.rvl's keys are trivial, but supported map ownership/copy/remove paths are covered; no exclusion of mutation is claimed."]
 
@@ -118,6 +136,10 @@
 
 ["function", "runtime-ref-frame-configschema-aliases-are-hardcoded-directl", "runtime_ref", 3, 3]
 
+["reason", "service-wide-commutative-flag-item-391-emit-services", "Service-wide commutative flag (item 391): emit_services_table renders the `'commutative': True` line of a `commutative service`, byte-identical to the reference, but the self-host gate refuses that declaration (\"unexpected declaration\"), so the gate/reference census would report any census-directory document carrying it as a false reject. tests/test_selfhost_emit_py.py::test_selfhosted_emitter_renders_a_commutative_service pins it from an inline source."]
+
+["function", "service-wide-commutative-flag-item-391-emit-services", "emit_services_table", 1, 1]
+
 ["reason", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "The self-host port of the reference `_named_call_kwarg` / `_inert` (issue #1369): the named call an inverse or a compensation writes into its WAL discharge descriptor. The corpus reaches the required-service shape and the witnessed inverse, where the two emitters agree byte for byte. Not reached: an unrecognised call shape, a non-`req` target, a `fn`-kind callee, a field-read argument, and an argument that is itself a call, for the reason the reference entry gives."]
 
 ["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "call_kwarg", 2, 2]
@@ -127,8 +149,6 @@
 ["reason", "type-string-compatibility-edges-split-fn-type-rejects", "Type-string compatibility edges: split_fn_type rejects missing arrow/unclosed params; split_types adjusts bracket/parenthesis nesting, while current generic argument/callable parameter lists are flat. Both parsers mirror reference _split_fn_type/_split_types and supported List/Map/Result/callable annotations are covered in types/branches."]
 
 ["function", "type-string-compatibility-edges-split-fn-type-rejects", "split_fn_type", 2, 2]
-
-["function", "type-string-compatibility-edges-split-fn-type-rejects", "split_types", 2, 2]
 
 ["reason", "unary-unknown-op-marker-only-cun-render-un", "Unary unknown-op marker only: cun/render_un implement typed negation, boolean not and bitwise not; final UNSUPPORTED-UN handles a foreign operator that the frontend does not lower. branches/bitwise exercise legal operators."]
 
@@ -151,10 +171,6 @@
 ["reason", "uses-builtin-result-s-tests-subtree-return-selects", "uses_builtin_result's tests-subtree return selects Result helpers used only by an in-file test. The port deliberately omits test emission; such a helper alone cannot establish harness parity. Extern/activation/function Result uses are positively covered by result/result_ctor_secrets/witnessed; the separate harness boundary is reproduced by fuzz_go_6be27824.rvl."]
 
 ["function", "uses-builtin-result-s-tests-subtree-return-selects", "uses_builtin_result", 1, 1]
-
-["reason", "witnessed-extern-final-miss-after-a-nonempty-table", "witnessed_extern final miss after a nonempty table: legal matching fn acquires are covered, and unknown fn names are frontend-rejected. The lookup's None fallback mirrors the reference dictionary miss."]
-
-["function", "witnessed-extern-final-miss-after-a-nonempty-table", "witnessed_extern", 1, 1]
 
 ["reason", "witnessed-idempotency-key-kwarg-is-an-incompatible-declarati", "Witnessed idempotency-key kwarg is an incompatible declaration combination: keyed inverse must be emission, witnessed inverse cannot be emission. witnessed_step retains the reference registration spelling for old/direct IR; witnessed.rvl exercises actual undo_idempotent/register metadata without inventing an invalid source declaration."]
 
