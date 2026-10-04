@@ -398,6 +398,12 @@ a diagnostic that describes one line at a time. With fill specs the loop is
    permissible. Most wrong answers are unrepresentable before they are written;
 4. re-check and repeat until `holes` is empty, then admit (§4).
 
+Over MCP the same loop needs no disk: `revl_scaffold` returns the skeleton and
+every fill spec; `revl_load` of it opens a DRAFT because holes remain (compiled
+and checked, nothing booted; issue #1727); `revl_edit {hole: <line>, expr}`
+fills one hole at a time; and the edit that fills the last one boots the draft
+through the load gates. A draft never boots while a hole remains.
+
 Each fill is a bounded, local decision against a spec, rather than a whole-file
 gamble against a refusal. The token economics of the two loops are the subject
 of the note in `bench/README` under item 20's demand harness.

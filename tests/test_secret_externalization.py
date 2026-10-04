@@ -243,7 +243,11 @@ def test_the_wal_still_records_a_non_secret_argument_verbatim(run_once):
     args = {record["label"]: record["boundary"]["detail"]["args"]
             for record in _wal_records(wal)
             if record.get("kind") == "emission"}
+    # `let t = emit charge(u)` is a value-position emission, recorded since
+    # issue #1603: its argument is an ordinary `Str`, so it stays legible too
+    # (the `Secret[Str]` it RETURNS is never part of the crossing's record)
     assert args == {"ops.go": ["u1"],
+                    "charge": ["u1"],
                     "vault.store": [REDACTED_SECRET],
                     "vault.note": [PUBLIC]}
 

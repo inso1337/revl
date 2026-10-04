@@ -486,3 +486,69 @@ def test_write_resolves_a_conflicted_file(lines, monkeypatch, tmp_path):
     assert "<<<<<<<" not in text and text.count('"function"') == 1
     assert lines._load_ledger(base)["reference"]["py"]["functions"]["f"] == {
         "uncovered": 3, "budget": 2, "reason": "a"}
+
+
+def test_write_files_a_reason_text_under_its_id(lines, monkeypatch, tmp_path):
+    """A function record whose reason field holds the reason's TEXT rather
+    than an id (the single-file ledger keyed buckets by text, and a record
+    carried across from it arrives that way) is filed by `--write` under the
+    reason's existing id, or under one new id with the text recorded once.
+    The budget is then the only hand edit left (found by the go lane in the
+    one-time #1768 merges)."""
+    known = "a specific decision about the stream runtime"
+    fresh = "a brand new decision nobody has filed yet"
+    raw = {"reference/go": (
+        f'["reason", "stream-runtime", "{known}"]\n\n'
+        f'["function", "stream-runtime", "kept", 2, 2]\n\n'
+        f'["function", "{known}", "by_known_text", 3, 3]\n\n'
+        f'["function", "{fresh}", "by_new_text", 4, 4]\n\n'
+        f'["function", "{fresh}", "by_new_text_too", 1, 1]\n')}
+    base = _ledger(lines, monkeypatch, tmp_path,
+                   {half: {tier: _entry({"f": ("a", 1)}) for tier in TIERS}
+                    for half in ("reference", "selfhost")}, raw)
+    before = lines.check({half: {tier: {"functions": {}, "sizes": {}}
+                                 for tier in TIERS}
+                          for half in ("reference", "selfhost")})
+    assert any(f"reason `{fresh}`, which is not declared" in p
+               and "--write" in p for p in before)
+
+    counts = {"kept": 2, "by_known_text": 3, "by_new_text": 4,
+              "by_new_text_too": 1}
+    survey = {half: {tier: {"functions": dict(counts if (half, tier) ==
+                                              ("reference", "go") else {"f": 1}),
+                            "sizes": {}}
+                     for tier in TIERS} for half in ("reference", "selfhost")}
+    lines.write_ledger(survey)
+    go = lines._load_ledger(base)["reference"]["go"]
+    assert go["functions"]["kept"]["reason"] == "stream-runtime"
+    assert go["functions"]["by_known_text"]["reason"] == "stream-runtime"
+    minted = go["functions"]["by_new_text"]["reason"]
+    assert minted != fresh and go["reasons"][minted] == fresh
+    assert go["functions"]["by_new_text_too"]["reason"] == minted
+    assert sorted(go["reasons"].values()) == sorted([known, fresh])
+    assert {n: f["budget"] for n, f in go["functions"].items()} == counts
+    text = (base / "reference" / "go.jsonl").read_text()
+    assert text.count(fresh) == 1, "the new reason's text is recorded once"
+    assert lines.check(survey) == []
+
+
+def test_two_new_functions_in_one_new_bucket_share_one_id(lines, monkeypatch,
+                                                          tmp_path):
+    """The defect the go lane hit, at its root. `--write` minted an id for the
+    first new function in a bucket and filed every later one in the same bucket
+    under the bucket's TEXT (a chained assignment stored the text where the id
+    belonged), so the author had to repair the reason by hand as well as set
+    the budget."""
+    base = _ledger(lines, monkeypatch, tmp_path,
+                   {half: {tier: _entry({"f": ("a", 1)}) for tier in TIERS}
+                    for half in ("reference", "selfhost")})
+    survey = {half: {tier: {"functions": {"f": 1, "zz_new_one": 5,
+                                          "zz_new_two": 5},
+                            "sizes": {"zz_new_one": 5, "zz_new_two": 5}}
+                     for tier in TIERS} for half in ("reference", "selfhost")}
+    lines.write_ledger(survey)
+    py = lines._load_ledger(base)["reference"]["py"]
+    one, two = (py["functions"][n]["reason"] for n in ("zz_new_one", "zz_new_two"))
+    assert one == two and one in py["reasons"]
+    assert py["reasons"][one] == lines.NEVER_ENTERED
+    assert not any("not declared" in p for p in lines.check(survey))

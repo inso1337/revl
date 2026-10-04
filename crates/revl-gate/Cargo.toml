@@ -5,6 +5,9 @@ version = "0.1.0"
 edition = "2021"
 description = "The revl admission gate as an embeddable library (layer 1, admit-only, frontier-limited)"
 license = "AGPL-3.0-only"
+# Computes the crate identity (FRONTIER_ID, ADMISSION_SURFACE_ID) from the
+# crate's own sources at build time; see build.rs.
+build = "build.rs"
 
 [lib]
 name = "revl_gate"

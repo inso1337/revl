@@ -69,10 +69,13 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    shrinks only, and a file joining one without a line in it fails the
    gate. Only `agree-*` and the generic `out-of-fragment` are purely
    informational.
-5. render the census and those buckets into `formal/STATUS.md` between the
+5. render those buckets into `formal/STATUS.md` between the
    `GENERATED alignment` markers, and fail the gate when the checked-in
    block is not what this run produced. The document's "0 formal-strict"
    is then this run's own output rather than a sentence somebody typed.
+   The block names the files in every failing or ratcheted bucket and
+   stores no count that moves with the corpus (issue #1768); the census
+   totals are printed by the run.
 
 Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
 file IS the answer) and is carried through as an `X` row; a parsed file
@@ -130,6 +133,11 @@ from revl.parser import (
     ExprArrow,
     ExprCall,
     ExprField,
+    ExprIf,
+    ExprIndex,
+    ExprList,
+    ExprMatch,
+    ExprRecord,
     ExprVar,
     IsolateStmt,
     LetEffect,
@@ -175,6 +183,30 @@ def _route(callee: object) -> tuple[str, str] | None:
     if isinstance(callee, ExprVar):
         return callee.name, ""
     return None
+
+
+def _route_values(callee: object) -> tuple[str, str] | None:
+    """`_route`, reading through a list element as well: `ps[0].charge(...)`
+    is `("ps", "[].charge")`. Used only where a call is resolved against the
+    provision aliases (`_resolve_emission`), whose list entries are keyed
+    `<name>[]` (issue #1509)."""
+    if isinstance(callee, ExprField):
+        parts: list[str] = []
+        cur = callee
+        while isinstance(cur, (ExprField, ExprIndex)):
+            parts.append(cur.name if isinstance(cur, ExprField) else "[]")
+            cur = cur.target
+        if isinstance(cur, ExprVar):
+            return cur.name, ".".join(reversed(parts))
+        # a receiver written in place (issue #1681): keyed by the expression,
+        # which `collect_provision_aliases` resolved to the provision it holds
+        return _expr_key(callee.target), callee.name
+    return _route(callee)
+
+
+def _expr_key(e) -> str:
+    """The alias key of a receiver expression written in place."""
+    return f"@expr{id(e)}"
 
 
 # ---------------------------------------------------------------- caps
@@ -604,10 +636,57 @@ def _resolve_emission(root: str, chain: str, requires: dict, handles: dict,
             return None
         svc = psvc.get(handles[root], {}).get(head)
         return (svc, rest) if svc else None
-    if aliases and root in aliases and chain and "." not in chain:
-        comp, key = aliases[root]
+    hit = _alias_hit(root, chain, aliases)
+    if hit is not None:
+        (comp, key), meth = hit
+        if comp == SERVICE_PARAM:
+            return key, meth  # a service-typed method parameter (#1682)
         svc = psvc.get(comp, {}).get(key)
-        return (svc, chain) if svc else None
+        return (svc, meth) if svc else None
+    return None
+
+
+#: The alias marker for a provide method's own SERVICE-TYPED parameter (issue
+#: #1682): `aliases[p] = (SERVICE_PARAM, <Service>)`. A call through it is a
+#: crossing of that service's declared scopes, judged in the method, so it
+#: resolves to the service directly rather than through a spawn handle.
+SERVICE_PARAM = "@service-param"
+
+
+def collect_service_params(c, psvc: dict, svc_objs: dict, aliases: dict) -> None:
+    """Record every provide method's service-typed parameters as aliases of
+    their service (issue #1682). Keyed by surface name over the whole
+    component, as `collect_provision_aliases` is."""
+    for stmt in c.body:
+        if not isinstance(stmt, ProvideStmt):
+            continue
+        svc = svc_objs.get(psvc.get(c.name, {}).get(stmt.key))
+        if svc is None:
+            continue
+        for pm in stmt.methods:
+            decl = svc.methods.get(pm.name)
+            if decl is None:
+                continue
+            for pname, (_dn, ptype) in zip(pm.params, decl.params):
+                head, _ = parse_type(ptype or "")
+                if head in svc_objs:
+                    aliases[pname] = (SERVICE_PARAM, head)
+
+
+def _alias_hit(root: str, chain: str, aliases: dict | None):
+    """`((component, key), method)` when the receiver of `root.chain` is a
+    provision alias, else None. The receiver is `root` itself (`t.run`), or a
+    field or element read off it (`r.p.run`, `ps[0].run`), whose alias is
+    keyed by the path (`r.p`, `ps[]`, issue #1509)."""
+    if not aliases or not chain:
+        return None
+    parts = chain.split(".")
+    name = root
+    for part in parts[:-1]:
+        name += part if part == "[]" else f".{part}"
+    held = aliases.get(name)
+    if isinstance(held, tuple):
+        return held, parts[-1]
     return None
 
 
@@ -617,15 +696,16 @@ def collect_provision_aliases(node, handles: dict, aliases: dict) -> None:
     `handles` it reads."""
     if node is None or isinstance(node, (str, int, float, bool)):
         return
-    if type(node).__name__ == "LetStmt":
-        value = getattr(node, "value", None)
-        name = getattr(node, "name", None)
-        if isinstance(value, ExprField) and isinstance(value.target, ExprVar) \
-                and value.target.name in handles and isinstance(name, str):
-            aliases[name] = (handles[value.target.name], value.name)
-        elif isinstance(value, ExprVar) and value.name in aliases \
-                and isinstance(name, str):
-            aliases[name] = aliases[value.name]  # a second hop
+    if type(node).__name__ == "LetStmt" and isinstance(getattr(node, "name", None), str):
+        _note_value_aliases(node.name, getattr(node, "value", None), handles,
+                            aliases)
+    if isinstance(node, ExprCall) and isinstance(node.callee, ExprField) \
+            and _alias_path(node.callee.target) is None:
+        # a receiver written in place (issue #1681): what it holds, keyed by
+        # the expression itself, which `_route_values` reads back
+        held = _value_provision(node.callee.target, handles, aliases)
+        if held is not None:
+            aliases[_expr_key(node.callee.target)] = held
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
             collect_provision_aliases(getattr(node, f.name), handles, aliases)
@@ -633,6 +713,77 @@ def collect_provision_aliases(node, handles: dict, aliases: dict) -> None:
     if isinstance(node, (list, tuple)):
         for x in node:
             collect_provision_aliases(x, handles, aliases)
+
+
+def _alias_path(e) -> str | None:
+    """`r`, `r.p`, `ps[]` for a value written as a name read through fields
+    and elements, else None."""
+    if isinstance(e, ExprVar):
+        return e.name
+    if isinstance(e, ExprField):
+        base = _alias_path(e.target)
+        return None if base is None else f"{base}.{e.name}"
+    if isinstance(e, ExprIndex):
+        base = _alias_path(e.target)
+        return None if base is None else f"{base}[]"
+    return None
+
+
+def _value_provision(value, handles: dict, aliases: dict):
+    """The (component, provide key) a value holds: the direct read off a
+    spawn handle, a name (or a field or element read off one) that already
+    aliases one, or an `if` whose two arms hold the same one. The checker
+    reads the same thing as the value's static type (issue #1509)."""
+    if isinstance(value, ExprField) and isinstance(value.target, ExprVar) \
+            and value.target.name in handles:
+        return (handles[value.target.name], value.name)
+    if isinstance(value, ExprIf):
+        then = _value_provision(value.then, handles, aliases)
+        return then if then is not None and then == _value_provision(
+            value.otherwise, handles, aliases) else None
+    if isinstance(value, ExprMatch):
+        arms = [_value_provision(arm[-1], handles, aliases) for arm in value.arms]
+        return arms[0] if arms and arms[0] is not None \
+            and all(a == arms[0] for a in arms) else None
+    if isinstance(value, ExprField) and isinstance(value.target, ExprRecord):
+        for key, item in value.target.fields:
+            if key == value.name:
+                return _value_provision(item, handles, aliases)
+        return None
+    if isinstance(value, ExprIndex) and isinstance(value.target, ExprList):
+        items = [_value_provision(i, handles, aliases) for i in value.target.items]
+        return items[0] if items and items[0] is not None \
+            and all(i == items[0] for i in items) else None
+    path = _alias_path(value)
+    held = aliases.get(path) if path is not None else None
+    return held if isinstance(held, tuple) else None
+
+
+def _note_value_aliases(name: str, value, handles: dict, aliases: dict) -> None:
+    """Record what a `let name = value` binding holds: the provision itself
+    (`let t = w.task`, a second hop, an `if` of one), or a record field or
+    list element holding one, keyed `name.field` / `name[]` (issue #1509), and
+    what a copy of such a record or list holds (`let r2 = r`)."""
+    held = _value_provision(value, handles, aliases)
+    if held is not None:
+        aliases[name] = held
+        return
+    if isinstance(value, ExprRecord):
+        for key, item in value.fields:
+            held = _value_provision(item, handles, aliases)
+            if held is not None:
+                aliases[f"{name}.{key}"] = held
+        return
+    if isinstance(value, ExprList):
+        items = [_value_provision(i, handles, aliases) for i in value.items]
+        if items and items[0] is not None and all(i == items[0] for i in items):
+            aliases[f"{name}[]"] = items[0]
+        return
+    path = _alias_path(value)
+    if path is not None:
+        for key in [k for k in aliases if k.startswith(f"{path}.")
+                    or k.startswith(f"{path}[]")]:
+            aliases[name + key[len(path):]] = aliases[key]
 
 
 def _arg_provision(arg, handles: dict, aliases: dict) -> "tuple[str, str] | None":
@@ -724,26 +875,38 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
     """The crossing ONE call head contributes (see `walk_reach`). The
     arguments are the caller's to walk, under whatever region encloses them:
     a call evaluated to produce an argument is not the marked crossing."""
-    rt = _route(node.callee)
+    rt = _route_values(node.callee)
     if not rt:
         return
     root, chain = rt
     res = _resolve_emission(root, chain, requires, handles, psvc, aliases)
     if res is not None and region == "all":
         svc, meth = res
-        if (svc, meth) in em_set:
-            if root in handles or (aliases and root in aliases):
+        hit = _alias_hit(root, chain, aliases)
+        if (svc, meth) in em_set and (root in handles or hit is not None):
+            # a crossing through a resolved receiver: a spawn handle, an alias
+            # of one, a service-typed local, or a method's own service-typed
+            # parameter (issues #1682, #1508). The BOUND column reads the op's
+            # declared scope, `*` when bare, which is what the checker's
+            # provider bound reads (`_resolved_crossings`); the attenuation
+            # column stays `*`, as `_emit_step_caps_pairs` reads a non-`req`
+            # head.
+            mode, entries = bounds[(svc, meth)]
+            if mode == "any":
                 out.add(("*", "*"))
             else:
-                mode, entries = bounds[(svc, meth)]
-                if mode == "any":
-                    # No declared token: the SERVICE names the boundary
-                    # for the fold, in its own namespace; the BOUND
-                    # column still reads the wiring key (item 561).
-                    out.add((_undeclared_cap(svc), root))
-                else:
-                    for e in entries:
-                        out.add((_declared_cap(e), _canon_cap(root, e)))
+                for e in entries:
+                    out.add(("*", e))
+        elif (svc, meth) in em_set:
+            mode, entries = bounds[(svc, meth)]
+            if mode == "any":
+                # No declared token: the SERVICE names the boundary
+                # for the fold, in its own namespace; the BOUND
+                # column still reads the wiring key (item 561).
+                out.add((_undeclared_cap(svc), root))
+            else:
+                for e in entries:
+                    out.add((_declared_cap(e), _canon_cap(root, e)))
     elif res is None and region == "all" and root in emitting:
         # A host emission. The two namespaces part company here (#1169 F3):
         # the attenuation fold gives it the unnameable `*` whatever the
@@ -874,7 +1037,7 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
             head_ctx = "emitnested" if ctx == "emitarg" else "emit"
             expr = getattr(node, "expr", None)
             if isinstance(expr, ExprCall):
-                route = _route(expr.callee)
+                route = _route_values(expr.callee)
                 if route is not None:
                     out.append((*route, head_ctx))
                 for a in expr.args:
@@ -886,7 +1049,7 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
                     walk_calls(getattr(node, f.name), out, "emit")
         return
     if isinstance(node, ExprCall):
-        route = _route(node.callee)
+        route = _route_values(node.callee)
         if route is not None:
             out.append((*route, ctx))
         for a in node.args:
@@ -1483,6 +1646,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # to, and the U rows it produces already carry the resolved
             # (service, method), so both sides read the same crossing.
             aliases: dict[str, tuple[str, str]] = {}
+            # the method parameters first, so a receiver written in place over
+            # one (`(if c { p } else { p }).charge(n)`) resolves through it
+            collect_service_params(c, psvc, svc_objs, aliases)
             for stmt in c.body:
                 collect_provision_aliases(stmt, handles, aliases)
             # ... and the SERVICE-TYPED arrow parameters an application binds a
@@ -3582,27 +3748,33 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
                  mismatches: int = 0) -> str:
     """The generated census + alignment section of `formal/STATUS.md`.
 
-    `mismatches` is the differential's own count, which only `main` has (it
-    needs the Lean side). `--write-status` renders 0, and that is not a claim
-    it measured: the gate returns non-zero on ANY mismatch, so a census can
-    only reach a green main saying zero, and a `main` run with a mismatch
-    renders the real number and reports the drift as well."""
-    parts = [
-        f"{len(ref.files)} files", f"{len(ref.comps)} components",
-        f"{len(ref.providers)} provide methods", f"{len(ref.spawns)} spawn edges",
-        f"{len(ref.refused)} parse refusals",
-        f"{len(ref.dispositions)} teardown scenarios",
-        f"{len(ref.recoveries)} recoveries",
-        f"{len(ref.confinements)} confinements", f"{len(ref.g8surface)} surfaces",
-        f"{len(ref.g5reg)} teardowns",
-        f"{len(ref.a9)} provide-clause components",
-        f"{len(ref.configs)} config fields", f"{len(ref.a2)} A2 bodies",
-    ]
+    It names every file in a bucket that fails or ratchets the gate, and it
+    carries NO count that moves with the corpus (issue #1768). The census
+    totals and the per-bucket file counts are printed by every gate run, and
+    they used to be rendered here too, so every pull request that added a
+    `.rvl` anywhere in the census directories rewrote the same lines of this
+    block and conflicted with every other one, and resolving that took a real
+    `lake build`. A count that is a function of the corpus is checked by the
+    gate that computes it; storing it here only added a line every pull
+    request rewrote. What stays is what a reader cannot get from the run's
+    summary at a glance and what only moves when the model's relation to a
+    named file moves: the bucket names, their gate class, and the named
+    members. The FATAL rows keep their count because it is zero on every run
+    that passes the gate, so it never churns, and a non-zero one is a red gate
+    with its files named below. The ratcheted rows keep theirs because it is
+    the size of a membership ledger that only shrinks: it moves only in a
+    diff that edits `formal/out_of_fragment_ledger.json` too.
+
+    `census`, `file_facts`, `componentless`, `refusals`, `ref` and
+    `mismatches` are still accepted, because the gate's own printout renders
+    them; this block deliberately does not."""
+    del census, file_facts, componentless, refusals, ref, mismatches
+
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
-        # would show up as a wall of diff noise every time the corpus grows.
-        # `break_on_hyphens` off, or `out-of-fragment*` splits mid-token and
-        # markdown stops reading the code span.
+        # would show up as a wall of diff noise. `break_on_hyphens` off, or
+        # `out-of-fragment*` splits mid-token and markdown stops reading the
+        # code span.
         return textwrap.fill(" ".join(text.split()), width=72,
                              break_on_hyphens=False, break_long_words=False)
 
@@ -3610,15 +3782,16 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         STATUS_BEGIN,
         "",
         para(
-            f"**{census['files']} .rvl files -> {census['components']} "
-            f"components -> {census['statements']} statements = "
-            f"{len(file_facts)} modeled + {len(componentless)} componentless "
-            f"+ {len(refusals)} refused at parse**, and **{ref.total()} "
-            f"verdicts compared ({' + '.join(parts)}), "
-            f"{ref.total() - mismatches} agree, {mismatches} mismatches**."),
+            "The census totals (files, components, statements, verdicts "
+            "compared and agreeing) and the file count of every informational "
+            "bucket are printed by every gate run, `make formal` and `python3 "
+            "formal/harness/diff_corpus.py`, and are not stored here: a count "
+            "that moves with the corpus made every pull request that added a "
+            "`.rvl` rewrite this block (issue #1768). The block changes only "
+            "when a named file joins or leaves a bucket below."),
         "",
         para(
-            f"Checker alignment over the {len(file_facts)} modeled files. "
+            "Checker alignment over the modeled files. "
             "Every bucket recording a DISAGREEMENT fails the gate, in both "
             "directions: `missed-*` is the model weaker than the checker, "
             "`formal-strict` and `formal-found-other` are the model stricter "
@@ -3643,9 +3816,12 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         "| --- | --- | --- |",
     ]
     for k in sorted(set(align) | set(FATAL_BUCKETS)):
-        gate = ("**FATAL**" if k in FATAL_BUCKETS else
-                "ratcheted" if k in OOF_RATCHET_BUCKETS else "informational")
-        lines.append(f"| `{k}` | {align.get(k, 0)} | {gate} |")
+        if k in FATAL_BUCKETS:
+            lines.append(f"| `{k}` | {align.get(k, 0)} | **FATAL** |")
+        elif k in OOF_RATCHET_BUCKETS:
+            lines.append(f"| `{k}` | {align.get(k, 0)} | ratcheted |")
+        else:
+            lines.append(f"| `{k}` | printed by the gate | informational |")
     lines.append("")
     named = [(k, rel)
              for k in (*OOF_RATCHET_BUCKETS, *FATAL_BUCKETS)
@@ -3822,8 +3998,38 @@ def main() -> int:
     return 1 if (mismatches or fatal) else 0
 
 
+def census_json() -> int:
+    """`--census-json`: the oracle census, as one JSON object on stdout.
+
+    This is the source `revl.cert` reads for the component certificate's
+    oracle requirement (issue #1768). The census used to be read back out of
+    the counts this harness rendered into `formal/STATUS.md`; the block no
+    longer stores counts that move with the corpus, so the certificate asks
+    the run that computes them. Reference side only, like `--write-status`:
+    `verdicts_compared` is every verdict the differential compares, and the
+    agreement half is the gate's (`make formal` fails on any mismatch)."""
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+    import warnings  # noqa: PLC0415
+
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter("ignore")
+        tsv, _facts, census = export()
+        if not tsv:
+            print("nothing extracted: no oracle census", file=sys.stderr)
+            return 1
+        ref = reference_from_tsv(tsv)
+    json.dump({"files": census["files"], "components": census["components"],
+               "statements": census["statements"],
+               "verdicts_compared": ref.total()}, sys.stdout, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
 if __name__ == "__main__":
     _argv = sys.argv[1:]
+    if "--census-json" in _argv:
+        sys.exit(census_json())
     if "--write-ledger" in _argv:
         sys.exit(write_status(ledger=True))
     sys.exit(write_status() if "--write-status" in _argv else main())

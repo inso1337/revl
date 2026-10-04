@@ -250,8 +250,6 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._boundary_wty", 1, 1]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._called_names", 2, 2]
-
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._expr", 2, 2]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._import_module", 1, 1]
@@ -274,17 +272,17 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._module._dispatch", 13, 13]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._need_fn", 5, 5]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._need_fn", 3, 3]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._op_spec", 6, 6]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._plan", 14, 14]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._plan", 8, 8]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._provide", 159, 159]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._provide", 158, 158]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._realm_sections", 9, 9]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._register_witnessed_calls", 10, 10]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._register_witnessed_calls", 3, 3]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._route_helpers", 32, 32]
 
@@ -304,9 +302,9 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_effect_step", 37, 37]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_extern", 5, 5]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_extern", 2, 2]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.emit", 45, 45]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.emit", 39, 39]
 
 ["reason", "the-item-130-required-stream-t-coeffect-refusal", "The item 130 required-`Stream[T]` coeffect refusal (`_refuse_required_stream`). This tier refuses the whole stream surface by design, having no async host seam, and the coeffect is refused with it at the component's DECLARATION. A corpus document declaring `requires <k>: Stream[T]` would be refused here rather than emitted, so it cannot be a byte-agreement case; the refusal is pinned by tests/test_stream_reactive.py instead."]
 

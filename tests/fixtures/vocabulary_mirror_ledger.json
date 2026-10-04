@@ -87,9 +87,9 @@
       "sites": [
         "src/revl/decode_grammar.py::grammar_refusal_reason",
         "src/revl/lower.py::_check_generatable",
-        "src/revl/mcp/schema.py::expressibility_reason",
-        "src/revl/mcp/schema.py::fully_expressible",
-        "src/revl/resources.py::resource_taint"
+        "src/revl/resources.py::resource_taint",
+        "src/revl/type_schema.py::expressibility_reason",
+        "src/revl/type_schema.py::fully_expressible"
       ],
       "tokens": [
         "cases",
@@ -175,7 +175,7 @@
     {
       "sites": [
         "src/revl/export_client.py::_SCALARS",
-        "src/revl/mcp/schema.py::_JSON_TYPES"
+        "src/revl/type_schema.py::_JSON_TYPES"
       ],
       "tokens": [
         "Bool",
@@ -185,7 +185,7 @@
         "Str",
         "Unit"
       ],
-      "note": "Issue #1272, instance 1 of issue #1285, the six-scalar half. `mcp/schema._JSON_TYPES` is the MCP projection's scalar table and `export_client._SCALARS` the client exporter's; both are kept, for the reasons PR #1283 records, and PR #1283's differential walks the pair driven by the surface type. See also the four-scalar class carrying `export_openapi._SCALARS`, which is the SAME vocabulary two scalars short."
+      "note": "Issue #1272, instance 1 of issue #1285, the six-scalar half. `type_schema._JSON_TYPES` is the type schema's scalar table (the MCP projection reads it) and `export_client._SCALARS` the client exporter's; both are kept, for the reasons PR #1283 records, and PR #1283's differential walks the pair driven by the surface type. See also the four-scalar class carrying `export_openapi._SCALARS`, which is the SAME vocabulary two scalars short."
     },
     {
       "sites": [
@@ -213,7 +213,7 @@
         "Int",
         "Str"
       ],
-      "note": "Issue #1272, instance 1 of issue #1285, the four-scalar half. `export_openapi._SCALARS` is `mcp/schema._JSON_TYPES` two scalars short (`Bytes`, `Unit`), which is exactly the drift the issue describes and is why exact-vocabulary matching puts the two halves in different classes. `run._ENV_TYPE_CHECKS` and `fuzz_cross_tier.BASE` are third and fourth declarations of the same four scalars."
+      "note": "Issue #1272, instance 1 of issue #1285, the four-scalar half. `export_openapi._SCALARS` is `type_schema._JSON_TYPES` two scalars short (`Bytes`, `Unit`), which is exactly the drift the issue describes and is why exact-vocabulary matching puts the two halves in different classes. `run._ENV_TYPE_CHECKS` and `fuzz_cross_tier.BASE` are third and fourth declarations of the same four scalars."
     },
     {
       "sites": [
@@ -501,6 +501,19 @@
         "name"
       ],
       "note": "FALSE POSITIVE. Five unrelated functions that each read the call node's fields out of the IR. Nothing is re-declared, so a function that starts reading a fifth field is a correct one-sided edit and would red this entry with no defect behind it."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_is_value_crossing",
+        "src/revl/query.py::Composition._service_calls"
+      ],
+      "tokens": [
+        "kind",
+        "method",
+        "name",
+        "target"
+      ],
+      "note": "FALSE POSITIVE. Two unrelated functions that each read a lowered call node's fields out of the IR (issue #1562 added the first). Nothing is re-declared: the four strings are IR keys, not a closed vocabulary, so a reader that starts using a fifth field is a correct one-sided edit."
     },
     {
       "sites": [

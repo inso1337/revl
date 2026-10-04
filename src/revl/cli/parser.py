@@ -1077,6 +1077,11 @@ def build_parser() -> argparse.ArgumentParser:
                                 "`registry`) may name (repeatable). Defaults to "
                                 "the directory the server was started in; anything "
                                 "outside is refused before it is read")
+    mcp_serve.add_argument("--all-tools", action="store_true",
+                           help="advertise every verb in tools/list, not only the "
+                                "core tier plus revl_verbs (also: "
+                                "REVL_MCP_ALL_TOOLS=1). Every verb is callable "
+                                "by name either way")
     _add_mcp_http_arguments(mcp_serve)
     _add_profile_settle_argument(mcp_serve)
     mcp_schema = mcp_sub.add_parser("schema",
