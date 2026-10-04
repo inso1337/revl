@@ -214,7 +214,7 @@ def test_a_files_loaded_edit_that_would_not_admit_offers_no_swap(tmp_path):
     refused = _call("revl_edit", {"edits": [{"anchor": "fn size() = 0",
                                              "replacement": "fn size() = \"x\""}]})
     assert refused["ok"] is False and refused["swapped"] is False, refused
-    assert (refused.get("next") or {}).get("tool") != "revl_swap"
+    assert "next" not in refused
 
 
 @needs_runtime

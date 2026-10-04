@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import textwrap
 from dataclasses import dataclass, field
 
@@ -154,6 +155,35 @@ class _LoadedModule:
     named_services: set[str] = field(default_factory=set)
     aliases: dict[str, "_LoadedModule"] = field(default_factory=dict)
     pure_dependencies: set[int] = field(default_factory=set)
+
+
+_TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _service_type_closure(module: "_LoadedModule", svc: ServiceDecl) -> list[int]:
+    """Indexes into `module.program.type_decls` of the public types `svc`'s
+    operations name, closed over the types those declarations name in turn
+    (issue #1899). Declaration order, so the merged table is deterministic."""
+    by_name = {decl.name: index
+               for index, decl in enumerate(module.program.type_decls)
+               if decl.public}
+    pending: list[str] = []
+    for method in svc.methods.values():
+        for _pname, ptype in method.params:
+            pending.extend(_TYPE_NAME.findall(ptype or ""))
+        pending.extend(_TYPE_NAME.findall(method.returns or ""))
+    seen: set[int] = set()
+    while pending:
+        index = by_name.get(pending.pop())
+        if index is None or index in seen:
+            continue
+        seen.add(index)
+        decl = module.program.type_decls[index]
+        for fld in decl.fields or ():
+            pending.extend(_TYPE_NAME.findall(fld.type or ""))
+        for case in decl.cases or ():
+            pending.extend(_TYPE_NAME.findall(case.payload or ""))
+    return sorted(seen)
 
 
 def escaping_use_path(path: str) -> bool:
@@ -929,7 +959,35 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # `contains`) co-compile, and a `use {dedent}`-then-local-`rstrip` no
     # longer collides — while a genuine duplicate of a `pub` name (neither is
     # mangled) still refuses. See _apply_module_privacy.
-    _apply_module_privacy(included)
+    # Issue #1899: a service imported on its own brings the record and variant
+    # types its operations name. Importing only `Store` does not make its
+    # module a pure dependency, so before this none of that module's types
+    # entered the merged table, and a structural literal passed to
+    # `store.put(row: Item)` was checked against an `Item` the caller could
+    # not resolve: "expects `Item`, got `{qty: Int, ref: Str}`" for equal
+    # shapes, where the same literal passed to an imported `fn` unified
+    # (docs/records.md section 3.1). Only the PUBLIC types the signatures
+    # reach, transitively through their fields and cases, are carried, so a
+    # consumer gains no other declaration of that module. They take part in
+    # the privacy pass's type namespace, so a caller's own private type of the
+    # same name is renamed apart exactly as it is against an imported `fn`'s
+    # module.
+    carried: list[tuple[_LoadedModule, int]] = []
+    for module in root_modules:
+        for use in module.program.uses:
+            if use.names is None:
+                continue
+            used = loader.load(loader.resolve_use(module.dir, module.path, use))
+            if id(used) in included_ids:
+                continue  # its types are merged with the rest of its module
+            for name in use.names:
+                svc = used.services.get(name)
+                if svc is None:
+                    continue
+                for index in _service_type_closure(used, svc):
+                    if (used, index) not in carried:
+                        carried.append((used, index))
+    _apply_module_privacy(included, carried)
 
     for module in included:
         for index, decl in enumerate(module.program.type_decls):
@@ -998,6 +1056,12 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if declaration_key(module, "prop_test", index) not in emitted_keys:
                 merged.prop_tests.append(decl)
                 emitted_keys.add(declaration_key(module, "prop_test", index))
+
+    for used, index in carried:
+        key = declaration_key(used, "type", index)
+        if key not in emitted_keys:
+            merged.type_decls.append(used.program.type_decls[index])
+            emitted_keys.add(key)
 
     # Build checker scopes for every emitted function so a module-private
     # declaration from another module is not accidentally callable.
@@ -1308,7 +1372,8 @@ def _reject_cross_module_case_collisions(included: list[_LoadedModule]) -> None:
             )
 
 
-def _apply_module_privacy(included: list[_LoadedModule]) -> None:
+def _apply_module_privacy(included: list[_LoadedModule],
+                          carried: list | None = None) -> None:
     """Namespace every module-private top-level declaration (roadmap 228).
 
     The merged program flattens the included modules into one flat table keyed
@@ -1355,6 +1420,11 @@ def _apply_module_privacy(included: list[_LoadedModule]) -> None:
             val_owners.setdefault(decl.name, set()).add(id(module))
         for decl in module.program.type_decls:
             type_owners.setdefault(decl.name, set()).add(id(module))
+    # issue #1899: the public types an imported service carries share the type
+    # namespace, so a clashing private of an included module is renamed apart
+    for used, index in carried or ():
+        decl = used.program.type_decls[index]
+        type_owners.setdefault(decl.name, set()).add(id(used))
 
     for idx, module in enumerate(included):
         program = module.program
