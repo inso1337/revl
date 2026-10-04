@@ -75,7 +75,10 @@ from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import fillspec
+from . import draft as _draft
+from . import proposal as _proposal
 from . import edit as _edit
+from . import effect_classes as _effect_classes
 from . import leases as _leases
 from . import operator as _operator
 from ..errors import RevlError
@@ -91,6 +94,7 @@ from .persist import RestoreError, admitted_name as _admitted_name
 from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
                        _canon as _approval_canon)
 from .. import query as Q
+from ..plan import _merge_resulting_ir
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
@@ -325,6 +329,27 @@ def _collect_module_keys(node, out: set) -> None:
     elif isinstance(node, list):
         for item in node:
             _collect_module_keys(item, out)
+
+
+def _operator_text_of(in_memory: dict, providers: dict) -> dict:
+    """The operator's own text of each file an in-memory source stands in for
+    (issue #1715): the file on disk, read only inside the sanctioned roots. A
+    path outside them has no operator text, so everything sent for it stays the
+    author's; reading it would make the trust decision an oracle on a file the
+    jail exists to keep closed. An operator-sanctioned provider is the
+    operator's text by configuration."""
+    roots = _file_roots()
+    operator: dict = {os.path.abspath(p): text for p, text in providers.items()}
+    for path in in_memory:
+        if path in operator or not _within_roots(path, roots) \
+                or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                operator[path] = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+    return operator
 
 
 def _jail_refusal(arguments: dict) -> dict | None:
@@ -575,7 +600,10 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
         if files:
             return compile_files(list(files), manifest=manifest,
                                  replacing=replacing, profile=prof,
-                                 sources=in_memory or None)
+                                 sources=in_memory or None,
+                                 operator_sources=(
+                                     _operator_text_of(in_memory, providers)
+                                     if prof is not None else None))
         raise ValueError("provide `source` or `files`")
 
     if providers and profile is not None:
@@ -830,27 +858,67 @@ def _tool_load(arguments: dict) -> dict:
     Under a policy that enforces leases, a load that would boot a component
     under a name another operator leases is refused, as a swap replacing it is
     (`leases.FENCED` says why a cold load is fenced too)."""
-    if not SESSION.loaded:   # a load over a running composition is refused below
-        refusal = _leases.check(SESSION, "load", arguments)
-        if refusal is not None:
-            return _refused_by_lease(refusal)
     source, files, modules = _candidate_of(arguments)
+    if source is None and not files and _draft.pending(SESSION) is not None \
+            and not SESSION.loaded:
+        return _draft.boot_held(SESSION, arguments, _boot_draft)
     try:
         ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
         return report(error)
+    if not SESSION.loaded and _draft.has_holes(ir):
+        # issue #1727: a holed candidate opens a draft rather than failing.
+        # Nothing boots, so nothing a lease fences happens yet: the lease is
+        # checked when the draft boots (`_boot_draft`)
+        return _draft.open_draft(SESSION, arguments, ir)
+    if not SESSION.loaded:   # a load over a running composition is refused below
+        refusal = _leases.check(SESSION, "load", arguments)
+        if refusal is not None:
+            return _refused_by_lease(refusal)
+    return _boot(ir, source, modules, arguments.get("config"),
+                 bool(arguments.get("record")), _origin(arguments))
+
+
+def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
+    """Boot a compiled composition: `Session.load`, then record what it
+    authored. Shared by `revl_load` and a draft that has no holes left."""
     authored = _authored_host_bodies(ir, source, modules)
     try:
-        state = SESSION.load(ir, arguments.get("config"),
-                             record=bool(arguments.get("record")),
-                             origin=_origin(arguments))
+        state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
         return _session_error(error)
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, **_summary(ir), **state}
+    _draft.discard(SESSION)
+    return {"ok": True, **_summary(ir), **state, **_effect_classes.report(ir)}
+
+
+def _boot_draft(vs: dict, config, record, verify=None) -> dict:
+    """Boot a hole-free draft through every gate `revl_load` runs (issue
+    #1727): the load half of the operator gate, a lease on a cold load, the
+    compile, and `Session.load`. Refused, the draft stays held."""
+    candidate = _edit.candidate_arguments(vs)
+    decision = _operator.decide(SESSION, "revl_load", candidate)
+    if decision.gated and not decision.allowed:
+        return _draft.still_a_draft(_refused_by_operator(decision))
+    refusal = _leases.check(SESSION, "load", candidate)
+    if refusal is not None:
+        return _draft.still_a_draft(_refused_by_lease(refusal))
+    try:
+        ir = _edit.compile_virtual(vs)
+    except RevlError as error:
+        return _draft.still_a_draft(report(error))
+    refused = verify(candidate) if verify is not None else None
+    if refused is not None:
+        return _draft.still_a_draft(refused)
+    modules = _edit.file_modules(vs) if vs.get("files") else vs.get("modules")
+    booted = _boot(ir, vs.get("source"), modules, config, bool(record),
+                   _edit._origin_from(vs))
+    if not booted.get("ok"):
+        return _draft.still_a_draft(booted)
+    return {**booted, "draft": False, "booted": True, "loaded": True}
 
 
 def _tool_call(arguments: dict) -> dict:
@@ -908,8 +976,9 @@ def _tool_swap(arguments: dict) -> dict:
         return quarantined
 
     inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
+    before = _edit.running_source(SESSION)
     if not inline:
-        return _swap_server_side(replacing)
+        return _with_touched(_swap_server_side(replacing), before)
 
     # issue #1446: like `revl_load` (#1444), a swap that does not succeed
     # changes nothing, so the candidate's host bodies are recorded only once it
@@ -938,6 +1007,7 @@ def _tool_swap(arguments: dict) -> dict:
                             "its own — pass the full source set to swap")
         return rejected
     authored = _authored_host_bodies(full, source, modules)
+    running = SESSION.ir
     try:
         state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
@@ -948,17 +1018,70 @@ def _tool_swap(arguments: dict) -> dict:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
+    return _with_touched({"ok": True, "admitted": True, "swapped": True,
+                          **_summary(full), **state,
+                          **_effect_classes.report(full, running, against=True)},
+                         before)
+
+
+def _with_touched(result: dict, before: dict) -> dict:
+    """A swap that landed reports the top-level symbols it added, changed or
+    removed against what was running (issue #1714)."""
+    if result.get("swapped"):
+        result["touched"] = _edit._touched(before, _edit.running_source(SESSION))
+    return result
+
+
+def _tool_source(arguments: dict) -> dict:
+    """One declaration of the server-side source, by symbol (issue #1714).
+
+    Reads what the session holds (inline source, modules, or the loaded files
+    as last swapped in), or, with nothing loaded, the `files`/`source` given."""
+    from . import symbols as _symbols  # noqa: PLC0415
+
+    symbol = arguments.get("symbol")
+    if not symbol:
+        return _session_error("`symbol` is required: a declaration name, "
+                              "`<buffer>:Name`, or `<buffer>:<line>`")
+    try:
+        vs = _source_set(arguments)
+        result = _symbols.read(vs, symbol,
+                               deps="deps" in (arguments.get("with") or []),
+                               comments=arguments.get("comments", True) is not False)
+    except (_symbols.SymbolError, _edit.EditError) as error:
+        return _session_error(str(error))
+    return {"ok": True, **result}
+
+
+def _source_set(arguments: dict) -> dict:
+    if arguments.get("proposal") is True:
+        held = _proposal.base(SESSION)
+        if held is None:
+            raise _edit.EditError("nothing is proposed: `proposal: true` reads "
+                                  "the caller's speculative working copy")
+        return held
+    if SESSION.loaded:
+        return _edit.running_source(SESSION)
+    if _draft.pending(SESSION) is not None and arguments.get("source") is None \
+            and not arguments.get("files"):
+        return _draft.pending(SESSION)["vs"]
+    if arguments.get("source") is not None:
+        return {"source": arguments["source"],
+                "modules": dict(arguments.get("modules") or {})}
+    if arguments.get("files"):
+        return _edit._files_source({"files": list(arguments["files"]),
+                                    "modules": arguments.get("modules")})
+    raise _edit.EditError("nothing is loaded: load a composition, or pass "
+                          "`files` or `source` to read from")
 
 
 def _swap_server_side(replacing: tuple) -> dict:
     """Swap the source the session already holds — no inline source resent."""
     vs = _edit.virtual_source(SESSION)
-    if vs.get("source") is None:
+    if vs.get("source") is None and not vs.get("files"):
         return _session_error(
-            "no server-side source to swap by name — this composition was "
-            "loaded from files, so the session holds no inline source to "
-            "re-admit; swap the files themselves",
+            "no server-side source to swap by name — there is nothing the "
+            "session can re-admit without you passing `source`/`files`",
             next=_remedy.swap_files_next(SESSION.origin, replacing))
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
@@ -977,19 +1100,204 @@ def _swap_server_side(replacing: tuple) -> dict:
         rejected["note"] = ("the server-side source admits but is not a complete "
                             "composition on its own")
         return rejected
+    running = SESSION.ir
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs))
     except SessionError as error:
         return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,
-            "fromServerSide": True, **_summary(full), **state}
+            "fromServerSide": True, **_summary(full), **state,
+            **_effect_classes.report(full, running, against=True)}
 
 
-def _tool_edit(arguments: dict) -> dict:
+def _tool_edit(arguments: dict, verify=None) -> dict:
     """Patch the server-side source of the running composition and re-admit —
-    deltas, not documents (roadmap item 50, docs/mcp-bridge.md)."""
+    deltas, not documents (roadmap item 50, docs/mcp-bridge.md).
+
+    With nothing loaded, a call that carries `files` or `source` loads it first,
+    through `revl_load` itself, then edits it (issue #1690): an agent never has
+    to learn that the edit verb needs a load verb before it."""
+    carried = any(arguments.get(k) is not None for k in ("source", "files"))
+    if not carried and not SESSION.loaded and _draft.pending(SESSION) is not None:
+        return _edit_draft(arguments, verify)
+    if carried and SESSION.loaded:
+        return _session_error(
+            "a composition is already loaded: revl_edit patches it, so omit "
+            "`files`/`source` (or revl_unload first to load another)",
+            edited=False, swapped=False)
+    loaded = None
+    if carried:
+        load_arguments = {k: arguments[k] for k in
+                          ("source", "files", "modules", "config", "record")
+                          if k in arguments}
+        # the load half answers to the load gate: the call was gated as an edit
+        decision = _operator.decide(SESSION, "revl_load", load_arguments)
+        if decision.gated and not decision.allowed:
+            return {**_refused_by_operator(decision), "loaded": False,
+                    "edited": False, "swapped": False}
+        loaded = _tool_load(load_arguments)
+        if not loaded.get("ok"):
+            return {**loaded, "loaded": False, "edited": False, "swapped": False}
+        if loaded.get("draft"):
+            return _edit_draft(arguments, verify)
+    result = _edit_loaded(arguments, verify)
+    return {**result, "loaded": True} if loaded is not None else result
+
+
+def _tool_change(arguments: dict) -> dict:
+    """One intent-shaped call for the whole change loop (issue #1695): load if
+    needed, plan, apply to a working copy, verify (admission, the gates, and
+    with `gauntlet: true` the gauntlet), and commit only if all of it passed.
+    Every intent is carried out as `revl_edit` edits, so the jail, the trust
+    rule, the gates and the draft handling are revl_edit's own."""
+    from . import change as _change  # noqa: PLC0415
+
+    commit = arguments.get("commit") is True
+    if arguments.get("discard") is True:
+        dropped = _proposal.discard(SESSION)
+        return {"ok": True, "discarded": dropped, "committed": False,
+                "note": ("the proposal was dropped; the running composition "
+                         "never saw it") if dropped else "nothing was proposed"}
+    if commit and not any(arguments.get(name) is not None
+                          for name in _change.INTENTS):
+        return _commit_held(arguments)
     try:
-        return _edit.apply_edit(SESSION, arguments)
+        intent = _change.intent_of(arguments)
+        plan = None
+        if intent == "withdraw":
+            component, _ = _change._withdraw_spec(arguments["withdraw"])
+            plan = _change.cascade_of(_change.running_ir(SESSION), component)
+        edit_arguments = {**_change.edit_arguments(intent, arguments, plan),
+                          "commit": commit}
+    except _change.ChangeError as error:
+        return _session_error(str(error), committed=False)
+    verifier = (_change.gauntlet_verifier(SESSION)
+                if arguments.get("gauntlet") is True else None)
+    refused = (_change.cascade_refusal(arguments, plan)
+               if intent == "withdraw" else None)
+    result = refused or _tool_edit(edit_arguments, verify=verifier)
+    return _change.shape(intent, result, plan,
+                         _change.withdrawn_names(edit_arguments), verifier)
+
+
+def _tool_export(arguments: dict) -> dict:
+    """Write the running composition's held source to disk, on request (issue
+    #1696). The held source is the source of truth; this is its one way out.
+    A files-loaded composition writes each loaded file whose held text differs
+    from disk back to its own path. An inline one writes to `path`, and its
+    in-memory modules beside it, refusing to overwrite unless `overwrite`.
+    Every path must be inside the sanctioned roots, checked before anything is
+    written, so a refusal writes nothing."""
+    if not SESSION.loaded:
+        return _session_error("nothing is loaded: revl_export writes the held "
+                              "source of a running composition")
+    held = _edit.running_source(SESSION)
+    try:
+        plan = _export_plan(held, arguments)
+    except _edit.EditError as error:
+        return _session_error(str(error), written=[])
+    for path, text in plan:
+        _write_atomic(path, text)
+    return {"ok": True, "written": [p for p, _ in plan],
+            "note": "the held source was written to disk"
+                    if plan else "the disk already holds the held source"}
+
+
+def _export_plan(held: dict, arguments: dict) -> list[tuple[str, str]]:
+    roots = _file_roots()
+    if held.get("files"):
+        targets = [(path, held["files_content"].get(path)) for path in held["files"]]
+        targets = [(p, t) for p, t in targets
+                   if t is not None and t != _edit._read_disk(p)]
+    else:
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path:
+            raise _edit.EditError("this composition was loaded from inline source: "
+                                  "name the file to write in `path`")
+        base_dir = os.path.dirname(os.path.abspath(path))
+        targets = [(os.path.abspath(path), held["source"])] + [
+            (os.path.normpath(os.path.join(base_dir, key)), text)
+            for key, text in (held.get("modules") or {}).items()]
+        if arguments.get("overwrite") is not True:
+            existing = [p for p, _ in targets if os.path.exists(p)]
+            if existing:
+                raise _edit.EditError(
+                    f"refused: {', '.join(existing)} already exists; pass "
+                    "`overwrite: true` to replace it")
+    outside = [p for p, _ in targets if not _within_roots(p, roots)]
+    if outside:
+        raise _edit.EditError(
+            f"refused: {', '.join(outside)} is outside the operator-sanctioned "
+            "root(s); nothing was written")
+    return targets
+
+
+def _write_atomic(path: str, text: str) -> None:
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temporary = os.path.join(directory, f".{os.path.basename(path)}.revl-export")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.replace(temporary, path)
+
+
+def _commit_held(arguments: dict) -> dict:
+    """`revl_change {commit: true}` with no intent: commit what is held. A
+    held draft boots (once hole-free); otherwise the caller's proposal is
+    re-verified against the running composition and swapped in."""
+    from . import change as _change  # noqa: PLC0415
+
+    verifier = (_change.gauntlet_verifier(SESSION)
+                if arguments.get("gauntlet") is True else None)
+    if not SESSION.loaded and _draft.pending(SESSION) is not None:
+        result = _draft.boot_held(
+            SESSION, arguments,
+            lambda vs, config, record: _boot_draft(vs, config, record,
+                                                   verify=verifier))
+    else:
+        result = _proposal.commit(SESSION, verify=verifier)
+    return _change.shape("commit", result, None, [], verifier)
+
+
+def _edit_draft(arguments: dict, verify=None) -> dict:
+    commit = arguments.get("commit", True) is not False
+
+    def boot(vs, config, record):
+        if not commit:  # issue #1696: a speculative change does not boot it
+            return {"ok": True, "draft": True, "booted": False, "loaded": False,
+                    "holeCount": 0, "speculative": True,
+                    "note": "the draft is hole-free and compiles; commit it "
+                            "(revl_change {commit: true}) to boot it"}
+        return _boot_draft(vs, config, record, verify=verify)
+    try:
+        return _draft.edit_draft(SESSION, arguments, boot)
+    except _edit.EditError as error:
+        return _session_error(str(error), edited=False, swapped=False, draft=True)
+
+
+def _edit_loaded(arguments: dict, verify=None) -> dict:
+    """Edit the running composition: speculatively, into the caller's proposal
+    (`commit: false`, issue #1696), or committed. Either way a held proposal
+    is what the edit builds on, and a commit is refused if it went stale."""
+    commit = arguments.get("commit", True) is not False
+    base = _proposal.base(SESSION)
+    if commit and base is not None and _proposal.stale(SESSION):
+        return _session_error(_proposal.stale(SESSION), edited=False,
+                              swapped=False)
+    if commit and base is not None:
+        held = _proposal.held(SESSION)["replacing"]
+        arguments = {**arguments, "replacing": held + [
+            name for name in arguments.get("replacing") or () if name not in held]}
+    running = _edit.running_source(SESSION)
+    try:
+        result = _edit.apply_edit(SESSION, arguments, verify=verify,
+                                  commit=commit, base=base)
+        if commit and result.get("swapped"):
+            if base is not None:  # what the commit changed, against what ran
+                result["touched"] = _edit._touched(
+                    running, _edit.running_source(SESSION))
+            _proposal.discard(SESSION)
+        return _proposal.keep(SESSION, result, arguments.get("replacing") or ())
     except _edit.EditError as error:
         return _edit_refusal(error, arguments)
     except SessionError as error:
@@ -1022,10 +1330,14 @@ def _edit_refusal(error, arguments: dict) -> dict:
 
 
 def _files_loaded_without_buffer(arguments: dict) -> bool:
+    """Whether the session lost a files-loaded composition's buffers. Since
+    issue #1690 each loaded file IS a buffer revl_edit patches, so this holds
+    only when the held working set carries neither inline source nor files."""
     if arguments.get("target") not in (None, "source"):
         return False
     vs = _edit.virtual_source(SESSION)
-    return vs.get("source") is None and bool((SESSION.origin or {}).get("files"))
+    return (vs.get("source") is None and not vs.get("files")
+            and bool((SESSION.origin or {}).get("files")))
 
 
 def _swap_would_refuse(arguments: dict) -> str | None:
@@ -1088,6 +1400,9 @@ def _tool_unload(arguments: dict) -> dict:
         refusal = _leases.check(SESSION, "unload", arguments)
         if refusal is not None:
             return _refused_by_lease(refusal)
+    elif _draft.discard(SESSION):
+        return {"ok": True, "discardedDraft": True,
+                "note": "the held draft was discarded; nothing was running"}
     try:
         return {"ok": True, **SESSION.unload()}
     except SessionError as error:
@@ -1512,7 +1827,15 @@ def _tool_estop_report(_arguments: dict) -> dict:
 
 
 def _tool_state(_arguments: dict) -> dict:
-    return {"ok": True, **SESSION.state(drain=True)}
+    state = {"ok": True, **SESSION.state(drain=True)}
+    held = _draft.pending(SESSION)
+    if held is not None and not SESSION.loaded:
+        try:
+            holes = len(_draft.collect_holes(_edit.compile_virtual(held["vs"])))
+        except RevlError:
+            holes = None
+        state["draft"] = {"holes": holes}
+    return state
 
 
 def _tool_gauntlet(arguments: dict) -> dict:
@@ -1883,7 +2206,7 @@ def _tool_check(arguments: dict) -> dict:
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
     result = {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-              "holes": holes,
+              "holes": holes, **_effect_classes.report(ir),
               "selfCheck": _authoring_loop.self_check(None, holes)}
     blocked = fillspec.unfillable(holes)
     if blocked:
@@ -1935,6 +2258,8 @@ def _tool_admit(arguments: dict) -> dict:
                 "G2/G3 hold across both and no interface drifted",
         **_summary(ir),
         "boundary": _boundary_of(ir),
+        **_effect_classes.report(_merge_resulting_ir(running, ir, set(replacing)),
+                                 running, against=True),
     }
 
 
@@ -1963,7 +2288,13 @@ def _tool_plan(arguments: dict) -> dict:
         manifest=running,
         modules=arguments.get("modules"),
         replacing=tuple(arguments.get("replacing") or ()),
+        include_ir=True,
     )
+    # issue #1707: the class diff reads the resulting composition; the IR
+    # itself is not part of a plan's answer.
+    resulting = result.pop("resultingIR", None)
+    if resulting is not None:
+        result.update(_effect_classes.report(resulting, running, against=True))
     # component leases (item 61): advise — never block — when this swap would
     # replace a component another operator leases. Surfaced so an agent sees
     # the race before it swaps; the plan itself is unchanged.
@@ -2365,7 +2696,9 @@ TOOLS = [
                        "each with file, line, expected type and message) on success, "
                        "or structured diagnostics (code, guarantee, expected/actual, "
                        "fix hint) on rejection. A draft with holes compiles; it is "
-                       "refused at admission until every hole is filled.",
+                       "refused at admission until every hole is filled. "
+                       "`effectClasses` gives each provided operation's effect class "
+                       "(a/b/c) and the crossings that set it.",
         "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
@@ -2592,7 +2925,10 @@ TOOLS = [
                        "NONE of those and swap re-admits the source the server already "
                        "holds for the running composition — so an agent that edited "
                        "server-side with revl_edit, or wants to re-admit the running "
-                       "generation, need not re-serialize the whole file.",
+                       "generation, need not re-serialize the whole file. The answer "
+                       "carries `effectClassChanges` against the running composition and "
+                       "an `effectClassWarnings` entry for every operation whose effect "
+                       "class rose, naming the crossing that raised it.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT,
@@ -2622,7 +2958,16 @@ TOOLS = [
                        "hot-swapped in; one that still has open holes advances the "
                        "server-side source (so the next edit builds on it) but swaps "
                        "nothing. Returns the admission verdict / holes / diagnostic — "
-                       "never the whole source.",
+                       "never the whole source. A composition loaded from `files` is "
+                       "edited too: each loaded file is a buffer named by its path, an "
+                       "edit's own `target` lets one call change several files (a `use` "
+                       "between edited files resolves to the edited text), and the disk "
+                       "is never written. With nothing loaded, pass `files` or `source` "
+                       "and this loads it first, then edits it. {symbol, replacement} "
+                       "replaces one top-level declaration by name (read it first with "
+                       "revl_source). A response that edited lists the `touched` "
+                       "symbols, plus `effectClassChanges` and `effectClassWarnings` "
+                       "against the running composition, as revl_swap does.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2649,19 +2994,160 @@ TOOLS = [
                             "count": {"type": "integer",
                                       "description": "max anchor sites to replace "
                                                      "(omit for all)"},
+                            "target": {"type": "string",
+                                       "description": "this edit's buffer, when it is "
+                                                      "not the call's `target`"},
+                            "symbol": {"type": "string",
+                                       "description": "with `replacement`: replace the "
+                                                      "whole top-level declaration "
+                                                      "this names (as revl_source "
+                                                      "addresses it)"},
                         },
                     },
                 },
                 "target": {"type": "string",
                            "description": "which server-side buffer to edit: omit for the "
-                                          "main inline source, or name an in-memory module"},
+                                          "main inline source (or the one loaded file), "
+                                          "name a loaded file by its path, or name an "
+                                          "in-memory module"},
                 "replacing": {"type": "array", "items": {"type": "string"},
                               "description": "components withdrawn in this admission"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: load these files first, "
+                                         "then edit them"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: load this source first, "
+                                          "then edit it"},
+                "modules": {"type": "object",
+                            "description": "in-memory `use` modules for that load"},
+                "config": {"type": "object",
+                           "description": "config for that load, as revl_load takes it"},
+                "commit": {"type": "boolean",
+                           "description": "false: propose and verify only, into "
+                                          "your proposal (revl_change commits it). "
+                                          "Default true: swap once admitted"},
             },
             "required": ["edits"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_edit,
+    },
+    {
+        "name": "revl_export",
+        "description": "Write the running composition's HELD source to disk, on "
+                       "request: the held source is the source of truth and disk "
+                       "is an export (docs/design/1696-speculation.md). A "
+                       "composition loaded from files writes each file whose held "
+                       "text differs back to its own path; one loaded from inline "
+                       "source writes to `path` (and its modules beside it), "
+                       "refusing to overwrite unless `overwrite: true`. Every path "
+                       "must be inside the sanctioned roots, or nothing is written. "
+                       "Never writes a proposal: commit it first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "inline composition: the file to write"},
+                "overwrite": {"type": "boolean",
+                              "description": "replace an existing file at `path`"},
+            },
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_export,
+    },
+    {
+        "name": "revl_change",
+        "description": "Make one change in ONE call. SPECULATIVE BY DEFAULT "
+                       "(docs/design/1696-speculation.md): the change is applied "
+                       "to your proposal and verified, and nothing swaps until "
+                       "you commit (`commit: true`, now or later with no intent) "
+                       "or drop it (`discard: true`). Name the intent and the "
+                       "server loads (if `files`/`source` are given and nothing is "
+                       "loaded), plans, applies it to a working copy, verifies it "
+                       "(admission against the running composition, the lease and "
+                       "quarantine gates, and with `gauntlet: true` an isolated "
+                       "boot and unload), and commits (hot swap, or boots a "
+                       "draft) only if everything passed. Intents: {edit: {target?, "
+                       "edits}} (revl_edit's patch); {replace: {component, source}} "
+                       "(one declaration by name); {withdraw: \"Name\"} or "
+                       "{withdraw: {component, cascade: true}} (remove a component; "
+                       "the plan reports the cascade of dependents that would lose "
+                       "a provider, and without `cascade: true` admission refuses "
+                       "it). Returns `committed`, `verified`, the `plan`, the "
+                       "`touched` symbols and every `component` the change touched. "
+                       "A failed verification commits nothing and says why.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "edit": {"type": "object",
+                         "description": "{target?, edits}: as revl_edit takes them"},
+                "replace": {"type": "object",
+                            "description": "{component, source}: the declaration's "
+                                           "name and its whole new text"},
+                "withdraw": {"description": "a component name, or {component, "
+                                            "cascade?: true}"},
+                "gauntlet": {"type": "boolean",
+                             "description": "also grade the candidate in the "
+                                            "gauntlet's isolated session before "
+                                            "committing"},
+                "commit": {"type": "boolean",
+                           "description": "true: commit (swap in) after verifying. "
+                                          "Default false: propose and verify only. "
+                                          "With no intent: commit the held "
+                                          "proposal (or boot a held draft)"},
+                "discard": {"type": "boolean",
+                            "description": "true: drop the held proposal"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: load these first"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: load this first"},
+                "modules": {"type": "object",
+                            "description": "in-memory `use` modules for that load"},
+                "config": {"type": "object",
+                           "description": "config for that load"},
+            },
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_change,
+    },
+    {
+        "name": "revl_source",
+        "description": "Read ONE declaration of the server-side source by symbol, "
+                       "instead of the whole file. `symbol` is a top-level "
+                       "declaration's name (a component, service, type, fn, "
+                       "extern...), `<buffer>:Name` when the name is not unique, or "
+                       "`<buffer>:<line>` for the declaration containing that line; a "
+                       "buffer is a loaded file's path, an in-memory module's key, or "
+                       "`source`. `with: [\"deps\"]` adds the declarations it names "
+                       "(its services, the functions and types it uses), and "
+                       "`comments: false` returns the code alone in canonical form. "
+                       "Reads the running composition, or, with nothing loaded, "
+                       "`files`/`source`. Pairs with revl_edit's {symbol, "
+                       "replacement} edit.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string",
+                           "description": "`Name`, `<buffer>:Name` or "
+                                          "`<buffer>:<line>`"},
+                "with": {"type": "array", "items": {"type": "string",
+                                                    "enum": ["deps"]},
+                         "description": "`deps`: also the declarations it names"},
+                "comments": {"type": "boolean",
+                             "description": "false: code only, canonical "
+                                            "(default true: verbatim)"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: files to read from"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: source to read from"},
+                "proposal": {"type": "boolean",
+                             "description": "true: read your speculative proposal "
+                                            "instead of the running source"},
+            },
+            "required": ["symbol"],
+        },
+        "annotations": {"readOnlyHint": True},
+        "handler": _tool_source,
     },
     {
         "name": "revl_gauntlet",

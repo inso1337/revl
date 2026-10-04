@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT / "src"))
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 import javac_gate  # noqa: E402
 
@@ -60,6 +60,28 @@ emit = _emit_module()
 
 def _emit_java(fixture: Path) -> str:
     return emit.emit(compile_files([str(fixture)]))
+
+
+# §4.5's last-n backlog, appended to the stream fixture for the executable
+# scenario (RunStream130.java drives `ReplayedPlugin`). Kept inline rather than
+# in scenarios/stream_130.rvl on purpose: every `.rvl` under that directory is a
+# case in the gate/reference census (tools/gate_reference_census.py), and the
+# native gate, built from selfhost/lower.rvl, does not carry §4.5 replay yet, so
+# a replay document there reads as a new false-reject divergence.
+_REPLAYED = """
+component Replayed requires sink: Sink {
+  let src = effect Stream.source() replay(3) undo src.close()
+  let sub = subscribe src replay(3) undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+"""
+
+
+def _emit_java_with_replay() -> str:
+    return emit.emit(compile_source(
+        FIXTURE.read_text(encoding="utf-8") + _REPLAYED, "stream_130.rvl"))
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +138,7 @@ def test_merge_opens_inside_the_subscriptions_acquisition():
     assert 'var sub = Stream.subscribe(Stream.merge(a, b), "error", 0);' in src
     # one bracket per subscribing component (Consumer, Parked, Fanin, Iterate,
     # Chain) and NO extra bracket for the derived merge or for any link of the
-    # Slice 2 combinator chain — each is owned by the subscription.
+    # Slice 2 combinator chain: each is owned by the subscription.
     assert src.count("() -> sub.close()") == 5
     fanin = src[src.index("class FaninPlugin"):src.index("class IteratePlugin")]
     assert fanin.count("fx.track(") == 3, (
@@ -216,7 +238,7 @@ def test_java_stream_scenario_builds_and_runs(tmp_path):
       * Slice 4 `every … in` — the body runs once per item and a `Closed` ends the
         loop without entering it.
     """
-    _run_scenario(tmp_path, _emit_java(FIXTURE), HARNESS,
+    _run_scenario(tmp_path, _emit_java_with_replay(), HARNESS,
                   "RunStream130", "STREAM_130_OK")
 
 
@@ -235,3 +257,33 @@ def test_java_typed_event_scenario_builds_and_runs(tmp_path):
     """
     _run_scenario(tmp_path, _emit_java(EVENT_FIXTURE), EVENT_HARNESS,
                   "RunStreamEvent130", "STREAM_EVENT_130_OK")
+
+
+# ---------------------------------------------------------------------------
+# §4.5's last-n backlog (the java row): lowered, and the durable cursor refused
+# ---------------------------------------------------------------------------
+
+def test_a_declared_last_n_backlog_lowers_on_both_ends():
+    """The provider's `replay(3)` opens a source that holds three items, and the
+    request opens through `subscribeReplay`, which delivers that backlog before
+    any live item. The subscription is still the ordinary closure bracket."""
+    src = _emit_java_with_replay()
+    assert "var src = Stream.source(3);" in src
+    assert 'var sub = Stream.subscribeReplay(src, 3, "error", 0);' in src
+    assert "public static Subscription subscribeReplay(" in src
+
+
+def test_a_durable_cursor_is_refused_by_name_at_both_ends():
+    for head in ("", 'replay(from: "orders")'):
+        ir = compile_source(
+            "component C {\n"
+            '  let src = effect Stream.source() replay(from: "orders") '
+            "undo src.close()\n"
+            f"  let sub = subscribe src {head} undo sub.close()\n"
+            "  await sub.next()\n"
+            "}\n")
+        with pytest.raises(emit.EmitError) as excinfo:
+            emit.emit(ir)
+        msg = str(excinfo.value)
+        assert "durable stream `replay(from: …)` cursor is not lowered" in msg
+        assert "cordis4j" in msg and "§4.9" in msg

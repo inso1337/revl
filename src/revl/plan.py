@@ -153,13 +153,16 @@ def _merge_resulting_ir(running_ir: dict | None, candidate_ir: dict,
     components += list(candidate_ir.get("components") or [])
     externs = {e["name"]: e for e in running_ir.get("externs") or []}
     externs.update({e["name"]: e for e in candidate_ir.get("externs") or []})
+    # an IR's `functions` is a LIST of `{name, ...}` (as `externs` is), so it
+    # merges by name the same way; a candidate's fn replaces a running one
+    functions = {f["name"]: f for f in running_ir.get("functions") or []}
+    functions.update({f["name"]: f for f in candidate_ir.get("functions") or []})
     return {
         "ir_version": candidate_ir.get("ir_version") or running_ir.get("ir_version"),
         "components": components,
         "services": {**(running_ir.get("services") or {}),
                      **(candidate_ir.get("services") or {})},
-        "functions": {**(running_ir.get("functions") or {}),
-                      **(candidate_ir.get("functions") or {})},
+        "functions": list(functions.values()),
         "externs": list(externs.values()),
         "manifest": candidate_ir.get("manifest") or running_ir.get("manifest") or {},
     }

@@ -127,6 +127,18 @@ the write-ahead discipline). Three record shapes:
               "compensated": false, "detail": {"key":"db","method":"execute","args":["…"]}},
  "inverse": {"reconstructible": false, "reason": "an emission is a one-way crossing…"}}
 
+// 2b. an effect a provider recorded WHILE answering another component's
+//     required-service crossing carries `within`, that crossing's record. A
+//     caller's `emit tickets.file("T1") compensate tickets.withdraw("T1")` and
+//     the `file_host` emission Desk's method makes to answer it are ONE
+//     crossing in the world: recover reports the nested emission under
+//     `nested` ("made inside tickets.file (seq 2); counted there") and counts
+//     it with its enclosing record, which is offset, settled or residue as
+//     that crossing is. Absent otherwise. Across a placement seam the two
+//     records are in different process WALs and neither is folded.
+{"record": "effect", "seq": 3, "component": "Desk", "kind": "emission",
+ "label": "file_host", "within": {"seq": 2, "component": "Agent", "label": "tickets.file"}, …}
+
 // 3. activation marker — present iff activation finished cleanly. NOT the end
 //    of the log: the WAL stays open for the whole run, so steady-state effects
 //    (below) are appended AFTER this line.

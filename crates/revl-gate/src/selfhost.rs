@@ -2821,14 +2821,15 @@ fn render_arrow(node: Value, ctx_: Ctx__m1) -> String {
 fn render_field(node: Value, ctx_: Ctx__m1) -> String {
     let tn = value_field(node.clone(), String::from("target"));
     let mut target = render_expr(tn.clone(), ctx_.clone());
+    let sized = value_bool(value_field(node.clone(), String::from("sized_length")));
     if ((node_kind(tn.clone()) == "index") && target.revl_ends_with(".clone()")) {
         let place = target.revl_slice(0i64, (target.revl_length()).checked_sub(8i64).expect("revl: Int overflow"));
-        return format!("{}.{}.clone()", place, mangle(value_str(value_field(node.clone(), String::from("name")))));
+        return if sized { format!("{}.revl_length()", place) } else { format!("{}.{}.clone()", place, mangle(value_str(value_field(node.clone(), String::from("name"))))) };
     }
     if (!is_atomic(&node_kind(tn.clone()))) {
         target = format!("({})", target);
     }
-    return format!("{}.{}", target, mangle(value_str(value_field(node.clone(), String::from("name")))));
+    return if sized { format!("{}.revl_length()", target) } else { format!("{}.{}", target, mangle(value_str(value_field(node.clone(), String::from("name"))))) };
 }
 
 fn render_record(node: Value, ctx_: Ctx__m1) -> String {
@@ -5773,6 +5774,68 @@ fn method_undo_clones(comp: Value, method: Value, indent: i64) -> Vec<String> {
     return out;
 }
 
+fn ref_ident(node: Value) -> String {
+    let mut ident = value_str(value_field(node.clone(), String::from("id")));
+    if (ident == "") {
+        ident = value_str(value_field(node.clone(), String::from("name")));
+    }
+    return ident;
+}
+
+fn expr_var_names(node: Value, acc: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
+    let mut m = acc;
+    if (value_kind(node.clone()) == "record") {
+        let k = node_kind(node.clone());
+        if (((k == "var") || (k == "name")) || (k == "req")) {
+            let ident = ref_ident(node.clone());
+            if (ident != "") {
+                m.insert(ident.clone(), String::from("1"));
+            }
+        }
+    }
+    for child in value_children(node.clone()) {
+        m = expr_var_names(child.clone(), m.clone());
+    }
+    return m;
+}
+
+fn acquire_moved_locals(node: Value, vt: std::collections::HashMap<String, String>, acc: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
+    let mut m = acc;
+    if (value_kind(node.clone()) == "record") {
+        if ((node_kind(node.clone()) == "call") && value_is_null(value_field(node.clone(), String::from("callee")))) {
+            let recv = ref_ident(value_field(node.clone(), String::from("target")));
+            let mth = value_str(value_field(node.clone(), String::from("method")));
+            if ((map_get(vt.clone(), recv.clone()).revl_starts_with("Map[") && (mth != "get")) && (mth != "remove")) {
+                for arg in value_list(value_field(node.clone(), String::from("args"))) {
+                    let ak = node_kind(arg.clone());
+                    if ((ak == "var") || (ak == "name")) {
+                        let ident = ref_ident(arg.clone());
+                        if (ident != "") {
+                            m.insert(ident.clone(), String::from("1"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for child in value_children(node.clone()) {
+        m = acquire_moved_locals(child.clone(), vt.clone(), m.clone());
+    }
+    return m;
+}
+
+fn undo_reclone_locals(acq: Value, undonode: Value, body_locals: std::collections::HashMap<String, String>, vt: std::collections::HashMap<String, String>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let refs = expr_var_names(undonode.clone(), std::collections::HashMap::new());
+    let moved = acquire_moved_locals(acq.clone(), vt.clone(), std::collections::HashMap::new());
+    for local in { let mut ks: std::vec::Vec<String> = body_locals.keys().cloned().collect(); ks.sort(); ks } {
+        if (refs.contains_key(&local) && moved.contains_key(&local)) {
+            out.push(local.clone());
+        }
+    }
+    return list_sort(out.clone());
+}
+
 fn provide_let_type(value: Value, ctx_: Ctx__m1, comp: Value, services: Value) -> String {
     let inferred = v3_infer_type(value.clone(), ctx_.clone());
     if (inferred != "") {
@@ -5811,6 +5874,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
     let mut c = set_rn(ctx_.clone(), scope.clone());
     let mut out: Vec<String> = vec![];
     let mut index = 0i64;
+    let mut body_locals = std::collections::HashMap::new();
     for step in value_list(value_field(method.clone(), String::from("body"))) {
         let kind = value_str(value_field(step.clone(), String::from("step")));
         if (kind == "return") {
@@ -5822,7 +5886,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
             }
         } else {
             if ((kind == "effect") || (kind == "emit")) {
-                let undoR = method_undo_rename(comp.clone(), method.clone());
+                let mut undoR = method_undo_rename(comp.clone(), method.clone());
                 let mut acqR = scope.clone();
                 for p in value_list(value_field(method.clone(), String::from("params"))) {
                     let pn = value_str(p.clone());
@@ -5843,6 +5907,10 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                 }
                 if registers_undo {
                     out.extend((method_undo_clones(comp.clone(), method.clone(), indent)).iter().cloned());
+                    for local in undo_reclone_locals(acqnode.clone(), undonode.clone(), body_locals.clone(), c.vt.clone()) {
+                        out.push(format!("{}let {}_undo = {}.clone();", pad, local, local));
+                        undoR.insert(local.clone(), format!("{}_undo", local));
+                    }
                 }
                 let acq = render_expr(acqnode.clone(), set_rn(c.clone(), acqR.clone()));
                 out.push(format!("{}let _ = {};", pad, acq));
@@ -5867,6 +5935,9 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                     }
                     if (inferred != "") {
                         c = set_vt(c.clone(), nm.clone(), inferred.clone());
+                    }
+                    if ((kind == "let") && (nm != "")) {
+                        body_locals.insert(nm.clone(), String::from("1"));
                     }
                 } else {
                     out.push(format!("{}<<DEFER-method-step:{}>>", pad, kind));
@@ -6723,10 +6794,37 @@ fn contains_stdlib(v: Value) -> bool {
     return false;
 }
 
+fn uses_stdlib(ir: Value) -> bool {
+    return ((stdlib_node_in(value_field(ir.clone(), String::from("components"))) || stdlib_node_in(value_field(ir.clone(), String::from("functions")))) || stdlib_node_in(value_field(ir.clone(), String::from("tests"))));
+}
+
+fn stdlib_node_in(v: Value) -> bool {
+    if value_is_null(v.clone()) {
+        return false;
+    }
+    let k = node_kind(v.clone());
+    if (((k == "builtin") || (k == "len")) || ((k == "field") && value_bool(value_field(v.clone(), String::from("sized_length"))))) {
+        return true;
+    }
+    for key in value_keys(v.clone()) {
+        if stdlib_node_in(value_field(v.clone(), key.clone())) {
+            return true;
+        }
+    }
+    for x in value_list(v.clone()) {
+        if stdlib_node_in(x.clone()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn deferred_test_markers(ir: Value) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for t in value_list(value_field(ir.clone(), String::from("tests"))) {
-        out.push(format!("<<UNSUPPORTED-TEST:{}>>", value_str(value_field(t.clone(), String::from("name")))));
+        if value_bool(value_field(t.clone(), String::from("lifecycle"))) {
+            out.push(format!("<<UNSUPPORTED-TEST:{}>>", value_str(value_field(t.clone(), String::from("name")))));
+        }
     }
     for t in value_list(value_field(ir.clone(), String::from("fault_tests"))) {
         out.push(format!("<<UNSUPPORTED-FAULT-TEST:{}>>", value_str(value_field(t.clone(), String::from("name")))));
@@ -6769,13 +6867,14 @@ pub fn emit_rust_src(ir: Value) -> String {
     if (functions.revl_length() > 0i64) {
         out.extend((emit_v3_functions(functions.clone(), fr.clone(), tables.clone())).iter().cloned());
     }
+    out.extend((emit_v3_tests(value_list(value_field(ir.clone(), String::from("tests"))), functions.clone(), externs.clone(), fr.clone(), tables.clone())).iter().cloned());
     let services = value_field(ir.clone(), String::from("services"));
     out.extend((emit_service_traits(services.clone(), tables.tn.clone())).iter().cloned());
     out.extend((emit_host_stubs(ir.clone())).iter().cloned());
     if (uses_timer(value_list(value_field(ir.clone(), String::from("components")))) || tests_use_advance(ir.clone())) {
         out.extend((revl_timer_preamble()).iter().cloned());
     }
-    if ((contains_stdlib(Value::new(serde_json::Value::Array((functions.clone()).iter().map(|_e| _e.downcast::<serde_json::Value>().map(|_j| (*_j).clone()).unwrap_or(serde_json::Value::Null)).collect::<Vec<serde_json::Value>>()))) || contains_stdlib(types.clone())) || contains_stdlib(Value::new(serde_json::Value::Array((externs.clone()).iter().map(|_e| _e.downcast::<serde_json::Value>().map(|_j| (*_j).clone()).unwrap_or(serde_json::Value::Null)).collect::<Vec<serde_json::Value>>())))) {
+    if uses_stdlib(ir.clone()) {
         out.extend((stdlib_helpers()).iter().cloned());
         out.push(String::from(""));
     }
@@ -6792,6 +6891,60 @@ pub fn emit_rust_src(ir: Value) -> String {
         out.extend((test_markers).iter().cloned());
     }
     return rstrip__m1(&(out.revl_join(&newline()))).revl_concat(&newline());
+}
+
+fn emit_v3_tests(tests: Vec<Value>, functions: Vec<Value>, externs: Vec<Value>, fr: std::collections::HashMap<String, String>, tables: TypeTables) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut used: Vec<String> = vec![];
+    for f in functions.clone() {
+        used.push(mangle(value_str(value_field(f.clone(), String::from("name")))));
+    }
+    for e in externs {
+        used.push(mangle(value_str(value_field(e.clone(), String::from("name")))));
+    }
+    let borrow = compute_str_param_borrows(functions.clone());
+    let list_borrow = compute_list_param_borrows(functions.clone());
+    for t in tests {
+        if (!value_bool(value_field(t.clone(), String::from("lifecycle")))) {
+            let name = unique_slug(test_slug(value_str(value_field(t.clone(), String::from("name")))), used.clone());
+            used.push(name.clone());
+            out.push(String::from("#[test]"));
+            out.push(format!("fn {}() {{", name));
+            let body = value_list(value_field(t.clone(), String::from("body")));
+            if (body.revl_length() == 0i64) {
+                out.push(String::from("    // (empty test body)"));
+            } else {
+                let ctx_ = Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new() };
+                out.extend((emit_stmts(body.clone(), ctx_.clone(), 1i64).lines).iter().cloned());
+            }
+            out.push(String::from("}"));
+            out.push(String::from(""));
+        }
+    }
+    return out;
+}
+
+fn test_slug(raw: String) -> String {
+    let base = snake(if (raw == "") { String::from("test") } else { raw.clone() });
+    let keep = String::from("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_");
+    let mut slug = String::from("");
+    let mut i = 0i64;
+    while (i < base.revl_length()) {
+        let ch = { base.chars().nth((i) as usize).unwrap().to_string() };
+        slug.push_str(&(if (keep.revl_index_of(&ch) >= 0i64) { ch.clone() } else { String::from("_") }));
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return if ((slug == "") || (String::from("0123456789").revl_index_of(&{ slug.chars().nth((0i64) as usize).unwrap().to_string() }) >= 0i64)) { String::from("test_").revl_concat(&slug) } else { slug.clone() };
+}
+
+fn unique_slug(base: String, used: Vec<String>) -> String {
+    let mut name = base.clone();
+    let mut counter = 0i64;
+    while list_contains(used.clone(), name.clone()) {
+        counter = (counter).checked_add(1i64).expect("revl: Int overflow");
+        name = format!("{}_{}", base, counter);
+    }
+    return name;
 }
 
 fn tkc(ts: &[Token], i: i64) -> Token {
@@ -20150,7 +20303,7 @@ fn cir_expr(e: Expr, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     Expr::FloatLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&v)).revl_concat("}")),
     Expr::BoolLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&v)).revl_concat("}")),
     Expr::StrLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&jstr(&v))).revl_concat("}")),
-    Expr::Var(n) => if scope_has(&sc, &n) { mk_irres(true, (String::from("{\"kind\": \"name\", \"id\": ").revl_concat(&jstr(&n))).revl_concat("}")) } else { mk_irres(false, String::from("")) },
+    Expr::Var(n) => cir_var(&n, sc.clone(), hostSc.clone(), cx.clone()),
     Expr::Bin(b) => { let b = *b; cir_bin(b, sc.clone(), hostSc.clone(), cx.clone()) },
     Expr::Un(u) => { let u = *u; cir_un(u.clone(), sc.clone(), hostSc.clone(), cx.clone()) },
     Expr::If(f) => { let f = *f; cir_if_expr(f.clone(), sc.clone(), hostSc.clone(), cx.clone()) },
@@ -20298,9 +20451,39 @@ fn cir_call(tg: Expr, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: C
     Expr::Var(root_) => if contains__m2(&cx.reqs, &root_) { cir_reqcall(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if contains__m2(&hostSc, &root_) { cir_hostverb(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if is_host_root(&root_) { cir_hostacq(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (instance_comp(&sc, fl.target.clone()) != "") { cir_hostverb(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (scope_has(&sc, &root_) && is_builtin_method(&fl.name)) { cir_builtin(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { mk_irres(false, String::from("")) } } } } },
     _ => mk_irres(false, String::from("")),
 } } },
-    Expr::Var(nm) => if (tagged_case_adt(&cx.cases, &nm) != "") { cir_adt(&tagged_case_adt(&cx.cases, &nm), &nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { cir_fncall(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) },
+    Expr::Var(nm) => if (tagged_case_adt(&cx.cases, &nm) != "") { cir_adt(&tagged_case_adt(&cx.cases, &nm), &nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if cir_calls_a_value(&nm, &sc, cx.clone()) { cir_value_call(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { cir_fncall(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } },
     _ => mk_irres(false, String::from("")),
 };
+}
+
+fn cir_var(n: &str, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
+    if cir_nullary_case(n, cx.clone()) {
+        return cir_adt(&tagged_case_adt(&cx.cases, n), n, vec![], sc.clone(), hostSc.clone(), cx.clone());
+    }
+    if scope_has(&sc, n) {
+        return mk_irres(true, (String::from("{\"kind\": \"name\", \"id\": ").revl_concat(&jstr(n))).revl_concat("}"));
+    }
+    return mk_irres(false, String::from(""));
+}
+
+fn cir_nullary_case(n: &str, cx: CCtx) -> bool {
+    let adt = tagged_case_adt(&cx.cases, n);
+    return ((((adt != "") && (tenv_get(&cx.cases, &(String::from("payload ").revl_concat(&n))) == "")) && (!adt.revl_starts_with("Result"))) && (!adt.revl_starts_with("Opt")));
+}
+
+fn cir_calls_a_value(nm: &str, sc: &[Bind], cx: CCtx) -> bool {
+    if ((((nm == "Some") || (nm == "None")) || (nm == "Ok")) || (nm == "Err")) {
+        return false;
+    }
+    return (scope_has(sc, nm) && (bind_lookup(&cx.fns, nm, 0i64) == ""));
+}
+
+fn cir_value_call(nm: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
+    let a = cir_args(args.clone(), 0i64, sc.clone(), hostSc.clone(), cx.clone(), String::from(""));
+    if (!a.ok) {
+        return mk_irres(false, String::from(""));
+    }
+    return mk_irres(true, (((String::from("{\"kind\": \"call\", \"callee\": {\"kind\": \"name\", \"id\": ").revl_concat(&jstr(nm))).revl_concat("}, \"args\": [")).revl_concat(&a.js)).revl_concat("]}"));
 }
 
 fn cir_adt(adt: &str, case_: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
