@@ -517,7 +517,7 @@ def _normalized_ir(ir: dict) -> dict:
     This is `registry._normalize_ir_for_attest` itself, called rather than
     re-implemented. It used to be a near-copy that normalized only
     `manifest.components[].file` and missed `components[].source`, so a
-    reproduce could never match an attestation `registry.build_evidence` had
+    reproduce could never match an attestation `registry_evidence.build_evidence` had
     signed. Nothing caught it because the attestation tier was reading a path
     the publisher never writes: a dead check cannot fail, and it cannot notice
     two definitions drifting apart either. One definition, one hash.
@@ -530,7 +530,7 @@ def _normalized_ir(ir: dict) -> dict:
 def _attestation_path(entry_dir: Path) -> Path | None:
     """Where the entry's attestation actually lives, or None.
 
-    `registry.build_evidence` publishes it at `<entry>/evidence/attestation.json`
+    `registry_evidence.build_evidence` publishes it at `<entry>/evidence/attestation.json`
     - the item-293 bundle path. This tier used to read `<entry>/attestation.json`,
     a path nothing writes, so for every entry the publish path produces the tier
     was structurally DEAD: it could only ever report "no recorded attestation",

@@ -827,9 +827,14 @@ def run_java(ir: dict) -> tuple[str, str]:
         out.mkdir()
 
         real_classes = os.environ.get("REVL_CORDIS4J_CLASSES")
+        # issue #1888: the real classes are not copied into `out`, so every
+        # step that compiles or runs against the plugin needs them on its
+        # classpath, not only the first compile; the stubs ARE compiled into
+        # `out`, so without the variable `out` alone is the whole classpath
+        classpath = str(out) + (os.pathsep + real_classes if real_classes else "")
         if real_classes:
             compile_components = subprocess.run(
-                [javac, "--release", "21", "-cp", str(out) + os.pathsep + real_classes,
+                [javac, "--release", "21", "-cp", classpath,
                  "-d", str(out), str(pkg / "Components.java")],
                 capture_output=True, text=True, timeout=600)
         else:
@@ -851,11 +856,11 @@ def run_java(ir: dict) -> tuple[str, str]:
             "}\n",
             encoding="utf-8")
         compile_runner = subprocess.run(
-            [javac, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+            [javac, "--release", "21", "-cp", classpath, "-d", str(out), str(runner)],
             capture_output=True, text=True, timeout=600)
         if compile_runner.returncode != 0:
             return ("fail", f"javac runner failed: {compile_runner.stderr.strip()}")
-        run = subprocess.run([java, "-cp", str(out), "RunRevlTests"],
+        run = subprocess.run([java, "-cp", classpath, "RunRevlTests"],
                              capture_output=True, text=True, timeout=600)
         run_output = run.stdout
 

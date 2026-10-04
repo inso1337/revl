@@ -1,0 +1,16 @@
+// REFUSED G-MODEL-PLACE (item 519, issue #1193 slice 2): role `tool` declares
+// no `reaches` clause, so its reach is the unnameable `*`, and `Classifier`
+// crosses `model.tool` with no `route model` block. An undeclared reach is not
+// an empty one, with or without the block. The admitted twin is
+// `ok_req_no_block.rvl`, which declares the reach. The file name's prefix is
+// the expected verdict (`model_` refused under G-MODEL-PLACE, `ok_` admitted);
+// tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device 
+
+service Tools { emission[model.tool] fn run(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Tools provides out: Answer {
+  provide out { fn classify(text) = emit llm.run(text) }
+}

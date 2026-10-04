@@ -112,14 +112,54 @@ def trusted_indices(agent_text: str, operator_text: str,
     return trusted
 
 
-def delta_program(program: Program, trusted: dict[str, frozenset[int]]) -> Program:
+def delta_program(program: Program, trusted: dict[str, frozenset[int]],
+                  placements: frozenset = frozenset()) -> Program:
     """`program` with only the agent's declarations: every item of a declaration
     list whose index is not trusted. The nodes are `program`'s own, so a check
-    run over the delta sees exactly what the merge lowers."""
+    run over the delta sees exactly what the merge lowers.
+
+    `placements` (`operator_placements`) are the realm placements the
+    operator's own text makes. A changed component keeps them out of its delta
+    copy (issue #1851): editing a method of a realm-isolated operator
+    component leaves its `isolate` clause the operator's, so the untrusted-
+    author profile does not read it as the agent naming a realm. Only a clause
+    identical to one in the operator's same-named component is dropped; one
+    that moves the component to another realm, or a new component's, stays in
+    the delta and is refused as before."""
     kept = {name: [item for index, item in enumerate(getattr(program, name))
                    if index not in trusted.get(name, frozenset())]
             for name in _DECL_LISTS}
+    if placements:
+        kept["components"] = [_without_placements(comp, placements)
+                              for comp in kept["components"]]
     return replace(program, **kept)
+
+
+def _realm_statements(comp) -> list:
+    from .parser import IsolateStmt, RouteStmt  # noqa: PLC0415 - import cycle
+
+    return [stmt for stmt in comp.body if isinstance(stmt, (IsolateStmt, RouteStmt))]
+
+
+def _without_placements(comp, placements: frozenset):
+    """A copy of `comp` without the realm statements the operator wrote in its
+    same-named component. The original node, which the merge lowers, is
+    untouched."""
+    ours = {id(stmt) for stmt in _realm_statements(comp)
+            if (comp.name, shape(stmt)) in placements}
+    if not ours:
+        return comp
+    return replace(comp, body=[stmt for stmt in comp.body if id(stmt) not in ours])
+
+
+def operator_placements(operator_text: str, filename: str) -> frozenset:
+    """`(component name, statement shape)` of every top-level `isolate ... in
+    realm(...)` / `realms(...)` statement in the operator's own text."""
+    program = _parse(operator_text, filename)
+    if program is None:
+        return frozenset()
+    return frozenset((comp.name, shape(stmt)) for comp in program.components
+                     for stmt in _realm_statements(comp))
 
 
 def empty_program(program: Program) -> Program:
@@ -134,4 +174,4 @@ def operator_uses(operator_text: str, filename: str) -> frozenset[str]:
 
 
 __all__ = ["shape", "trusted_indices", "delta_program", "empty_program",
-           "operator_uses"]
+           "operator_uses", "operator_placements"]
