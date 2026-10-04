@@ -4692,8 +4692,11 @@ def _revl_unreleased(events):
     """Host resources acquired during the test and never released (R1)."""
     live = {}
     for event in events:
-        tag, _, verb = event.split(" ", 1)[0].rpartition(".")
-        if not tag:
+        head, _, rest = event.partition(" ")
+        tag, _, verb = head.rpartition(".")
+        if not tag or rest.startswith("refused"):
+            # `pool.open refused <url>`: the acquisition raised and acquired
+            # nothing, so there is nothing to release (issue #1859)
             continue
         if verb in _REVL_ACQUIRE:
             live[tag] = verb
