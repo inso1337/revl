@@ -2821,14 +2821,15 @@ fn render_arrow(node: Value, ctx_: Ctx__m1) -> String {
 fn render_field(node: Value, ctx_: Ctx__m1) -> String {
     let tn = value_field(node.clone(), String::from("target"));
     let mut target = render_expr(tn.clone(), ctx_.clone());
+    let sized = value_bool(value_field(node.clone(), String::from("sized_length")));
     if ((node_kind(tn.clone()) == "index") && target.revl_ends_with(".clone()")) {
         let place = target.revl_slice(0i64, (target.revl_length()).checked_sub(8i64).expect("revl: Int overflow"));
-        return format!("{}.{}.clone()", place, mangle(value_str(value_field(node.clone(), String::from("name")))));
+        return if sized { format!("{}.revl_length()", place) } else { format!("{}.{}.clone()", place, mangle(value_str(value_field(node.clone(), String::from("name"))))) };
     }
     if (!is_atomic(&node_kind(tn.clone()))) {
         target = format!("({})", target);
     }
-    return format!("{}.{}", target, mangle(value_str(value_field(node.clone(), String::from("name")))));
+    return if sized { format!("{}.revl_length()", target) } else { format!("{}.{}", target, mangle(value_str(value_field(node.clone(), String::from("name"))))) };
 }
 
 fn render_record(node: Value, ctx_: Ctx__m1) -> String {
@@ -6866,6 +6867,31 @@ fn contains_stdlib(v: Value) -> bool {
     return false;
 }
 
+fn uses_stdlib(ir: Value) -> bool {
+    return ((stdlib_node_in(value_field(ir.clone(), String::from("components"))) || stdlib_node_in(value_field(ir.clone(), String::from("functions")))) || stdlib_node_in(value_field(ir.clone(), String::from("tests"))));
+}
+
+fn stdlib_node_in(v: Value) -> bool {
+    if value_is_null(v.clone()) {
+        return false;
+    }
+    let k = node_kind(v.clone());
+    if (((k == "builtin") || (k == "len")) || ((k == "field") && value_bool(value_field(v.clone(), String::from("sized_length"))))) {
+        return true;
+    }
+    for key in value_keys(v.clone()) {
+        if stdlib_node_in(value_field(v.clone(), key.clone())) {
+            return true;
+        }
+    }
+    for x in value_list(v.clone()) {
+        if stdlib_node_in(x.clone()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn deferred_test_markers(ir: Value) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for t in value_list(value_field(ir.clone(), String::from("tests"))) {
@@ -6918,7 +6944,7 @@ pub fn emit_rust_src(ir: Value) -> String {
     if (uses_timer(value_list(value_field(ir.clone(), String::from("components")))) || tests_use_advance(ir.clone())) {
         out.extend((revl_timer_preamble()).iter().cloned());
     }
-    if ((contains_stdlib(Value::new(serde_json::Value::Array((functions.clone()).iter().map(|_e| _e.downcast::<serde_json::Value>().map(|_j| (*_j).clone()).unwrap_or(serde_json::Value::Null)).collect::<Vec<serde_json::Value>>()))) || contains_stdlib(types.clone())) || contains_stdlib(Value::new(serde_json::Value::Array((externs.clone()).iter().map(|_e| _e.downcast::<serde_json::Value>().map(|_j| (*_j).clone()).unwrap_or(serde_json::Value::Null)).collect::<Vec<serde_json::Value>>())))) {
+    if uses_stdlib(ir.clone()) {
         out.extend((stdlib_helpers()).iter().cloned());
         out.push(String::from(""));
     }
