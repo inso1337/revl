@@ -16,7 +16,7 @@ composition, and brings it up on a cordis-py Context:
 
 While it holds, it also reads newline-delimited JSON *control* commands on
 stdin — the channel `revl swap <component> --to <backend>` uses to drive a
-live migration (docs/swap.md). Today one command is understood:
+live migration (docs/swap.md). The command it always understands:
 
   {"op": "repoint", "key": "<k>", "socket": "<successor.sock>"}
 
@@ -40,6 +40,14 @@ receiver compares it against its own (`_gate_surface_compatible`) and refuses a
 crossing whose gate `api` differs from its own, so two ends that do not cover
 the same surface never trust each other's agreement (item 337 seam identity).
 The process acknowledges an accepted repoint with `[name] REPOINTED <k> -> <socket>`.
+
+Under `revl run --placement --wal` the spec carries `wal`, this process's own
+write-ahead log (issue #1477, `_ProcessWal`), and a second command applies:
+
+  {"op": "commit-wal"}
+
+which the conductor sends once every process is UP. It stamps the WAL's
+`activation-complete` and is acknowledged with `[name] WAL COMMITTED`.
 
 All output is line-prefixed with the process name so the conductor can
 interleave several of these into one readable log. `[name] UP` marks a process
@@ -341,14 +349,62 @@ def _has_provisions(hosts: dict) -> bool:
     return providers.has_provisions(hosts)
 
 
-def _load_module(ir: dict) -> types.ModuleType:
+def _load_module(ir: dict, wal: "_ProcessWal | None" = None) -> types.ModuleType:
     import emit  # noqa: PLC0415  backend dir already on sys.path
 
     source = emit.emit(ir)
     module = types.ModuleType("revl_proc_mod")
     sys.modules[module.__name__] = module
     exec(compile(source, "<revl-proc>", "exec"), module.__dict__)
+    if wal is not None:
+        # between exec and plugin, as the single-process driver does it: the
+        # recorder replaces each component's `apply`, and a fiber's context
+        # chain is fixed at plugin time.
+        wal.open(module, source, ir)
     return module
+
+
+class _ProcessWal:
+    """This process's own write-ahead log under `revl run --placement --wal`
+    (issue #1477).
+
+    One WAL per process, written by the same `replay.Recorder` the
+    single-process driver uses, so `revl recover` reads it with no new reader.
+    It is opened before activation, so every crossing is written ahead of it
+    mattering. Its `activation-complete` marker is NOT stamped when this
+    process's own components finish: a placement's activation is the whole
+    composition's, so the marker waits for the conductor's `commit-wal`
+    command, which it sends only once every process is UP. A crash before that
+    leaves every process's WAL uncommitted, and recover rolls all of them back,
+    as it would the same composition run in one process."""
+
+    def __init__(self, path: str, components: list) -> None:
+        self.path = path
+        self.components = list(components)
+        self.recorder = None
+        self.committed = False
+
+    def open(self, module, source: str, ir: dict) -> None:
+        import replay  # noqa: PLC0415  backend dir already on sys.path
+
+        self.recorder = replay.Recorder(ir)
+        self.recorder.register_source("<revl-proc>", source)
+        self.recorder.activation_origin()
+        self.recorder.timelines.clear()
+        self.recorder.instrument(module, ir)
+        self.recorder.open_wal(self.path, 1)
+
+    def commit(self) -> None:
+        if not self.committed:
+            self.recorder.commit_wal(self.components)
+            self.committed = True
+
+    def close(self) -> None:
+        """Close at an orderly teardown. `run-complete` only after a commit:
+        an orderly stop of a placement that never came fully UP is an
+        activation that did not finish, which is what a WAL with no
+        `activation-complete` says."""
+        self.recorder.close_wal(clean=self.committed)
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +902,8 @@ async def run(spec: dict, spec_path=None) -> None:
     # so a component's first model call already reads the scheduled device.
     # Re-derived from the files, never believed off the spec.
     _install_model_schedule(spec)
-    module = _load_module(running_ir)
+    wal = _ProcessWal(spec["wal"], spec["components"]) if spec.get("wal") else None
+    module = _load_module(running_ir, wal)
     # The backend directory is a trusted LOADER path for the runtime's own
     # first-party modules (`emit`, `runtime`, `bridge`), not an ambient import
     # capability for user-authored `@py` bodies. Keep it on sys.path through the
@@ -1127,7 +1184,13 @@ async def run(spec: dict, spec_path=None) -> None:
                 cmd = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if cmd.get("op") == "repoint":
+            if cmd.get("op") == "commit-wal" and wal is not None:
+                # issue #1477: every process is UP, so the placement's
+                # activation is complete. Stamped on the loop, the only thread
+                # that writes this WAL.
+                asyncio.run_coroutine_threadsafe(_commit_wal(), loop).result()
+                _funnel_line(f"[{name}] WAL COMMITTED")
+            elif cmd.get("op") == "repoint":
                 # item 337: a repoint must pass the SAME admission gate as boot
                 # and `revl swap` before it can substitute a provider at this
                 # seam. `_apply_repoint` re-admits the named successor against
@@ -1139,6 +1202,9 @@ async def run(spec: dict, spec_path=None) -> None:
                                   anchor=anchor):
                     _funnel_line(f"[{name}] REPOINTED {cmd.get('key')} -> "
                                  f"{cmd.get('socket')}")
+
+    async def _commit_wal() -> None:
+        wal.commit()
 
     threading.Thread(target=control_reader, name="revl-control", daemon=True).start()
 
@@ -1181,6 +1247,8 @@ async def run(spec: dict, spec_path=None) -> None:
             f"{role}: {', '.join(problems)}"
             for role, problems in sorted(model_residue.items())) or "unloaded")
     verdict = "no residue" if all(checks.values()) else "RESIDUE LEFT"
+    if wal is not None:
+        wal.close()
     _funnel_line(f"[{name}] residue {verdict} | {detail}")
     _funnel_line(f"[{name}] DOWN")
 

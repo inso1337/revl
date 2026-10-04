@@ -1495,7 +1495,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="persist the effect accumulator as a durable write-ahead "
                           "log (implies --record). On restart, `revl recover --wal "
                           "FILE` rolls forward or back and states a checked verdict "
-                          "(docs/crash-recovery.md)")
+                          "(docs/crash-recovery.md). With --placement, each process "
+                          "writes FILE.<process> and FILE is the run's index")
     run.add_argument("--trace", default=None, metavar="FILE",
                      help="write a causal lifecycle trace (JSONL) — every "
                           "transition carries the cause chain behind it, "
@@ -1588,7 +1589,9 @@ def build_parser() -> argparse.ArgumentParser:
              "boundary inverses LIFO), ending in a checked verdict + residue "
              "proof (docs/crash-recovery.md)")
     recover.add_argument("--wal", required=True, metavar="FILE",
-                         help="a write-ahead log written by `revl run --wal`")
+                         help="a write-ahead log written by `revl run --wal`, or "
+                              "the index of a `revl run --placement --wal` run, "
+                              "whose process WALs are recovered together")
     recover.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
                          help="on roll-forward, the item-15 snapshot to re-admit "
                               "so recovery resumes the persisted generation")
@@ -1619,6 +1622,19 @@ def build_parser() -> argparse.ArgumentParser:
                               "recover reports the classification per un-finalized "
                               "decision and changes nothing, matching `revl estop "
                               "--report`")
+    recover.add_argument("--composition", nargs="+", default=None,
+                         metavar="FILE",
+                         help="replay against the REAL world (issue #1477): the "
+                              "composition the WAL was written by, compiled and "
+                              "checked against the digest in the WAL header "
+                              "(refused on a mismatch). Its discharge "
+                              "descriptors are re-issued through its own host "
+                              "bodies and the providers they call through, by "
+                              "the runtime's abort path")
+    recover.add_argument("--config", default=None, metavar="FILE",
+                         help="with --composition: the component config (TOML "
+                              "or JSON) the composition ran with, as for `revl "
+                              "run --config`")
     recover.add_argument("--model-only", action="store_true",
                          help="accept a run against the in-memory model (issue "
                               "#1477). recover has no real world binding yet, so "
