@@ -116,8 +116,15 @@ acknowledged is on disk before the effect it describes is allowed to matter —
 the write-ahead discipline). Three record shapes:
 
 ```jsonc
-// 1. header (first line)
-{"record": "header", "walVersion": 1, "generation": 7, "guarantee": "…"}
+// 1. header (first line). `composition` is the digest of the IR the log was
+//    opened with (issue #1477); `revl recover --composition` checks it.
+{"record": "header", "walVersion": 1, "generation": 7, "guarantee": "…",
+ "composition": "sha256:…"}
+
+// 1b. every LATER opening of the same file (a `--watch` reload, or a later
+//     run reusing it, #641/#642) records its own composition and the first
+//     seq it owns, when it was opened with an IR
+{"record": "generation", "generation": 8, "fromSeq": 42, "composition": "sha256:…"}
 
 // 2. one per committed effect, written as it commits
 {"record": "effect", "seq": 3, "component": "UserCache", "stepIndex": 4,
@@ -134,10 +141,18 @@ the write-ahead discipline). Three record shapes:
 //     crossing in the world: recover reports the nested emission under
 //     `nested` ("made inside tickets.file (seq 2); counted there") and counts
 //     it with its enclosing record, which is offset, settled or residue as
-//     that crossing is. Absent otherwise. Across a placement seam the two
-//     records are in different process WALs and neither is folded.
+//     that crossing is. Absent otherwise. Across a placement seam (issue
+//     #1889) the bridge carries the caller's crossing with the call, so the
+//     provider's records name it with the caller's PROCESS too, and placement
+//     recover counts such a record with that crossing when the caller
+//     process's WAL holds it ("made inside tickets.file (seq 4 in process
+//     agent)"). A caller WAL that is missing, or that does not hold the seq,
+//     leaves the record as residue: a fold is never assumed.
 {"record": "effect", "seq": 3, "component": "Desk", "kind": "emission",
  "label": "file_host", "within": {"seq": 2, "component": "Agent", "label": "tickets.file"}, …}
+{"record": "effect", "seq": 6, "component": "Desk", "kind": "emission",
+ "label": "file_host", "within": {"seq": 4, "component": "Agent",
+                                  "label": "tickets.file", "process": "agent"}, …}
 
 // 3. activation marker — present iff activation finished cleanly. NOT the end
 //    of the log: the WAL stays open for the whole run, so steady-state effects
@@ -392,9 +407,9 @@ by default; a real host supplies an adapter over the actual filesystem/database)
 with every durable referent the WAL says was created, runs the reconstructible
 inverses against it, and the **residue proof** is the set of referents still
 present afterward. Clean iff that set is empty. The `World` is the catch:
-`revl recover` has no way to bind a real one yet, so today every CLI run is a
-model run, and the proof is a proof about the model. Section 5b says what that
-means for the output and the exit status.
+without `--composition`, `revl recover` runs against the model, and the proof
+is a proof about the model. Section 5b says what that means for the output and
+the exit status, and section 5c how to recover against the real world.
 
 ### 5b. The model is not the world (issue #1477)
 
@@ -403,10 +418,9 @@ through a `World` adapter. The adapter declares what it is with `kind`:
 `"model"` for an in-memory stand-in, `"real"` for an adapter over the actual
 outside world. The default is `"model"`, and `DictWorld` is one.
 
-`revl recover` has no way to supply a real adapter yet, so the CLI always runs
-against `DictWorld`. Nothing it reports as ran, rolled back, re-attempted,
-re-issued or reclaimed happened to a file, a row or a remote service. The
-output says so:
+Without `--composition` (section 5c), the CLI runs against `DictWorld`.
+Nothing it reports as ran, rolled back, re-attempted, re-issued or reclaimed
+happened to a file, a row or a remote service. The output says so:
 
 - the verdict JSON carries `"world": "model"` (or `"real"` for an adapter that
   declares it), on every verdict, including roll-forward and fork-retired,
@@ -445,9 +459,175 @@ they found them. What a model run still writes is world-independent: the
 roll-forward window's `discharge` record and a finalized two-phase admission's
 records, as before.
 
-A real world path, where `revl recover` binds the composition's own externs and
-host bodies and replays the WAL's discharge descriptors against them, is the
-rest of issue #1477.
+### 5c. Recovering against the real world (issue #1477)
+
+```
+revl recover --wal run.wal --composition agent.rvl [--config config.toml]
+```
+
+`--composition` names the composition that wrote the WAL, as passed to `revl
+run`, and `--config` the config it ran with. Recover then:
+
+1. **Checks the composition against the log, opening by opening.** A WAL
+   opened with an IR carries the IR's digest in its header (`composition`, a
+   sha256 over the canonical IR with each `.rvl` path reduced to its basename,
+   so the working directory does not matter), and every later opening of the
+   same file writes a `generation` record with its own digest and the first
+   seq it owns. Each open call belongs to the opening that wrote it, and is
+   replayed only through that opening's composition. A call another opening
+   wrote is `generation-residue`, not attempted, and names the opening
+   ("generation 1 (opening 2 of this log, from seq 9)") and its digest: run
+   recover again with that composition. When the composition wrote none of the
+   open calls, recover refuses outright and names every opening it checked; an
+   opening with no digest (written before this change, or without an IR) is
+   named as such. Replaying a call through another composition would call the
+   wrong host bodies with the right arguments. Two runs of the same
+   composition may both say `generation 1`; the opening number tells them
+   apart.
+2. **Loads the composition's emitted module without activating it**, through
+   the driver's own plug seam, so extern config and bound secrets are
+   installed and no activation body runs again.
+3. **Boots only the providers the open descriptors call through, and only
+   when booting them crosses nothing.** A descriptor whose `call.receiver` is
+   a required-service key needs the live provider. Recover boots the
+   components that provide those keys, and what they require, and names them
+   in the verdict (`binding.booted`). Booting a component runs its
+   activation, so a provider whose activation crosses the boundary (a
+   non-pure extern it reaches, directly or through functions, or an emission
+   method of a service it requires; teardown-position crossings count, since
+   recover unloads what it boots) would make that crossing a second time,
+   and the WAL already holds the first. Recover reads each provider's
+   activation crossings off the IR with `revl audit`'s boundary walk, its
+   provided methods and compensations left out because booting runs neither,
+   and does not boot a provider that has any, or whose required components
+   have any. Each such key is listed in `binding.refused` (`key`,
+   `component`, `crossings`), and every call through it is declined by name
+   (`would-reactivate`). A second recover with nothing open boots nothing.
+4. **Replays the open discharge descriptors through the runtime's own abort
+   path** (`runtime.replay_descriptors`): witnessed inverses newest first with
+   their fences, then compensations newest first under the Phase-2 budget.
+   The runtime appends an `aborted` record naming every seq that ran, which
+   settles it: a later recover, real or model, finds it settled.
+
+The verdict carries `"world": "real"` and a `binding` object (`composition`,
+`digest`, `booted`). Per descriptor:
+
+| runtime outcome | in the verdict |
+|---|---|
+| `ran` | a transactional inverse in `transactionalRolledBack`; a compensation in `compensationsRan` (performed, its host body returned; not residue) |
+| `settled` | `settledByReplay`: an earlier replay already settled it, nothing re-run |
+| `failed` | residue (`restore-residue` or `compensation-residue`, outcome `failed`) |
+| `fenced` | residue (`fenced-residue`): an earlier attempt spent the at-most-once fence |
+| `unresolved` | residue (`unresolved-residue`): the call names no host body in this binding |
+| `stranded` | residue (`stranded-residue`): an E-Stop is in force, nothing ran |
+| `would-reactivate` | residue (`reactivation-residue`): reaching the receiver needs a provider whose activation crosses (`binding.refused`); not attempted, and no fence is spent |
+
+A descriptor whose arguments were not captured at registration (`args: null`,
+a compensation whose argument is itself a call) or were redacted as
+`Secret[T]` is never handed to the runtime: recover never guesses an argument.
+It is residue, named by its call, for example `a.y(<not captured>)`.
+
+What else the binding does, call family by call family. Each goes to its own
+runtime entry point, so the fences and settling records are the runtime's:
+
+- **A legacy boundary inverse** (an `effect` record with a reconstructible
+  `op`, written by `record_boundary`) is a named call with captured arguments,
+  so it goes to `runtime.replay_descriptors` as the transactional entry it is,
+  in the same batch as the descriptors: one seq space, one LIFO order, the
+  runtime's fence and `aborted` record. It lands in `ran`. The one py-tier
+  writer today is a durable-cursor subscription, whose op is
+  `Stream.close(cursor)`; the runtime resolves `Stream` to its own class and
+  closes whatever live subscription resumes from that cursor. In a fresh
+  process nothing is live, so the close has nothing left to do; the recorded
+  position is kept, which is the point of a durable cursor.
+- **An owed deferred emission** is re-fired through `runtime.reissue_deferred`,
+  the session's own flush: the same E-Stop check before the host body and the
+  same `flushed` (or `flush-residue`) record after it. Recover keeps what it
+  always owned: the operator's policy (`--policy` with `recovery may re-issue
+  owed emissions`), the tier, and the `reissue-fence` it writes before the
+  fire. A second recover reads `flushed` and fires nothing.
+- **A shared reclaim** runs through `runtime.reclaim_shared`, which writes the
+  handle's `shared-reclaim-fence` before the inverse and `shared-complete`
+  after it. A second recover finds the completion and reclaims nothing; a
+  fence with no completion is an unknown outcome and is not re-fired.
+
+Against the model none of these is performed, and none spends a fence.
+
+A compensated emission is **offset** once its compensation ran. Each
+compensation descriptor names the emission it offsets (`offsets`, the seq of
+the emission's `effect` record), and after the replay recover re-asks, for
+every emission it had counted closure-only residue, whether its compensation
+is now settled; if so the emission moves to `offset` and out of the residue. A
+bare emission (one with no compensation) still crossed the boundary and stays
+residue. So a crash whose every emission was compensated recovers CLEAN, exit
+`0`; the exit status follows the residue as always.
+
+### 5d. Recovering a placement run (issue #1477)
+
+```
+revl run app.rvl --placement p.toml --wal run.wal
+revl recover --wal run.wal --composition app.rvl
+```
+
+A placement runs each process on its own runtime, so it writes **one WAL per
+process**. With `--wal FILE`, every py process records its own crossings to
+`FILE.<process>` (for `run.wal` and processes `desk` and `agent`:
+`run.wal.desk`, `run.wal.agent`), through the same recorder a single-process
+run uses. FILE itself is the run's **index**, JSON Lines:
+
+- `placement-index` (first line): `placementVersion` and `processes`, each
+  with its `name`, `components`, `backend` and `wal` (a file name relative to
+  the index, so the set moves as one);
+- `opened` (`run`) per run that armed the index;
+- `committed` (`run`) once every process of that run was UP.
+
+**The commit is the placement's, not a process's.** A placement's activation
+is the whole composition's, so no process stamps its own `activation-complete`
+when its components finish. Once every process says UP, the conductor writes
+`committed` to the index, then tells each process to stamp its marker. A crash
+before that leaves every process WAL uncommitted, and recover rolls all of them
+back, as it would the same composition run in one process. A crash between the
+index's `committed` and a process's marker is completed by recover: it stamps
+that process's `activation-complete` from the index (`commitStamped` in the
+verdict), so the process rolls forward with the others instead of back alone.
+
+`revl recover --wal FILE` on an index recovers the whole run:
+
+1. **Finds every process WAL the index names.** A missing one is residue named
+   by its process (`missing-wal`): recover cannot tell what it crossed. An
+   empty one was created by the conductor and never opened by its process,
+   which crossed nothing.
+2. **Recovers processes consumers first**: a process that requires a key from
+   another is recovered before it, so compensations run newest first across
+   the run as within one process.
+3. **Replays each WAL through the composition's binding** (section 5c), with
+   one emitted module and one boot of the providers the open calls of every
+   process go through. A compensation declared in one process through a
+   service another process provides reaches the component that provides it;
+   the process verdict's `binding.reached` names that component and the
+   process the placement hosted it in. A key no process provides is listed in
+   `binding.unreached`, and the runtime reports its calls as residue.
+4. **Gives one verdict** (`"verdict": "placement"`): `placement` (the index,
+   the run, whether it committed, the recovery order), `processes` (each
+   process's own verdict), and one `residue` whose `outstanding` entries carry
+   their `process` and whose proof names each process's residue. It is clean
+   only when every process is clean. A second recover performs nothing.
+
+`revl estop --wal FILE` on an index reads every process WAL it names: the
+outstanding entries are listed per process, and the inventory is known only
+when every process WAL could be read.
+
+Read as a WAL, an index has no records, so a reader would call a crashed
+placement clean. Every WAL reader refuses it instead
+(`PlacementIndexNotAWAL`), naming the process WALs.
+
+`--wal` with `--placement` is refused for a process on a tier other than py
+(its placement runner writes no WAL) and for a sandboxed process (its WAL
+would sit outside the sandbox). `revl swap` is refused while a WAL is armed: a
+successor would write a WAL the index does not name. An existing index is
+reused only for the same processes and components; recover a different
+placement's run first, or name a new path. `--restore` does not apply to a
+placement run.
 
 ### Recovering a session that was forked (item 250)
 

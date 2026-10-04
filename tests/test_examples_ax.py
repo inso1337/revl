@@ -106,7 +106,9 @@ def test_the_gate_is_a_stdio_server_whose_flags_revl_accepts():
     assert args.provider == ["tickets.rvl"]
     assert args.grant == ["Tickets"]
     assert args.root == [MOUNT]
-    assert args.approval_policy == "auto"
+    # issue #1706: the example's agent approves its own tickets, which is the
+    # explicit `advisory` mode now that the default refuses it
+    assert args.approval_policy == "advisory"
     env = dict(w.split("=", 1) for w in words[:start] if "=" in w)
     assert env["REVL_WAL_DIR"] == f"{MOUNT}/.revl/wal"
 

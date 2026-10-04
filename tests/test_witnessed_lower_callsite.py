@@ -267,7 +267,9 @@ def test_emitted_body_matches_slice2a_shape_from_source():
     # which the recorder copies onto the step's scope so the scope-gated fork
     # rewind reads the declaration instead of an absence.
     assert ("_revl_frame.transactional((lambda result: unstash(result)), "
-            "_revl_wit1.value, scope={'caps': ['fs']})") in body
+            "_revl_wit1.value, scope={'caps': ['fs']}, "
+            "call={'receiver': None, 'method': 'unstash', "
+            "'args': (lambda result: [result])(_revl_wit1.value)})") in body
     assert "yield lambda:" not in body
 
 

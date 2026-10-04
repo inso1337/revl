@@ -2592,6 +2592,7 @@ def run_command(args, hold_once: bool = False) -> int:
         return run_placement(args.files, args.placement,
                              once=getattr(args, "once", False),
                              estop_latch=getattr(args, "estop_latch", None),
+                             wal=getattr(args, "wal", None),
                              providers=getattr(args, "providers", None))
 
     backend = getattr(args, "backend", "py")
