@@ -1,0 +1,50 @@
+// item 391 (#106), held to byte agreement by tests/test_selfhost_emit_rust.py:
+// the bridge's marshalling beyond the scalars. The cross-process proxy and the
+// provider dispatch serialize every argument and return; selfhost/emit_rust.rvl
+// used to name anything but a scalar, a scalar `Opt` and `()` with a
+// `DEFER-bridge-*` marker.
+//
+//   - a std `Result`, as a return and as an argument: encoded by hand to the
+//     canonical `{"$kind","$value"}` and decoded back, split at its top-level
+//     comma even when an argument is itself generic (`Result[List[Int], Str]`);
+//   - a `List` and a record: through serde (`to_value` / `from_value`), including
+//     a record whose name merely contains `Value` (`ValueNote` is serde-able;
+//     only the whole word names the opaque cordis `Value`);
+//   - an `Opt[Float]`, the scalar option the return table serializes directly;
+//   - a serde-able argument (a `List`), on the proxy and the dispatch side;
+//   - an `Any` (the opaque cordis `Value`) and a list of them: not marshalled,
+//     so the proxy names the unsupported return, the dispatch refuses an opaque
+//     argument and answers `Null` for an opaque return.
+
+type Note = { title: Str, size: Int }
+type ValueNote = { price: Int }
+
+service Shelf {
+  fn titles() -> List[Str]
+  fn first() -> Note
+  fn checked(n: Int) -> Result[Int, Str]
+  fn settle(r: Result[Int, Str]) -> Int
+  fn weight(name: Str) -> Opt[Float]
+  fn priced() -> ValueNote
+  fn sizes(n: Int) -> Result[List[Int], Str]
+  fn tally(xs: List[Str]) -> Int
+  fn blob() -> Any
+  fn raw(v: Any) -> Any
+  fn raws() -> List[Any]
+}
+
+component Store provides shelf: Shelf {
+  provide shelf {
+    fn titles() = ["a", "b"]
+    fn first() = { title: "a", size: 1 }
+    fn checked(n) = n > 0 ? Ok(n) : Err("negative")
+    fn settle(r) = 1
+    fn weight(name) = None
+    fn priced() = { price: 3 }
+    fn sizes(n) = Ok([n])
+    fn tally(xs) = 2
+    fn blob() = "x"
+    fn raw(v) = v
+    fn raws() = []
+  }
+}

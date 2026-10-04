@@ -140,6 +140,12 @@
 
 ["function", "service-wide-commutative-flag-item-391-emit-services", "emit_services_table", 1, 1]
 
+["reason", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "The self-host port of the reference `_named_call_kwarg` / `_inert` (issue #1369): the named call an inverse or a compensation writes into its WAL discharge descriptor. The corpus reaches the required-service shape and the witnessed inverse, where the two emitters agree byte for byte. Not reached: an unrecognised call shape, a non-`req` target, a `fn`-kind callee, a field-read argument, and an argument that is itself a call, for the reason the reference entry gives."]
+
+["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "call_kwarg", 2, 2]
+
+["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "inert_arg", 1, 1]
+
 ["reason", "type-string-compatibility-edges-split-fn-type-rejects", "Type-string compatibility edges: split_fn_type rejects missing arrow/unclosed params; split_types adjusts bracket/parenthesis nesting, while current generic argument/callable parameter lists are flat. Both parsers mirror reference _split_fn_type/_split_types and supported List/Map/Result/callable annotations are covered in types/branches."]
 
 ["function", "type-string-compatibility-edges-split-fn-type-rejects", "split_fn_type", 2, 2]

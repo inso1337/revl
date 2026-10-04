@@ -28,7 +28,7 @@ def _run_fmt(args: argparse.Namespace) -> int:
     byte-identical IR (roadmap item 35); a file whose IR would change is
     REFUSED (named, nonzero exit) rather than written.
     """
-    from ..formatter import format_source, ir_equivalent, FormatError
+    from ..formatter import format_admitted, ir_equivalent, FormatError
 
     if args.output and len(args.files) != 1:
         print("error: `fmt -o` expects exactly one input file", file=sys.stderr)
@@ -54,7 +54,9 @@ def _run_fmt(args: argparse.Namespace) -> int:
                 print(f"warning: {warning}", file=sys.stderr)
         else:
             try:
-                rewritten = format_source(original, str(path))
+                # issue #1700: the member split when the gate admits it, the
+                # line-preserving layout when it does not
+                rewritten, _gate = format_admitted(original, str(path))
             except FormatError as error:
                 print(f"error: cannot format {path_str}: {error}", file=sys.stderr)
                 exit_code = 1
@@ -93,6 +95,58 @@ def _run_fmt(args: argparse.Namespace) -> int:
                 return 1
 
     return exit_code
+
+
+#: `revl mcp serve --approval-policy` values (issue #1706) -> the session's
+#: (`approval_policy`, `approval_separation`). `auto` is the default: the gate,
+#: and the identity that raised a ticket cannot approve it. `advisory` is what
+#: `--approval-policy auto` meant before #1706: the gate, but the raiser may
+#: answer its own ticket. `off` is the pre-#1706 default: no policy.
+SERVE_APPROVAL_MODES = {"auto": ("auto", True), "advisory": ("auto", False),
+                        "off": (None, False)}
+
+
+def _resolve_serve_approval_mode(args) -> None:
+    """Issue #1706: `revl mcp serve` runs the effect-class gate by default, with
+    separation of duties, and says which mode it is in on stderr. `revl mcp
+    proxy` does not pass through here: it always runs `auto` and keeps its own
+    approval wiring."""
+    mode = getattr(args, "approval_policy", None) or "auto"
+    args.approval_policy, args.approval_separation = SERVE_APPROVAL_MODES[mode]
+    if mode == "advisory":
+        print("approval gate: advisory (--approval-policy advisory). Class (c) "
+              "emissions return a ticket and fire nothing until approved, but "
+              "the identity that raised a ticket may approve it (the behaviour "
+              "of --approval-policy auto before issue #1706). Omit the flag for "
+              "a gate the agent cannot answer itself", file=sys.stderr)
+        return
+    if args.approval_policy is None:
+        print("warning: --approval-policy off: the approval gate is OFF. A "
+              "class-(c) crossing (an irreversible emission with no checked "
+              "inverse) fires unprompted and no ticket is raised, so nothing "
+              "this agent does waits for a human (the behaviour before issue "
+              "#1706). Omit the flag to run the gate", file=sys.stderr)
+        return
+    if getattr(args, "http", None):
+        how = ("each HTTP request is its own operator, so approve as an "
+               "operator granted `approve` in --operator-profile, separate from "
+               "the operator that makes the call")
+    elif getattr(args, "operator_profile", None):
+        how = ("this session runs as one operator and cannot answer its own "
+               "tickets; to approve, serve with --http HOST:PORT and approve as "
+               "a separate operator granted `approve` in --operator-profile")
+    else:
+        how = ("with no operator profile this session can raise tickets but not "
+               "answer them; to approve, serve with --http HOST:PORT "
+               "--operator-profile PROFILE and grant `approve` only to the "
+               "human's operator")
+    print(f"approval gate: on (--approval-policy auto). Class (a) witnessed "
+          f"crossings with an inverse proceed, class (b) deferred emissions wait "
+          f"for commit, class (c) emissions return a ticket and fire nothing. "
+          f"The identity that raised a ticket cannot approve it: {how} "
+          f"(docs/harness-gate-guide.md). --approval-policy advisory lets the "
+          f"raiser approve; --approval-policy off turns the gate off.",
+          file=sys.stderr)
 
 
 def _bind_session_authority(args) -> int | None:
@@ -162,6 +216,12 @@ def _bind_session_authority(args) -> int | None:
         from ..mcp.server import SESSION
 
         SESSION.approval_policy = args.approval_policy
+        SESSION.approval_separation = bool(getattr(args, "approval_separation",
+                                                   False))
+    if getattr(args, "approval_policy", None) \
+            and not getattr(args, "approval_separation", False):
+        from ..mcp.server import SESSION
+
         operator = getattr(SESSION, "operator", None)
         self_approvable = operator is None or any(
             g.allow and g.covers_verb("approve")
@@ -281,6 +341,7 @@ def _run_mcp(args) -> int:
             exposure, code = _http_exposure(args)
             if exposure is None:
                 return code
+        _resolve_serve_approval_mode(args)
         refused = _bind_session_authority(args)
         if refused is not None:
             return refused
@@ -864,3 +925,88 @@ def _announce_or_reexec_runtime(args) -> None:
     if not _gate.cordis_importable():
         print(f"revl mcp serve: {_gate.announcement()}", file=sys.stderr,
               flush=True)
+
+
+# -- issue #1708: `revl act`, the CLI form of `revl_act` -----------------------
+
+def _run_act(args) -> int:
+    """`revl act FILES...`: boot the composition under the approval gate, run
+    each proposed action read from stdin (one JSON object per line: `key`,
+    `method`, `args`) through the same handler as the `revl_act` MCP verb, and
+    print one JSON result per line. At end of input print the commit manifest,
+    which lists every action, then confirm it with `--commit` or abort.
+
+    Nothing here can approve a ticket, so a class-(c) action stays a ticket and
+    never fires. Exit status: 0 when every line was acted on, 1 when a line was
+    malformed or refused, or the composition did not boot."""
+    from ..mcp import server  # noqa: PLC0415
+
+    session = _act_session(args)
+    if session is None:
+        return 1
+    server.SESSION = session
+    failed = False
+    for line in sys.stdin:
+        if line.strip():
+            out = _act_line(server, line)
+            failed |= not out.get("ok") and not out.get("approvalRequired")
+            print(json.dumps(out, default=str), flush=True)
+    print(json.dumps(_act_finish(server, args), default=str), flush=True)
+    return 1 if failed else 0
+
+
+def _act_session(args):
+    """A recording session under the gate, with the composition booted; None
+    (and the reason on stderr) when it cannot boot."""
+    from .._paths import backends_root  # noqa: PLC0415
+
+    backend = backends_root() / "python"
+    if str(backend) not in sys.path:
+        sys.path.insert(0, str(backend))
+    from ..mcp.approval import ApprovalRequired  # noqa: PLC0415
+    from ..mcp.session import Session, SessionError  # noqa: PLC0415
+
+    try:
+        ir = compile_files(args.files)
+    except RevlError as error:
+        print(json.dumps(report(error), indent=2))
+        return None
+    session = Session()
+    session.approval_policy = "auto"
+    if getattr(args, "wal", None):
+        session._wal_path = args.wal
+    try:
+        session.load(ir, record=True)
+    except ApprovalRequired as exc:
+        print(f"error: the composition's activation body reaches a class-(c) "
+              f"crossing (ticket {exc.ticket.get('hash')}), and `revl act` "
+              f"cannot approve one. Serve it with `revl mcp serve` instead",
+              file=sys.stderr)
+        return None
+    except SessionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None
+    return session
+
+
+def _act_line(server, line: str) -> dict:
+    """One proposed action, through the `revl_act` handler."""
+    try:
+        action = json.loads(line)
+    except json.JSONDecodeError as error:
+        return server._session_error(f"not a JSON action: {error}")
+    if not isinstance(action, dict):
+        return server._session_error("an action is a JSON object with `key`, "
+                                     "`method` and `args`")
+    return server._tool_act(action)
+
+
+def _act_finish(server, args) -> dict:
+    """The commit manifest, then the commit (`--commit`) or the abort."""
+    manifest = server._tool_commit({})
+    if not manifest.get("ok"):
+        return manifest
+    if getattr(args, "commit", False):
+        done = server._tool_commit_confirm({"hash": manifest["manifest"]["hash"]})
+        return {**manifest, "committed": done}
+    return {**manifest, "aborted": server._tool_abort({})}

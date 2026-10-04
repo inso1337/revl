@@ -2,17 +2,13 @@
 
 ["function", "async-activation-remains-outside-the-self-host-rust", "erase_async_ret", 1, 1]
 
-["reason", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "Canonical ABI bridge boundary: these residuals emit opaque/non-scalar Value extraction, serialization and deserialization plus proxy glue. Scalar and scalar-Option bridge paths are covered; records, collections, Results and opaque payloads remain explicit DEFER cases."]
+["reason", "canonical-abi-bridge-boundary-the-marshalling-helpers-are", "Canonical ABI bridge boundary: the marshalling helpers are ported since item 391 (records, collections, std `Result` and the opaque `Value`, held to byte agreement by emit_rust_corpus/bridge_types.rvl). What is left mirrors the reference: `split_result`'s final `return []` for a `Result<...>` with no top-level comma, which no well-formed type produces, and `emit_bridge`'s config-default field line, which needs a bridged provider that declares a `config` default."]
 
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "bridge_arg_extract", 1, 1]
+["function", "canonical-abi-bridge-boundary-the-marshalling-helpers-are", "split_result", 1, 1]
 
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "bridge_arg_ser", 1, 1]
+["reason", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "Canonical ABI bridge boundary: the marshalling helpers are ported since item 391 (records, collections, std `Result` and the opaque `Value`, held to byte agreement by emit_rust_corpus/bridge_types.rvl). What is left mirrors the reference: `split_result`'s final `return []` for a `Result<...>` with no top-level comma, which no well-formed type produces, and `emit_bridge`'s config-default field line, which needs a bridged provider that declares a `config` default."]
 
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "bridge_ret_deser", 1, 1]
-
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "bridge_ret_ser", 1, 1]
-
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "emit_bridge", 4, 4]
+["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "emit_bridge", 1, 1]
 
 ["reason", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming."]
 
@@ -32,9 +28,13 @@
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "is_scalar_option", 1, 1]
 
+["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "is_word_char", 1, 1]
+
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "list_element_type", 3, 3]
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "resolved", 1, 1]
+
+["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "result_to_json", 1, 1]
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "rstrip", 5, 5]
 
@@ -50,7 +50,7 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these", "is_extra_linebreak", 3, 3]
 
-["function", "component-construction-and-provide-method-alternatives-these", "method_body_lines", 5, 5]
+["function", "component-construction-and-provide-method-alternatives-these", "method_body_lines", 3, 3]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "mname", 1, 1]
 
@@ -104,7 +104,7 @@
 
 ["function", "host-object-blocks-no-corpus-document-acquires-the", "is_map_cas_verb", 1, 1]
 
-["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32."]
+["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `render_var`'s statements."]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "borrow_str_arg", 1, 1]
 
@@ -134,7 +134,7 @@
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_un", 2, 2]
 
-["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_var", 2, 2]
+["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_var", 1, 1]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "str_param_readonly", 3, 3]
 
@@ -180,7 +180,7 @@
 
 ["function", "the-port-s-stream-typed-event-host-dialect", "stream_stage_arrow", 1, 1]
 
-["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered."]
+["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements."]
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "build_type_tables", 2, 2]
 
@@ -194,7 +194,7 @@
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "ref_name", 1, 1]
 
-["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_type_t", 3, 3]
+["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_type_t", 2, 2]
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_v3_lit", 3, 3]
 

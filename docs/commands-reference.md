@@ -14,8 +14,8 @@ compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
-dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
-profile  pool  attest  dash  repair  bundle  emit  verify  deploy
+dev  recover  act  estop  slo  branch  compare  replay  why  metrics
+trace  profile  pool  attest  dash  repair  bundle  emit  verify  deploy
 deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -931,7 +931,10 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   (`:timeline`, `:back k`); see [replay.md](replay.md).
 - `--wal FILE` - persist the effect accumulator as a durable write-ahead log
   (implies `--record`). On restart, `revl recover --wal FILE` rolls forward or
-  back with a checked verdict ([crash-recovery.md](crash-recovery.md)).
+  back with a checked verdict ([crash-recovery.md](crash-recovery.md)). With
+  `--placement`, each process writes its own WAL (`FILE.<process>`) and FILE
+  is the run's index; py processes only, unsandboxed, and no `revl swap`
+  ([section 5d](crash-recovery.md#5d-recovering-a-placement-run-issue-1477)).
 - `--estop-latch FILE` - watch FILE for an operator E-Stop, so `revl estop
   --latch FILE` from another terminal halts this run immediately
   ([443-estop.md](design/443-estop.md)). Unarmed by default; an unarmed run
@@ -1033,6 +1036,32 @@ when a teardown is legitimately long rather than wedged.
 `run --record` opens the replay REPL (`:timeline`, `:back`, `:forward`,
 `:inspect`, `:bisect`; see [replay.md](replay.md)).
 
+### `revl act`
+
+The agent tool loop in one call per action (issue #1708), the CLI form of the
+`revl_act` MCP verb ([mcp-reference.md](mcp-reference.md#revl_act)). Boots the
+composition in FILES under the approval gate with recording on, then reads
+proposed actions from stdin, one JSON object per line:
+
+    {"key": "ops", "method": "stash", "args": ["/srv/out/report.txt"]}
+
+and prints one JSON result per line: the action's `class`, `outcome`
+(`executed`, `deferred` or `ticket`), `receipt` and `residue`, exactly as
+`revl_act` returns them. At end of input it prints the commit manifest, which
+lists every action under `actions`.
+
+- `--commit` - confirm the manifest at end of input: flush the deferred actions
+  and keep the witnessed ones. Without it the session is aborted: nothing
+  deferred fires and the witnessed actions are undone.
+- `--wal FILE` - the session's write-ahead log (default: a file in the per-user
+  approval WAL directory).
+
+`revl act` has no operator, so it cannot approve a ticket: a class-(c) action
+stays a ticket and never fires. To approve one, run the loop over
+`revl mcp serve` instead ([harness-gate-guide.md](harness-gate-guide.md)). Exit
+status: `0` when every line was acted on, `1` when a line was malformed or
+refused or the composition did not boot.
+
 ### `revl recover`
 
 Crash recovery: read a `revl run --wal` write-ahead log and roll forward
@@ -1041,6 +1070,9 @@ LIFO), ending in a checked verdict + residue proof
 ([crash-recovery.md](crash-recovery.md)).
 
 - `--wal FILE` - a write-ahead log written by `revl run --wal` (required).
+  For a `--placement` run, the index: recover finds every process WAL it
+  names, recovers them consumers first, and gives one verdict naming each
+  process's residue ([section 5d](crash-recovery.md#5d-recovering-a-placement-run-issue-1477)).
 - `--restore SNAPSHOT.json` - on roll-forward, the item-15 snapshot to
   re-admit so recovery resumes the persisted generation.
 - `--approval-policy auto` - on `--restore`, re-arm the auto-approve policy the
@@ -1052,16 +1084,30 @@ LIFO), ending in a checked verdict + residue proof
 - `--forward` - finalize forward a two-phase admission whose runtime advanced
   past the crash and whose surface still matches. Without it, recover only
   reports each un-finalized decision.
+- `--composition FILE...` - recover against the REAL world: the composition
+  that wrote the WAL. Each open call is replayed only through the composition
+  of the log opening that wrote it (the header, or a later `generation`
+  record); another opening's calls are residue naming that opening, and a
+  composition that wrote none of them is refused by name. A provider whose
+  activation crosses the boundary is never booted to reach it (booting would
+  cross again); calls through it are residue naming the provider and its
+  crossings (`binding.refused`). The WAL's open discharge descriptors are re-issued through its own
+  host bodies and the providers they call through, by the runtime's abort
+  path, and the runtime's `aborted` record settles each one that ran.
+- `--config FILE` - with `--composition`, the config the composition ran with,
+  as for `revl run --config`.
 - `--model-only` - accept a run against the in-memory model (see below).
-- `--json` - machine-readable output. The verdict carries `world`.
+- `--json` - machine-readable output. The verdict carries `world`, and with
+  `--composition` a `binding` object naming the providers it booted.
 
-`revl recover` cannot bind the real outside world yet, so it replays against an
-in-memory model (`DictWorld`). Every call it reports is marked `[modelled, not
+Without `--composition`, `revl recover` replays against an in-memory model
+(`DictWorld`). Every call it reports is marked `[modelled, not
 performed]`, the verdict carries `"world": "model"` and `"worldCalls"`, and a
 model run never writes an at-most-once fence to the WAL. Exit status: `0`
 clean (with `--model-only` if the model stood in for any call), `1` honest
 residue, `3` clean in the model after the model stood in for at least one call,
-without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477).
+without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477)
+and, for `--composition`, [section 5c](crash-recovery.md#5c-recovering-against-the-real-world-issue-1477).
 
 ### `revl estop`
 
@@ -1082,7 +1128,11 @@ resume, and the way back is `revl recover --wal FILE`.
   `--wal` is given.
 - `--wal FILE` - the running session's write-ahead log. Derives the latch as
   `FILE.estop` when `--latch` is omitted, and names the log the outstanding
-  inventory is read from.
+  inventory is read from. For a `--placement` run's index, the inventory is
+  read from every process WAL it names, each entry tagged with its process.
+  An entry is outstanding until a `discharge` record (a commit) or an
+  `aborted` record (a recover replayed it) settles it; `settled` counts the
+  ones that were.
 - `--reason TEXT` - why the button was hit; carried into the halt record and
   every residue record it produces.
 - `--operator TOKEN` - the operator accountable for the halt. An E-Stop is an
@@ -1826,6 +1876,18 @@ the server whose verbs are documented in [mcp-reference.md](mcp-reference.md).
   its `mcp` sandbox bounds admitted agent code, and `leases enforced` refuses a
   swap that would replace a component another operator leases (item 61). Omit
   for advisory-only leases.
+- `--approval-policy {auto, advisory, off}` - the effect-class approval gate (item 246,
+  [harness-gate-guide.md](harness-gate-guide.md)). `auto` is the default:
+  - class (a) witnessed crossings with an inverse proceed;
+  - class (b) deferred emissions wait for commit;
+  - class (c) emissions return a ticket and fire nothing;
+  - the identity that raised a ticket cannot approve it (issue #1706), so with
+    no operator profile the session raises tickets but cannot answer them.
+
+  `advisory` runs the same gate but lets the raiser approve its own ticket, so
+  the prompt is advisory; this is what `auto` meant before issue #1706, and the
+  server says so at startup. `off` turns the gate off, the default before issue
+  #1706, and says so with a startup warning.
 - `--http HOST:PORT` - serve MCP 2026-07-28 Streamable HTTP at
   `http(s)://HOST:PORT/mcp` instead of stdio, one operator per request
   ([mcp-http-transport.md](mcp-http-transport.md)). Needs `--operator-profile`

@@ -379,6 +379,55 @@ post-commit crash would find the logged inverse descriptors and replay a
 committed transaction's rollback. Discharge must be durable before the
 activation reports success.
 
+## A scoped abort: the UI transaction unit (item 522, py tier only)
+
+Amendment (issue #1369, [538-ui-transactions.md](538-ui-transactions.md)
+§10). A provide method that crosses a computer-use verb runs inside
+`Frame.ui_transaction`. When that call FAILS, the unit runs the abort above
+over the entries this call registered, and over no others: Phase 1 replays
+its `transactional` entries newest first, Phase 2 runs its `compensation`
+entries newest first under the same bound and the same continue-and-record
+rule, and the failure propagates. The entries are removed from the frame's
+deferred lists before they run, so the activation's own later commit or abort
+never reaches them again. A call that returns leaves its entries parked, and
+the path above settles them as it settles any method-registered entry.
+Brackets are not touched: releasing a handle stays the activation's business.
+Under an E-Stop the unit runs nothing and the halt strands the entries.
+
+Only the python tier implements it. The other five tiers keep a failed call's
+entries parked until the activation settles.
+
+### A declared compensation registers wherever it is crossed (py tier)
+
+An extern may declare its own compensation (`extern emission fn put(..)
+compensate undo_put()`, item 254). The activation body registered it at an
+`emit put(..)` statement; a provide method registered it nowhere, so an abort
+after a tool call could not undo a crossing the program declared undoable.
+Every extern that declares `compensate` is now decorated with
+`runtime.declared_crossing`, and every provide method that can reach one runs
+in `Frame.call_scope`, inside which the decorator registers the compensation
+through `Frame.compensation_method`, the call a site-spelled compensation
+makes, after the host body returns. That holds in every position the frontend
+admits: a statement, a `let`, a `return`, an argument, an `if` arm. A plain
+call scope settles nothing on failure; the UI transaction unit above is the
+scope that does.
+
+Measured with `revl test --sweep --backend all` over an activation-body
+crossing: go, rust and java never run an extern-declared compensation, and the
+sweep still reports the tiers as agreeing and residue-free. Those tiers are
+not changed here.
+
+### An owed compensation that did not land is not a clean verdict
+
+A session boundary report (`Session.abort`, `commit`, `unload`, `aclose`)
+carries `noResidue`, the in-process R4 checks, beside `compensationResidue`.
+When a compensation was owed and did not land, `noResidue` used to stay true:
+a clean verdict for an undo that did not happen. When the residue is not
+empty, a fifth check, `compensations`, is now present and false, and
+`noResidue` is false with it. A boundary with no compensation residue reports
+the four checks as before. `aclose`'s `settled` stays physical settlement and
+reads the four R4 checks only.
+
 ## The merged residue schema (246 freezes this)
 
 One schema, one channel. 243 rule 6 (restore-residue feeds 246's prompt) and
@@ -529,6 +578,91 @@ rollback that owed a compensation it did not complete is `rolled-back` with
 residue, never clean. Because recover can re-attempt what an abort already
 attempted, inverses must be idempotent-on-replay (243 rule 5) and
 compensations should be idempotent or carry the idempotency key.
+
+### The named call, as the py tier writes it (issue #1369)
+
+Until issue #1369 the py tier did not keep the `call` shape above. It guessed:
+`receiver` was the component, `method` was the first global name the closure
+loaded, and `args` was `[]` for a compensation and `[witness]` for an inverse,
+so `compensate tickets.withdraw(t)` was recorded as receiver `Agent`, method
+`tickets`, args `[]`. Nothing a fresh process could call.
+
+The emitter now derives the named call at every registration site
+(activation and method, transactional and compensation, and the compensation
+an extern declares) and passes it as `call=`; the frame writes it verbatim.
+
+- `receiver` is the required-service key for a call through one, and `null`
+  for an extern or module fn, which the emitted module binds by `method`.
+- `args` are evaluated at registration. An inverse's are evaluated against
+  `result`, the `Ok` witness, so an `undo restore(result.path)` records the
+  path and not the whole witness.
+- A compensation whose argument is itself a call (`compensate a.y(a.q(t))`)
+  records `"args": null`. Capturing it would run `a.q` at registration, on
+  every successful call, instead of only when the compensation is owed; `null`
+  says the arguments were not captured rather than recording a list that
+  looks complete.
+
+`runtime.replay_descriptors(module, wal_path, descriptors, services=...)`
+re-issues open descriptors in a fresh process. It rebuilds each one as the
+`_Transactional` or `_Compensation` it was, under its original `seq`, and runs
+them through `Frame.drain` and `Frame._drain_phase2`, so the replay fences,
+the E-Stop, the Phase-2 budget and the residue records are the in-process
+ones. It writes an `aborted` record naming what ran, skips a seq a discharge
+or `aborted` record already settles and a non-idempotent inverse a previous
+attempt fenced, and reports a descriptor whose call names nothing it can
+resolve (or whose `args` are `null`) as `unresolved`. A service-call
+descriptor needs the live provider for its key, which the caller supplies.
+
+### A compensation names the emission it offsets (py tier)
+
+A compensation's discharge descriptor also carries `"offsets": <seq>`, the
+seq of the `effect` record of the emission it offsets. The link lives on the
+descriptor because the emission's `effect` record is written AHEAD of the host
+body and the descriptor only after it returns, so the effect record cannot
+know the descriptor's seq, and its `compensated` flag is written before the
+compensation exists. The frame pairs the compensation with the recorded
+emission when it registers it: by source adjacency, or, for a compensation an
+extern declares, by the crossing's name. An emission the recorder never saw
+(one in expression position) is left unpaired rather than paired with a
+neighbour.
+
+`revl recover` reads it three ways:
+
+- an emission is `offset`, not residue, exactly when its compensation's
+  descriptor seq is settled, meaning a `discharge` or `aborted` record names it;
+- a compensation an `aborted` record names (an in-process abort, or
+  `runtime.replay_descriptors`) is reported as settled and not re-issued;
+- the timeline's own `compensation` record for a compensation that has a
+  descriptor is reported through the descriptor, not a second time as
+  closure-only.
+
+An emission with no compensation is still out.
+
+### Three more fresh-process entry points (py tier, issue #1477)
+
+`replay_descriptors` covers the abort path. Three call families it does not
+cover each have their own entry point in `backends/python/runtime.py`, and
+`revl recover` keeps the policy for all of them (tiers, fences it spends,
+what it reports):
+
+- `reissue_deferred(module, wal_path, descriptors, services=...)` fires owed
+  `deferred-emission`s a crashed session never flushed. They go through the
+  session's own flush (`SessionOwner._flush`), in program order: the E-Stop
+  check before each host body, continue-and-record, and a `flushed` or
+  `flush-residue` record after each fire. A seq that already has either record
+  is `settled` and is not fired again.
+- `Stream.close(cursor)` is now a classmethod, so the `Stream.close(<cursor>)`
+  a durable-cursor subscription's record names resolves. It closes any live
+  subscription on that cursor and keeps the recorded position. In a fresh
+  process nothing is live, so it has nothing to close and returns False.
+- `reclaim_shared(module, wal_path, grants, services=...)` re-fires the inverse
+  of a `shared` grant a crash left counted, once. It honours the shared book's
+  records: `shared-complete` is `settled`, `shared-reclaim-fence` is `fenced`
+  (outcome unknown, not re-fired). A counted grant is fenced durably before its
+  inverse runs, and `shared-complete` is written only after it returns.
+
+Each returns an outcome per seq or handle, and under an E-Stop each strands
+everything and writes nothing.
 
 ### Owned deliverable: the recovery.py/replay.py WAL migration (py tier, landed)
 
