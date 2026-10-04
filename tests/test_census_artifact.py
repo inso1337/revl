@@ -302,9 +302,9 @@ def test_a_stale_reproduction_lifts_no_claim(artifact, committed):
 
 def test_the_reproduction_fixture_matches_what_was_published(artifact,
                                                              committed):
-    recorded = json.loads(
-        artifact.CRATE_REPRODUCTION.read_text(encoding="utf-8"))
+    recorded = artifact.load_reproduction()
     rep = committed["census"]["reproduction"]
+    assert recorded["n"] == rep["n"] == len(recorded["programs"])
     assert recorded["engine"] == "crate"
     assert recorded["checker_version"] == rep["recorded_at_checker_version"]
     assert recorded["false_admissions"] == rep["crate_false_admissions"]
@@ -1099,3 +1099,107 @@ def test_verify_reads_the_records_directory(artifact, tmp_path):
     (tmp_path / "cases.jsonl").write_text("not json\n")
     code, text = artifact.verify(tmp_path)
     assert code == 2 and "cannot read the records" in text
+
+
+# --- the crate reproduction stores no count (issue #1768) ---------------------
+#
+# `tests/fixtures/census_crate_reproduction.json` stored `n`, the number of
+# programs the crate run covered. It was the one line every corpus-moving pull
+# request that re-recorded rewrote, so any two of them conflicted on it. The
+# directory that replaces it records WHICH programs the run covered, one per
+# line, and the count is derived.
+
+
+def _reproduction(programs, version="GATE-CENSUS-1+aaaaaaaaaaaa"):
+    return {"note": "n", "engine": "crate", "checker_version": version,
+            "tracked_buckets": {}, "false_admissions": [],
+            "programs": sorted(programs)}
+
+
+def _repro_files(artifact, recorded) -> dict[str, str]:
+    return {f"tests/fixtures/census_crate_reproduction/{name}": text
+            for name, text in artifact.reproduction_texts(recorded).items()}
+
+
+def test_the_committed_reproduction_is_canonical_and_stores_no_count(artifact):
+    recorded = artifact.load_reproduction()
+    assert recorded is not None and recorded["programs"]
+    facts = json.loads((artifact.CRATE_REPRODUCTION
+                        / artifact.REPRODUCTION_FACTS).read_text())
+    assert "n" not in facts and "programs" not in facts
+    for rel, text in _repro_files(artifact, recorded).items():
+        assert (ROOT / rel).read_text(encoding="utf-8") == text, (
+            f"{rel} is not in canonical form; re-record it")
+    assert recorded["programs"] == sorted(recorded["programs"])
+
+
+def test_trim_records_the_programs_and_derives_the_count(artifact, census,
+                                                         tmp_path):
+    raw = {"engine": "crate",
+           "buckets": {"agree-admit": ["b.rvl", "a.rvl"],
+                       "agree-refuse/G1": ["oracle-reject:twice",
+                                           "oracle-reject:twice"],
+                       "false-admit/T1": ["c.rvl"]}}
+    recorded = artifact.trim_reproduction(census, raw)
+    assert recorded["programs"] == ["a.rvl", "b.rvl", "c.rvl",
+                                    "oracle-reject:twice",
+                                    "oracle-reject:twice"]
+    assert recorded["tracked_buckets"] == {"false-admit/T1": ["c.rvl"]}
+    assert "n" not in recorded
+    for name, text in artifact.reproduction_texts(recorded).items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    loaded = artifact.load_reproduction(tmp_path)
+    assert loaded["n"] == 5 and loaded["programs"] == recorded["programs"]
+
+
+@_needs_merge_tree
+def test_two_re_recordings_that_add_programs_merge(artifact):
+    """The exit test for this file. Two pull requests each add a program and
+    re-record the crate run at the same checker version. In the directory
+    each adds one line and they merge; in the single file both rewrite `n`
+    and conflict."""
+    base = [f"examples/p{i:03d}.rvl" for i in range(0, 40, 2)]
+    left = base + ["examples/p011.rvl"]
+    right = base + ["examples/p031.rvl", "examples/p033.rvl"]
+    clean, conflicted = merge(_repro_files(artifact, _reproduction(base)),
+                              _repro_files(artifact, _reproduction(left)),
+                              _repro_files(artifact, _reproduction(right)))
+    assert clean, conflicted
+
+    def old(programs):
+        recorded = _reproduction(programs)
+        recorded["n"] = len(recorded.pop("programs"))
+        return {"tests/fixtures/census_crate_reproduction.json":
+                json.dumps(recorded, indent=1, sort_keys=True) + "\n"}
+
+    clean, conflicted = merge(old(base), old(left), old(right))
+    assert not clean and conflicted == [
+        "tests/fixtures/census_crate_reproduction.json"]
+
+
+def test_the_reproduction_check_is_as_strict_and_names_what_it_missed(
+        artifact, census, records, sources):
+    """A reproduction recorded at another checker version still lifts no
+    claim, whatever it covered, and one at the current version over fewer
+    programs than the census now runs is reported with the gap counted."""
+    provenance = _load("tools/corpus_provenance.py", "artifact_test_prov3")
+    hydrated = artifact.hydrate(records, artifact.corpus_sources(sources))
+    measured = artifact.measured_from_records(hydrated)
+    version, _ = artifact.checker_version()
+    ids = sorted({row[0] for row in measured["case_rows"]})
+
+    def report(recorded):
+        loaded = dict(recorded, n=len(recorded["programs"]))
+        return artifact.build_report(census, provenance, measured, loaded,
+                                     probe=records["facts"]["mechanism"])
+
+    stale = report(_reproduction(ids))
+    assert stale["census"]["reproduction"]["is_current"] is False
+    assert all(c["rung"] != "demonstrated" for c in stale["claims"])
+
+    short = report(_reproduction(ids[3:], version))
+    rep = short["census"]["reproduction"]
+    assert rep["is_current"] is True
+    assert rep["census_programs_not_in_reproduction"] == 3
+    assert ("census programs this run read that the reproduction did not: "
+            "**3**") in artifact.render_markdown(short)

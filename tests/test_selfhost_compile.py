@@ -696,6 +696,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # when a provide method's body is a bare `None` (`fn weight(name) =
         # None`), so the native chain emits the component with no provision.
         "bridge_types.rvl",
+        # item 391: in-file `test` blocks. Emitter-exact from the reference IR;
+        # the native IR producer carries no `tests` section, so the native chain
+        # emits the functions and drops every `#[test] fn`.
+        "in_file_tests.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),

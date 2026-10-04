@@ -1837,6 +1837,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `component_edges.rvl`
 - `comp_stream.rvl`
 - `bridge_types.rvl`
+- `in_file_tests.rvl`
 
 `wasm`:
 
