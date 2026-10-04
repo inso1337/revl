@@ -13353,61 +13353,95 @@ fn match_bracket(ts: &[Token], i: i64) -> i64 {
     return (0i64).checked_sub(1i64).expect("revl: Int overflow");
 }
 
-fn kwarg_at(ts: &[Token], i: i64) -> bool {
-    let end = match_bracket(ts, i);
-    if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-        return false;
-    }
-    let mut depth = 0i64;
-    let mut j = i;
-    while (j < end) {
-        let k = tkc(ts, j).kind;
+fn bracket_facts(ts: &[Token]) -> Vec<i64> {
+    let mut rows = std::collections::HashMap::new();
+    let mut opener: Vec<i64> = vec![];
+    let mut parent: Vec<i64> = vec![];
+    let mut cur = (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    let mut j = 0i64;
+    let n = ts.revl_length();
+    while (j < n) {
+        let k = (ts)[(j) as usize].kind.clone();
         if (((k == "(") || (k == "[")) || (k == "{")) {
-            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
-        }
-        if (((k == ")") || (k == "]")) || (k == "}")) {
-            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
-        }
-        if ((depth == 1i64) && (k == "=")) {
-            return true;
-        }
-        j = (j).checked_add(1i64).expect("revl: Int overflow");
-    }
-    return false;
-}
-
-fn slice_at(ts: &[Token], i: i64) -> bool {
-    let end = match_bracket(ts, i);
-    if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-        return false;
-    }
-    let mut depth = 0i64;
-    let mut q = 0i64;
-    let mut j = i;
-    while (j < end) {
-        let k = tkc(ts, j).kind;
-        if (((k == "(") || (k == "[")) || (k == "{")) {
-            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
-        }
-        if (((k == ")") || (k == "]")) || (k == "}")) {
-            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
-        }
-        if ((depth == 1i64) && (k == "?")) {
-            q = (q).checked_add(1i64).expect("revl: Int overflow");
-        }
-        if ((depth == 1i64) && (k == ":")) {
-            if (q == 0i64) {
-                return true;
+            rows.insert((j).to_string(), vec![(0i64).checked_sub(1i64).expect("revl: Int overflow"), 0i64, 0i64, 0i64, 0i64]);
+            opener.push(j);
+            parent.push(cur.clone());
+            cur = (opener.revl_length()).checked_sub(1i64).expect("revl: Int overflow");
+        } else {
+            if ((cur != (0i64).checked_sub(1i64).expect("revl: Int overflow")) && (((((((k == ")") || (k == "]")) || (k == "}")) || (k == "=")) || (k == ",")) || (k == "?")) || (k == ":"))) {
+                let key = ((opener)[(cur) as usize]).to_string();
+                let f = match rows.get(&key).cloned() {
+    Some(v) => v,
+    None => vec![(0i64).checked_sub(1i64).expect("revl: Int overflow"), 0i64, 0i64, 0i64, 0i64],
+    _ => unreachable!(),
+};
+                if (((k == ")") || (k == "]")) || (k == "}")) {
+                    rows.insert(key.clone(), vec![j, (f)[(1i64) as usize].clone(), (f)[(2i64) as usize].clone(), (f)[(3i64) as usize].clone(), (f)[(4i64) as usize].clone()]);
+                    cur = (parent)[(cur) as usize].clone();
+                } else {
+                    if (k == "=") {
+                        rows.insert(key.clone(), vec![(f)[(0i64) as usize].clone(), 1i64, (f)[(2i64) as usize].clone(), (f)[(3i64) as usize].clone(), (f)[(4i64) as usize].clone()]);
+                    } else {
+                        if (k == ",") {
+                            rows.insert(key.clone(), vec![(f)[(0i64) as usize].clone(), (f)[(1i64) as usize].clone(), 1i64, (f)[(3i64) as usize].clone(), (f)[(4i64) as usize].clone()]);
+                        } else {
+                            if (k == "?") {
+                                rows.insert(key.clone(), vec![(f)[(0i64) as usize].clone(), (f)[(1i64) as usize].clone(), (f)[(2i64) as usize].clone(), (f)[(3i64) as usize].clone(), ((f)[(4i64) as usize].clone()).checked_add(1i64).expect("revl: Int overflow")]);
+                            } else {
+                                if ((f)[(4i64) as usize] == 0i64) {
+                                    rows.insert(key.clone(), vec![(f)[(0i64) as usize].clone(), (f)[(1i64) as usize].clone(), (f)[(2i64) as usize].clone(), 1i64, (f)[(4i64) as usize].clone()]);
+                                } else {
+                                    rows.insert(key.clone(), vec![(f)[(0i64) as usize].clone(), (f)[(1i64) as usize].clone(), (f)[(2i64) as usize].clone(), (f)[(3i64) as usize].clone(), ((f)[(4i64) as usize].clone()).checked_sub(1i64).expect("revl: Int overflow")]);
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            q = (q).checked_sub(1i64).expect("revl: Int overflow");
         }
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
-    return false;
+    let mut out: Vec<i64> = vec![];
+    let mut i = 0i64;
+    while (i < n) {
+        let f = match rows.get(&(i).to_string()).cloned() {
+    Some(v) => v,
+    None => vec![(0i64).checked_sub(1i64).expect("revl: Int overflow"), 0i64, 0i64, 0i64, 0i64],
+    _ => unreachable!(),
+};
+        out.push((f)[(0i64) as usize].clone());
+        out.push(if ((f)[(0i64) as usize] == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { 0i64 } else { (f)[(1i64) as usize].clone() });
+        out.push(if ((f)[(0i64) as usize] == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { 0i64 } else { (f)[(2i64) as usize].clone() });
+        out.push(if ((f)[(0i64) as usize] == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { 0i64 } else { (f)[(3i64) as usize].clone() });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
 }
 
-fn tuple_at(ts: &[Token], i: i64) -> bool {
-    let end = match_bracket(ts, i);
+fn bracket_close(facts: &[i64], i: i64) -> i64 {
+    if ((i < 0i64) || ((4i64).checked_mul(i).expect("revl: Int overflow") >= facts.revl_length())) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    return (facts)[((4i64).checked_mul(i).expect("revl: Int overflow")) as usize].clone();
+}
+
+fn bracket_fact(facts: &[i64], i: i64, slot: i64) -> i64 {
+    if (bracket_close(facts, i) == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return 0i64;
+    }
+    return (facts)[(((4i64).checked_mul(i).expect("revl: Int overflow")).checked_add(slot).expect("revl: Int overflow")) as usize].clone();
+}
+
+fn kwarg_at(facts: &[i64], i: i64) -> bool {
+    return (bracket_fact(facts, i, 1i64) == 1i64);
+}
+
+fn slice_at(facts: &[i64], i: i64) -> bool {
+    return (bracket_fact(facts, i, 3i64) == 1i64);
+}
+
+fn tuple_at(ts: &[Token], facts: &[i64], i: i64) -> bool {
+    let end = bracket_close(facts, i);
     if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return false;
     }
@@ -13415,22 +13449,7 @@ fn tuple_at(ts: &[Token], i: i64) -> bool {
     if ((closer.kind == "=>") || (closer.kind == ":")) {
         return false;
     }
-    let mut depth = 0i64;
-    let mut j = i;
-    while (j < end) {
-        let k = tkc(ts, j).kind;
-        if (((k == "(") || (k == "[")) || (k == "{")) {
-            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
-        }
-        if (((k == ")") || (k == "]")) || (k == "}")) {
-            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
-        }
-        if ((depth == 1i64) && (k == ",")) {
-            return true;
-        }
-        j = (j).checked_add(1i64).expect("revl: Int overflow");
-    }
-    return false;
+    return (bracket_fact(facts, i, 2i64) == 1i64);
 }
 
 fn value_paren(ts: &[Token], i: i64) -> bool {
@@ -13491,7 +13510,7 @@ fn foreign_name_at(ts: &[Token], i: i64, bound: &[String]) -> String {
     return if ((prev.kind == "}") && (nxt.kind == "(")) { foreign_name_msg(&n) } else { String::from("") };
 }
 
-fn foreign_form_at(ts: &[Token], i: i64) -> String {
+fn foreign_form_at(ts: &[Token], facts: &[i64], i: i64) -> String {
     let t = tkc(ts, i);
     let nxt = tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
     if ((t.kind == "+") && (nxt.kind == "+")) {
@@ -13515,16 +13534,16 @@ fn foreign_form_at(ts: &[Token], i: i64) -> String {
         return String::from("revl has no Python-style `a if c else b` conditional expression");
     }
     let pv = tkl(ts, (i).checked_sub(1i64).expect("revl: Int overflow"));
-    if ((((t.kind == "ident") && (nxt.kind == "(")) && (!((pv.kind == "kw") && (pv.text == "fn")))) && kwarg_at(ts, (i).checked_add(1i64).expect("revl: Int overflow"))) {
+    if ((((t.kind == "ident") && (nxt.kind == "(")) && (!((pv.kind == "kw") && (pv.text == "fn")))) && kwarg_at(facts, (i).checked_add(1i64).expect("revl: Int overflow"))) {
         return String::from("revl has no keyword arguments — `f(k=v)` is not a call");
     }
-    if (((t.kind == "[") && ends_expr(pv.clone())) && slice_at(ts, i)) {
+    if (((t.kind == "[") && ends_expr(pv.clone())) && slice_at(facts, i)) {
         return String::from("revl has no slice syntax `xs[a:b]`");
     }
     if (((t.kind == "{") && (nxt.kind == "string")) && atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), ":")) {
         return String::from("revl records use identifier keys, not string keys like `{\"k\": v}`");
     }
-    if (((t.kind == "(") && value_paren(ts, i)) && tuple_at(ts, i)) {
+    if (((t.kind == "(") && value_paren(ts, i)) && tuple_at(ts, facts, i)) {
         return String::from("revl has no tuples — `(a, b)` is not a value");
     }
     return String::from("");
@@ -13532,20 +13551,21 @@ fn foreign_form_at(ts: &[Token], i: i64) -> String {
 
 fn foreign_scan_ts(ts: &[Token]) -> String {
     let bound = bound_idents(ts);
+    let facts = bracket_facts(ts);
     let mut i = 0i64;
     while (i < ts.revl_length()) {
         if atk(ts, i, "error") {
             return String::from("");
         }
         if (atw(ts, i, "emission") && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "[")) {
-            let e = match_bracket(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+            let e = bracket_close(&facts, (i).checked_add(1i64).expect("revl: Int overflow"));
             if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 i = (e).checked_add(1i64).expect("revl: Int overflow");
             } else {
                 i = (i).checked_add(1i64).expect("revl: Int overflow");
             }
         } else {
-            let f = foreign_form_at(ts, i);
+            let f = foreign_form_at(ts, &facts, i);
             if (f != "") {
                 return f;
             }
