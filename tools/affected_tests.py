@@ -1916,15 +1916,33 @@ CI_BACKEND_BLIND_TREES = ("docs/", "dogfood/", "formal/", "site/", "LICENSES/",
                           "playground/", "grammar/", "tree-sitter-revl/",
                           "assets/")
 _CI_CORPUS_SUFFIXES = (".py", ".sh", ".mjs", ".js", ".ts", ".toml", ".json")
-_CI_CORPUS_SKIP_DIRS = {"node_modules", ".venv", "target", "golden", "goldens"}
+_CI_CORPUS_SKIP_DIRS = {"node_modules", ".venv", "target", "golden", "goldens",
+                        ".cordis-py"}
+
+
+def _ci_backend_files(root: Path) -> list:
+    """The repository's own files under backends/: what `git ls-files` tracks
+    there. A job's setup puts other files in the tree that are not this
+    repository's code and read no path of it: backends/python/setup.sh clones
+    the cordis-py fork into `backends/python/.cordis-py` and makes a `.venv`,
+    and npm fills `node_modules`. Scanning those made the blind-tree pins red
+    in any job that had run setup (frontend-cordis, issue #1886). Without git
+    (an exported tree), every file is read except those known setup paths."""
+    tracked = _git(root, "ls-files", "-z", "--", "backends").split("\0")
+    files = [root / p for p in tracked if p]
+    if not files:
+        files = [p for p in (root / "backends").rglob("*")
+                 if p.is_file() and not {".cordis-py", ".venv", "node_modules"}
+                 & set(p.relative_to(root).parts)]
+    return sorted(files)
 
 
 def ci_backend_corpus(root: Path) -> str:
-    """The text a backend job can read a path out of: every script and config
-    under backends/ (not goldens, vendored packages or build output) plus the
-    six `backend-*` job blocks of ci.yml."""
+    """The text a backend job can read a path out of: every tracked script and
+    config under backends/ (not goldens or build output) plus the six
+    `backend-*` job blocks of ci.yml."""
     parts = []
-    for path in sorted((root / "backends").rglob("*")):
+    for path in _ci_backend_files(root):
         if (path.suffix not in _CI_CORPUS_SUFFIXES or not path.is_file()
                 or _CI_CORPUS_SKIP_DIRS & set(path.relative_to(root).parts)):
             continue
