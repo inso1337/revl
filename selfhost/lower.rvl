@@ -4642,7 +4642,7 @@ fn is_typecheck_builtin_type(n: Str) -> Bool {
 
 fn builtin_type_value_msg(name: Str) -> Str {
   return "`".concat(name)
-    .concat("` is a builtin type, not a value: a builtin method is called on a value of the type, never on the type")
+    .concat("` is a builtin type, not a value")
 }
 
 // lower.py `_RESERVED_REQUIREMENT_KEYS`: every builtin type and every host
@@ -25462,7 +25462,7 @@ test "a builtin type read as a value names the type rule" {
 component C provides s: S {
   provide s { fn go(n) = List.reverse(["a"]) }
 }""")
-  assert v == "T1|`List` is a builtin type, not a value: a builtin method is called on a value of the type, never on the type"
+  assert v == "T1|`List` is a builtin type, not a value"
 }
 
 test "an extern acquire's site undo that is not its declared inverse is refused" {

@@ -362,5 +362,7 @@ def test_an_acquisition_with_no_declared_inverse_keeps_the_generic_wording():
     msg = _refusal("component C {\n  config { url: Str }\n"
                    "  let pool = effect Pool.open(config.url)\n}\n")
     assert "effect has no `undo` and `Pool.open` is not pure" in msg
-    # ... and the spelling it offers is no longer double-backticked.
-    assert "write `effect Pool.open(...) undo <expr>`" in msg
+    # ... and the spelling it offers is no longer double-backticked. Since
+    # issue #1859 a host acquisition's hint names its one inverse, the
+    # family's release on the bound handle, instead of `undo <expr>`.
+    assert "write `let <name> = effect Pool.open(...) undo <name>.close()`" in msg
