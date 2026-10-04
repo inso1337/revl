@@ -1742,6 +1742,8 @@
 
 ["tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/comp_str_builtin.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/comp_stream.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/comp_timer.rvl", "agree-admit"]
@@ -1761,6 +1763,8 @@
 ["tests/fixtures/emit_rust_corpus/externs.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/float_pub.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/in_file_tests.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/lengths.rvl", "agree-admit"]
 
