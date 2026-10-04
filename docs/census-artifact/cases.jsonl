@@ -1486,6 +1486,8 @@
 
 ["tests/fixtures/emit_go_corpus/calls.rvl", "agree-admit"]
 
+["tests/fixtures/emit_go_corpus/comp_provide_pure.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_go_corpus/control.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_go_corpus/extern_config.rvl", "agree-admit"]
