@@ -39,9 +39,9 @@ service Analysis {
 
 component AnalysisProvider requires filesystem: Filesystem provides analysis: Analysis {
 
-  // The acquire/undo scaffolding is real; the resource it yields is an obligation.
-  let resource = effect hole[AnalysisResource] "acquire the resource AnalysisProvider manages; the undo must fully release it (no residue)"
-                 undo resource.release()
+  // The acquire/undo pairing is real; the resource and its release are obligations.
+  let resource = effect hole[AnalysisResource] "acquire the resource AnalysisProvider manages"
+                 undo hole[Unit] "release `resource` fully (no residue): the inverse its acquisition declares"
 
   provide analysis {
     fn run(input) = hole[Str] "produce run's Str result (a fill here may emit through the declared boundary)"
@@ -51,6 +51,14 @@ component AnalysisProvider requires filesystem: Filesystem provides analysis: An
 
 It compiles as a draft (the holes check) and is never admissible while a hole
 remains (admission refuses holes, docs/holes.md §4). Fill the holes, then admit.
+
+The effect's inverse is a hole as well as its acquisition. What releases the
+resource depends on what acquires it (the inverse an `acquire` extern names
+over its `result`, or a builtin's own release such as `store.drop()`), so the
+scaffold writes no call that might not exist. The inverse's fill spec has
+`resource` in scope and lists the declared inverse as a producer.
+tests/test_served_examples_compile_1846.py fills every hole of a served
+scaffold with the minimal fill its spec offers and compiles the result.
 
 ## Flags
 
@@ -101,6 +109,13 @@ language: the generator never grants authority the spec did not ask for.
 * **An emission with nowhere to go is refused.** `--emits` with no wired
   capability would force a bare `emission` ("any boundary"). The generator
   refuses rather than write it.
+* **A method that returns `Unit` is a crossing or nothing.** revl has no unit
+  value, so a `Unit` hole is filled only by a call that returns nothing. An
+  `--emits` method returning `Unit` gets a hole whose fill is the crossing:
+  declare the operation on the stub service, then `emit` it (its fill spec
+  lists it once declared). A pure `--methods` entry returning `Unit` computes
+  nothing a caller can see, so it is refused with that reason instead of
+  being written as a hole nothing can fill (issue #1857).
 
 ## `--json`: the skeleton and its remaining work in one response
 

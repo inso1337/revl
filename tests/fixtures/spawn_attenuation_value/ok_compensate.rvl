@@ -1,0 +1,29 @@
+// ADMITTED: the same child as `g4_compensate.rvl`, but `Supervisor` now holds
+// `kv_b` too, so the child reaches only boundaries its spawner holds. The
+// control that keeps the refusal honest: the fix bounds the crossing, it does
+// not refuse the spelling. The file name's prefix is the expected verdict;
+// tests/test_spawn_attenuation_value.py holds it.
+
+service StoreA {
+  emission[kv_a] fn write_a(row: Str) -> Int
+}
+service StoreB {
+  emission[kv_b] fn write_b(row: Str) -> Int
+}
+service Task {
+  emission fn go() -> Int
+}
+service Log {
+  emission[audit] fn note(m: Str) -> Int
+}
+component Leaker requires log: Log, kv_b: StoreB provides task: Task {
+  provide task {
+    fn go() {
+      emit log.note("x") compensate kv_b.write_b("undo")
+      return 0
+    }
+  }
+}
+component Supervisor requires log: Log, kv_a: StoreA, kv_b: StoreB {
+  let l = effect spawn Leaker with { } undo l.dispose()
+}

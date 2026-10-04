@@ -1,0 +1,17 @@
+// REJECTED, G4: the same crossing through a local that aliases the handle's
+// provision (`let t = w.task`, then `emit t.run(n)`). The alias resolves back
+// to the handle read, so the floor judges the direct form.
+//
+// expected error:
+//   crossing capability `pay` requires approval, but this `emit` carries no
+//     covering `with` edge
+
+extern emission[pay] fn charge(amount: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[pay] fn run(n: Int) -> Int }
+service Sup { emission fn go(n: Int) -> Int }
+component Worker provides task: Pay {
+  provide task { fn run(n) = n }
+}
+component Supervisor provides sup: Sup {
+  provide sup { fn go(n) { let w = effect spawn Worker with { } undo w.dispose()  let t = w.task  let r = emit t.run(n)  return r } }
+}

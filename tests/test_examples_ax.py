@@ -209,9 +209,13 @@ def gate(tmp_path):
 
 def test_the_gate_answers_over_stdio_and_admits_the_readme_agent(gate):
     _, server = gate
+    # tools/list carries the core tier (issue #1697); the README agent's
+    # other verbs are served by name and found through revl_verbs
     names = {t["name"] for t in server.rpc("tools/list")["result"]["tools"]}
-    assert {"revl_load", "revl_call", "revl_approve", "revl_commit",
-            "revl_commit_confirm"} <= names
+    assert {"revl_load", "revl_call", "revl_verbs"} <= names
+    wanted = ["revl_approve", "revl_commit", "revl_commit_confirm"]
+    found = server.tool("revl_verbs", {"names": wanted})
+    assert [t["name"] for t in found["tools"]] == wanted, found
     verdict = server.tool("revl_check", {"source": _agent_source()})
     assert verdict["ok"] is True, verdict
 

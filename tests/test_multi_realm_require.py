@@ -296,7 +296,7 @@ def test_wasm_emitter_provides_the_routed_key_through_the_route():
     for op in methods:
         assert f'(export "provide:{key}.{op}")' in module
         # the provision IS the route: one call, no realm chosen by the host
-        assert f"(call $route_{key}_{op}" in module
+        assert f"(call $route.{key}.{op}" in module   # issue #1756 spelling
     # and the body routes through the substrate's liveness + dispatch ops
     assert f'(import "route:{key}" "live"' in module
     assert f'(import "route:{key}" "call"' in module
