@@ -1,0 +1,53 @@
+// item 391: the `validated` shapes (item 257, item 513) the tree's one
+// validated document leaves out, held to byte agreement by
+// tests/test_selfhost_emit_py.py. selfhost/emit_py.rvl refused a validated call
+// by name before.
+//
+//   - a tagged-union response, so the seam carries a constructor map;
+//   - a record response with an `Opt`, a `List` and a `Bytes` field, so the
+//     registry's `json-schema` dialect rewrites a `nullable`, closes an object
+//     and drops a `contentEncoding`;
+//   - an `async` operation, called from an async provide method and with
+//     `await emit` from the activation body: either way the response is
+//     awaited INSIDE the seam (issue #1647 fixed the activation-body form);
+//   - a crossing in a provide method (inside an arrow, too), where the seam's
+//     `where` is `<component>.<method>`;
+//   - a validated operation declared and never called: it is still registered.
+//
+// It sits beside emit_py_corpus/ rather than in it because
+// tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
+// is not this slice.
+
+type Call = { tool: Str, args: Str }
+type AgentTurn = Final(Str) | ToolCalls(List[Call])
+type Note = { title: Str, tag: Opt[Str], parts: List[Int], blob: Bytes }
+
+fn first(ctx: List[Str], step: (List[Str]) -> AgentTurn) -> Str {
+  return match step(ctx) {
+    Final(answer) => answer,
+    ToolCalls(calls) => "tools",
+  }
+}
+
+service Model {
+  emission validated fn complete(h: List[Str]) -> AgentTurn
+  emission validated fn note(h: Str) -> Note
+  emission validated async fn later(h: Str) -> Str
+  emission validated fn unused(h: Str) -> Int
+}
+service Loop {
+  emission fn run(p: Str) -> Str
+  emission async fn ask(p: Str) -> Str
+}
+
+component Agent requires model: Model provides agent: Loop {
+  emit model.note("boot")
+  await emit model.later("boot")
+  provide agent {
+    fn run(session_id) {
+      let msgs = ["prompt"]
+      return first(msgs, msgs2 => emit model.complete(msgs2))
+    }
+    async fn ask(p) = emit model.later(p)
+  }
+}

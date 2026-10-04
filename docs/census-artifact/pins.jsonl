@@ -84,6 +84,8 @@
 
 ["report_inputs", "crates/revl-gate/Cargo.toml"]
 
+["report_inputs", "crates/revl-gate/build.rs"]
+
 ["report_inputs", "crates/revl-gate/src/admission.rs"]
 
 ["report_inputs", "crates/revl-gate/src/frontier.rs"]
@@ -98,7 +100,9 @@
 
 ["report_inputs", "crates/revl-gate/src/symbols.rs"]
 
-["report_inputs", "tests/fixtures/census_crate_reproduction.json"]
+["report_inputs", "tests/fixtures/census_crate_reproduction/programs.jsonl"]
+
+["report_inputs", "tests/fixtures/census_crate_reproduction/reproduction.json"]
 
 ["report_inputs", "tests/fixtures/corpus_provenance.json"]
 
