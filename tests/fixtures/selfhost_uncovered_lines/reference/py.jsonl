@@ -1,10 +1,6 @@
-["reason", "850-added-componentemitter-extern-emit-fire-to-the", "#850 added `_ComponentEmitter._extern_emit_fire` to the reference emitter and left this record off the ledger. The shipped corpus reaches the four `emission_fire` call sites, so the dispatch arm counts as covered, while the single `if` body that actually fires the extern hook is never taken: no document in the corpus declares an extern emit. services_body.rvl and witnessed.rvl pin every other shape in this region. A fixture that compiles an extern emit onto a component method is the corpus work that retires this entry."]
+["reason", "activation-residuals-map-cas-conditional-undo-belongs-to", "Activation residuals: non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). The approval path belongs to the named runtime boundaries. The `await` step is exercised by emit_ts_corpus/components_await.rvl, the `stream-iter` step by emit_py_corpus/streams.rvl and a deferred emission by emit_py_deferred_shapes.rvl since item 391. The result-guarded `Map.cas` undo and the extern-declared compensation are exercised by emit_ts_corpus/cas_runtime.rvl and erase_receipt.rvl. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms. Item 130 §4.9 adds one statement: the durable-cursor subscription's self-describing disposer (`yield sub.durable_undo()`), which only a `replay(from: …)` program reaches. No corpus document can be one while the self-host gate refuses the `replay(…)` clause with G1, and selfhost/emit_py.rvl refuses the subscribe that asks for it by name (test_a_subscribe_replay_request_is_named_not_dropped). The activation-body `emit` arm of the `validated` async emission fix (issue #1647: the await lands inside the seam, `_revl_validate((await <call>), ..)`) is mirrored by selfhost/emit_py.rvl and exercised by emit_py_validated_shapes.rvl."]
 
-["function", "850-added-componentemitter-extern-emit-fire-to-the", "_ComponentEmitter._extern_emit_fire", 1, 1]
-
-["reason", "activation-residuals-map-cas-conditional-undo-belongs-to", "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms. Item 130 §4.9 adds one statement: the durable-cursor subscription's self-describing disposer (`yield sub.durable_undo()`), which only a `replay(from: …)` program reaches and which selfhost/emit_py.rvl does not port, for the same reason the rest of the stream runtime boundary is not ported. The `validated` async emission fix adds six statements to the activation-body `emit` arm: a `validated` async service operation fired as `await emit model.op(..)` renders its fire in async mode, so the await lands inside the seam (`_revl_validate((await <call>), ..)`) instead of around it. No py corpus document fires a validated operation from an activation body, and selfhost/emit_py.rvl does not carry the new form on main; backends/python/tests/test_validated_async_emit_activation.py runs it against cordis-py."]
-
-["function", "activation-residuals-map-cas-conditional-undo-belongs-to", "_ComponentEmitter._body_step", 24, 24]
+["function", "activation-residuals-map-cas-conditional-undo-belongs-to", "_ComponentEmitter._body_step", 10, 10]
 
 ["reason", "approval-lease-runtime-boundary-approval-step-renders-frame", "Approval/lease runtime boundary: _approval_step renders frame.approval handles; _emit_fire renders approval_crossing with capability and callback. Neither exists in selfhost/emit_py.rvl. Representative accepted inputs are tests/test_approval_typed.py and tests/test_capability_leases.py::_SOURCE, not ordinary witnessed effects."]
 
@@ -14,7 +10,7 @@
 
 ["reason", "async-parallel-planner-boundary-build-parallel-leaders-skips", "Async parallel planner boundary: _build_parallel_leaders skips nested/noncontiguous members and records contiguous leaders; _emission_shape distinguishes req/spawn/extern; idempotency helpers inspect service/extern/undo declarations; _group_eligible rejects unsafe compensation, approval, deferred and validated calls; _emit_parallel_group awaits tasks, flushes records, registers successful compensation then raises. The port emits sequentially. tests/test_parallel_259.py::HDR and its commutative/disjoint tests reproduce the input family."]
 
-["function", "async-parallel-planner-boundary-build-parallel-leaders-skips", "_ComponentEmitter._build_parallel_leaders", 3, 3]
+["function", "async-parallel-planner-boundary-build-parallel-leaders-skips", "_ComponentEmitter._build_parallel_leaders", 2, 2]
 
 ["function", "async-parallel-planner-boundary-build-parallel-leaders-skips", "_ComponentEmitter._call_declares_idempotent", 12, 12]
 
@@ -28,49 +24,27 @@
 
 ["function", "async-parallel-planner-boundary-build-parallel-leaders-skips", "_ComponentEmitter._group_eligible", 15, 15]
 
-["reason", "async-stream-runtime-boundary-stream-head-emits-stream", "Async stream runtime boundary: _stream_head emits Stream.merge or delegates a leaf; _stream_iter emits event contract/window validation, await next, iteration yield, closed break, contract filtering and nested body steps. The port has no stream loop. backends/go/testdata/stream_130.rvl pins subscribe/await refusal; tests/test_stream_reactive.py supplies merge/stage/event cases."]
+["reason", "async-stream-runtime-boundary-stream-head-emits-stream", "Async stream runtime boundary: `_stream_iter` refuses an event contract whose dedup window is not a positive integer. The frontend bounds the window by construction, so no document reaches the raise. The rest of the loop (the event contract and its admit gate, the awaited `next`, the A1 iteration yield, the `Closed` break and the nested body steps) and `_stream_head` with its `merge` fan-in are exercised by emit_py_corpus/streams.rvl, backends/go/testdata/stream_130.rvl, stream_event_130.rvl, backends/rust/scenarios/stream.rvl and emit_rust_corpus/comp_stream.rvl since item 391."]
 
-["function", "async-stream-runtime-boundary-stream-head-emits-stream", "_ComponentEmitter._stream_head", 4, 4]
-
-["function", "async-stream-runtime-boundary-stream-head-emits-stream", "_ComponentEmitter._stream_iter", 25, 25]
-
-["reason", "async-timer-boundary-only-timer-s-inflight-set", "Async timer boundary only: _timer's inflight set, ensure_future callbacks, cancellation loop and async import are selected by a coroutine-reachable emission. services_timers.rvl covers both synchronous modes; async extern/service inputs require the excluded await/coloring surface."]
-
-["function", "async-timer-boundary-only-timer-s-inflight-set", "_ComponentEmitter._timer", 20, 20]
-
-["reason", "async-walrus-match-binding-path-match-expr-bind", "Async/walrus match-binding path: _match_expr.bind_payload uses a walrus for emitter temps or a comprehension to retain an awaited binder; _walrus_temp recognizes generated names/optional-temp regex. Sync binder use/folding is covered by result/control/services_match and branches fixtures. Async match source is represented by emit_ts_corpus/async_module_switch.rvl; async lowering is the retained boundary, not ordinary match."]
-
-["function", "async-walrus-match-binding-path-match-expr-bind", "_match_expr.bind_payload", 3, 3]
-
-["function", "async-walrus-match-binding-path-match-expr-bind", "_walrus_temp", 1, 1]
+["function", "async-stream-runtime-boundary-stream-head-emits-stream", "_ComponentEmitter._stream_iter", 1, 1]
 
 ["reason", "backends-python-emit-py-componentemitter-method-control-issu", "backends/python/emit.py::_ComponentEmitter._method_control: issue #548 provide-method control flow. `_method_control` itself is covered now — emit_py_corpus/services_control_flow.rvl (issue #721) is the corpus document that reaches every arm of it. What is left is its nested `block` helper's EMPTY-arm `pass`, which is legal but is a shape no author writes, and the port's twin line is recorded under selfhost/py `method_block`."]
 
 ["function", "backends-python-emit-py-componentemitter-method-control-issu", "_ComponentEmitter._method_control.block", 2, 2]
 
-["reason", "compensated-emission-boundary-item-254-compensated-extern-re", "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run. `_ComponentEmitter._timer_compensation` registers the same compensation on a timer firing (issue #1589) and is unreached for the same reason; its one call on the async-timer path adds one statement to `_ComponentEmitter._timer`."]
+["reason", "compensated-emission-boundary-item-254-compensated-extern", "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run. `_ComponentEmitter._timer_compensation` registers the same compensation on a timer firing (issue #1589) and is unreached for the same reason; its one call on the async-timer path adds one statement to `_ComponentEmitter._timer`. The provide-method sites (#1592) are the same boundary: `_method_step` registers an emit statement's declared compensation (recorded with the method residuals), and `_value_emission_fire` registers a value emission's (`return emit put_row(m)`). selfhost/emit_py.rvl ports the extern-declared compensate at no site, so a corpus document carrying one would turn the byte oracle red rather than close the gap."]
 
-["function", "compensated-emission-boundary-item-254-compensated-extern-re", "_ComponentEmitter._compensated_extern", 3, 3]
+["function", "compensated-emission-boundary-item-254-compensated-extern", "_ComponentEmitter._value_emission_fire", 2, 2]
 
-["function", "compensated-emission-boundary-item-254-compensated-extern-re", "_ComponentEmitter._timer_compensation", 1, 1]
+["reason", "component-expression-residuals-read-in-expr-malformed-expres", "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; produced_emit/model completion/validated retry; the unknown-host-root refusal; lease acquire/revoke. (The await-seed and async arrows are exercised by services_async.rvl, async_arrow_emission.rvl and emit_py_async_shapes.rvl since item 391.) These are the named realm/runtime/flow boundaries reproduced by async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses both by name (the `host` and `subscribe` markers), and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped and test_a_subscribe_replay_request_is_named_not_dropped pin the refusals). A `subscribe` with its policy, derived stages, `buffer` and `drain` is exercised by emit_py_corpus/streams.rvl since item 391. The plain validate seam (`_revl_validate` over the settled response) is exercised by emit_ts_refusals/validated_emission_operation.rvl and emit_py_validated_shapes.rvl since item 391. A `retry` budget and the item-121 `produced_emit` marking are not: selfhost/emit_py.rvl names a retrying crossing instead (test_a_validated_retry_budget_is_named_not_dropped). `spawn` and `instance-get` are exercised by emit_ts_corpus/spawn.rvl, instance_get.rvl, accessor.rvl, tenant_attenuation.rvl and emit_py_spawn_shapes.rvl since item 391."]
 
-["reason", "component-expression-residuals-read-in-expr-malformed-expres", "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; the unknown-host-root refusal; spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal)."]
-
-["function", "component-expression-residuals-read-in-expr-malformed-expres", "_ComponentEmitter._expr", 81, 81]
+["function", "component-expression-residuals-read-in-expr-malformed-expres", "_ComponentEmitter._expr", 39, 39]
 
 ["reason", "declared-secret-map-k-v-marking-item-481", "Declared-`Secret[Map[K, V]]` marking (item 481): `_split_type_name` splits a declared type spelling into its head and its generic arguments, and `_secret_shape_facts` walks a document's declared secret roots transitively to answer whether any shape reachable from one is a `Map` and to render the field table the runtime needs so a map's keys and values are routed through their own declared types. The python corpus reaches both, but only through the non-generic splitter path and the no-Map answers; the branches that fire for a declared `Map` reachable from a secret root are not reached, because no `emit_py_corpus` document declares one. `selfhost/emit_py.rvl` carries the declared-`Secret[T]` marking import line only, not the call-site shape (item-429(d)), so a corpus document that reached them would flip the byte-agreement oracle red rather than close this gap. The reference half is pinned by tests/test_secret_map_key_redaction.py."]
 
 ["function", "declared-secret-map-k-v-marking-item-481", "_secret_shape_facts", 3, 3]
 
 ["function", "declared-secret-map-k-v-marking-item-481", "_split_type_name", 1, 1]
-
-["reason", "deferred-delivery-boundary-deferred-extern-s-non-fn", "Deferred delivery boundary: _deferred_extern's non-fn/lookup paths require a nonempty deferred table; _deferred_step builds frame.emit_deferred; _deferred_register_kwargs handles absent register and declared key position/argument count. The port does not implement deferred delivery. tests/test_standing_approval.py::_SOURCE declares the representative deferred deliver extern. Witnessed register kwargs are separately ported."]
-
-["function", "deferred-delivery-boundary-deferred-extern-s-non-fn", "_ComponentEmitter._deferred_extern", 3, 3]
-
-["function", "deferred-delivery-boundary-deferred-extern-s-non-fn", "_ComponentEmitter._deferred_step", 5, 5]
-
-["function", "deferred-delivery-boundary-deferred-extern-s-non-fn", "_deferred_register_kwargs", 12, 12]
 
 ["reason", "destructuring-binder-scan-only-inline-bound-names-iterates", "Destructuring binder scan only: _inline_bound_names iterates step.names strings for let_pattern. Port inline_bound mirrors it; ordinary name/bind/rest/arrow/match binders are exercised. Destructuring remains the existing explicit separate boundary."]
 
@@ -84,21 +58,17 @@
 
 ["function", "empty-record-class-pass-in-emit-types-both", "_emit_types", 1, 1]
 
-["reason", "existing-async-coloring-boundary-py-yields-coroutine-recogni", "Existing async-coloring boundary: _py_yields_coroutine recognizes required async services, instance handles, colored functions/externs/locals; _py_reaches_coroutine walks children but stops at nested async arrows; _py_async_arrow passes through a single coroutine or wraps a sync lambda and rejects compound suspension. _is_async_fn_type's remaining false return rejects a non-string type. async_module_local.rvl/services_async.rvl/async_arrow_emission.rvl in emit_ts_corpus reproduce this gap; named boundary tests pin it."]
+["reason", "existing-async-coloring-boundary-py-yields-coroutine-recogni", "Async-colouring residuals: _py_yields_coroutine's non-dict guard, which no IR node reaches; _py_async_arrow's refusal of an async arrow with an internal (non-tail) await, which the port names; _is_async_fn_type's false return on a non-string type. The await-seed itself is exercised by async_colour.rvl, async_arrow_arg.rvl, services_async.rvl, async_arrow_emission.rvl and emit_py_async_shapes.rvl since item 391, and its spawn-handle branch by emit_py_spawn_shapes.rvl."]
 
 ["function", "existing-async-coloring-boundary-py-yields-coroutine-recogni", "_is_async_fn_type", 1, 1]
 
-["function", "existing-async-coloring-boundary-py-yields-coroutine-recogni", "_py_async_arrow", 7, 7]
+["function", "existing-async-coloring-boundary-py-yields-coroutine-recogni", "_py_async_arrow", 1, 1]
 
-["function", "existing-async-coloring-boundary-py-yields-coroutine-recogni", "_py_reaches_coroutine", 2, 2]
+["function", "existing-async-coloring-boundary-py-yields-coroutine-recogni", "_py_yields_coroutine", 1, 1]
 
-["function", "existing-async-coloring-boundary-py-yields-coroutine-recogni", "_py_yields_coroutine", 9, 9]
+["reason", "existing-deterministic-destructuring-boundary-let-pattern-st", "Destructuring residual: _let_pattern_stmt rejects a pattern kind other than record or list, which the frontend never lowers. Record, single, multi-name and rest list patterns are exercised by destructure.rvl, emit_ts_corpus/destructuring.rvl and emit_py_async_shapes.rvl since item 391."]
 
-["reason", "existing-deterministic-destructuring-boundary-let-pattern-st", "Existing deterministic-destructuring boundary: _let_pattern_stmt allocates a numbered temp, emits record field extraction, exact/single/rest list unpacking, or rejects a foreign pattern. _Lines.next_destructure_seq increments that temp. selfhost fn_stmt has no let_pattern arm. Representative let {a} and let [a, ...rest] source cases are in tests/test_v2_language.py; item 179 removed id-based naming, not this port omission."]
-
-["function", "existing-deterministic-destructuring-boundary-let-pattern-st", "_Lines.next_destructure_seq", 2, 2]
-
-["function", "existing-deterministic-destructuring-boundary-let-pattern-st", "_let_pattern_stmt", 14, 14]
+["function", "existing-deterministic-destructuring-boundary-let-pattern-st", "_let_pattern_stmt", 1, 1]
 
 ["reason", "explicit-unresolved-hole-rejection-refuse-holes-walk-records", "Explicit unresolved-hole rejection: _refuse_holes.walk records holes; _refuse_holes formats locations, truncates after three and raises. tests/test_holes.py provides ?? inputs. The positive oracle cannot require output from a reference-refused document."]
 
@@ -106,19 +76,19 @@
 
 ["function", "explicit-unresolved-hole-rejection-refuse-holes-walk-records", "_refuse_holes.walk", 1, 1]
 
-["reason", "extern-host-ref-abi-boundary-ref-dotted-converts", "Extern host-ref ABI boundary: _ref_dotted converts path/suffix to a module; _emit_py_ref_thunk emits lazy import/cache, sync-vs-coroutine/awaitable rejection, and async awaiting. stdlib/fs.rvl's @py ref imports reproduce missing _REVL_REFS in the port, pinned by test_named_runtime_and_harness_boundaries."]
+["reason", "extern-host-ref-abi-boundary-ref-dotted-converts", "Extern host-ref ABI boundary: _ref_dotted converts path/suffix to a module; _emit_py_ref_thunk emits lazy import/cache, sync-vs-coroutine/awaitable rejection, and async awaiting. selfhost/emit_py.rvl refuses a `@py` ref extern by name rather than emit a thunk (test_a_py_ref_extern_is_named_not_emitted_empty). stdlib/fs.rvl is a corpus document since item 391, and the refs it carries reach only the `import inspect` / `_REVL_REFS` header, not this thunk."]
 
 ["function", "extern-host-ref-abi-boundary-ref-dotted-converts", "_emit_py_ref_thunk", 26, 26]
 
 ["function", "extern-host-ref-abi-boundary-ref-dotted-converts", "_ref_dotted", 2, 2]
 
-["reason", "extern-residual-abi-configuration-boundary-emit-externs-emit", "Extern residual ABI/configuration boundary: _emit_externs emits capability-bound secret lookup/store and extern plug-time config required/default merging; dispatches @py refs; rejects missing target bodies and emits pass for empty bodies. Port supports verbatim bodies and declared Secret[T] marking, not capability-secret/config installation. Representative sources: stdlib/fs.rvl, tests/test_extern_config_cross_tier_378.py and tests/test_secret_bound.py. Empty-body pass is equivalent on both sides. The declared-`Secret[Map[K, V]]` marking adds a `_declared=` argument at the extern site (item 481), so one statement arrives with it and this is re-recorded 40 to 41 under the same reason. `selfhost/emit_py.rvl` carries the marking import line only, not the call-site shape (item-429(d)): a corpus document that reached it would flip the byte-agreement oracle red rather than close this gap."]
+["reason", "extern-residual-abi-configuration-boundary-emit-externs-emit", "Extern residual boundary: _emit_externs rejects a missing target body; emits `pass` for an empty body; renders the lazy `@py ref` import thunk (item 396 option B), which selfhost/emit_py.rvl refuses by name (`<<UNSUPPORTED-EXTERN:py-ref ...>>`, pinned by tests/test_selfhost_emit_py.py::test_a_py_ref_extern_is_named_not_emitted_empty); and writes the capability-bound secret store and lookup (item 256 Slice 1), which the port carries byte-identically but no census-directory document can reach, because the self-host gate refuses a top-level `secret ... for` declaration (tests/test_selfhost_emit_py.py::test_selfhosted_emitter_binds_an_extern_secret holds both halves to agreement from an inline source). The extern plug-time config helper and its `_revl_config` local are exercised by extern_config.rvl since item 391. The declared-`Secret[Map[K, V]]` marking adds a `_declared=` argument at the extern site (item 481); `selfhost/emit_py.rvl` carries the marking import line only, not the call-site shape (item-429(d)): a corpus document that reached it would flip the byte-agreement oracle red rather than close this gap."]
 
-["function", "extern-residual-abi-configuration-boundary-emit-externs-emit", "_emit_externs", 41, 41]
+["function", "extern-residual-abi-configuration-boundary-emit-externs-emit", "_emit_externs", 18, 18]
 
-["reason", "fault-harness-boundary-emit-fault-tests-validates-target", "Fault-harness boundary: _emit_fault_tests validates target component and serializes injection/assertion metadata into REVL_FAULT_TESTS. tests/test_fault_tests.py::SOURCE and test_python_tier_lowers_the_section_into_the_module reproduce this unported trailer."]
+["reason", "fault-harness-boundary-emit-fault-tests-validates-target", "Fault-test manifest residual: _emit_fault_tests refuses a fault test naming an unknown component, which the frontend rejects first. The manifest itself is ported and exercised by examples/uxprobe2_fault.rvl and emit_py_test_sections.rvl since item 391."]
 
-["function", "fault-harness-boundary-emit-fault-tests-validates-target", "_emit_fault_tests", 11, 11]
+["function", "fault-harness-boundary-emit-fault-tests-validates-target", "_emit_fault_tests", 1, 1]
 
 ["reason", "float-shape-fallback-is-float-expr-rejects-nondicts", "Float-shape fallback: _is_float_expr rejects nondicts and recursively infers unary minus only after direct Float operands stamps fail. Legal typed unary nodes carry operands=Float, exercised by branches.rvl::negate_float; the port retains the same unstamped-IR recursion."]
 
@@ -138,9 +108,9 @@
 
 ["function", "full-model-flow-provenance-boundary-separate-from-declared", "_ComponentEmitter._mint_site", 2, 2]
 
-["reason", "function-statement-residuals-let-pattern-dispatch-is-the", "Function statement residuals: let_pattern dispatch is the named deferred destructuring feature; final unknown-step rejection cannot arise in the documented function statement grammar. selfhost fn_stmt marks those unsupported rather than silently dropping them."]
+["reason", "function-statement-residuals-let-pattern-dispatch-is-the", "Function statement residual: the final unknown-step rejection cannot arise in the documented function statement grammar; the port marks it. let_pattern dispatch is exercised by the destructure documents since item 391."]
 
-["function", "function-statement-residuals-let-pattern-dispatch-is-the", "_fn_stmt", 2, 2]
+["function", "function-statement-residuals-let-pattern-dispatch-is-the", "_fn_stmt", 1, 1]
 
 ["reason", "function-type-parser-malformed-spelling-returns-split-fn", "Function-type parser malformed spelling returns: _split_fn_type rejects a missing -> after the closing parameter parenthesis or a never-closed list. The frontend supplies balanced canonical type spellings; types/branches exercise valid callable annotations, and the port retains the same rejection checks."]
 
@@ -150,13 +120,9 @@
 
 ["function", "identifier-rejection-in-ident-unusable-python-identifiers-an", "_ident", 2, 2]
 
-["reason", "in-file-ordinary-test-harness-boundary-emit-tests", "In-file ordinary-test harness boundary: _emit_tests emits REVL_TESTS, empty-body pass and fn statements, or delegates lifecycle tests. Port emits none of this trailer. examples/regressions/fuzz_go_6be27824.rvl reproduces omission; named boundary test requires the precise missing REVL_TESTS text."]
+["reason", "inlining-template-exclusions-fn-inline-template-rejects-asyn", "Inlining template exclusions: _fn_inline_template rejects guarded returns whose return expression/condition is absent. inline.rvl covers legal guarded returns; frontend value-returning guards cannot omit either expression. Port has the same null checks. The async exclusion is exercised by async_colour.rvl since item 391."]
 
-["function", "in-file-ordinary-test-harness-boundary-emit-tests", "_emit_tests", 21, 21]
-
-["reason", "inlining-template-exclusions-fn-inline-template-rejects-asyn", "Inlining template exclusions: _fn_inline_template rejects async functions (retained async boundary) and guarded returns whose return expression/condition is absent. inline.rvl covers legal guarded returns; frontend value-returning guards cannot omit either expression. Port has the same null checks."]
-
-["function", "inlining-template-exclusions-fn-inline-template-rejects-asyn", "_fn_inline_template", 2, 2]
+["function", "inlining-template-exclusions-fn-inline-template-rejects-asyn", "_fn_inline_template", 1, 1]
 
 ["reason", "issue-1382-added-refuse-validated-externs-to-the", "issue #1382 added `_refuse_validated_externs` to the python reference emitter: the tier refuses a `validated` EXTERN rather than dropping the modifier and emitting a module byte-identical to one written without it. The loop header, the `validated` test and its `continue` are executed by every corpus document that declares any extern; the two statements that name the offender and raise are not, because no corpus document declares a validated extern (measured 2026-09-22: 0 of 1068 `.rvl` sources and 0 of 54 `.ir.json` documents). Adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_extern_python_1382.py, which asserts the message names the extern and that the sibling service-operation carrier still lowers."]
 
@@ -172,41 +138,25 @@
 
 ["function", "item-130-4-5-replay-rendering-backends-python", "_replay_kwarg", 3, 3]
 
-["reason", "item-513-slice-2-pr-1326-composes-service", "Item 513 slice 2 (PR #1326) composes `{\"Service.method\": grammar}` for every VALIDATED service emission in the document, adding the slice-4 `json-schema` dialect from the `response_schema` the crossing already carries. The function IS called on every emit; what no corpus document reaches is the body below the per-service loop, because no emit_py_corpus document declares a `response_grammar`. A document that declared one would flip the byte-agreement oracle RED rather than close the gap: selfhost/emit_py.rvl has no grammar-registry arm at all, so the reference would emit a `register_grammars(...)` line the port does not (item-429(d)). The seam is pinned by tests/test_decode_grammar_seam_513s2.py."]
+["reason", "item-513-slice-2-pr-1326-composes-service", "Item 513 slice 2 (PR #1326) composes `{\"Service.method\": grammar}` for every VALIDATED service emission in the document, adding the slice-4 `json-schema` dialect from the `response_schema` the crossing already carries. The composition is exercised by emit_ts_refusals/validated_emission_operation.rvl and emit_py_validated_shapes.rvl since item 391. What is left are its two `except` arms: the frontend import failing (a backend-only context) and the json-schema composition raising. Neither is reachable from a corpus run, which imports revl and derives a well-formed schema."]
 
-["function", "item-513-slice-2-pr-1326-composes-service", "_grammar_registry", 10, 10]
+["function", "item-513-slice-2-pr-1326-composes-service", "_grammar_registry", 4, 4]
 
 ["reason", "item-872-additivity-arm-of-the-transactional-scope", "item 872 additivity arm of the `.transactional(scope=...)` kwarg: every witnessed extern in the corpus declares a capability (`emit_py_corpus/witnessed.rvl` declares `witnessed[fs]`), so the branch that emits NO `scope=` for a cap-less witnessed extern never runs under the oracle. That branch is the byte-identical additivity guarantee a pre-872 witnessed extern depends on, and reaching it from a corpus document means adding a `tests/fixtures` input, which is a gate-crate census input this item must not move."]
 
 ["function", "item-872-additivity-arm-of-the-transactional-scope", "_transactional_scope_kwargs", 1, 1]
 
-["reason", "lifecycle-harness-boundary-emit-lifecycle-harness-installs-a", "Lifecycle-harness boundary: _emit_lifecycle_harness installs acquire/driver source; _emit_lifecycle_test manages Context, optional clock/session owner, tracing, fibers and finally disposal; _lifecycle_step lowers load/unload/call/advance/abort/assert_no_residue/assert; detectors select abort/clock support. examples/lifecycle_wasm.rvl and tests/test_lifecycle_abort.py are representative inputs. Port has no lifecycle harness, explicitly distinguished from supported component activation."]
-
-["function", "lifecycle-harness-boundary-emit-lifecycle-harness-installs-a", "_emit_lifecycle_harness", 9, 9]
-
-["function", "lifecycle-harness-boundary-emit-lifecycle-harness-installs-a", "_emit_lifecycle_test", 43, 43]
-
-["function", "lifecycle-harness-boundary-emit-lifecycle-harness-installs-a", "_lifecycle_step", 38, 38]
-
-["function", "lifecycle-harness-boundary-emit-lifecycle-harness-installs-a", "_lifecycle_uses_abort", 1, 1]
-
-["function", "lifecycle-harness-boundary-emit-lifecycle-harness-installs-a", "_lifecycle_uses_clock", 1, 1]
-
 ["reason", "loop-lifetime-refusal-guard-frame-neutral-loop-rejects", "Loop lifetime refusal: _guard_frame_neutral_loop rejects a loop carrying frame-owning body steps. Ordinary fn loops in control/branches are frame-neutral; acquisition is not legal inside a pure fn loop (examples/rejections/g4_fn_body_host_acquire.rvl). No waiver of the frontend contract."]
 
 ["function", "loop-lifetime-refusal-guard-frame-neutral-loop-rejects", "_guard_frame_neutral_loop", 1, 1]
 
-["reason", "malformed-component-header-validation-only-init-rejects-rout", "Malformed component-header validation only: __init__ rejects route/intercept keys absent from requires and isolate keys absent from both requires/provides. The frontend enforces these relations. Valid realm metadata remains explicitly deferred in ComponentEmitter.emit, with emit_ts_corpus/realm_{intercept,isolate}.rvl reproductions."]
+["reason", "malformed-component-header-validation-only-init-rejects-rout", "Malformed component-header validation only: the three raises in __init__ for a route/intercept key absent from requires and an isolate key absent from both requires/provides. The frontend enforces these relations. Valid realm metadata (routes, intercept, isolate) is ported and exercised by emit_py_placement.rvl and emit_ts_corpus/realm_intercept.rvl."]
 
-["function", "malformed-component-header-validation-only-init-rejects-rout", "_ComponentEmitter.__init__", 6, 6]
+["function", "malformed-component-header-validation-only-init-rejects-rout", "_ComponentEmitter.__init__", 3, 3]
 
 ["reason", "malformed-ownership-annotation-py-inplace-write-returns-none", "Malformed ownership annotation: _py_inplace_write returns None when an assign stamped unique has a non-dict value. Frontend ownership marks expression dictionaries only; port is_inplace_write also declines this shape."]
 
 ["function", "malformed-ownership-annotation-py-inplace-write-returns-none", "_py_inplace_write", 1, 1]
-
-["reason", "map-subscript-lowering-issue-957-scan-uses-sets", "`Map` subscript lowering (issue #957): `_scan_uses` sets the `map_index` gate that pulls the `_revl_map_index` helper into the module. No emit_py_corpus document indexes a `Map` — `lookup`/`has`/`set` are the Map surface the corpus exercises — and a document that did would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d), the same shape as the declared-`Secret[Map[K, V]]` entry). The reference half is pinned on all five tiers by tests/test_cross_tier_execution.py: the hit, the miss asserted by its reason, and a per-tier guard on the emitted lowering. Porting the arm to selfhost/emit_py.rvl is the corpus work that retires this entry."]
-
-["function", "map-subscript-lowering-issue-957-scan-uses-sets", "_scan_uses", 1, 1]
 
 ["reason", "match-binder-short-circuit-made-unreachable-by-320", "Match-binder short-circuit made unreachable by #320: _arm_body_is_bind's `bind in (\"Some\", \"None\")` guard returns False for a payload bound to a constructor spelling, but the frontend now mangles a predeclared binder in lower.py `_predeclared_mangle` (`Some` -> `Some_`) BEFORE the emitter reads the IR, and `None` carries no payload so it is never a binder. So `bind` is never literally `Some`/`None` at this emitter and the guard's early `return False` is unreachable through the byte-agreement oracle. match_binder_scan.rvl's some_binder still drives the arm (`Some(Some) => 0`), but now through the mangled `Some_` binder, which the arm body never reads."]
 
@@ -222,17 +172,17 @@
 
 ["function", "method-declaration-rejection-only-method-rejects-a-method", "_ComponentEmitter._method", 4, 4]
 
-["reason", "method-residuals-assign-emits-the-same-name-value", "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration."]
+["reason", "method-residuals-assign-emits-the-same-name-value", "Method residuals: assign emits the same name/value form as the covered let path (port combines them); the witnessed bind is frontend-rejected; the `await` step is exercised by emit_py_async_shapes.rvl and a deferred emission by emit_ts_refusals/deferred_emission_call.rvl since item 391. The `Map.cas` undo and the by-value pins on an effect undo and an emission compensate are exercised by emit_ts_corpus/cas_runtime.rvl and emit_py_placement.rvl. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration."]
 
-["function", "method-residuals-assign-emits-the-same-name-value", "_ComponentEmitter._method_step", 22, 22]
+["function", "method-residuals-assign-emits-the-same-name-value", "_ComponentEmitter._method_step", 9, 9]
 
-["reason", "module-emit-residuals-non-dict-version-empty-document", "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; idempotent map and commutative/async/idempotent service metadata; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter; router runtime source. Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. Issue #957's `Map` subscript arm adds seven statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 513 slice 2 (PR #1326) adds the two statements inside `if grammar_registry:`: the module-level `register_grammars(...)` call and the blank line after it. The guard is the point, because a document with no validated service crossing stays byte-identical to one compiled before the slice. No emit_py_corpus document declares a `response_grammar`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no grammar-registry arm at all (item-429(d)); the seam is pinned by tests/test_decode_grammar_seam_513s2.py instead."]
+["reason", "module-emit-residuals-non-dict-version-empty-document", "Module emit residuals: non-dict/version/empty-document/duplicate-component errors. (The asyncio import for an async timer and the `_revl_as_async` adapter are exercised by async_timer.rvl and emit_py_async_shapes.rvl since item 391.) (The lifecycle imports, the asyncio import and the test and fault-test sections are exercised by uxprobe2_jobs.rvl, advance.rvl, model_store_sqlite.rvl, uxprobe2_fault.rvl and emit_py_test_sections.rvl since item 391.) (The idempotent map, the per-operation commutative/async/idempotent metadata and the router runtime source are exercised by emit_py_placement.rvl, async_effects.rvl and erase_receipt.rvl since item 391's placement slice. The SERVICE-wide `'commutative': True` line is not: the self-host gate refuses a `commutative service` declaration as \"unexpected declaration\", so no census-directory document can carry one, and tests/test_selfhost_emit_py.py::test_selfhosted_emitter_renders_a_commutative_service holds both halves to agreement from an inline source.) Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. The `import inspect` / `_REVL_REFS` header and the #957 `Map` subscript helper are exercised by stdlib/fs.rvl and maps.rvl since item 391. The module-level `register_grammars(...)` line of item 513 slice 2 (PR #1326) is exercised by emit_ts_refusals/validated_emission_operation.rvl and emit_py_validated_shapes.rvl since item 391."]
 
-["function", "module-emit-residuals-non-dict-version-empty-document", "emit", 45, 45]
+["function", "module-emit-residuals-non-dict-version-empty-document", "emit", 8, 8]
 
-["reason", "module-expression-residuals-bare-some-identity-and-legacy", "Module expression residuals: bare Some identity and legacy sized_length field both match expr_inner; unsupported binary/unary/kind raise while port emits explicit markers. Awaited call and async arrow require the retained async surface (emit_ts_corpus/async_module_local.rvl). Legal current module .length lowers to len, already covered by branches.rvl. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py."]
+["reason", "module-expression-residuals-bare-some-identity-and-legacy", "Module expression residuals: bare Some identity and legacy sized_length field both match expr_inner; unsupported binary/unary/kind raise while port emits explicit markers. The awaited call and the async arrow are exercised by async_colour.rvl, async_arrow_arg.rvl and emit_py_async_shapes.rvl since item 391. Legal current module .length lowers to len, already covered by branches.rvl. The #957 `Map` subscript arm is exercised by maps.rvl since item 391."]
 
-["function", "module-expression-residuals-bare-some-identity-and-legacy", "_expr", 9, 9]
+["function", "module-expression-residuals-bare-some-identity-and-legacy", "_expr", 6, 6]
 
 ["reason", "nonfinite-literal-refusal-in-finite-float-no-finite", "Nonfinite literal refusal in _finite_float: no finite source Float literal can produce NaN/Infinity in literal IR. Runtime floating arithmetic is not this branch. Direct malformed IR is rejected, not a positive oracle input."]
 
@@ -246,17 +196,17 @@
 
 ["function", "provide-residuals-undeclared-provide-unknown-service-header", "_ComponentEmitter._provide", 5, 5]
 
-["reason", "realm-parallel-component-output-boundary-emit-renders-route", "Realm/parallel component output boundary: emit renders route proxies, advances over an emitted parallel group, replaces inject list with intercept map, and emits isolate metadata. Port retains simple inject lists. stdlib/router.rvl and emit_ts_corpus/realm_{intercept,isolate}.rvl reproduce these output differences, with metadata pinned in named boundary tests."]
+["reason", "realm-parallel-component-output-boundary-emit-renders-route", "Parallel component output boundary: emit advances over an emitted item-259 parallel group, which only a whole-program `revl.parallel` plan produces; the port refuses two adjacent awaited emits by name instead. Route proxies, the intercept inject map and isolate metadata are ported and exercised by emit_py_placement.rvl and emit_ts_corpus/realm_intercept.rvl."]
 
-["function", "realm-parallel-component-output-boundary-emit-renders-route", "_ComponentEmitter.emit", 9, 9]
+["function", "realm-parallel-component-output-boundary-emit-renders-route", "_ComponentEmitter.emit", 2, 2]
 
 ["reason", "reviewed-eager-substitution-residuals-inline-eager-vars-retu", "Reviewed eager-substitution residuals: _inline_eager_vars returns empty for non-dict children and descends optfield/optcall targets or match scrutinees. Both sources implement the same recursion; inline.rvl covers strict/list/record/index/field/unary/short-circuit argument positions, while opt/match functions may exceed the 24-node template bound before this helper is queried. No broader optimization claim is inferred from coverage."]
 
-["function", "reviewed-eager-substitution-residuals-inline-eager-vars-retu", "_inline_eager_vars", 3, 3]
+["function", "reviewed-eager-substitution-residuals-inline-eager-vars-retu", "_inline_eager_vars", 2, 2]
 
-["reason", "reviewed-map-has-branch-plus-unknown-method-rejection", "Reviewed Map.has branch plus unknown-method rejection: _render_builtin renders key in map exactly like selfhost render_builtin; existing map corpus uses lookup/set/size/keys/remove but not has. Unknown builtin names are frontend-invalid and produce an explicit port marker. This is not a deferred supported map operation. Issue #1632 adds one statement to `_render_builtin`: a `Map.remove` receiver that carries an assignment expression (a nested field read such as `o.ctx.sc`) is evaluated as an argument outside the dict comprehension, because Python refuses a walrus in a comprehension's iterable. selfhost/emit_py.rvl does not mirror it yet and no py corpus document removes through a nested field; tests/test_py_nested_field_remove_1632.py executes it."]
+["reason", "reviewed-map-has-branch-plus-unknown-method-rejection", "Reviewed Map.has branch plus unknown-method rejection: _render_builtin renders key in map exactly like selfhost render_builtin; existing map corpus uses lookup/set/size/keys/remove but not has. Unknown builtin names are frontend-invalid and produce an explicit port marker. This is not a deferred supported map operation. Issue #1632's `Map.remove` through a receiver that carries an assignment expression (evaluated as a lambda argument, outside the comprehension) is mirrored by selfhost/emit_py.rvl and exercised by emit_py_map_remove_nested.rvl."]
 
-["function", "reviewed-map-has-branch-plus-unknown-method-rejection", "_render_builtin", 3, 3]
+["function", "reviewed-map-has-branch-plus-unknown-method-rejection", "_render_builtin", 2, 2]
 
 ["reason", "reviewed-owned-map-evaluation-order-py-inplace-stmts", "Reviewed owned-map evaluation order: _py_inplace_stmts binds a nontrivial set key to _revl_key before value evaluation; port inplace_stmts emits the same two statements. Current unique assignments have trivial keys; in_place.rvl covers owned set/remove/copy paths. The missing branch is a computed key, not unsupported Map mutation."]
 
@@ -273,13 +223,3 @@
 ["reason", "unknown-generic-annotation-fallback-py-type-erases-arguments", "Unknown generic annotation fallback: _py_type erases arguments of non-List/Map/Opt/Result generic names to Any. Both sources retain this compatibility path; frontend-supported builtins/function types and nominal annotations are exercised by types/branches, rather than inventing an undeclared generic type."]
 
 ["function", "unknown-generic-annotation-fallback-py-type-erases-arguments", "_py_type", 1, 1]
-
-["reason", "validated-completion-runtime-boundary-validated-call-returns", "Validated completion/runtime boundary: _validated_call returns schema/constructors/retry for stamped calls, and _ctor_map extracts oneOf tag constants or returns None for an untagged schema. The port's ordinary ADT constructors are supported but validation wrappers are not. Named reproductions: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk."]
-
-["function", "validated-completion-runtime-boundary-validated-call-returns", "_ComponentEmitter._ctor_map", 8, 8]
-
-["function", "validated-completion-runtime-boundary-validated-call-returns", "_ComponentEmitter._validated_call", 1, 1]
-
-["reason", "witness-lookup-non-dict-guard-after-a-witnessed", "Witness lookup non-dict guard: after a witnessed table exists, _witnessed_extern returns None for a malformed/non-dict acquire. Legal effect acquires are expression dictionaries. witnessed.rvl covers matching and nonmatching fn lookups; the port's final missing-name return is equivalent."]
-
-["function", "witness-lookup-non-dict-guard-after-a-witnessed", "_ComponentEmitter._witnessed_extern", 1, 1]

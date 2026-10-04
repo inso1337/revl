@@ -62,6 +62,20 @@ fallen; walls 1 and 3 stand.**
    but capture-by-value means they cannot see a `var` rebound across
    iterations, so they cannot carry a loop.
 
+### The agent loop's crossing ceiling (issue #1755)
+
+A loop that dispatches the model's chosen action to a capability, and grows its
+history as it goes, has a proved crossing ceiling in `revl audit`. For example,
+`agent_loop(h.push(act(a)), decide, act, n - 1)`, with
+`act = a => match a { Search(q) => search.find(q), Write(b) => emit fs.write(b), ... }`,
+reports `model` and `fs` each at `config.max_steps` crossings, one per
+iteration (docs/design/260 §2.2, clause 5). The effect class of every action is
+checked as for any arrow: `Agent.run` must declare every capability the
+dispatch reaches, and each emission must be marked `emit`. An action behind
+`requires approval` cannot be taken inside the loop yet. `await approval` is
+only allowed in an activation body, and the value form of `emit` carries no
+`with`; the options for lifting that are in issue #1755.
+
 ## Design
 
 ### Shape: arrow parameters bind in provide-method scope (77a smallest fix)

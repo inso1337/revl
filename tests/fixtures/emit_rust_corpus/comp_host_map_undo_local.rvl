@@ -1,0 +1,21 @@
+// A host-Map `effect` whose `undo` re-reads a method-body local the acquire
+// moved. `insert(key, value)` takes `key` by value, so the `move` undo closure
+// cannot read `key` again (E0382). The reference pre-clones it into `key_undo`
+// before the acquire (item 114, `_undo_reclone_locals`); the self-host emitter
+// skipped that step and emitted a closure over the moved `key`, which did not
+// compile. No corpus document had a body local in a host-Map undo before this.
+service Cache {
+  fn put(k: Str, v: Str) -> Str
+}
+
+component Slots provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn put(k, v) {
+      let key = "slot"
+      effect store.insert(key, v) undo store.remove(key)
+      return v
+    }
+  }
+}

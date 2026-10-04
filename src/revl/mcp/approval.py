@@ -219,6 +219,8 @@ class ClassMap:
         for a caller that holds one (`erase_report._crossings`)."""
         self.ir = ir
         self.index = index if index is not None else Composition(ir)
+        self._cardinality: dict | None = None   # issue #1755, built on demand
+        self._cardinality_error: str | None = None
         self._semantic = {c["name"]: _semantic(c)
                           for c in ir.get("components") or []}
         # direct (non-transitive) classification per scope, with every
@@ -910,6 +912,30 @@ class ClassMap:
 
     # -- the ticket ---------------------------------------------------------
 
+    def ceilings(self, reach: dict, tokens) -> dict:
+        """The item-260 crossing ceiling of each of `tokens` in this reach
+        (issue #1755, `approval_ceilings`). The cardinality report is computed
+        once per class map, lazily: a generation that never raises a class-(c)
+        ticket never pays for it."""
+        from . import approval_ceilings  # noqa: PLC0415
+        if self._cardinality is None:
+            from ..cardinality import cardinality  # noqa: PLC0415
+            try:
+                self._cardinality = cardinality(self.ir)
+            except Exception as error:  # noqa: BLE001 - the ticket must still issue
+                # an analysis that cannot run proves nothing: every capability
+                # reads `unbounded`, and the reason says why
+                self._cardinality = {}
+                self._cardinality_error = f"{type(error).__name__}: {error}"
+        out = approval_ceilings.ceilings(
+            self._cardinality, reach, tokens, self.index.externs,
+            self._carried_caps)
+        if self._cardinality_error is not None:
+            for entry in out.values():
+                entry["reason"] = (f"the cardinality analysis did not run "
+                                   f"({self._cardinality_error})")
+        return out
+
     def build_ticket(self, reach: dict, args=None,
                      record_values: str = "withheld") -> dict:
         """The class-(c) ticket: what a yes would mean. Names the component, key,
@@ -999,6 +1025,11 @@ class ClassMap:
         # reads it as known-clean, NOT as the empty-but-relevant set the H2 floor
         # deliberately treats as all five (an empty recorded set is reserved for
         # the enforcement-tier red flag, design §3.3).
+        # issue #1755: the item-260 ceiling of each capability this ticket asks
+        # about, so whoever answers it sees the worst case. After the hash, so
+        # the ticket's identity is unchanged.
+        if reach.get("classC"):
+            body["ceilings"] = self.ceilings(reach, reach["classC"])
         component = reach.get("component")
         if component is not None:
             body["realm"] = self.component_realm(component)
