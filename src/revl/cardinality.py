@@ -728,6 +728,36 @@ def cardinality(ir: dict) -> dict:
                 return bound_arrow_vec(arg["id"])
             return count_expr(arg)
 
+        def carried_vec(arg) -> dict:
+            """What an argument carries into a recursive loop: an arrow's
+            per-invocation crossings, or a data argument's once-evaluated
+            crossings plus one invocation of every arrow nested in it. The
+            loop can read such an arrow out of the data and invoke it, so the
+            certifier must see it to refuse with its own reason (issue #1755).
+            Since #1757, `count_expr` no longer counts an arrow literal's body
+            where it is written, so the nested arrows are collected here."""
+            if is_arrow_arg(arg):
+                return arg_vec(arg)
+            total = dict(count_expr(arg))
+
+            def nested(node):
+                if isinstance(node, dict):
+                    if node.get("kind") == "arrow":
+                        _merge_sum(total, arrow_body_vec(node))
+                        return
+                    if node.get("kind") == "name" \
+                            and node.get("id") in arrow_bindings:
+                        _merge_sum(total, bound_arrow_vec(node["id"]))
+                        return
+                    for value in node.values():
+                        nested(value)
+                elif isinstance(node, list):
+                    for value in node:
+                        nested(value)
+
+            nested(arg)
+            return total
+
         def is_arrow_arg(arg) -> bool:
             return isinstance(arg, dict) and (
                 arg.get("kind") == "arrow"
@@ -938,7 +968,7 @@ def cardinality(ir: dict) -> dict:
             else:
                 fname = (node.get("callee") or {}).get("name")
             args = node.get("args") or []
-            arg_vecs = [arg_vec(arg) for arg in args]
+            arg_vecs = [carried_vec(arg) for arg in args]
             rec = _certify(fname)
             if not rec["ok"]:
                 resolutions[id(node)] = {"int": {}}
