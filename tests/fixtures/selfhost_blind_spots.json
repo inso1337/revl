@@ -162,62 +162,25 @@
         "stage=take",
         "step=stream-iter",
         "subscribe=<true>"
+      ],
+      "Issue #1511: an extern of `class=emission` that declares `compensate` is registered at every crossing in a component through `RevlDeclared`. selfhost/emit_java.rvl does not port the registration, so a corpus document declaring one would make the byte-agreement oracle diverge; the runtime proof is backends/java/test_declared_compensate_java.py.": [
+        "class=emission"
       ]
     }
   },
   "py": {
-    "blind": {
-      "Retained Path B async boundary (items 146/391): emit_py.rvl::emit_externs can spell async def but does not reproduce emit.py::_py_yields_coroutine/_py_async_arrow or await insertion. emit_ts_corpus/async_module_local.rvl and services_async.rvl reproduce missing async def/metadata; test_named_runtime_and_harness_boundaries pins both. An async extern declaration alone would falsely imply complete async support.": [
-        "async=<true>"
-      ]
-    },
+    "blind": {},
     "unported": {
-      "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
-        "kind=stream-merge",
-        "kind=subscribe",
-        "stage=take",
-        "step=await",
-        "step=stream-iter",
-        "subscribe=<true>"
-      ],
-      "Async-runtime planner boundary: emit.py::_group_eligible requires idempotent emissions with safe compensation; _emit_parallel_group emits await/flush/raise ordering and emit adds service metadata. emit_py.rvl::emit_services_table/body_step has sequential dispatch only. tests/test_parallel_259.py::HDR and its commutative/disjoint cases reproduce the family. Witnessed undo_idempotent registration is separately supported.": [
-        "commutative=<true>",
-        "idempotent=<true>"
-      ],
       "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
         "kind=lease-acquire",
         "kind=lease-revoke",
         "step=approval"
-      ],
-      "Deferred delivery runtime boundary: emit.py::_deferred_step/_deferred_register_kwargs register emit_deferred with argument-position idempotency keys; emit_py.rvl::body_step/method_step issue ordinary calls. tests/test_standing_approval.py::_SOURCE declares extern emission deferred fn deliver. This is distinct from the now-ported witnessed transactional registration.": [
-        "deferred=<true>"
-      ],
-      "Existing deterministic-destructuring boundary: emit.py::_let_pattern_stmt emits record bindings and exact/rest list unpacking using _Lines.next_destructure_seq. emit_py.rvl::fn_stmt has no let_pattern arm. Representative let {a} = record and let [a, ...rest] = list forms are in tests/test_v2_language.py. Item 179 removed id-based naming, not this port omission.": [
-        "pattern=list",
-        "pattern=record",
-        "step=let_pattern"
-      ],
-      "In-file harness boundary: emit.py::_emit_tests/_emit_lifecycle_test/_lifecycle_step emit Context/clock/abort/load/unload/call/residue orchestration; emit_py.rvl::emit_py_src has no REVL_TESTS generation. examples/lifecycle_wasm.rvl and examples/durable_log.rvl reproduce omission; tests/test_lifecycle_abort.py covers abort. Named boundary tests pin the missing trailer.": [
-        "lifecycle=<true>",
-        "step=abort",
-        "step=advance",
-        "step=assert_no_residue",
-        "step=call",
-        "step=load",
-        "step=unload"
       ],
       "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [
         "kind=hole"
       ],
       "Internal reference-only pseudo-node, not frontend syntax: emit.py::_RenderedBody wraps already rendered component match arms with kind=__rendered__; emit_py.rvl::cmatch_branch passes expression strings directly. emit_py_corpus/branches.rvl::block_match covers the corresponding source behavior.": [
         "kind=__rendered__"
-      ],
-      "Spawn/instance runtime boundary: emit.py::_ComponentEmitter._expr calls runtime spawn and handle.get; emit_py.rvl::cexpr emits markers. backends/go/scenarios/accessor.rvl reproduces both; the spawn marker is independently pinned by test_named_runtime_and_harness_boundaries.": [
-        "kind=instance-get",
-        "kind=spawn"
-      ],
-      "Validated runtime/model-flow boundary: emit.py::_validated_call/_ctor_map/_ComponentEmitter._expr wrap completion in validate_response/validate_retry with schema/constructors; emit_py.rvl::cexpr emits raw calls. Named inputs: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk. Ordinary ADT construction/Secret[T] marking are supported.": [
-        "validated=<true>"
       ]
     }
   },
@@ -338,7 +301,7 @@
       "Legacy component reference spelling consumed by _ComponentEmitter; canonical pure source references lower to kind=var. This syntax-census mismatch does not mean variable reads are unsupported.": [
         "kind=name"
       ],
-      "Live component activation/provide/job/spawn/resource and witnessed undo ABI is implemented by the separate _ComponentEmitter, which the module-only selfhost port does not instantiate. This includes teardown/transactional frames and secret-witness WAL metadata; runtime redaction remains a separate roadmap 421F6 boundary.": [
+      "Live component activation/provide/job/spawn/resource and witnessed undo ABI is implemented by the separate _ComponentEmitter, which the module-only selfhost port does not instantiate. This includes teardown/transactional frames, secret-witness WAL metadata and the issue #1577 refusal of a witnessed extern that takes a `secret` parameter; runtime redaction remains a separate roadmap 421F6 boundary.": [
         "async=<true>",
         "class=witnessed",
         "fn=Job.run",
@@ -352,6 +315,7 @@
         "kind=transactional",
         "lifecycle=<true>",
         "method=dispose",
+        "secret=<true>",
         "secret_witness=<true>",
         "step=await",
         "step=effect",

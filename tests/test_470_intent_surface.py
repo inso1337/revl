@@ -198,12 +198,12 @@ def test_a_bare_emission_cannot_refine_a_declaration():
 
 
 def test_a_crossing_with_no_resolvable_capability_is_refused():
-    """The same rule for the shapes whose boundary set the per-crossing
-    resolution cannot pin down at all (here, a crossing through a service-typed
-    parameter). An empty capability set is "nothing to compare", not "nothing to
-    check": treating it as the latter is the silent hole."""
+    """The same rule for a crossing whose capability set names nothing at all
+    (here, a bare `emission` op reached through a service-typed parameter). An
+    empty or unnameable capability set is "nothing to compare", not "nothing
+    to check": treating it as the latter is the silent hole."""
     src = (
-        'service Store { emission[db] fn ingest(row: Str) -> Int }\n'
+        'service Store { emission fn ingest(row: Str) -> Int }\n'
         'service Worker { emission fn run(s: Store) -> Str'
         ' within { object: db, verbs: [ingest] } }\n'
         'component W provides worker: Worker {\n'
@@ -215,6 +215,23 @@ def test_a_crossing_with_no_resolvable_capability_is_refused():
         compile_source(src, "<test>")
     assert "crosses an unnameable boundary" in str(exc.value)
     assert "authorizes `db`" in str(exc.value)
+
+
+def test_a_crossing_through_a_service_typed_parameter_is_named_by_its_scope():
+    """Issue #1508: the parameter crossing resolves to the op's declared scope
+    through the shared resolver, so a scoped op inside the declared intent
+    compiles. This was refused as unnameable while the resolution returned
+    nothing for a parameter."""
+    src = (
+        'service Store { emission[db] fn ingest(row: Str) -> Int }\n'
+        'service Worker { emission fn run(s: Store) -> Str'
+        ' within { object: db, verbs: [ingest] } }\n'
+        'component W provides worker: Worker {\n'
+        '  provide worker { fn run(s: Store) { emit s.ingest("row")'
+        ' acting { verb: ingest } return "k" } }\n'
+        '}\n'
+    )
+    assert compile_source(src, "<test>")
 
 
 # ------------------------------------- the clause grammar

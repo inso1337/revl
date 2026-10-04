@@ -30,9 +30,9 @@
 
 ["function", "backends-java-emit-py-component-needs-frame-step", "_component_needs_frame.step_needs", 1, 1]
 
-["reason", "backends-java-emit-py-component-needs-modern-the", "backends/java/emit.py::_component_needs_modern: The remaining true returns are routes and step setup. Routers and setup are explicitly outside the admitted component subset, unlike config, requirements and realm placement."]
+["reason", "backends-java-emit-py-component-needs-modern-the", "backends/java/emit.py::_component_needs_modern: The remaining true returns are routes and step setup. Routers and setup are explicitly outside the admitted component subset, unlike config, requirements and realm placement. Issue #1511 (declared compensations, java tier) adds one: the branch that sends a component crossing an extern that declares `compensate` to the modern path. selfhost/emit_java.rvl does not port that registration and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge."]
 
-["function", "backends-java-emit-py-component-needs-modern-the", "_component_needs_modern", 3, 3]
+["function", "backends-java-emit-py-component-needs-modern-the", "_component_needs_modern", 4, 4]
 
 ["reason", "backends-java-emit-py-contains-expr-the-remaining", "backends/java/emit.py::_contains_expr: The remaining true return detects call with callee in a component expression. Component direct calls lower to kind=fn or target/method; callee calls require the explicitly deferred local-arrow/first-class/value-builtin path. Non-v1 kind detection and ordinary traversal are covered."]
 
@@ -170,9 +170,9 @@
 
 ["function", "backends-java-emit-py-empty-map-decl-type", "_empty_map_decl_type", 2, 2]
 
-["reason", "backends-java-emit-py-expr-residual-successful-arms", "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered, and so, since item 429's java blind-spot closure, are the builtin/len and sized-length arms (tests/fixtures/emit_java_corpus/stdlib_builtins.rvl). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower."]
+["reason", "backends-java-emit-py-expr-residual-successful-arms", "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered, and so, since item 429's java blind-spot closure, are the builtin/len and sized-length arms (tests/fixtures/emit_java_corpus/stdlib_builtins.rvl). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1511 (declared compensations, java tier) adds one: the branch that sends a component crossing an extern that declares `compensate` through `RevlDeclared` from the `fn` arm. selfhost/emit_java.rvl does not port that registration and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge."]
 
-["function", "backends-java-emit-py-expr-residual-successful-arms", "_expr", 28, 28]
+["function", "backends-java-emit-py-expr-residual-successful-arms", "_expr", 33, 33]
 
 ["reason", "backends-java-emit-py-finite-float-the-only", "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value."]
 
@@ -226,9 +226,9 @@
 
 ["function", "backends-java-emit-py-java-test-method-name", "_java_test_method_name", 11, 11]
 
-["reason", "backends-java-emit-py-java-type-residual-legacy", "backends/java/emit.py::_java_type: Residual legacy Map generic splitting/boxing lies beyond the declared scalar v1/v2 signature slice. Null/missing type returns Object for hand-built IR; frontend signatures are typed. Modern generic boxing is covered by java_v3_type."]
+["reason", "backends-java-emit-py-java-type-residual-legacy", "backends/java/emit.py::_java_type: Residual legacy Map generic splitting/boxing lies beyond the declared scalar v1/v2 signature slice. Null/missing type returns Object for hand-built IR; frontend signatures are typed. Modern generic boxing is covered by java_v3_type. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the `Object` fallback here, through `_param_type`. Its method now renders with its declared `long` signature."]
 
-["function", "backends-java-emit-py-java-type-residual-legacy", "_java_type", 4, 4]
+["function", "backends-java-emit-py-java-type-residual-legacy", "_java_type", 5, 5]
 
 ["reason", "backends-java-emit-py-java-v3-type-residual", "backends/java/emit.py::_java_v3_type: Residual Result boxing and undeclared host Pool Row-to-Object typing belong to the explicit Result/Pool boundaries. Unknown generic heads (user generics are monomorphized) and missing/non-string types are hand-built or invalid IR."]
 
@@ -258,9 +258,9 @@
 
 ["function", "backends-java-emit-py-metadata-lit-only-unsupported", "_metadata_lit", 1, 1]
 
-["reason", "backends-java-emit-py-method-body-lines-render", "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms."]
+["reason", "backends-java-emit-py-method-body-lines-render", "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the two `void` return statements here: its return type lookup failed too, so `x + x` was emitted as a statement followed by `return;`. Its method now renders with its declared `long` signature."]
 
-["function", "backends-java-emit-py-method-body-lines-render", "_method_body_lines.render", 54, 54]
+["function", "backends-java-emit-py-method-body-lines-render", "_method_body_lines.render", 56, 56]
 
 ["reason", "backends-java-emit-py-method-body-residual-empty", "backends/java/emit.py::_method_body: Residual empty/multistep effectful-body traps and nonvoid bare-return refusal are outside the simple legacy method gate; a value expression discarded by a void method requires the nonsimple legacy effect/call path. Void bare returns and scalar/name returns are covered."]
 
@@ -410,7 +410,7 @@
 
 ["function", "backends-java-emit-py-witnessed-extern-for-residual", "_witnessed_extern_for", 3, 3]
 
-["reason", "blocking-tier-stream-and-typed-event-runtime-item", "Blocking-tier stream and typed-event runtime (item 130), reached only by a component that holds a stream: the emitted `Stream`/`Subscription` runtime and its R1 markers (`_emit_stream_runtime`, `_r1_marker_lines`), the `subscribe` head including the `merge` fan-in (`_stream_head`), the `every … in` / `on … as` loop (`_emit_stream_iter`), the `on … as` schema-and-dedup contract runtime and the field-by-field reading of a validated item (`_emit_stream_event_runtime`, `_java_event_field`), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the predicates that decide whether a document pulls either runtime in (`_document_holds_stream`, `_body_holds_stream`, `_document_holds_stream_event`, `_body_holds_stream_event`). The corpus IS the byte-agreement corpus and `selfhost/emit_java.rvl` ports no stream lowering (nor do the go and rust ports), so a corpus document holding a stream would force a divergence; see the matching `unported` entry in selfhost_blind_spots.json. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead."]
+["reason", "blocking-tier-stream-and-typed-event-runtime-item", "Blocking-tier stream and typed-event runtime (item 130), reached only by a component that holds a stream: the emitted `Stream`/`Subscription` runtime and its R1 markers (`_emit_stream_runtime`, `_r1_marker_lines`), the `subscribe` head including the `merge` fan-in (`_stream_head`), the `every … in` / `on … as` loop (`_emit_stream_iter`), the `on … as` schema-and-dedup contract runtime and the field-by-field reading of a validated item (`_emit_stream_event_runtime`, `_java_event_field`), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the predicates that decide whether a document pulls either runtime in (`_document_holds_stream`, `_body_holds_stream`, `_document_holds_stream_event`, `_body_holds_stream_event`). The corpus IS the byte-agreement corpus and `selfhost/emit_java.rvl` ports no stream lowering (nor do the go and rust ports), so a corpus document holding a stream would force a divergence; see the matching `unported` entry in selfhost_blind_spots.json. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead. Item 130 §4.5's last-n backlog is LOWERED on this tier now: `_refuse_unlowered_stream_surface` goes from 4 to 5 because its replay arm now tells the durable `replay(from: …)` cursor (refused) from the last-n count (lowered), and `_expr` rises by 4 for the `Stream.source(n)` and `Stream.subscribeReplay` arms. A cursor refusal document is no way out: every `.rvl` under tests/fixtures is a gate/reference census case and the native gate (selfhost/lower.rvl) false-rejects any document carrying `replay(…)`. Executed by backends/java/test_stream_exec_java_130.py."]
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-item", "_body_holds_stream", 1, 1]
 
@@ -432,13 +432,29 @@
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-item", "_refuse_required_stream", 1, 1]
 
-["function", "blocking-tier-stream-and-typed-event-runtime-item", "_refuse_unlowered_stream_surface", 4, 4]
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_refuse_unlowered_stream_surface", 5, 5]
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-item", "_stream_chain", 11, 11]
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-item", "_stream_head", 4, 4]
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-item", "_stream_stage_arrow", 9, 9]
+
+["reason", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "Issue #1511, the java tier: an extern that declares `compensate` was registered in no position. `_reaches_declared` finds a component that crosses one, `_component_needs_frame` gives it the frame, `_declared_crossing` renders every crossing through `RevlDeclared.crossed`, and `_emit_revl_frame_runtime` appends `RevlDeclared`. selfhost/emit_java.rvl does not port it, and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge; the self-host port is the work that retires this entry. The input family is backends/java/test_declared_compensate_java.py."]
+
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_component_needs_frame", 1, 1]
+
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_declared_crossing", 13, 13]
+
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_emit_revl_frame_runtime", 1, 1]
+
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_reaches_declared", 7, 7]
+
+["reason", "issue-1512-param-type-s-object-fallback-is-no-longer-reached", "Issue #1512: `_param_type`'s `Object` fallback is no longer reached. The one corpus document that reached it (double_tool.rvl) did so because the provider looked its renamed method `double_` up in the service table; `_method_name` keeps the lookup on the contract name, and the frontend admits no provider method or parameter the service does not declare. `_method_name`'s extra rung for a method named with underscores alone (`_` is a Java keyword) is reached by no corpus document; backends/java/test_keyword_method_names_java.py runs `_` end to end."]
+
+["function", "issue-1512-param-type-s-object-fallback-is-no-longer-reached", "_method_name", 1, 1]
+
+["function", "issue-1512-param-type-s-object-fallback-is-no-longer-reached", "_param_type", 1, 1]
 
 ["reason", "item-458-java-s-div-floor-div-euclid", "Item 458: java's `div_floor`/`div_euclid`/`mod` move from inline `Math.*` expressions to static helpers, because `Math.floorDiv` wraps at Int.MIN / -1 and `Math.abs(Long.MIN_VALUE)` is negative. `_emit_int_arith_helpers` is the block and `_uses_int_arith.walk` the demand scan; no java corpus document calls a named division, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl ports none of this family (item-429(d)). The reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py."]
 

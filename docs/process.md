@@ -282,11 +282,16 @@ root suite.
 the same `tools/affected_tests.py` selection. When it is the full root suite
 (about 70 minutes as one job), or 40 or more files, the shards split it by test
 file with `REVL_TEST_SHARD=k/4`, balanced by the per-file seconds in
-`tests/shard_weights.json`. A smaller selection runs whole in shard 1. The
+`tests/shard_weights.json`. A file heavier than half an even shard is split
+further, by test family (a test function with all its parametrizations, or a
+test class): `tests/test_selfhost_lower.py` is one, and its single nesting test
+of about 19 minutes is now the floor of the slowest shard. A smaller selection
+runs whole in shard 1. The
 shards run every selected test exactly once, which
 `tests/test_root_suite_shards_1774.py` pins. A stale weight only makes the
 shards uneven. A sharded run ends by printing `REVL_SHARD_SECONDS <seconds> <file>`
-for each file it ran; `python tools/refresh_shard_weights.py --run <run id> --write`
+for each file it ran, and `<file>::<family>` lines for a split file;
+`python tools/refresh_shard_weights.py --run <run id> --write`
 reads those lines from a FULL run's four job logs into the weights file. To run one
 shard locally: `REVL_TEST_SHARD=2/4 pytest tests/ -q`.
 
@@ -448,8 +453,13 @@ It then runs every generator's own check, and stages what it resolved.
 - **`bench/results/` is left alone** unless you pass `--bench`, which takes
   main's side, including a file main deleted.
 - **A step whose tool is missing** (`lake`, `cargo`) is skipped with a loud
-  banner, and the files it owns are left as they were. `--fast` skips the
-  crate census on purpose.
+  banner, and the files it owns are left as they were. The run then exits 1,
+  because a file nothing checked is not a passing one; pass `--allow-skip` on
+  a machine that cannot install the tool. Before giving up, the tool looks in
+  `~/.elan/bin` for `lake` and `~/.cargo/bin` for `cargo`, so a shell that never
+  sourced their profiles still finds them; `formal/scripts/run_gate.sh` looks in
+  `~/.elan/bin` too. `--fast` skips the crate census on purpose, and that skip
+  does not fail the run.
 - **Provenance has no default generation** for your branch's new census
   documents. Pass `--provenance-generation N` when its manifest conflicts, or
   when its check names an UNDECLARED document this branch added:
@@ -463,7 +473,8 @@ and `TRANSITIONS`,
 which `tests/test_regen_generated.py` checks against the tree. `--list`
 prints what it knows; `--all` and `--only NAME` regenerate outside a
 conflict. It exits 0 when every conflict it owns is resolved and every check
-passes, and 1 when a check fails or a conflict is left for a human.
+passes, and 1 when a check fails, a conflict is left for a human, or a
+generator was skipped for a missing tool without `--allow-skip`.
 
 ## Merging
 

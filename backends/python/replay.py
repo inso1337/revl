@@ -51,6 +51,7 @@ is never imported.
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 import itertools
 import json
@@ -403,7 +404,7 @@ class Step:
     __slots__ = ("index", "kind", "label", "effect", "file", "lineno", "source",
                  "detail", "origin", "undo", "undone", "undone_by", "crossed",
                  "compensation", "note", "error", "scope", "undo_idempotent",
-                 "inverse_op")
+                 "inverse_op", "within", "wal_seq")
 
     def __init__(self, index: int, kind: str, label: str, effect: Optional[str],
                  origin: dict, file=None, lineno=None, source=None,
@@ -421,6 +422,14 @@ class Step:
         self.undo: Optional[Callable] = None
         self.undone = False
         self.undone_by: Optional[str] = None
+        # issue #1609: the required-service crossing this step was recorded
+        # INSIDE (`_ENCLOSING`), as `{"seq", "component", "label"}`, or None.
+        # A provider body's own emission made while answering a caller's
+        # `emit svc.op(...)` is the same physical crossing the caller's record
+        # already describes; recovery counts it there, once.
+        self.within: Optional[dict] = _ENCLOSING.get()
+        # the WAL seq this step was written at, once it is (None without a WAL)
+        self.wal_seq: Optional[int] = None
         self.crossed = False          # an emission the unwind stepped over
         self.compensation: Optional[int] = None  # index of its compensation
         self.error: Optional[str] = None
@@ -551,7 +560,7 @@ class Timeline:
 
     def _wal_append(self, step: Step) -> None:
         if self._wal is not None:
-            self._wal.append_step(step, self.component)
+            step.wal_seq = self._wal.append_step(step, self.component)["seq"]
 
     # -- recording ---------------------------------------------------------
 
@@ -1373,16 +1382,49 @@ class _ServiceProxy:
             while frame is not None and \
                     "_revl_transparent_frame" in frame.f_code.co_varnames:
                 frame = frame.f_back
-            timeline.record_emission(
+            step = timeline.record_emission(
                 key, name, args, service,
                 (frame.f_code.co_filename, frame.f_lineno)
                 if frame is not None else (None, None))
-            return attr(*args, **kwargs)
+            return _call_within(_crossing_ref(timeline, step), attr, args, kwargs)
 
         return emission
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
         return f"<recording {self._key}: {self._service}>"
+
+
+#: issue #1609: the required-service crossing being answered right now. Set by
+#: `_ServiceProxy` around the provider's method, so a step the provider records
+#: while answering it carries `within` (see `Step.within`). A ContextVar, so an
+#: `async fn` operation awaited later still sees the crossing it belongs to.
+_ENCLOSING: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "revl_enclosing_crossing", default=None)
+
+
+def _crossing_ref(timeline: "Timeline", step: Step) -> dict:
+    return {"seq": step.wal_seq, "component": timeline.component, "label": step.label}
+
+
+def _call_within(ref: dict, fn: Callable, args: tuple, kwargs: dict) -> Any:
+    """``fn(*args, **kwargs)`` with ``ref`` as the enclosing crossing, for the
+    synchronous body and, when it returns an awaitable, for the awaited one."""
+    token = _ENCLOSING.set(ref)
+    try:
+        result = fn(*args, **kwargs)
+    finally:
+        _ENCLOSING.reset(token)
+    if inspect.isawaitable(result):
+        return _await_within(ref, result)
+    return result
+
+
+async def _await_within(ref: dict, awaitable: Any) -> Any:
+    token = _ENCLOSING.set(ref)
+    try:
+        return await awaitable
+    finally:
+        _ENCLOSING.reset(token)
 
 
 class _SpawnRecorder:
@@ -1996,6 +2038,9 @@ def _wal_record(step: "Step", component: str, seq: int,
         **({"compensated": True} if step.compensation is not None else {}),
         **({"undoIdempotent": step.undo_idempotent}
            if step.undo_idempotent is not None else {}),
+        # issue #1609: absent unless the step was recorded inside another
+        # component's required-service crossing
+        **({"within": step.within} if step.within is not None else {}),
     }
 
 

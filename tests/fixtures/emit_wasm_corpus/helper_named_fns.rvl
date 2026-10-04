@@ -1,0 +1,15 @@
+// User functions whose names are the wasm emitter's own helper names (issue
+// #1756). Both emitters used to spell a user `fn` `$<name>`, so `fn int_add`,
+// `fn alloc` and `fn str_concat` redefined the helpers this module also pulls
+// in (`$int_add` for `+`, `$alloc` and `$str_concat` for a Str concatenation),
+// and the module did not assemble. A user `fn` is `$fn.<name>` now on both
+// sides; the helpers keep their names, which hand-written `@wasm` bodies call.
+fn int_add(a: Int, b: Int) -> Int { return a * b }
+
+fn alloc(n: Int) -> Int { return int_add(n, 2) + 1 }
+
+fn str_concat(s: Str) -> Str { return s.concat("!") }
+
+pub fn probe(n: Int) -> Int { return alloc(n) + int_add(n, n) }
+
+pub fn shout(s: Str) -> Str { return str_concat(s).concat("?") }

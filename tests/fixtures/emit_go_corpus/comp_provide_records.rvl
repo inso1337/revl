@@ -68,10 +68,9 @@ component Printer requires geo: Geometry provides report: Report {
 // comparison, a `!`, a `.length` and a nested ternary;
 // `.length` on a list literal, on a fn result and on a service result's
 // field; a match over the result of a service call; and a method with a bare
-// `return`. Two shapes are left out because both emitters render Go that does
-// not build: a match over a case built in place (`switch _m :=
-// ShapeCircle{..}.(type)`), and a match whose type is inferred (issue #1834:
-// `_comp_infer` answers the scrutinee's type for a match).
+// `return`. Since issue #1834 a match's type is its first typed arm's, with the
+// arm's binding in scope, and a case built in place is bound to an
+// interface-typed temp before the type switch; `Matcher` below carries both.
 fn keep(n: Int) -> Int { return n }
 fn keepL(xs: List[Int]) -> Int { return 0 }
 fn keepP(p: Point) -> Int { return p.x }
@@ -113,5 +112,29 @@ component Inferrer requires geo: Geometry provides inf: Infer {
     fn v(f, s) = keep(f ? s.length : 1)
     fn w(f) = keep(f ? (f ? 1 : 2) : 3)
     fn x(s) = keepS(match s { _ => s })
+  }
+}
+
+// issue #1834: a match in an inferred position (a call argument, a `.length`
+// receiver, a nested match), a match whose type comes from an arm's binding,
+// and a match over a case built in place. And issue #1838: an Int returned as
+// a Float carries the frontend's widen marker, rendered `float64(..)`.
+service Matcher {
+  fn k(s: Shape) -> Int
+  fn j(s: Shape) -> Int
+  fn a(n: Int) -> Int
+  fn r(s: Shape) -> Int
+  fn p(s: Shape) -> Int
+  fn wf(n: Int) -> Float
+}
+
+component Matching provides mt: Matcher {
+  provide mt {
+    fn k(s) = keep(match s { Dot => (match s { _ => 2 }), _ => 3 })
+    fn j(s) = (match s { Dot => "dot", _ => "other" }).length
+    fn a(n) = match Circle(n) { Circle(r) => keep(r), _ => 0 }
+    fn r(s) = keep(match s { Circle(r) => r, _ => 0 })
+    fn p(s) = keepP(match s { Box(b) => b, _ => { x: 0, y: 0 } })
+    fn wf(n) = n
   }
 }

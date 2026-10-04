@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import attest  # noqa: E402
 from revl import registry as reg  # noqa: E402
+from revl.evidence_recompute import recompute_component  # noqa: E402
 from revl import compile_source  # noqa: E402
 from revl.audit_diff import audit_report  # noqa: E402
 from revl.policy import (  # noqa: E402
@@ -405,7 +406,8 @@ def test_recompute_grades_a_fresh_dossier_marking_recomputed_vs_published():
     # component in hand, grades `pass`, and the clause is marked `recomputed`.
     ir = compile_source(SOLO)
     result = explain(policy, audit, origins={"CsvReader": "source"},
-                     recompute=True, recompute_ir={"CsvReader": ir})
+                     recompute=True, recompute_producer=recompute_component,
+                     recompute_ir={"CsvReader": ir})
     assert result["recomputed"] is True
     assert not result["refused"]
     clause = result["components"][0]["rules"][0]["clauses"][0]
@@ -424,7 +426,8 @@ def test_recompute_gauntlet_facet_is_operator_run_and_marked_recomputed():
     # the caller supplies the cold gauntlet dossier the CLI would run; recompute
     # overlays it as an operator-run facet, so the mcp draft admits.
     result = explain(policy, audit, mcp_components={"CsvReader"},
-                     recompute=True, recompute_ir={"CsvReader": ir},
+                     recompute=True, recompute_producer=recompute_component,
+                     recompute_ir={"CsvReader": ir},
                      recompute_gauntlet={"verdict": "admissible"})
     assert not result["refused"]
     clauses = result["components"][0]["rules"][0]["clauses"]
@@ -440,9 +443,11 @@ def test_recompute_leaves_the_verdict_agreeing_with_the_gate():
     policy = parse_policy(RECOMPUTE_POLICY)
     ir = compile_source(SOLO)
     violations = evaluate(policy, audit, origins={"CsvReader": "source"},
-                          recompute=True, recompute_ir={"CsvReader": ir})
+                          recompute=True, recompute_producer=recompute_component,
+                     recompute_ir={"CsvReader": ir})
     result = explain(policy, audit, origins={"CsvReader": "source"},
-                     recompute=True, recompute_ir={"CsvReader": ir})
+                     recompute=True, recompute_producer=recompute_component,
+                     recompute_ir={"CsvReader": ir})
     assert bool(violations) == result["refused"]
 
 

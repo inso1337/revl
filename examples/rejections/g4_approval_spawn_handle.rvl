@@ -1,0 +1,25 @@
+// REJECTED, G4: an approval-required capability crossed through a spawn
+// handle (`emit w.task.run(1)`) with no `with` edge.
+//
+// The crossing's token is the `emission[pay]` scope of the op the handle's
+// provision yields, resolved by the same resolver the marker rule uses for
+// this carrier (`_instance_get_call`). Before, the approval floor resolved only
+// a required service and a direct extern, so this crossing met no floor. The
+// requirement is the capability's: `charge` declares it for `pay`, and the
+// handle's op crosses `pay` whatever its own body does.
+//
+// expected error:
+//   crossing capability `pay` requires approval, but this `emit` carries no
+//     covering `with` edge
+
+extern emission[pay] fn charge(amount: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[pay] fn run(n: Int) -> Int }
+service Sup { fn go(n: Int) -> Int }
+component Worker provides task: Pay {
+  provide task { fn run(n) = n }
+}
+component Supervisor provides sup: Sup {
+  let w = effect spawn Worker with { } undo w.dispose()
+  emit w.task.run(1)
+  provide sup { fn go(n) = 0 }
+}

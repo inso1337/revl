@@ -56,7 +56,10 @@ def _boundary(source: str, component: str) -> dict:
 
 def test_emission_stashed_in_a_record_field_is_refused():
     """`{ f: ship }` never names `ship` in call position — the record literal
-    carries the value. First-class detection must trip on the container."""
+    carries the value. First-class detection must trip on the container. The
+    function is read off the field and called through a binding, the only
+    spelling a component body admits (`r.f(a)` itself is refused since issue
+    #1547: records carry no methods)."""
     with pytest.raises(RevlError) as excinfo:
         compile_source(SHIP + """
 service S { fn quiet(a: Str) -> Str }
@@ -64,7 +67,8 @@ component C provides s: S {
   provide s {
     fn quiet(a) {
       let r = { f: ship }
-      return r.f(a)
+      let g = r.f
+      return g(a)
     }
   }
 }

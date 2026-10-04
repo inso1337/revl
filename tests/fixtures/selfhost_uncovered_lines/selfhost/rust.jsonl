@@ -2,17 +2,13 @@
 
 ["function", "async-activation-remains-outside-the-self-host-rust", "erase_async_ret", 1, 1]
 
-["reason", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "Canonical ABI bridge boundary: these residuals emit opaque/non-scalar Value extraction, serialization and deserialization plus proxy glue. Scalar and scalar-Option bridge paths are covered; records, collections, Results and opaque payloads remain explicit DEFER cases."]
+["reason", "canonical-abi-bridge-boundary-the-marshalling-helpers-are", "Canonical ABI bridge boundary: the marshalling helpers are ported since item 391 (records, collections, std `Result` and the opaque `Value`, held to byte agreement by emit_rust_corpus/bridge_types.rvl). What is left mirrors the reference: `split_result`'s final `return []` for a `Result<...>` with no top-level comma, which no well-formed type produces, and `emit_bridge`'s config-default field line, which needs a bridged provider that declares a `config` default."]
 
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "bridge_arg_extract", 1, 1]
+["function", "canonical-abi-bridge-boundary-the-marshalling-helpers-are", "split_result", 1, 1]
 
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "bridge_arg_ser", 1, 1]
+["reason", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "Canonical ABI bridge boundary: the marshalling helpers are ported since item 391 (records, collections, std `Result` and the opaque `Value`, held to byte agreement by emit_rust_corpus/bridge_types.rvl). What is left mirrors the reference: `split_result`'s final `return []` for a `Result<...>` with no top-level comma, which no well-formed type produces, and `emit_bridge`'s config-default field line, which needs a bridged provider that declares a `config` default."]
 
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "bridge_ret_deser", 1, 1]
-
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "bridge_ret_ser", 1, 1]
-
-["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "emit_bridge", 4, 4]
+["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "emit_bridge", 1, 1]
 
 ["reason", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming."]
 
@@ -20,7 +16,7 @@
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "default_for_rust_type", 11, 11]
 
-["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "emit_host_stubs", 2, 2]
+["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "emit_host_stubs", 1, 1]
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "ind", 1, 1]
 
@@ -32,9 +28,13 @@
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "is_scalar_option", 1, 1]
 
+["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "is_word_char", 1, 1]
+
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "list_element_type", 3, 3]
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "resolved", 1, 1]
+
+["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "result_to_json", 1, 1]
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "rstrip", 5, 5]
 
@@ -66,7 +66,7 @@
 
 ["function", "declared-out-of-every-self-host-slice-realm", "collect_realm_labels", 3, 3]
 
-["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry"]
+["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test sections, marked rather than emitted (issue #1123): `deferred_test_markers` names each `lifecycle test` with an `<<UNSUPPORTED-TEST:...>>` marker and each `fault test` with an `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block in. A plain `test` is EMITTED since item 391 (`emit_v3_tests`, held to byte agreement by emit_rust_corpus/in_file_tests.rvl); the two sections still marked drive a live composition or are a reference refusal, so no byte-agreement corpus document can carry either, and the marker is what keeps them loud rather than silently skipped, as all six emitters did before #1123."]
 
 ["function", "deferred-in-file-test-section-marked-rather-than", "deferred_test_markers", 2, 2]
 
@@ -90,7 +90,7 @@
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "host_of", 6, 6]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "map_insert_candidates", 8, 8]
+["function", "host-bind-and-realm-residuals-beyond-the-two", "map_insert_candidates", 7, 7]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_expr_type", 75, 75]
 
@@ -104,7 +104,7 @@
 
 ["function", "host-object-blocks-no-corpus-document-acquires-the", "is_map_cas_verb", 1, 1]
 
-["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32."]
+["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `render_var`'s statements."]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "borrow_str_arg", 1, 1]
 
@@ -134,7 +134,7 @@
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_un", 2, 2]
 
-["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_var", 2, 2]
+["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_var", 1, 1]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "str_param_readonly", 3, 3]
 
@@ -154,9 +154,9 @@
 
 ["function", "selfhost-emit-rust-rvl-strip-index-clone-the", "strip_index_clone", 1, 1]
 
-["reason", "the-in-file-test-declarations-that-drive-the", "The in-file `test` declarations that drive the clock. Consulted only when no component arms a timer — `uses_timer(..) || tests_use_advance(ir)` at selfhost/emit_rust.rvl:5568 short-circuits on the left — and the corpus's own document arms one. The section that would consult it is the in-file test section the port defers (tests/fixtures/selfhost_blind_spots.json, `step=advance`) (issue 1153)."]
+["reason", "the-in-file-test-declarations-that-drive-the", "The in-file `test` declarations that drive the clock. Consulted only when no component arms a timer: `uses_timer(..) || tests_use_advance(ir)` short-circuits on the left. Since item 391 emit_rust_corpus/in_file_tests.rvl reaches it (a test section and no component), so its walk runs; what is left is the `advance` match and its early returns, because no corpus test drives the clock: an `advance` is a lifecycle step, and the lifecycle section is still marked (tests/fixtures/selfhost_blind_spots.json, `step=advance`) (issue 1153)."]
 
-["function", "the-in-file-test-declarations-that-drive-the", "tests_use_advance", 4, 4]
+["function", "the-in-file-test-declarations-that-drive-the", "tests_use_advance", 3, 3]
 
 ["reason", "the-port-s-own-json-dumps-for-the", "The port's own `json.dumps` for the typed-event contract schema (`json_str`, `json_dumps`) and the non-BMP `\\uXXXX` escape arm inside it (`hex4`). They are reached only through `Stream::contract` at selfhost/emit_rust.rvl:4889, which the corpus's `comp_stream.rvl` `Handler` component does not reach; the reference calls python's `json`, so it has no counterpart in `backends/rust/emit.py` (issue 1153)."]
 
@@ -180,7 +180,7 @@
 
 ["function", "the-port-s-stream-typed-event-host-dialect", "stream_stage_arrow", 1, 1]
 
-["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered."]
+["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements."]
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "build_type_tables", 2, 2]
 
@@ -194,7 +194,7 @@
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "ref_name", 1, 1]
 
-["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_type_t", 3, 3]
+["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_type_t", 2, 2]
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_v3_lit", 3, 3]
 

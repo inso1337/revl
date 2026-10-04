@@ -1,0 +1,24 @@
+// ADMITTED: the same child as `g4_host_extern.rvl`, but `Supervisor` crosses a
+// host emission itself, so it holds the unnameable host boundary the child
+// reaches. The file name's prefix is the expected verdict;
+// tests/test_spawn_attenuation_value.py holds it.
+
+extern emission fn host_write(row: Str) -> Int = @py { return 1 }
+service StoreA {
+  emission[kv_a] fn write_a(row: Str) -> Int
+}
+service Task {
+  emission fn go() -> Int
+}
+component Leaker provides task: Task {
+  provide task {
+    fn go() {
+      let r = emit host_write("leak")
+      return r
+    }
+  }
+}
+component Supervisor requires kv_a: StoreA {
+  emit host_write("sup")
+  let l = effect spawn Leaker with { } undo l.dispose()
+}

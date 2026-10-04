@@ -93,7 +93,7 @@ file on disk; the canonical IR spelling is a project invariant that
 `selfhost/*.rvl` must reproduce byte for byte, so it does not move for this.
 Identity is location-independent, not content-independent: the same basename in
 another directory over different bytes is a different composition and still
-refuses. `revl bundle`, `registry.build_evidence` and `truc reproduce` each
+refuses. `revl bundle`, `registry_evidence.build_evidence` and `truc reproduce` each
 applied this normalization already (`docs/bundle.md` resolves it as a named
 design decision, and item 305 records the bundle's own version of the omission
 as a bug it fixed), but each from its own copy of the rule, which is how the

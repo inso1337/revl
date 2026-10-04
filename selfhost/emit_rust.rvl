@@ -56,8 +56,8 @@
 //     `req`/`config`/`fn` expression kinds and the `target`/`method` call form).
 //     Still DEFERRED and REPORTED (each fires a `<<DEFER-*>>` marker): timers /
 //     routers (`routes`), `await`/`spawn`, `isolate`/`intercept`/realms, host
-//     `let-effect` binds (`Pool`/`Map`/`Job`) and the item-114 host-Map
-//     undo-reclone, body-level `effect`/`timer`/`fail`/`if` steps, the `host`/
+//     `let-effect` binds (`Pool`/`Map`/`Job`), body-level
+//     `effect`/`timer`/`fail`/`if` steps, the `host`/
 //     `format` component-dialect kinds, and the non-scalar bridge marshalling
 //     (Result/serde/`Vec<Value>`/opaque-`Value`). These stay ENTANGLED with the
 //     erasure surface below;
@@ -127,7 +127,7 @@ use "../stdlib/value.rvl" {
 // `sorted(...)` the reference uses to canonicalise a record's field set into a
 // `record_by_fields` key; `str_lt` is its comparator, reused by the in-file
 // tests. Both are byte-fuzz-pinned against Python `sorted()` — no re-hand-roll.
-use "../stdlib/list.rvl" { list_sort, str_lt }
+use "../stdlib/list.rvl" { list_sort, str_lt, list_contains }
 // `trim` is Python `str.strip()` for ASCII — the reference `.strip()`s an
 // extern's `@rs` body before splicing it. No re-hand-roll (item 194).
 use "../stdlib/str.rvl" { trim }
@@ -1516,12 +1516,16 @@ fn render_field(node: Any, ctx: Ctx) -> Str {
   // Clone just the field instead: strictly less copied, still owned, so valid
   // in every position; a read-only caller then strips even this field clone
   // via `strip_index_clone`. The `.clone()` is 8 chars.
+  // item 104 (issue #1734): a property-form `.length` on a sized value in a
+  // component position stays a `field` node marked `sized_length`; it is the
+  // code-point / element count through the helper trait, not a struct field.
+  let sized = value_bool(value_field(node, "sized_length"))
   if (node_kind(tn) == "index" && target.endsWith(".clone()")) {
     let place = target.slice(0, target.length() - 8)
-    return `${place}.${mangle(value_str(value_field(node, "name")))}.clone()`
+    return sized ? `${place}.revl_length()` : `${place}.${mangle(value_str(value_field(node, "name")))}.clone()`
   }
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
-  return `${target}.${mangle(value_str(value_field(node, "name")))}`
+  return sized ? `${target}.revl_length()` : `${target}.${mangle(value_str(value_field(node, "name")))}`
 }
 
 // `record`: a nominal `Struct { f: v, .. }` literal. Each field value moves into
@@ -4431,6 +4435,62 @@ fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
   return out
 }
+// The identifier a `var`/`name`/`req` node names (`id`, falling back to `name`).
+fn ref_ident(node: Any) -> Str {
+  var ident = value_str(value_field(node, "id"))
+  if (ident == "") { ident = value_str(value_field(node, "name")) }
+  return ident
+}
+// `_expr_var_names`: every bare variable name an IR subtree references, so the
+// undo's reads can be matched against the acquire's moves (item 114).
+fn expr_var_names(node: Any, acc: Map[Str, Str]) -> Map[Str, Str] {
+  var m = acc
+  if (value_kind(node) == "record") {
+    let k = node_kind(node)
+    if (k == "var" || k == "name" || k == "req") {
+      let ident = ref_ident(node)
+      if (ident != "") { m = m.set(ident, "1") }
+    }
+  }
+  for (child of value_children(node)) { m = expr_var_names(child, m) }
+  return m
+}
+// `_acquire_moved_locals`: the bare-identifier arguments a host-Map method
+// takes by value (`insert(key, value)`; `get`/`remove` borrow the key). Every
+// other acquire argument is already cloned at the call site.
+fn acquire_moved_locals(node: Any, vt: Map[Str, Str], acc: Map[Str, Str]) -> Map[Str, Str] {
+  var m = acc
+  if (value_kind(node) == "record") {
+    if (node_kind(node) == "call" && value_is_null(value_field(node, "callee"))) {
+      let recv = ref_ident(value_field(node, "target"))
+      let mth = value_str(value_field(node, "method"))
+      if (map_get(vt, recv).startsWith("Map[") && mth != "get" && mth != "remove") {
+        for (arg of value_list(value_field(node, "args"))) {
+          let ak = node_kind(arg)
+          if (ak == "var" || ak == "name") {
+            let ident = ref_ident(arg)
+            if (ident != "") { m = m.set(ident, "1") }
+          }
+        }
+      }
+    }
+  }
+  for (child of value_children(node)) { m = acquire_moved_locals(child, vt, m) }
+  return m
+}
+// `_undo_reclone_locals`, sorted: the method-body locals the undo reads AND the
+// acquire consumes by value. The `move` undo closure would find those already
+// moved (E0382), so each is pre-cloned into `<local>_undo` before the acquire.
+fn undo_reclone_locals(acq: Any, undonode: Any, body_locals: Map[Str, Str], vt: Map[Str, Str]) -> List[Str] {
+  // Only reached for a step that registers an undo, so `undonode` is never null.
+  var out = []
+  let refs = expr_var_names(undonode, Map.empty())
+  let moved = acquire_moved_locals(acq, vt, Map.empty())
+  for (local of body_locals.keys()) {
+    if (refs.has(local) && moved.has(local)) { out = out.push(local) }
+  }
+  return list_sort(out)
+}
 // `_provide_let_type`: `_v3_infer_type` extended with the one source that only
 // exists in a provide body — a required-service method call's declared return
 // (`let answer = model.complete(seed)`), so a later by-value use of the local
@@ -4461,8 +4521,9 @@ fn reqs_map(comp: Any) -> Map[Str, Str] {
 
 // `_method_body_lines`: lower effect/emit/return/let/assign steps in an
 // effectful provide-method body. Effect registration is fire-and-forget through
-// `self.ctx.effect(..)`. The host-Map reclone (item 114) is DEFERRED — the
-// subset declares no host `Map`, so `_undo_reclone_locals` is always empty.
+// `self.ctx.effect(..)`. Ahead of each undo, a method-body local the undo reads
+// and a host-Map acquire moves (`insert(key, ..)`) is pre-cloned into
+// `<local>_undo` (item 114, `_undo_reclone_locals`).
 // Returns the lines AND the threaded ctx (its `vt` carries let-inferred types).
 fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: Int) -> Sout {
   let pad = ind(indent)
@@ -4472,6 +4533,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
   var c = set_rn(ctx, scope)
   var out = []
   var index = 0
+  var body_locals: Map[Str, Str] = Map.empty()
   for (step of value_list(value_field(method, "body"))) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "return") {
@@ -4480,7 +4542,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
       else { out = out.push(`${pad}return ${render_expr(e, c)};`) }
     } else {
       if (kind == "effect" || kind == "emit") {
-        let undoR = method_undo_rename(comp, method)
+        var undoR = method_undo_rename(comp, method)
         var acqR = scope
         for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
         let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
@@ -4494,7 +4556,10 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
         if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
         if (registers_undo) {
           out = out.concat(method_undo_clones(comp, method, indent))
-          // host-Map reclone (item 114): DEFERRED — no host Map in subset.
+          for (local of undo_reclone_locals(acqnode, undonode, body_locals, c.vt)) {
+            out = out.push(`${pad}let ${local}_undo = ${local}.clone();`)
+            undoR = undoR.set(local, `${local}_undo`)
+          }
         }
         let acq = render_expr(acqnode, set_rn(c, acqR))
         out = out.push(`${pad}let _ = ${acq};`)
@@ -4516,6 +4581,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
             out = out.push(`${pad}${mangle(nm)} = ${render_expr(value_field(step, "value"), c)};`)
           }
           if (inferred != "") { c = set_vt(c, nm, inferred) }
+          if (kind == "let" && nm != "") { body_locals = body_locals.set(nm, "1") }
         } else {
           out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
         }
@@ -5164,15 +5230,69 @@ fn emit_component_auto(comp: Any, services: Any, ir: Any) -> List[Str] {
 }
 
 // ---------------------------------------------------------------- the bridge
-// The scalar bridge marshalling helpers (`_bridge_arg_ser`/`_arg_extract`/
-// `_ret_deser`/`_ret_ser`), SUBSET: the `String`/`i64`/`f64`/`bool` scalars, the
-// scalar-`Option` return table, and `()`. Result/serde/`Vec<Value>`/opaque-Value
-// marshalling is DEFERRED — a `<<DEFER-*>>` / `<<NONE>>` marker keeps it loud.
+// The bridge marshalling helpers (`_bridge_arg_ser`/`_arg_extract`/`_ret_deser`/
+// `_ret_ser`): the `String`/`i64`/`f64`/`bool` scalars, the scalar-`Option`
+// table, `()`, a std `Result` encoded by hand to the canonical
+// `{"$kind","$value"}` (std `Result` serializes externally tagged), any other
+// serde-able type, and the opaque cordis `Value`, which is not marshalled. The
+// reference's `_SECRET_MODE` Err funnel is a process-wide switch the oracle
+// runs with OFF, and this port carries no secret registry, so `Result` takes
+// the plain encoding.
+
+// `_bridge_serde_ok`: a type crosses via serde unless it names the opaque
+// cordis `Value` (as a whole word).
+fn bridge_serde_ok(rtype: Str) -> Bool {
+  var i = rtype.indexOf("Value")
+  var from = 0
+  while (i >= 0) {
+    let at = from + i
+    let prev = at == 0 ? "" : rtype.charAt(at - 1)
+    let next = at + 5 >= rtype.length() ? "" : rtype.charAt(at + 5)
+    if (!is_word_char(prev) && !is_word_char(next)) { return false }
+    from = at + 5
+    i = rtype.slice(from, rtype.length()).indexOf("Value")
+  }
+  return true
+}
+
+fn is_word_char(ch: Str) -> Bool {
+  return ch != "" && "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".indexOf(ch) >= 0
+}
+
+// `_split_result`: `Result<T, E>` -> [T, E] at the top-level comma, else [].
+fn split_result(raw: Str) -> List[Str] {
+  let rtype = trim(raw)
+  if (!rtype.startsWith("Result<") || !rtype.endsWith(">")) { return [] }
+  let inner = rtype.slice(7, rtype.length() - 1)
+  var depth = 0
+  var i = 0
+  while (i < inner.length()) {
+    let ch = inner.charAt(i)
+    if (ch == "<") { depth = depth + 1 }
+    if (ch == ">") { depth = depth - 1 }
+    if (ch == "," && depth == 0) { return [trim(inner.slice(0, i)), trim(inner.slice(i + 1, inner.length()))] }
+    i = i + 1
+  }
+  return []
+}
+
+// `_result_ok_err`: a std Result built from a canonical `{"$kind","$value"}`.
+fn result_ok_err(value: Str, ok_ty: Str, err_ty: Str) -> Str {
+  let payload = `_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)`
+  return `{ let _r = ${value}.clone(); if _r.get("$kind").and_then(|k| k.as_str()) == Some("Ok") { Ok(serde_json::from_value::<${ok_ty}>(${payload}).expect("bridge: decode Ok")) } else { Err(serde_json::from_value::<${err_ty}>(${payload}).expect("bridge: decode Err")) } }`
+}
+
+// `_result_to_json`: a std Result encoded to the canonical `{"$kind","$value"}`.
+fn result_to_json(call: Str) -> Str {
+  return `{ match ${call} { Ok(_v) => serde_json::json!({"$kind": "Ok", "$value": serde_json::to_value(&_v).unwrap_or(serde_json::Value::Null)}), Err(_e) => serde_json::json!({"$kind": "Err", "$value": serde_json::to_value(&_e).unwrap_or(serde_json::Value::Null)}) } }`
+}
+
 fn bridge_arg_ser(name: Str, rtype: Str) -> Str {
   if (rtype == "String" || rtype == "i64" || rtype == "f64" || rtype == "bool") {
     return `serde_json::json!(${name})`
   }
-  return `<<DEFER-bridge-arg-ser:${rtype}>>`
+  if (split_result(rtype).length() == 2) { return result_to_json(name) }
+  return bridge_serde_ok(rtype) ? `serde_json::to_value(&${name}).unwrap_or(serde_json::Value::Null)` : "serde_json::Value::Null"
 }
 fn bridge_arg_extract(index: Int, rtype: Str) -> Str {
   let i = num_str(index)
@@ -5180,7 +5300,9 @@ fn bridge_arg_extract(index: Int, rtype: Str) -> Str {
   if (rtype == "i64") { return `args[${i}].as_i64().unwrap_or(0)` }
   if (rtype == "f64") { return `args[${i}].as_f64().unwrap_or(0.0)` }
   if (rtype == "bool") { return `args[${i}].as_bool().unwrap_or(false)` }
-  return "<<NONE>>"
+  let result = split_result(rtype)
+  if (result.length() == 2) { return result_ok_err(`args[${i}]`, result[0], result[1]) }
+  return bridge_serde_ok(rtype) ? `serde_json::from_value::<${rtype}>(args[${i}].clone()).expect("bridge: decode arg")` : "<<NONE>>"
 }
 fn bridge_ret_deser(value: Str, rtype: Str) -> Str {
   if (rtype == "i64") { return `${value}.as_i64().unwrap_or(0)` }
@@ -5191,7 +5313,10 @@ fn bridge_ret_deser(value: Str, rtype: Str) -> Str {
   if (rtype == "Option<String>") { return `${value}.as_str().map(|s| s.to_string())` }
   if (rtype == "Option<i64>") { return `${value}.as_i64()` }
   if (rtype == "Option<bool>") { return `${value}.as_bool()` }
-  return "<<NONE>>"
+  if (rtype == "Vec<Value>") { return `${value}.as_array().map(|a| a.iter().map(|x| Value::new(x.to_string())).collect()).unwrap_or_default()` }
+  let result = split_result(rtype)
+  if (result.length() == 2) { return result_ok_err(value, result[0], result[1]) }
+  return bridge_serde_ok(rtype) ? `serde_json::from_value::<${rtype}>(${value}.clone()).expect("bridge: decode return")` : "<<NONE>>"
 }
 fn is_scalar_option(rtype: Str) -> Bool {
   return rtype == "Option<String>" || rtype == "Option<i64>" || rtype == "Option<bool>" || rtype == "Option<f64>"
@@ -5201,7 +5326,9 @@ fn bridge_ret_ser(call: Str, rtype: Str) -> Str {
     return `serde_json::json!(${call})`
   }
   if (rtype == "()") { return `{ ${call}; serde_json::Value::Null }` }
-  return `<<DEFER-bridge-ret-ser:${rtype}>>`
+  if (rtype == "Vec<Value>") { return `{ let _r = ${call}; serde_json::json!(_r.iter().map(|v| v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default()).collect::<Vec<_>>()) }` }
+  if (split_result(rtype).length() == 2) { return result_to_json(call) }
+  return bridge_serde_ok(rtype) ? `{ let _r = ${call}; serde_json::to_value(&_r).unwrap_or(serde_json::Value::Null) }` : `{ let _ = ${call}; serde_json::Value::Null }`
 }
 
 // The fixed `_revl_rpc` preamble — the Unix-socket JSON-RPC proxy the bridge
@@ -5508,6 +5635,29 @@ fn contains_stdlib(v: Any) -> Bool {
   return false
 }
 
+// `_uses_stdlib` (issue #1734): the helper traits are emitted when a stdlib node
+// appears in a component, a function or a test, the three sections the
+// reference walks. A sized `.length` field counts too: it stays a `field` node
+// marked `sized_length` and renders through `revl_length`. `contains_stdlib`
+// stays the borrow pass's narrower test (`_functions_use_stdlib`).
+fn uses_stdlib(ir: Any) -> Bool {
+  return stdlib_node_in(value_field(ir, "components")) || stdlib_node_in(value_field(ir, "functions"))
+    || stdlib_node_in(value_field(ir, "tests"))
+}
+
+fn stdlib_node_in(v: Any) -> Bool {
+  if (value_is_null(v)) { return false }
+  let k = node_kind(v)
+  if (k == "builtin" || k == "len" || (k == "field" && value_bool(value_field(v, "sized_length")))) { return true }
+  for (key of value_keys(v)) {
+    if (stdlib_node_in(value_field(v, key))) { return true }
+  }
+  for (x of value_list(v)) {
+    if (stdlib_node_in(x)) { return true }
+  }
+  return false
+}
+
 // The document assembly for a TYPES + FUNCTIONS v3 document (`_emit_v3`, subset):
 // the module header, then the user `type` items, then the free functions —
 // joined with newlines, right-stripped, and closed with a single trailing
@@ -5546,7 +5696,9 @@ fn contains_stdlib(v: Any) -> Bool {
 fn deferred_test_markers(ir: Any) -> List[Str] {
   var out = []
   for (t of value_list(value_field(ir, "tests"))) {
-    out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
+    if (value_bool(value_field(t, "lifecycle"))) {
+      out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
+    }
   }
   for (t of value_list(value_field(ir, "fault_tests"))) {
     out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
@@ -5590,8 +5742,9 @@ pub fn emit_rust_src(ir: Any) -> Str {
   if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types, tables.tn)) }
   if (externs.length() > 0) { out = out.concat(emit_v3_externs(externs, tables.tn)) }
   if (functions.length() > 0) { out = out.concat(emit_v3_functions(functions, fr, tables)) }
+  out = out.concat(emit_v3_tests(value_list(value_field(ir, "tests")), functions, externs, fr, tables))
   // `_emit_components`, run unconditionally in `_emit_v3` (after the
-  // types/externs/functions and the DEFERRED tests sections). Empty when the document
+  // types/externs/functions and the tests sections). Empty when the document
   // declares no service/comp — so a types+functions-only document is
   // unchanged — and byte-exact for the covered service/comp subset:
   // service traits, host stubs (empty here), each comp (simple path), then
@@ -5602,7 +5755,7 @@ pub fn emit_rust_src(ir: Any) -> Str {
   if (uses_timer(value_list(value_field(ir, "components"))) || tests_use_advance(ir)) {
     out = out.concat(revl_timer_preamble())
   }
-  if (contains_stdlib(functions) || contains_stdlib(types) || contains_stdlib(externs)) {
+  if (uses_stdlib(ir)) {
     out = out.concat(stdlib_helpers())
     out = out.push("")
   }
@@ -5620,6 +5773,67 @@ pub fn emit_rust_src(ir: Any) -> Str {
 }
 
 // ---------------------------------------------------------------- in-file tests
+
+// `_emit_v3_tests` (item 391, #106): each pure `test` block as a `#[test] fn`.
+// Its body is a function body, rendered by the same statement renderer with
+// per-test bindings, so a test cannot move a value a function would not. A
+// lifecycle test is a script over a live composition, not pure statements; it
+// keeps its named marker (`deferred_test_markers`).
+fn emit_v3_tests(tests: List[Any], functions: List[Any], externs: List[Any], fr: Map[Str, Str], tables: TypeTables) -> List[Str] {
+  var out = []
+  // A test slug shares the module namespace with every top-level fn and extern
+  // (both emit a bare `fn <name>`), so those names are taken first (#552 B7).
+  var used = []
+  for (f of functions) { used = used.push(mangle(value_str(value_field(f, "name")))) }
+  for (e of externs) { used = used.push(mangle(value_str(value_field(e, "name")))) }
+  let borrow = compute_str_param_borrows(functions)
+  let list_borrow = compute_list_param_borrows(functions)
+  for (t of tests) {
+    if (!value_bool(value_field(t, "lifecycle"))) {
+      let name = unique_slug(test_slug(value_str(value_field(t, "name"))), used)
+      used = used.push(name)
+      out = out.push("#[test]")
+      out = out.push(`fn ${name}() {`)
+      let body = value_list(value_field(t, "body"))
+      if (body.length() == 0) {
+        out = out.push("    // (empty test body)")
+      } else {
+        let ctx = { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty() }
+        out = out.concat(emit_stmts(body, ctx, 1).lines)
+      }
+      out = out.push("}")
+      out = out.push("")
+    }
+  }
+  return out
+}
+
+// The reference's slug: `_snake` of the name, every character outside
+// `[A-Za-z0-9_]` replaced by `_`, and `test_` in front of an empty slug or one
+// that starts with a digit.
+fn test_slug(raw: Str) -> Str {
+  let base = snake(raw == "" ? "test" : raw)
+  let keep = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+  var slug = ""
+  var i = 0
+  while (i < base.length()) {
+    let ch = base.charAt(i)
+    slug = slug.concat(keep.indexOf(ch) >= 0 ? ch : "_")
+    i = i + 1
+  }
+  return slug == "" || "0123456789".indexOf(slug.charAt(0)) >= 0 ? "test_".concat(slug) : slug
+}
+
+// `base`, or `base_1`, `base_2`, ... the first not already taken.
+fn unique_slug(base: Str, used: List[Str]) -> Str {
+  var name = base
+  var counter = 0
+  while (list_contains(used, name)) {
+    counter = counter + 1
+    name = `${base}_${counter}`
+  }
+  return name
+}
 test "rust_type covers the scalar and generic surface" {
   assert rust_type("Int") == "i64"
   assert rust_type("Str") == "String"

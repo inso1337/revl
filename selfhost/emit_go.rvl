@@ -3725,8 +3725,8 @@ fn comp_infer(n: Any, env: CEnv) -> Str {
     let m = value_field(service_methods(env.services, svc), value_str(value_field(n, "method")))
     return node_kind(target) == "req" ? value_str(value_field(m, "returns")) : ""
   }
-  // a match's value type is its scrutinee's, as on the reference (issue #1834)
-  if (k == "match") { return comp_infer(value_field(n, "scrutinee"), env) }
+  // a match's value is one of its arms', never its scrutinee's (issue #1834)
+  if (k == "match") { return comp_infer_match(n, env) }
   if (k == "field") {
     let tt = comp_infer(value_field(n, "target"), env)
     let ft = value_str(value_field(value_field(value_field(env.types, tt), "fields"), value_str(value_field(n, "name"))))
@@ -4037,6 +4037,24 @@ fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
 // type switch returns each arm's body. A bound payload's type is visible to
 // every later arm too, as on the reference (its `var_types` is restored only
 // after the whole match).
+// `_comp_infer_match`: the first arm whose body infers a type, with the arm's
+// binding in scope (issue #1834). The slice declines an Opt or Result
+// scrutinee, so a binding is a declared variant's payload or, for `_`, the
+// scrutinee itself (`_comp_arm_binding`).
+fn comp_infer_match(n: Any, env: CEnv) -> Str {
+  let st = comp_infer(value_field(n, "scrutinee"), env)
+  var found = ""
+  for (arm of value_list(value_field(n, "arms"))) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    let bind = value_str(value_field(arm, "bind"))
+    let adt = decl_kind(env.types, st) != "" ? st : case_variant_of(env.types, "", pattern)
+    let bound = pattern == "_" ? st : case_payload(env.types, adt, pattern)
+    let e = bind != "" && bind != "_" && bound != "" ? with_vt(env, bind, bound) : env
+    found = found != "" ? found : comp_infer(value_field(arm, "body"), e)
+  }
+  return found
+}
+
 fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
   let scrut_node = value_field(n, "scrutinee")
   let st = comp_infer(scrut_node, env)
@@ -4047,7 +4065,18 @@ fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
   for (b of bodies) { if (exp_t == "") { exp_t = comp_go_type(comp_infer(b, env), env.types) } }
   exp_t = exp_t == "" ? "any" : exp_t
   let scrutinee = comp_expr(scrut_node, env, st)
-  var lines = [`func() ${exp_t} {`, line(1, `switch _m := ${scrutinee}.(type) {`)]
+  // issue #1834: a scrutinee that is not a bare name (a case built in place)
+  // is bound to an interface-typed temp first, as the pure tier does (item 313)
+  let bare = list_contains(["var", "name"], node_kind(scrut_node))
+  var first_case = ""
+  for (arm of arms) {
+    let pc = case_variant_of(env.types, "", value_str(value_field(arm, "pattern")))
+    first_case = first_case != "" ? first_case : pc
+  }
+  let iface = decl_kind(env.types, st) != "" ? st : first_case
+  let iface_t = comp_go_type(iface, env.types)
+  var lines = bare ? [`func() ${exp_t} {`] : [`func() ${exp_t} {`, line(1, `var _s ${iface_t == "" ? "any" : iface_t} = ${scrutinee}`)]
+  lines = lines.push(line(1, `switch _m := ${bare ? scrutinee : "_s"}.(type) {`))
   var has_wild = false
   var e = env
   for (arm of arms) {

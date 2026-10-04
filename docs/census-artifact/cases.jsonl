@@ -350,9 +350,21 @@
 
 ["examples/rejections/g3_dependency_cycle.rvl", "agree-refuse/G3"]
 
+["examples/rejections/g4_approval_compensate.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_approval_compensate_method.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_approval_compensate_other_edge.rvl", "agree-refuse/G4"]
+
 ["examples/rejections/g4_approval_helper_reach.rvl", "agree-refuse/G4"]
 
 ["examples/rejections/g4_approval_scoped_extern.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_approval_spawn_handle.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_approval_spawn_handle_alias.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_approval_spawn_handle_method.rvl", "agree-refuse/G4"]
 
 ["examples/rejections/g4_approval_value_form_method.rvl", "agree-refuse/G4"]
 
@@ -718,6 +730,8 @@
 
 ["oracle-accept:a service-typed arrow parameter not applied to a provision", "agree-admit"]
 
+["oracle-accept:a spawn-handle emit under a bound covering the op's scope", "agree-admit"]
+
 ["oracle-accept:a terminating chain of transparent aliases", "agree-admit"]
 
 ["oracle-accept:a transparent alias through a service, a config field and a body", "agree-admit"]
@@ -964,7 +978,7 @@
 
 ["oracle-reject:a spawn-handle emit through a provision alias", "agree-refuse/G4"]
 
-["oracle-reject:a spawn-handle emit under a bound naming the child's key", "agree-refuse/G4"]
+["oracle-reject:a spawn-handle emit under a bound that misses the op's scope", "agree-refuse/G4"]
 
 ["oracle-reject:a ternary with three undeclared arms names the condition", "agree-refuse/G1"]
 
@@ -1398,6 +1412,42 @@
 
 ["tests/fixtures/angle_brackets_not_a_document_1120.rvl", "agree-admit"]
 
+["tests/fixtures/approval_service_locals/g4_alias_step.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_arrow_param_applied.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_handle_direct_value.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_if_local_step.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_if_local_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_if_local_value.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_list_element_step.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_list_element_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_record_alias_step.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_record_field_step.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_record_field_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/ok_alias_step.rvl", "agree-admit"]
+
+["tests/fixtures/approval_service_locals/ok_arrow_param_unapplied.rvl", "agree-admit"]
+
+["tests/fixtures/approval_service_locals/ok_if_local_no_approval.rvl", "agree-admit"]
+
+["tests/fixtures/approval_service_locals/ok_if_local_step.rvl", "agree-admit"]
+
+["tests/fixtures/approval_service_locals/ok_list_element_step.rvl", "agree-admit"]
+
+["tests/fixtures/approval_service_locals/ok_record_alias_step.rvl", "agree-admit"]
+
+["tests/fixtures/approval_service_locals/ok_record_field_step.rvl", "agree-admit"]
+
 ["tests/fixtures/canary_candidate_diverge.rvl", "agree-admit"]
 
 ["tests/fixtures/canary_candidate_inverse.rvl", "agree-admit"]
@@ -1560,6 +1610,10 @@
 
 ["tests/fixtures/emit_java_refusals/validated_emission_operation.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_async_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_builtin_shadow.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_py_corpus/adt.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_py_corpus/adt_inference.rvl", "agree-admit"]
@@ -1672,6 +1726,8 @@
 
 ["tests/fixtures/emit_py_corpus/services_timers.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_corpus/services_value_emission.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_py_corpus/shadowing_near_misses.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_py_corpus/streams.rvl", "agree-admit"]
@@ -1696,6 +1752,24 @@
 
 ["tests/fixtures/emit_py_corpus/witnessed_secret_unused.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_deferred_register.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_deferred_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_map_remove_nested.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_placement.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_spawn_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_stream_builtin_bind.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_test_sections.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_timer_compensate.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_validated_shapes.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/arith.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/bitwise.rvl", "agree-admit"]
@@ -1705,6 +1779,8 @@
 ["tests/fixtures/emit_rust_corpus/borrow_shadowing.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/branch_edges.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/bridge_types.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/calls.rvl", "agree-admit"]
 
@@ -1716,7 +1792,11 @@
 
 ["tests/fixtures/emit_rust_corpus/comp_host_map.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/comp_host_map_undo_local.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_str_builtin.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/comp_stream.rvl", "agree-admit"]
 
@@ -1737,6 +1817,8 @@
 ["tests/fixtures/emit_rust_corpus/externs.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/float_pub.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/in_file_tests.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/lengths.rvl", "agree-admit"]
 
@@ -1898,6 +1980,8 @@
 
 ["tests/fixtures/emit_wasm_corpus/forloop.rvl", "agree-admit"]
 
+["tests/fixtures/emit_wasm_corpus/helper_named_fns.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_wasm_corpus/inference.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_corpus/listmem.rvl", "agree-admit"]
@@ -1927,6 +2011,10 @@
 ["tests/fixtures/emit_wasm_refusals/compound_required_call.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_refusals/fn_named_memory.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_refusals/secret_fed_plain_witness.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl", "agree-admit"]
 
@@ -2076,6 +2164,48 @@
 
 ["tests/fixtures/gate_block_nesting/ok_emit_after_while.rvl", "agree-admit"]
 
+["tests/fixtures/handle_provider_bound/g4_alias_not_covered.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/handle_provider_bound/g4_bare_op.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/handle_provider_bound/g4_plain_method.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/handle_provider_bound/g4_step_not_covered.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/handle_provider_bound/g4_value_not_covered.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/handle_provider_bound/ok_alias_covered.rvl", "agree-admit"]
+
+["tests/fixtures/handle_provider_bound/ok_step_covered.rvl", "agree-admit"]
+
+["tests/fixtures/handle_provider_bound/ok_value_covered.rvl", "agree-admit"]
+
+["tests/fixtures/model_reach_crossing/model_extern_block_value.rvl", "agree-refuse/MODEL"]
+
+["tests/fixtures/model_reach_crossing/model_extern_no_block.rvl", "agree-refuse/MODEL"]
+
+["tests/fixtures/model_reach_crossing/model_helper_no_block.rvl", "agree-refuse/MODEL"]
+
+["tests/fixtures/model_reach_crossing/model_req_block.rvl", "agree-refuse/MODEL"]
+
+["tests/fixtures/model_reach_crossing/model_req_no_block.rvl", "agree-refuse/MODEL"]
+
+["tests/fixtures/model_reach_crossing/model_undeclared_no_block.rvl", "agree-refuse/MODEL"]
+
+["tests/fixtures/model_reach_crossing/model_unscoped_emission.rvl", "agree-refuse/MODEL"]
+
+["tests/fixtures/model_reach_crossing/ok_extern_block_value.rvl", "agree-admit"]
+
+["tests/fixtures/model_reach_crossing/ok_extern_no_block.rvl", "agree-admit"]
+
+["tests/fixtures/model_reach_crossing/ok_helper_no_block.rvl", "agree-admit"]
+
+["tests/fixtures/model_reach_crossing/ok_req_block.rvl", "agree-admit"]
+
+["tests/fixtures/model_reach_crossing/ok_req_no_block.rvl", "agree-admit"]
+
+["tests/fixtures/model_reach_crossing/ok_scoped_emission.rvl", "agree-admit"]
+
 ["tests/fixtures/policy_agents.rvl", "agree-admit"]
 
 ["tests/fixtures/policy_tenants.rvl", "agree-admit"]
@@ -2087,6 +2217,112 @@
 ["tests/fixtures/realm_conformance/provider_b.rvl", "agree-admit"]
 
 ["tests/fixtures/realm_conformance/provider_other.rvl", "agree-admit"]
+
+["tests/fixtures/record_field_call/ok_field_read.rvl", "agree-admit"]
+
+["tests/fixtures/record_field_call/ok_in_place_binding.rvl", "agree-admit"]
+
+["tests/fixtures/record_field_call/ok_let_binding.rvl", "agree-admit"]
+
+["tests/fixtures/record_field_call/t1_arrow_field.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/record_field_call/t1_declared_type.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/record_field_call/t1_in_place.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/record_field_call/t1_let.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/record_field_call/t1_nested_field.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/record_field_call/t1_return.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/service_receiver_expressions/g4_if_marked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_if_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_list_marked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_list_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_match_marked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_match_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_record_marked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_record_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_upper_bound_if_inline.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_upper_bound_if_local.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/ok_arrow_param_expression_unapplied.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_if_approved.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_if_no_approval.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_list_approved.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_match_approved.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_record_approved.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_upper_bound_if_inline.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_upper_bound_if_local.rvl", "agree-admit"]
+
+["tests/fixtures/service_typed_params/g4_param_end_to_end.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_typed_params/g4_param_if_expression.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_typed_params/g4_param_plain.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_typed_params/g4_param_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_typed_params/g4_param_upper_bound.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_typed_params/ok_param_approved.rvl", "agree-admit"]
+
+["tests/fixtures/service_typed_params/ok_param_no_approval.rvl", "agree-admit"]
+
+["tests/fixtures/service_typed_params/ok_param_non_emission.rvl", "agree-admit"]
+
+["tests/fixtures/service_typed_params/ok_param_upper_bound.rvl", "agree-admit"]
+
+["tests/fixtures/spawn_attenuation_value/g4_argument.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/spawn_attenuation_value/g4_compensate.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/spawn_attenuation_value/g4_expression_body.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/spawn_attenuation_value/g4_host_extern.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/spawn_attenuation_value/g4_if_arm.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/spawn_attenuation_value/g4_let.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/spawn_attenuation_value/g4_return.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/spawn_attenuation_value/g4_spawn_handle.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/spawn_attenuation_value/ok_argument.rvl", "agree-admit"]
+
+["tests/fixtures/spawn_attenuation_value/ok_compensate.rvl", "agree-admit"]
+
+["tests/fixtures/spawn_attenuation_value/ok_expression_body.rvl", "agree-admit"]
+
+["tests/fixtures/spawn_attenuation_value/ok_host_extern.rvl", "agree-admit"]
+
+["tests/fixtures/spawn_attenuation_value/ok_if_arm.rvl", "agree-admit"]
+
+["tests/fixtures/spawn_attenuation_value/ok_let.rvl", "agree-admit"]
+
+["tests/fixtures/spawn_attenuation_value/ok_return.rvl", "agree-admit"]
+
+["tests/fixtures/spawn_attenuation_value/ok_spawn_handle.rvl", "agree-admit"]
 
 ["tests/fixtures/triple_string.rvl", "refuse-out-of-slice/BAD"]
 
