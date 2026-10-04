@@ -1,0 +1,16 @@
+// REFUSED G-MODEL-PLACE (item 519, issue #1193 slice 2): `Classifier` crosses
+// the host extern `run_tool`, declared `emission[model.tool]`, so the crossing
+// is placed on model role `tool`, which reaches `shell.exec`. A host emission
+// is held as the unnameable `*`, which does not cover `shell.exec`. No `route
+// model` block is written, and the role was outside the product. The file
+// name's prefix is the expected verdict (`model_` refused under G-MODEL-PLACE,
+// `ok_` admitted); tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+extern emission[model.tool] fn run_tool(p: Str) -> Str = @py { return p }
+service Answer { emission fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = emit run_tool(text) }
+}

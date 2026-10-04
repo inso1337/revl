@@ -264,21 +264,26 @@ def block_mcp_verbs(current: str) -> str:
 # any two such pull requests conflicted in all three. What a reader needs from
 # them is that the list is COMPLETE, which `verbs-documented` and
 # `verbs-in-guide` check verb by verb, and the count is one command away:
-# `python3 tools/docgen.py --show mcp-verb-count`.
+# `python3 tools/docgen.py --show mcp-verb-count`. The core tier (issue #1697)
+# is named, not counted, for the same reason.
 
 
 def block_mcp_count(current: str) -> str:
     mcp_tools()  # the registry must load, as before
-    return ("The advertised list is exactly the verbs below, one section each "
-            "(`python3 tools/docgen.py --show mcp-verb-count` counts them).")
+    return ("The server has exactly the verbs below, one section each "
+            "(`python3 tools/docgen.py --show mcp-verb-count` counts them). By "
+            "default `tools/list` advertises the core tier and `revl_verbs` "
+            "returns the rest; see \"Find a verb\".")
 
 
 def block_agents_mcp_count(current: str) -> str:
     mcp_tools()
     return (
-        "The complete advertised verb set, from\n"
-        "`src/revl/mcp/server.py` and `query_tools.py`, is grouped below by what\n"
-        "you reach for; each verb's exact inputs and outputs are in\n"
+        "The complete verb set comes from\n"
+        "`src/revl/mcp/server.py` and `query_tools.py`. `tools/list` shows the\n"
+        "core tier by default; call `revl_verbs` for any other verb's\n"
+        "schema, or call it by name. It is grouped below by what you reach for;\n"
+        "each verb's exact inputs and outputs are in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
 
@@ -290,7 +295,8 @@ def block_authoring_mcp_count(current: str) -> str:
     registry. Generating it ties the page to `TOOLS` like the other two."""
     mcp_tools()
     return (
-        "`revl mcp serve` advertises the verbs listed in full in\n"
+        "`revl mcp serve` lists its core tier by default and `revl_verbs`\n"
+        "finds the rest; every verb is listed in full in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
 

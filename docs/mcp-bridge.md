@@ -227,6 +227,11 @@ own text of that file, which is the file on disk inside the sanctioned roots:
   directly or through any function, the operator's included; a self-minted
   declassifier, a realm, an `asset`, the granted allowlist, and `use`
   confinement all apply to it;
+- inside a changed component, a top-level `isolate ... in realm(...)` or
+  `realms(...)` clause identical to one in the operator's same-named component
+  stays the operator's (issue #1851), so editing a method of a realm-isolated
+  component is not read as the agent naming a realm. Moving the component to
+  another realm, or adding a component with a realm, is still refused `G9`;
 - a file the call did not overlay is the operator's, as at load. An imported
   file the call did overlay is checked the same way as a root, so rewriting an
   operator library under an untouched operator component is still swept;

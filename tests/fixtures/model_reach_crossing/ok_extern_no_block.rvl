@@ -1,0 +1,14 @@
+// ADMITTED: the same component as `model_extern_no_block.rvl`, but role `tool`
+// declares `reaches [*]`, the unnameable host boundary, which is exactly what a
+// component crossing a host emission holds. The file name's prefix is the
+// expected verdict (`model_` refused under G-MODEL-PLACE, `ok_` admitted);
+// tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device reaches [*]
+
+extern emission[model.tool] fn run_tool(p: Str) -> Str = @py { return p }
+service Answer { emission fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = emit run_tool(text) }
+}

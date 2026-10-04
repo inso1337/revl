@@ -75,6 +75,42 @@ public final class RealPlacementRunner {
                 + "| " + redactSecrets(detail)).stripTrailing());
     }
 
+    // --- service method names at the seam (issue #1512) --------------------
+    //
+    // The bridge speaks the CONTRACT name of a service method (`class`), which
+    // is what every tier sends and looks up. The java emitter declares a method
+    // named after a Java keyword under its escaped spelling (`class_`), so this
+    // runner translates at the seam: an incoming name before the reflective
+    // lookup, an outgoing proxy call's Java name before it is sent. It keeps no
+    // table of its own: it binds to the one the emitted Components carries
+    // (`revlMethodName` / `revlContractName`, generated from the emitter's one
+    // mangler), and a Components with no renamed method carries none, so both
+    // stay the identity.
+    static volatile java.util.function.UnaryOperator<String> toJavaMethod = name -> name;
+    static volatile java.util.function.UnaryOperator<String> toContractMethod = name -> name;
+
+    static void bindMethodNames(String container) {
+        Method java;
+        Method contract;
+        try {
+            Class<?> cls = Class.forName(container);
+            java = cls.getMethod("revlMethodName", String.class);
+            contract = cls.getMethod("revlContractName", String.class);
+        } catch (ReflectiveOperationException absent) {
+            return; // no service method needed a rename in this document
+        }
+        toJavaMethod = name -> translateName(java, name);
+        toContractMethod = name -> translateName(contract, name);
+    }
+
+    static String translateName(Method table, String name) {
+        try {
+            return (String) table.invoke(null, name);
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException("method-name table failed", failure);
+        }
+    }
+
     // --- the declared Secret[T] registry (item 421 F6): PlacementRunner's twin --
     //
     // The emitted Components registers every declared `Secret[T]` value with a
@@ -205,6 +241,7 @@ public final class RealPlacementRunner {
         name = (String) spec.get("name");
         String container = (String) spec.getOrDefault("module", "revl.Components");
         bindSecretRegistry(container); // before the first line is printed
+        bindMethodNames(container);
 
         // item 443 / issue #122: publish the spec's E-Stop latch to the ambient
         // path the dispatch seam (`BridgeClient.call`) and the idle watcher below
@@ -851,8 +888,9 @@ public final class RealPlacementRunner {
     }
 
     static Method findMethod(Class<?> iface, String name, int arity) {
+        String javaName = toJavaMethod.apply(name); // the contract name, as declared (#1512)
         for (Method m : iface.getMethods()) {
-            if (m.getName().equals(name) && m.getParameterCount() == arity) return m;
+            if (m.getName().equals(javaName) && m.getParameterCount() == arity) return m;
         }
         throw new RuntimeException("no method " + name + "/" + arity + " on " + iface.getName());
     }
@@ -901,7 +939,7 @@ public final class RealPlacementRunner {
             // issue #1627: encoded as a reply is, so an Optional crosses as
             // its value or `null`, never as its `toString()`
             if (args != null) for (Object a : args) callArgs.add(BridgeCodec.encode(a));
-            return BridgeCodec.decode(client.call(key, method.getName(), callArgs), method.getGenericReturnType());
+            return BridgeCodec.decode(client.call(key, toContractMethod.apply(method.getName()), callArgs), method.getGenericReturnType());
         }
 
         Object coerceReturn(Object value, Class<?> ret) {

@@ -1,0 +1,20 @@
+// REFUSED G-MODEL-PLACE (item 519, issue #1193 slice 2): `Classifier` holds
+// `model.tool` through `llm`, so its crossing is placed on model role `tool`,
+// which reaches `shell.exec`. It writes no `route model` block.
+//
+// The attenuation fold used to run only for a component that wrote a block, so
+// the same program WITH `route model on classify { * -> tool }` was refused and
+// this one, with the block deleted, was admitted. Deleting a declaration
+// widened the authority. A crossing placed on a role is now an edge of the
+// product either way. The file name's prefix is the expected verdict (`model_`
+// refused under G-MODEL-PLACE, `ok_` admitted);
+// tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+service Tools { emission[model.tool] fn run(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Tools provides out: Answer {
+  provide out { fn classify(text) = emit llm.run(text) }
+}
