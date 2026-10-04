@@ -362,9 +362,9 @@ regenerated.
 
 Each slice is closable on its own and carries the oracle that makes it a
 measurement. All five have now landed; each entry carries its own evidence.
-What the five do NOT include is execution: revl computes a compensation run and
-performs no crossing, which is issue #1369's remainder, and the check-to-use
-race is issue #1371.
+Slice 3's run is now also PERFORMED, on the python reference tier only (see
+slice 3 below). What the five do not include is a DECLARED transaction unit,
+and the check-to-use race is issue #1371.
 
 **Slice 1: the classification and the two teardown refusals. LANDED.**
 `src/revl/ui_family.py` gains the five classes, the per-verb table, the
@@ -426,10 +426,54 @@ down was absent from the fold. The generic walk is section 5.1 of
 shape, of which two tests fail on the walk it replaces and two are the controls
 that say what each run was entitled to claim.
 
-What did not land with it: revl performs nothing. It computes the run, and the
-compensating crossings are the substrate's (item 539), exactly as the
-actuations are. A compensation that is performed and FAILS has no word in
-section 2's five states, and none was invented for it.
+**The run is performed on the python tier** (issue #1369, the second half).
+Before it, the static run had nothing to be true of at runtime, for two
+reasons measured on the item's own five-step program. A provide method never
+registered an extern's DECLARED `compensate`: the emitter handled only a
+site-spelled `emit ... compensate ...`, and a computer-use extern declares its
+inverse on the extern, which is the only form slice 1 checks. And nothing was
+keyed on the failure: a method-registered entry stays parked on the activation
+frame, and the clean unload after a failed call discharged it. The transaction
+stopped half way, kept what it typed, and ran no compensation.
+
+Now the unit `method_plan` reads is also the unit the python tier runs. The
+emitter wraps each planned provide method in `Frame.ui_transaction` and
+decorates each computer-use extern with `declared_crossing`, which registers the
+extern's declared compensation wherever the crossing is written (a `let`, a
+`return`, an argument), after the host body returns. If the call fails, the
+unit settles the entries this call registered with the teardown contract's two
+phases scoped to them: witnessed inverses newest first, then compensations
+newest first, each continue-and-record. The failure then propagates unchanged.
+The entries leave the frame's deferred lists first, so a later commit does not
+discharge them and a later abort does not run them twice. Under an E-Stop
+nothing runs and the halt strands them, as it strands every other entry.
+
+Three rules, each pinned by `tests/test_ui_transaction_runtime_1369.py`:
+
+- the run the tier performs is the run `compensation_run` computes. On the
+  five-step program, the read that checks `actuate` raises, and the tier runs
+  `clear_memo` then `clear_amount`, which are the compensations of the steps
+  the erase report's `if actuate() fails` line names, in the same order;
+- a crossing that RAISES still registers its own declared compensation, which
+  is this section's rule for the failing step, applied at runtime;
+- a compensation that raises is a `compensation-residue` record in the merged
+  residue schema the teardown contract already defines, and the older
+  compensations still run. That record is the runtime's word for a performed
+  compensation that FAILED. Section 2's five states are still five: they
+  describe a program, and this describes one execution of it.
+
+The compensating host bodies are still the substrate's (item 539), exactly as
+the actuations are. What revl owns and now runs is the order and the
+membership, which is section 3's `compensate` row.
+
+What is still not here. The unit is INFERRED from a method body that crosses a
+computer-use verb; there is no `transaction` construct an author writes. A
+declaration needs a new IR key, and the IR is built in `src/revl/lower.py`, so
+it is filed as the next step rather than folded into this one. The other five
+tiers have no unit. The unit writes no WAL record of its own: its entries are
+named in the discharge record a later commit writes, so a crash between the
+unit's run and the session's verdict leaves their descriptors open, and what
+`revl recover` then does with them was not measured.
 
 **Slice 4: `uncompensated` on the residue report. LANDED** (PR #1287 and
 #1296 for the states and the DOES NOT PROVE clauses, PR #1386 for the run the
@@ -505,10 +549,12 @@ Written down so a reader does not infer more than was measured.
   Slice 5's binding is re-resolution by name compared across two crossings.
   It is a stronger statement than position and it is not the race, and slice
   3 does not close it either.
-- **No phase executes.** Slice 3 COMPUTES the LIFO run and slice 5 computes
-  which read carries which postcondition; neither performs a crossing, drives
-  a desktop, or evaluates a postcondition against a real screen. Section 3's
-  table is still a division of responsibility, and the substrate is item 539.
+- **Only `compensate` executes, and only on the python tier.** The python
+  tier runs slice 3's LIFO run when a unit fails (section 10). Nothing
+  evaluates a postcondition against a real screen: a failure is whatever the
+  substrate's host body raises, and slice 5's binding says which read would
+  have to raise for the transaction to learn about a given step. No other
+  phase runs, and the substrate is item 539.
 - **A step with no bound postcondition starts no run.** A LIFO run is
   triggered by an unmet postcondition, so an actuation that has none is an
   actuation whose failure the transaction never learns about. The plan
