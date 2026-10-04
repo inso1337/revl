@@ -98,6 +98,10 @@ tenants never reach each other
 # the MCP / agent sandbox — the profile for agent-generated code admitted
 # through the MCP session: "agent output may reach [llm, kv*] and nothing else"
 mcp may reach llm, kv*
+
+# refuse a call whose class-(c) capability has an unbounded item-260 crossing
+# ceiling, instead of ticketing it (issue #1755; off unless written)
+approvals require bounded crossings
 ```
 
 The JSON form parses to the same policy:
@@ -109,7 +113,8 @@ The JSON form parses to the same policy:
   ],
   "realms": [{"realm": "billing", "allow": ["db", "ledger"]}],
   "tenants": {"neverReachEachOther": true},
-  "mcp": {"allow": ["llm", "kv*"]}
+  "mcp": {"allow": ["llm", "kv*"]},
+  "approvalCeilings": {"refuseUnbounded": true}
 }
 ```
 
@@ -134,6 +139,13 @@ The JSON form parses to the same policy:
 * **`mcp` / `agent` (the sandbox).** An allow-list that applies only to
   components admitted through the MCP session (see below). Everywhere else it
   is inert.
+* **`approvals require bounded crossings`.** Every class-(c) ticket carries the
+  item-260 ceiling of each capability it asks about (`ceilings`, see
+  [mcp-reference.md](mcp-reference.md#revl_approve)). With this line, a call
+  whose capability's ceiling is `unbounded` in the crossing component is
+  refused before anything is spent or ticketed, and the refusal names the
+  capability and the cardinality reason. Without it the call is ticketed as
+  before, with the `unbounded` ceiling on the ticket.
 
 ## The refusal
 

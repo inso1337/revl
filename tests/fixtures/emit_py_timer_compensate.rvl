@@ -1,0 +1,25 @@
+// issue #1589, held to byte agreement by tests/test_selfhost_emit_py.py: a
+// timer body (`every` and `after`) emitting an extern that DECLARES its
+// compensate (item 254). The reference registers that compensation once per
+// firing, after the fire, through `_revl_frame.compensation_method(...)`; an
+// extern with no compensate beside it registers nothing.
+//
+// It sits beside emit_py_corpus/ rather than in it because
+// tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
+// is not this slice.
+
+extern emission fn put_row(body: Str) -> Int
+  compensate restore_row()
+  = @py { return 1 }
+
+extern emission fn restore_row() -> Int = @py { return 0 }
+
+extern emission fn bare_row(body: Str) -> Int = @py { return 1 }
+
+component Beat {
+  every 10s { emit put_row("x") }
+  after 10s {
+    emit put_row("y")
+    emit bare_row("z")
+  }
+}

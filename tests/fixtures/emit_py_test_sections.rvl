@@ -1,0 +1,52 @@
+// item 391: the in-file test-section shapes the corpus documents taken from the
+// tree do not reach, held to byte agreement by tests/test_selfhost_emit_py.py.
+//
+//   - an empty plain `test` (its function is a bare `pass`);
+//   - an empty `lifecycle test` (its driver's `try` holds a bare `pass`);
+//   - `load ... with { ... }`, the config a lifecycle step plugs a component
+//     with;
+//   - a lifecycle `call` that binds its result, through a provider whose
+//     operation is `idempotent`, which fills the module's `_REVL_IDEMPOTENT`
+//     retry map;
+//   - a `fault test ... with { ... }`, whose manifest entry carries the config.
+//
+// selfhost/emit_py.rvl named every test instead of emitting it before item 391
+// ported the three sections. This document sits beside emit_py_corpus/ rather
+// than in it because tests/test_selfhost_lower_ir.py globs that directory and
+// compares the native IR, which carries no test sections.
+
+service Counter {
+  idempotent emission fn bump(by: Int) -> Int
+  fn total() -> Int
+}
+
+component Tally provides counter: Counter {
+  config { start: Int = 0 }
+  let cells = effect Map.new() undo cells.drop()
+  provide counter {
+    fn bump(by) {
+      effect cells.insert("n", by) undo cells.remove("n")
+      return by
+    }
+    fn total() = 0
+  }
+}
+
+test "nothing to check" {
+}
+
+lifecycle test "nothing loaded" {
+}
+
+lifecycle test "a configured load and a bound idempotent call" {
+  load Tally with { start: 5 }
+  let n = call counter.bump(2)
+  assert n == 2
+  unload Tally
+  assert no_residue
+}
+
+fault test "the bump undo reverts" for Tally with { start: 1 } {
+  fail at step 1
+  assert no residue
+}
