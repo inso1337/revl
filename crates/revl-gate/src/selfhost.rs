@@ -6475,14 +6475,70 @@ fn emit_component_auto(comp: Value, services: Value, ir: Value) -> Vec<String> {
     return emit_component_new(comp.clone(), services.clone(), ir.clone());
 }
 
-fn bridge_arg_ser(name: &str, rtype: &str) -> String {
+fn bridge_serde_ok(rtype: &str) -> bool {
+    let mut i = rtype.revl_index_of("Value");
+    let mut from = 0i64;
+    while (i >= 0i64) {
+        let at = (from).checked_add(i).expect("revl: Int overflow");
+        let prev = if (at == 0i64) { String::from("") } else { { rtype.chars().nth(((at).checked_sub(1i64).expect("revl: Int overflow")) as usize).unwrap().to_string() } };
+        let next = if ((at).checked_add(5i64).expect("revl: Int overflow") >= rtype.revl_length()) { String::from("") } else { { rtype.chars().nth(((at).checked_add(5i64).expect("revl: Int overflow")) as usize).unwrap().to_string() } };
+        if ((!is_word_char(&prev)) && (!is_word_char(&next))) {
+            return false;
+        }
+        from = (at).checked_add(5i64).expect("revl: Int overflow");
+        i = (rtype.revl_slice(from, rtype.revl_length())).revl_index_of("Value");
+    }
+    return true;
+}
+
+fn is_word_char(ch: &str) -> bool {
+    return ((ch != "") && (String::from("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_").revl_index_of(&ch) >= 0i64));
+}
+
+fn split_result(raw: String) -> Vec<String> {
+    let rtype = trim(raw.clone());
+    if ((!rtype.revl_starts_with("Result<")) || (!rtype.revl_ends_with(">"))) {
+        return vec![];
+    }
+    let inner = rtype.revl_slice(7i64, (rtype.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+    let mut depth = 0i64;
+    let mut i = 0i64;
+    while (i < inner.revl_length()) {
+        let ch = { inner.chars().nth((i) as usize).unwrap().to_string() };
+        if (ch == "<") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (ch == ">") {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if ((ch == ",") && (depth == 0i64)) {
+            return vec![trim(inner.revl_slice(0i64, i)), trim(inner.revl_slice((i).checked_add(1i64).expect("revl: Int overflow"), inner.revl_length()))];
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return vec![];
+}
+
+fn result_ok_err(value: &str, ok_ty: &str, err_ty: &str) -> String {
+    let payload = format!("_r.get(\"$value\").cloned().unwrap_or(serde_json::Value::Null)");
+    return format!("{{ let _r = {}.clone(); if _r.get(\"$kind\").and_then(|k| k.as_str()) == Some(\"Ok\") {{ Ok(serde_json::from_value::<{}>({}).expect(\"bridge: decode Ok\")) }} else {{ Err(serde_json::from_value::<{}>({}).expect(\"bridge: decode Err\")) }} }}", value, ok_ty, payload, err_ty, payload);
+}
+
+fn result_to_json(call: &str) -> String {
+    return format!("{{ match {} {{ Ok(_v) => serde_json::json!({{\"$kind\": \"Ok\", \"$value\": serde_json::to_value(&_v).unwrap_or(serde_json::Value::Null)}}), Err(_e) => serde_json::json!({{\"$kind\": \"Err\", \"$value\": serde_json::to_value(&_e).unwrap_or(serde_json::Value::Null)}}) }} }}", call);
+}
+
+fn bridge_arg_ser(name: &str, rtype: String) -> String {
     if ((((rtype == "String") || (rtype == "i64")) || (rtype == "f64")) || (rtype == "bool")) {
         return format!("serde_json::json!({})", name);
     }
-    return format!("<<DEFER-bridge-arg-ser:{}>>", rtype);
+    if (split_result(rtype.clone()).revl_length() == 2i64) {
+        return result_to_json(name);
+    }
+    return if bridge_serde_ok(&rtype) { format!("serde_json::to_value(&{}).unwrap_or(serde_json::Value::Null)", name) } else { String::from("serde_json::Value::Null") };
 }
 
-fn bridge_arg_extract(index: i64, rtype: &str) -> String {
+fn bridge_arg_extract(index: i64, rtype: String) -> String {
     let i = num_str(Value::new(serde_json::Value::from(index)));
     if (rtype == "String") {
         return format!("args[{}].as_str().unwrap_or(\"\").to_string()", i);
@@ -6496,10 +6552,14 @@ fn bridge_arg_extract(index: i64, rtype: &str) -> String {
     if (rtype == "bool") {
         return format!("args[{}].as_bool().unwrap_or(false)", i);
     }
-    return String::from("<<NONE>>");
+    let result = split_result(rtype.clone());
+    if (result.revl_length() == 2i64) {
+        return result_ok_err(&(format!("args[{}]", i)), &(result)[(0i64) as usize], &(result)[(1i64) as usize]);
+    }
+    return if bridge_serde_ok(&rtype) { format!("serde_json::from_value::<{}>(args[{}].clone()).expect(\"bridge: decode arg\")", rtype, i) } else { String::from("<<NONE>>") };
 }
 
-fn bridge_ret_deser(value: &str, rtype: &str) -> String {
+fn bridge_ret_deser(value: &str, rtype: String) -> String {
     if (rtype == "i64") {
         return format!("{}.as_i64().unwrap_or(0)", value);
     }
@@ -6524,21 +6584,34 @@ fn bridge_ret_deser(value: &str, rtype: &str) -> String {
     if (rtype == "Option<bool>") {
         return format!("{}.as_bool()", value);
     }
-    return String::from("<<NONE>>");
+    if (rtype == "Vec<Value>") {
+        return format!("{}.as_array().map(|a| a.iter().map(|x| Value::new(x.to_string())).collect()).unwrap_or_default()", value);
+    }
+    let result = split_result(rtype.clone());
+    if (result.revl_length() == 2i64) {
+        return result_ok_err(value, &(result)[(0i64) as usize], &(result)[(1i64) as usize]);
+    }
+    return if bridge_serde_ok(&rtype) { format!("serde_json::from_value::<{}>({}.clone()).expect(\"bridge: decode return\")", rtype, value) } else { String::from("<<NONE>>") };
 }
 
 fn is_scalar_option(rtype: &str) -> bool {
     return ((((rtype == "Option<String>") || (rtype == "Option<i64>")) || (rtype == "Option<bool>")) || (rtype == "Option<f64>"));
 }
 
-fn bridge_ret_ser(call: &str, rtype: &str) -> String {
-    if (((((rtype == "i64") || (rtype == "String")) || (rtype == "bool")) || (rtype == "f64")) || is_scalar_option(rtype)) {
+fn bridge_ret_ser(call: &str, rtype: String) -> String {
+    if (((((rtype == "i64") || (rtype == "String")) || (rtype == "bool")) || (rtype == "f64")) || is_scalar_option(&rtype)) {
         return format!("serde_json::json!({})", call);
     }
     if (rtype == "()") {
         return format!("{{ {}; serde_json::Value::Null }}", call);
     }
-    return format!("<<DEFER-bridge-ret-ser:{}>>", rtype);
+    if (rtype == "Vec<Value>") {
+        return format!("{{ let _r = {}; serde_json::json!(_r.iter().map(|v| v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default()).collect::<Vec<_>>()) }}", call);
+    }
+    if (split_result(rtype.clone()).revl_length() == 2i64) {
+        return result_to_json(call);
+    }
+    return if bridge_serde_ok(&rtype) { format!("{{ let _r = {}; serde_json::to_value(&_r).unwrap_or(serde_json::Value::Null) }}", call) } else { format!("{{ let _ = {}; serde_json::Value::Null }}", call) };
 }
 
 fn bridge_rpc_preamble() -> Vec<String> {
@@ -6606,14 +6679,14 @@ fn emit_bridge(ir: Value) -> Vec<String> {
                 let pname = value_str(value_field(p.clone(), String::from("name")));
                 let pty = rust_type_t(value_field(p.clone(), String::from("type")), tnames.clone());
                 plist.push(format!("{}: {}", pname, pty));
-                argv.push(bridge_arg_ser(&pname, &pty));
+                argv.push(bridge_arg_ser(&pname, pty.clone()));
             }
             let mut ret = String::from("()");
             let r = value_field(method.clone(), String::from("returns"));
             if (!value_is_null(r.clone())) {
                 ret = rust_type_t(r.clone(), tnames.clone());
             }
-            let deser = bridge_ret_deser("_v", &ret);
+            let deser = bridge_ret_deser("_v", ret.clone());
             out.push(format!("    fn {}(&self, {}) -> {} {{", mname(mn.clone()), plist.revl_join(", "), ret));
             if (deser == "<<NONE>>") {
                 out.push(format!("        panic!(\"bridge proxy: unsupported return type for {}.{}\");", sname, mn));
@@ -6638,7 +6711,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             let mut idx = 0i64;
             let mut any_none = false;
             for p in params.clone() {
-                let e = bridge_arg_extract(idx, &rust_type_t(value_field(p.clone(), String::from("type")), tnames.clone()));
+                let e = bridge_arg_extract(idx, rust_type_t(value_field(p.clone(), String::from("type")), tnames.clone()));
                 if (e == "<<NONE>>") {
                     any_none = true;
                 }
@@ -6648,7 +6721,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             if any_none {
                 out.push(format!("        \"{}\" => Err(\"{}.{} cannot be called across a seam: a parameter type has no wire form\".to_string()),", mn, sname, mn));
             } else {
-                out.push(format!("        \"{}\" => Ok({}),", mn, bridge_ret_ser(&(format!("svc.{}({})", mname(mn.clone()), extracts.revl_join(", "))), &ret)));
+                out.push(format!("        \"{}\" => Ok({}),", mn, bridge_ret_ser(&(format!("svc.{}({})", mname(mn.clone()), extracts.revl_join(", "))), ret.clone())));
             }
         }
         out.push(format!("        _ => Err(format!(\"method '{{method}}' is not exported for service {}\")),", sname));

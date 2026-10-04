@@ -1770,6 +1770,8 @@
 
 ["tests/fixtures/emit_rust_corpus/branch_edges.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/bridge_types.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/calls.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/checked_div.rvl", "agree-admit"]
