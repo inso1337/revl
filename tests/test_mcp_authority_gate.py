@@ -456,6 +456,7 @@ UNGATED = {
     "revl_history_emitted_between": "reads the recording",
     "revl_history_lifetime": "reads the recording",
     "revl_timeline": "reads the recording",
+    "revl_counterfactual": "decides a variant of the act log; runs nothing",
     "revl_inspect_step": "reads one recorded step",
     "revl_replay_bisect": "binary-searches the recording for a predicate flip",
 }

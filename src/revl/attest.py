@@ -501,6 +501,11 @@ NOT_A_RULE = {
                       "composition. It refuses a placement onto a host's "
                       "declared devices, never a program: nothing under "
                       "`compile_files` imports it.",
+    "placement_wal": "the per-process write-ahead logs of a placement run "
+                     "and their index (issue #1477), written by "
+                     "`placement`'s conductor at run time and read by "
+                     "`revl recover`. It records crossings; it refuses no "
+                     "program.",
     "refusal": "tells a backend emitter's EmitError apart from its fault "
                "after the frontend has admitted the document; `placement` "
                "reads it only on the emit path. Measured: making "
