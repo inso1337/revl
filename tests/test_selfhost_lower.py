@@ -460,6 +460,9 @@ def _classify(e: RevlError) -> str:
         return "G1"
     if ("cannot reassign" in m
             or "is already declared in this function" in m
+            # issue #1813: a module fn and an extern fn of one name
+            or ("is already declared as an extern on line " in m)
+            or ("is already declared as a function on line " in m)
             or "is bound here and called in this body" in m
             or "is already bound in" in m
             or "(G6)" in m):
@@ -1796,6 +1799,24 @@ component Supervisor requires net: Kv provides sup: Sup {
 # reference's own text is the ground truth. Several are the documented
 # `expected error` of a checked-in rejection fixture.
 REJECTED_PROGRAMS = [
+    # ---- issue #1813: a module fn and an extern fn of one name --------------
+    # The reference checks it once the program is otherwise admitted, so the
+    # second case's G1 is what both sides report; the third puts the extern
+    # second, and the refusal moves to the extern's line.
+    ("a fn that reuses an extern's name", """extern pure fn f(x: Int) -> Int = @py { return x }
+fn f(x: Int) -> Int { return x + 1 }
+fn g() -> Int { return f(1) }
+""", "G6"),
+    ("any other refusal outranks a fn reusing an extern's name", """service S { fn g() -> Int }
+component C provides s: S {
+  provide s { fn g() = db.get() }
+}
+extern pure fn f(x: Int) -> Int = @py { return x }
+fn f(x: Int) -> Int { return x + 1 }
+""", "G1"),
+    ("an extern that reuses a fn's name", """fn f(x: Int) -> Int { return x + 1 }
+pub extern pure fn f(x: Int) -> Int = @py { return x }
+""", "G6"),
     # ---- the qualified test heads, negative controls (item 391) ------------
     # Stepping over a test block must land on the NEXT declaration, not past
     # it: each of these puts a real refusal in the tail, so a step that

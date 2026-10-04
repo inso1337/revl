@@ -412,10 +412,33 @@ admits: a statement, a `let`, a `return`, an argument, an `if` arm. A plain
 call scope settles nothing on failure; the UI transaction unit above is the
 scope that does.
 
-Measured with `revl test --sweep --backend all` over an activation-body
-crossing: go, rust and java never run an extern-declared compensation, and the
-sweep still reports the tiers as agreeing and residue-free. Those tiers are
-not changed here.
+When this landed, `revl test --sweep --backend all` over an activation-body
+crossing showed go, rust and java never ran an extern-declared compensation,
+and the sweep still reported the tiers as agreeing. Every compiled tier now
+registers it at every emission site it supports: ts (#1548), go (#1615), rust
+(#1629) and java (#1558). The sweep fails a tier that drops it (#1511).
+
+### One compensation per crossing
+
+A crossing registers exactly one compensation. A site-spelled
+`emit put(..) compensate g()` **replaces** the extern's declared `compensate`
+for that crossing, and the declared one is the default only when the site
+spells none:
+
+```
+extern emission fn put(k: Str) -> Int compensate undo_put() = ...
+
+emit put("a")                       // owes undo_put()
+emit put("b") compensate refund()   // owes refund(), not undo_put()
+```
+
+Registering both would run two offsets for one emission on an abort (two
+refunds for one charge). Every tier keeps this rule (py, ts, go, rust, java),
+and so does the sweep's owed list (`fault._owed_compensations`). On the py
+tier a computer-use crossing registers its own compensation through
+`declared_crossing`, so a site-spelled one is handed to the decorator
+(`runtime.site_compensation`) and registered in place of the declared one,
+including 538 §10's registration on a raising step (issue #1902).
 
 ### An owed compensation that did not land is not a clean verdict
 

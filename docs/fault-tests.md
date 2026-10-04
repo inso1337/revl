@@ -460,7 +460,9 @@ every fault point the sweep therefore also compares:
 
 * **owed**, read off the IR: the faulted component's steps up to the fault,
   each `emit` with a site-spelled `compensate` and each `emit` of an extern
-  that declares one (`extern emission fn put(..) compensate undo()`); and
+  that declares one (`extern emission fn put(..) compensate undo()`). An emit
+  owes one compensation: a site-spelled one replaces the extern's declared one
+  for that crossing, as every tier registers it (issue #1902); and
 * **ran**, observed on the tier: the sweep prepends one line to the host body
   of every compensation extern, on every tier, printing
   `[revl-sweep] compensation ran: <name>`. The host body itself proves it ran.
