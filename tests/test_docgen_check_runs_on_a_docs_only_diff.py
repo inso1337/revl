@@ -203,3 +203,42 @@ def test_the_coverage_baseline_is_seen_to_fire():
     unparsed = _identity("verbs-documented", "docs/mcp-reference.md has no section for `revl.plan`")
     assert unparsed not in KNOWN_COVERAGE_FAILURES
     assert unparsed[1] == "", "a failure with no location must stay whole, not lose its text"
+
+
+# --- blocks that store no moving count (issue #1768) -------------------------
+#
+# The MCP verb total was rendered into three documents and the test count of
+# tests/test_mcp.py into a fourth. Every pull request that added a verb or a
+# test rewrote those lines, and any two of them conflicted in all of them.
+# Completeness is what the blocks are for, and `verbs-documented` and
+# `verbs-in-guide` check it verb by verb; the counts are `--show` away.
+
+COUNT_FREE = ("mcp-verb-count", "agents-mcp-count", "authoring-mcp-count",
+              "mcp-test-count", "selfhost-residual", "selfhost-residual-docs")
+
+
+def test_the_count_blocks_hold_no_number_that_moves(monkeypatch):
+    """Driven: the registry grows by a verb and the test module by a test,
+    and the four count blocks render the same bytes."""
+    renders = {key: render for key, _, _, render in docgen.BLOCKS
+               if key in COUNT_FREE[:4]}
+    assert set(renders) == set(COUNT_FREE[:4])
+    before = {key: render("") for key, render in renders.items()}
+    tools = docgen.mcp_tools()
+    monkeypatch.setattr(docgen, "mcp_tools",
+                        lambda: tools + [{"name": "revl_new_verb"}])
+    real_count = docgen.test_count
+    monkeypatch.setattr(docgen, "test_count", lambda rel: real_count(rel) + 1)
+    assert {key: render("") for key, render in renders.items()} == before
+    for body in before.values():
+        assert not re.search(r"\b\d+\b", body), body
+
+
+def test_show_prints_what_the_blocks_no_longer_store():
+    import subprocess  # noqa: PLC0415
+    for key, expect in (("mcp-verb-count", str(len(docgen.mcp_tools()))),
+                        ("selfhost-residual", "| **total** |")):
+        out = subprocess.run([sys.executable, str(ROOT / "tools" / "docgen.py"),
+                              "--show", key], capture_output=True, text=True,
+                             check=True).stdout
+        assert expect in out, (key, out)

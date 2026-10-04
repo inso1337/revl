@@ -335,6 +335,15 @@ floor that needs no source change; the typed surface is how a component is
 *written against* the requirement, and it is what makes the approval
 confused-deputy-resistant rather than merely present.
 
+**How many crossings a yes can cover (issue #1755).** A ticket carries,
+for each class-(c) capability it asks about, the crossing component's item-260
+ceiling (`ceilings`, from `revl.cardinality`; see
+[260-emission-cardinality-bounds.md](260-emission-cardinality-bounds.md)). The
+operator sizes a standing grant's `uses` against that worst case, and never
+the author: a budget written in source would be the author setting their own
+limit. The policy line `approvals require bounded crossings` (off by default)
+refuses a call whose capability the analysis cannot bound.
+
 **Who owns the requirement: the operator, not the author.** This is the
 load-bearing choice. In the agent setting the component author is the
 agent, so a declaration-owned requirement ("the author writes
