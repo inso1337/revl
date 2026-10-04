@@ -816,6 +816,11 @@ class Env:
         # one is still refused, but the refusal must say the inverse was
         # discarded and by which rule rather than claim there is none.
         self.extern_undo: dict[str, str] = {}
+        # `extern acquire` name -> its DECLARED inverse expression, the
+        # `undo <inverse>(result)` the declaration wrote. Read by
+        # `_check_site_release` (issue #1859 slice 3): a site-spelled `undo`
+        # of such an acquisition must be that inverse on the bound handle.
+        self.extern_inverse: dict[str, dict] = {}
         # roadmap item 470 (docs/design/470-intent-refinement.md §4 stage 1):
         # the intent the service operation whose provide-method body is being
         # lowered DECLARES, as `(WithinClause, service_name, method_name)`.
@@ -8392,6 +8397,11 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                                 e["name"]: _callee_name(e.get("undo"))
                                                 for e in externs
                                                 if _callee_name(e.get("undo"))},
+                                            extern_inverse={
+                                                e["name"]: e["undo"]
+                                                for e in externs
+                                                if e.get("class") == "acquire"
+                                                and _callee_name(e.get("undo"))},
                                             errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -11211,6 +11221,121 @@ def _check_host_release(step: dict, env: "Env", filename: str, line: int, *,
         code="G4", category="inverse")
 
 
+def _check_site_release(step: dict, env: "Env", filename: str, line: int, *,
+                        bind: str | None, safe: str | None,
+                        seam: bool = False) -> None:
+    """A bracket's site `undo` is the inverse its acquisition owns.
+
+    The one entry for both rules of issue #1859, at every bracket site (a bound
+    and an unbound activation bracket, and an unbound provide-method bracket):
+    a host acquisition's `undo` is its family's release (`_check_host_release`,
+    provable, revl owns the stubs), and an `extern acquire`'s is the inverse
+    its declaration names (`_check_extern_release`, as provable as that
+    declaration: that the host body reverts is the author's assertion). Runs
+    after G5 and O1/B1, so a program those refuse keeps its message."""
+    _check_host_release(step, env, filename, line, bind=bind, safe=safe)
+    _check_extern_release(step, env, filename, line, bind=bind, safe=safe,
+                          seam=seam)
+
+
+def _extern_acquire_of(acquire, env: "Env") -> tuple | None:
+    """`(extern name, declared inverse)` for an acquisition of an `extern
+    acquire` that declares one, else None. Both spellings count: the call
+    (`effect open_h()`, a `fn` node) and the bare name (`effect open_h`, a
+    `var` node), which name the same declaration."""
+    if not isinstance(acquire, dict) or acquire.get("kind") not in ("fn", "var"):
+        return None
+    name = acquire.get("name")
+    if env.extern_class.get(name) != "acquire":
+        return None
+    declared = env.extern_inverse.get(name)
+    return (name, declared) if isinstance(declared, dict) else None
+
+
+def _is_result_var(arg) -> bool:
+    return (isinstance(arg, dict) and arg.get("kind") == "var"
+            and arg.get("name") == "result")
+
+
+def _extern_release_form(inv: str, slots: list, who: str) -> str:
+    """How the site `undo` is written, for the diagnostic: the exact call when
+    the declaration is `undo <inv>(result)`, else the rule in words."""
+    if slots == [True]:
+        return f"`undo {inv}({who})`"
+    if any(slots):
+        return f"`undo {inv}(...)` with `{who}` where the declaration passes `result`"
+    return f"`undo {inv}(...)` as the declaration calls it"
+
+
+def _check_extern_release(step: dict, env: "Env", filename: str, line: int, *,
+                          bind: str | None, safe: str | None,
+                          seam: bool = False) -> None:
+    """An `extern acquire`'s site `undo` is its DECLARED inverse on THAT handle.
+
+    Issue #1859 slice 3. `extern acquire fn open_h() -> H undo close_h(result)`
+    names the one call that releases what it acquires, with `result` standing
+    for the handle. A site `undo` that calls something else (`undo noop()`, a
+    helper, a literal) compiled, ran at teardown, and left the handle open while
+    the teardown reported a clean release. So the site `undo` must call the
+    declared inverse, with the same arity, and pass the handle the bracket bound
+    wherever the declaration passes `result`; the other arguments are the
+    author's, and `_lower_site_inverse` has already checked their types. An
+    acquisition whose declared inverse takes `result` must be bound, since an
+    unbound one leaves nothing to pass. In a provide method (`seam`) only
+    `spawn` may be bound, so there the refusal names the spelling that does
+    release exactly what a seam acquires: a `witnessed` extern, whose declared
+    inverse registers once per acquisition.
+
+    What this proves is the CHOICE of inverse, not that the host body reverts:
+    that half stays the declaration author's assertion."""
+    found = _extern_acquire_of(step.get("acquire"), env)
+    if found is None:
+        return
+    fn, declared = found
+    inv = _callee_name(declared)
+    slots = [_is_result_var(a) for a in declared.get("args") or []]
+    hint = (f"`extern acquire fn {fn}` declares its inverse, `undo {inv}(...)` "
+            f"with `result` for the acquired handle, and a site `undo` of that "
+            f"acquisition must be that call on the handle it bound. Anything "
+            f"else runs at teardown and leaves the handle open while the "
+            f"teardown reports a clean release. That `{inv}` reverts the "
+            f"acquisition is what the declaration asserts (issue #1859)")
+    if bind is None and any(slots) and seam:
+        raise RevlError(
+            filename, line,
+            f"`effect {fn}(...)` in a provide method cannot name its handle, so "
+            f"no site `undo` can release it: declare `{fn}` `witnessed` and drop "
+            f"the site `undo`, and its declared `undo {inv}(...)` releases each "
+            f"acquisition",
+            hint=hint + ". A provide method may bind only `spawn`; a witnessed "
+                 "extern's declared inverse registers on the activation's "
+                 "accumulator with `result` bound to what the acquisition "
+                 "returned (docs/design/243-witnessed-externs.md)",
+            code="G4", category="inverse")
+    if bind is None and any(slots):
+        raise RevlError(
+            filename, line,
+            f"`effect {fn}(...)` must bind its handle so its `undo` can release "
+            f"it: write `let <name> = effect {fn}(...)` with "
+            + _extern_release_form(inv, slots, "<name>"),
+            hint=hint, code="G4", category="inverse")
+    undo = step.get("undo")
+    args = undo.get("args") or [] if isinstance(undo, dict) else []
+    if (isinstance(undo, dict) and undo.get("kind") == "fn"
+            and undo.get("name") == inv and len(args) == len(slots)
+            and all(not want or (isinstance(a, dict) and a.get("kind") == "name"
+                                 and a.get("id") == safe)
+                    for a, want in zip(args, slots))):
+        return
+    head = f"let {bind} = effect {fn}(...)" if bind is not None else f"effect {fn}(...)"
+    raise RevlError(
+        filename, line,
+        f"the `undo` of `{head}` must be the inverse `{fn}` declares"
+        + (", on THAT handle" if any(slots) else "")
+        + ": write " + _extern_release_form(inv, slots, bind or "<name>"),
+        hint=hint, code="G4", category="inverse")
+
+
 def _bare_callee_name(raw_acquire) -> str | None:
     """The extern name an acquisition AST names by bare spelling, or None.
 
@@ -11712,7 +11837,8 @@ def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
             # program they refuse keeps its message. (A host acquisition BOUND
             # in a method is refused earlier: only `spawn` may be.)
             if stp == "effect":
-                _check_host_release(st, env, filename, line, bind=None, safe=None)
+                _check_site_release(st, env, filename, line, bind=None, safe=None,
+                                    seam=True)
             if acq_res and bind:
                 method_owned.add(bind)
         elif stp == "emit":
@@ -12065,6 +12191,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      extern_colour_instances: dict | None = None,
                      extern_class: dict | None = None,
                      extern_undo: dict | None = None,
+                     extern_inverse: dict | None = None,
                      errors: list | None = None,
                      untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
@@ -12072,6 +12199,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     env.emitting_fns = emitting_fns or set()
     env.extern_class = extern_class or {}
     env.extern_undo = extern_undo or {}
+    env.extern_inverse = extern_inverse or {}
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
     env.witnessed_externs = witnessed_externs or set()
@@ -12278,7 +12406,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                           position="undo", exempt_handle=safe)
                 _b1_no_resource(step["undo"], env, filename, stmt.line,
                                 clause="undo", borrows_only=True)
-            _check_host_release(step, env, filename, stmt.line,
+            _check_site_release(step, env, filename, stmt.line,
                                 bind=stmt.bind, safe=safe)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
@@ -12340,7 +12468,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 _o1_check(step["undo"], env, filename, stmt.line, position="undo")
                 _b1_no_resource(step["undo"], env, filename, stmt.line,
                                 clause="undo", borrows_only=True)
-            _check_host_release(step, env, filename, stmt.line, bind=None, safe=None)
+            _check_site_release(step, env, filename, stmt.line, bind=None, safe=None)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
             body.append(step)

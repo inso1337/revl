@@ -181,9 +181,15 @@ def test_a_laundered_call_nested_under_an_opaque_host_call_is_checked():
 def test_an_unknown_typed_argument_stays_admitted():
     # a host-verb result is opaque (`infer_ir` -> None); `unify` passes on an
     # unknown, so the slot check stays silent exactly where the type oracle is.
-    ir = _compile(_VAULT + "component C {\n"
+    # (an extern whose declared inverse takes a constant, not the
+    # handle: since issue #1859 a site `undo` is the DECLARED inverse, and only
+    # a `result` slot is pinned to the bound handle)
+    ir = _compile(_VAULT
+                  + "extern acquire fn tag_put(v: Str) -> SecretHandle"
+                  ' undo note("t") = @py { return 1 }\n'
+                  "component C {\n"
                   "  let store = effect Map.new() undo store.drop()\n"
-                  '  let s = effect secret_put("v") undo note(store.get("k"))\n'
+                  '  let s = effect tag_put("v") undo note(store.get("k"))\n'
                   "}\n")
     assert any(c["name"] == "C" for c in ir["components"])
 

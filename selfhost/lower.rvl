@@ -279,9 +279,13 @@ use "./types.rvl" { WfR, check_type_wellformed }
 // `extern emission[db] fn pg_write` was refused as emitting through `pg_write`,
 // and the repair widened a declaration that was already correct toward a token
 // no `capability <glob>` rule can select.
+// `inv` is an `extern acquire`'s DECLARED inverse, encoded `<callee>|<slots>`
+// with one slot letter per argument, `R` where the declaration passes
+// `result` and `_` elsewhere ("" for every other declaration; issue #1859).
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
              callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
-             body: List[Stmt], cachePure: Bool, line: Int, caps: List[Str] }
+             body: List[Stmt], cachePure: Bool, line: Int, caps: List[Str],
+             inv: Str }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -1212,7 +1216,14 @@ fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
           aps: List[Str], bd: List[Stmt], ln: Int, cps: List[Str]) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
            asyncSlots: slots, asyncParams: aps, body: bd, cachePure: false,
-           line: ln, caps: cps }
+           line: ln, caps: cps, inv: "" }
+}
+
+fn fnd_with_inv(f: FnD, inv: Str) -> FnD {
+  return { name: f.name, isEmExtern: f.isEmExtern, isAsyncExtern: f.isAsyncExtern,
+           callees: f.callees, asyncSlots: f.asyncSlots,
+           asyncParams: f.asyncParams, body: f.body, cachePure: f.cachePure,
+           line: f.line, caps: f.caps, inv: inv }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool,
@@ -2235,6 +2246,7 @@ fn fn_params_i(ts: List[Token], i: Int) -> Int {
 // bracket sits after `fn <name>`, never here.
 fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   var j = i + 1
+  var isAcq = false
   var isEm = false
   var isAsync = false
   var isWit = false
@@ -2247,6 +2259,7 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
          || atw(ts, j, "async") || ati(ts, j, "witnessed") || ati(ts, j, "deferred")
          || atw(ts, j, "idempotent") || atk(ts, j, "[") || atk(ts, j, "(")) {
     if (atw(ts, j, "emission")) { isEm = true }
+    if (atw(ts, j, "acquire")) { isAcq = true }
     if (ati(ts, j, "witnessed")) { isWit = true }
     if (atw(ts, j, "async")) { isAsync = true }
     if (atk(ts, j, "[")) {
@@ -2274,6 +2287,7 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
   var k = ret_at(ts, ps.i)
+  let inv = isAcq ? declared_inverse_at(ts, k) : ""
   // skip any `= @host { ... }` bodies without letting a brace end the decl early.
   //
   // The stop set has to name every declaration head, not just the ones the
@@ -2295,10 +2309,42 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   // the scope is carried only for a crossing class. `pure`/`acquire` take no
   // capability scope at all (the reference refuses the bracket on them), so
   // this is the declaration's own set for every extern that can seed.
-  return mk_step(push_fn(pg, mk_fnd(nm, isEm || isWit, isAsync, [],
+  return mk_step(push_fn(pg, fnd_with_inv(mk_fnd(nm, isEm || isWit, isAsync, [],
                                     async_slots_of(ps.ps),
                                     async_params_of(ps.ps), [], tkc(ts, i).line,
-                                    isEm || isWit ? caps : [])), k)
+                                    isEm || isWit ? caps : []), inv)), k)
+}
+
+// An `extern acquire`'s declared inverse, read from its header after the
+// return type: `undo <callee>(<args>)`, encoded `<callee>|<slots>` (see
+// `FnD.inv`). The reference keeps the inverse only when it is a call
+// (`_callee_name`), so a bare `undo name` or no `undo` at all is "".
+fn declared_inverse_at(ts: List[Token], k: Int) -> Str {
+  var u = k
+  while (u < ts.length() && !atw(ts, u, "undo") && !atk(ts, u, "=")
+         && !atk(ts, u, "{") && !atk(ts, u, "eof")) { u += 1 }
+  if (!atw(ts, u, "undo") || !atk(ts, u + 1, "ident") || !atk(ts, u + 2, "(")) {
+    return ""
+  }
+  return tkc(ts, u + 1).text.concat("|").concat(inverse_slots(ts, u + 3, 0, "", true))
+}
+
+// One letter per top-level argument from `i` to the closing `)`: `R` for an
+// argument that is exactly `result`, `_` for any other. `fresh` is true at the
+// start of an argument; `cur` is the letter of the argument being read.
+fn inverse_slots(ts: List[Token], i: Int, depth: Int, acc: Str, fresh: Bool) -> Str {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+  if (depth == 0 && atk(ts, i, ")")) { return acc }
+  if (depth == 0 && atk(ts, i, ",")) { return inverse_slots(ts, i + 1, 0, acc, true) }
+  if (fresh) {
+    let lone = ati(ts, i, "result")
+      && (atk(ts, i + 1, ",") || atk(ts, i + 1, ")"))
+    let d = atk(ts, i, "(") || atk(ts, i, "[") || atk(ts, i, "{") ? 1 : 0
+    return inverse_slots(ts, i + 1, depth + d, acc.concat(lone ? "R" : "_"), false)
+  }
+  let up = atk(ts, i, "(") || atk(ts, i, "[") || atk(ts, i, "{") ? 1 : 0
+  let down = atk(ts, i, ")") || atk(ts, i, "]") || atk(ts, i, "}") ? 1 : 0
+  return inverse_slots(ts, i + 1, depth + up - down, acc, false)
 }
 
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -2321,7 +2367,7 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
                               asyncSlots: async_slots_of(ps.ps),
                               asyncParams: async_params_of(ps.ps),
                               body: body, cachePure: cachePure,
-                              line: tkc(ts, i).line, caps: [] }), bend)
+                              line: tkc(ts, i).line, caps: [], inv: "" }), bend)
 }
 
 type MethsR = { xs: List[MSig], i: Int, ok: Bool }
@@ -3421,7 +3467,7 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
              localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str,
-             appr: ApprI }
+             appr: ApprI, extInv: Map[Str, Str] }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -3699,7 +3745,7 @@ fn ctx_appr(cx: Ctx, ap: ApprI) -> Ctx {
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere,
-           emitPos: cx.emitPos, appr: ap }
+           emitPos: cx.emitPos, appr: ap, extInv: cx.extInv }
 }
 
 fn appr_info(ts: List[Token], pg: Prog) -> ApprI {
@@ -3915,7 +3961,7 @@ fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
            // "setup" there, whose host-acquire phrase is "this position"
            acqWhere: pos == "args" && cx.emitPos == "head" ? "this position"
                                                             : cx.acqWhere,
-           emitPos: pos, appr: cx.appr }
+           emitPos: pos, appr: cx.appr, extInv: cx.extInv }
 }
 
 // Whether a marked head's arguments admit a bare emission: never under a
@@ -3957,7 +4003,7 @@ fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (i >= ss.length() || a.msg != "") { return a }
   let j = group_end(ss, i)
   return walk_stmts(ss, j, cx,
-    release_group(ss, i, appr_group(ss, i, cx, walk_span(ss, i, j, cx, a))))
+    release_group(ss, i, cx, appr_group(ss, i, cx, walk_span(ss, i, j, cx, a))))
 }
 
 // ---- a host acquisition's inverse is its release (issue #1859) ------------
@@ -4043,11 +4089,12 @@ fn host_release_msg(bind: Str, hf: Str, release: Str) -> Str {
     .concat(".").concat(release).concat("()`")
 }
 
-// The verdict for the group at i, when it is the `undo` of a host acquisition.
-fn release_msg_at(ss: List[Stmt], i: Int) -> Str {
+// The verdict for the group at i, when it is the `undo` of a host acquisition
+// or of an `extern acquire` (`seam`: a provide-method body).
+fn release_msg_at(ss: List[Stmt], i: Int, cx: Ctx, seam: Bool) -> Str {
   if (i == 0 || ss[i].kind != "undo") { return "" }
   let hf = host_acq_fn(ss[i - 1])
-  if (hf == "") { return "" }
+  if (hf == "") { return extern_release_msg(ss[i - 1], ss[i].e, cx, seam) }
   let release = release_of_fn(hf)
   let bind = ss[i - 1].bind
   if (bind == "") { return host_unbound_msg(hf, release) }
@@ -4061,19 +4108,104 @@ fn release_msg_at(ss: List[Stmt], i: Int) -> Str {
 }
 
 // The first release refusal over a provide-method body.
-fn method_release_msg(ss: List[Stmt], i: Int) -> Str {
+fn method_release_msg(ss: List[Stmt], i: Int, cx: Ctx) -> Str {
   if (i >= ss.length()) { return "" }
   // only the UNBOUND form: a host acquisition bound in a method is the
   // reference's "only `spawn` may be acquired" refusal, raised earlier
-  let m = ss[i - 1].bind == "" ? release_msg_at(ss, i) : ""
+  let m = ss[i - 1].bind == "" ? release_msg_at(ss, i, cx, true) : ""
   if (m != "") { return m }
-  return method_release_msg(ss, i + 1)
+  return method_release_msg(ss, i + 1, cx)
 }
 
-fn release_group(ss: List[Stmt], i: Int, a: Ac) -> Ac {
+fn release_group(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (a.msg != "") { return a }
-  let m = release_msg_at(ss, i)
+  let m = release_msg_at(ss, i, cx, false)
   return m == "" ? a : ac_refuse(a, "G4", m)
+}
+
+// ---- an `extern acquire`'s inverse is its declared one (issue #1859) -------
+//
+// lower.py `_check_extern_release`: the site `undo` of an acquisition of an
+// `extern acquire` that declares `undo <inv>(...)` must call `<inv>` with the
+// same arity and pass the bound handle wherever the declaration passes
+// `result`. An unbound acquisition whose inverse takes `result` is refused,
+// with the `witnessed` spelling named in a provide method, where only `spawn`
+// may be bound.
+//
+// A site `undo` that calls the declared inverse with the right arity but
+// another value in a `result` slot is left alone here: the reference reports
+// a sibling handle there as the O1 double-close (G7), which this gate does not
+// judge, so refusing with the G4 wording would contradict it.
+fn ext_acq_name(s: Stmt) -> Str {
+  if (s.kind != "effect") { return "" }
+  return match s.e {
+    Call(c) => match c.target { Var(v) => v, _ => "" },
+    Var(v) => v,
+    _ => "",
+  }
+}
+
+fn inv_has_result(slots: Str) -> Bool { return slots.indexOf("R") >= 0 }
+
+fn ext_release_form(inv: Str, slots: Str, who: Str) -> Str {
+  if (slots == "R") { return "`undo ".concat(inv).concat("(").concat(who).concat(")`") }
+  if (inv_has_result(slots)) {
+    return "`undo ".concat(inv).concat("(...)` with `").concat(who)
+      .concat("` where the declaration passes `result`")
+  }
+  return "`undo ".concat(inv).concat("(...)` as the declaration calls it")
+}
+
+fn undo_calls_inverse(u: Expr, inv: Str, slots: Str, bind: Str) -> Bool {
+  return match u {
+    Call(c) => is_var_named(c.target, inv) && c.args.length() == slots.length()
+      && result_slots_hold(c.args, slots, bind, 0),
+    _ => false,
+  }
+}
+
+fn calls_inverse_by_arity(u: Expr, inv: Str, slots: Str) -> Bool {
+  return match u {
+    Call(c) => is_var_named(c.target, inv) && c.args.length() == slots.length(),
+    _ => false,
+  }
+}
+
+fn result_slots_hold(args: List[Expr], slots: Str, bind: Str, i: Int) -> Bool {
+  if (i >= args.length()) { return true }
+  if (slots.slice(i, i + 1) == "R" && !is_var_named(args[i], bind)) { return false }
+  return result_slots_hold(args, slots, bind, i + 1)
+}
+
+fn extern_release_msg(acq: Stmt, u: Expr, cx: Ctx, seam: Bool) -> Str {
+  let fnm = ext_acq_name(acq)
+  if (fnm == "") { return "" }
+  let enc = match cx.extInv.lookup(fnm) { Some(v) => v, None => "" }
+  if (enc == "") { return "" }
+  let bar = enc.indexOf("|")
+  let inv = enc.slice(0, bar)
+  let slots = enc.slice(bar + 1, enc.length())
+  let bind = acq.bind
+  if (bind == "" && inv_has_result(slots) && seam) {
+    return "`effect ".concat(fnm)
+      .concat("(...)` in a provide method cannot name its handle, so no site `undo` can release it: declare `")
+      .concat(fnm).concat("` `witnessed` and drop the site `undo`, and its declared `undo ")
+      .concat(inv).concat("(...)` releases each acquisition")
+  }
+  if (bind == "" && inv_has_result(slots)) {
+    return "`effect ".concat(fnm)
+      .concat("(...)` must bind its handle so its `undo` can release it: write `let <name> = effect ")
+      .concat(fnm).concat("(...)` with ").concat(ext_release_form(inv, slots, "<name>"))
+  }
+  if (undo_calls_inverse(u, inv, slots, bind)) { return "" }
+  // the declared callee at its arity with another value in a `result` slot:
+  // the reference's O1 territory (see above)
+  if (inv_has_result(slots) && calls_inverse_by_arity(u, inv, slots)) { return "" }
+  let head = bind != "" ? "let ".concat(bind).concat(" = effect ").concat(fnm).concat("(...)")
+                        : "effect ".concat(fnm).concat("(...)")
+  return "the `undo` of `".concat(head).concat("` must be the inverse `").concat(fnm)
+    .concat("` declares").concat(inv_has_result(slots) ? ", on THAT handle" : "")
+    .concat(": write ").concat(ext_release_form(inv, slots, bind != "" ? bind : "<name>"))
 }
 
 // ---- one statement's evidence, in the reference's order (issue #1261) ------
@@ -4760,7 +4892,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
 }
 
 // The same context carrying the host-acquire position phrase of the statement
@@ -4774,7 +4906,7 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: where, emitPos: cx.emitPos, appr: cx.appr }
+           acqWhere: where, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
 }
 
 // The same context carrying a body's provision-alias map.
@@ -4786,7 +4918,7 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
 }
 
 // The same context carrying the local arrows one body binds (`let f = (…) =>
@@ -4800,7 +4932,7 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -4821,7 +4953,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
            acqWhere: cx.acqWhere,
-           emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr }
+           emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr, extInv: cx.extInv }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -4951,15 +5083,17 @@ fn build_maps(pg: Prog) -> Ctx {
   let colored = async_colored(pg.fns, slots)
   var emitting: List[Str] = []
   var ai: List[Str] = []
+  var inv: Map[Str, Str] = Map.empty()
   var fi = 0
   while (fi < pg.fns.length()) {
     let f = pg.fns[fi]
     if (caps_of(caps, f.name).length() > 0) { emitting = emitting.push(f.name) }
     if (f.isAsyncExtern) { ai = ai.push(f.name) }
+    if (f.inv != "") { inv = inv.set(f.name, f.inv) }
     fi += 1
   }
   return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai,
-                [], fn_names_of(pg.fns), "", slots, prov_key_svc(pg))
+                [], fn_names_of(pg.fns), "", slots, prov_key_svc(pg), inv)
 }
 
 // The global (component `#` key -> service) table: every component's provided
@@ -4984,14 +5118,15 @@ fn prov_key_svc(pg: Prog) -> Map[Str, Str] {
 fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
           colored: List[Str], emitting: List[Str], ai: List[Str],
           scope: List[Str], fnn: List[Str], cnm: Str,
-          slots: Map[Str, List[Int]], pks: Map[Str, Str]) -> Ctx {
+          slots: Map[Str, List[Int]], pks: Map[Str, Str],
+          inv: Map[Str, Str]) -> Ctx {
   return { svcs: svcs, ambOps: Map.empty(), reqMap: rm, caps: caps,
            colored: colored,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position", emitPos: "", appr: no_appr() }
+           acqWhere: "this position", emitPos: "", appr: no_appr(), extInv: inv }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -5005,7 +5140,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
 }
 
 // The RUNNING composition's service table, off the item-346 service block's
@@ -5027,7 +5162,7 @@ fn ctx_amb_ops(cx: Ctx, ops: Map[Str, AmbSvc]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, extInv: cx.extInv }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -5051,7 +5186,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position", emitPos: "", appr: base.appr }
+           acqWhere: "this position", emitPos: "", appr: base.appr, extInv: base.extInv }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -5245,7 +5380,7 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   if (na.msg != "") { return ss[i].line }
   // a host release refusal is reported at the bracket's own line, the
   // acquisition's, as the reference reports it (`_check_host_release`)
-  na = release_group(ss, i, na)
+  na = release_group(ss, i, cx, na)
   if (na.msg != "") { return ss[i - 1].line }
   return refusal_line(ss, j, cx, na)
 }
@@ -6696,7 +6831,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // method. The reference judges it in `_ownership_walk_method`, after the
       // whole body is lowered and the missing-return rule has run, at the
       // method's line.
-      let mrel = method_release_msg(pm.body, 1)
+      let mrel = method_release_msg(pm.body, 1, cx)
       if (mrel != "") { return mk_verd(tagged("G4", mrel), pm.line) }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
       // restated because stratum 3 never runs the checker over arrows): a
@@ -25328,4 +25463,72 @@ component C provides s: S {
   provide s { fn go(n) = List.reverse(["a"]) }
 }""")
   assert v == "T1|`List` is a builtin type, not a value: a builtin method is called on a value of the type, never on the type"
+}
+
+test "an extern acquire's site undo that is not its declared inverse is refused" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let h = effect open_h() undo noop()
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == "G4|the `undo` of `let h = effect open_h(...)` must be the inverse `open_h` declares, on THAT handle: write `undo close_h(h)`"
+}
+
+test "an extern acquire released by its declared inverse is admitted" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let h = effect open_h() undo close_h(h)
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == ""
+}
+
+test "an unbound extern acquire whose inverse takes the handle is refused" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  effect open_h() undo noop()
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == "G4|`effect open_h(...)` must bind its handle so its `undo` can release it: write `let <name> = effect open_h(...)` with `undo close_h(<name>)`"
+}
+
+test "an extern acquire in a provide method names the witnessed spelling" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n) {
+      effect open_h() undo noop()
+      return n
+    }
+  }
+}""")
+  assert v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so no site `undo` can release it: declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"
+}
+
+test "a declared inverse that takes no handle pins only the callee" {
+  let v = admit_src("""type H = Opaque
+extern pure fn unlock() -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn lock() -> H undo unlock() = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  effect lock() undo noop()
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == "G4|the `undo` of `effect lock(...)` must be the inverse `lock` declares: write `undo unlock(...)` as the declaration calls it"
 }

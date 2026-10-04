@@ -1,0 +1,27 @@
+// REJECTED — G4: an `extern acquire`'s site `undo` is not its declared inverse.
+//
+// `log_open` declares its inverse, `undo log_close(result)`, with `result` for
+// the descriptor it opens. `undo log_flush()` runs at teardown and closes
+// nothing, so the descriptor outlives the component while the teardown reports
+// a clean release. Before issue #1859 any site `undo` was taken for the
+// inverse; now it must be the declared one on the handle the bracket bound.
+//
+// expected error:
+//   the `undo` of `let log = effect log_open(...)` must be the inverse
+//     `log_open` declares, on THAT handle: write `undo log_close(log)`
+
+type LogHandle = Opaque
+
+extern pure fn log_close(fd: LogHandle) -> Unit = @py { return None }
+
+extern pure fn log_flush() -> Unit = @py { return None }
+
+extern acquire fn log_open(path: Str) -> LogHandle undo log_close(result)
+= @py { return 3 }
+
+service S { fn go(k: Str) -> Int }
+
+component C provides s: S {
+  let log = effect log_open("/tmp/audit.log") undo log_flush()
+  provide s { fn go(k) = 1 }
+}
