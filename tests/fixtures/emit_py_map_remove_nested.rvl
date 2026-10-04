@@ -1,0 +1,20 @@
+// issue #1632, held to byte agreement by tests/test_selfhost_emit_py.py: a
+// `Map.remove` whose receiver is not a bare name. The receiver read carries an
+// assignment expression (the `_fv :=` field temp), which Python refuses inside
+// a comprehension's iterable, so the receiver and key are passed into a lambda
+// instead. The bare-name receiver beside it keeps the one-frame comprehension.
+//
+// It sits beside emit_py_corpus/ rather than in it because
+// tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
+// is not this slice.
+
+type Box = { m: Map[Str, Int] }
+type Outer = { box: Box }
+
+fn drop_nested(o: Outer, k: Str) -> Map[Str, Int] {
+  return o.box.m.remove(k)
+}
+
+fn drop_plain(m: Map[Str, Int], k: Str) -> Map[Str, Int] {
+  return m.remove(k)
+}
