@@ -79,7 +79,7 @@ from .decode_grammar import (
     decode_grammar_for,
     grammar_refusal_reason,
 )
-from .mcp.schema import (
+from .type_schema import (
     _parse_type as _schema_parse_type,
     expressibility_reason,
     fully_expressible,
@@ -4157,7 +4157,7 @@ def _validated_response_ir(name: str, returns: str | None, is_emission: bool,
     # Item 513 (§4.2): the grammar walk, kept as an INTERNAL drift assertion
     # rather than an author-facing refusal, because on a type the gate above
     # accepted it cannot fire. `decode_grammar._admits_null` and
-    # `mcp.schema.admits_json_null` are the same predicate over the same surface
+    # `type_schema.admits_json_null` are the same predicate over the same surface
     # positions (`Opt` inner, `List` element, `Map` value, record field, variant
     # payload), so every shape this walk refuses `fully_expressible` refused one
     # line up. Measured over 1872 constructed types (issue #1348): 0 reach here,
@@ -12992,6 +12992,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 check_ir(lowered_return, decl.returns, env.type_env,
                          env.types, env.services, filename, ms.line,
                          f"`{method.name}` returns")
+                # issue #1838: `return n` from a method declared `-> Float`
+                # is a coercion site, marked as a pure fn's `return` is
+                # (docs/arithmetic.md), so every tier emits the conversion
+                _mark_widen(decl.returns, actual, lowered_return)
                 lowered_return = _inject_opt(decl.returns, actual, lowered_return)
             out.append({"step": "return", "expr": lowered_return})
 

@@ -1968,6 +1968,8 @@
 
 ["tests/fixtures/emit_wasm_corpus/forloop.rvl", "agree-admit"]
 
+["tests/fixtures/emit_wasm_corpus/helper_named_fns.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_wasm_corpus/inference.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_corpus/listmem.rvl", "agree-admit"]
@@ -1997,6 +1999,8 @@
 ["tests/fixtures/emit_wasm_refusals/compound_required_call.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_refusals/fn_named_memory.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/secret_fed_plain_witness.rvl", "agree-admit"]
 

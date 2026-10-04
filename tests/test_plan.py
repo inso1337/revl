@@ -717,7 +717,7 @@ def _call(name: str, arguments: dict) -> dict:
     return handle(message)["result"]["structuredContent"]
 
 
-def test_mcp_advertises_revl_plan_as_read_only():
+def test_mcp_advertises_revl_plan_as_read_only(all_mcp_tools):
     tools = {t["name"]: t
              for t in handle({"jsonrpc": "2.0", "id": 1,
                               "method": "tools/list"})["result"]["tools"]}
