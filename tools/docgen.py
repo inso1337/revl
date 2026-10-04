@@ -259,16 +259,25 @@ def block_mcp_verbs(current: str) -> str:
     return "\n".join(out)
 
 
+# The three verb-count blocks below state no count (issue #1768). The total
+# moved with every verb a pull request added, in three documents at once, so
+# any two such pull requests conflicted in all three. What a reader needs from
+# them is that the list is COMPLETE, which `verbs-documented` and
+# `verbs-in-guide` check verb by verb, and the count is one command away:
+# `python3 tools/docgen.py --show mcp-verb-count`.
+
+
 def block_mcp_count(current: str) -> str:
-    n = len(mcp_tools())
-    return (f"The advertised list is exactly the {n} verbs below, one section each.")
+    mcp_tools()  # the registry must load, as before
+    return ("The advertised list is exactly the verbs below, one section each "
+            "(`python3 tools/docgen.py --show mcp-verb-count` counts them).")
 
 
 def block_agents_mcp_count(current: str) -> str:
-    n = len(mcp_tools())
+    mcp_tools()
     return (
-        f"The complete advertised verb set is {n} verbs, from\n"
-        "`src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what\n"
+        "The complete advertised verb set, from\n"
+        "`src/revl/mcp/server.py` and `query_tools.py`, is grouped below by what\n"
         "you reach for; each verb's exact inputs and outputs are in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
@@ -279,9 +288,9 @@ def block_authoring_mcp_count(current: str) -> str:
     drifted (issue #939): the page still claimed the authoring verbs were
     CLI-only after item 345 exposed them over MCP, and its total lagged the
     registry. Generating it ties the page to `TOOLS` like the other two."""
-    n = len(mcp_tools())
+    mcp_tools()
     return (
-        f"`revl mcp serve` advertises {n} verbs in total; the full list is in\n"
+        "`revl mcp serve` advertises the verbs listed in full in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
 
@@ -348,11 +357,23 @@ def block_guarantees_humans(current: str) -> str:
 
 
 def block_mcp_test_count(current: str) -> str:
-    n = test_count("tests/test_mcp.py")
+    """No count since issue #1768: it moved with every test added to the
+    module. `--show mcp-test-count` prints it."""
+    if not test_count("tests/test_mcp.py"):
+        raise SystemExit("docgen: tests/test_mcp.py defines no test")
     return (
         "The `mcp serve` tool surface, its annotations and its structured rejections\n"
-        f"are gated by `tests/test_mcp.py` ({n} tests)."
+        "are gated by `tests/test_mcp.py`."
     )
+
+
+#: What `--show` prints: the counts the committed blocks no longer store.
+SHOW = {
+    "selfhost-residual": lambda: residual_report(),
+    "mcp-verb-count": lambda: f"{len(mcp_tools())} advertised MCP verbs",
+    "mcp-test-count": lambda: (f"{test_count('tests/test_mcp.py')} tests in "
+                               "tests/test_mcp.py"),
+}
 
 
 class VisionTierError(SystemExit):
@@ -573,20 +594,21 @@ def _residual_table(rows: list[tuple[str, int, int]]) -> list[str]:
     return out
 
 
-def block_selfhost_residual(current: str, root: Path | None = None) -> str:
-    """The per-tier residual table and its total, for `docs/selfhost-compile.md`
-    and `docs/selfhost-findings.md`.
+def residual_report(root: Path | None = None) -> str:
+    """The per-tier residual table and its totals, printed by
+    `python3 tools/docgen.py --show selfhost-residual`.
 
-    Nothing is carried: every cell is a count of a committed list, so the block
-    is a rendering of `LOWER_GAP_DOCS` and the six `CORPUS` lists and a reader
-    who wants the documents themselves can read the same tables.
+    Every cell is a count of a committed list, `LOWER_GAP_DOCS` and the six
+    `CORPUS` lists. The middle column is the emitter half of roadmap item 146,
+    and it reads 100% because `test_the_residual_is_located_in_lower_not_in_
+    the_emitter` asserts it per document, for every document, on every run.
 
-    The middle column is the emitter half of roadmap item 146, and it reads
-    100% because `test_the_residual_is_located_in_lower_not_in_the_emitter`
-    asserts it per document, for every document, on every run. It is rendered
-    rather than counted separately on purpose: if that assertion ever fails the
-    suite is red, which is a louder answer than a column quietly dropping to
-    99%.
+    This table used to be the committed `selfhost-residual` block. Its corpus
+    column and both totals moved with every corpus document a pull request
+    added, so two such pull requests conflicted in two documents after every
+    landing (issue #1768). The committed block now states the finding and this
+    command, and stores no count; the prose gate still reds a figure typed
+    anywhere in `docs/` that disagrees with the ledger.
     """
     rows = selfhost_residual(root)
     corpus = sum(c for _, c, _ in rows)
@@ -594,16 +616,45 @@ def block_selfhost_residual(current: str, root: Path | None = None) -> str:
     out = _residual_table(rows)
     out += [
         "",
-        f"Every one of the {corpus} documents is reproduced byte-for-byte by its",
-        "self-host emitter when the emitter is fed the **reference** IR. "
-        f"{corpus - gap} of",
-        f"them survive the **fully-native** chain, so all {gap} residual documents",
-        "are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter",
-        "gaps.",
+        f"Every one of the {corpus} documents is reproduced byte-for-byte by its "
+        f"self-host emitter when the emitter is fed the reference IR. "
+        f"{corpus - gap} of them survive the fully-native chain, so all {gap} "
+        f"residual documents are `selfhost/lower.rvl` gaps, not emitter gaps.",
+    ]
+    return "\n".join(out)
+
+
+def block_selfhost_residual(current: str, root: Path | None = None) -> str:
+    """The residual finding, for `docs/selfhost-compile.md` and
+    `docs/selfhost-findings.md`, with no count in it.
+
+    The finding is structural: every corpus document is reproduced by its
+    emitter fed the reference IR, so every document the fully-native chain
+    loses is a `selfhost/lower.rvl` gap. That holds or the suite is red
+    (`test_the_residual_is_located_in_lower_not_in_the_emitter`). The counts
+    are printed by `--show selfhost-residual` (`residual_report`) and the
+    documents are named in `selfhost-residual-docs`; a stored count moved
+    with every corpus document and conflicted (issue #1768). Rendered from the
+    same ledger as before, so a ledger whose tiers the corpora do not cover
+    still fails here, loudly."""
+    rows = selfhost_residual(root)
+    clean = [t for t, _, g in rows if not g]
+    out = [
+        "Every document in each tier's corpus is reproduced byte-for-byte by its",
+        "self-host emitter when the emitter is fed the **reference** IR. Every",
+        "document the **fully-native** chain does not reproduce is therefore a",
+        "`selfhost/lower.rvl` gap, the native IR producer, and not an emitter gap;",
+        "they are named document by document in",
+        "[`LOWER_GAP_DOCS`](../" + NATIVE_CHAIN_TEST + ").",
         "",
-        "Both columns and both totals are generated by `tools/docgen.py` from",
-        f"[`LOWER_GAP_DOCS`](../{NATIVE_CHAIN_TEST}) and from each tier's",
-        "`tests/test_selfhost_emit_<tier>.py::CORPUS`. Do not edit them here:",
+        "Tiers whose whole corpus survives the fully-native chain: "
+        + (", ".join(f"`{t}`" for t in clean) if clean else "none") + ".",
+        "",
+        "The per-tier counts are not stored here, because they move with every",
+        "corpus document a pull request adds. Print them with",
+        "`python3 tools/docgen.py --show selfhost-residual`. This block is",
+        "generated by `tools/docgen.py` from that ledger and from each tier's",
+        "`tests/test_selfhost_emit_<tier>.py::CORPUS`. Do not edit it here:",
         "change the ledger, then run `make docs-gen`.",
     ]
     return "\n".join(out)
@@ -623,8 +674,10 @@ def block_selfhost_residual_docs(current: str, root: Path | None = None) -> str:
     ledger = _literal(NATIVE_CHAIN_TEST, "LOWER_GAP_DOCS", root)
     rows = selfhost_residual(root)
     out: list[str] = []
-    for tier, corpus, gap in rows:
-        out.append(f"`{tier}`, {gap} residual of {corpus}:")
+    for tier, _corpus, gap in rows:
+        # No count in the header: it moved with every corpus document added to
+        # the tier (issue #1768). The documents below are the residual.
+        out.append(f"`{tier}`:")
         out.append("")
         if not gap:
             out.append("- none; the fully-native chain reproduces the whole corpus.")
@@ -864,7 +917,13 @@ def main() -> int:
                     help="regenerate every generated block in place")
     ap.add_argument("--list", action="store_true",
                     help="print the blocks and coverage checks with their sources")
+    ap.add_argument("--show", choices=sorted(SHOW),
+                    help="print a count the committed blocks do not store")
     args = ap.parse_args()
+
+    if args.show:
+        print(SHOW[args.show]())
+        return 0
 
     if args.list:
         print("generated blocks (byte-compared):")
