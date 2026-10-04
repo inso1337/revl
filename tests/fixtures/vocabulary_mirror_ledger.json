@@ -504,6 +504,19 @@
     },
     {
       "sites": [
+        "src/revl/lower.py::_is_value_crossing",
+        "src/revl/query.py::Composition._service_calls"
+      ],
+      "tokens": [
+        "kind",
+        "method",
+        "name",
+        "target"
+      ],
+      "note": "FALSE POSITIVE. Two unrelated functions that each read a lowered call node's fields out of the IR (issue #1562 added the first). Nothing is re-declared: the four strings are IR keys, not a closed vocabulary, so a reader that starts using a fifth field is a correct one-sided edit."
+    },
+    {
+      "sites": [
         "src/revl/lower.py::_lower_type_decls",
         "src/revl/lower.py::_validate_declared_types",
         "src/revl/typecheck.py::_walk_config_type"

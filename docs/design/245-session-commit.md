@@ -392,6 +392,21 @@ does not invoke the host body; it appends the descriptor to the session queue
 never. This single-lowering property is load-bearing for Decision 4's
 exhaustiveness proof.
 
+**Every marked position is a call site (issue #1457).** The enqueue used to be
+emitted for the `emit` STEP alone, so the same crossing written as a value
+fired at the call: the tail form `fn put(k, v) = emit host_put(v)` (emitted as
+`return host_put(v)`), `let r = emit d(..)`, `return emit d(..)`, and a marked
+call in an arrow body. Every one of them now enqueues, because the `emit`
+marker is what makes a call a crossing (issue #1437) and the enqueue is an
+expression that evaluates to Unit. The ownerless-tier gate reads the same set
+of call sites, so those tiers refuse the value forms too instead of emitting a
+call that fires at once. A deferred extern reached with NO marker cannot be
+enqueued and does not compile: passed as a function value, in a component or
+a fn/test body ("is passed as a function value"), or called inside an arrow in
+a fn/test body ("cannot be called inside an arrow in ..."), beside item 400's
+refusal of a direct call in a fn/test body. In a component an unmarked call
+inside an arrow is already refused by the marker rule.
+
 **On commit: FLUSH.** After the approval (Decision 4) is durable, the driver
 fires the queue FIFO (program order, the causal order the intents were
 formed in), calling each descriptor's host body. Each completed fire appends

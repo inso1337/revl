@@ -1,0 +1,13 @@
+// ADMITTED: `ok_req_no_block.rvl` with the `route model` block written. The
+// file name's prefix is the expected verdict (`model_` refused under
+// G-MODEL-PLACE, `ok_` admitted); tests/test_model_reach_crossing.py holds it.
+
+model role tool on_device reaches [model.tool]
+
+service Tools { emission[model.tool] fn run(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Tools provides out: Answer {
+  route model on classify { * -> tool }
+  provide out { fn classify(text) = emit llm.run(text) }
+}

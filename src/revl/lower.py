@@ -955,6 +955,26 @@ class Env:
         # through what holds it (a record field, a list index, an arm); scoped
         # to the body being lowered, exactly like `local_arrows`.
         self.provision_values: dict = {}
+        # SERVICE-TYPED LOCALS (issue #1509): the safe names a `let` bound in
+        # the body being lowered. A local whose static type is a service holds
+        # a provision (only a provision read yields a service value), so a call
+        # through it is the crossing the provision's own call is, and the
+        # marker rule and the approval floor both judge it
+        # (`_service_receiver_decl`). An arrow PARAMETER is not one of these:
+        # whether a provision flows into it is decided at the application
+        # (`_check_arrow_param_crossings`), and `_arrow_params` keeps the
+        # parameters of the arrow being lowered out of the set.
+        self.let_locals: set = set()
+        self._arrow_params: set = set()
+        # A provide method's own parameters whose declared type mentions a
+        # service (issue #1682): a call through one is a crossing of that
+        # service's declared emission scopes, judged in the method like any
+        # other. `resolved_crossings` carries what the body crossed through a
+        # resolved receiver (a parameter, a spawn handle, a service-typed
+        # local; issue #1508), by IR node, from the body walk to the provider
+        # upper bound, which runs after the method's types are restored.
+        self.service_params: set = set()
+        self.resolved_crossings: dict = {}
         # item 130: stream lifecycle tracking. `terminal_stream_sources` holds
         # the safe names of stream sources (`let s = effect Stream.source() undo
         # s.close()`) whose inverse CLOSES the source — the terminal-delivering
@@ -3869,6 +3889,15 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     `callables` set), so these are explicit refusals, checked over the author's
     AST where the call site still has a line.
 
+    A `deferred` emission is also refused wherever it is reached with no
+    `emit` marker that could enqueue it (issue #1457): passed as a function
+    VALUE (`apply(deliver, s, m)`, in a fn/test body or a component), and,
+    in a fn/test body, called inside an arrow (named as such, the route the
+    author took). Whoever calls the value or the arrow fires the host body at
+    once, with no session commit, so a deferral that cannot be honoured does
+    not compile. A component's own CALL of one carries the marker (#1437) and
+    is enqueued in every position the marker appears.
+
     These were three sequential passes, each re-walking the identical set of
     fn/test bodies (P-9, #543). Folded into one traversal here. Diagnostic order
     is preserved verbatim: the walk records the FIRST violation of each kind (in
@@ -3878,7 +3907,7 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     carries one classification, so the `witnessed` and `acquire` sets are
     disjoint; `acquire` is checked before `deferred`, matching the original
     first-`if`-raises order."""
-    from .parser import ExprCall, ExprVar
+    from .parser import ExprArrow, ExprCall, ExprVar
 
     witnessed = _witnessed_extern_names(program)
     acquire_undo = {
@@ -3891,9 +3920,16 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     first_witnessed: RevlError | None = None
     first_teardown: RevlError | None = None
 
-    def _walk(node, where: str):
+    def _walk(node, where: str, in_arrow: bool = False, calls: bool = True):
         nonlocal first_witnessed, first_teardown
-        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
+        if isinstance(node, ExprArrow):
+            in_arrow = True
+        if isinstance(node, ExprVar) and node.name in deferred \
+                and first_teardown is None:
+            # a value, not a call: the callee position is skipped below
+            first_teardown = _deferred_value_refusal(node.name, where,
+                                                     filename, node.line)
+        if calls and isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
             name = node.callee.name
             if first_witnessed is None and name in witnessed:
                 first_witnessed = RevlError(
@@ -3920,10 +3956,12 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                     code="G4", category="acquire",
                 )
             elif first_teardown is None and name in deferred:
+                route = (f"inside an arrow in {where}" if in_arrow
+                         else f"in {where}")
                 first_teardown = RevlError(
                     filename, node.line,
-                    f"`deferred` emission extern `{name}` cannot be called in "
-                    f"{where}; a fn/test body has no session commit for the "
+                    f"`deferred` emission extern `{name}` cannot be called "
+                    f"{route}; a fn/test body has no session commit for the "
                     f"deferral to fire at (G4)",
                     hint="a deferred emission enqueues onto the session deferral "
                          "queue and fires at commit; that queue exists only inside "
@@ -3933,10 +3971,14 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 )
         if hasattr(node, "__dataclass_fields__"):
             for f in type(node).__dataclass_fields__:
-                _walk(getattr(node, f), where)
+                child = getattr(node, f)
+                if f == "callee" and isinstance(node, ExprCall) \
+                        and isinstance(child, ExprVar):
+                    continue  # the callee position is a CALL, judged above
+                _walk(child, where, in_arrow, calls)
         elif isinstance(node, (list, tuple)):
             for x in node:
-                _walk(x, where)
+                _walk(x, where, in_arrow, calls)
 
     for fn in program.fn_decls:
         for stmt in fn.body:
@@ -3944,11 +3986,34 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     for test in program.tests:
         for stmt in test.body:
             _walk(stmt, f"the body of test `{test.name}`")
+    if deferred:
+        # a component CALLS a deferred extern under its `emit` marker, which is
+        # enqueued wherever it appears; only a VALUE reference is refused there
+        for comp in program.components:
+            _walk(comp.body, f"component `{comp.name}`", calls=False)
 
     if first_witnessed is not None:
         raise first_witnessed
     if first_teardown is not None:
         raise first_teardown
+
+
+def _deferred_value_refusal(name: str, where: str, filename: str,
+                            line: int) -> RevlError:
+    """A `deferred` emission passed as a function value (issue #1457): whoever
+    calls the value fires the host body at once, with no `emit` marker to
+    enqueue it and no session commit to wait for."""
+    return RevlError(
+        filename, line,
+        f"`deferred` emission extern `{name}` is passed as a function value in "
+        f"{where}; whoever calls the value fires it at once, with no session "
+        f"commit (G4)",
+        hint="a deferred emission is enqueued only by an `emit`-marked call, "
+             "which fires at the session commit; call it directly as "
+             f"`emit {name}(...)` in a component activation or provide method "
+             "(docs/design/245-session-commit.md, issue #1457)",
+        code="G4", category="deferred",
+    )
 
 
 def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: str) -> None:
@@ -8477,9 +8542,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # capability set must be a checked subset of its spawner's held authority,
     # so lineage narrows monotonically and a supervisor cannot amplify. Returns
     # the per-instance attenuation chain for the G8 audit surface.
+    # every crossing a child reaches counts, in every position (issue #1562):
+    # a named call to an emission extern or a fn reaching one, by name, as
+    # `_is_emission_call` reads it. A witnessed extern is marked by `effect`
+    # and stays out, as it does for the marker rule.
     attenuation_chain = _collect(_check_spawn_attenuation,
                                  live_components, services, spawn_reg,
-                                 program.filename, untrusted=untrusted)
+                                 program.filename, untrusted=untrusted,
+                                 emitting=frozenset(emitting_fns
+                                                    - witnessed_externs))
 
     # The MODEL ROLE in that same product (item 519): a component's effective
     # ceiling is the union of what it holds and what the model role it routes
@@ -8487,9 +8558,18 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # both sets named. Inert for a program that declares no `model role`, which
     # is every program that does not opt in (docs/design/541-model-in-
     # attenuation.md).
+    # Slice 2 (issue #1193): a crossing placed on a role by its `model.<role>`
+    # token is an edge whether or not a `route model` block names the role,
+    # and the held set reads every crossing in every position, as the spawn
+    # fold above does.
     model_product = _collect(_check_model_attenuation, live_components,
                              services, model_roles, model_routes,
-                             program.filename)
+                             program.filename,
+                             emitting=frozenset(emitting_fns
+                                                - witnessed_externs),
+                             emitting_caps=emitting_caps,
+                             lines={c.name: c.line
+                                    for c in program.components})
 
     # Emission budgets, static check (item 260 §3.2): a declared `budget.requests`
     # / `calls` ceiling that the proved cardinality max exceeds is a red compile,
@@ -9310,9 +9390,13 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                         f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
                         hint="records carry data, not methods; call functions as `f(x)` (G6)",
                     )
-                return {"kind": "call",
+                _refuse_record_method(method, recv_t, env, filename, line)
+                node = {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
+                _refuse_unmarked_local_crossing(node, f"{root}.{method}", env,
+                                                filename, line)
+                return node
         if isinstance(expr.callee, ExprVar):
             name = expr.callee.name
             # ADT/Opt construction lowers exactly as it does in a `fn` body:
@@ -9389,7 +9473,20 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                          "`emit` makes that visible at the call site",
                     code="G4", category="emission",
                 )
-        return {"kind": "call", "callee": callee_node, "args": args}
+        node = {"kind": "call", "callee": callee_node, "args": args}
+        if inst is None and isinstance(callee_node.get("target"), dict):
+            # a record receiver read in place (`r.g.f(n)`, issue #1547)
+            _refuse_record_method(
+                callee_node.get("name"),
+                infer_ir(callee_node["target"], env.type_env, env.types,
+                         env.services),
+                env, filename, line)
+        if inst is None:
+            # a field or element read off a service-typed local (issue #1509)
+            _refuse_unmarked_local_crossing(
+                node, _receiver_spelling(expr.callee) or callee_node.get("name"),
+                env, filename, line)
+        return node
     if isinstance(expr, ExprBin):
         node = {"kind": "bin", "op": expr.op,
                 "left": _lower_component_pure_expr(expr.left, env, scope, callables,
@@ -9491,11 +9588,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         # refused the inline spelling as a nested `emit`.
         saved_in_args = getattr(env, "_in_emit_args", False)
         env._in_emit_args = False
+        # the parameters are not service-typed LOCALS (issue #1509): what flows
+        # into one is decided at the application, so they leave the set while
+        # the body is lowered
+        saved_arrow_params = set(getattr(env, "_arrow_params", ()) or ())
+        env._arrow_params = saved_arrow_params | set(expr.params)
         try:
             body = _lower_component_pure_expr(expr.body, env, inner, callables,
                                               pure_only)
         finally:
             env._in_emit_args = saved_in_args
+            env._arrow_params = saved_arrow_params
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": body}
         # item 75(a) §4/§5.3: the same complete-signature condition as the
@@ -9562,6 +9665,7 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
             env.type_env[safe] = inferred
         _note_provision_alias(safe, value, env)
         env.provision_values[stmt.name] = stmt.value
+        env.let_locals.add(safe)
         if isinstance(stmt.value, ExprArrow):
             env.local_arrows[stmt.name] = stmt.value
         out.append({"step": "let", "name": safe, "value": value})
@@ -12703,6 +12807,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         saved_provisions = dict(env.provision_locals)
         saved_arrows = dict(env.local_arrows)
         saved_values = dict(env.provision_values)
+        saved_let_locals = set(env.let_locals)
+        saved_service_params = set(env.service_params)
         env.params = env.bind_params(method.params, method.line)
         # method params carry the service's declared types (A6): surface
         # names bind the body, the service contributes the signature
@@ -12710,6 +12816,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         method_locals: dict[str, str] = {}
         for surface, (_, ptype) in zip(method.params, decl.params):
             env.type_env[env.params[surface]] = ptype
+            if _mentions_service(ptype, env):
+                env.service_params.add(env.params[surface])
 
         # L1 (roadmap item 441 / issue #120,
         # docs/design/458-termination-language-surface.md §3): a termination
@@ -12828,6 +12936,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             env.params[ms.name] = safe
             _note_provision_alias(safe, value, env)
             env.provision_values[ms.name] = ms.value
+            env.let_locals.add(safe)
             if isinstance(ms.value, ExprArrow):
                 env.local_arrows[ms.name] = ms.value
             if ms.type is not None:
@@ -13252,6 +13361,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         _check_intent_completeness(decl, mbody, env, svc.name, method.name,
                                    comp.source or filename, method.line)
         safe_params = [env.params[p] for p in method.params]
+        # issues #1682 and #1508: what the body crossed through a resolved
+        # receiver, read while the method's types are still in scope
+        env.resolved_crossings = _resolved_crossings(mbody, env)
         env.params = saved
         env.declared_intent = saved_intent
         env.stated_crossings = saved_stated
@@ -13259,6 +13371,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         env.provision_locals = saved_provisions
         env.local_arrows = saved_arrows
         env.provision_values = saved_values
+        env.let_locals = saved_let_locals
+        env.service_params = saved_service_params
 
         # A service declaration is an *upper bound* on its providers' effects:
         # consumers bind to the service, not to this component, and a provider
@@ -13335,6 +13449,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                           decl.capabilities, extra),
                     code="G4", category="emission-capability",
                 )
+
+        env.resolved_crossings = {}
 
         # sync/async arrow polymorphism (item 342): in a SYNC method, redirect
         # each call of a colour-polymorphic fn that receives only genuinely-sync
@@ -13600,14 +13716,16 @@ def _check_intent_refinement(stmt: EmitStmt, node: dict, env: Env) -> None:
                  "adding `tenant:` and `scopes:` where the intent bounds them "
                  "(item 470)",
             code="G4", category="intent-refinement")
-    crossed = _emit_crossed_caps(node, env)
+    crossed = _resolved_crossed_caps(node, env)
     if not crossed or "*" in crossed:
         # The crossing names no capability this check can compare: a bare
         # `emission` operation, or a shape whose boundary set the per-crossing
-        # resolution cannot pin down (a provision call off a spawn handle, a
-        # service-typed local, an unclassified extern). Either way no declared
-        # object can be SHOWN to cover it, and reading the unnameable as the
-        # declared one is the direction the whole kernel was built to close.
+        # resolution cannot pin down (an unclassified extern, a `fn` hop).
+        # Either way no declared object can be SHOWN to cover it, and reading
+        # the unnameable as the declared one is the direction the whole kernel
+        # was built to close. A provision call off a spawn handle and a call
+        # through a service-typed receiver ARE named, at the op's declared
+        # scope (`_resolved_crossed_caps`, issue #1508).
         _refuse_unnameable_crossing(clause, where, filename, stmt.line, "`emit`")
     for token in crossed:
         _refine_one_crossing(token, clause, acting, where, filename, stmt.line,
@@ -13670,7 +13788,7 @@ def _check_let_intent_refinement(stmt, value, env: Env) -> None:
                  "clause on an unmarked value would leave the real crossing "
                  "unstated (item 470)",
             code="G4", category="intent-refinement")
-    crossed = _emit_crossed_caps(value, env)
+    crossed = _resolved_crossed_caps(value, env)
     if not crossed or "*" in crossed:
         _refuse_unnameable_crossing(clause, where, filename, stmt.line, "`let`")
     for token in crossed:
@@ -13893,20 +14011,68 @@ def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> No
                      "approval (item 246)")
         step["approval"] = {"capability": edge_scope, "expr": appr_node}
     _require_declared_approval(node, edge_scope, env, stmt.line)
+    # A compensation crosses too, during rollback, where there is nobody to
+    # ask: every emission it reaches meets the same floor, covered by the same
+    # step's `with` edge. The slot keeps its bare-emission exception for the
+    # MARKER; it has none for approval.
+    for crossing in _compensate_crossings(step.get("compensate"), env):
+        _require_declared_approval(crossing, edge_scope, env, stmt.line,
+                                   slot="compensate")
+
+
+def _compensate_crossings(node, env: Env) -> list:
+    """Every emission crossing inside a lowered `compensate` slot, outermost
+    first, in source order. The slot is lowered bare (teardown mode), so a
+    crossing there carries no marker and has to be found by walking."""
+    found: list = []
+
+    def walk(n) -> None:
+        if isinstance(n, dict):
+            if n.get("kind") in ("fn", "call") and _is_emission_call(n, env):
+                found.append(n)
+            for value in n.values():
+                walk(value)
+        elif isinstance(n, list):
+            for value in n:
+                walk(value)
+
+    walk(node)
+    return found
+
+
+def _resolved_crossed_caps(node: dict, env: Env) -> list:
+    """The capability tokens one crossing's HEAD reaches, through the one
+    resolver every reader of a crossing shares. `_emit_crossed_caps` names a
+    `req` service emission and a direct host emission extern; a provision call
+    off a spawn handle (`w.<key>.<op>(...)`, the same through a local aliasing
+    `w.<key>`) and a call through a service-typed receiver (a `let` local, a
+    receiver written in place, a provide method's own parameter) resolve to the
+    op's declared `emission[...]` scope, `*` when bare
+    (`_instance_get_call`, `_service_receiver_decl`, the resolvers the marker
+    rule uses for those carriers).
+
+    Read by the approval floor (`_approval_crossed_caps`) and by item 470's
+    intent check (issue #1508). Kept apart from `_emit_crossed_caps`, whose
+    other readers keep their own reading."""
+    crossed = _emit_crossed_caps(node, env)
+    if crossed:
+        return crossed
+    inst = _instance_get_call(node, env)
+    decl = inst[1] if inst is not None else _service_receiver_decl(node, env)
+    if decl is not None and decl.emission:
+        caps = getattr(decl, "capabilities", None)
+        return list(caps) if caps else ["*"]
+    return crossed
 
 
 def _approval_crossed_caps(node: dict, env: Env) -> list:
     """The capability tokens one marked crossing reaches, for the approval
-    floor. `_emit_crossed_caps` resolves the HEAD: a `req` service emission or a
-    direct host emission extern. A marked call to a module `fn` that reaches an
-    emission extern crosses what that `fn` reaches, so its tokens come from the
-    emission fixed point (`env.emitting_caps`). Without this, `emit helper(1)`
-    carried `charge`'s crossing past the floor that `emit charge(1)` meets.
-
-    Kept apart from `_emit_crossed_caps` on purpose: item 470's refinement reads
-    that function and refuses a crossing it cannot name, and widening it would
-    change that judgment too."""
-    crossed = _emit_crossed_caps(node, env)
+    floor: the head as `_resolved_crossed_caps` names it, and a marked call to
+    a module `fn` that reaches an emission extern, whose tokens come from the
+    emission fixed point (`env.emitting_caps`). Without the latter,
+    `emit helper(1)` carried `charge`'s crossing past the floor that
+    `emit charge(1)` meets."""
+    crossed = _resolved_crossed_caps(node, env)
     if not crossed and node.get("kind") == "fn":
         reached = (getattr(env, "emitting_caps", None) or {}).get(node.get("name"))
         crossed = sorted(reached or ())
@@ -13914,7 +14080,8 @@ def _approval_crossed_caps(node: dict, env: Env) -> list:
 
 
 def _require_declared_approval(node: dict, edge_scope: str | None, env: Env,
-                               line: int, value_form: bool = False) -> None:
+                               line: int, value_form: bool = False,
+                               slot: str | None = None) -> None:
     """The declaration-owned approval floor over one marked crossing (item 246,
     Decision 3): every token it crosses that an extern declared `requires
     approval` for must be covered by the crossing's `with` edge.
@@ -13940,6 +14107,10 @@ def _require_declared_approval(node: dict, edge_scope: str | None, env: Env,
             if value_form:
                 hint += (". The value form `emit <call>` has no `with` clause, "
                          "so write this crossing as an `emit … with a` step")
+            if slot == "compensate":
+                hint += (". The crossing is in this step's `compensate` slot, "
+                         "which runs during rollback with nobody to ask, so the "
+                         "step's own `with` edge has to cover it too")
             raise RevlError(
                 env.filename, line,
                 f"crossing capability `{token}` requires approval, but this "
@@ -14492,11 +14663,223 @@ def _instance_get_call(node: dict, env: Env):
     recv = callee.get("target")
     if not (isinstance(recv, dict) and recv.get("kind") == "instance-get"):
         return None
-    svc = env.services.get(recv.get("service"))
+    return _instance_get_decl(node, env.services)
+
+
+def _instance_get_decl(node: dict, services: dict):
+    """`_instance_get_call` over a lowered node and a service table alone, so a
+    pass that runs on the lowered IR (the spawn attenuation reach) resolves a
+    spawn-handle crossing with the same rule the marker uses."""
+    if node.get("kind") != "call":
+        return None
+    callee = node.get("callee")
+    if not (isinstance(callee, dict) and callee.get("kind") == "field"):
+        return None
+    recv = callee.get("target")
+    if not (isinstance(recv, dict) and recv.get("kind") == "instance-get"):
+        return None
+    svc = services.get(recv.get("service"))
     if svc is None:
         return None
     decl = svc.methods.get(callee.get("name"))
     return (recv, decl) if decl is not None else None
+
+
+def _service_receiver_decl(node: dict, env: Env):
+    """The `MethodDecl` a call reaches through a receiver whose static type is
+    a service, else None. Issues #1509 and #1681.
+
+    Only a provision read yields a service value, so such a receiver holds a
+    provision, and a call through it crosses the boundary exactly as the
+    provision's own call does. The direct read and its plain alias already
+    lower back to the `instance-get` (`Env.provision_locals`); this is every
+    other way to write one. A `let`-bound local (`t.charge(n)` after
+    `let t = if c { w.pay } else { w.pay }`), a field or element read off one
+    (`r.p.charge(n)`, `ps[0].charge(n)`), and an expression written in place
+    (`(if c { w.pay } else { w.pay }).charge(n)`, a `match`, a record or list
+    literal read in place). One resolver, read by the marker rule
+    (`_is_emission_call`, and the unmarked demand at both call sites) and by
+    the approval floor (`_approval_crossed_caps`).
+
+    A receiver that depends on a binder this rule does not decide is left out
+    (`_receiver_names_decided`): an arrow PARAMETER, whose value is decided at
+    the application (`_check_arrow_param_crossings`), so an arrow never applied
+    to a provision must still compile. A provide method's own service-typed
+    parameter IS decided (issue #1682): a call through it is a crossing of the
+    service's declared scopes, judged in the method."""
+    if node.get("kind") != "call":
+        return None
+    target = node.get("target")
+    if isinstance(target, dict):
+        if target.get("kind") != "name":
+            return None
+        recv, method = target, node.get("method")
+    else:
+        callee = node.get("callee")
+        if not (isinstance(callee, dict) and callee.get("kind") == "field"):
+            return None
+        recv, method = callee.get("target"), callee.get("name")
+        if not isinstance(recv, dict) or recv.get("kind") == "instance-get":
+            return None
+    if not _receiver_names_decided(recv, env):
+        return None
+    ty = infer_ir(recv, getattr(env, "type_env", None) or {}, env.types,
+                  env.services)
+    head, _ = parse_type(ty or "")
+    svc = env.services.get(head)
+    return svc.methods.get(method) if svc is not None else None
+
+
+def _receiver_names_decided(recv, env: Env) -> bool:
+    """Whether every name a receiver expression reads is one this rule
+    decides: a `let`-bound local of the body being lowered, a provide
+    method's own parameter of a type that mentions a service (issue #1682),
+    or a name whose type mentions no service at all (a condition's `n`, a
+    scrutinee's `o`). An arrow parameter is not decided here: what flows into
+    it is decided at the application."""
+    lets = set(getattr(env, "let_locals", None) or ()) \
+        | set(getattr(env, "service_params", None) or ())
+    arrow_params = getattr(env, "_arrow_params", None) or ()
+    tenv = getattr(env, "type_env", None) or {}
+
+    def ok(n) -> bool:
+        if isinstance(n, dict):
+            if n.get("kind") == "name":
+                rid = n.get("id")
+                if rid in arrow_params:
+                    return False
+                if rid not in lets and _mentions_service(tenv.get(rid), env):
+                    return False
+            return all(ok(v) for v in n.values())
+        if isinstance(n, list):
+            return all(ok(v) for v in n)
+        return True
+
+    return ok(recv)
+
+
+def _resolved_crossings(body, env: Env) -> dict:
+    """Every emission crossing a provide-method body makes through a resolved
+    receiver, by IR node: `id(node) -> (label, capabilities)`. Issues #1682 and
+    #1508.
+
+    A resolved receiver is one the shared resolver names (`_instance_get_call`,
+    `_service_receiver_decl`): a provision call off a spawn handle, the same
+    through an alias, a service-typed `let` local or a receiver written in
+    place, and a provide method's own service-typed parameter. The label is
+    `<Service>.<op>` and the capabilities are the op's declared scope,
+    `{"*"}` when bare. The declared scope is a fact the provider is held to by
+    its own G4 provider bound, which is why the crossing can be read at it.
+
+    Read by the provider upper bound (`_method_emissions`), which runs after
+    the method's type environment is restored and so cannot resolve them
+    itself. A step through one is therefore not a host emission."""
+    out: dict = {}
+
+    def walk(n) -> None:
+        if isinstance(n, dict):
+            if n.get("kind") == "call":
+                inst = _instance_get_call(n, env)
+                if inst is not None:
+                    recv, decl = inst
+                    head = recv.get("service")
+                else:
+                    decl = _service_receiver_decl(n, env)
+                    head = None
+                    if decl is not None:
+                        target = n.get("target")
+                        recv = target if isinstance(target, dict) else \
+                            (n.get("callee") or {}).get("target")
+                        ty = infer_ir(recv, env.type_env, env.types,
+                                      env.services)
+                        head, _ = parse_type(ty or "")
+                if decl is not None and decl.emission and head:
+                    caps = set(getattr(decl, "capabilities", None) or ())
+                    out[id(n)] = (f"{head}.{decl.name}", caps or {"*"})
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(body)
+    return out
+
+
+def _mentions_service(ty, env: Env) -> bool:
+    """Whether a type spelling names a declared service anywhere in it."""
+    if not ty:
+        return False
+    import re as _re  # noqa: PLC0415
+    return any(word in env.services
+               for word in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(ty)))
+
+
+def _is_record_type(ty, types: dict) -> bool:
+    """Whether a type spelling is a record: a structural `{…}` record, or a
+    declared `type T = { … }` (a `record` entry in the type table)."""
+    if not ty:
+        return False
+    if str(ty).lstrip().startswith("{"):
+        return True
+    head, _ = parse_type(ty)
+    entry = (types or {}).get(head)
+    return isinstance(entry, dict) and entry.get("kind") == "record"
+
+
+def _refuse_record_method(method, recv_t, env: Env, filename: str,
+                          line: int) -> None:
+    """A method call on a RECORD in a component body (issue #1547, option A):
+    refused with the message a `fn` body gives the same call.
+
+    Records carry data, not methods, and `r.f(n)` with `f` a function-typed
+    field is not a call through the field: a `fn` body refuses it on every
+    tier. The component-method lowering refused only a Str/List/Bytes receiver
+    and let a record through as a generic method call, which no emitter can
+    tell from a host-object call; py rendered the record as a dict and the call
+    as attribute access, and crashed with `AttributeError`. The documented
+    spelling `let g = r.f  g(n)` is unaffected."""
+    if not method or not _is_record_type(recv_t, env.types):
+        return
+    raise RevlError(
+        filename, line,
+        f"no builtin method `{method}` on values — the stdlib surface is "
+        f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
+        hint="records carry data, not methods; call functions as `f(x)`, "
+             "and call arrows through a `let` binding",
+    )
+
+
+def _refuse_unmarked_local_crossing(node: dict, spelled: str, env: Env,
+                                    filename: str, line: int) -> None:
+    """The marker rule for a call through a service-typed local (issue #1509):
+    an unmarked emission is refused exactly as the direct provision call is
+    (`call to emission `w.task.run` must be marked `emit``), spelled as the
+    author wrote the receiver."""
+    if getattr(env, "_expr_mode", "setup") != "setup":
+        return
+    decl = _service_receiver_decl(node, env)
+    if decl is None or not decl.emission:
+        return
+    raise RevlError(
+        filename, line,
+        f"call to emission `{spelled}` must be marked `emit` (G4)",
+        hint="an emission crosses the system boundary and cannot be reverted; "
+             "`emit` makes that visible at the call site",
+        code="G4", category="emission",
+    )
+
+
+def _receiver_spelling(expr) -> "str | None":
+    """`t.charge` / `r.p.charge` for a callee written as a chain of names and
+    fields, else None (the refusal then names the operation alone)."""
+    from .parser import ExprField, ExprVar  # noqa: PLC0415
+    if isinstance(expr, ExprVar):
+        return expr.name
+    if isinstance(expr, ExprField):
+        base = _receiver_spelling(expr.target)
+        return f"{base}.{expr.name}" if base is not None else None
+    return None
 
 
 def _is_emission_call(node: dict, env: Env) -> bool:
@@ -14513,7 +14896,11 @@ def _is_emission_call(node: dict, env: Env) -> bool:
         # handle's provision to the service and read the method's emission-ness
         # there rather than assuming a `req` target (which KeyError'd here)
         inst = _instance_get_call(node, env)
-        return inst is not None and inst[1].emission
+        if inst is not None:
+            return inst[1].emission
+        # a field or element read off a service-typed local (issue #1509)
+        decl = _service_receiver_decl(node, env)
+        return decl is not None and decl.emission
     if target.get("kind") == "name":
         # a call whose receiver is a service-typed local or parameter. A value
         # of a service type is a boundary handle — only a provision read or a
@@ -15465,34 +15852,89 @@ def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> lis
 
 
 def _collect_emit_caps_pairs(node, caps: set, requires_map: dict,
-                             services: dict) -> None:
+                             services: dict,
+                             emitting: "frozenset | None" = None,
+                             named: "set | None" = None) -> None:
     """`_collect_emit_caps`, resolved to structured `Cap`s through the bridge.
-    Same traversal (emit STEPS only), so a parameter-free body yields the same
-    set of elements as today, spelled as bare `Cap`s."""
+
+    Every emission crossing the body makes, in every position (issue #1562):
+    an `emit` STEP, and a crossing call node anywhere else, the value form
+    (`let r = emit …`, `return emit …`, an expression-bodied method), an
+    argument, an `if`/`match` arm, a compensate slot. The lowered value form
+    is the bare call node (the `emit` marker leaves no trace in the IR), so a
+    walk that read steps alone let a child cross a boundary its spawner does
+    not hold by writing the crossing as a value. A call node crosses when it is
+    a `req` call to an `emission` method, a provision call off a spawn handle
+    to one (`_instance_get_decl`, the marker rule's resolver), or a named call
+    to an `emission` extern or a `fn` reaching one (`emitting`); each resolves
+    through `_emit_step_caps_pairs`, the per-crossing resolver the step uses.
+    `emitting` None reads steps alone, the behaviour before the fix.
+
+    `named`, when given, collects the NAME of every emitting extern or `fn` the
+    body crosses, so a caller can read the tokens that crossing declares
+    (`_emitting_capabilities`); the fold element for one is the unnameable `*`
+    and carries no token of its own (issue #1193, the model-reach crossing
+    edge)."""
     if isinstance(node, dict):
         if node.get("step") == "emit":
             caps.update(_emit_step_caps_pairs(node, requires_map, services))
+        elif _is_value_crossing(node, requires_map, services, emitting):
+            caps.update(_emit_step_caps_pairs({"expr": node}, requires_map,
+                                              services))
+            if named is not None and node.get("kind") == "fn":
+                named.add(node.get("name"))
         for value in node.values():
-            _collect_emit_caps_pairs(value, caps, requires_map, services)
+            _collect_emit_caps_pairs(value, caps, requires_map, services,
+                                     emitting, named)
     elif isinstance(node, list):
         for value in node:
-            _collect_emit_caps_pairs(value, caps, requires_map, services)
+            _collect_emit_caps_pairs(value, caps, requires_map, services,
+                                     emitting, named)
+
+
+def _is_value_crossing(node: dict, requires_map: dict, services: dict,
+                       emitting: "frozenset | None") -> bool:
+    """Whether a lowered call node is an emission crossing (the IR twin of
+    `_is_emission_call`). Inert when `emitting` is None, so a caller that
+    does not pass it keeps reading `emit` steps alone."""
+    if emitting is None:
+        return False
+    kind = node.get("kind")
+    if kind == "fn":
+        return node.get("name") in emitting
+    if kind != "call":
+        return False
+    target = node.get("target")
+    if isinstance(target, dict) and target.get("kind") == "req":
+        svc = services.get((requires_map or {}).get(target.get("name")))
+        decl = svc.methods.get(node.get("method")) if svc is not None else None
+        return bool(decl is not None and decl.emission)
+    inst = _instance_get_decl(node, services)
+    return bool(inst is not None and inst[1].emission)
 
 
 def _spawn_reached_surface_pairs(components: list[dict],
-                                 services: dict) -> dict[str, set]:
+                                 services: dict,
+                                 emitting: "frozenset | None" = None,
+                                 named: "dict | None" = None
+                                 ) -> dict[str, set]:
     """Per-component actual capability reach as structured `(T, P)` pairs,
     resolved through the bridge: the boundaries a component's own code crosses
-    (the key-and-valuation of every `emit` step, `*` for a host emission), so a
+    (the key-and-valuation of every `emit` step, and with `emitting` of every
+    crossing in value position too, `*` for a host emission), so a
     parameterized crossing survives into the attenuation fold as its valuation
-    rather than degrading to a bare wiring key."""
+    rather than degrading to a bare wiring key. `named`, when given, maps each
+    component to the emitting externs and `fn`s it crosses by name."""
     surface: dict[str, set] = {}
     for comp in components:
         requires_map = comp.get("requires") or {}
         caps: set = set()
+        names: "set | None" = None if named is None else set()
         _collect_emit_caps_pairs(comp.get("body") or [], caps, requires_map,
-                                 services)
+                                 services, emitting, names)
         surface[comp["name"]] = caps
+        if named is not None:
+            named[comp["name"]] = names
     return surface
 
 
@@ -16026,9 +16468,77 @@ def _consults_a_model(held: set) -> bool:
     return False
 
 
+def _model_held_render(cap: "object") -> str:
+    """One held element in a G-MODEL-PLACE refusal (issue #1451).
+
+    A method that declares a bare `emission` folds to its SERVICE's element
+    (`_undeclared_cap`), a token no `reaches [...]` list can spell. Rendered as
+    the bare service name, it read as the very name a `reaches [Model]` clause
+    writes, and the refusal named `Model` on both sides of its "but": two
+    different tokens under one name. It now reads as what it is."""
+    text = cap.to_str()
+    if text.startswith(_UNDECLARED_NS):
+        return f"service `{text[len(_UNDECLARED_NS):]}`'s unscoped emission"
+    return f"`{text}`"
+
+
+def _model_held_str(held: set) -> str:
+    """The held set of a G-MODEL-PLACE refusal, in `_cap_sorted_strs` order,
+    and, when it holds an unscoped emission, what that means and the fix."""
+    order = sorted(held, key=_cap_render)
+    text = ", ".join(_model_held_render(c) for c in order) or "no capabilities"
+    folded = [_cap_render(c) for c in order
+              if c.to_str().startswith(_UNDECLARED_NS)]
+    if folded:
+        text += (" (an unscoped emission has no token a `reaches [...]` list "
+                 "can name: give the `emission` methods of "
+                 + ", ".join(f"`{n}`" for n in folded)
+                 + " a scoped capability, such as `emission[model.complete]`, "
+                   "and reach that)")
+    return text
+
+
+def _model_reach_edges(comp: dict, actions: dict, held: set, roles: dict,
+                       crossed: set, line: int) -> list[dict]:
+    """Every (role, placement) pair a component's effective ceiling folds in.
+
+    BLOCK edges are the roles its `route model` block names, every candidate
+    of an ordered set (item 519 slice 1). CROSSING edges (slice 2, issue
+    #1193) are the roles its crossings are PLACED on by a `model.<role>` token
+    (item 512 slice 4, `model_route.role_of_crossing`), read off what it holds
+    and off the tokens every extern or `fn` it crosses declares. Without them
+    the fold ran only for a component that wrote a block, so deleting the
+    block took a role reaching past the component out of the product: a
+    declaration deleted, and the authority widened. A role the block already
+    names is folded once, as a block edge."""
+    edges: list[dict] = []
+    named: set = set()
+    for action in sorted(actions):
+        for origin in sorted(actions[action]):
+            placement = actions[action][origin]
+            # EVERY candidate of an item-515 ordered set, not just the head:
+            # a fallback the scheduler may pick is a role the component routes
+            # through, and a reach checked only on the head would be widened
+            # by the first fallback.
+            for name in placement.get("candidates", (placement["role"],)):
+                named.add(name)
+                edges.append({"action": action, "origin": origin,
+                              "role": name, "crossing": None,
+                              "line": placement.get("line", line)})
+    placed = {_model_route.role_of_crossing(t, roles) for t in crossed}
+    for name in sorted(placed - named - {None}):
+        edges.append({"action": "*", "origin": "*", "role": name,
+                      "crossing": f"{_model_route.MODEL_SCOPE}.{name}",
+                      "line": line})
+    return edges
+
+
 def _check_model_attenuation(components: list[dict], services: dict,
                              roles: dict, routes: dict,
-                             filename: str) -> list[dict]:
+                             filename: str,
+                             emitting: "frozenset | None" = None,
+                             emitting_caps: "dict | None" = None,
+                             lines: "dict | None" = None) -> list[dict]:
     """The model role in the capability attenuation product (item 519).
 
     A model is an AUTHORITY SURROGATE: it picks which capability the component
@@ -16047,108 +16557,120 @@ def _check_model_attenuation(components: list[dict], services: dict,
     compared and a role reaching `fs.write` under a component holding
     `fs.write(path="/tmp")` is refused.
 
-    WHICH WAY IT FAILS. Toward refusing, at both unknowns. A role that declares
+    WHICH WAY IT FAILS. Toward refusing, at every unknown. A role that declares
     no `reaches [...]` clause reaches the unnameable `*`
     (`model_route.UNDECLARED_REACH`), which no held set covers - reading
     silence as "reaches nothing" would make an unknown model inert in the
     product, and an unknown model is the whole reason the item exists. A
     crossing whose declared token does not PROVE it is some other boundary
-    counts as a model call (`_consults_a_model`).
+    counts as a model call (`_consults_a_model`). A crossing placed on a role
+    by its `model.<role>` token is an edge whether or not a `route model`
+    block names the role (`_model_reach_edges`), so leaving the block out is
+    not a way out of the product.
 
-    SCOPE. Slice 1 of `docs/design/541-model-in-attenuation.md`: the roles a
-    component's `route model` block NAMES, against what that component holds.
-    Which role a given crossing actually reaches is item 512's slice 4 (the
-    crossing carries a `model.<role>` token), and until it lands every named
-    role is folded in, which over-approximates in the refusing direction.
-    "Names" means every candidate of an item-515 ordered set and not only its
-    head: a fallback the scheduler may pick is a role the component routes
-    through, so folding only the head would let the first fallback widen a
-    ceiling the head respects.
+    SCOPE. The roles a component's `route model` block NAMES, and the roles
+    its crossings are placed on (slice 2), against what that component holds,
+    where what it holds includes every crossing its body makes in every
+    position (issue #1562's reading). A named role no crossing reaches is
+    still folded in, which over-approximates in the refusing direction.
 
     Returns the per-edge product record for the audit surface; raises on a
-    widening. Inert - not even a fold - for a program that declares no role,
-    which is every program on the tree today."""
-    if not roles or not routes:
+    widening. Inert - not even a fold - for a program that declares no role."""
+    if not roles:
         return []
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    base = _spawn_reached_surface_pairs(components, services)
+    crossed_names: dict = {}
+    base = _spawn_reached_surface_pairs(components, services, emitting,
+                                        crossed_names)
     product: list[dict] = []
     for comp in components:
-        actions = routes.get(comp["name"])
-        if not actions:
-            continue
+        actions = (routes or {}).get(comp["name"]) or {}
         own = base.get(comp["name"], set())
         held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
         if not _consults_a_model(held):
             continue
+        crossed = {c.token for c in held}
+        for name in crossed_names.get(comp["name"]) or ():
+            crossed.update((emitting_caps or {}).get(name) or ())
+        # a crossing edge has no arm to point at, so it cites the component's
+        # declaration line (`lines`), which the lowered dict does not carry
+        edges = _model_reach_edges(
+            comp, actions, held, roles, crossed,
+            (lines or {}).get(comp["name"], comp.get("line", 1)))
+        if not edges:
+            continue
         where = comp.get("source") or filename
-        held_str = ", ".join(f"`{s}`" for s in _cap_sorted_strs(held)) \
-            or "no capabilities"
-        for action in sorted(actions):
-            for origin in sorted(actions[action]):
-                placement = actions[action][origin]
-                # EVERY candidate of an item-515 ordered set, not just the
-                # head: a fallback the scheduler may pick is a role the
-                # component routes through, and a reach checked only on the
-                # head would be widened by the first fallback. A one-role arm
-                # has a one-tuple here, so a program written against item 512
-                # folds exactly what it folded before.
-                for name in placement.get("candidates", (placement["role"],)):
-                    role = roles[name]
-                    reach = _strip_ceilings(_model_reach_caps(role))
-                    extra = cap_order.covers_set(held, reach)
-                    if extra:
-                        extra = sorted(extra, key=lambda c: c.to_str())
-                        offending = ", ".join(_cap_offending(c) for c in extra)
-                        if role.reach_declared:
-                            why = (f"model role `{role.name}` declares "
-                                   f"`reaches [{', '.join(role.reach_tokens)}]` on "
-                                   f"line {role.line}")
-                            fix = (f"narrow `{role.name}`'s `reaches [...]` to what "
-                                   f"`{comp['name']}` holds, or add the matching "
-                                   f"`requires` to `{comp['name']}` so it holds what "
-                                   f"the model it consults can reach")
-                        else:
-                            why = (f"model role `{role.name}` (line {role.line}) "
-                                   f"declares no reach, so its reach is the "
-                                   f"unnameable `*`")
-                            fix = (f"declare it - `model role {role.name} "
-                                   f"{role.residence} reaches [...]` - naming the "
-                                   f"capabilities a call to it can reach; an "
-                                   f"undeclared reach is not an empty one, because "
-                                   f"a model that steers a component is exactly the "
-                                   f"one whose reach must be written down")
-                        raise RevlError(
-                            where, placement.get("line", comp.get("line", 1)),
-                            f"`{comp['name']}` routes `{action}` ({origin}) through "
-                            f"model role `{role.name}`, which reaches {offending}, "
-                            f"but `{comp['name']}` holds only {held_str} - a "
-                            f"component's effective ceiling is the pair's, so a "
-                            f"model may not reach past the component that consults "
-                            f"it (G-MODEL-PLACE)",
-                            hint=f"{why}. A model role is an authority surrogate: it "
-                                 f"chooses which capability the component reaches "
-                                 f"for, so routing through it widens the component's "
-                                 f"effective ceiling to the union "
-                                 f"(docs/capability-attenuation.md, item 519). "
-                                 f"{fix}",
-                            code=_model_route.CODE,
-                            category="capability-attenuation",
-                        )
-                    product.append({
-                        "component": comp["name"],
-                        "action": action,
-                        "origin": origin,
-                        "role": role.name,
-                        "residence": role.residence,
-                        "holds": _cap_sorted_strs(held),
-                        "reaches": _cap_sorted_strs(reach),
-                        "effective": _cap_sorted_strs(held),
-                        "attenuated": _cap_sorted_strs(
-                            {c for c in held
-                             if not cap_order.covered_by_any(reach, c)}),
-                        "reach_declared": role.reach_declared,
-                    })
+        held_str = _model_held_str(held)
+        for edge in edges:
+            role = roles[edge["role"]]
+            reach = _strip_ceilings(_model_reach_caps(role))
+            extra = cap_order.covers_set(held, reach)
+            if extra:
+                extra = sorted(extra, key=lambda c: c.to_str())
+                offending = ", ".join(_cap_offending(c) for c in extra)
+                if role.reach_declared:
+                    why = (f"model role `{role.name}` declares "
+                           f"`reaches [{', '.join(role.reach_tokens)}]` on "
+                           f"line {role.line}")
+                    fix = (f"narrow `{role.name}`'s `reaches [...]` to what "
+                           f"`{comp['name']}` holds, or add the matching "
+                           f"`requires` to `{comp['name']}` so it holds what "
+                           f"the model it consults can reach")
+                else:
+                    why = (f"model role `{role.name}` (line {role.line}) "
+                           f"declares no reach, so its reach is the "
+                           f"unnameable `*`")
+                    fix = (f"declare it - `model role {role.name} "
+                           f"{role.residence} reaches [...]` - naming the "
+                           f"capabilities a call to it can reach; an "
+                           f"undeclared reach is not an empty one, because "
+                           f"a model that steers a component is exactly the "
+                           f"one whose reach must be written down")
+                if edge["crossing"] is None:
+                    lead = (f"`{comp['name']}` routes `{edge['action']}` "
+                            f"({edge['origin']}) through model role "
+                            f"`{role.name}`")
+                else:
+                    lead = (f"`{comp['name']}` crosses `{edge['crossing']}`, "
+                            f"placed on model role `{role.name}`")
+                    fix += (". Leaving out the `route model` block does not "
+                            "take the role out of the product: a crossing "
+                            "placed on a role is held to the role's reach "
+                            "either way")
+                raise RevlError(
+                    where, edge["line"],
+                    f"{lead}, which reaches {offending}, but `{comp['name']}` "
+                    f"holds only {held_str} - a component's effective ceiling "
+                    f"is the pair's, so a model may not reach past the "
+                    f"component that consults it (G-MODEL-PLACE)",
+                    hint=f"{why}. A model role is an authority surrogate: it "
+                         f"chooses which capability the component reaches "
+                         f"for, so routing through it widens the component's "
+                         f"effective ceiling to the union "
+                         f"(docs/capability-attenuation.md, item 519). "
+                         f"{fix}",
+                    code=_model_route.CODE,
+                    category="capability-attenuation",
+                )
+            row = {
+                "component": comp["name"],
+                "action": edge["action"],
+                "origin": edge["origin"],
+                "role": role.name,
+                "residence": role.residence,
+                "holds": _cap_sorted_strs(held),
+                "reaches": _cap_sorted_strs(reach),
+                "effective": _cap_sorted_strs(held),
+                "attenuated": _cap_sorted_strs(
+                    {c for c in held
+                     if not cap_order.covered_by_any(reach, c)}),
+                "reach_declared": role.reach_declared,
+            }
+            if edge["crossing"] is not None:
+                # additive and crossing-only: a block row is byte-identical to
+                # the one slice 1 recorded, and `kernel_boundary` reads by key
+                row["crossing"] = edge["crossing"]
+            product.append(row)
     # `role` joins the sort key only to keep an ordered candidate set stable;
     # a one-role arm produces one record per (component, action, origin), so
     # the order is the one item 519 shipped.
@@ -16159,7 +16681,8 @@ def _check_model_attenuation(components: list[dict], services: dict,
 
 def _check_spawn_attenuation(components: list[dict], services: dict,
                              spawn_reg: dict, filename: str,
-                             untrusted: bool = False) -> list[dict]:
+                             untrusted: bool = False,
+                             emitting: "frozenset | None" = None) -> list[dict]:
     """Capability attenuation on spawn (item 66, extended by item 294): a
     spawned child's capability set must be a **checked subset** of its
     spawner's (monotone shrinkage, the direction §5 admits for purity). A spawn
@@ -16208,7 +16731,7 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
     if not edges:
         return []
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    base = _spawn_reached_surface_pairs(components, services)
+    base = _spawn_reached_surface_pairs(components, services, emitting)
     reachable = _spawn_surface_closure(base, edges)
 
     chain: list[dict] = []

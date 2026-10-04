@@ -47,10 +47,11 @@ needs_cordis = pytest.mark.skipif(
 # own module name shares one copy with pytest's collection of that file.
 _T118 = load_by_path("test_deploy_118", ROOT / "tests" / "test_deploy_118.py")
 SPELLINGS = sorted(_T118._FN_VALUE_SPELLINGS)
-# `r.f(n)` on a record holding a function value raises AttributeError on the
-# py tier today, with or without an emission in it, so the record-field
-# spelling cannot run end to end. Its hash is still covered below.
-RUNNABLE = [s for s in SPELLINGS if s != "record-field"]
+# Every spelling runs end to end. The record-field one used to be `r.f(n)`,
+# which crashed on the py tier with AttributeError; that call is refused in a
+# component body since issue #1547, and the spelling now reads the function
+# off the field and calls it through a binding, which runs.
+RUNNABLE = list(SPELLINGS)
 
 _EXTERN = """extern emission fn charge(n: Int) -> Int = @py {{
     with open({sink!r}, 'a') as _f: _f.write({dest!r} + chr(10))
