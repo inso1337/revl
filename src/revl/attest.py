@@ -413,6 +413,16 @@ def named_guarantees() -> list[str]:
 #: `tests/test_model_portfolio_515.py` from admitted to refused. A pure table
 #: read by a member, the `cap_order` and `ui_family` shape, citing no `(Gn)`.
 #:
+#: `operator_text` joined with issue #1715 on the same rule. It decides which
+#: declarations of transport-carried text are still the operator's, and
+#: `compiler.compile_files` applies the untrusted-author profile to the rest
+#: (`delta_program`) and exempts the operator's own `use` paths from
+#: confinement (`operator_uses`). So its answer sets how much of a candidate
+#: the profile refuses: if `trusted_indices` matched every declaration, an
+#: agent's new host extern in an operator's file would be admitted.
+#: `tests/test_edit_trust_diff_1715.py` holds both sides of that line. It cites
+#: no `(Gn)` tag, so it is a digest input and not a cited code.
+#:
 #: WHY THIS IS STILL A LIST. Membership is reachability plus effect, and neither
 #: is a property of the bytes of this file: a module refuses only when the
 #: frontend reaches it on some program, which only a run settles. An import-time
@@ -431,7 +441,8 @@ RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "model_route", "model_council", "model_answer",
                    "typecheck", "lexer", "composition", "hostref", "hostfile",
                    "cap_order", "ui_family", "resources", "kernel_boundary",
-                   "cardinality", "decode_grammar", "model_profile")
+                   "cardinality", "decode_grammar", "model_profile",
+                   "operator_text")
 
 #: The sibling modules a rule module imports that are NOT rules, each with the
 #: reason it is not one. This is the argued half of the membership question and
