@@ -182,7 +182,8 @@ def test_the_lifecycle_battery_boots_unloads_and_counts_no_residue():
     lifecycle = d["tested"]["lifecycle"]
     assert lifecycle["status"] == "passed"
     assert lifecycle["ran"] is True
-    assert lifecycle["counts"] == {"checks": 4, "passed": 4, "failed": 0}
+    # issue #1859: the four counters plus the host-resource pairing
+    assert lifecycle["counts"] == {"checks": 5, "passed": 5, "failed": 0}
     assert all(lifecycle["checks"].values())
 
 
