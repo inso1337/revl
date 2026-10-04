@@ -29,6 +29,8 @@ boundary surface it is joined to.
 
 from __future__ import annotations
 
+import re
+
 import math
 
 # --------------------------------------------------------------------------
@@ -185,8 +187,60 @@ def _max_iters(n0: int, c: int, k: int, op: str) -> int:
     return max(0, (n0 - c) // k + 1) if n0 >= c else 0
 
 
+_TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _type_mentions_fn(written, types: dict, seen: frozenset = frozenset()) -> bool:
+    """Whether a declared type can hold a function value: an arrow type, or a
+    record/variant whose fields or payloads can, transitively. Conservative: a
+    missing type, a generic parameter or any name this IR does not define is
+    treated as possibly a function, so a doubt can only keep the identity rule
+    (issue #1755)."""
+    from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS  # noqa: PLC0415
+    if not isinstance(written, str) or "->" in written:
+        return True
+    for name in _TYPE_NAME.findall(written):
+        if name in PRIMITIVE_TYPE_NAMES or name in _STRUCTURAL_HEADS:
+            continue
+        defn = types.get(name)
+        if defn is None:
+            return True
+        if name in seen:
+            continue
+        inner = list((defn.get("fields") or {}).values())
+        inner += [case.get("payload") for case in defn.get("cases") or []
+                  if case.get("payload") is not None]
+        if any(_type_mentions_fn(t, types, seen | {name}) for t in inner):
+            return True
+    return False
+
+
+def _param_escapes(node, pname: str, fname: str, index: int) -> bool:
+    """Whether parameter `pname` (position `index` of `fname`) is used in any
+    way other than invoked directly (`pname(...)`) or threaded unchanged into
+    the self-call at its own position. Any other use (an alias, a field or
+    element read, a pass to another fn or position) carries the value
+    somewhere the per-iteration fold cannot follow, so an arrow riding it would
+    be dropped (issue #1755)."""
+    if isinstance(node, list):
+        return any(_param_escapes(item, pname, fname, index) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if _is_param_call(node, pname):
+        return _param_escapes(node.get("args") or [], pname, fname, index)
+    if _is_self_call(node, fname):
+        args = node.get("args") or []
+        return any(_param_escapes(arg, pname, fname, index)
+                   for j, arg in enumerate(args)
+                   if not (j == index and _bare_name(arg) == pname))
+    if node.get("kind") == "var" and node.get("name") == pname:
+        return True
+    return any(_param_escapes(value, pname, fname, index) for value in node.values())
+
+
 def _certify_recursion(fname, decl, direct, recursive, closure,
-                       reach, fn_caps_map, has_loop, unknown_dispatch):
+                       reach, fn_caps_map, has_loop, unknown_dispatch,
+                       types=None):
     """Decide whether the self-recursive fn `fname` is a certifiable LINEAR
     iteration (docs/design/260 §2.2 clauses 1,2,4). On success returns a record
     `{ok: True, params, fuel_index, fuel_op, c, k, base, cont}`; on refusal
@@ -281,8 +335,15 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
         return refuse("noguard")
 
     # --- clause 1: every self-call strictly decreases the SAME fuel param by a
-    # positive literal, and threads every OTHER argument by identity (so an arrow
-    # parameter cannot be swapped for a wider dispatch on the back-edge).
+    # positive literal, and threads every FUNCTION-TYPED argument by identity,
+    # so an arrow parameter cannot be swapped for a wider dispatch on the
+    # back-edge. A data argument may change (issue #1755): an agent loop grows
+    # its history. Its new value is computed in the continuation, so every
+    # arrow invocation in it is already in `per_iter`, and any other fn call,
+    # host reach or capability in the body is refused above.
+    types = types or {}
+    fn_typed = [_type_mentions_fn(p.get("type"), types)
+                for p in decl.get("params") or []]
     k_min = None
     for call in self_calls:
         args = call.get("args") or []
@@ -298,13 +359,14 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
             return refuse("nonfuel")
         k_min = k if k_min is None else min(k_min, k)
         for j, arg in enumerate(args):
-            if j == fuel_index:
+            if j == fuel_index or _bare_name(arg) == params[j]:
                 continue
-            if _bare_name(arg) != params[j]:
-                return refuse("nonfuel")
+            if fn_typed[j]:
+                return refuse("rebinds-fn")
 
     return {"ok": True, "params": params, "fuel_index": fuel_index,
-            "fuel_op": op, "c": c, "k": k_min, "base": base, "cont": cont}
+            "fuel_op": op, "c": c, "k": k_min, "base": base, "cont": cont,
+            "body": body}
 
 
 def _local_call_names(node, out: set) -> None:
@@ -350,6 +412,15 @@ def _cert_reason(kind: str, fname: str) -> str:
         "nonfuel": (f"recursion through `{fname}` has no fuel that strictly "
                     "decreases by a positive literal on every back-edge "
                     "(docs/design/260 §2.2 clause 1)"),
+        "rebinds-fn": (f"recursion through `{fname}` passes a different value "
+                       "for a function-typed parameter on a back-edge, so the "
+                       "dispatch one iteration invokes is not the one counted "
+                       "(docs/design/260 §2.2 clause 1)"),
+        "escape": (f"recursion through `{fname}` uses a parameter that carries a "
+                   "crossing other than by invoking it or passing it unchanged "
+                   "to the recursive call (an alias, a field or element read, "
+                   "or a pass elsewhere), so its per-iteration count is not "
+                   "provable (docs/design/260 §2.2, issue #1755)"),
         "noguard": (f"recursion through `{fname}` has no dominating base guard "
                     "`if (n <= c)` with a non-recursive base branch "
                     "(docs/design/260 §2.2 clause 2)"),
@@ -367,6 +438,19 @@ def _cert_reason(kind: str, fname: str) -> str:
     return reasons.get(kind, reasons["mutual"])
 
 
+def _arrow_reason(kind: str, fname: str | None) -> str:
+    """Why an arrow-borne crossing is `unbounded` (issue #1757)."""
+    if kind == "loop":
+        return (f"an emitting arrow is handed to `{fname}`, which invokes its "
+                "parameters inside a loop, so the number of crossings is not "
+                "statically provable (docs/design/260 §2.1, issue #1757)")
+    where = f" by `{fname}`" if fname else ""
+    return ("an emitting arrow is used where its invocations cannot be counted"
+            f"{where} (aliased, stored, returned, invoked inside another arrow, "
+            "or passed on), so it is not counted once per literal "
+            "(docs/design/260 §2.1, issue #1757)")
+
+
 def _collect_arrows(node, out: dict) -> None:
     """Every `let <name> = (…) => …` arrow binding in a component/method body,
     keyed by the name its application's callee resolves to. This is the SAME
@@ -381,6 +465,50 @@ def _collect_arrows(node, out: dict) -> None:
     elif isinstance(node, list):
         for value in node:
             _collect_arrows(value, out)
+
+
+def _collect_arrow_bindings(node, out: dict) -> None:
+    """Every arrow bound to a name in a component/method body, by `let`, `var`
+    or assignment: `{name: [arrow, ...]}`. A list per name, because two methods
+    (or a reassigned `var`) can bind the same name; the count takes the
+    worst of them (issue #1757)."""
+    if isinstance(node, dict):
+        value = node.get("value")
+        if node.get("step") in ("let", "assign") and isinstance(value, dict) \
+                and value.get("kind") == "arrow":
+            out.setdefault(node.get("name"), []).append(value)
+        for child in node.values():
+            _collect_arrow_bindings(child, out)
+    elif isinstance(node, list):
+        for child in node:
+            _collect_arrow_bindings(child, out)
+
+
+def _is_arrow_binding_step(step) -> bool:
+    value = step.get("value") if isinstance(step, dict) else None
+    return isinstance(step, dict) and step.get("step") in ("let", "assign") \
+        and isinstance(value, dict) and value.get("kind") == "arrow"
+
+
+def _fn_param_escapes(node, pname: str, inside_arrow: bool = False) -> bool:
+    """Whether a top-level fn uses its parameter `pname` other than by
+    invoking it directly (`pname(...)`): an alias, a pass to another call,
+    storage, a return, or an invocation inside an arrow (which may itself run
+    any number of times). Any of these hides how often the arrow handed in
+    runs (issue #1757)."""
+    if isinstance(node, list):
+        return any(_fn_param_escapes(item, pname, inside_arrow) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if node.get("kind") == "arrow":
+        return _fn_param_escapes(node.get("body"), pname, True)
+    if _is_param_call(node, pname):
+        return inside_arrow or _fn_param_escapes(node.get("args") or [], pname,
+                                                 inside_arrow)
+    if node.get("kind") == "var" and node.get("name") == pname:
+        return True
+    return any(_fn_param_escapes(value, pname, inside_arrow)
+               for value in node.values())
 
 
 def _count_arrow_body(body, bind_service: dict, services: dict) -> dict:
@@ -514,7 +642,8 @@ def cardinality(ir: dict) -> dict:
             else:
                 certify_cache[name] = _certify_recursion(
                     name, decl, direct, recursive, _closure(name), reach,
-                    fn_caps_map, has_loop, _UNKNOWN_DISPATCH)
+                    fn_caps_map, has_loop, _UNKNOWN_DISPATCH,
+                    types=ir.get("types") or {})
         return certify_cache[name]
 
     def _classify(name: str) -> tuple[str, str]:
@@ -561,6 +690,82 @@ def cardinality(ir: dict) -> dict:
         arrow_defs: dict = {}
         _collect_arrows(comp.get("body") or [], arrow_defs)
 
+        # ---- issue #1757: an emitting arrow crosses once per INVOCATION, not
+        # once per literal. A bound arrow is counted at each direct call of its
+        # name; an arrow handed to a top-level fn is counted as many times as
+        # that fn invokes the parameter on one path; an emitting arrow anywhere
+        # else (stored, returned, aliased, passed where the fold cannot follow)
+        # is `unbounded`, never counted once.
+        arrow_bindings: dict = {}
+        _collect_arrow_bindings(comp.get("body") or [], arrow_bindings)
+        arrow_vec_memo: dict = {}
+        arrow_unbounded: dict[str, str] = {}
+
+        def _arrow_escape(vec: dict, reason: str) -> None:
+            for cap in vec:
+                arrow_unbounded.setdefault(cap, reason)
+
+        def bound_arrow_vec(name: str) -> dict:
+            if name not in arrow_vec_memo:
+                arrow_vec_memo[name] = {}          # cycle guard
+                worst: dict = {}
+                _merge_max(worst, [arrow_body_vec(a)
+                                   for a in arrow_bindings.get(name, [])])
+                arrow_vec_memo[name] = worst
+            return arrow_vec_memo[name]
+
+        def arrow_body_vec(arrow: dict) -> dict:
+            body = arrow.get("body")
+            return count_steps(body) if isinstance(body, list) else count_expr(body)
+
+        def arg_vec(arg) -> dict:
+            """The crossings one invocation of an arrow argument costs, or the
+            once-evaluated crossings of a data argument."""
+            if isinstance(arg, dict) and arg.get("kind") == "arrow":
+                return arrow_body_vec(arg)
+            if isinstance(arg, dict) and arg.get("kind") == "name" \
+                    and arg.get("id") in arrow_bindings:
+                return bound_arrow_vec(arg["id"])
+            return count_expr(arg)
+
+        def is_arrow_arg(arg) -> bool:
+            return isinstance(arg, dict) and (
+                arg.get("kind") == "arrow"
+                or (arg.get("kind") == "name" and arg.get("id") in arrow_bindings))
+
+        def count_fn_call(node) -> dict:
+            """A call to a top-level fn: data arguments are evaluated once; an
+            arrow argument costs its crossings times the number of direct
+            invocations of the receiving parameter on one path."""
+            total: dict = {}
+            decl = fn_by_name.get(node.get("name"))
+            params = [p.get("name") for p in (decl or {}).get("params") or []]
+            for i, arg in enumerate(node.get("args") or []):
+                if not is_arrow_arg(arg):
+                    _merge_sum(total, count_expr(arg))
+                    continue
+                vec = arg_vec(arg)
+                if not vec:
+                    continue
+                if decl is None or i >= len(params) \
+                        or node.get("name") in recursive:
+                    # a recursive callee reaching here was not certified by
+                    # the Slice 2 resolver; its multiplicity is not provable
+                    _arrow_escape(vec, _arrow_reason("escape", node.get("name")))
+                    continue
+                body = decl.get("body") or []
+                if node.get("name") in has_loop:
+                    _arrow_escape(vec, _arrow_reason("loop", node.get("name")))
+                    continue
+                if _fn_param_escapes(body, params[i]):
+                    _arrow_escape(vec, _arrow_reason("escape", node.get("name")))
+                    continue
+                mult = _path_max_calls(
+                    body, lambda n, pp=params[i]: _is_param_call(n, pp))
+                for cap, cnt in vec.items():
+                    total[cap] = total.get(cap, 0) + mult * cnt
+            return total
+
         # ---- Slice 2 resolution state: a certified/refused recursive-loop call
         # in this component body is resolved once (below) into either a folded
         # integer contribution (`resolutions`), a symbolic per-iteration ceiling
@@ -586,6 +791,26 @@ def cardinality(ir: dict) -> dict:
                 if resolved is not None:
                     return dict(resolved["int"])
                 kind = node.get("kind")
+                callee = node.get("callee")
+                # issue #1757: count an arrow where it RUNS
+                if kind == "fn" and node.get("name") in fn_by_name:
+                    return count_fn_call(node)
+                if kind == "arrow":
+                    # an arrow literal in a position nothing follows: if it
+                    # emits, its invocations are uncountable
+                    _arrow_escape(arrow_body_vec(node),
+                                  _arrow_reason("escape", None))
+                    return total
+                if kind == "name" and node.get("id") in arrow_bindings:
+                    # a bound arrow used as a value (aliased, stored, returned)
+                    _arrow_escape(bound_arrow_vec(node["id"]),
+                                  _arrow_reason("escape", None))
+                    return total
+                if kind == "call" and isinstance(callee, dict) \
+                        and callee.get("kind") == "arrow":
+                    _merge_sum(total, arrow_body_vec(callee))
+                    _merge_sum(total, count_expr(node.get("args") or []))
+                    return total
                 # arm 1: a `req`-target emission call (`emit db.execute(...)` or
                 # `let r = db.execute(...)`), keyed on the required KEY.
                 target = node.get("target")
@@ -644,6 +869,13 @@ def cardinality(ir: dict) -> dict:
                         if bind_service:
                             _merge_sum(total, _count_arrow_body(
                                 arrow.get("body"), bind_service, services))
+                # issue #1757: one invocation of a bound arrow costs its body
+                if kind == "call" and isinstance(callee, dict) \
+                        and callee.get("kind") == "name" \
+                        and callee.get("id") in arrow_bindings:
+                    _merge_sum(total, bound_arrow_vec(callee["id"]))
+                    _merge_sum(total, count_expr(node.get("args") or []))
+                    return total
                 # branch nodes take the MAX over arms (a proved upper bound must
                 # hold on every path, so the worst arm is the ceiling); the
                 # scrutinee/cond is evaluated once, so it SUMS.
@@ -685,6 +917,9 @@ def cardinality(ir: dict) -> dict:
                 elif kind == "provide":
                     for method in step.get("methods") or []:
                         _merge_sum(total, count_steps(method.get("body") or []))
+                elif _is_arrow_binding_step(step):
+                    # counted at each invocation of the name (issue #1757)
+                    continue
                 else:
                     _merge_sum(total, count_expr(step))
             return total
@@ -703,7 +938,7 @@ def cardinality(ir: dict) -> dict:
             else:
                 fname = (node.get("callee") or {}).get("name")
             args = node.get("args") or []
-            arg_vecs = [count_expr(arg) for arg in args]
+            arg_vecs = [arg_vec(arg) for arg in args]
             rec = _certify(fname)
             if not rec["ok"]:
                 resolutions[id(node)] = {"int": {}}
@@ -714,6 +949,16 @@ def cardinality(ir: dict) -> dict:
                 return
 
             params = rec["params"]
+            escaped = [i for i, p in enumerate(params)
+                       if i < len(arg_vecs) and arg_vecs[i]
+                       and _param_escapes(rec["body"], p, fname, i)]
+            if escaped:
+                resolutions[id(node)] = {"int": {}}
+                reason = _cert_reason("escape", fname)
+                for vec in arg_vecs:
+                    for cap in vec:
+                        _record_cert_unbounded(cap, reason)
+                return
             per_iter = {p: _path_max_calls(
                 rec["cont"], lambda n, pp=p: _is_param_call(n, pp))
                 for p in params}
@@ -836,6 +1081,8 @@ def cardinality(ir: dict) -> dict:
         # `bounded-symbolic` per-iteration ceiling. `unbounded` still dominates.
         for cap, reason in cert_unbounded.items():
             unbounded[cap] = reason
+        for cap, reason in arrow_unbounded.items():
+            unbounded.setdefault(cap, reason)
         symbolic = {cap: entry for cap, entry in cert_symbolic.items()
                     if cap not in unbounded}
 

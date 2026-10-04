@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass, field
 
 from .compiler import compile_source
-from .mcp.fillspec import enrich
+from .mcp.fillspec import enrich, step_name, unfillable
 
 
 class ScaffoldError(Exception):
@@ -199,11 +199,31 @@ def _render_signature(method: Method, bound: list[str]) -> str:
     return f"  {prefix}fn {method.name}({params}) -> {method.returns}"
 
 
-def _provide_body(method: Method, unwired: list[str]) -> str:
+def _split_body(method: Method, names: str, bound: list[str]) -> str:
+    """The issue-#1660 split: an emission method bound to two or more
+    capabilities gets one statement hole per capability, then the result, so
+    each obligation is one sentence. The services are TODO stubs here, so the
+    split follows the bound the scaffold declares rather than their (not yet
+    written) operations, and each step takes the method's return type."""
+    lines = [f"    fn {method.name}({names}) {{"]
+    for token in bound:
+        lines.append(f"      let {step_name(token)} = hole[{method.returns}] "
+                     f"\"the crossing through {token}, if any; a pure value "
+                     f"otherwise\"")
+    lines.append(f"      return hole[{method.returns}] \"the result of "
+                 f"{method.name}, from the steps above\"")
+    lines.append("    }")
+    return "\n".join(lines)
+
+
+def _provide_body(method: Method, unwired: list[str],
+                  bound: list[str] | None = None) -> str:
     """A provide method: `fn m(p) = hole[R] "obligation"`. The message names the
     boundary a fill may cross, and flags any capability the spec asked for but
     did not inject — a gap the fill must not paper over by emitting."""
     names = ", ".join(n for n, _ in method.params)
+    if method.emits and len(bound or []) >= 2:
+        return _split_body(method, names, list(bound))
     note = ""
     if method.emits:
         note = " (a fill here may emit through the declared boundary)"
@@ -266,7 +286,7 @@ def build_skeleton(spec: Spec) -> str:
     lines.append("")
     lines.append(f"  provide {spec.provides} {{")
     for method in spec.methods:
-        lines.append(_provide_body(method, unwired))
+        lines.append(_provide_body(method, unwired, wired))
     lines.append("  }")
     lines.append("}")
     lines.append("")
@@ -285,13 +305,20 @@ def scaffold_document(spec: Spec, filename: str = "scaffold.rvl",
     source = build_skeleton(spec)
     ir = compile_source(source, filename)
     holes = ir.get("holes") or []
-    return {
+    obligations = enrich(ir, untrusted=untrusted)
+    document = {
         "ok": True,
         "source": source,
         "holeCount": len(holes),
         "admissible": not holes,
-        "obligations": enrich(ir, untrusted=untrusted),
+        "obligations": obligations,
     }
+    # a hole this author can never fill is flagged up front rather than
+    # handed out as work (fillspec `fillable`); absent when there is none
+    blocked = unfillable(obligations)
+    if blocked:
+        document["unfillable"] = blocked
+    return document
 
 
 __all__ = [
