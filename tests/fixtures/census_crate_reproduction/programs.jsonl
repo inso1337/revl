@@ -926,6 +926,8 @@
 
 "oracle-reject:a deeper required-key crossing follows the sorted names"
 
+"oracle-reject:a fn that reuses an extern's name"
+
 "oracle-reject:a for binding over a live name"
 
 "oracle-reject:a for loop as the only returning path"
@@ -1070,6 +1072,8 @@
 
 "oracle-reject:an extern slot refusal inside a match arm"
 
+"oracle-reject:an extern that reuses a fn's name"
+
 "oracle-reject:an if with no else"
 
 "oracle-reject:an if/else with only one returning arm"
@@ -1105,6 +1109,8 @@
 "oracle-reject:an unmarked emission left of an undeclared name is still G4"
 
 "oracle-reject:an unmarked emission left of an undeclared name is still G4"
+
+"oracle-reject:any other refusal outranks a fn reusing an extern's name"
 
 "oracle-reject:assignment to a name nothing bound"
 
@@ -1486,6 +1492,8 @@
 
 "tests/fixtures/emit_go_corpus/calls.rvl"
 
+"tests/fixtures/emit_go_corpus/comp_provide_pure.rvl"
+
 "tests/fixtures/emit_go_corpus/control.rvl"
 
 "tests/fixtures/emit_go_corpus/extern_config.rvl"
@@ -1769,6 +1777,8 @@
 "tests/fixtures/emit_rust_corpus/borrow_shadowing.rvl"
 
 "tests/fixtures/emit_rust_corpus/branch_edges.rvl"
+
+"tests/fixtures/emit_rust_corpus/bridge_types.rvl"
 
 "tests/fixtures/emit_rust_corpus/calls.rvl"
 
