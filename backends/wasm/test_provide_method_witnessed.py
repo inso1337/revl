@@ -124,7 +124,7 @@ def test_method_witnessed_effect_is_lowerable_and_wires_the_runtime_accumulator(
     assert "(call $alloc (i32.const 24))" in wat
     assert "(global.set $__mw_head" in wat
     # the declared inverse (`unstash`) is planned and rendered into the drain
-    assert "(call $unstash)" in wat
+    assert "(call $fn.unstash)" in wat
 
 
 def test_a_program_without_a_method_witnessed_effect_is_byte_identical():

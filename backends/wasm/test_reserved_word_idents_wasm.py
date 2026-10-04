@@ -3,7 +3,7 @@ reserved word emits and RUNS on the wasm tier.
 
 Unlike the textual tiers, the wasm backend is *structurally* immune: every user
 identifier is emitted as a WAT identifier in the sigil namespace (`$p_<param>`,
-`$l_<local>`, `$<fn>`), which is disjoint from WAT's bare keyword tokens
+`$l_<local>`, `$fn.<fn>`), which is disjoint from WAT's bare keyword tokens
 (`func`, `param`, `local`, `i64`, …). A revl parameter named `func` becomes
 `$p_func`, which cannot collide with the WAT keyword `func`. So no reserved-word
 set or mangling is needed here — the sigil prefix IS the universal, collision-
@@ -55,7 +55,7 @@ def test_keyword_identifiers_are_sigil_namespaced():
     wat = _functions_wat()
     # the exported name is the source spelling (a string, never a WAT token);
     # the param/local identifiers live in the disjoint sigil namespace
-    assert '(func $probe (export "probe")' in wat
+    assert '(func $fn.probe (export "probe")' in wat
     assert "(param $p_func i64)" in wat
     assert "(param $p_chan i64)" in wat
     assert "(local $l_range i64)" in wat
