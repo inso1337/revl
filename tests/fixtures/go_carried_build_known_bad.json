@@ -7,12 +7,10 @@
     "`go build` over it. Every carried document that emits must build unless",
     "it is named here, with the diagnostic it still produces.",
     "",
-    "All but the named documents build (issue #1356; empty until issue #1892). It",
+    "The list is EMPTY: every carried document builds (issues #1356 and #1892). It",
     "stays a RATCHET. Removing an entry is the only edit that needs no",
     "argument. Adding one needs the reason in the entry and an issue behind",
     "it: a carried document that does not build is a defect, not a baseline."
   ],
-  "known_bad": {
-    "tests/fixtures/emit_rust_corpus/bridge_types.rvl": "issue #1892 - `undefined: Result; undefined: Any; undefined: Any`. The go tier's component-dialect `_go_type` has no `Any` arm and no value-position `Result` arm, so a service method taking a `Result[Int, Str]` or `Any` prints the surface spelling into its Go signature. The document is a rust byte-agreement corpus case (item 391, #1816) that reaches the combined go renderer only because it declares top-level record types beside its component."
-  }
+  "known_bad": {}
 }

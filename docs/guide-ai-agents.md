@@ -315,6 +315,8 @@ each verb's exact inputs and outputs are in
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
 | `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-reference.md](mcp-reference.md#revl_audit) |
 | `revl_idiom` | the minimal admitted example of one construct (every hole's fillSpec carries its own) | [mcp-reference.md](mcp-reference.md#revl_idiom) |
+| `revl_act` | one call per action through the approval gate: its class, and executed (a), deferred to commit (b) or ticketed (c), with a receipt the commit manifest lists | [mcp-reference.md](mcp-reference.md#revl_act) |
+| `revl_counterfactual` | replace, insert or drop one action of the `revl_act` log and see how the gate's decisions would differ, with nothing run | [mcp-reference.md](mcp-reference.md#revl_counterfactual) |
 | `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-reference.md](mcp-reference.md#revl_load) |
 | `revl_export` | write the committed (held) source to disk, on request: disk is an export, never a side effect | [mcp-reference.md](mcp-reference.md#revl_export) |
 | `revl_change` | **propose, verify, commit**: speculative by default (nothing swaps until `commit: true`), one call for a whole change: `{edit}`, `{replace: {component, source}}` or `{withdraw}`; loads if needed, plans (the withdrawal cascade), verifies (admission, gates, optional gauntlet) and commits only if all pass, naming every component touched | [mcp-reference.md](mcp-reference.md#revl_change) |

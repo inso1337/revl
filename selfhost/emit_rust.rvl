@@ -4923,6 +4923,20 @@ fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
   return out
 }
+// `_bare_param`: the parameter a bare `var`/`name` node names, else ""
+// (issue #1723). A body `let` cannot rebind a parameter, so a name in
+// `params` is the parameter itself.
+fn bare_param(node: Any, method: Any) -> Str {
+  let k = node_kind(node)
+  var out = ""
+  if (k == "var" || k == "name") {
+    let ident = ref_ident(node)
+    for (p of value_list(value_field(method, "params"))) {
+      if (value_str(p) == ident) { out = ident }
+    }
+  }
+  return out
+}
 // The identifier a `var`/`name`/`req` node names (`id`, falling back to `name`).
 fn ref_ident(node: Any) -> Str {
   var ident = value_str(value_field(node, "id"))
@@ -5068,14 +5082,22 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
         if (kind == "let" || kind == "assign") {
           let nm = value_str(value_field(step, "name"))
           let inferred = provide_let_type(value_field(step, "value"), c, comp, services)
+          // issue #1723: a bare parameter on the right is cloned, so the
+          // `let` does not move it before a later step's `<p>_undo` clone
+          // reads it (E0382); a body local stays a move.
+          let param = bare_param(value_field(step, "value"), method)
           if (kind == "let") {
             let cshadow = set_rn(c, c.rn.set(nm, mangle(nm)))
+            var cvalue = cshadow
+            if (param != "") { cvalue = set_rn(cshadow, cshadow.rn.set(param, `${param}.clone()`)) }
             var mut = ""
             if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
-            out = out.push(`${pad}let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
+            out = out.push(`${pad}let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
             c = cshadow
           } else {
-            out = out.push(`${pad}${mangle(nm)} = ${render_expr(value_field(step, "value"), c)};`)
+            var cvalue = c
+            if (param != "") { cvalue = set_rn(c, c.rn.set(param, `${param}.clone()`)) }
+            out = out.push(`${pad}${mangle(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
           }
           if (inferred != "") { c = set_vt(c, nm, inferred) }
           if (kind == "let" && nm != "") { body_locals = body_locals.set(nm, "1") }
