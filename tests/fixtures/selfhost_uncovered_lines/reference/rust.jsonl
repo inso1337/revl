@@ -28,11 +28,11 @@
 
 ["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_split_result", 1, 1]
 
-["reason", "component-construction-fallbacks-residuals-cover-absent-malf", "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls. emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 2 more statements each of `_emit_component`, `_emit_component_new` and `_emit_components`: the teardown begin and commit lines on both provider paths, and the module's teardown preamble."]
+["reason", "component-construction-fallbacks-residuals-cover-absent-malf", "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls. emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 2 more statements each of `_emit_component`, `_emit_component_new` and `_emit_components`: the teardown begin and commit lines on both provider paths, and the module's teardown preamble. emit_rust_corpus/intercept_metadata.rvl (item 391, the intercept port) reaches more of this group: `_emit_component_new` 21 -> 7."]
 
 ["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component", 3, 3]
 
-["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component_new", 21, 21]
+["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component_new", 7, 7]
 
 ["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_components", 4, 4]
 
@@ -176,15 +176,15 @@
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_stmt", 5, 5]
 
-["reason", "realm-routing-and-child-instances-require-intercept-json", "Realm routing and child instances require intercept JSON metadata, deterministic realm identities, router structs, spawn handles, and runtime child configuration. The self-host emitter explicitly defers isolate/intercept/routes/spawn."]
+["reason", "realm-routing-and-child-instances-require-intercept-json", "Realm routing and child instances require intercept JSON metadata, deterministic realm identities, router structs, spawn handles, and runtime child configuration. The self-host emitter explicitly defers isolate/intercept/routes/spawn. emit_rust_corpus/intercept_metadata.rvl (item 391, the intercept port) reaches more of this group: `_intercept_json_lit` 18 -> 2, `_intercept_json_type` 34 -> 3."]
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_collect_realm_labels", 2, 2]
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_emit_router_struct", 16, 16]
 
-["function", "realm-routing-and-child-instances-require-intercept-json", "_intercept_json_lit", 18, 18]
+["function", "realm-routing-and-child-instances-require-intercept-json", "_intercept_json_lit", 2, 2]
 
-["function", "realm-routing-and-child-instances-require-intercept-json", "_intercept_json_type", 34, 34]
+["function", "realm-routing-and-child-instances-require-intercept-json", "_intercept_json_type", 3, 3]
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_revl_spawn_handle", 1, 1]
 
@@ -280,15 +280,15 @@
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_string", 5, 5]
 
-["reason", "version-and-document-shape-guards-emit-rejects-malformed", "Version and document-shape guards: emit rejects malformed/unknown IR, _emit_v1/_emit_v2 are legacy paths outside the mirrored v3 contract, and the residual _emit_v3 statements handle empty documents plus test/lifecycle sections delegated to their explicit boundaries."]
+["reason", "version-and-document-shape-guards-emit-rejects-malformed", "Version and document-shape guards: emit rejects malformed/unknown IR, _emit_v1/_emit_v2 are legacy paths outside the mirrored v3 contract, and the residual _emit_v3 statements handle empty documents plus test/lifecycle sections delegated to their explicit boundaries. emit_rust_corpus/intercept_metadata.rvl (item 391, the intercept port) reaches more of this group: `_emit_v2` 6 -> 1, `emit` 3 -> 2."]
 
 ["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v1", 1, 1]
 
-["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v2", 6, 6]
+["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v2", 1, 1]
 
 ["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v3", 7, 7]
 
-["function", "version-and-document-shape-guards-emit-rejects-malformed", "emit", 3, 3]
+["function", "version-and-document-shape-guards-emit-rejects-malformed", "emit", 2, 2]
 
 ["reason", "witnessed-effect-and-compensation-runtime-these-branches-det", "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers the witnessed half rather than emitting a partial transaction. The compensation half is ported since item 391 and held to byte agreement by emit_rust_corpus/teardown_compensate.rvl, which reaches `_emit_teardown_begin`, `_emit_teardown_commit`, `_emit_compensation_registration` and `_emit_activation_compensation` in full, 6 more of `_method_body_lines`'s statements and 1 more each of `_body_has_compensation`'s and `_method_bodies_have_compensation`'s. What is left of those is the witnessed half, the extern-declared compensation (issue #1592) and the component-`if` walk, which no document can reach because a component `if` is a guard that holds only `fail` (G6). emit_rust_corpus/method_control_flow.rvl (item 391) reaches 5 more of `_method_body_lines`'s statements, 35 -> 30: the top-level control-flow arm (issue #548)."]
 

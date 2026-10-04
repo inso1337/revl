@@ -290,6 +290,9 @@ CORPUS = [
                              #   list element, branch tail, `let`, iterable),
                              #   the field and constructor clones, the moving
                              #   iterable, and the inference behind them
+    "intercept_metadata.rvl",  # item 391: `intercept` metadata as a generated
+                             #   struct and the `require_with` gate, and the
+                             #   bridge tables over a key two realms provide
     "method_control_flow.rvl",  # item 391: control flow in a provide method
                              #   (issue #548): `if`/`else`, `while` + `break`,
                              #   `for` + `continue`, a guard beside an emit, and

@@ -5805,7 +5805,6 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   let functions = value_list(value_field(ir, "functions"))
   let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
-  if (value_keys(value_field(comp, "intercept")).length() > 0) { out = out.push(`<<DEFER-intercept:${name}>>`) }
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
@@ -5820,6 +5819,8 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     out = out.push("}")
     out = out.push("")
   }
+  let gate = intercept_inject(comp, cname)
+  out = out.concat(gate.defs)
   // An `await` step colours the whole activation: cordis-rs drives the closure
   // as a real future through `plugin_async`, so the factory and the closure
   // header both change. The gate is per-COMPONENT — a component with no await
@@ -5833,7 +5834,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.push(`pub fn ${snk}() -> cordis::PluginHandle {`)
   out = out.push(plugin_open)
   out = out.push(`        ${string_lit(name)},`)
-  out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
+  out = out.push(`        cordis::${gate.inject},`)
   out = out.push(closure_open)
   let teardown = component_needs_teardown(comp)
   if (teardown) { out = out.push(teardown_begin(comp)) }
@@ -5866,6 +5867,117 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
 // `_emit_component_auto`: a component with NO isolate/intercept and NO effectful
 // method routes to the simple `_emit_component`; anything else routes to
 // `_emit_component_new`.
+// `_intercept_json_type` / `_intercept_json_lit`: an `intercept` key's
+// metadata as a concrete Rust value. cordis-rs has no serde_json dependency, so
+// a record becomes a generated `#[derive(Clone)] struct` (named
+// `<base>Intercept<n>`, a nested record's base being its parent struct) and a
+// list a `Vec<T>`. The reference caches a record's struct by object identity;
+// both passes walk the same tree, so this port keys the cache by the record's
+// path in it instead. Struct definitions land in `defs` children first.
+type IcSt = { defs: List[Str], names: Map[Str, Str], counter: Int }
+type IcRes = { text: Str, st: IcSt }
+
+fn ic_type(v: Any, base: Str, path: Str, st: IcSt) -> IcRes {
+  let k = value_kind(v)
+  if (k == "record") {
+    let cached = map_get(st.names, path)
+    if (cached != "") { return { text: cached, st: st } }
+    let n = st.counter + 1
+    let name = `${base}Intercept${n.to_str()}`
+    var s = { defs: st.defs, names: st.names.set(path, name), counter: n }
+    var lines = ["#[derive(Clone)]", `struct ${name} {`]
+    for (key of value_keys(v)) {
+      let r = ic_type(value_field(v, key), name, `${path}/${key}`, s)
+      s = r.st
+      lines = lines.push(`    ${key}: ${r.text},`)
+    }
+    lines = lines.push("}")
+    return { text: name, st: { defs: s.defs.concat(lines).push(""), names: s.names, counter: s.counter } }
+  }
+  if (k == "list") {
+    let items = value_list(v)
+    if (items.length() == 0) { return { text: "Vec<()>", st: st } }
+    let first = ic_type(items[0], base, `${path}/0`, st)
+    var s = first.st
+    var i = 1
+    while (i < items.length()) {
+      let r = ic_type(items[i], base, `${path}/${i.to_str()}`, s)
+      s = r.st
+      // the reference refuses a heterogeneous array; this port names it
+      if (r.text != first.text) { return { text: "<<UNSUPPORTED-intercept-array>>", st: s } }
+      i = i + 1
+    }
+    return { text: `Vec<${first.text}>`, st: s }
+  }
+  if (k == "bool") { return { text: "bool", st: st } }
+  if (k == "int") { return { text: "i64", st: st } }
+  if (k == "float") { return { text: "f64", st: st } }
+  if (k == "null") { return { text: "()", st: st } }
+  return { text: "String", st: st }
+}
+
+fn ic_lit(v: Any, base: Str, path: Str, st: IcSt) -> IcRes {
+  let k = value_kind(v)
+  if (k == "record") {
+    let t = ic_type(v, base, path, st)
+    var s = t.st
+    var fields = []
+    for (key of value_keys(v)) {
+      let r = ic_lit(value_field(v, key), base, `${path}/${key}`, s)
+      s = r.st
+      fields = fields.push(`${key}: ${r.text}`)
+    }
+    return { text: `${t.text} { ${fields.join(", ")} }`, st: s }
+  }
+  if (k == "list") {
+    var s = st
+    var parts = []
+    var i = 0
+    for (item of value_list(v)) {
+      let r = ic_lit(item, base, `${path}/${i.to_str()}`, s)
+      s = r.st
+      parts = parts.push(r.text)
+      i = i + 1
+    }
+    return { text: `vec![${parts.join(", ")}]`, st: s }
+  }
+  if (k == "bool") {
+    if (value_bool(v)) { return { text: "true", st: st } }
+    return { text: "false", st: st }
+  }
+  if (k == "int") { return { text: `${num_str(v)}i64`, st: st } }
+  if (k == "float") { return { text: `${num_str(v)}f64`, st: st } }
+  if (k == "null") { return { text: "()", st: st } }
+  return { text: `String::from(${string_lit(v)})`, st: st }
+}
+
+// The plugin's `Inject` gate. A component that intercepts a requirement builds
+// it field by field, `.require_with(<key>, <metadata>)` for an intercepted key
+// and `.require(<key>)` for the rest, and the metadata's struct definitions
+// are emitted ahead of the plugin.
+type InjectR = { inject: Str, defs: List[Str] }
+
+fn intercept_inject(comp: Any, cname: Str) -> InjectR {
+  let reqs = value_field(comp, "requires")
+  let itc = value_field(comp, "intercept")
+  if (value_keys(itc).length() == 0) { return { inject: rust_inject(value_keys(reqs)), defs: [] } }
+  var inject = "Inject::none()"
+  var defs = []
+  for (local of value_keys(reqs)) {
+    if (str_in(value_keys(itc), local)) {
+      let base = `${cname}${camel(local)}`
+      let empty: IcSt = { defs: [], names: Map.empty(), counter: 0 }
+      let t = ic_type(value_field(itc, local), base, "", empty)
+      let l = ic_lit(value_field(itc, local), base, "", t.st)
+      defs = defs.concat(l.st.defs)
+      inject = inject.concat(`.require_with(${string_lit(local)}, ${l.text})`)
+    } else {
+      inject = inject.concat(`.require(${string_lit(local)})`)
+    }
+  }
+  return { inject: inject, defs: defs }
+}
+
 fn emit_component_auto(comp: Any, services: Any, ir: Any) -> List[Str] {
   let iso = value_keys(value_field(comp, "isolate")).length() > 0
   let itc = value_keys(value_field(comp, "intercept")).length() > 0
@@ -5873,6 +5985,17 @@ fn emit_component_auto(comp: Any, services: Any, ir: Any) -> List[Str] {
     return emit_component(comp, services, ir)
   }
   return emit_component_new(comp, services, ir)
+}
+
+// `xs` with the entry at `at` replaced by `v`.
+fn replaced_at(xs: List[Str], at: Int, v: Str) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  for (x of xs) {
+    if (i == at) { out = out.push(v) } else { out = out.push(x) }
+    i = i + 1
+  }
+  return out
 }
 
 // ---------------------------------------------------------------- the bridge
@@ -6023,15 +6146,22 @@ fn emit_bridge(ir: Any) -> List[Str] {
   let components = value_list(value_field(ir, "components"))
   let tables = build_type_tables(value_field(ir, "types"))
   let tnames = tables.tn
-  // provided: key -> service, over every comp's provisions (subset: no
-  // duplicate keys across components — that dedup is deferred).
-  var pkeys = []
-  var psvcs = []
+  // provided: key -> service, over every comp's provisions. A key two
+  // components provide (one per realm) is one entry, at its first position,
+  // naming the service its last provider declares (the reference's dict).
+  var pkeys: List[Str] = []
+  var psvcs: List[Str] = []
   for (comp of components) {
     let provs = value_field(comp, "provides")
     for (key of value_keys(provs)) {
-      pkeys = pkeys.push(key)
-      psvcs = psvcs.push(value_str(value_field(provs, key)))
+      let svc = value_str(value_field(provs, key))
+      let at = pkeys.indexOf(key)
+      if (at < 0) {
+        pkeys = pkeys.push(key)
+        psvcs = psvcs.push(svc)
+      } else {
+        psvcs = replaced_at(psvcs, at, svc)
+      }
     }
   }
   var out = bridge_rpc_preamble()

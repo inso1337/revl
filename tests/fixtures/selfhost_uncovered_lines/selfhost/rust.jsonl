@@ -44,8 +44,6 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these", "emit_component", 1, 1]
 
-["function", "component-construction-and-provide-method-alternatives-these", "emit_component_new", 1, 1]
-
 ["function", "component-construction-and-provide-method-alternatives-these", "has_extra_linebreak", 1, 1]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "is_extra_linebreak", 3, 3]
@@ -115,6 +113,12 @@
 ["function", "item-391-by-value-reuse-residuals-emit-rust", "by_value_tail", 1, 1]
 
 ["function", "item-391-by-value-reuse-residuals-emit-rust", "decl_site_names", 1, 1]
+
+["reason", "item-391-intercept-metadata-shapes-the-surface-cannot-spell", "Item 391 intercept metadata (emit_rust_corpus/intercept_metadata.rvl holds the port to byte agreement): `ic_type`'s heterogeneous-array marker and `null` type, and `ic_lit`'s `null` literal, mirror the reference's `_intercept_json_type`/`_intercept_json_lit` arms for a value the `intercept <key> with { .. }` surface cannot spell (its literals take no `None` and no record), so no corpus document reaches them, and the reference half records the same arms."]
+
+["function", "item-391-intercept-metadata-shapes-the-surface-cannot-spell", "ic_lit", 1, 1]
+
+["function", "item-391-intercept-metadata-shapes-the-surface-cannot-spell", "ic_type", 2, 2]
 
 ["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `render_var`'s statements. Item 391 (the by-value reuse port, emit_rust_corpus/by_value_reuse.rvl): `owned_borrowed_tail` is gone (its sites take the reference's `by_value_reuse`/`by_value_tail`), `v3_is_float` is reached in full and `render_builtin` 2 -> 1."]
 

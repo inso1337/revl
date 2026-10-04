@@ -48,6 +48,25 @@ pub struct MovSt {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IcSt {
+    defs: Vec<String>,
+    names: std::collections::HashMap<String, String>,
+    counter: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IcRes {
+    text: String,
+    st: IcSt,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InjectR {
+    inject: String,
+    defs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FnD {
     name: String,
     isEmExtern: bool,
@@ -7080,9 +7099,6 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
     let functions = value_list(value_field(ir.clone(), String::from("functions")));
     let map_values = component_map_values(comp.clone(), services.clone(), functions.clone(), plain_ctx(tables.clone(), fr.clone()), tables.tn.clone());
     let mut out = emit_config_struct_lines(comp.clone());
-    if (value_keys(value_field(comp.clone(), String::from("intercept"))).revl_length() > 0i64) {
-        out.push(format!("<<DEFER-intercept:{}>>", name));
-    }
     for key in value_keys(provs.clone()) {
         let srv = value_str(value_field(provs.clone(), key.clone()));
         let struct_ = format!("{}{}", cname, camel(key.clone()));
@@ -7103,6 +7119,8 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
         out.push(String::from("}"));
         out.push(String::from(""));
     }
+    let gate = intercept_inject(comp.clone(), &cname);
+    out.extend((gate.defs).iter().cloned());
     let mut plugin_open = format!("    cordis::plugin_sync::<{}, _>(", cty);
     let mut closure_open = String::from("        |ctx, config| {");
     if component_uses_await(comp.clone()) {
@@ -7112,7 +7130,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
     out.push(format!("pub fn {}() -> cordis::PluginHandle {{", snk));
     out.push(plugin_open);
     out.push(format!("        {},", string_lit(Value::new(serde_json::Value::from(name.clone())))));
-    out.push(format!("        cordis::{},", rust_inject(value_keys(reqs.clone()))));
+    out.push(format!("        cordis::{},", gate.inject));
     out.push(closure_open);
     let teardown = component_needs_teardown(comp.clone());
     if teardown {
@@ -7146,6 +7164,124 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
     return out;
 }
 
+fn ic_type(v: Value, base: &str, path: String, st: IcSt) -> IcRes {
+    let k = value_kind(v.clone());
+    if (k == "record") {
+        let cached = map_get(st.names.clone(), path.clone());
+        if (cached != "") {
+            return IcRes { text: cached.clone(), st: st.clone() };
+        }
+        let n = (st.counter).checked_add(1i64).expect("revl: Int overflow");
+        let name = format!("{}Intercept{}", base, (n).to_string());
+        let mut s = IcSt { defs: st.defs.clone(), names: { let mut c = st.names.clone(); c.insert(path.clone(), name.clone()); c }, counter: n.clone() };
+        let mut lines = vec![String::from("#[derive(Clone)]"), format!("struct {} {{", name)];
+        for key in value_keys(v.clone()) {
+            let r = ic_type(value_field(v.clone(), key.clone()), &name, format!("{}/{}", path, key), s.clone());
+            s = r.st;
+            lines.push(format!("    {}: {},", key, r.text));
+        }
+        lines.push(String::from("}"));
+        return IcRes { text: name.clone(), st: IcSt { defs: (s.defs.revl_concat(&lines)).revl_push(String::from("")), names: s.names.clone(), counter: s.counter } };
+    }
+    if (k == "list") {
+        let items = value_list(v.clone());
+        if (items.revl_length() == 0i64) {
+            return IcRes { text: String::from("Vec<()>"), st: st.clone() };
+        }
+        let first = ic_type((items)[(0i64) as usize].clone(), base, format!("{}/0", path), st.clone());
+        let mut s = first.st;
+        let mut i = 1i64;
+        while (i < items.revl_length()) {
+            let r = ic_type((items)[(i) as usize].clone(), base, format!("{}/{}", path, (i).to_string()), s.clone());
+            s = r.st;
+            if (r.text != first.text) {
+                return IcRes { text: String::from("<<UNSUPPORTED-intercept-array>>"), st: s.clone() };
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return IcRes { text: format!("Vec<{}>", first.text), st: s.clone() };
+    }
+    if (k == "bool") {
+        return IcRes { text: String::from("bool"), st: st.clone() };
+    }
+    if (k == "int") {
+        return IcRes { text: String::from("i64"), st: st.clone() };
+    }
+    if (k == "float") {
+        return IcRes { text: String::from("f64"), st: st.clone() };
+    }
+    if (k == "null") {
+        return IcRes { text: String::from("()"), st: st.clone() };
+    }
+    return IcRes { text: String::from("String"), st: st.clone() };
+}
+
+fn ic_lit(v: Value, base: &str, path: String, st: IcSt) -> IcRes {
+    let k = value_kind(v.clone());
+    if (k == "record") {
+        let t = ic_type(v.clone(), base, path.clone(), st.clone());
+        let mut s = t.st;
+        let mut fields: Vec<String> = vec![];
+        for key in value_keys(v.clone()) {
+            let r = ic_lit(value_field(v.clone(), key.clone()), base, format!("{}/{}", path, key), s.clone());
+            s = r.st;
+            fields.push(format!("{}: {}", key, r.text));
+        }
+        return IcRes { text: format!("{} {{ {} }}", t.text, fields.revl_join(", ")), st: s.clone() };
+    }
+    if (k == "list") {
+        let mut s = st.clone();
+        let mut parts: Vec<String> = vec![];
+        let mut i = 0i64;
+        for item in value_list(v.clone()) {
+            let r = ic_lit(item.clone(), base, format!("{}/{}", path, (i).to_string()), s.clone());
+            s = r.st;
+            parts.push(r.text.clone());
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return IcRes { text: format!("vec![{}]", parts.revl_join(", ")), st: s.clone() };
+    }
+    if (k == "bool") {
+        if value_bool(v.clone()) {
+            return IcRes { text: String::from("true"), st: st.clone() };
+        }
+        return IcRes { text: String::from("false"), st: st.clone() };
+    }
+    if (k == "int") {
+        return IcRes { text: format!("{}i64", num_str(v.clone())), st: st.clone() };
+    }
+    if (k == "float") {
+        return IcRes { text: format!("{}f64", num_str(v.clone())), st: st.clone() };
+    }
+    if (k == "null") {
+        return IcRes { text: String::from("()"), st: st.clone() };
+    }
+    return IcRes { text: format!("String::from({})", string_lit(v.clone())), st: st.clone() };
+}
+
+fn intercept_inject(comp: Value, cname: &str) -> InjectR {
+    let reqs = value_field(comp.clone(), String::from("requires"));
+    let itc = value_field(comp.clone(), String::from("intercept"));
+    if (value_keys(itc.clone()).revl_length() == 0i64) {
+        return InjectR { inject: rust_inject(value_keys(reqs.clone())), defs: vec![] };
+    }
+    let mut inject = String::from("Inject::none()");
+    let mut defs = vec![];
+    for local in value_keys(reqs.clone()) {
+        if str_in(value_keys(itc.clone()), &local) {
+            let base = format!("{}{}", cname, camel(local.clone()));
+            let empty = IcSt { defs: vec![], names: std::collections::HashMap::new(), counter: 0i64 };
+            let t = ic_type(value_field(itc.clone(), local.clone()), &base, String::from(""), empty.clone());
+            let l = ic_lit(value_field(itc.clone(), local.clone()), &base, String::from(""), t.st);
+            defs.extend((l.st.defs).iter().cloned());
+            inject.push_str(&(format!(".require_with({}, {})", string_lit(Value::new(serde_json::Value::from(local.clone()))), l.text)));
+        } else {
+            inject.push_str(&(format!(".require({})", string_lit(Value::new(serde_json::Value::from(local.clone()))))));
+        }
+    }
+    return InjectR { inject: inject.clone(), defs: defs.clone() };
+}
+
 fn emit_component_auto(comp: Value, services: Value, ir: Value) -> Vec<String> {
     let iso = (value_keys(value_field(comp.clone(), String::from("isolate"))).revl_length() > 0i64);
     let itc = (value_keys(value_field(comp.clone(), String::from("intercept"))).revl_length() > 0i64);
@@ -7153,6 +7289,20 @@ fn emit_component_auto(comp: Value, services: Value, ir: Value) -> Vec<String> {
         return emit_component(comp.clone(), services.clone(), ir.clone());
     }
     return emit_component_new(comp.clone(), services.clone(), ir.clone());
+}
+
+fn replaced_at(xs: Vec<String>, at: i64, v: String) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    for x in xs {
+        if (i == at) {
+            out.push(v.clone());
+        } else {
+            out.push(x);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
 }
 
 fn bridge_serde_ok(rtype: &str) -> bool {
@@ -7340,8 +7490,14 @@ fn emit_bridge(ir: Value) -> Vec<String> {
     for comp in components.clone() {
         let provs = value_field(comp.clone(), String::from("provides"));
         for key in value_keys(provs.clone()) {
-            pkeys.push(key.clone());
-            psvcs.push(value_str(value_field(provs.clone(), key.clone())));
+            let svc = value_str(value_field(provs.clone(), key.clone()));
+            let at = pkeys.revl_index_of(&key);
+            if (at < 0i64) {
+                pkeys.push(key.clone());
+                psvcs.push(svc.clone());
+            } else {
+                psvcs = replaced_at(psvcs.clone(), at, svc.clone());
+            }
         }
     }
     let mut out = bridge_rpc_preamble();
