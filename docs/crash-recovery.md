@@ -141,10 +141,18 @@ the write-ahead discipline). Three record shapes:
 //     crossing in the world: recover reports the nested emission under
 //     `nested` ("made inside tickets.file (seq 2); counted there") and counts
 //     it with its enclosing record, which is offset, settled or residue as
-//     that crossing is. Absent otherwise. Across a placement seam the two
-//     records are in different process WALs and neither is folded.
+//     that crossing is. Absent otherwise. Across a placement seam (issue
+//     #1889) the bridge carries the caller's crossing with the call, so the
+//     provider's records name it with the caller's PROCESS too, and placement
+//     recover counts such a record with that crossing when the caller
+//     process's WAL holds it ("made inside tickets.file (seq 4 in process
+//     agent)"). A caller WAL that is missing, or that does not hold the seq,
+//     leaves the record as residue: a fold is never assumed.
 {"record": "effect", "seq": 3, "component": "Desk", "kind": "emission",
  "label": "file_host", "within": {"seq": 2, "component": "Agent", "label": "tickets.file"}, …}
+{"record": "effect", "seq": 6, "component": "Desk", "kind": "emission",
+ "label": "file_host", "within": {"seq": 4, "component": "Agent",
+                                  "label": "tickets.file", "process": "agent"}, …}
 
 // 3. activation marker — present iff activation finished cleanly. NOT the end
 //    of the log: the WAL stays open for the whole run, so steady-state effects

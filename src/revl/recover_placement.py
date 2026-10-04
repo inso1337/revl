@@ -231,6 +231,25 @@ def _aggregate(index_path: str, index: dict, results: list, world: str) -> dict:
     }
 
 
+def _effect_seqs(results: list) -> dict:
+    """``{process: {seq, ...}}``: the effect records each recorded process WAL
+    holds, read before any process is recovered (issue #1889). A provider's
+    record of a served call names the caller's crossing by process and seq;
+    recover counts it with that crossing only when the caller's WAL holds it."""
+    from .wal import read_wal  # noqa: PLC0415 - tier-agnostic core, lazy
+    seqs: dict = {}
+    for result in results:
+        if result["state"] != "recorded":
+            continue
+        try:
+            records = read_wal(result["wal"])["records"]
+        except Exception:  # noqa: BLE001 - an unreadable WAL folds nothing
+            continue
+        seqs[result["process"]] = {r.get("seq") for r in records
+                                   if r.get("record") == "effect"}
+    return seqs
+
+
 def recover_index(index_path: str, index: dict, *,
                   composition: Optional[list] = None,
                   config: Optional[dict] = None, reissue: Optional[str] = None,
@@ -255,14 +274,18 @@ def recover_index(index_path: str, index: dict, *,
                 if r["state"] == "recorded"]
     binding = (_PlacementBinding(list(composition), ir, digest, dict(config or {}))
                if composition else None)
+    seqs = _effect_seqs(results)
     try:
         worlds = binding.bind(recorded) if binding else {}
         for result in results:
             if result["state"] != "recorded":
                 continue
             world = worlds.get(result["process"])
+            callers = {name: found for name, found in seqs.items()
+                       if name != result["process"]}
             report = recover(result["wal"], world=world, reissue=reissue,
-                             forward_admissions=forward_admissions)
+                             forward_admissions=forward_admissions,
+                             callers=callers)
             if world is not None:
                 report["binding"] = _describe(
                     world, binding.keys[result["process"]], ir, entries)

@@ -193,10 +193,7 @@ def test_placement_recover_does_not_re_run_a_providers_crossing_activation(tmp_p
     assert residue["referent"] == "tickets.withdraw('T1')"
     assert [r["process"] for r in report["residue"]["outstanding"]
             if r["kind"] == "reactivation-residue"] == ["agent"]
-    # issue #1889: desk's `file_host`, made while answering agent's
-    # cross-process `tickets.file`, is recorded since #1603 and stays residue
-    # until a served call's records link to the caller's crossing
-    assert [u["label"] for u in by_name["desk"]["unreconstructible"]] == ["file_host"]
+    assert by_name["desk"]["residue"]["clean"] is True
     assert proc.returncode == 1
 
 

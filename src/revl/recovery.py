@@ -297,7 +297,8 @@ def _referent_key(record: dict, world: World) -> Optional[str]:
 def recover(wal_path: str, *, world: Optional[World] = None,
             session=None, snapshot: Optional[dict] = None,
             reissue: Optional[str] = None,
-            forward_admissions: bool = False) -> dict:
+            forward_admissions: bool = False,
+            callers: Optional[dict] = None) -> dict:
     """Read the WAL at ``wal_path`` and prove a way back.
 
     Returns a stated verdict (``rolled-forward`` or ``rolled-back``) with a
@@ -322,6 +323,12 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     ``backends/python/replay.py`` so recover reads a WAL produced by any tier's
     runtime — the py in-process driver or a non-py (go/rust/java/wasm)
     subprocess — with no backend on the path.
+
+    ``callers`` (issue #1889) is placement recover's map of every OTHER process
+    of the run to the effect seqs its WAL holds, ``{process: {seq, ...}}``. A
+    record this process made while serving a call from one of them names that
+    call's crossing (`within.process`), and is counted with it when the caller's
+    WAL holds it (:func:`_split_nested`). ``None`` for a single-process WAL.
     """
     from .wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
 
@@ -339,6 +346,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         return _Counted(world if world is not None else DictWorld(), tally)
 
     records = wal["records"]
+    wal["callers"] = dict(callers or {})
     frozen = next((r for r in records
                    if r.get("record") == "fork-frozen"), None)
     if frozen is not None:
@@ -566,7 +574,8 @@ def _fork_retired(wal: dict, frozen: dict) -> dict:
     }
 
 
-def _split_nested(effects: list, records: list) -> tuple:
+def _split_nested(effects: list, records: list,
+                  callers: Optional[dict] = None) -> tuple:
     """``(own, nested)``: ``effects`` without, and with, the emissions a
     provider recorded INSIDE another component's required-service crossing
     (issue #1609, `replay.Step.within`).
@@ -577,27 +586,46 @@ def _split_nested(effects: list, records: list) -> tuple:
     describe the same effect in the world, and the caller's record is the one
     the compensation names. So the nested record is not a second residue: it is
     counted with the crossing it was made inside, which is offset, settled or
-    residue as that crossing is. Only an emission nests this way, and only when
-    the enclosing record is in this same WAL: across a placement seam the two
-    are in different process WALs, and neither is folded."""
+    residue as that crossing is. Only an emission nests this way.
+
+    Across a placement seam (issue #1889) the caller's crossing is in ANOTHER
+    process's WAL, and the provider's record names that process
+    (`within.process`). It is counted with that crossing when ``callers``, the
+    other processes' effect seqs, holds it; a caller WAL that is missing, or
+    that does not hold the seq, leaves the record as residue here. A record
+    naming another process is never matched against this WAL's own seqs: the
+    two seq spaces are unrelated."""
     seqs = {r.get("seq") for r in records if r.get("record") == "effect"}
     own, nested = [], []
     for record in effects:
-        enclosing = (record.get("within") or {}).get("seq")
         if (record.get("boundary") or {}).get("class") == "emission" \
-                and enclosing is not None and enclosing in seqs:
+                and _enclosed(record.get("within") or {}, seqs, callers or {}):
             nested.append(record)
         else:
             own.append(record)
     return own, nested
 
 
+def _enclosed(within: dict, seqs: set, callers: dict) -> bool:
+    """Whether the crossing a record names (`within`) is on the record: in this
+    WAL, or for a served cross-process call, in the caller process's WAL."""
+    enclosing = within.get("seq")
+    if enclosing is None:
+        return False
+    process = within.get("process")
+    if process is None:
+        return enclosing in seqs
+    return enclosing in (callers.get(process) or ())
+
+
 def _nested_entries(nested: list) -> list:
     return [{"component": r.get("component"), "label": r.get("label"),
              "seq": r.get("seq"), "within": r.get("within"),
              "why": (f"made inside {(r.get('within') or {}).get('label')} "
-                     f"(seq {(r.get('within') or {}).get('seq')}), the same "
-                     f"crossing; counted there")}
+                     f"(seq {(r.get('within') or {}).get('seq')}"
+                     + (f" in process {(r.get('within') or {})['process']}"
+                        if (r.get('within') or {}).get('process') else "")
+                     + "), the same crossing; counted there")}
             for r in nested]
 
 
@@ -810,7 +838,7 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
          if tail[i].get("record") == "run-complete"), -1)
     steady = [r for r in tail[last_run_complete + 1:]
               if r.get("record") == "effect"]
-    steady, steady_nested = _split_nested(steady, records)
+    steady, steady_nested = _split_nested(steady, records, wal.get("callers"))
     steady_residue = _steady_state_residue(steady)
     steady_residue["nested"] = _nested_entries(steady_nested)
     # issue #1017: the activation marker is not a flush receipt. Cross-check the
@@ -2114,7 +2142,7 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
     Phase 2 re-issues owed compensations through :meth:`World.apply_compensation`
     (which records, never clears)."""
     committed = [r for r in wal["records"] if r.get("record") == "effect"]
-    effects, nested = _split_nested(committed, wal["records"])
+    effects, nested = _split_nested(committed, wal["records"], wal.get("callers"))
     descriptors = [r for r in wal["records"]
                    if r.get("record") == "discharge-descriptor"]
     discharged: set = set()
