@@ -17459,24 +17459,26 @@ fn ext_arg_at(ts: Vec<Token>, i: i64) -> Verd {
 }
 
 fn svc_arg_at(ts: Vec<Token>, i: i64) -> Verd {
-    if (i >= ts.revl_length()) {
-        return no_verd();
+    let mut i0 = i;
+    while (i0 < ts.revl_length()) {
+        if (!atw(&ts, i0, "service")) {
+            i0 = (i0).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if (!atk(&ts, (i0).checked_add(2i64).expect("revl: Int overflow"), "{")) {
+                return no_verd();
+            }
+            let end = close_brace(&ts, (i0).checked_add(2i64).expect("revl: Int overflow"));
+            if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return no_verd();
+            }
+            let v = svc_arg_in(ts.clone(), (i0).checked_add(3i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), &tkc(&ts, (i0).checked_add(1i64).expect("revl: Int overflow")).text);
+            if (v.v != "") {
+                return v;
+            }
+            i0 = end;
+        }
     }
-    if (!atw(&ts, i, "service")) {
-        return svc_arg_at(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
-    }
-    if (!atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "{")) {
-        return no_verd();
-    }
-    let end = close_brace(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
-    if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-        return no_verd();
-    }
-    let v = svc_arg_in(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), &tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text);
-    if (v.v != "") {
-        return v;
-    }
-    return svc_arg_at(ts.clone(), end);
+    return no_verd();
 }
 
 fn svc_arg_in(ts: Vec<Token>, j: i64, end: i64, sn: &str) -> Verd {
