@@ -18360,12 +18360,14 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 //          single-line statement gives the reference's own `op.line`.
 type CCtx = { reqs: List[Str], cases: List[Bind], fns: List[Bind],
               fnps: List[Bind], wit: List[Str], al: Map[Str, Str],
-              cprovs: List[Bind], cfg: Str, ln: Int }
+              cprovs: List[Bind], cfg: Str, ln: Int, reqops: List[Bind],
+              handles: Bool }
 
 // `cx` re-stamped with the line of the statement now being lowered.
 fn cx_at(cx: CCtx, n: Int) -> CCtx {
   return { reqs: cx.reqs, cases: cx.cases, fns: cx.fns, fnps: cx.fnps,
-           wit: cx.wit, al: cx.al, cprovs: cx.cprovs, cfg: cx.cfg, ln: n }
+           wit: cx.wit, al: cx.al, cprovs: cx.cprovs, cfg: cx.cfg, ln: n,
+           reqops: cx.reqops, handles: cx.handles }
 }
 
 // Membership in a lexical scope, INDEPENDENT of whether the name's type is
@@ -18401,6 +18403,17 @@ fn concat_binds(a: List[Bind], b: List[Bind]) -> List[Bind] {
 fn cenv(cx: CCtx, sc: List[Bind]) -> List[Bind] {
   let base = cx.cfg == "" ? cx.cases : tenv_put(cx.cases, "config", cx.cfg)
   return concat_binds(base, sc)
+}
+
+// `cenv` plus the declared returns of the required services' operations
+// (`req_op_returns`), for the two sites where the reference types a lowered
+// node with the service-aware `infer_ir`: a field read's receiver (its
+// `sized_length` mark) and a provide method's returned value (its `widen`
+// mark). A `match` scrutinee keeps `cenv`: the reference types it with
+// `_expr_static_type`, which knows no service, so `match geo.circle(1)` writes
+// no arm `payload_type`. The keys hold a space, so no scope name shadows one.
+fn cenv_ir(cx: CCtx, sc: List[Bind]) -> List[Bind] {
+  return concat_binds(cx.reqops, cenv(cx, sc))
 }
 
 // The `witnessed` externs a program declares. A witnessed acquisition registers
@@ -18541,6 +18554,90 @@ fn is_witnessed_acq(e: Expr, cx: CCtx) -> Bool {
     Call(c) => match c.target { Var(nm) => contains(cx.wit, nm), _ => false, },
     _ => false,
   }
+}
+
+// The declared return of every operation of every required service, under the
+// reserved `reqop <key>.<op>` key (issue #1845). `infer_method` reads it for
+// `<key>.<op>(...)`, so `geo.label(s).text.length` types `geo.label(s)` as the
+// service declares it, and the `.length` read off its `Str` field is marked
+// `sized_length` as the reference marks it.
+fn req_op_returns(ts: List[Token], reqs: List[Bind], al: Map[Str, Str],
+                  acc: List[Bind]) -> List[Bind] {
+  var out = acc
+  var r = 0
+  while (r < reqs.length()) {
+    let ops = svc_op_names(ts, reqs[r].ty)
+    var o = 0
+    while (o < ops.length()) {
+      let rt = svc_method_ret(ts, reqs[r].ty, ops[o], al)
+      if (rt != "") {
+        out = tenv_put(out, "reqop ".concat(reqs[r].name).concat(".").concat(ops[o]), rt)
+      }
+      o += 1
+    }
+    r += 1
+  }
+  return out
+}
+
+fn svc_op_names(ts: List[Token], svc: Str) -> List[Str] {
+  var out: List[Str] = []
+  var j = 0
+  while (j < ts.length() && !atk(ts, j, "eof")) {
+    if (atw(ts, j, "service") && tkc(ts, j + 1).text == svc && atk(ts, j + 2, "{")) {
+      let end = close_brace(ts, j + 2)
+      let hi = end == 0 - 1 ? j + 3 : end - 1
+      var k = j + 3
+      while (k < hi) {
+        if (atw(ts, k, "fn") && atk(ts, k + 1, "ident") && atk(ts, k + 2, "(")) {
+          out = out.push(tkc(ts, k + 1).text)
+        }
+        k += 1
+      }
+      return out
+    }
+    j += 1
+  }
+  return out
+}
+
+// A service operation's declared return type, erased as its parameters are.
+fn svc_method_ret(ts: List[Token], svc: Str, meth: Str, al: Map[Str, Str]) -> Str {
+  var j = 0
+  while (j < ts.length() && !atk(ts, j, "eof")) {
+    if (atw(ts, j, "service") && tkc(ts, j + 1).text == svc && atk(ts, j + 2, "{")) {
+      let end = close_brace(ts, j + 2)
+      let hi = end == 0 - 1 ? j + 3 : end - 1
+      var k = j + 3
+      while (k < hi) {
+        if (atw(ts, k, "fn") && tkc(ts, k + 1).text == meth && atk(ts, k + 2, "(")) {
+          let ps = params_at(ts, k + 3)
+          if (!atk(ts, ps.i, "arrow")) { return "" }
+          let rt = type_at(ts, ps.i + 1)
+          return rt.ok ? taint_strip(alias_subst(rt.ty, al)) : ""
+        }
+        k += 1
+      }
+      return ""
+    }
+    j += 1
+  }
+  return ""
+}
+
+// lower.py `_mark_widen` on a provide method's `return` (issue #1894, the
+// frontend's #1838): an `Int` returned where the operation declares `Float`
+// is a coercion site, marked `"widen": "Float"` on the returned node, and an
+// `Int32` returned where it declares `Int` is marked `"widen": "Int"`. The key
+// goes last, where the reference adds it to the node.
+fn cir_widen(js: Str, expected: Str, actual: Str) -> Str {
+  let e = parse_head(expected)
+  let a = parse_head(actual)
+  var w = ""
+  if (e == "Float" && (a == "Int" || a == "Int32")) { w = "Float" }
+  if (e == "Int" && a == "Int32") { w = "Int" }
+  if (w == "" || !js.endsWith("}")) { return js }
+  return js.slice(0, js.length() - 1).concat(", \"widen\": ").concat(jstr(w)).concat("}")
 }
 
 // A provide method's surface parameter names bound to the service signature's
@@ -18920,8 +19017,70 @@ fn cir_expr(e: Expr, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     // [name, value] PAIRS, not the fn path's object — a different node for the
     // same surface, so it is written out here rather than shared.
     Rec(r)      => cir_record(r.fields, 0, sc, hostSc, cx, ""),
+    Arrow(a)    => cir_arrow(a, sc, hostSc, cx),
     _           => mk_irres(false, ""),
   }
+}
+
+// An arrow in a component position (issue #1844): `let g = (x: Int) => x + 1`
+// in a provide method. The reference (`_lower_component_pure_expr`'s ExprArrow
+// arm) writes `{"kind": "arrow", "params", "captures", "body"}`, with the
+// parameters bound in the body's scope and no `param_types`/`returns` pair: a
+// component-position arrow is never checked, so its signature is never
+// resolved. Before this `cir_expr` had no arm for it, so the method failed,
+// `cir_body` failed with it, and `ir_component` dropped the whole `body`.
+//
+// `captures` is always empty. The reference collects the free names whose
+// scope entry is `True` (a `var`), but a component scope maps every name to
+// its safe id, so none qualifies: a captured `var` is read by name, as any
+// other local is.
+//
+// Three shapes keep refusing, each because the reference writes something
+// this arm does not: an arrow that names its own `Async[...]` colour (the
+// reference refuses it, rule C1), a parameter whose annotation names a
+// service (the reference adds a `service_params` key), and any arrow in a
+// program that can bind a resource handle (see `cir_arrow`).
+fn cir_arrow(a: ArrowN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  if (parse_head(a.ret) == "Async") { return mk_irres(false, "") }
+  // B1 clause 2 (`_b1_capture_check`): the reference refuses an arrow that
+  // captures a resource-typed value. This producer does not track the handle
+  // types, so in a program that could bind one it refuses every arrow.
+  if (cx.handles) { return mk_irres(false, "") }
+  var inner = sc
+  var i = 0
+  while (i < a.params.length()) {
+    let p = a.params[i]
+    if (cir_names_a_service(p.ty, cx)) { return mk_irres(false, "") }
+    // stratum 3 does not check an arrow, so a parameter binds untyped even
+    // when annotated (the reference pops it from `type_env`)
+    inner = inner.push({ name: p.name, ty: "" })
+    i += 1
+  }
+  let b = cir_expr(a.body, inner, hostSc, cx)
+  if (!b.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"arrow\", \"params\": [".concat(str_list_json(param_names(a.params)))
+    .concat("], \"captures\": [], \"body\": ").concat(b.js).concat("}"))
+}
+
+// Can this program bind a value of a resource type, the taint `_resource_ctx`
+// builds? Its handles are what an `acquire` extern returns, plus a
+// `Delegate[S]` reference, so a program that spells neither can bind none.
+fn program_names_handles(ts: List[Token]) -> Bool {
+  var j = 0
+  while (j < ts.length() && !atk(ts, j, "eof")) {
+    if (atw(ts, j, "acquire") || tkc(ts, j).text == "Delegate") { return true }
+    j += 1
+  }
+  return false
+}
+
+// Does a written parameter type name something other than a builtin or a
+// declared record/variant? A required or provided service is the one other
+// thing a component can name there.
+fn cir_names_a_service(ty: Str, cx: CCtx) -> Bool {
+  if (ty == "") { return false }
+  let h = parse_head(ty)
+  return !is_typecheck_builtin_type(h) && tenv_get(cx.cases, "decl ".concat(h)) == ""
 }
 
 fn cir_list(items: List[Expr], sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
@@ -18971,7 +19130,7 @@ fn cir_match(m: MatchN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     let b = cir_expr(a.body, inner, hostSc, cx)
     if (!b.ok) { return mk_irres(false, "") }
     var arm = "{\"pattern\": ".concat(jstr(a.pat))
-      .concat(", \"bind\": ").concat(a.bind == "" ? "null" : jstr(a.bind))
+      .concat(", \"bind\": ").concat(a.bind == "" ? "null" : jstr(cir_safe_binder(a.bind)))
       .concat(", \"body\": ").concat(b.js)
     if (pay != "") { arm = arm.concat(", \"payload_type\": ").concat(jstr(pay)) }
     arm = arm.concat("}")
@@ -18981,6 +19140,15 @@ fn cir_match(m: MatchN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   return mk_irres(true, "{\"kind\": \"match\", \"scrutinee\": ".concat(sr.js)
     .concat(", \"arms\": [").concat(arms).concat("]}"))
 }
+
+// The binder the reference writes for a payload binding (issue #1845). It
+// runs the binder through `_safe_name`, which appends `_` while the name is a
+// Python keyword or soft keyword, so the discarded `Box(_)` payload binds
+// `__`: `_` is a soft keyword. That is the one spelling a body can never read
+// back, which is why it is the one this producer renames; any other binder
+// that `_safe_name` would rename is still written as the author spelled it,
+// as before.
+fn cir_safe_binder(n: Str) -> Str { return n == "_" ? "__" : n }
 
 // Every literal `$` in a template's TEXT is doubled, so a `$` the author wrote
 // can never be read back as a positional slot (A4). The reference spells this
@@ -19302,7 +19470,7 @@ fn cir_field(f: FieldN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   // whose field is literally named `length` still reads its slot — and a
   // receiver whose type the scope cannot answer infers to "" and stays unmarked.
   let sized = f.name == "length"
-    && tk_sized_head(parse_head(infer(f.target, cenv(cx, sc))))
+    && tk_sized_head(parse_head(infer(f.target, cenv_ir(cx, sc))))
   return mk_irres(true, "{\"kind\": \"field\", \"target\": ".concat(t.js)
     .concat(", \"name\": ").concat(jstr(f.name))
     .concat(sized ? ", \"sized_length\": true" : "").concat("}"))
@@ -19460,7 +19628,8 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
     if (!ve.ok) { return mk_irres(false, "") }
-    let step = "{\"step\": \"return\", \"expr\": ".concat(ve.js).concat("}")
+    let wj = cir_widen(ve.js, tenv_get(sc, "returns "), infer(r.e, cenv_ir(cx, sc)))
+    let step = "{\"step\": \"return\", \"expr\": ".concat(wj).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc)
   }
@@ -19559,6 +19728,9 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
   let pnames = param_names(ps.ps)
   let pjson = str_list_json(pnames)
   let pbinds = method_param_binds(pnames, svc_method_params(ts, svc, nm), cx.al)
+  // the operation's declared return, under the reserved `returns ` key the
+  // block body's `return` reads (a space is not an identifier character)
+  let mret = svc_method_ret(ts, svc, nm, cx.al)
   var h = ps.i
   if (atk(ts, h, "arrow")) { h = type_at(ts, h + 1).i }
   if (atk(ts, h, "=")) {
@@ -19568,18 +19740,21 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
     // parameters — that is where an activation `let` binds a host acquisition
     // or a spawn handle — which is the scope the block-bodied form below
     // already builds.
-    let be = cir_expr(r.e, concat_binds(sc, pbinds), hostSc,
-                      cx_at(cx, tkc(ts, h + 1).line))
+    let bsc = concat_binds(sc, pbinds)
+    let be = cir_expr(r.e, bsc, hostSc, cx_at(cx, tkc(ts, h + 1).line))
     if (!be.ok) { return mk_irres(false, "") }
+    let bj = cir_widen(be.js, mret, infer(r.e, cenv_ir(cx, bsc)))
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
-      .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(be.js).concat("}]}")
+      .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(bj).concat("}]}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
     return cir_prov_methods(ts, r.i, end, cx, sc, hostSc, svc, nacc)
   }
   if (atk(ts, h, "{")) {
     let bend = close_brace(ts, h)
     if (bend == 0 - 1) { return mk_irres(false, "") }
-    let br = cir_method_stmts(ts, h + 1, bend - 1, cx, concat_binds(sc, pbinds), hostSc, "")
+    let br = cir_method_stmts(ts, h + 1, bend - 1, cx,
+                              tenv_put(concat_binds(sc, pbinds), "returns ", mret),
+                              hostSc, "")
     if (!br.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
       .concat("], \"body\": [").concat(br.js).concat("]}")
@@ -20154,11 +20329,13 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
   let reqSet = bind_names(reqs, 0, [])
   // the program-global facts the body reader needs beyond its lexical scope
   let cx = { reqs: reqSet, cases: case_binds(ts, al),
+             reqops: req_op_returns(ts, reqs, al, []),
              fns: module_callable_sigs(ts),
              fnps: module_callable_ptypes(ts, al),
              wit: witnessed_extern_names(ts), al: al,
              cprovs: program_provisions(ts),
-             cfg: comp_config_struct(ts, lo, hi, al), ln: 0 }
+             cfg: comp_config_struct(ts, lo, hi, al), ln: 0,
+             handles: program_names_handles(ts) }
   let sc0: List[Bind] = []
   let bodyRes = cir_body(ts, lo, hi, cx, provs, sc0, [], "")
   let isoJs = ir_isolate(ts, lo, hi, "")
@@ -20500,6 +20677,12 @@ fn map_index_tags(t: Str) -> Str {
 fn infer_method(recv: Expr, method: Str, env: List[Bind]) -> Str {
   let recvHostRoot = match recv { Var(n) => is_host_root(n), _ => false, }
   if (recvHostRoot) { return "" }
+  // a required service's operation, in a component position (`req_op_returns`)
+  let reqop = match recv {
+    Var(n) => tenv_get(env, "reqop ".concat(n).concat(".").concat(method)),
+    _ => "",
+  }
+  if (reqop != "") { return reqop }
   if (!is_builtin_method(method)) { return "" }
   return builtin_ret(method, infer(recv, env))
 }
@@ -23638,9 +23821,24 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
 
 // ================================================================ tests
 
+test "lower_to_ir binds a discarded payload as __ in a provide method" {
+  assert str_has(lower_to_ir("type Shape = Dot | Box(Int) service S { fn m(s: Shape) -> Int } component C provides p: S { provide p { fn m(s) = match s { Box(_) => 4, _ => 0 } } }"),
+    "{\"pattern\": \"Box\", \"bind\": \"__\", \"body\": {\"kind\": \"lit\", \"value\": 4}")
+}
+
 test "lower_to_ir emits the services table for a simple provider" {
   assert lower_to_ir("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")
     == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}, \"body\": [{\"step\": \"provide\", \"name\": \"cache\", \"service\": \"Cache\", \"methods\": [{\"name\": \"put\", \"params\": [\"key\", \"value\"], \"body\": [{\"step\": \"let\", \"name\": \"k\", \"value\": {\"kind\": \"name\", \"id\": \"key\"}, \"mutable\": false}]}]}]}]}"
+}
+
+test "lower_to_ir lowers an arrow bound in a provide method" {
+  assert str_has(lower_to_ir("service Math { fn go(n: Int) -> Int } component C provides math: Math { provide math { fn go(n: Int) { let g = (x: Int) => x + 1 return g(n) } } }"),
+    "\"value\": {\"kind\": \"arrow\", \"params\": [\"x\"], \"captures\": [], \"body\": {\"kind\": \"bin\", \"op\": \"+\", \"left\": {\"kind\": \"name\", \"id\": \"x\"}, \"right\": {\"kind\": \"lit\", \"value\": 1}}}")
+}
+
+test "lower_to_ir marks an Int returned as Float from a provide method (widen)" {
+  assert str_has(lower_to_ir("service Matcher { fn wf(n: Int) -> Float } component Matching provides mt: Matcher { provide mt { fn wf(n) = n } }"),
+    "\"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"name\", \"id\": \"n\", \"widen\": \"Float\"}}]")
 }
 
 test "lower_to_ir marks an emission op and a scoped capability" {
@@ -23699,6 +23897,11 @@ test "lower_to_ir emits literal config-field defaults (config schema)" {
 
 test "clean provider admits" {
   assert admit_src("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }") == ""
+}
+
+test "lower_to_ir marks sized_length on a field of a required service's returned record" {
+  assert str_has(lower_to_ir("type Label = { text: Str } service Geo { fn label(s: Str) -> Label } service S { fn m(s: Str) -> Int } component C requires geo: Geo provides p: S { provide p { fn m(s) = geo.label(s).text.length } }"),
+    "\"name\": \"length\", \"sized_length\": true}")
 }
 
 test "plain provider reaching an emission is refused (G4), exact wording" {
