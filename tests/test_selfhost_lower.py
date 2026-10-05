@@ -488,6 +488,13 @@ def _classify(e: RevlError) -> str:
             # already files it as a type mismatch, so it carries the T1 the
             # design's §4.3 vocabulary gives it (slice T2a).
             or "has no field" in m
+            # issue #1897: `verified` in a provide method on anything but a
+            # witnessed effect, and the parser's `verified` head before
+            # anything but `effect`. Both code-less; the gate spells each byte
+            # for byte (selfhost/lower.rvl's `verified` section).
+            or ("`verified effect` in a provide-method body is only allowed "
+                "on a witnessed effect") in m
+            or "expected `effect` after `verified`, found " in m
             # issue #1963: a teardown-registering step inside a provide-method
             # `if`/`while`/`for` body. Code-less; the gate spells it byte for
             # byte (selfhost/lower.rvl's effect-statement section).
@@ -741,7 +748,25 @@ component Mailer provides ops: Ops {{
 }}
 """
 
+# issue #1897: a witnessed extern a provide method may mark `verified`.
+_VERIFIED_WIT = """type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+"""
+
 ACCEPTED_PROGRAMS = [
+    # Issue #1897: a provide method may mark a WITNESSED effect `verified`.
+    ("a verified witnessed effect in a provide method", _VERIFIED_WIT + """service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      verified effect put_w(k)
+  } }
+}"""),
     # Issue #1508: a spawn-handle crossing is read by the provider bound at the
     # op's declared scope, a fact the spawned provider is held to by its own
     # bound. `Task.go` is `emission[net]` and `Sup.run` declares
@@ -1851,6 +1876,35 @@ component Front requires kv: KV provides api: Api {
   provide api { fn read(k) = kv.get(k) }
 }
 """, "G2"),
+    # ---- issue #1897: `verified` in a provide method ------------------------
+    # Only a witnessed effect may be verified there. The gate used to skip a
+    # `verified` line whole and admit every one of these; the corpus documents
+    # are tests/fixtures/verified_method_effect/, these are the edge controls.
+    ("a verified method effect whose undo is on the next line", '''service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      verified effect store.insert(k, "1")
+        undo store.remove(k)
+  } }
+}''', "T1"),
+    ("a let-bound verified method effect on a witnessed extern", _VERIFIED_WIT + '''service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      let r = verified effect put_w(k)
+  } }
+}''', "T1"),
+    ("a let-bound verified call that is not an effect", '''service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      let r = verified store.insert(k, "1")
+  } }
+}''', "T1"),
+    ("verified emit in an activation body", '''service Bus { emission fn send(k: Str) }
+component C requires bus: Bus {
+  verified emit bus.send("a")
+}''', "T1"),
     # ---- issue #1813: a module fn and an extern fn of one name --------------
     # The reference checks it once the program is otherwise admitted, so the
     # second case's G1 is what both sides report; the third puts the extern
@@ -7657,3 +7711,49 @@ def test_a_bare_return_in_a_provide_method_is_not_typed(admit):
              "component C provides s: S {\n"
              "  provide s { fn put(k) { return k } }\n}\n")
     assert admit(typed) == "T1|`put` returns expects `Int`, got `Str`"
+
+
+# ---- issue #1897: `verified` in a provide method, the LINE and the sink -----
+#
+# The census compares tag and message. These hold the line as well: the method
+# refusal is collected per component at the statement's line, as the reference's
+# component loop collects it, and the parse-stage one rides alone (line 0 on the
+# gate's wire, as every parse refusal does).
+_VERIFIED_CORPUS = ROOT / "tests" / "fixtures" / "verified_method_effect"
+
+
+@pytest.mark.parametrize("stem", ["t1_plain_site_undo", "t1_let_bound"])
+def test_verified_method_refusal_carries_the_statement_line(admit_all, stem):
+    src = (_VERIFIED_CORPUS / f"{stem}.rvl").read_text()
+    ref = _ref_all(src)
+    assert ref == [(8, "T1")], ref
+    assert admit_all(src) == (
+        "8|T1|`verified effect` in a provide-method body is only allowed on a "
+        "witnessed effect (issue #1897)")
+
+
+def test_verified_parse_refusal_rides_alone(admit_all):
+    src = (_VERIFIED_CORPUS / "t1_emit.rvl").read_text()
+    assert _ref_all(src) == [(7, "T1")]
+    assert admit_all(src) == "0|T1|expected `effect` after `verified`, found 'emit'"
+
+
+def test_verified_method_refusal_is_collected_beside_another_component(admit_all):
+    src = '''service W { fn put(k: Str) }
+service R { fn get() -> Str }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      verified effect store.insert(k, "1") undo store.remove(k)
+  } }
+}
+component D provides r: R {
+  provide r { fn get() = db.get() }
+}
+'''
+    assert _ref_all(src) == [(6, "T1"), (10, "G1")]
+    # `admit_all` joins rows with a literal backslash-n. Only the tags of the
+    # second row are compared: D's arrow-body G1 line is not this rule's.
+    rows = [r.split("|", 2) for r in admit_all(src).split("\\n")]
+    assert rows[0][:2] == ["6", "T1"], rows
+    assert [r[1] for r in rows] == ["T1", "G1"], rows

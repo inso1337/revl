@@ -9813,6 +9813,210 @@ fn fn_extern_scan(ts: List[Token]) -> Verd {
   return no_verd()
 }
 
+// ================================================== `verified` in a method
+//
+// Issue #1897. A provide method may mark a WITNESSED effect `verified`: its
+// round trip is call-then-abort, which replays the extern's declared inverse.
+// Everything else the reference still refuses, and the gate used to skip the
+// whole line (a `verified` head is not an expression, so the statement reader
+// dropped it), which admitted all of it:
+//
+//   * `verified` heading a body statement before anything but `effect`, and
+//     `let x = verified <not effect>`. The reference's PARSER refuses these
+//     (`expected `effect` after `verified`, found '<tok>'`, at the token after
+//     `verified`), in an activation body as well as a method, so the scan reads
+//     every component body and runs where the gate's other parse-stage refusal
+//     (`closure_assign_scan`) does.
+//   * `let x = verified effect …` in a method, witnessed or not, and
+//     `verified effect … undo …` in a method on anything but a witnessed extern.
+//     `lower.py`'s method loop refuses both with `_verified_method_refusal`, at
+//     the statement's line. A witnessed callee with a site `undo` is refused
+//     first by `_lower_effect_step` under its own message, so it is not this
+//     rule's; a plain effect with no `undo` is the same (the G4 missing-undo).
+//
+// Only a method body's top-level statements are read for the second family: a
+// `verified effect` nested in a method `if`/`while`/`for` is refused by the
+// reference's control-flow rule instead, which this section does not claim.
+// The census tags both families T1 (`tests/test_selfhost_lower.py::_classify`).
+
+fn verified_after_msg(found: Str) -> Str {
+  return "expected `effect` after `verified`, found '".concat(found).concat("'")
+}
+
+fn verified_method_msg() -> Str {
+  return "`verified effect` in a provide-method body is only allowed on a witnessed effect (issue #1897)"
+}
+
+// `let <x> = verified`: the one binding form whose `verified` the parser reads
+// (`var` never takes it, and an annotated binding is refused on its own).
+fn verified_let_at(ts: List[Token], i: Int) -> Bool {
+  return atk(ts, i - 1, "=") && atk(ts, i - 2, "ident") && atw(ts, i - 3, "let")
+}
+
+// A `verified` keyword in a position where the parser reads it as a statement
+// modifier: the first token of a statement, or right after `let <x> =`.
+fn verified_head_at(ts: List[Token], i: Int) -> Bool {
+  if (!atw(ts, i, "verified")) { return false }
+  let p = tkc(ts, i - 1)
+  if (p.kind == "{" || p.kind == "}" || p.kind == ";") { return true }
+  if (p.line < tkc(ts, i).line) { return true }
+  return verified_let_at(ts, i)
+}
+
+// The parse-stage half: the first `verified` head inside a component body that
+// is not followed by `effect`. Only a word is reported: the reference renders
+// the token with python's `repr`, which a bare word round-trips exactly.
+fn verified_parse_scan(ts: List[Token]) -> Verd {
+  let spans = model_comp_spans(ts)
+  var s = 0
+  while (s < spans.length()) {
+    var i = spans[s].slo
+    while (i < spans[s].shi) {
+      if (verified_head_at(ts, i) && !atw(ts, i + 1, "effect")) {
+        let nx = tkc(ts, i + 1)
+        if (nx.kind == "ident" || nx.kind == "kw") {
+          return mk_verd(tagged("T1", verified_after_msg(nx.text)), nx.line)
+        }
+      }
+      i += 1
+    }
+    s += 1
+  }
+  return no_verd()
+}
+
+// Whether the effect statement whose `verified` sits at `i` carries a site
+// `undo`: one at bracket depth 0 before the statement ends. The statement ends
+// at the body's closing `}` or at the first depth-0 token on a later line that
+// is not `undo` itself (the reference reads an `undo` written on the next line
+// as the same statement's).
+fn verified_has_undo(ts: List[Token], i: Int, hi: Int) -> Bool {
+  let ln = tkc(ts, i).line
+  var depth = 0
+  var j = i + 2
+  while (j < hi) {
+    let k = tkc(ts, j).kind
+    if (depth == 0) {
+      if (atw(ts, j, "undo")) { return true }
+      if (k == "}") { return false }
+      if (tkc(ts, j).line > ln) { return false }
+    }
+    if (k == "(" || k == "[" || k == "{") { depth += 1 }
+    if (k == ")" || k == "]" || k == "}") { depth -= 1 }
+    j += 1
+  }
+  return false
+}
+
+// The refusal for one top-level method statement headed by `verified` at `i`,
+// "" when the reference admits it (a witnessed effect with no site `undo`) or
+// refuses it under another rule.
+fn verified_stmt_msg(ts: List[Token], i: Int, hi: Int, wit: List[Str]) -> Str {
+  if (!atw(ts, i + 1, "effect")) { return "" }
+  if (verified_let_at(ts, i)) { return verified_method_msg() }
+  let callee = tkc(ts, i + 2)
+  let witnessed = callee.kind == "ident" && atk(ts, i + 3, "(")
+                  && contains(wit, callee.text)
+  if (witnessed) { return "" }
+  if (!verified_has_undo(ts, i, hi)) { return "" }
+  return verified_method_msg()
+}
+
+// The first refusal in one brace-bodied method body `{lo .. hi}` (`lo` the `{`,
+// `hi` the index just past its `}`), read at the body's top level.
+fn verified_in_body(ts: List[Token], lo: Int, hi: Int, wit: List[Str]) -> Verd {
+  var depth = 0
+  var i = lo + 1
+  while (i < hi - 1) {
+    let k = tkc(ts, i).kind
+    if (depth == 0 && verified_head_at(ts, i)) {
+      let m = verified_stmt_msg(ts, i, hi - 1, wit)
+      if (m != "") {
+        // the statement's line: the `let` for a binding, else `verified`'s own
+        let at = verified_let_at(ts, i) ? i - 3 : i
+        return mk_verd(tagged("T1", m), tkc(ts, at).line)
+      }
+    }
+    if (k == "(" || k == "[" || k == "{") { depth += 1 }
+    if (k == ")" || k == "]" || k == "}") { depth -= 1 }
+    i += 1
+  }
+  return no_verd()
+}
+
+// The first refusal across the `fn` methods of one `provide` block `{lo .. hi}`.
+// An arrow method (`fn m() = …`) has no statement body, so it is stepped over.
+fn verified_in_provide(ts: List[Token], lo: Int, hi: Int, wit: List[Str]) -> Verd {
+  var depth = 0
+  var i = lo + 1
+  while (i < hi - 1) {
+    if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")
+        && atk(ts, i + 2, "(")) {
+      var j = close_paren(ts, i + 2)
+      if (j == 0 - 1) { return no_verd() }
+      while (j < hi - 1 && !atk(ts, j, "{") && !atk(ts, j, "=")) { j += 1 }
+      if (atk(ts, j, "{")) {
+        let e = close_brace(ts, j)
+        if (e == 0 - 1) { return no_verd() }
+        let v = verified_in_body(ts, j, e, wit)
+        if (v.v != "") { return v }
+        i = e
+      } else {
+        i = j
+      }
+    } else {
+      let k = tkc(ts, i).kind
+      if (k == "{") { depth += 1 }
+      if (k == "}") { depth -= 1 }
+      i += 1
+    }
+  }
+  return no_verd()
+}
+
+// The method-body half for the component named `cname`: the first refusal over
+// its `provide` blocks in source order, or no verdict.
+fn verified_method_verd(ts: List[Token], cname: Str, wit: List[Str]) -> Verd {
+  let spans = model_comp_spans(ts)
+  var s = 0
+  while (s < spans.length()) {
+    if (spans[s].sname == cname) {
+      var depth = 0
+      var i = spans[s].slo
+      while (i < spans[s].shi) {
+        if (depth == 0 && atw(ts, i, "provide") && atk(ts, i + 1, "ident")) {
+          var j = i + 2
+          while (j < spans[s].shi && !atk(ts, j, "{")) { j += 1 }
+          let e = close_brace(ts, j)
+          if (e == 0 - 1) { return no_verd() }
+          let v = verified_in_provide(ts, j, e, wit)
+          if (v.v != "") { return v }
+          i = e
+        } else {
+          let k = tkc(ts, i).kind
+          if (k == "{") { depth += 1 }
+          if (k == "}") { depth -= 1 }
+          i += 1
+        }
+      }
+      return no_verd()
+    }
+    s += 1
+  }
+  return no_verd()
+}
+
+// The component's one verdict when the method rule also fires. The reference
+// raises `vm` inside its method loop, so it beats a refusal the gate anchors at
+// the component line (a post-walk verdict: aggregate G4/A1, signature parity,
+// `await`, setup reach) and an inline one on a later line; an inline refusal on
+// an earlier line was raised first.
+fn verified_or(vm: Verd, v: Verd, compLine: Int) -> Verd {
+  if (vm.v == "") { return v }
+  if (v.v == "" || v.line == compLine || vm.line <= v.line) { return vm }
+  return v
+}
+
 // The admission entry. "" admits; "<tag>|<message>" refuses.
 // ----------------------------------------------------------- nesting bound
 //
@@ -16745,8 +16949,6 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   let base = ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
                                   amb_ops_map(ambOps, 0, Map.empty())),
                       appr_info(ts, pg))
-  // issue #1963: the witnessed externs, whose calls may not spell a site `undo`
-  let wits = witnessed_extern_names(ts)
   // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
   // `errors` sink exists): a program that trips one produces that single
   // diagnostic and never reaches the component loop, so the gate returns it
@@ -16855,6 +17057,8 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // names, and whether the gate knows the full set at all (see `svc_known`).
   let sNames = svc_names(pg.svcs, 0, [])
   let svcsDecidable = ambSvcsKnown && !has_use_decl(ts)
+  // issue #1897: the witnessed externs, the callees a method may verify.
+  let wit = witnessed_extern_names(ts)
   var ci = 0
   while (ci < pg.comps.length()) {
     let comp = pg.comps[ci]
@@ -16888,9 +17092,13 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
         poisoned = poisoned.push(comp.name)
       } else {
         let cx = ctx_for(base, comp)
-        // issue #1963: the effect-statement rules the walk does not decide
-        let v = effect_stmt_or(effect_stmt_verd(ts, comp.name, wits),
-                               check_component(comp, cx, gtys), comp.line)
+        // issue #1897 (`verified` in a method) and issue #1963 (the
+        // effect-statement rules): statement refusals the walk does not
+        // decide, raised during the reference's lowering in source order, so
+        // the earlier line of the two is the component's
+        let sv = effect_stmt_or(effect_stmt_verd(ts, comp.name, wit),
+                                verified_method_verd(ts, comp.name, wit), comp.line)
+        let v = effect_stmt_or(sv, check_component(comp, cx, gtys), comp.line)
         if (v.v != "") {
           refs = refs.push(v)
           poisoned = poisoned.push(comp.name)
@@ -16962,9 +17170,10 @@ pub fn admit_src(src: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
-  // issue #1963: an undo-less dotted `effect`, a parser refusal.
-  let enu = effect_no_undo_scan(ts)
-  if (enu.v != "") { return enu.v }
+  // issue #1897 (`verified` heading anything but `effect`) and issue #1963
+  // (an undo-less dotted `effect`): parser refusals, the earlier line first.
+  let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
+  if (pps.v != "") { return pps.v }
   // issue #1728: an unbound realm placeholder is refused before lowering.
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return rph.v }
@@ -16997,8 +17206,8 @@ pub fn admit_all(src: Str) -> Str {
   if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
-  let enu = effect_no_undo_scan(ts)
-  if (enu.v != "") { return fmt_all([mk_verd(enu.v, 0)]) }
+  let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
+  if (pps.v != "") { return fmt_all([mk_verd(pps.v, 0)]) }
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return fmt_all([rph]) }
   let refs = collect_refusals(ts, pg)
@@ -17891,9 +18100,9 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
-  // issue #1963, as in `admit_src`: a parser refusal.
-  let enu = effect_no_undo_scan(ts)
-  if (enu.v != "") { return enu.v }
+  // issues #1897 and #1963, as in `admit_src`: parser refusals.
+  let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
+  if (pps.v != "") { return pps.v }
   // issue #1728, as in `admit_src`: no binding reaches the gate.
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return rph.v }
@@ -19053,6 +19262,14 @@ fn effect_stmt_verd(ts: List[Token], cname: Str, wit: List[Str]) -> Verd {
 // the gate anchors at the component line (a post-walk one: aggregate G4/A1,
 // signature parity, `await`, setup reach) and an inline one on a later line;
 // an inline refusal on an earlier line was raised first.
+// The first of two parse-stage refusals by line: the reference's parser
+// raises whichever it reaches first in the file.
+fn first_parse_verd(a: Verd, b: Verd) -> Verd {
+  if (a.v == "") { return b }
+  if (b.v == "") { return a }
+  return a.line <= b.line ? a : b
+}
+
 fn effect_stmt_or(ev: Verd, v: Verd, compLine: Int) -> Verd {
   if (ev.v == "") { return v }
   if (v.v == "" || v.line == compLine || ev.line <= v.line) { return ev }
@@ -25313,6 +25530,17 @@ test "a legitimate replacement that re-provides the key admits" {
   assert admit_ambient(svc.concat(x), "Old/db/;Store/cache/;Store<db") == ""
 }
 
+test "a let-bound verified method effect is refused (T1)" {
+  let v = admit_src("""service W { fn put(k: Str) }
+component Widget provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      let ok = verified effect store.insert_if_absent(k, "1") undo store.remove(k)
+  } }
+}""")
+  assert v == "T1|`verified effect` in a provide-method body is only allowed on a witnessed effect (issue #1897)"
+}
+
 // A `-C` row that does not name a component is a garbled wire: it refuses
 // rather than withdrawing nothing in silence.
 test "a malformed replacement row refuses rather than withdrawing nothing" {
@@ -26234,6 +26462,35 @@ test "a typed hole in a host acquisition's undo is not refused" {
 component C provides s: S {
   let store = effect Map.new() undo hole[Unit] "release"
   provide s { fn go(k) = 1 }
+}""")
+  assert v == ""
+}
+
+test "a verified method effect with a site undo is refused (T1)" {
+  let v = admit_src("""service W { fn put(k: Str) }
+component Widget provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      verified effect store.insert(k, "1") undo store.remove(k)
+  } }
+}""")
+  assert v == "T1|`verified effect` in a provide-method body is only allowed on a witnessed effect (issue #1897)"
+}
+
+test "a verified witnessed method effect is admitted" {
+  let v = admit_src("""type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      verified effect put_w(k)
+  } }
 }""")
   assert v == ""
 }
@@ -27922,6 +28179,17 @@ test "undeclared bare value in a method is refused (G1)" {
 
 test "unmarked emission is refused (G4)" {
   assert admit_src("""service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute("x") undo db.execute("y") }""") == "G4|call to emission `db.execute` must be marked `emit` (G4)"
+}
+
+test "verified before emit is a parse refusal (T1)" {
+  let v = admit_src("""service Bus { emission fn send(k: Str) }
+service W { emission fn put(k: Str) }
+component Widget requires bus: Bus provides w: W {
+  provide w { fn put(k) {
+      verified emit bus.send(k)
+  } }
+}""")
+  assert v == "T1|expected `effect` after `verified`, found 'emit'"
 }
 
 test "what a member may be declared to read is a closed vocabulary" {
