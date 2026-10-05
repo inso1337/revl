@@ -1,0 +1,1 @@
+{"case": "oracle-reject:undo slot may only call a declared fn, extern, or host builtin", "buckets": ["agree-refuse/G4"]}

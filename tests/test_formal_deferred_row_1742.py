@@ -23,7 +23,6 @@ runs in the plain `pytest tests/` job and pins the Python half.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -40,7 +39,7 @@ LEAN = ROOT / "formal" / "RevL" / "Theorems" / "G4_DeferredPosition.lean"
 ORACLE = ROOT / "formal" / "harness" / "Oracle.lean"
 GATE = ROOT / "formal" / "scripts" / "run_gate.sh"
 CHECK = ROOT / "formal" / "CheckAxioms.lean"
-LEDGER = ROOT / "formal" / "out_of_fragment_ledger.json"
+LEDGER = ROOT / "formal" / "out_of_fragment_ledger"
 STATUS = ROOT / "formal" / "STATUS.md"
 
 
@@ -155,8 +154,11 @@ def test_the_coverage_ratchet_bites(harness, monkeypatch):
 # ------------------------------------------------------- the ledger and docs
 
 def test_the_ledger_no_longer_names_the_rule(harness):
-    doc = json.loads(LEDGER.read_text(encoding="utf-8"))
+    doc = harness.load_out_of_fragment_ledger(LEDGER)
     assert "out-of-fragment-deferred" not in doc
+    assert not any("out-of-fragment-deferred" in p.read_text(encoding="utf-8")
+                   or "out-of-fragment-deferred" in p.as_posix()
+                   for p in LEDGER.rglob("*") if p.is_file())
     assert "out-of-fragment-deferred" not in harness.OOF_RATCHET_BUCKETS
     assert not any(rel in names for key, names in doc.items() if key != "_about"
                    for rel in REFUSED)

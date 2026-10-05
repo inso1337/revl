@@ -205,6 +205,11 @@ REGISTRY = [
 ]
 
 # Hand-maintained files that look generated and are not. Never resolved here.
+OOF_RULE = ("a hand-read ratchet of names (formal/out_of_fragment_ledger.md). "
+            "Take main's side, run `lake build` in formal/ and then "
+            "`python3 formal/harness/diff_corpus.py --write-ledger`, and read "
+            "the diff: a name this branch adds is a new hole.")
+
 HAND = [
     {"paths": ["tests/fixtures/selfhost_blind_spots.json",
                "tests/fixtures/oracle_construct_reach_ledger.json"],
@@ -231,8 +236,12 @@ LEDGER_RULE = ("the coverage ledger is hand-maintained PER FUNCTION. Take main's
 # `group` regenerates the new layout. Both with it: the move is history and the
 # old paths are ordinary files (`docs/census-artifact.md` is hand-written now).
 TRANSITIONS = [
-    {"paths": ["docs/census-artifact.json", "docs/census-artifact.md"],
-     "marker": "docs/census-artifact/cases.jsonl",
+    # the census artifact: the rendered report until the records layout, then
+    # one sorted cases.jsonl until a same-gap insert churned it, now one file
+    # per program under cases/ (issue #1768)
+    {"paths": ["docs/census-artifact.json", "docs/census-artifact.md",
+               "docs/census-artifact/cases.jsonl"],
+     "marker": "docs/census-artifact/cases/README.md",
      "group": "census", "before": {"group": "census"}},
     {"paths": ["tests/fixtures/selfhost_uncovered_lines.json"],
      "marker": "tests/fixtures/selfhost_uncovered_lines/README.md",
@@ -246,6 +255,15 @@ TRANSITIONS = [
                "tests/fixtures/census_crate_reproduction/programs.jsonl"],
      "marker": "tests/fixtures/census_crate_reproduction/README.md",
      "group": "census", "before": {"group": "census"}},
+    # the out-of-fragment ledger: one JSON object of lists until neighbouring
+    # list edits conflicted, now one file per record under
+    # formal/out_of_fragment_ledger/ (issue #1768), which two branches only
+    # conflict on when both change the same name. Crossing takes main's side
+    # of the old file; the formal check then names any record this branch
+    # still owes (`--write-ledger`).
+    {"paths": ["formal/out_of_fragment_ledger.json"],
+     "marker": "formal/out_of_fragment_ledger.md",
+     "group": "formal", "before": {"rule": OOF_RULE}},
 ]
 
 

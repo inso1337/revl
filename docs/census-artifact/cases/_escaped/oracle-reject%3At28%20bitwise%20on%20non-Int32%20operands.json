@@ -1,0 +1,1 @@
+{"case": "oracle-reject:t28 bitwise on non-Int32 operands", "buckets": ["agree-refuse/T1"]}

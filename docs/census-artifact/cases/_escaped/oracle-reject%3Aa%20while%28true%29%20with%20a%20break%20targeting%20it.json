@@ -1,0 +1,1 @@
+{"case": "oracle-reject:a while(true) with a break targeting it", "buckets": ["agree-refuse/T1"]}

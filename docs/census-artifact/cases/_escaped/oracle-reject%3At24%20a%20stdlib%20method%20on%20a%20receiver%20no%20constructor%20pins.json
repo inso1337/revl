@@ -1,0 +1,1 @@
+{"case": "oracle-reject:t24 a stdlib method on a receiver no constructor pins", "buckets": ["agree-refuse/HOST-METHOD"]}

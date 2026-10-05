@@ -1,0 +1,1 @@
+{"case": "oracle-reject:two handoffs in one component are refused", "buckets": ["agree-refuse/HANDOFF"]}

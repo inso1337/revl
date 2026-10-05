@@ -1,0 +1,1 @@
+{"case": "oracle-accept:a coerced arrow nested in a sync arrow does not leak", "buckets": ["agree-admit"]}

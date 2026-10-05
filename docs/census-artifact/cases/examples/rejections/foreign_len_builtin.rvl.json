@@ -1,0 +1,1 @@
+{"case": "examples/rejections/foreign_len_builtin.rvl", "buckets": ["refuse-out-of-slice/FOREIGN"]}

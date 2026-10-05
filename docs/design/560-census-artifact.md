@@ -49,10 +49,14 @@ in conflict there, and resolving it meant another census run that the next
 landing undid.
 
 What is committed now is the records of the run, in `docs/census-artifact/`:
-`cases.jsonl` (one `[case id, bucket]` row per program, sorted by case id),
-`pins.jsonl` (one `[group, file]` row per pinned file, sorted) and `facts.json`
-(the engine, the issued admissions, the reference faults and the driven probe).
-One record per line, a blank line between records, nothing derived. Not even the
+`cases/` (one file per program, at a path that mirrors its case id; see
+`docs/census-artifact/cases/README.md`), `pins.jsonl` (one `[group, file]` row
+per pinned file, sorted) and `facts.json` (the engine, the issued admissions, the
+reference faults and the driven probe). One record per line in the two record
+files, a blank line between records, nothing derived. The cases began as one
+sorted `cases.jsonl`, and two pull requests that each added programs at the
+same place in it still conflicted (issue #1768); a file per program removes
+that. Not even the
 digests are stored: the sha256 of a program or of a pinned file is a property of
 the checkout, and storing it meant every pull request that edited a pinned
 module rewrote its line even when no verdict moved. Every aggregate is a function
@@ -65,11 +69,11 @@ holds that the report is the same either way. `docs/census-artifact.md` is now a
 hand-written page with no number in it.
 
 Two pull requests now conflict in the records only when both moved the verdict
-of the same program, added programs at the same place, or changed which files the
-run reads, and the resolution is
+of the same program or changed which files the run reads, and the resolution is
 the same command as the regeneration: `python3 tools/census_artifact.py
---write`. `--verify --strict` also compares each record file byte for byte
-against the run, so a reordered or hand-merged file fails it.
+--write`. `--verify --strict` also compares each record file and each case
+file byte for byte against the run, and reports a missing or left-over case
+file, so a reordered, hand-merged or forgotten file fails it.
 
 ## The mechanism is driven, not asserted
 
