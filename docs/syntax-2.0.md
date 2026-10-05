@@ -782,7 +782,10 @@ compile error, not a runtime surprise.
   config. Loading is *not* activation: a component whose `requires` are unmet
   stays PENDING (R2), and only becomes ACTIVE when a provider arrives.
   `load UserCache` before `load PgDatabase` is legal and does nothing until
-  the database lands.
+  the database lands. A component whose activation RAISES is a different
+  failure, and the `load` step reports it as such: the component's name and
+  the error it raised, on every tier (issue #1895). The R2 wording is only for
+  a `requires` that is unmet.
 - **`unload C`** disposes the instance, running its accumulated inverses
   newest-first (R1) and withdrawing its provisions (R5). Unloading a
   component that is not loaded is a compile error.
@@ -840,15 +843,16 @@ test was released by the end: no `Pool.open` without a `close`, and no
 Together the two halves catch the two ways a composition leaks:
 
 - *the test left something loaded*: R4 fires (`provisions: [] -> ['db']`);
-- *an `undo` is not the inverse of its acquisition*: R1 fires
+- *a host resource was never released*: R1 fires
   (`pool#1 (open() with no close())`).
 
-The second is the interesting one, and it is why this form earns its place:
-G4 requires an acquisition to *carry* an `undo`, but nothing in the type
-system knows whether that undo undoes anything. `verified effect` (§7)
-would, and is not implemented. `examples/lifecycle_leak.rvl` is a component
-that passes every static check and leaks a connection pool on every unload;
-the assertion catches it.
+For a HOST acquisition (`Map.new`, `Pool.open`, `Stream.source`) the checker
+now proves the inverse statically: the `undo` must be the family's release
+on the bound handle (issue #1859), so a wrong host `undo` never reaches this
+assertion. What R1 still catches at runtime is a release that did not happen
+for another reason. `examples/lifecycle_leak.rvl` is a component that passes
+every static check and whose test never unloads it, so the pool it opened is
+still live; the assertion catches both halves.
 
 The resource half is necessarily tier-specific: it is stated over the
 reference tier's host-builtin vocabulary (`Pool`/`Map` in

@@ -93,6 +93,7 @@ _IMPORT_ALIAS = {
     "estop_gated": "_revl_estop_gated",
     "declare_secret_types": "_revl_declare_secret_types",
     "declared_crossing": "_revl_declared_crossing",
+    "site_compensation": "_revl_site_compensation",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -2059,7 +2060,11 @@ class _ComponentEmitter:
                 out.add(indent, "yield _revl_frame.compensation(lambda: "
                                  f"{self._expr(step.get('compensate'), where)}"
                                  f"{self._compensation_call(step.get('compensate'), where)})")
-            ext_comp = self._compensated_extern(step.get("expr"))
+            # issue #1902: one compensation per crossing. A site-spelled
+            # `compensate` REPLACES the extern's declared one; the declared one
+            # is the default only when the site spells none.
+            ext_comp = (self._compensated_extern(step.get("expr"))
+                        if step.get("compensate") is None else None)
             if ext_comp is not None:
                 # item 254: the emitted extern DECLARES its own `compensate` (the
                 # extern owns the reversal, so no site spelling is required — the
@@ -2493,6 +2498,12 @@ class _ComponentEmitter:
         if ext is None or ext.get("name") in self._decorated:
             return None
         return ext
+
+    def _decorated_crossing(self, expr: Any) -> bool:
+        """Whether `expr` is a call to an extern `declared_crossing` decorates
+        (a computer-use crossing), which registers its own compensation."""
+        return (isinstance(expr, dict) and expr.get("kind") == "fn"
+                and expr.get("name") in self._decorated)
 
     def _method_compensation(self, ext_comp: dict, where: str) -> str:
         """The compensation an extern declares, registered at a provide-method
@@ -3058,19 +3069,28 @@ class _ComponentEmitter:
                 # guarded and residue-collected. Fire the emission first, then
                 # register — the sync spelling of the activation body's
                 # `<fire>; yield _revl_frame.compensation(...)`.
-                out.add(indent, self._emit_fire(step, where))
-                out.add(indent,
-                        "_revl_frame.compensation_method("
-                        f"{_inverse_lambda(step, 'compensate')}: "
+                site = (f"{_inverse_lambda(step, 'compensate')}: "
                         f"{self._inverse_expr(step.get('compensate'), where)}"
-                        f"{_named_call_kwarg(step.get('compensate'), lambda a: self._inverse_expr(a, where))})")
+                        f"{_named_call_kwarg(step.get('compensate'), lambda a: self._inverse_expr(a, where))}")
+                if (self._decorated_crossing(step.get("expr"))
+                        and self._compensated_extern(step.get("expr")) is not None):
+                    # issue #1902: a decorated crossing registers its extern's
+                    # declared compensation itself (`declared_crossing`), so
+                    # the site-spelled one is handed to it and REPLACES the
+                    # declared one: one registrar and one entry per crossing.
+                    self.uses.add("site_compensation")
+                    out.add(indent, f"with {_runtime_ref('site_compensation')}({site}):")
+                    out.add(indent + 1, self._emit_fire(step, where))
+                else:
+                    out.add(indent, self._emit_fire(step, where))
+                    out.add(indent, f"_revl_frame.compensation_method({site})")
             else:
                 out.add(indent, self._emit_fire(step, where))
             ext_comp = self._method_compensated_extern(step.get("expr"))
-            if deferred is None and ext_comp is not None:
-                # item 254 / #1592: the extern DECLARES its own `compensate`.
-                # Registered after the fire and after a site-spelled one, the
-                # order the activation body (and the timer site, #1590) uses.
+            if deferred is None and ext_comp is not None and step.get("compensate") is None:
+                # item 254 / #1592: the extern DECLARES its own `compensate`,
+                # registered after the fire. A site-spelled one replaces it
+                # (issue #1902), as at the activation body.
                 out.add(indent, self._method_compensation(ext_comp, where))
         elif kind == "return":
             if step.get("expr") is None:
@@ -4737,9 +4757,25 @@ async def _revl_settle():
         await _revl_asyncio.sleep(0)
 
 
+def _revl_live():
+    # the fibers this lifecycle test loaded, by component, kept where
+    # `_revl_call` can read why a provider is missing (issue #1895)
+    _REVL_LIVE.clear()
+    return _REVL_LIVE
+
+
 async def _revl_call(root, key, method, args, where):
     impl = root.get(key)
     if impl is None:
+        # a provider whose activation RAISED is its own failure, with the error
+        # it raised; the R2 wording is only for a `requires` that is unmet
+        # (issue #1895). cordis records the error on the FAILED fiber.
+        for name in _REVL_PROVIDERS.get(key, ()):
+            err = getattr(_REVL_LIVE.get(name), "_error", None)
+            if err is not None:
+                raise AssertionError(
+                    "{}: no provider for key {!r}: its provider {} failed to activate: "
+                    "{}: {}".format(where, key, name, type(err).__name__, err)) from err
         raise AssertionError(
             "{}: no provider for key {!r} \u2014 its component is loaded but not ACTIVE; "
             "a component with an unmet `requires` stays PENDING (R2)".format(where, key))
@@ -4758,10 +4794,23 @@ def _revl_collect_inverse_residue(fiber):
 '''
 
 
+def _render_providers(ir: dict) -> str:
+    """`_REVL_PROVIDERS`: each provision key, sorted, to the components that
+    provide it, in declaration order (issue #1895)."""
+    providers: dict = {}
+    for comp in ir.get("components") or []:
+        for key in comp.get("provides") or {}:
+            providers.setdefault(key, []).append(_ident(comp["name"], "component name"))
+    return "{" + ", ".join(
+        f"{key!r}: [{', '.join(map(repr, names))}]"
+        for key, names in sorted(providers.items())) + "}"
+
+
 def _emit_lifecycle_harness() -> "_Lines":
     out = _Lines()
     out.add(0, f"_REVL_ACQUIRE = {_LIFECYCLE_ACQUIRE!r}")
     out.add(0, "_REVL_INVERSE_RESIDUE = []")
+    out.add(0, "_REVL_LIVE = {}")
     out.add(0)
     for line in _LIFECYCLE_HARNESS.strip("\n").split("\n"):
         out.add(0, line)
@@ -4792,7 +4841,7 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         out.add(2, "_revl_Clock.reset()")
     out.add(2, "events = []")
     out.add(2, "_REVL_INVERSE_RESIDUE.clear()")
-    out.add(2, "_revl_fibers = {}")
+    out.add(2, "_revl_fibers = _revl_live()")
     if uses_abort:
         # item 377: register a 245 session-commit owner BEFORE any component
         # loads, so every activation frame joins its live-frame registry and an
@@ -5865,6 +5914,9 @@ def emit(ir: dict) -> str:
             for key, idem in sorted(idempotent_map.items())
         ) + "}"
         out.add(0, f"_REVL_IDEMPOTENT = {rendered_idem}")
+        # issue #1895: {key: the components that provide it}, so a call that
+        # finds no provider can say the provider's activation raised
+        out.add(0, f"_REVL_PROVIDERS = {_render_providers(ir)}")
         out.add(0)
     # issue #540: one traversal answers every `_uses_*` gate below, in place of
     # the dozen-plus full-IR walks that dominated emit. Byte-identical output.

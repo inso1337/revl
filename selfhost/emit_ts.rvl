@@ -2797,15 +2797,16 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
     }
     var out = [`${pad}${emitted}`]
     var c = er.counter
-    // the site-spelled clause, then the emitted extern's own declared one
-    // (item 254, issue #1592), each registered after the fire
+    // one compensation per crossing (issue #1902), registered after the fire:
+    // the site-spelled clause, else the emitted extern's own declared one
+    // (item 254, issue #1592)
     let comp = value_field(step, "compensate")
     if (!value_is_null(comp)) {
       let r = register_compensation(comp, false, level, c, a, site_prefix, scope_name, register)
       out = out.concat(r.lines)
       c = r.counter
     }
-    let idx = compensated_extern_index(value_field(step, "expr"), a.comps)
+    let idx = value_is_null(comp) ? compensated_extern_index(value_field(step, "expr"), a.comps) : -1
     if (idx >= 0) {
       let r = register_compensation(value_field(a.comps[idx], "compensate"), true, level, c, a, site_prefix, scope_name, register)
       out = out.concat(r.lines)

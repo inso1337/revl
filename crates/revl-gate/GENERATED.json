@@ -31,7 +31,7 @@
     "Unit"
   ],
   "admission_surface": "admission-interface:<identity>",
-  "admitted_layer": "interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides",
+  "admitted_layer": "interface declarations, and components whose provide-method bodies are parameter reads and calls on a required service, over a closed scalar type vocabulary; every term in the region is one this gate types itself",
   "covered_layer": "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer",
   "crate": "revl-gate",
   "crate_version": "0.1.0",

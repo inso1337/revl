@@ -3219,9 +3219,10 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))}${call_kwarg(value_field(step, "compensate"), "")})`))
     }
     // item 254: the reversal an emission extern declares on itself, registered
-    // as the same Phase-2 compensation a site-spelled one is.
+    // as the same Phase-2 compensation a site-spelled one is. One per crossing
+    // (issue #1902): a site-spelled `compensate` replaces it.
     let ext_comp = compensated_extern(value_field(step, "expr"), externs)
-    if (!value_is_null(ext_comp)) {
+    if (!value_is_null(ext_comp) && value_is_null(value_field(step, "compensate"))) {
       out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(ext_comp, "compensate"))}${call_kwarg(value_field(ext_comp, "compensate"), "")})`))
     }
     out = out.push("")
@@ -4176,6 +4177,7 @@ fn lifecycle_harness() -> List[Str] {
   var out = [
     "_REVL_ACQUIRE = {'new': 'drop', 'open': 'close', 'schedule': 'cancel'}",
     "_REVL_INVERSE_RESIDUE = []",
+    "_REVL_LIVE = {}",
     "",
     "def _revl_residue(root):",
     "    \"\"\"R4 (docs/backend-ir.md): what the host runtime holds for a composition.\"\"\"",
@@ -4236,9 +4238,25 @@ fn lifecycle_harness() -> List[Str] {
     "        await _revl_asyncio.sleep(0)",
     "",
     "",
+    "def _revl_live():",
+    "    # the fibers this lifecycle test loaded, by component, kept where",
+    "    # `_revl_call` can read why a provider is missing (issue #1895)",
+    "    _REVL_LIVE.clear()",
+    "    return _REVL_LIVE",
+    "",
+    "",
     "async def _revl_call(root, key, method, args, where):",
     "    impl = root.get(key)",
     "    if impl is None:",
+    "        # a provider whose activation RAISED is its own failure, with the error",
+    "        # it raised; the R2 wording is only for a `requires` that is unmet",
+    "        # (issue #1895). cordis records the error on the FAILED fiber.",
+    "        for name in _REVL_PROVIDERS.get(key, ()):",
+    "            err = getattr(_REVL_LIVE.get(name), \"_error\", None)",
+    "            if err is not None:",
+    "                raise AssertionError(",
+    "                    \"{}: no provider for key {!r}: its provider {} failed to activate: \"",
+    "                    \"{}: {}\".format(where, key, name, type(err).__name__, err)) from err",
     "        raise AssertionError(",
     "            \"{}: no provider for key {!r} — its component is loaded but not ACTIVE; \"",
     "            \"a component with an unmet `requires` stays PENDING (R2)\".format(where, key))",
@@ -4304,6 +4322,29 @@ fn idempotent_map_line(ir: Any) -> Str {
     }
   }
   return `_REVL_IDEMPOTENT = {${list_sort(entries).join(", ")}}`
+}
+
+// `_REVL_PROVIDERS` (issue #1895): {provision key: the components providing
+// it}, keys sorted and components in declaration order, as the reference's
+// `_render_providers` writes it.
+fn providers_map_line(ir: Any) -> Str {
+  var keys = []
+  for (c of value_list(value_field(ir, "components"))) {
+    for (key of value_keys(value_field(c, "provides"))) {
+      keys = keys.push(key)
+    }
+  }
+  var entries = []
+  for (key of list_sort(list_dedup(keys))) {
+    var names = []
+    for (c of value_list(value_field(ir, "components"))) {
+      if (list_contains(value_keys(value_field(c, "provides")), key)) {
+        names = names.push(py_repr(mangle(value_str(value_field(c, "name")))))
+      }
+    }
+    entries = entries.push(`${py_repr(key)}: [${names.join(", ")}]`)
+  }
+  return `_REVL_PROVIDERS = {${entries.join(", ")}}`
 }
 
 // `_lifecycle_step`: one statement of a lifecycle test's async driver.
@@ -4372,7 +4413,7 @@ fn emit_lifecycle_test(t: Any, fname: Str) -> List[Str] {
     line(1, "async def _run():"),
     line(2, "root = Context()")]
   if (test_uses_step(t, "advance")) { out = out.push(line(2, "_revl_Clock.reset()")) }
-  out = out.concat([line(2, "events = []"), line(2, "_REVL_INVERSE_RESIDUE.clear()"), line(2, "_revl_fibers = {}")])
+  out = out.concat([line(2, "events = []"), line(2, "_REVL_INVERSE_RESIDUE.clear()"), line(2, "_revl_fibers = _revl_live()")])
   if (uses_abort) {
     out = out.concat([line(2, "_revl_owner = _revl_SessionOwner()"), line(2, "_revl_set_session_owner(_revl_owner)")])
   }
@@ -4568,6 +4609,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (async_timer && !has_lifecycle_test(ir)) { out = out.push("") }
   if (has_lifecycle_test(ir)) {
     out = out.push(idempotent_map_line(ir))
+    out = out.push(providers_map_line(ir))
     out = out.push("")
   }
   if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }

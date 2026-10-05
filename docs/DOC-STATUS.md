@@ -129,7 +129,7 @@ was corrected by hand and had drifted back within a day.
 | frontend-assets.md | needs-work | 13 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
-| gate-dependency-contract.md | stale-fixed | 0 |  |
+| gate-dependency-contract.md | stale-fixed | 1 |  |
 | gauntlet.md | needs-work | 18 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
@@ -173,7 +173,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 46 | yes |
-| rejections.md | needs-work | 70 |  |
+| rejections.md | needs-work | 71 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |
