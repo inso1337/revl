@@ -583,6 +583,50 @@ pub fn join(a: Str, b: Str) -> Str {
 pub fn widen_bottom(declared: Str, actual: Str) -> Str {
   if (declared == "" || actual == "") { return "" }
   if (declared == "Never") { return actual }
+  // Port of the reference's structural-record branch. A record spelling has no
+  // parsed head/args to recurse into, so `var svc = { name: n, methods: [] }`
+  // (declared `{methods: List[Never], name: Str}`) was refused at its first
+  // reassignment where `var m = Map.empty()` is admitted — the same rule, one
+  // level in. Field-wise, with the same "only bottoms may be filled" test.
+  // The reference also tries `nominal_record_fields` on each side; this port
+  // has no declared-type table, so it takes the structural reading only, which
+  // is exactly the reference's `types = None` path.
+  let ds = structural_parse(declared)
+  let as0 = structural_parse(actual)
+  if (ds.is_rec && ds.fields.length() > 0
+      && as0.is_rec && as0.fields.length() > 0) {
+    var i = 0
+    while (i < ds.fields.length()) {
+      if (!has_field(as0.fields, ds.fields[i].name)) { return "" }
+      i += 1
+    }
+    var j = 0
+    while (j < as0.fields.length()) {
+      if (!has_field(ds.fields, as0.fields[j].name)) { return "" }
+      j += 1
+    }
+    var filled: List[RecField] = []
+    var grew_field = false
+    var k = 0
+    while (k < ds.fields.length()) {
+      let d = ds.fields[k].ty
+      let a = field_ty(as0.fields, ds.fields[k].name)
+      let inner = widen_bottom(d, a)
+      if (inner != "" && inner != d) {
+        filled = filled.push({ name: ds.fields[k].name, ty: inner })
+        grew_field = true
+      } else {
+        if (compatible(d, a)) {
+          filled = filled.push({ name: ds.fields[k].name, ty: d })
+        } else {
+          return ""
+        }
+      }
+      k += 1
+    }
+    if (grew_field) { return format_structural(filled) }
+    return ""
+  }
   let dp = parse_type(declared)
   let ap = parse_type(actual)
   if (dp.args.length() == 0 || dp.head != ap.head
