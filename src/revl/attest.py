@@ -210,7 +210,7 @@ def path_normalized_ir(ir):
     shape — sign in CI at one checkout path, verify against the same source at
     another — could not work while it was.
 
-    This is not a new decision. `revl bundle`, `registry.build_evidence` and
+    This is not a new decision. `revl bundle`, `registry_evidence.build_evidence` and
     `truc reproduce` each already normalized these exact fields for exactly
     this reason, and each did it in its own copy; two of those copies drifted
     apart and left `truc reproduce`'s attestation tier structurally dead
@@ -423,6 +423,17 @@ def named_guarantees() -> list[str]:
 #: `tests/test_edit_trust_diff_1715.py` holds both sides of that line. It cites
 #: no `(Gn)` tag, so it is a digest input and not a cited code.
 #:
+#: `type_schema` joined with issue #1780 on the same rule. It is the half of the
+#: MCP tool projection the compiler needs, moved out of `revl.mcp.schema` so
+#: compiling no longer imports `revl.mcp`. Its bytes were a rule before the
+#: move too: `lower` refuses an event item, a validated emission response or a
+#: routed body whose type `fully_expressible` rejects, and checks
+#: `has_revl_stub` on the schema it renders. Measured: making
+#: `fully_expressible` answer True, `expressibility_reason` None and
+#: `has_revl_stub` False turns `event Wrapped(key: id) { id: Str, payload:
+#: Opt[Opt[Str]] }` from refused to admitted. It cites no `(Gn)` tag, so it is
+#: a digest input and not a cited code.
+#:
 #: WHY THIS IS STILL A LIST. Membership is reachability plus effect, and neither
 #: is a property of the bytes of this file: a module refuses only when the
 #: frontend reaches it on some program, which only a run settles. An import-time
@@ -442,7 +453,7 @@ RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "typecheck", "lexer", "composition", "hostref", "hostfile",
                    "cap_order", "ui_family", "resources", "kernel_boundary",
                    "cardinality", "decode_grammar", "model_profile",
-                   "operator_text")
+                   "operator_text", "type_schema")
 
 #: The sibling modules a rule module imports that are NOT rules, each with the
 #: reason it is not one. This is the argued half of the membership question and
@@ -490,6 +501,11 @@ NOT_A_RULE = {
                       "composition. It refuses a placement onto a host's "
                       "declared devices, never a program: nothing under "
                       "`compile_files` imports it.",
+    "placement_wal": "the per-process write-ahead logs of a placement run "
+                     "and their index (issue #1477), written by "
+                     "`placement`'s conductor at run time and read by "
+                     "`revl recover`. It records crossings; it refuses no "
+                     "program.",
     "refusal": "tells a backend emitter's EmitError apart from its fault "
                "after the frontend has admitted the document; `placement` "
                "reads it only on the emit path. Measured: making "
@@ -581,10 +597,23 @@ def discharged_guarantees() -> list[str]:
 
 
 def compiler_version() -> str:
-    """The revl toolchain version recorded as `checker.compiler`."""
-    from .gate import _language_version  # noqa: PLC0415 — lazy, avoids an import cycle
+    """The revl toolchain version recorded as `checker.compiler`: the installed
+    distribution's version, falling back to the in-repo package version when
+    running from a checkout with no install. `revl.gate` reports the same value
+    as `gate_version().language`.
 
-    return _language_version()
+    Defined here, not in `revl.gate`: the compiler's import chain reaches this
+    module, and importing `revl.gate` from it put the gate, and through the
+    gate `revl.mcp`, on that chain (issue #1780)."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+        try:
+            return version("revl")
+        except PackageNotFoundError:
+            pass
+    except Exception:  # noqa: BLE001 — metadata is a convenience, never fatal
+        pass
+    return "2.0.0"
 
 
 def checker_identity() -> dict:

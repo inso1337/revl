@@ -37,9 +37,23 @@
     "examples/rejections/g6_method_local_shadows_component.rvl"
   ],
   "out-of-fragment-approval": [
+    "examples/rejections/g4_approval_compensate.rvl",
+    "examples/rejections/g4_approval_compensate_method.rvl",
+    "examples/rejections/g4_approval_compensate_other_edge.rvl",
     "examples/rejections/g4_approval_helper_reach.rvl",
     "examples/rejections/g4_approval_scoped_extern.rvl",
+    "examples/rejections/g4_approval_spawn_handle.rvl",
+    "examples/rejections/g4_approval_spawn_handle_alias.rvl",
+    "examples/rejections/g4_approval_spawn_handle_method.rvl",
     "examples/rejections/g4_approval_value_form_method.rvl",
+    "tests/fixtures/approval_service_locals/g4_alias_step.rvl",
+    "tests/fixtures/approval_service_locals/g4_arrow_param_applied.rvl",
+    "tests/fixtures/approval_service_locals/g4_handle_direct_value.rvl",
+    "tests/fixtures/approval_service_locals/g4_if_local_step.rvl",
+    "tests/fixtures/approval_service_locals/g4_if_local_value.rvl",
+    "tests/fixtures/approval_service_locals/g4_list_element_step.rvl",
+    "tests/fixtures/approval_service_locals/g4_record_alias_step.rvl",
+    "tests/fixtures/approval_service_locals/g4_record_field_step.rvl",
     "tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl",
     "tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl",
     "tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl",
@@ -51,7 +65,12 @@
     "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_else.rvl",
     "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl",
     "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl"
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_if_marked.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_list_marked.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_match_marked.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_record_marked.rvl",
+    "tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl"
   ],
   "out-of-fragment-inverse": [
     "examples/rejections/g4_extern_undo_not_declared.rvl",

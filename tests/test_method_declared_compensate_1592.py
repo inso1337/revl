@@ -10,9 +10,9 @@ that, and the timer site since #1590, but a provide-method `emit put_row(m)`
 rendered only the forward call: a call then an abort left `put m` and never
 ran `restore`, while the site-spelled control (`emit put_row(m) compensate
 plain_restore()`) restored. The method site now registers the declared
-compensation through `Frame.compensation_method` after the fire, after a
-site-spelled one when both are present; a value-position `return emit
-put_row(m)` (#1603) registers it too, before the value is returned.
+compensation through `Frame.compensation_method` after the fire, unless the
+site spells its own, which replaces it (issue #1902); a value-position `return
+emit put_row(m)` (#1603) registers it too, before the value is returned.
 """
 
 import copy
@@ -89,16 +89,22 @@ def _method(src: str, name: str) -> list:
 
 
 FIRE = "_revl_extern_emit(_revl_ctx, 'put_row', put_row, (m,))"
-DECLARED = "_revl_frame.compensation_method(lambda: restore_row())"
+# the named call rides beside the thunk so a fresh process can re-issue it
+# (issue #1369's WAL descriptor)
+DECLARED = ("_revl_frame.compensation_method(lambda: restore_row(), "
+            "call={'receiver': None, 'method': 'restore_row', 'args': []})")
 
 
 def test_an_emit_statement_registers_the_declared_compensation():
     assert _method(_emitted(), "put") == [FIRE, DECLARED]
 
 
-def test_a_site_spelled_compensation_registers_first_then_the_declared_one():
+def test_a_site_spelled_compensation_replaces_the_declared_one():
+    """Issue #1902: one compensation per crossing. The site spells its own, so
+    the extern's declared one is not registered beside it."""
     assert _method(_emitted(), "both") == [
-        FIRE, "_revl_frame.compensation_method(lambda: plain_restore())", DECLARED]
+        FIRE, "_revl_frame.compensation_method(lambda: plain_restore(), "
+              "call={'receiver': None, 'method': 'plain_restore', 'args': []})"]
 
 
 def test_a_value_emission_registers_the_declared_compensation_before_returning():
@@ -145,15 +151,15 @@ def test_a_call_then_an_abort_runs_the_declared_compensation(order, method, valu
 
 
 @needs_cordis
-def test_a_call_then_an_abort_runs_site_spelled_then_declared(order):
+def test_a_call_then_an_abort_runs_only_the_site_spelled_one(order):
     session, frame = _session()
 
     session.call("rows", "both", ["m"])
     frame.abort()
     session.unload()
 
-    # Phase 2 drains newest first: the declared one registered last
-    assert _lines(order) == ["put m", "restore", "site-restore"]
+    # issue #1902: the site-spelled compensation replaces the declared one
+    assert _lines(order) == ["put m", "site-restore"]
 
 
 @needs_cordis

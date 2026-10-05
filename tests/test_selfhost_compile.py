@@ -655,6 +655,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../backends/go/testdata/opt_gaps_280.rvl",
         # ... and on the issue #1631 erased-Result document
         "../../../backends/go/testdata/result_erased_1631.rvl",
+        # issue #106, the combined path's first slice: the same `tests` section
+        # gap, and issue #1823, a provide method that calls a function-valued
+        # parameter (`f(f(n))`), whose whole `provide` block lower.rvl drops.
+        # The other combined documents are byte-exact through the native chain.
+        "comp_provide_pure.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -691,6 +696,15 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # rather than skipped, so the day lower.rvl grows that surface this list
         # shrinks instead of quietly keeping a waiver nobody rereads.
         "comp_stream.rvl",
+        # item 391: the bridge marshalling document. Emitter-exact from the
+        # reference IR; the native IR producer drops the whole component body
+        # when a provide method's body is a bare `None` (`fn weight(name) =
+        # None`), so the native chain emits the component with no provision.
+        "bridge_types.rvl",
+        # item 391: in-file `test` blocks. Emitter-exact from the reference IR;
+        # the native IR producer carries no `tests` section, so the native chain
+        # emits the functions and drops every `#[test] fn`.
+        "in_file_tests.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),

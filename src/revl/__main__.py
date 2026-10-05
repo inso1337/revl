@@ -270,11 +270,18 @@ def _run_policy(args) -> int:
     mcp_components = (frozenset(audit.get("boundary") or {})
                      if "*" in scope else frozenset(scope))
 
+    # the producer that RUNS the program under --recompute (issue #1780: it is
+    # passed in, so revl.policy never imports the runtime)
+    recompute_producer = None
+    if recompute:
+        from .evidence_recompute import recompute_component as recompute_producer  # noqa: PLC0415
+
     result = explain(policy, audit, mcp_components, evidence=evidence,
                      origins=origins, trusted_publishers=trusted, key=key,
                      evidence_ir=evidence_ir, recompute=recompute,
                      recompute_ir=recompute_ir,
                      recompute_gauntlet=recompute_gauntlet,
+                     recompute_producer=recompute_producer,
                      component=args.component)
     if args.json:
         print(json.dumps(result, indent=2))
@@ -1361,6 +1368,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_attest(args)
     if args.command == "dash":
         return _run_dash(args)
+    if args.command == "act":
+        from .cli.interop import _run_act  # noqa: PLC0415 - lazy
+        return _run_act(args)
     if args.command == "recover":
         return _run_recover(args)
     if args.command == "estop":

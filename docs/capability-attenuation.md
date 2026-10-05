@@ -169,11 +169,33 @@ the product, and a model nobody has described is exactly the one whose reach is
 unknown. It is the same choice `_spawn_emission_surface` already makes for a
 service method that declares `emission` with no capability list.
 
+**Leaving out the block is not a way out.** A role enters the product two
+ways: the `route model` block names it, or a crossing is placed on it by its
+`model.<role>` token (item 512 slice 4). The second is an edge whether or not a
+block is written, so deleting the block cannot widen what the component may
+reach (issue #1193 slice 2):
+
+```
+`Classifier` crosses `model.tool`, placed on model role `tool`, which reaches
+`shell.exec`, but `Classifier` holds only `model.tool` - ... (G-MODEL-PLACE)
+```
+
+The crossings are read in every position (a `let`, a `return`, an expression
+body, an argument) and through a helper `fn` that reaches the extern, the same
+reading the spawn fold above takes.
+
+**An unscoped emission is named as one.** A method that declares a bare
+`emission` folds to an element of its service, a token no `reaches [...]` list
+can spell, so the refusal says the component holds service `Model`'s
+unscoped emission and names the fix: give the method a scoped capability and
+reach that (issue #1451).
+
 The question is asked only of a component that holds a boundary which could be
 a model call, because a role can only steer an action that reaches a boundary.
 An admitted composition records the product per edge under
 `manifest.model_reach`, including `attenuated` — what the component holds that
-the role does not reach. The section is role-only: a composition that declares
+the role does not reach. A crossing edge's row also carries `crossing`, the
+`model.<role>` token that placed it. The section is role-only: a composition that declares
 no `model role` has no `model_reach` key.
 
 ## The audit chain (G8)

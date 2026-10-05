@@ -20,18 +20,13 @@
     "BEFORE the port and seen to fail."
   ],
   "go": {
-    "blind": {
-      "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
-        "kind=name"
-      ]
-    },
+    "blind": {},
     "unported": {
       "Issues #1511 and #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit` (a `ctx.Effect` compensation entry), a provide-method `emit` and every value position of a provide method (`registerMethodCompensation`, through `revlDeclared` for a `let`, a `return`, an argument or a nested operand), and a timer firing. It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/extern_compensate/exec_test.go.": [
         "class=emission"
       ],
-      "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
+      "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support. Issue #106: a v3 provide method's own body does spell `name` and `fn` (a parameter, a module fn call), and the combined slice ports and reaches both, so they left this list.": [
         "kind=bool",
-        "kind=fn",
         "kind=format",
         "kind=int",
         "kind=str"
@@ -39,13 +34,11 @@
       "Lifecycle fault/teardown harness assertion checks runtime residue; in-file lifecycle tests and the live component teardown ABI are outside emit_go.rvl.": [
         "step=assert_no_residue"
       ],
-      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all.": [
+      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all. Issue #106 ports the combined path's provide-only slice (a `provide` block of single-`return` methods, required services and the service interfaces), so `step=provide`, `kind=req` and `idempotent` left this list; the rest of the live ABI stays here.": [
         "has_config=<true>",
-        "idempotent=<true>",
         "kind=config",
         "kind=host",
         "kind=instance-get",
-        "kind=req",
         "kind=spawn",
         "kind=stream-merge",
         "kind=subscribe",
@@ -64,7 +57,6 @@
         "step=intercept",
         "step=let-effect",
         "step=load",
-        "step=provide",
         "step=stream-iter",
         "step=timer",
         "step=unload",
@@ -174,6 +166,9 @@
         "stage=take",
         "step=stream-iter",
         "subscribe=<true>"
+      ],
+      "Issue #1511: an extern of `class=emission` that declares `compensate` is registered at every crossing in a component through `RevlDeclared`. selfhost/emit_java.rvl does not port the registration, so a corpus document declaring one would make the byte-agreement oracle diverge; the runtime proof is backends/java/test_declared_compensate_java.py.": [
+        "class=emission"
       ]
     }
   },
@@ -190,6 +185,9 @@
       ],
       "Internal reference-only pseudo-node, not frontend syntax: emit.py::_RenderedBody wraps already rendered component match arms with kind=__rendered__; emit_py.rvl::cmatch_branch passes expression strings directly. emit_py_corpus/branches.rvl::block_match covers the corresponding source behavior.": [
         "kind=__rendered__"
+      ],
+      "UI transaction unit boundary (item 522): emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and _emit_externs decorates each such extern with `declared_crossing` (`ui=True`). emit_py.rvl::emit_externs/method_step carries no UI transaction unit at all. tests/test_ui_transaction_runtime_1369.py reproduces the family; a corpus document would need a computer-use capability the port cannot emit.": [
+        "key=<activation>"
       ]
     }
   },

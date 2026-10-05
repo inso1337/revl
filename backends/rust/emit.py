@@ -1847,19 +1847,19 @@ def _as_fn_call(node):
 
 
 def _emit_compensations(step: dict, compensated: dict | None) -> list:
-    """The compensations an `emit` step registers, in order: the site-spelled
-    `compensate` clause, then the emitted extern's own declared one (item 254,
-    issue #1592), the order the py reference registers them in. An extern is
-    matched as a `fn`-kind call naming it."""
-    out = []
+    """The compensation an `emit` step registers: one per crossing (issue
+    #1902). A site-spelled `compensate` clause REPLACES the emitted extern's
+    own declared one (item 254, issue #1592); the declared one is the default
+    only when the site spells none. The rule the py reference keeps. An extern
+    is matched as a `fn`-kind call naming it."""
     if step.get("compensate") is not None:
-        out.append(step["compensate"])
+        return [step["compensate"]]
     expr = step.get("expr")
     if compensated and isinstance(expr, dict) and expr.get("kind") == "fn":
         ext = compensated.get(expr.get("name"))
         if ext is not None:
-            out.append(_as_fn_call(ext["compensate"]))
-    return out
+            return [_as_fn_call(ext["compensate"])]
+    return []
 
 
 def _reaches_declared(node, compensated: dict | None) -> bool:
@@ -4627,6 +4627,16 @@ def _undo_reclone_locals(acquire_node: object, undo_node: object,
     return undo_refs & moved & body_locals
 
 
+def _bare_param(node: object, method: dict) -> str | None:
+    """The parameter `node` names when it is a bare reference to one, else None
+    (issue #1723). A body `let` cannot rebind a parameter (the checker refuses
+    `k` "already bound"), so a name in `params` is the parameter itself."""
+    if not isinstance(node, dict) or node.get("kind") not in ("var", "name"):
+        return None
+    ident = node.get("id") or node.get("name")
+    return ident if ident in (method.get("params") or []) else None
+
+
 def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) -> None:
     pad = "    " * indent
     for bind in _binds(env.component):
@@ -4768,10 +4778,22 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             inferred = _provide_let_type(env, step.get("value"), env.v3_ctx())
             if kind == "let":
                 rename.pop(name, None)  # a local shadows an outer rename
+            # issue #1723: `let key = k` must not MOVE the parameter `k`. A later
+            # `effect ... undo` step clones every parameter into `<p>_undo`
+            # (`_method_undo_clones`), and any later read of `k` would find it
+            # moved (E0382). A bare parameter on the right is cloned; a body local
+            # stays a move, since no undo clone reads it again.
+            value_rename = rename
+            param = _bare_param(step.get("value"), method)
+            if param is not None:
+                value_rename = dict(rename)
+                value_rename[param] = f"{param}.clone()"
+            value = _expr(step["value"], env, value_rename)
+            if kind == "let":
                 out.append(f"{pad}let {'mut ' if step.get('mutable') else ''}"
-                           f"{name} = {_expr(step['value'], env, rename)};")
+                           f"{name} = {value};")
             else:
-                out.append(f"{pad}{name} = {_expr(step['value'], env, rename)};")
+                out.append(f"{pad}{name} = {value};")
             if inferred is not None:
                 env.v3_ctx().var_types[step.get("name")] = inferred
             if kind == "let" and step.get("name") is not None:
@@ -5657,8 +5679,9 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
-        # the site-spelled clause, then the extern's own declared one (item
-        # 254, issue #1592), each registered after the fire.
+        # one compensation per crossing, registered after the fire: the
+        # site-spelled clause, else the extern's own declared one (item 254,
+        # issues #1592 and #1902).
         for compensate_node in _emit_compensations(step, env.compensated):
             _emit_activation_compensation(env, compensate_node, out, indent)
     elif kind == "timer":

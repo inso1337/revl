@@ -1084,7 +1084,7 @@ with corpus work that never touched this layer.
 | `out-of-fragment` | printed by the gate | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
-| `out-of-fragment-approval` | 15 | ratcheted |
+| `out-of-fragment-approval` | 34 | ratcheted |
 | `out-of-fragment-inverse` | 2 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
@@ -1101,9 +1101,23 @@ buckets are:
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_match_arm.rvl`
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_record.rvl`
 - `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_method.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_other_edge.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_helper_reach.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_scoped_extern.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_alias.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_method.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_value_form_method.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_alias_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_arrow_param_applied.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_handle_direct_value.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_if_local_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_if_local_value.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_list_element_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_record_alias_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_record_field_step.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl`
@@ -1116,6 +1130,11 @@ buckets are:
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_if_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_list_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_match_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_record_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl`
 - `out-of-fragment-inverse`: `examples/rejections/g4_extern_undo_not_declared.rvl`
 - `out-of-fragment-inverse`: `examples/rejections/g4_undo_not_release.rvl`
 

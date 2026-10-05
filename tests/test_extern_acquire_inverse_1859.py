@@ -143,3 +143,10 @@ def test_the_rejection_fixture_is_refused_with_the_rule():
             / "g4_extern_undo_not_declared.rvl")
     err = _refusal(path.read_text(encoding="utf-8"))
     assert err.message == _mismatch("log", "log_open", "`undo log_close(log)`")
+
+
+def test_a_typed_hole_in_the_site_undo_is_not_refused():
+    # an unfilled obligation, as in the host half: admission refuses the draft
+    # until it is filled, and the fill is judged by this rule
+    assert compile_source(_src('  let h = effect open_h() undo hole[Unit] "release"'),
+                          "t.rvl")["components"]

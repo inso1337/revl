@@ -213,13 +213,14 @@ def _call(tool: str, arguments: dict) -> dict:
     return response["result"]["structuredContent"]
 
 
-def test_initialize_and_tools_list():
+def test_initialize_and_tools_list(all_mcp_tools):
     init = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     assert init["result"]["serverInfo"]["name"] == "revl"
     listed = handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     assert set(tools) == {"revl_check", "revl_admit", "revl_plan", "revl_audit",
                           "revl_tools", "revl_grammar", "revl_idiom", "revl_load", "revl_call",
+                          "revl_act", "revl_counterfactual",
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
                           # symbol-addressed reads (issue #1714)
                           "revl_source",
@@ -266,6 +267,8 @@ def test_initialize_and_tools_list():
                           # live + historical query modes (docs/queries.md §9)
                           "revl_live_query", "revl_history_emitted_between",
                           "revl_history_lifetime",
+                          # tiered disclosure: the discovery verb (issue #1697)
+                          "revl_verbs",
                           # backwards replay (docs/replay.md)
                           "revl_timeline", "revl_inspect_step", "revl_step_back",
                           "revl_replay_forward", "revl_replay_bisect",

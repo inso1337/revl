@@ -799,6 +799,31 @@ def _ident(name: object, role: str) -> str:
     return _mangle(name, extra)
 
 
+def _method_name(name: object) -> str:
+    """The Java spelling of a service method, and the ONLY place it is decided
+    (issue #1512).
+
+    A service method is spelled in five places: the service interface, the
+    provider class that implements it, a routed require's router, a call
+    through a required service, and a lifecycle `call`. They used to decide it
+    separately. The interface wrote the contract name verbatim (`long
+    class(long x);`, which javac rejects), while the provider renamed it
+    (`class_`) and then looked the RENAMED spelling up in the service table, so
+    the parameter types fell back to `Object` and the emitter refused the
+    program. Every one of those sites now calls this, and every service-table
+    lookup keeps the contract name. `_method_name_table` carries the same
+    mapping to the placement runners, which translate at the seam.
+
+    The rename is `_ident`'s injective keyword ladder (`class` -> `class_`,
+    `class_` -> `class__`), plus one rung for a name made of underscores alone:
+    `_` has been a keyword since Java 9 (JLS 3.9), so `_` -> `__` and `__` ->
+    `___`, which stays injective. A name that is neither is emitted
+    byte-identically."""
+    if isinstance(name, str) and name and not name.strip("_"):
+        return name + "_"
+    return _ident(name, "method")
+
+
 def _fn_name(name: object) -> str:
     """The Java identifier for a revl top-level `fn` or extern.
 
@@ -1124,6 +1149,16 @@ class _V3Ctx:
         # effect step can be recognised as a transactional crossing. Empty for
         # every non-witnessed document, so their emission stays byte-identical.
         self.witnessed = _witnessed_externs(externs)
+        # issue #1511: externs that declare their own `compensate`, and the
+        # frame a crossing of one registers on. `crossing_frame` is set only
+        # while a component that needs the frame is being emitted; outside a
+        # component (a top-level fn) there is no activation to owe it to.
+        self.declared = _declared_externs(externs)
+        self.crossing_frame: str | None = None
+        # issue #1902: the one call node an `emit .. compensate ..` statement
+        # renders bare. Its site-spelled compensation REPLACES the extern's
+        # declared one, so the call must not also register the declared one.
+        self.declared_skip: object = None
         # Every component in the document, keyed by name, so a `spawn`
         # acquisition can resolve its target template's config layout (the
         # plugin-constructor argument order) and provided keys (the services to
@@ -2110,7 +2145,7 @@ def _expr(
         if "callee" in node:
             return _v3_call(node, ctx, rename, env)
         target = node.get("target") or {}
-        method = _ident(node.get("method"), "method")
+        method = _method_name(node.get("method"))
         args = ", ".join(
             _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
@@ -2127,6 +2162,10 @@ def _expr(
         args = ", ".join(
             _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
+        declared = ctx.declared.get(node.get("name"))
+        if (declared is not None and ctx.crossing_frame is not None
+                and node is not ctx.declared_skip):
+            return _declared_crossing(f"{fn_name}({args})", declared, ctx, env)
         return f"{fn_name}({args})"
 
     if kind == "bin":
@@ -3807,10 +3846,15 @@ def _v3_lifecycle_step(step: dict, ctx: _V3Ctx, where: str,
         if method is None:  # pragma: no cover — the lowerer rejects it
             raise EmitError(f"{where}: unknown method {step['method']!r}")
         args = ", ".join(_expr(arg, ctx) for arg in step.get("args") or [])
-        # `get` throws when the key is not ACTIVE (R2) — the resolution IS the
-        # liveness check, the same read RunOnce's UP proof performs.
-        call = (f"_revlRoot.get({_ident(service, 'service')}.class)"
-                f".{_ident(step['method'], 'method')}({args})")
+        # `get` throws when the key is not ACTIVE (R2) - the resolution IS the
+        # liveness check, the same read RunOnce's UP proof performs. It reads
+        # the provision by its KEY, as the provider registered it
+        # (`ServiceKey.of(<Svc>.class, "<key>")`): real cordis4j does not
+        # answer a type-only `get(<Svc>.class)` for a keyed provision, which
+        # only the in-repo stubs did (issue #1888).
+        call = (f"_revlRoot.get(ServiceKey.of({_ident(service, 'service')}.class, "
+                f"{_string(key)}))"
+                f".{_method_name(step['method'])}({args})")
         bind = step.get("bind")
         if bind is None:
             return [f"    {call};"]
@@ -3910,7 +3954,7 @@ def _emit_service_interfaces(services: dict) -> list[str]:
         _ident(sname, "service")
         out.append(f"public interface {sname} {{")
         for mname, method in (service.get("methods") or {}).items():
-            _ident(mname, "method")
+            jname = _method_name(mname)
             params = ", ".join(
                 f"{_java_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
                 for p in method.get("params") or []
@@ -3920,9 +3964,55 @@ def _emit_service_interfaces(services: dict) -> list[str]:
                 # delivery semantics (item 44): safe to re-deliver, so the
                 # runtime may auto-retry a transient failure of this emission
                 out.append("    /** idempotent: the runtime may auto-retry a transient failure. */")
-            out.append(f"    {ret} {mname}({params});")
+            out.append(f"    {ret} {jname}({params});")
         out.append("}")
         out.append("")
+    out.extend(_method_name_table(services))
+    return out
+
+
+def _method_name_table(services: dict) -> list[str]:
+    """The seam's side of `_method_name` (issue #1512).
+
+    The bridge between placed processes speaks the CONTRACT name (`class`),
+    which is what every other tier sends and looks up. A Java method named
+    after a keyword is declared as `class_`, so the placement runners translate
+    at the seam: an incoming call's name goes through `revlMethodName` before
+    the reflective lookup, and an outgoing proxy call's Java name goes through
+    `revlContractName` before it is sent. They bind to both reflectively, the
+    way they bind `revlRedactText`, and treat an absent one as the identity, so
+    a document with no renamed method emits neither and is byte-identical.
+    Both are generated from `_method_name`, so the table cannot drift from the
+    declarations."""
+    renamed = sorted({(mname, _method_name(mname))
+                      for service in services.values()
+                      for mname in (service.get("methods") or {})
+                      if _method_name(mname) != mname})
+    if not renamed:
+        return []
+    out = [
+        "// issue #1512: a service method named after a Java keyword is declared",
+        "// under its escaped spelling; the seam speaks the contract name. The",
+        "// placement runners translate through these two at the bridge.",
+        "public static String revlMethodName(String contract) {",
+        "    return switch (contract) {",
+    ]
+    out += [f"        case {_string(c)} -> {_string(j)};" for c, j in renamed]
+    out += [
+        "        default -> contract;",
+        "    };",
+        "}",
+        "",
+        "public static String revlContractName(String method) {",
+        "    return switch (method) {",
+    ]
+    out += [f"        case {_string(j)} -> {_string(c)};" for c, j in renamed]
+    out += [
+        "        default -> method;",
+        "    };",
+        "}",
+        "",
+    ]
     return out
 
 
@@ -6042,7 +6132,8 @@ def _provider_config_fields(component: dict) -> list[dict]:
     return []
 
 
-def _component_needs_modern(component: dict) -> bool:
+def _component_needs_modern(component: dict,
+                            declared: dict[str, dict] | None = None) -> bool:
     if component.get("isolate") or component.get("intercept"):
         return True
     # item 173: a routed require needs the modern path — its emitted router
@@ -6050,6 +6141,10 @@ def _component_needs_modern(component: dict) -> bool:
     # provide method already calls the routed service, so it reaches modern via
     # `_contains_expr` anyway; this makes the routing dependence explicit.)
     if component.get("routes"):
+        return True
+    # issue #1511: the legacy renderer has no frame, so a crossing of an
+    # extern that declares its own `compensate` would lose the compensation.
+    if _reaches_declared(component.get("body"), declared or {}):
         return True
     for step in component.get("body") or []:
         if step.get("setup"):
@@ -6102,6 +6197,84 @@ def _witnessed_externs(externs: list | None) -> dict[str, dict]:
     }
 
 
+def _declared_externs(externs: list | None) -> dict[str, dict]:
+    """Emission externs that DECLARE their own compensation, by name
+    (`extern emission fn put(k: Str) -> Int compensate undo_put()`, the
+    item-254 shape; issue #1511). Empty for a document that declares none, so
+    its emission stays byte-identical."""
+    return {
+        ext["name"]: ext for ext in (externs or [])
+        if ext.get("name") and ext.get("class") == "emission"
+        and ext.get("compensate") is not None
+    }
+
+
+def _reaches_declared(tree: object, declared: dict[str, dict]) -> bool:
+    """True iff some `fn` call anywhere under `tree` crosses an extern in
+    `declared`."""
+    if not declared:
+        return False
+    if isinstance(tree, dict):
+        if tree.get("kind") == "fn" and tree.get("name") in declared:
+            return True
+        return any(_reaches_declared(v, declared) for v in tree.values())
+    if isinstance(tree, list):
+        return any(_reaches_declared(v, declared) for v in tree)
+    return False
+
+
+def _declared_crossings_used(ir: dict) -> bool:
+    """True iff some component crosses an extern that declares its own
+    compensation, so the file needs `RevlDeclared` (issue #1511)."""
+    declared = _declared_externs(ir.get("externs"))
+    return any(_reaches_declared(component.get("body"), declared)
+               for component in ir.get("components") or [])
+
+
+def _site_compensated_call(step: dict, ctx: "_V3Ctx", rename, env: "_Env | None") -> str:
+    """An `emit` statement's own call. One compensation per crossing (issue
+    #1902): when the statement spells `compensate`, that one REPLACES the
+    extern's declared one, so the call renders bare and only the site entry is
+    tracked. A declared crossing nested in its arguments still registers."""
+    if step.get("compensate") is None:
+        return _expr(step["expr"], ctx, rename, env)
+    previous, ctx.declared_skip = ctx.declared_skip, step["expr"]
+    try:
+        return _expr(step["expr"], ctx, rename, env)
+    finally:
+        ctx.declared_skip = previous
+
+
+def _declared_crossing(call: str, ext: dict, ctx: "_V3Ctx", env: "_Env | None") -> str:
+    """One crossing of `ext`, an extern that declares its own `compensate`,
+    in a component body (issue #1511). Every position a call can be written in
+    renders through `_expr`'s `fn` arm and so through here: the forward call is
+    an argument, which Java evaluates first, and `RevlDeclared` then tracks the
+    declared compensation into the activation's `fx` through
+    `RevlFrame.compensation`, the entry a site-spelled `emit .. compensate ..`
+    makes. So it is discharged on commit, runs in Phase 2 on abort, newest
+    first, and a crossing that throws registers nothing."""
+    comp = ext["compensate"]
+    callee = comp.get("callee") or {}
+    name = callee.get("name") or callee.get("id")
+    if comp.get("kind") != "call" or callee.get("kind") != "var" or not name:
+        raise EmitError(
+            f"extern {ext.get('name')}: its declared `compensate` is not a plain "
+            "call of a declared callable, which is the only shape the java tier "
+            "registers (issue #1511)")
+    # the slot binds nothing (lower.py `_check_extern_undo`), so no rename
+    args = ", ".join(_expr(a, ctx, None, env) for a in comp.get("args") or [])
+    compensate = f"{_fn_name(name)}({args})"
+    frame = ctx.crossing_frame
+    crossing = _string(str(ext.get("name")))
+    attempted = _string(str(name))
+    if _java_v3_type(ext.get("returns")) == "void":
+        return (f"RevlDeclared.crossedUnit(fx, {frame}, {crossing}, {attempted}, "
+                f"() -> {call}, () -> {compensate})")
+    return (f"RevlDeclared.crossed(fx, {frame}, {crossing}, {attempted}, {call}, "
+            f"() -> {compensate})")
+
+
 def _witnessed_extern_for(acquire: object, witnessed: dict[str, dict]) -> dict | None:
     """The witnessed extern descriptor a step's `acquire` calls, or None. A
     component-step acquisition renders as an IR `fn` node (v1/component
@@ -6114,7 +6287,8 @@ def _witnessed_extern_for(acquire: object, witnessed: dict[str, dict]) -> dict |
     return witnessed.get(acquire.get("name"))
 
 
-def _component_needs_frame(component: dict, witnessed: dict[str, dict]) -> bool:
+def _component_needs_frame(component: dict, witnessed: dict[str, dict],
+                           declared: dict[str, dict] | None = None) -> bool:
     """True if this component registers at least one `transactional` (item
     243) or `compensation` (item 247) teardown entry — the two entry kinds
     beyond the plain `bracket`, per docs/design/teardown-contract.md. Gates
@@ -6145,6 +6319,10 @@ def _component_needs_frame(component: dict, witnessed: dict[str, dict]) -> bool:
             )
         return False
 
+    # issue #1511: a crossing of an extern that declares its own `compensate`
+    # registers a compensation entry wherever it is written.
+    if _reaches_declared(component.get("body"), declared or {}):
+        return True
     return any(step_needs(step) for step in component.get("body") or [])
 
 
@@ -6153,13 +6331,14 @@ def _uses_revl_frame(ir: dict) -> bool:
     teardown loop — gates emitting the shared helper class once per file."""
     externs = ir.get("externs") or []
     witnessed = _witnessed_externs(externs)
+    declared = _declared_externs(externs)
     return any(
-        _component_needs_frame(component, witnessed)
+        _component_needs_frame(component, witnessed, declared)
         for component in ir.get("components") or []
     )
 
 
-def _emit_revl_frame_runtime() -> list[str]:
+def _emit_revl_frame_runtime(declared: bool = False) -> list[str]:
     """The shared two-phase teardown accumulator (docs/design/teardown-
     contract.md), emitted once per file when any component needs it.
 
@@ -6203,7 +6382,7 @@ def _emit_revl_frame_runtime() -> list[str]:
     ordering in the scenario harnesses; the WAL is the crash-durable channel that
     outlives the process (a JVM subprocess writes it to `$REVL_WAL` and fsyncs
     per record), which `revl recover` reads tier-agnostically."""
-    return [
+    lines = [
         "// docs/design/teardown-contract.md: the shared bracket/transactional/",
         "// compensation two-phase teardown loop (item 243 Slice 2b, item 247).",
         "private static final class RevlFrame {",
@@ -6423,6 +6602,37 @@ def _emit_revl_frame_runtime() -> list[str]:
         "}",
         "",
     ]
+    if declared:
+        lines.extend(_DECLARED_CROSSING_RUNTIME)
+    return lines
+
+
+# Issue #1511: the registration of an extern-DECLARED compensation at a
+# crossing (see `_declared_crossing`). Emitted beside `RevlFrame` only when a
+# component crosses such an extern, so every other file stays byte-identical.
+_DECLARED_CROSSING_RUNTIME = [
+    "// issue #1511: a crossing of an extern that DECLARES its own compensation",
+    "// (`extern emission fn put(..) compensate undo()`), in whatever position the",
+    "// call is written. Java evaluates the forward call as an argument before",
+    "// either method runs, so the compensation is owed only for a crossing that",
+    "// returned; a throwing crossing registers nothing. The entry is the one a",
+    "// site-spelled `emit .. compensate ..` tracks: discharged on commit, Phase 2",
+    "// on abort, newest first.",
+    "private static final class RevlDeclared {",
+    "    static <T> T crossed(Context.EffectScope fx, RevlFrame frame, String crossing,",
+    "            String attempted, T value, Runnable compensate) {",
+    "        fx.track(frame.compensation(crossing, attempted, compensate));",
+    "        return value;",
+    "    }",
+    "",
+    "    static void crossedUnit(Context.EffectScope fx, RevlFrame frame, String crossing,",
+    "            String attempted, Runnable call, Runnable compensate) {",
+    "        call.run();",
+    "        fx.track(frame.compensation(crossing, attempted, compensate));",
+    "    }",
+    "}",
+    "",
+]
 
 
 # item 322 Slice 2: the durable WAL recording sink emitted into Components when
@@ -6825,7 +7035,7 @@ def _method_body_lines(
                     "a non-witnessed let-effect is not supported inside a method "
                     "body on the java tier")
         elif step == "emit":
-            lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
+            lines.append(f"{_site_compensated_call(stmt, v3_ctx, rename, env)};")
             if stmt.get("compensate") is not None:
                 _emit_compensation_track(
                     lines, "", stmt["expr"], stmt["compensate"], v3_ctx, env, frame_expr,
@@ -7136,7 +7346,7 @@ def _emit_component_stmts(
             _emit_bracket_track(out, pad, step["acquire"], step["undo"], v3_ctx, env,
                                 frame_expr, None, step)
         elif kind == "emit":
-            out.append(f"{pad}{_expr(step['expr'], v3_ctx, None, env)};")
+            out.append(f"{pad}{_site_compensated_call(step, v3_ctx, None, env)};")
             if step.get("compensate") is not None:
                 _emit_compensation_track(
                     out, pad, step["expr"], step["compensate"], v3_ctx, env, frame_expr)
@@ -7457,7 +7667,7 @@ def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str
         out.append(f"        throw new CordisException({empty_msg});")
     out.append("    }")
     for mname, decl in methods.items():
-        jname = _ident(mname, "method")
+        jname = _method_name(mname)
         params_decl = decl.get("params", []) or []
         params = ", ".join(f"{render_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
                            for p in params_decl)
@@ -7501,8 +7711,10 @@ def _emit_component_modern(
     # the RevlFrame two-phase loop; a bracket-only component keeps emitting
     # exactly as before (see `_component_needs_frame`).
     witnessed = _witnessed_externs(externs)
-    needs_frame = _component_needs_frame(component, witnessed)
+    needs_frame = _component_needs_frame(component, witnessed, v3_ctx.declared)
     frame_expr = "frame" if needs_frame else None
+    # issue #1511: where a crossing of a compensate-declaring extern registers
+    v3_ctx.crossing_frame = frame_expr
     provider_config = _provider_config_fields(component)
 
     for key in isolate:
@@ -7568,7 +7780,10 @@ def _emit_component_modern(
             {"methods": []},
         )
         for method in provide.get("methods") or []:
-            mname = _ident(method.get("name"), "method")
+            # issue #1512: `contract` looks the method up in the service,
+            # `mname` is its Java spelling
+            contract = method.get("name")
+            mname = _method_name(contract)
             # Provider-method signatures MUST render with the SAME renderer as
             # the service interface this class implements (`render_type`:
             # `_java_type` for IR v1/v2, `_java_v3_type` for v3) — the exact
@@ -7583,15 +7798,16 @@ def _emit_component_modern(
             # `_java_v3_type`) and for any v1/v2 program using only declared
             # types (both renderers agree via TYPE_MAP).
             params = ", ".join(
-                f"{render_type(_param_type(env, key, mname, p))} {p}"
+                f"{render_type(_param_type(env, key, contract, p))} {p}"
                 for p in method.get("params") or []
             )
-            ret = render_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
+            ret = (render_type(_method_return(env, key, contract))
+                   if _method_return(env, key, contract) else "void")
             out.append(f"    public {ret} {mname}({params}) {{")
             # item 421 F6: a parameter the service declared `Secret[T]` is a
             # declared DISCLOSURE RECEIVER; registering it at the head is what
             # lets every sink scrub it once the body hands it on.
-            secret_params = _secret_method_params(env, key, mname, method.get("params") or [])
+            secret_params = _secret_method_params(env, key, contract, method.get("params") or [])
             if secret_params:
                 out.append(f"        revlMarkSecret({', '.join(secret_params)});")
             for line in _method_body_lines(
@@ -7740,7 +7956,7 @@ def _emit_component(
     `f(Object)`, which javac reports as the class not being abstract.
     """
     _refuse_required_stream(component, "cordis4j")
-    if _component_needs_modern(component):
+    if _component_needs_modern(component, _declared_externs(externs)):
         return _emit_component_modern(
             component, services, types, functions, externs, components,
             render_type=render_type)
@@ -7795,13 +8011,15 @@ def _emit_component(
             {"methods": []},
         )
         for method in provide.get("methods") or []:
-            mname = _ident(method.get("name"), "method")
+            contract = method.get("name")   # the service-table key (issue #1512)
+            mname = _method_name(contract)
             params = ", ".join(
-                f"{render_type(_param_type(env, key, mname, p))} {p}"
+                f"{render_type(_param_type(env, key, contract, p))} {p}"
                 for p in method.get("params") or []
             )
-            ret = render_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
-            secret_params = _secret_method_params(env, key, mname, method.get("params") or [])
+            ret = (render_type(_method_return(env, key, contract))
+                   if _method_return(env, key, contract) else "void")
+            secret_params = _secret_method_params(env, key, contract, method.get("params") or [])
             mark = f"revlMarkSecret({', '.join(secret_params)}); " if secret_params else ""
             out.append(f"    public {ret} {mname}({params}) {{ {mark}{_method_body(env, key, method)} }}")
         out.append("}")
@@ -7884,15 +8102,16 @@ def _emit_service_interfaces_v3(services: dict) -> list[str]:
         _ident(sname, "service")
         out.append(f"public interface {sname} {{")
         for mname, method in (service.get("methods") or {}).items():
-            _ident(mname, "method")
+            jname = _method_name(mname)
             params = ", ".join(
                 f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
                 for p in method.get("params") or []
             )
             ret = _java_v3_type(method.get("returns")) if method.get("returns") else "void"
-            out.append(f"    {ret} {mname}({params});")
+            out.append(f"    {ret} {jname}({params});")
         out.append("}")
         out.append("")
+    out.extend(_method_name_table(services))
     return out
 
 
@@ -7923,7 +8142,7 @@ def _emit_v1(ir: dict, package_name: str) -> str:
     if _uses_float_interp(ir):
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_revl_frame(ir):
-        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
+        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime(_declared_crossings_used(ir))])
         # item 322 Slice 2: the durable WAL sink rides alongside the
         # teardown frame, but ONLY under `--record` — off, this whole block
         # is absent and the output is byte-identical. Mirrors `_emit_v3`'s
@@ -7980,7 +8199,7 @@ def _emit_v2(ir: dict, package_name: str) -> str:
     if _uses_float_interp(ir):
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_revl_frame(ir):
-        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
+        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime(_declared_crossings_used(ir))])
         # item 322 Slice 2: the durable WAL sink rides alongside the
         # teardown frame, but ONLY under `--record` — off, this whole block
         # is absent and the output is byte-identical. Mirrors `_emit_v3`'s
@@ -8220,7 +8439,7 @@ def _emit_v3(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line
                     for line in _emit_spawn_handle(with_get=_uses_instance_get(ir))])
     if _uses_revl_frame(ir):
-        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
+        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime(_declared_crossings_used(ir))])
         # item 322 Slice 2: the durable WAL sink rides alongside the teardown
         # frame, but ONLY under `--record` — off, this whole block is absent and
         # the output is byte-identical (the golden oracle + selfhost gate).

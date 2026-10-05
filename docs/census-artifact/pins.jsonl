@@ -48,10 +48,6 @@
 
 ["reference", "src/revl/manifest.py"]
 
-["reference", "src/revl/mcp/__init__.py"]
-
-["reference", "src/revl/mcp/schema.py"]
-
 ["reference", "src/revl/model_answer.py"]
 
 ["reference", "src/revl/model_council.py"]
@@ -78,6 +74,8 @@
 
 ["reference", "src/revl/taint.py"]
 
+["reference", "src/revl/type_schema.py"]
+
 ["reference", "src/revl/typecheck.py"]
 
 ["reference", "src/revl/ui_family.py"]
@@ -102,7 +100,7 @@
 
 ["report_inputs", "crates/revl-gate/src/symbols.rs"]
 
-["report_inputs", "tests/fixtures/census_crate_reproduction.json"]
+["report_inputs", "tests/fixtures/census_crate_reproduction"]
 
 ["report_inputs", "tests/fixtures/corpus_provenance.json"]
 

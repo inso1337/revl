@@ -139,9 +139,20 @@ questions. Measured for this artifact: 848 programs, the same 9 false-admit
 residuals, zero false admissions, agreement on every tracked bucket.
 
 That run takes about fourteen minutes and needs a rust toolchain, so `--check`
-cannot run it. It is recorded in
-`tests/fixtures/census_crate_reproduction.json` beside the checker version it was
-taken at, and a recorded result rots, so it is not trusted blind: every run
+cannot run it. It is recorded in `tests/fixtures/census_crate_reproduction/`,
+one file per checker version it was taken at: `<checker version>.json` holds the
+version, the tracked buckets, the false admissions and the programs the run
+covered (issue #1768). One file holding the version was the line every pull
+request that moved a checker source rewrote, so two of them always conflicted
+on it; now a re-record ADDS its version's file, and two re-records add two
+different files, which git merges. A re-record does not delete the old record,
+because a delete plus a near-identical add reads to git as a rename and two
+renames of one file conflict; `--prune-stale-reproductions` deletes stale
+records in a change of its own. The program count is derived, and a census
+program the reproduction did not run is counted in the report. After two
+re-recording pull requests land, no record is at main's checker version until
+one re-record there (`python3 tools/regen_generated.py --only census`), and
+`--verify --strict` names it until then. A recorded result rots, so it is not trusted blind: every run
 compares the recorded version against the current one, and a reproduction taken
 at a different version is published as stale and **lifts no claim**. The ladder
 rung in the report is computed from evidence that is current, never declared.

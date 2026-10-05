@@ -470,6 +470,10 @@ def test_the_real_registry_lists_every_generator_in_dependency_order():
                      "conformance", "ledger", "docgen"]
     assert "layout move: tests/fixtures/selfhost_uncovered_lines.json -> ledger" in result.stdout
     assert "layout move: docs/census-artifact.json, docs/census-artifact.md -> census" in result.stdout
+    assert ("layout move: tests/fixtures/census_crate_reproduction.json, "
+            "tests/fixtures/census_crate_reproduction/reproduction.json, "
+            "tests/fixtures/census_crate_reproduction/programs.jsonl -> census"
+            in result.stdout)
     assert "left alone unless --bench: bench/results/*" in result.stdout
 
 
