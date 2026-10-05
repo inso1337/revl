@@ -1,0 +1,8 @@
+// G1 (issue #1963): an undeclared requirement in an arrow method whose
+// expression is on the line after `fn`. Both refuse; the line the refusal
+// carries is the expression's, which the gate used to anchor at the component.
+service R { fn get() -> Str }
+component D provides r: R {
+  provide r { fn get() =
+    db.get() }
+}

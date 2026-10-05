@@ -2796,8 +2796,12 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
     let le = line_end(ts, si + 1, end)
     let r = p_stmt_run(ts, si + 1, le)
     let nx = r.i > si + 1 ? r.i : le
+    // issue #1963: the arrow's statement carries the line its expression is
+    // written on, as a block body's statements do (`p_stmts`), so a refusal
+    // in it is anchored there rather than falling back to the component line
+    let abody = arrow_body(stamp_lines(r.ss, tkc(ts, si + 1).line))
     return p_prov_methods(ts, nx, end,
-                          acc.push({ name: nm, params: pnames, body: arrow_body(r.ss),
+                          acc.push({ name: nm, params: pnames, body: abody,
                                      isAsync: masync, ps: ps.ps, ret: pret,
                                      isArrow: true, line: mline,
                                      mayRet: true }))
@@ -16741,6 +16745,8 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   let base = ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
                                   amb_ops_map(ambOps, 0, Map.empty())),
                       appr_info(ts, pg))
+  // issue #1963: the witnessed externs, whose calls may not spell a site `undo`
+  let wits = witnessed_extern_names(ts)
   // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
   // `errors` sink exists): a program that trips one produces that single
   // diagnostic and never reaches the component loop, so the gate returns it
@@ -16882,7 +16888,9 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
         poisoned = poisoned.push(comp.name)
       } else {
         let cx = ctx_for(base, comp)
-        let v = check_component(comp, cx, gtys)
+        // issue #1963: the effect-statement rules the walk does not decide
+        let v = effect_stmt_or(effect_stmt_verd(ts, comp.name, wits),
+                               check_component(comp, cx, gtys), comp.line)
         if (v.v != "") {
           refs = refs.push(v)
           poisoned = poisoned.push(comp.name)
@@ -16954,6 +16962,9 @@ pub fn admit_src(src: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  // issue #1963: an undo-less dotted `effect`, a parser refusal.
+  let enu = effect_no_undo_scan(ts)
+  if (enu.v != "") { return enu.v }
   // issue #1728: an unbound realm placeholder is refused before lowering.
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return rph.v }
@@ -16986,6 +16997,8 @@ pub fn admit_all(src: Str) -> Str {
   if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
+  let enu = effect_no_undo_scan(ts)
+  if (enu.v != "") { return fmt_all([mk_verd(enu.v, 0)]) }
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return fmt_all([rph]) }
   let refs = collect_refusals(ts, pg)
@@ -17878,6 +17891,9 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  // issue #1963, as in `admit_src`: a parser refusal.
+  let enu = effect_no_undo_scan(ts)
+  if (enu.v != "") { return enu.v }
   // issue #1728, as in `admit_src`: no binding reaches the gate.
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return rph.v }
@@ -18735,6 +18751,312 @@ fn cenv(cx: CCtx, sc: List[Bind]) -> List[Bind] {
 // no arm `payload_type`. The keys hold a space, so no scope name shadows one.
 fn cenv_ir(cx: CCtx, sc: List[Bind]) -> List[Bind] {
   return concat_binds(cx.reqops, cenv(cx, sc))
+}
+
+// ================================================== effect statements (issue #1963)
+//
+// Three statement rules the reference decides over an `effect` statement, which
+// this gate did not decide at all. Its statement reader reads a provide-method
+// `if`/`while`/`for` body as one `skip` and carries no rule for these shapes, so
+// all three were false admissions. Each is decided here over the token stream,
+// the way `verified` in a provide method is, and spelled byte for byte:
+//
+//   * PARSE stage: an `effect` with no `undo` whose acquisition is a dotted call
+//     or path (`effect store.insert(k, v)`). The reference's parser refuses it
+//     before any lowering (parser.py `missing_undo_refusal`): no `use` can turn
+//     a dotted path into a witnessed call, so nothing is deferred. A bare-name
+//     acquisition is deferred to the lowering, which knows the extern table, and
+//     this gate leaves that case alone. Tagged G4, the guarantee the reference's
+//     own `revl.diagnostics.classify` files the message under.
+//   * COMPONENT stage, a top-level activation or provide-method statement: a
+//     witnessed extern called with a site `undo` (lower.py
+//     `_lower_effect_step`, G4). A witnessed extern's declared inverse is the one
+//     the teardown accumulator registers, so the call site may not spell one.
+//   * COMPONENT stage, a provide-method `if`/`while`/`for` body: a
+//     teardown-registering step (`effect`, `let … = effect`, a statement
+//     `await`) is refused at its own line (lower.py's method control-flow
+//     lowering). Code-less in the reference; tagged T1 as the other code-less
+//     method-statement refusals are (`tests/test_selfhost_lower.py::_classify`).
+//
+// The two component-stage rules are raised during the reference's component
+// lowering, in source order, so the first one by token order is the
+// component's, and `effect_stmt_or` decides it against the component walk's
+// own verdict the way `_lower_component` would have raised them.
+
+// A token that begins a statement: the first token of a line, or one right
+// after a `{`, `}` or `;`.
+fn es_head_at(ts: List[Token], i: Int) -> Bool {
+  let p = tkc(ts, i - 1)
+  if (p.kind == "{" || p.kind == "}" || p.kind == ";") { return true }
+  return p.line < tkc(ts, i).line
+}
+
+// The first token of the statement the token at `i` sits in, scanning back
+// along its line (an annotated `let x: T = effect …` keeps one line).
+fn es_line_head(ts: List[Token], i: Int) -> Int {
+  var j = i
+  while (j > 0 && !es_head_at(ts, j)) { j -= 1 }
+  return j
+}
+
+// The statement head of the `effect` at `i`, or -1 when `i` is not an
+// `effect` the parser reads as an effect statement: the statement's first
+// token, after `verified`, or the right-hand side of `let <x> [: T] =`.
+fn es_effect_head(ts: List[Token], i: Int) -> Int {
+  if (!atw(ts, i, "effect")) { return 0 - 1 }
+  if (es_head_at(ts, i)) { return i }
+  if (atw(ts, i - 1, "verified") && es_head_at(ts, i - 1)) { return i - 1 }
+  let k = atw(ts, i - 1, "verified") ? i - 2 : i - 1
+  if (!atk(ts, k, "=")) { return 0 - 1 }
+  let h = es_line_head(ts, k)
+  if (atw(ts, h, "let") && atk(ts, h + 1, "ident")) { return h }
+  return 0 - 1
+}
+
+// Whether the effect statement whose `effect` sits at `i` carries a site
+// `undo`: one at bracket depth 0 before the statement ends, at a depth-0 `}`,
+// `;` or the first depth-0 token on a later line that is not `undo` (the
+// reference reads an `undo` on the next line as the same statement's).
+fn es_has_undo(ts: List[Token], i: Int, hi: Int) -> Bool {
+  let ln = tkc(ts, i).line
+  var depth = 0
+  var j = i + 1
+  while (j < hi) {
+    let k = tkc(ts, j).kind
+    if (depth == 0) {
+      if (atw(ts, j, "undo")) { return true }
+      if (k == "}" || k == ";") { return false }
+      if (tkc(ts, j).line > ln) { return false }
+    }
+    if (k == "(" || k == "[" || k == "{") { depth += 1 }
+    if (k == ")" || k == "]" || k == "}") {
+      if (depth == 0) { return false }
+      depth -= 1
+    }
+    j += 1
+  }
+  return false
+}
+
+// The described acquisition of the `effect` at `i` when it is a dotted call or
+// path that ends the statement (`store.insert(k, v)` -> "`store.insert`", the
+// reference's `_describe_expr` over a postfix chain), else "". Anything else —
+// a bare name, a literal, an operator, a block — is not this rule's to decide.
+fn es_dotted_acq(ts: List[Token], i: Int, hi: Int) -> Str {
+  var j = i + 1
+  if (!atk(ts, j, "ident") || !atk(ts, j + 1, ".")) { return "" }
+  var names: List[Str] = [tkc(ts, j).text]
+  j += 1
+  var ok = true
+  while (ok && atk(ts, j, ".")) {
+    if (!atk(ts, j + 1, "ident")) { return "" }
+    names = names.push(tkc(ts, j + 1).text)
+    j += 2
+    if (atk(ts, j, "(")) {
+      let e = close_paren(ts, j)
+      if (e == 0 - 1) { return "" }
+      j = e
+    }
+  }
+  // the chain must end the acquisition: an operator or anything else after it
+  // makes it an expression the reference describes differently
+  let ln = tkc(ts, i).line
+  if (j < hi && tkc(ts, j).line == ln && !atk(ts, j, "}") && !atk(ts, j, ";")
+      && !atw(ts, j, "undo") && !ati(ts, j, "replay")) { return "" }
+  return "`".concat(names.join(".")).concat("`")
+}
+
+fn es_no_undo_msg(head: Str) -> Str {
+  return "effect has no `undo` and ".concat(head).concat(" is not pure")
+}
+
+// The PARSE-stage rule: the first undo-less dotted effect in any component
+// body, in source order, as the reference's parser raises it.
+fn effect_no_undo_scan(ts: List[Token]) -> Verd {
+  let spans = model_comp_spans(ts)
+  var s = 0
+  while (s < spans.length()) {
+    var i = spans[s].slo
+    while (i < spans[s].shi) {
+      let h = es_effect_head(ts, i)
+      if (h != 0 - 1 && !es_has_undo(ts, i, spans[s].shi + 1)) {
+        let head = es_dotted_acq(ts, i, spans[s].shi + 1)
+        if (head != "") {
+          return mk_verd(tagged("G4", es_no_undo_msg(head)), tkc(ts, h).line)
+        }
+      }
+      i += 1
+    }
+    s += 1
+  }
+  return no_verd()
+}
+
+fn es_wit_site_undo_msg(name: Str) -> Str {
+  return "witnessed extern `".concat(name).concat("` cannot declare a site `undo`")
+}
+
+fn es_teardown_in_flow_msg() -> Str {
+  return "a teardown-registering step (`effect`/`let-effect`/`await`) is not allowed inside a provide-method `if`/`while`/`for` body"
+}
+
+// The witnessed-site-undo refusal for the effect statement at `i` (a top-level
+// one), or no verdict.
+fn es_wit_verd(ts: List[Token], i: Int, hi: Int, wit: List[Str]) -> Verd {
+  let h = es_effect_head(ts, i)
+  if (h == 0 - 1) { return no_verd() }
+  let c = tkc(ts, i + 1)
+  if (c.kind != "ident" || !atk(ts, i + 2, "(") || !contains(wit, c.text)) {
+    return no_verd()
+  }
+  if (!es_has_undo(ts, i, hi)) { return no_verd() }
+  return mk_verd(tagged("G4", es_wit_site_undo_msg(c.text)), tkc(ts, h).line)
+}
+
+// The first teardown-registering step inside the control-flow block `{lo ..
+// hi}` (`hi` just past its `}`), at any depth inside it.
+fn es_flow_block_verd(ts: List[Token], lo: Int, hi: Int) -> Verd {
+  var i = lo + 1
+  while (i < hi - 1) {
+    let h = es_effect_head(ts, i)
+    if (h != 0 - 1) {
+      return mk_verd(tagged("T1", es_teardown_in_flow_msg()), tkc(ts, h).line)
+    }
+    if (atw(ts, i, "await") && es_head_at(ts, i)) {
+      return mk_verd(tagged("T1", es_teardown_in_flow_msg()), tkc(ts, i).line)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// A control-flow statement headed at `i` (`if`/`while`/`for`): the first
+// refusal inside its blocks, `else if` and `else` included, and the index just
+// past it, carried as a Verd whose `line` is the verdict's and a separate end.
+type EsFlow = { v: Verd, end: Int }
+
+fn es_flow_at(ts: List[Token], i: Int, hi: Int) -> EsFlow {
+  var j = i + 1
+  if (!atk(ts, j, "(")) { return { v: no_verd(), end: i + 1 } }
+  j = close_paren(ts, j)
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return { v: no_verd(), end: i + 1 } }
+  var e = close_brace(ts, j)
+  if (e == 0 - 1) { return { v: no_verd(), end: hi } }
+  let v = es_flow_block_verd(ts, j, e)
+  if (v.v != "") { return { v: v, end: e } }
+  if (atw(ts, i, "if") && atw(ts, e, "else")) {
+    if (atw(ts, e + 1, "if")) { return es_flow_at(ts, e + 1, hi) }
+    if (atk(ts, e + 1, "{")) {
+      let e2 = close_brace(ts, e + 1)
+      if (e2 == 0 - 1) { return { v: no_verd(), end: hi } }
+      return { v: es_flow_block_verd(ts, e + 1, e2), end: e2 }
+    }
+  }
+  return { v: no_verd(), end: e }
+}
+
+// The first component-stage refusal in one brace-bodied method body `{lo ..
+// hi}`, read in source order: a top-level witnessed site `undo`, or a
+// teardown-registering step inside a control-flow block.
+fn es_method_body(ts: List[Token], lo: Int, hi: Int, wit: List[Str]) -> Verd {
+  var depth = 0
+  var i = lo + 1
+  while (i < hi - 1) {
+    if (depth == 0 && es_head_at(ts, i)
+        && (atw(ts, i, "if") || atw(ts, i, "while") || atw(ts, i, "for"))) {
+      let f = es_flow_at(ts, i, hi - 1)
+      if (f.v.v != "") { return f.v }
+      i = f.end
+    } else {
+      if (depth == 0) {
+        let w = es_wit_verd(ts, i, hi - 1, wit)
+        if (w.v != "") { return w }
+      }
+      let k = tkc(ts, i).kind
+      if (k == "(" || k == "[" || k == "{") { depth += 1 }
+      if (k == ")" || k == "]" || k == "}") { depth -= 1 }
+      i += 1
+    }
+  }
+  return no_verd()
+}
+
+// The first refusal across the `fn` methods of one `provide` block `{lo .. hi}`.
+// An arrow method (`fn m() = …`) has no statement body, so it is stepped over.
+fn es_provide(ts: List[Token], lo: Int, hi: Int, wit: List[Str]) -> Verd {
+  var depth = 0
+  var i = lo + 1
+  while (i < hi - 1) {
+    if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")
+        && atk(ts, i + 2, "(")) {
+      var j = close_paren(ts, i + 2)
+      if (j == 0 - 1) { return no_verd() }
+      while (j < hi - 1 && !atk(ts, j, "{") && !atk(ts, j, "=")) { j += 1 }
+      if (atk(ts, j, "{")) {
+        let e = close_brace(ts, j)
+        if (e == 0 - 1) { return no_verd() }
+        let v = es_method_body(ts, j, e, wit)
+        if (v.v != "") { return v }
+        i = e
+      } else {
+        i = j
+      }
+    } else {
+      let k = tkc(ts, i).kind
+      if (k == "{") { depth += 1 }
+      if (k == "}") { depth -= 1 }
+      i += 1
+    }
+  }
+  return no_verd()
+}
+
+// The component-stage half for the component named `cname`: the first refusal
+// over its top-level activation statements and its `provide` blocks, in source
+// order, or no verdict.
+fn effect_stmt_verd(ts: List[Token], cname: Str, wit: List[Str]) -> Verd {
+  let spans = model_comp_spans(ts)
+  var s = 0
+  while (s < spans.length()) {
+    if (spans[s].sname == cname) {
+      var depth = 0
+      var i = spans[s].slo
+      while (i < spans[s].shi) {
+        if (depth == 0 && atw(ts, i, "provide") && atk(ts, i + 1, "ident")) {
+          var j = i + 2
+          while (j < spans[s].shi && !atk(ts, j, "{")) { j += 1 }
+          let e = close_brace(ts, j)
+          if (e == 0 - 1) { return no_verd() }
+          let v = es_provide(ts, j, e, wit)
+          if (v.v != "") { return v }
+          i = e
+        } else {
+          if (depth == 0) {
+            let w = es_wit_verd(ts, i, spans[s].shi + 1, wit)
+            if (w.v != "") { return w }
+          }
+          let k = tkc(ts, i).kind
+          if (k == "{") { depth += 1 }
+          if (k == "}") { depth -= 1 }
+          i += 1
+        }
+      }
+      return no_verd()
+    }
+    s += 1
+  }
+  return no_verd()
+}
+
+// The component's one verdict when a component-stage effect rule also fires.
+// The reference raises it while lowering the statement, so it beats a verdict
+// the gate anchors at the component line (a post-walk one: aggregate G4/A1,
+// signature parity, `await`, setup reach) and an inline one on a later line;
+// an inline refusal on an earlier line was raised first.
+fn effect_stmt_or(ev: Verd, v: Verd, compLine: Int) -> Verd {
+  if (ev.v == "") { return v }
+  if (v.v == "" || v.line == compLine || ev.line <= v.line) { return ev }
+  return v
 }
 
 // The `witnessed` externs a program declares. A witnessed acquisition registers
@@ -24283,6 +24605,19 @@ test "a Stream requirement is not a service lookup" {
     == ""
 }
 
+test "a bare emit in a provide-method if is admitted" {
+  let v = admit_src("""service Bus { emission fn send(k: Str) }
+service W { emission fn put(k: Str) }
+component C requires bus: Bus provides w: W {
+  provide w { fn put(k) {
+      if (k == "a") {
+        emit bus.send(k)
+      }
+  } }
+}""")
+  assert v == ""
+}
+
 test "a block match arm in a provide method is read as the arm's scope" {
   let v = admit_src("""service S { fn go(n: Int) -> Int }
 component C provides s: S {
@@ -25865,6 +26200,35 @@ test "a successor that cannot hold the running state is refused (handoff)" {
     == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Int`, but `OldStore` exports `Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"
 }
 
+test "a teardown-registering step in a provide-method if carries its own line" {
+  let v = admit_all("""service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      var n = 0
+      while (n < 2) {
+        effect store.insert(k, "1") undo store.remove(k)
+        n += 1
+      }
+  } }
+}""")
+  assert v == "7|T1|a teardown-registering step (`effect`/`let-effect`/`await`) is not allowed inside a provide-method `if`/`while`/`for` body"
+}
+
+// issue #1963: the effect-statement rules (the section above `witnessed_extern_names`).
+test "a teardown-registering step in a provide-method if is refused (T1)" {
+  let v = admit_src("""service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      if (k == "a") {
+        effect store.insert(k, "1") undo store.remove(k)
+      }
+  } }
+}""")
+  assert v == "T1|a teardown-registering step (`effect`/`let-effect`/`await`) is not allowed inside a provide-method `if`/`while`/`for` body"
+}
+
 test "a typed hole in a host acquisition's undo is not refused" {
   let v = admit_src("""service S { fn go(k: Str) -> Int }
 component C provides s: S {
@@ -25956,6 +26320,59 @@ test "a withdrawn provision a retained running consumer requires is refused" {
   let x = "component Old provides other: C { provide other { fn g(k) { return k } } }"
   assert admit_ambient(svc.concat(x), "Old/db/;Store/cache/;Store<db")
     == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"
+}
+
+test "a witnessed effect with a site undo in the activation body is refused (G4)" {
+  let v = admit_src("""type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  effect put_w("a") undo unput("a")
+  provide w { fn put(k) { } }
+}""")
+  assert v == "G4|witnessed extern `put_w` cannot declare a site `undo`"
+}
+
+test "a witnessed effect with a site undo is refused (G4)" {
+  let v = admit_all("""type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      effect put_w(k) undo unput(k)
+  } }
+}""")
+  assert v == "12|G4|witnessed extern `put_w` cannot declare a site `undo`"
+}
+
+test "a witnessed effect with no site undo is admitted" {
+  let v = admit_src("""type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      effect put_w(k)
+  } }
+}""")
+  assert v == ""
 }
 
 // Exit test 3: admission against a halted composition refuses every incoming
@@ -26123,6 +26540,15 @@ test "an arrow in an emit head's arguments leaves the argument position (G4)" {
   assert admit_src(pre.concat("return emit gt.decide(true, emit ap.approve(k, k)) } } }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
 }
 
+test "an arrow method's refusal carries its expression's line" {
+  let v = admit_all("""service R { fn get() -> Str }
+component D provides r: R {
+  provide r { fn get() =
+    db.get() }
+}""")
+  assert v == "4|G1|`db` is not a declared requirement of D"
+}
+
 test "an arrow parameter resolves in its body (no false G1)" {
   assert admit_src("fn apply(f: (Int) -> Int, x: Int) -> Int { return f(x) } service S { fn go(n: Int) -> Int } component C provides s: S { provide s { fn go(n) { let r = apply(x => x, n)   return r } } }") == ""
 }
@@ -26163,6 +26589,29 @@ component Worker requires kv2: Kv2 provides task: Task { provide task { fn go() 
 component Old provides other: C { provide other { fn g(k) { return k } } }"""
   assert admit_ambient(src, "Old/db/;Store/cache/;Store<db")
     == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv2`"
+}
+
+test "an effect whose undo is on the next line is admitted" {
+  let v = admit_src("""service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      effect store.insert(k, "1")
+        undo store.remove(k)
+  } }
+}""")
+  assert v == ""
+}
+
+test "an effect with no undo over a dotted call is refused (G4)" {
+  let v = admit_src("""service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      effect store.insert(k, "1")
+  } }
+}""")
+  assert v == "G4|effect has no `undo` and `store.insert` is not pure"
 }
 
 // issue #1427: the same rule on the HOST EMISSION EXTERN carrier. Both of the

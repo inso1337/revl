@@ -1,0 +1,10 @@
+// T1 (issue #1963): a bound `let … = effect` inside a provide-method `for`.
+service W { fn put(ks: List[Str]) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(ks) {
+      for (k of ks) {
+        let ok = effect store.insert_if_absent(k, "1") undo store.remove(k)
+      }
+  } }
+}

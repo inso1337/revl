@@ -1,0 +1,10 @@
+// G4 (issue #1963): a provide-method effect with no `undo` over a dotted call.
+// The reference's parser refuses it: no import can make `store.insert` a
+// witnessed call, so there is no declared inverse to defer to.
+service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      effect store.insert(k, "1")
+  } }
+}
