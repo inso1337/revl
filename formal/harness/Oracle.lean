@@ -8,6 +8,13 @@ import RevL.Theorems.A8_WalDischarge
 import RevL.Theorems.R4_NoResidue
 import RevL.Theorems.A9_ProvideKeyDeclared
 import RevL.Theorems.A2_NoAcquisitionAfterProvision
+import RevL.Theorems.G4_DeferredPosition
+import RevL.Theorems.G4_ApprovalFloor
+import RevL.Theorems.G6_BindingUnique
+import RevL.Theorems.G1_KeyAccess
+import RevL.Theorems.A1_AsyncColour
+import RevL.Theorems.Prelude_InterceptMethod
+import RevL.Theorems.ModelPlacement
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -32,7 +39,36 @@ proved model itself**, not from a private restatement of it (roadmap item
     `LComponent` beside its installed provide-block keys (the `PB` rows)
     and its routed keys (the `PR` rows); `a9RowB_iff` PROVES
     `a9RowB c blocks routed = true ↔ RevL.A9.A9OK ⟨c, blocks, routed⟩`,
-    both directions of the rule (issues 1167 and #1172).
+    both directions of the rule (issues 1167 and #1172);
+  * `AP … approval=` is `approvalRowB`, which IS
+    `RevL.G4Approval.crossingB` over one marked crossing's tokens (the
+    `AX` rows), its `with` edge (the `AE` row) and the file's
+    approval-required tokens (the `AR` rows); `approvalRowB_iff` PROVES
+    it equals `RevL.G4Approval.CrossingOK` (issue #1455);
+  * `BU … binding=` is `bindingRowB`, which IS `RevL.G6Binding.bindingB`
+    over one scope's seed names and its bind/enter/leave events (the `BE`
+    rows); `bindingRowB_iff` PROVES it equals `RevL.G6Binding.BindingOK`
+    (G6 binding uniqueness, issue #1812);
+  * `G1 … access=` is `accessRowB`, which IS `RevL.G1Access.accessB` over
+    the component's declared requirements (its `M` row) and its access
+    roots (the `GA` rows); `accessRowB_iff` PROVES it equals
+    `RevL.G1Access.AccessOK` (G1 declared access, issue #1807);
+  * `A1 … async=` is `asyncRowB`, which IS `RevL.A1Async.siteB` over one
+    site's kind and heads, the file's async names (the `AN` rows) and its
+    `fn` call graph (the `FN` rows); `asyncRowB_iff` PROVES it equals
+    `RevL.A1Async.SiteOK`, and `A1S … sig=` is `RevL.A1Async.sigB`
+    (`sigRowB_iff`) over one provide method's two colours (issue #1808);
+  * `PL … prelude=`, `IC … intercept=` and `MS … method=` are
+    `RevL.Prelude.preludeB`, `interceptB` and `methodB` over the `PS`
+    steps, the `IT` targets against the `M` row, and the `MC` operations
+    against the file's `B` table; `preludeRowB_iff`, `interceptRowB_iff`
+    and `methodRowB_iff` PROVE each is its rule (issue #1809);
+  * `MPV … place=` is `placeRowB`, which IS `RevL.ModelPlace.placeB` over a
+    component's placed route arms (`MP`) and the confidentiality origins
+    (`MO`), with `placeRowB_iff`; `MAV … reach=` is `modelReachB`, which IS
+    `attenuatesB` over the component's held set and a consulted role's
+    reach (`ME`, `MRC`), with `modelReachB_iff` (G-MODEL-PLACE, issue
+    #1811).
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -47,7 +83,9 @@ overstated:
 
 1. `g4OK` and `hostAcquireOK` (the `G` row), and `configDataOK` (the `CD`
    row). Three rules under the G4
-   guarantee. `g4OK` is the MARKER rule; the G4 model
+   guarantee. (The fourth, the DEFERRED-POSITION rule, is not a private
+   restatement: the `DF` row decides `RevL.G4Deferred.deferredB`, issue
+   #1742.) `g4OK` is the MARKER rule; the G4 model
    (`RevL.Theorems.G4_InverseOrEmit` over `RevL.Syntax.Stmt`) is indexed
    by statement syntax, and the export carries call FACTS — receiver,
    service, method, marker context — so no model definition takes its
@@ -122,9 +160,13 @@ Fact rows in (tab-separated, one fact per line):
                                              KEY it went through (what the
                                              provide-method bound compares
                                              against its service's
-                                             `emission[...]`). `A` and `K`
-                                             feed the fold alone and carry
-                                             the boundary spelling only
+                                             `emission[...]`); for a host
+                                             emission it is the capability
+                                             TOKEN the call reaches, a scoped
+                                             extern's scope (issue #1455).
+                                             `A` and `K` feed the fold alone
+                                             and carry the boundary spelling
+                                             only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context:
@@ -145,6 +187,55 @@ Fact rows in (tab-separated, one fact per line):
                                              an `effect … undo …` (legal); any
                                              other site acquires irreversibly
                                              (G4, category `acquire`)
+  BE <file> <comp> <scope> <ord> <seed|bind|enter|leave> <name|->
+                                             one step through a binding scope
+                                             (`@act` for the activation body,
+                                             `<key>.<method>` for a provide
+                                             method): a name in view at its
+                                             start, a binding, or a block
+                                             boundary (G6, category `binding`)
+  AN <file> <name>                           an async name: an async extern,
+                                             or an async service operation
+                                             spelled `<Service>.<op>` (A1)
+  AS <file> <comp> <ord> <kind> <heads=csv>  one A1 site: a provide method
+                                             (`syncMethod`/`asyncMethod`), an
+                                             `effect`/`emit` step (`…Await`
+                                             when awaited), or an `undo` /
+                                             `compensate` slot, with the heads
+                                             it calls (issue #1808)
+  AG <file> <comp> <key.method> <declared> <impl>
+                                             a provide method's colour as its
+                                             service declares it and as it is
+                                             written (`async`/`sync`)
+  MP <file> <comp> <action> <origin> <role> <on_device|off_device>
+                                             one placed role of a `route
+                                             model` arm (a council arm places
+                                             each member that receives it)
+  MO <file> <origin>                         a confidentiality origin
+  ME <file> <comp> <role>                    a model role the component
+                                             consults (a block names it, or a
+                                             crossing is placed on it)
+  MRC <file> <role> <cap>                    one capability the role reaches
+                                             (`*` when it declares none)
+  PS <file> <comp> <ord> <prelude|action>    one activation-body statement
+                                             as the prelude rule sees it
+  IT <file> <comp> <key>                     an `intercept` target
+  MC <file> <comp> <svc> <meth>              a service operation the
+                                             component names: a crossing
+                                             through a requirement, a handle
+                                             or an alias, or a provide-block
+                                             implementation (issue #1809)
+  GA <file> <comp> <root>                    one ACCESS root: a call head's
+                                             root that is no binding, module
+                                             callable, import, host family or
+                                             constructor, or an `intercept`
+                                             target (G1, issue #1807)
+  DR <file> <fn|test|component> <owner> <extern> <call|arrow|value>
+                                             one reach of a `deferred` emission
+                                             extern and where it sits: a call,
+                                             a call inside an arrow, or the
+                                             extern as a function value (G4,
+                                             category `deferred`, issue #1742)
   CF <file> <component|extern> <owner> <field> <type>
                                              a declared config field
   CN <file> <component|extern> <owner> <field> <ord> <form> <type>
@@ -181,6 +272,14 @@ Fact rows in (tab-separated, one fact per line):
                                              re-issued. Not a WAL record — a
                                              property of the world the
                                              reference drives.
+  AR <file> <token>                          an approval-required capability
+                                             token: an extern declares
+                                             `requires approval`, and this is
+                                             its scope, or its name
+  AX <file> <comp> <ord> <token>             one token the component's
+                                             marked crossing `ord` reaches
+  AE <file> <comp> <ord> <scope>             that crossing's `with` edge; no
+                                             row when it carries none
   AQ <file> <comp> <ord> <acquire|provide|other>
                                              one activation-body statement,
                                              at body index `ord`, as the A2
@@ -215,6 +314,34 @@ Verdict rows out:
   A2 <file> <comp> <a2=ok|fail>                    no acquisition after a
                                                    provision: `RevL.A2.a2B`
                                                    over the body's `AQ` steps
+  DF <file> <deferred=ok|fail>                     G4 deferred position:
+                                                   `RevL.G4Deferred.deferredB`
+                                                   over the file's `DR` reaches
+  AP <file> <comp> <ord> <approval=ok|fail>        the approval floor over one
+                                                   marked crossing:
+                                                   `RevL.G4Approval.crossingB`
+  BU <file> <comp> <scope> <binding=ok|fail>       G6 binding uniqueness over
+                                                   one scope:
+                                                   `RevL.G6Binding.bindingB`
+  G1 <file> <comp> <access=ok|fail>                G1 declared access:
+                                                   `RevL.G1Access.accessB`
+                                                   over the `GA` roots
+  A1 <file> <comp> <ord> <async=ok|fail>           A1 async colour over one
+                                                   site: `RevL.A1Async.siteB`
+  A1S <file> <comp> <key.method> <sig=ok|fail>     A1, a provide method's
+                                                   colour is its service's:
+                                                   `RevL.A1Async.sigB`
+  PL <file> <comp> <prelude=ok|fail>               prelude ordering:
+                                                   `RevL.Prelude.preludeB`
+  IC <file> <comp> <intercept=ok|fail>             intercept target:
+                                                   `RevL.Prelude.interceptB`
+  MS <file> <comp> <method=ok|fail>                method in service:
+                                                   `RevL.Prelude.methodB`
+  MPV <file> <comp> <place=ok|fail>                model placement:
+                                                   `RevL.ModelPlace.placeB`
+  MAV <file> <comp> <role> <reach=ok|fail>         model reach within the
+                                                   component's held set:
+                                                   `attenuatesB`
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -992,6 +1119,15 @@ structure HARow where
   verb : String
   pos : String
 
+/-- One reach of a `deferred` emission extern (`DR` row), with the scope and
+position the model's `RevL.G4Deferred` rule reads. -/
+structure DRRow where
+  path : String
+  scope : String
+  owner : String
+  ext : String
+  pos : String
+
 /-- A declared config field (`CF` row). `kind` is `component` or `extern`,
 the two owners `lower._check_config` is called for; `spelling` is the type
 as the author wrote it and is carried for legibility only — the judgment
@@ -1284,6 +1420,11 @@ def parseHA (f : List String) : Option HARow :=
   | ["HA", path, comp, verb, pos] => some ⟨path, comp, verb, pos⟩
   | _ => none
 
+def parseDR (f : List String) : Option DRRow :=
+  match f with
+  | ["DR", path, scope, owner, ext, pos] => some ⟨path, scope, owner, ext, pos⟩
+  | _ => none
+
 def parseCF (f : List String) : Option CFRow :=
   match f with
   | ["CF", path, kind, owner, field, spelling] =>
@@ -1499,6 +1640,46 @@ def closeN (n : Nat) (edges : List (String × String)) (closed : CapMap) : CapMa
   | 0 => closed
   | n + 1 => closeN n edges (oneStep edges closed)
 
+/-! ## Deciding the G4 deferred-position rule (issue #1742)
+
+A `DR` row is one reach of a `deferred` emission extern. Its scope and
+position are read into the model's own `RevL.G4Deferred.Reach`, and the file
+verdict is `RevL.G4Deferred.deferredB` over the file's reaches.
+`deferredOKB_iff` is the bridge: the printed `DF` Bool is the declarative
+`RevL.G4Deferred.DeferredOK`. A scope or position the model has no
+constructor for is a HARD error in `main`, never a silently dropped reach. -/
+
+section DeferredPosition
+
+def parseScope : String → Option RevL.G4Deferred.Scope
+  | "fn" => some .fn
+  | "test" => some .test
+  | "component" => some .component
+  | _ => none
+
+def parsePos : String → Option RevL.G4Deferred.Pos
+  | "call" => some .call
+  | "arrow" => some .arrow
+  | "value" => some .value
+  | _ => none
+
+/-- The model's reach for one `DR` row, or `none` for an unknown spelling. -/
+def reachOf (r : DRRow) : Option RevL.G4Deferred.Reach :=
+  match parseScope r.scope, parsePos r.pos with
+  | some s, some p => some ⟨s, p⟩
+  | _, _ => none
+
+/-- **Deferred-position decider**: the model's rule over the file's reaches. -/
+def deferredOKB (reaches : List RevL.G4Deferred.Reach) : Bool :=
+  RevL.G4Deferred.deferredB reaches
+
+/-- **The `DF` verdict is the model's rule** (`RevL.G4Deferred.deferredB_iff`). -/
+theorem deferredOKB_iff (reaches : List RevL.G4Deferred.Reach) :
+    deferredOKB reaches = true ↔ RevL.G4Deferred.DeferredOK reaches :=
+  RevL.G4Deferred.deferredB_iff reaches
+
+end DeferredPosition
+
 /-! ## Deciding A2: no acquisition after a provision (issue 1166)
 
 The `AQ` rows are one component's activation body in order, each statement
@@ -1564,6 +1745,388 @@ theorem a2OKB_iff (steps : List RevL.A2.Step) :
 
 end A2Ordering
 
+/-! ## Deciding the approval floor (issue #1455)
+
+Item 246's declaration-owned floor: a marked crossing that reaches a
+capability token some extern declared `requires approval` for must carry a
+`with` edge whose scope covers it (`lower._require_declared_approval`). The
+exporter resolves the three facts the rule is stated over, per crossing:
+the tokens it reaches (`AX`), its edge (`AE`) and the file's required tokens
+(`AR`). The verdict is the model's `RevL.G4Approval.crossingB`, and
+`approvalRowB_iff` is the bridge to `RevL.G4Approval.CrossingOK`. -/
+
+section ApprovalFloor
+
+structure ARRow where
+  path : String
+  token : String
+
+structure AXRow where
+  path : String
+  comp : String
+  ord : String
+  token : String
+
+structure AERow where
+  path : String
+  comp : String
+  ord : String
+  scope : String
+
+def parseAR (f : List String) : Option ARRow :=
+  match f with
+  | ["AR", path, token] => some ⟨path, token⟩
+  | _ => none
+
+def parseAX (f : List String) : Option AXRow :=
+  match f with
+  | ["AX", path, comp, ord, token] => some ⟨path, comp, ord, token⟩
+  | _ => none
+
+def parseAE (f : List String) : Option AERow :=
+  match f with
+  | ["AE", path, comp, ord, scope] => some ⟨path, comp, ord, scope⟩
+  | _ => none
+
+/-- **Approval decider**: the model's judgment over one crossing. -/
+def approvalRowB (required tokens : List String) (edge : Option String) : Bool :=
+  RevL.G4Approval.crossingB required ⟨tokens, edge⟩
+
+/-- **The approval verdict is the model's rule**: the printed Bool is
+`true` exactly when every approval-required token the crossing reaches is
+covered by its edge. -/
+theorem approvalRowB_iff (required tokens : List String) (edge : Option String) :
+    approvalRowB required tokens edge = true ↔
+      RevL.G4Approval.CrossingOK required ⟨tokens, edge⟩ :=
+  RevL.G4Approval.crossingB_iff required ⟨tokens, edge⟩
+
+end ApprovalFloor
+
+/-! ## Deciding G6 binding uniqueness (issue #1812)
+
+A `BE` row is one step through a binding scope, in source order: a `seed`
+name in view when the scope starts, a `bind`, or an `enter`/`leave` block
+boundary. The verdict is the model's `RevL.G6Binding.bindingB` over the seed
+and the events, and `bindingRowB_iff` is the bridge to
+`RevL.G6Binding.BindingOK`. An unknown step kind is a hard error in `main`. -/
+
+section BindingUnique
+
+structure BERow where
+  path : String
+  comp : String
+  scope : String
+  ord : Nat
+  kind : String
+  name : String
+
+def parseBE (f : List String) : Option BERow :=
+  match f with
+  | ["BE", path, comp, scope, ord, kind, name] =>
+      ord.toNat?.map fun o => ⟨path, comp, scope, o, kind, name⟩
+  | _ => none
+
+/-- The model's event for one `BE` row; `none` for a seed or an unknown kind. -/
+def beEvent (r : BERow) : Option RevL.G6Binding.Ev :=
+  match r.kind with
+  | "bind" => some (.bind r.name)
+  | "enter" => some .enter
+  | "leave" => some .leave
+  | _ => none
+
+def beKnown (r : BERow) : Bool :=
+  r.kind == "seed" || (beEvent r).isSome
+
+/-- **Binding decider**: the model's judgment over one scope. -/
+def bindingRowB (seed : List String) (evs : List RevL.G6Binding.Ev) : Bool :=
+  RevL.G6Binding.bindingB seed evs
+
+/-- **The `BU` verdict is the model's rule.** -/
+theorem bindingRowB_iff (seed : List String) (evs : List RevL.G6Binding.Ev) :
+    bindingRowB seed evs = true ↔ RevL.G6Binding.BindingOK seed evs :=
+  RevL.G6Binding.bindingB_iff seed evs
+
+end BindingUnique
+
+/-! ## Deciding G1 declared access (issue #1807)
+
+A `GA` row is one access root of a component: a call head's root the
+checker can only resolve through a requirement. The verdict is the model's
+`RevL.G1Access.accessB` over the component's declared requirements (its `M`
+row) and its roots, and `accessRowB_iff` is the bridge to
+`RevL.G1Access.AccessOK`. -/
+
+section KeyAccess
+
+structure GARow where
+  path : String
+  comp : String
+  root : String
+
+def parseGA (f : List String) : Option GARow :=
+  match f with
+  | ["GA", path, comp, root] => some ⟨path, comp, root⟩
+  | _ => none
+
+/-- **Access decider**: the model's judgment over one component. -/
+def accessRowB (declared roots : List String) : Bool :=
+  RevL.G1Access.accessB declared roots
+
+/-- **The `G1` verdict is the model's rule.** -/
+theorem accessRowB_iff (declared roots : List String) :
+    accessRowB declared roots = true ↔ RevL.G1Access.AccessOK declared roots :=
+  RevL.G1Access.accessB_iff declared roots
+
+end KeyAccess
+
+/-! ## Deciding A1 async colour (issue #1808)
+
+An `AS` row is one site the A1 rules judge, with the heads it calls. The
+verdict is the model's `RevL.A1Async.siteB` over the site's kind, the file's
+async names (`AN`) and its `fn` call graph (the `FN` rows), with a fuel of
+one step per `fn` plus one: a shortest reach path visits each `fn` at most
+once. `asyncRowB_iff` is the bridge to `RevL.A1Async.SiteOK`. An `AG` row is
+decided by `RevL.A1Async.sigB` (`sigRowB_iff`). An unknown site kind is a
+hard error in `main`. -/
+
+section AsyncColour
+
+structure ANRow where
+  path : String
+  name : String
+
+structure ASRow where
+  path : String
+  comp : String
+  ord : String
+  kind : String
+  heads : List String
+
+structure AGRow where
+  path : String
+  comp : String
+  meth : String
+  declared : String
+  impl : String
+
+def parseAN (f : List String) : Option ANRow :=
+  match f with
+  | ["AN", path, name] => some ⟨path, name⟩
+  | _ => none
+
+def parseAS (f : List String) : Option ASRow :=
+  match f with
+  | ["AS", path, comp, ord, kind, heads] => some ⟨path, comp, ord, kind, splitKeys heads⟩
+  | _ => none
+
+def parseAG (f : List String) : Option AGRow :=
+  match f with
+  | ["AG", path, comp, meth, declared, impl] => some ⟨path, comp, meth, declared, impl⟩
+  | _ => none
+
+def parseSiteKind : String → Option RevL.A1Async.Kind
+  | "syncMethod" => some .syncMethod
+  | "asyncMethod" => some .asyncMethod
+  | "effect" => some .effect
+  | "effectAwait" => some .effectAwait
+  | "emit" => some .emit
+  | "emitAwait" => some .emitAwait
+  | "undo" => some .undo
+  | "compensate" => some .compensate
+  | _ => none
+
+/-- **Async decider**: the model's judgment over one site. -/
+def asyncRowB (g : RevL.A1Async.Graph) (as : List String) (fuel : Nat)
+    (k : RevL.A1Async.Kind) (heads : List String) : Bool :=
+  RevL.A1Async.siteB g as fuel k heads
+
+/-- **The `A1` verdict is the model's rule.** -/
+theorem asyncRowB_iff (g : RevL.A1Async.Graph) (as : List String) (fuel : Nat)
+    (k : RevL.A1Async.Kind) (heads : List String) :
+    asyncRowB g as fuel k heads = true ↔ RevL.A1Async.SiteOK g as fuel k heads :=
+  RevL.A1Async.siteB_iff g as fuel k heads
+
+/-- **Signature decider**: a provide method's colour against its service's. -/
+def sigRowB (declared impl : Bool) : Bool := RevL.A1Async.sigB declared impl
+
+theorem sigRowB_iff (declared impl : Bool) :
+    sigRowB declared impl = true ↔ RevL.A1Async.SigOK declared impl :=
+  RevL.A1Async.sigB_iff declared impl
+
+end AsyncColour
+
+/-! ## Deciding the three declaration rules (issue #1809)
+
+`PS` rows are the activation body's statements in order, as preludes and
+actions; `IT` rows are `intercept` targets; `MC` rows are the service
+operations a component names. The verdicts are `RevL.Prelude.preludeB`,
+`interceptB` and `methodB`, each with a bridge. -/
+
+section PreludeRules
+
+structure PSRow where
+  path : String
+  comp : String
+  ord : Nat
+  kind : String
+
+structure ITRow where
+  path : String
+  comp : String
+  key : String
+
+structure MCRow where
+  path : String
+  comp : String
+  svc : String
+  meth : String
+
+def parsePS (f : List String) : Option PSRow :=
+  match f with
+  | ["PS", path, comp, ord, kind] => ord.toNat?.map fun o => ⟨path, comp, o, kind⟩
+  | _ => none
+
+def parseIT (f : List String) : Option ITRow :=
+  match f with
+  | ["IT", path, comp, key] => some ⟨path, comp, key⟩
+  | _ => none
+
+def parseMC (f : List String) : Option MCRow :=
+  match f with
+  | ["MC", path, comp, svc, meth] => some ⟨path, comp, svc, meth⟩
+  | _ => none
+
+def parsePreludeStep : String → Option RevL.Prelude.Step
+  | "prelude" => some .prelude
+  | "action" => some .action
+  | _ => none
+
+def preludeRowB (steps : List RevL.Prelude.Step) : Bool := RevL.Prelude.preludeB steps
+
+theorem preludeRowB_iff (steps : List RevL.Prelude.Step) :
+    preludeRowB steps = true ↔ RevL.Prelude.PreludeOK steps :=
+  RevL.Prelude.preludeB_iff steps
+
+def interceptRowB (provides requires targets : List String) : Bool :=
+  RevL.Prelude.interceptB provides requires targets
+
+theorem interceptRowB_iff (provides requires targets : List String) :
+    interceptRowB provides requires targets = true ↔
+      RevL.Prelude.InterceptOK provides requires targets :=
+  RevL.Prelude.interceptB_iff provides requires targets
+
+def methodRowB (table calls : List RevL.Prelude.Op) : Bool := RevL.Prelude.methodB table calls
+
+theorem methodRowB_iff (table calls : List RevL.Prelude.Op) :
+    methodRowB table calls = true ↔ RevL.Prelude.MethodOK table calls :=
+  RevL.Prelude.methodB_iff table calls
+
+end PreludeRules
+
+/-! ## Deciding G-MODEL-PLACE (issue #1811)
+
+`MP` rows are the placed roles of a component's route arms, judged by
+`RevL.ModelPlace.placeB` against the `MO` confidentiality origins. `ME` rows
+are the roles a component consults and `MRC` rows each role's reach, judged
+by the same proved `attenuatesB` the spawn `W` row uses, over the
+component's held set. -/
+
+section ModelPlacement
+
+structure MPRow where
+  path : String
+  comp : String
+  origin : String
+  residence : String
+
+structure MERow where
+  path : String
+  comp : String
+  role : String
+
+structure MRCRow where
+  path : String
+  role : String
+  cap : String
+
+def parseMP (f : List String) : Option MPRow :=
+  match f with
+  | ["MP", path, comp, _action, origin, _role, res] => some ⟨path, comp, origin, res⟩
+  | _ => none
+
+def parseMO (f : List String) : Option (String × String) :=
+  match f with
+  | ["MO", path, origin] => some (path, origin)
+  | _ => none
+
+def parseME (f : List String) : Option MERow :=
+  match f with
+  | ["ME", path, comp, role] => some ⟨path, comp, role⟩
+  | _ => none
+
+def parseMRC (f : List String) : Option MRCRow :=
+  match f with
+  | ["MRC", path, role, cap] => some ⟨path, role, cap⟩
+  | _ => none
+
+def parseResidence : String → Option RevL.ModelPlace.Residence
+  | "on_device" => some .onDevice
+  | "off_device" => some .offDevice
+  | _ => none
+
+def placeRowB (conf : List String) (arms : List RevL.ModelPlace.Placed) : Bool :=
+  RevL.ModelPlace.placeB conf arms
+
+theorem placeRowB_iff (conf : List String) (arms : List RevL.ModelPlace.Placed) :
+    placeRowB conf arms = true ↔ RevL.ModelPlace.PlaceOK conf arms :=
+  RevL.ModelPlace.placeB_iff conf arms
+
+/-- **Model-reach decider**: the role's reach within the component's held
+set, by the spawn rule's own decider. -/
+def modelReachB (held reach : List Cap) : Bool := attenuatesB held reach
+
+theorem modelReachB_iff (held reach : List Cap) :
+    modelReachB held reach = true ↔ Attenuates held reach :=
+  attenuatesB_iff held reach
+
+/-- The `MPV` and `MAV` rows of one file. Kept out of `main` so its
+elaboration stays within the default heartbeat budget. -/
+structure ModelRows where
+  mo : List (String × String)
+  mp : List MPRow
+  me : List MERow
+  mrc : List MRCRow
+  unknown : List String
+
+/-- The model-placement rows, parsed once; `unknown` names the files with an
+`MP` row of a residence the model has no constructor for. -/
+def parseModelRows (fields : List (List String)) : ModelRows :=
+  let mp := fields.filterMap parseMP
+  { mo := fields.filterMap parseMO, mp := mp, me := fields.filterMap parseME,
+    mrc := fields.filterMap parseMRC,
+    unknown := (mp.filter (fun r => (parseResidence r.residence).isNone)).map (·.path) }
+
+def modelVerdicts (p : String) (rows : ModelRows)
+    (held : CapMap) (capTable : CapTable) : String := Id.run do
+  let mut out := ""
+  let conf := (rows.mo.filter (fun r => r.1 == p)).map (·.2)
+  let pmp := rows.mp.filter (fun r => r.path == p)
+  for cn in (pmp.map (·.comp)).eraseDups do
+    let arms := (pmp.filter (fun r => r.comp == cn)).filterMap
+      (fun r => (parseResidence r.residence).map fun res => (⟨r.origin, res⟩ : RevL.ModelPlace.Placed))
+    let mpv := if placeRowB conf arms then "ok" else "fail"
+    out := out ++ s!"MPV\t{p}\t{cn}\tplace={mpv}\n"
+  let pmrc := rows.mrc.filter (fun r => r.path == p)
+  for e in rows.me.filter (fun r => r.path == p) do
+    let reachCaps := ((pmrc.filter (fun r => r.role == e.role)).map (·.cap)).filterMap
+      (capOf capTable)
+    let heldCaps := (lookupCaps held e.comp).filterMap (capOf capTable)
+    let mav := if modelReachB heldCaps reachCaps then "ok" else "fail"
+    out := out ++ s!"MAV\t{p}\t{e.comp}\t{e.role}\treach={mav}\n"
+  return out
+
+end ModelPlacement
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1583,6 +2146,74 @@ def toLComponent (r : MRow) (routed : List String) : LComponent :=
       | some (_, rl) => rl
       | none => sharedRealm }
 
+/-- BU verdicts (G6 binding uniqueness, issue #1812), one per scope: the
+model's rule over the scope's seed names and its ordered events. -/
+def bindingVerdicts (p : String) (berows : List BERow) : String := Id.run do
+  let mut out := ""
+  let pbe := berows.filter (fun r => r.path == p)
+  for k in (pbe.map (fun r => (r.comp, r.scope))).eraseDups do
+    let mine := (pbe.filter (fun r => r.comp == k.1 && r.scope == k.2)).mergeSort
+      (fun a b => a.ord <= b.ord)
+    let seed := (mine.filter (fun r => r.kind == "seed")).map (·.name)
+    let evs := mine.filterMap beEvent
+    let buv := if bindingRowB seed evs then "ok" else "fail"
+    out := out ++ s!"BU\t{p}\t{k.1}\t{k.2}\tbinding={buv}\n"
+  return out
+
+/-- G1 verdicts (declared access, issue #1807), one per component: the
+model's rule over its declared requirements and its access roots. -/
+def accessVerdicts (p : String) (fm : List MRow) (garows : List GARow) : String := Id.run do
+  let mut out := ""
+  let pga := garows.filter (fun r => r.path == p)
+  for m in fm do
+    let roots := (pga.filter (fun r => r.comp == m.name)).map (·.root)
+    let g1v := if accessRowB m.requires roots then "ok" else "fail"
+    out := out ++ s!"G1\t{p}\t{m.name}\taccess={g1v}\n"
+  return out
+
+/-- A1 verdicts (async colour, issue #1808), one per site and one per
+provide method's signature. -/
+def asyncVerdicts (p : String) (fnrows : List FNRow) (anrows : List ANRow)
+    (asrows : List ASRow) (agrows : List AGRow) : String := Id.run do
+  let mut out := ""
+  let graph : RevL.A1Async.Graph :=
+    (fnrows.filter (fun r => r.path == p)).map (fun r => (r.name, r.calls))
+  let anames := (anrows.filter (fun r => r.path == p)).map (·.name)
+  for r in asrows.filter (fun r => r.path == p) do
+    match parseSiteKind r.kind with
+    | some k =>
+      let a1v := if asyncRowB graph anames (graph.length + 1) k r.heads
+        then "ok" else "fail"
+      out := out ++ s!"A1\t{p}\t{r.comp}\t{r.ord}\tasync={a1v}\n"
+    | none => pure ()
+  for r in agrows.filter (fun r => r.path == p) do
+    let sv := if sigRowB (r.declared == "async") (r.impl == "async")
+      then "ok" else "fail"
+    out := out ++ s!"A1S\t{p}\t{r.comp}\t{r.meth}\tsig={sv}\n"
+  return out
+
+/-- PL / IC / MS verdicts (issue #1809), one each per component. -/
+def declVerdicts (p : String) (fm : List MRow) (brows : List BRow)
+    (psrows : List PSRow) (itrows : List ITRow) (mcrows : List MCRow) : String := Id.run do
+  let mut out := ""
+  let table : List RevL.Prelude.Op :=
+    (brows.filter (fun r => r.path == p)).map (fun r => (r.svc, r.meth))
+  let pps := psrows.filter (fun r => r.path == p)
+  let pit := itrows.filter (fun r => r.path == p)
+  let pmc := mcrows.filter (fun r => r.path == p)
+  for m in fm do
+    let steps := ((pps.filter (fun r => r.comp == m.name)).mergeSort
+      (fun a b => a.ord <= b.ord)).filterMap (fun r => parsePreludeStep r.kind)
+    let plv := if preludeRowB steps then "ok" else "fail"
+    out := out ++ s!"PL\t{p}\t{m.name}\tprelude={plv}\n"
+    let targets := (pit.filter (fun r => r.comp == m.name)).map (·.key)
+    let icv := if interceptRowB m.provides m.requires targets then "ok" else "fail"
+    out := out ++ s!"IC\t{p}\t{m.name}\tintercept={icv}\n"
+    let calls := (pmc.filter (fun r => r.comp == m.name)).map (fun r => (r.svc, r.meth))
+    let msv := if methodRowB table calls then "ok" else "fail"
+    out := out ++ s!"MS\t{p}\t{m.name}\tmethod={msv}\n"
+  return out
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | [inPath, outPath] =>
@@ -1601,6 +2232,7 @@ def main (args : List String) : IO UInt32 := do
     let pbrows := fields.filterMap parsePB
     let prrows := fields.filterMap parsePR
     let harows := fields.filterMap parseHA
+    let drrows := fields.filterMap parseDR
     let cfrows := fields.filterMap parseCF
     let cnrows := fields.filterMap parseCN
     let irows := fields.filterMap parseI
@@ -1613,6 +2245,27 @@ def main (args : List String) : IO UInt32 := do
     let lruns := fields.filterMap parseLRun
     let lfails := fields.filterMap parseLFail
     let aqrows := fields.filterMap parseAQ
+    let arrows' := fields.filterMap parseAR
+    let axrows := fields.filterMap parseAX
+    let berows := fields.filterMap parseBE
+    let garows := fields.filterMap parseGA
+    let anrows := fields.filterMap parseAN
+    let asrows := fields.filterMap parseAS
+    let agrows := fields.filterMap parseAG
+    let psrows := fields.filterMap parsePS
+    let mrows' := parseModelRows fields
+    let itrows := fields.filterMap parseIT
+    let mcrows := fields.filterMap parseMC
+    let aerows := fields.filterMap parseAE
+    -- An edge with no crossing, or two edges on one crossing, is a malformed
+    -- export: refuse it rather than read one of them.
+    for e in aerows do
+      if !(axrows.any fun x => x.path == e.path && x.comp == e.comp && x.ord == e.ord) then
+        IO.eprintln s!"oracle: AE row without a crossing: {e.path} {e.comp} {e.ord}"
+        return 1
+      if (aerows.filter fun x => x.path == e.path && x.comp == e.comp && x.ord == e.ord).length > 1 then
+        IO.eprintln s!"oracle: two AE rows on one crossing: {e.path} {e.comp} {e.ord}"
+        return 1
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
@@ -1667,6 +2320,27 @@ def main (args : List String) : IO UInt32 := do
         if outcome log = .rolledBack then csv (reportedSeqLabels log ok) else "n/a"
       out := out ++ s!"O\t{scen}\toutcome={outcomeName (outcome log)}\t" ++
         s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\n"
+    -- A `DR` row whose scope or position the model has no constructor for
+    -- would drop a reach silently and move the verdict: refuse instead.
+    if !mrows'.unknown.isEmpty then
+      IO.eprintln s!"oracle: MP rows of unknown residence: {mrows'.unknown}"
+      return 1
+    let unknownPS := psrows.filter (fun r => (parsePreludeStep r.kind).isNone)
+    if !unknownPS.isEmpty then
+      IO.eprintln s!"oracle: PS rows of unknown step kind: {unknownPS.map (·.path)}"
+      return 1
+    let unknownAS := asrows.filter (fun r => (parseSiteKind r.kind).isNone)
+    if !unknownAS.isEmpty then
+      IO.eprintln s!"oracle: AS rows of unknown site kind: {unknownAS.map (·.path)}"
+      return 1
+    let unknownBE := berows.filter (fun r => !beKnown r)
+    if !unknownBE.isEmpty then
+      IO.eprintln s!"oracle: BE rows of unknown kind: {unknownBE.map (·.path)}"
+      return 1
+    let unknownDR := drrows.filter (fun r => (reachOf r).isNone)
+    if !unknownDR.isEmpty then
+      IO.eprintln s!"oracle: DR rows of unknown scope or position: {unknownDR.map (·.path)}"
+      return 1
     for p in paths do
       let fm := mrows.filter (fun r => r.path == p)
       let ub := brows.filter (fun r => r.path == p)
@@ -1740,6 +2414,8 @@ def main (args : List String) : IO UInt32 := do
         let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 caps
         let pv := if ok then "ok" else "fail"
         out := out ++ s!"P\t{p}\t{k.1}\t{k.2.1}\t{k.2.2.1}\t{k.2.2.2}\tbound={pv}\n"
+      -- MPV / MAV verdicts (G-MODEL-PLACE, issue #1811)
+      out := out ++ modelVerdicts p mrows' held capTable
       -- W verdicts (spawn attenuation) per edge
       for e in edges do
         let childCaps := (lookupCaps closed e.2).filterMap (capOf capTable)
@@ -1807,6 +2483,28 @@ def main (args : List String) : IO UInt32 := do
         let steps := mine.filterMap (fun r => parseStep r.kind)
         let av := if a2OKB steps then "ok" else "fail"
         out := out ++ s!"A2\t{p}\t{cn}\ta2={av}\n"
+      -- DF verdict (G4 deferred position, issue #1742), one per file: the
+      -- model's rule over every reach of a `deferred` extern the file makes.
+      let reaches := (drrows.filter (fun r => r.path == p)).filterMap reachOf
+      let dfv := if deferredOKB reaches then "ok" else "fail"
+      out := out ++ s!"DF\t{p}\tdeferred={dfv}\n"
+      -- AP verdicts (the approval floor, issue #1455), one per marked
+      -- crossing that reaches a token: the model's `crossingB` over its `AX`
+      -- tokens, its `AE` edge and the file's `AR` required tokens.
+      let required := (arrows'.filter (fun r => r.path == p)).map (·.token)
+      let pax := axrows.filter (fun r => r.path == p)
+      let pae := aerows.filter (fun r => r.path == p)
+      for k in (pax.map (fun r => (r.comp, r.ord))).eraseDups do
+        let toks := (pax.filter (fun r => r.comp == k.1 && r.ord == k.2)).map (·.token)
+        let edge := (pae.find? (fun r => r.comp == k.1 && r.ord == k.2)).map (·.scope)
+        let apv := if approvalRowB required toks edge then "ok" else "fail"
+        out := out ++ s!"AP\t{p}\t{k.1}\t{k.2}\tapproval={apv}\n"
+      -- BU, G1, A1/A1S and PL/IC/MS verdicts (issues #1812, #1807, #1808,
+      -- #1809), in helpers so `main` stays within the elaboration budget.
+      out := out ++ bindingVerdicts p berows
+      out := out ++ accessVerdicts p fm garows
+      out := out ++ asyncVerdicts p fnrows anrows asrows agrows
+      out := out ++ declVerdicts p fm brows psrows itrows mcrows
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -1866,3 +2564,14 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.a9RowB_iff
 #print axioms RevLOracle.parseStep_stepName
 #print axioms RevLOracle.a2OKB_iff
+#print axioms RevLOracle.deferredOKB_iff
+#print axioms RevLOracle.approvalRowB_iff
+#print axioms RevLOracle.bindingRowB_iff
+#print axioms RevLOracle.accessRowB_iff
+#print axioms RevLOracle.asyncRowB_iff
+#print axioms RevLOracle.sigRowB_iff
+#print axioms RevLOracle.preludeRowB_iff
+#print axioms RevLOracle.interceptRowB_iff
+#print axioms RevLOracle.methodRowB_iff
+#print axioms RevLOracle.placeRowB_iff
+#print axioms RevLOracle.modelReachB_iff

@@ -250,7 +250,63 @@ python3 scripts/axioms_gate.py \
   RevL.A2.fixture_refused \
   RevL.A2.fixture_release_before_withdrawal \
   RevL.A2.fixture_opens_the_window \
-  RevL.A2.a2_not_vacuous < .axioms.out
+  RevL.A2.a2_not_vacuous \
+  RevL.G4Deferred.legalB_iff \
+  RevL.G4Deferred.deferredB_iff \
+  RevL.G4Deferred.value_never_legal \
+  RevL.G4Deferred.body_reach_refused \
+  RevL.G4Deferred.refused_of_mem \
+  RevL.G4Deferred.fixtures_decided \
+  RevL.G4Deferred.deferred_not_vacuous \
+  RevL.G4Approval.coversB_iff \
+  RevL.G4Approval.edgeCoversB_iff \
+  RevL.G4Approval.crossingB_iff \
+  RevL.G4Approval.no_edge_iff_nothing_required \
+  RevL.G4Approval.uncovered_required_refused \
+  RevL.G4Approval.unrequired_needs_no_edge \
+  RevL.G4Approval.covering_edge_admits \
+  RevL.G4Approval.globMatch_star_any \
+  RevL.G4Approval.approval_not_vacuous \
+  RevL.G4Approval.approval_row_not_vacuous \
+  RevL.G6Binding.okB_iff \
+  RevL.G6Binding.bindingB_iff \
+  RevL.G6Binding.visibleB_iff \
+  RevL.G6Binding.seed_rebind_refused \
+  RevL.G6Binding.rebind_refused \
+  RevL.G6Binding.inner_shadow_refused \
+  RevL.G6Binding.fixtures_decided \
+  RevL.G6Binding.binding_not_vacuous \
+  RevL.G1Access.accessB_iff \
+  RevL.G1Access.undeclared_refused \
+  RevL.G1Access.access_mono \
+  RevL.G1Access.declaring_admits \
+  RevL.G1Access.fixtures_decided \
+  RevL.G1Access.g1_access_not_vacuous \
+  RevL.A1Async.reachB_iff \
+  RevL.A1Async.reach_mono \
+  RevL.A1Async.reaches_iff \
+  RevL.A1Async.siteB_iff \
+  RevL.A1Async.teardown_suspension_refused \
+  RevL.A1Async.await_without_async_refused \
+  RevL.A1Async.await_pairing_exact \
+  RevL.A1Async.sigB_iff \
+  RevL.A1Async.fixtures_decided \
+  RevL.A1Async.a1_not_vacuous \
+  RevL.Prelude.preludeB_iff \
+  RevL.Prelude.prelude_after_action_refused \
+  RevL.Prelude.preludes_first_admitted \
+  RevL.Prelude.interceptB_iff \
+  RevL.Prelude.intercept_provision_refused \
+  RevL.Prelude.methodB_iff \
+  RevL.Prelude.undeclared_method_refused \
+  RevL.Prelude.fixtures_decided \
+  RevL.Prelude.prelude_rules_not_vacuous \
+  RevL.ModelPlace.placeB_iff \
+  RevL.ModelPlace.off_device_refused \
+  RevL.ModelPlace.open_origin_anywhere \
+  RevL.ModelPlace.on_device_admitted \
+  RevL.ModelPlace.fixtures_decided \
+  RevL.ModelPlace.placement_not_vacuous < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -293,6 +349,17 @@ python3 scripts/axioms_gate.py \
   RevLOracle.reportedSeqLabels_nil_iff_clean \
   RevLOracle.a9RowB_iff \
   RevLOracle.parseStep_stepName \
-  RevLOracle.a2OKB_iff < .oracle-axioms.out
+  RevLOracle.a2OKB_iff \
+  RevLOracle.deferredOKB_iff \
+  RevLOracle.approvalRowB_iff \
+  RevLOracle.bindingRowB_iff \
+  RevLOracle.accessRowB_iff \
+  RevLOracle.asyncRowB_iff \
+  RevLOracle.sigRowB_iff \
+  RevLOracle.preludeRowB_iff \
+  RevLOracle.interceptRowB_iff \
+  RevLOracle.methodRowB_iff \
+  RevLOracle.placeRowB_iff \
+  RevLOracle.modelReachB_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py
