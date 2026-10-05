@@ -342,6 +342,16 @@ CORPUS = [
     # externs / config / method-body effects (slice 4, item 206)
     "externs.rvl",              # `_emit_externs`: verbatim `@py` body via stdlib/str.rvl::dedent (item 193) + splitlines
     "services_config.rvl",      # component `config`/`ConfigSchema`: schema block, ConfigSchema-first import, `Config` key, `config.<field>` read
+    # item 550 (issues #1915/#1923): two names the config and type surfaces
+    # spell that no earlier document did — a config field named after a Python
+    # KEYWORD (the schema tuple's first element is a runtime dict KEY, so the
+    # mangling every other identifier takes made the schema demand a field the
+    # `load … with {…}` plug site never supplied) and a record field typed
+    # `Value`, the NAMED erased-dynamic builtin that is never a DECLARED type
+    # and so cannot be quoted as a forward reference. Added FAILING FIRST: the
+    # port's `py_type` `Value` arm was unreached by all 70 prior documents,
+    # which is what the line-coverage ledger reported.
+    "keyword_config_value_field.rvl",
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
     # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
     # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
