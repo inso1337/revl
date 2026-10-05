@@ -99,3 +99,30 @@ def python_backend_emitter():
             f"{want}; another backend's emitter was imported under the bare "
             "name `emit` earlier in this process")
     return emit
+
+
+def venv_python(venv: Path) -> Path:
+    """The interpreter of the virtualenv at `venv`.
+
+    A POSIX venv keeps it at `bin/python`; a Windows one at
+    `Scripts/python.exe` (issue #1939). The Windows spelling is taken when it
+    exists, so a POSIX venv is unchanged; otherwise `bin/python` is returned
+    even if absent, so callers keep their own "not set up" errors.
+    """
+    windows = Path(venv) / "Scripts" / "python.exe"
+    if windows.exists():
+        return windows
+    return Path(venv) / "bin" / "python"
+
+
+def relpath_or_abs(path, start=None) -> str:
+    """`os.path.relpath(path, start)`, or the absolute path when there is no
+    relative one: on Windows a path on another drive than `start` (or the
+    working directory) has none, and `relpath` raises ValueError (issue
+    #1944)."""
+    import os  # noqa: PLC0415
+
+    try:
+        return os.path.relpath(path, start) if start is not None else os.path.relpath(path)
+    except ValueError:
+        return os.path.abspath(path)

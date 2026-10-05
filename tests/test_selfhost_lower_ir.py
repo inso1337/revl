@@ -638,6 +638,138 @@ def test_native_ir_lowers_a_nullary_case_in_a_component(lower_to_ir, returns, bo
     assert native["body"] == reference["body"]
 
 
+@pytest.mark.parametrize("body", [
+    "let g = (x: Int) => x + 1 return n",
+    "let g = (x: Int) => x + 1 return g(n)",
+    # a `let` and a `var` of the method, read by name: `captures` stays empty
+    "let k = n + 1 let g = (x: Int) => x + k return g(n)",
+    "var k = n + 1 k = k + 2 let g = (x) => x + k + n return g(n)",
+    "let g = (x: Int) => (y: Int) => x + y let h = g(n) return h(1)",
+    "let f = (p: Point) => p.x + n return f({ x: n, y: 2 })",
+])
+def test_native_ir_lowers_an_arrow_in_a_provide_method(lower_to_ir, body):
+    """Issue #1844: `cir_expr` had no `Arrow` arm, so a provide method that
+    binds an arrow failed, and a failed method drops the WHOLE component
+    `body`. The reference writes `{kind: arrow, params, captures, body}` with
+    no signature keys, since a component-position arrow is never checked."""
+    source = ("type Point = { x: Int, y: Int } "
+              "service Math { fn go(n: Int) -> Int } "
+              f"component C provides math: Math {{ provide math {{ fn go(n: Int) {{ {body} }} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
+def test_native_ir_refuses_an_arrow_where_a_handle_could_be_captured(lower_to_ir):
+    """The B1 capture rule refuses an arrow that captures a resource-typed
+    value. The native producer does not track handle types, so in a program
+    that declares an `acquire` extern it keeps withholding the body rather
+    than lowering an arrow the reference might refuse."""
+    source = ("extern acquire fn open_sink(name: Str) -> SinkHandle\n"
+              "  undo close_sink(result)\n  = @py { return name }\n"
+              "extern pure fn close_sink(h: SinkHandle) -> Str = @py { return \"\" }\n"
+              "service Math { fn go(n: Int) -> Int } "
+              "component C provides math: Math { provide math { "
+              "fn go(n: Int) { let g = (x: Int) => x + 1 return g(n) } } }")
+    assert "body" in compile_source(source)["components"][0]
+    assert "body" not in json.loads(lower_to_ir(source))["components"][0]
+
+
+@pytest.mark.parametrize("declared,ret,body", [
+    ("Int", "Float", "= n"),
+    ("Int", "Float", "{ return n + 1 }"),
+    ("Int32", "Int", "= n"),
+    # the returned value's type comes off a required service's operation
+    ("Int", "Float", "{ return geo.xOf(n) }"),
+    # no coercion, no marker
+    ("Float", "Float", "= n"),
+])
+def test_native_ir_marks_provide_method_return_widening(lower_to_ir, declared, ret, body):
+    """Issue #1894: the reference marks an `Int` returned where the operation
+    declares `Float` (and an `Int32` where it declares `Int`) with
+    `"widen": "<T>"` on the returned node (`_mark_widen`, issue #1838). The
+    native producer wrote no marker."""
+    source = ("service Geo { fn xOf(n: Int) -> Int } "
+              f"service Matcher {{ fn wf(n: {declared}) -> {ret} }} "
+              "component Matching requires geo: Geo provides mt: Matcher { "
+              f"provide mt {{ fn wf(n) {body} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
+@pytest.mark.parametrize("sig,method", [
+    # `_safe_name` renames the discarded payload binder: `_` is a soft keyword
+    ("fn m(s: Shape) -> Int", "fn m(s) = match s { Box(_) => 4, _ => 0 }"),
+    ("fn m() -> Int", "fn m() = match geo.circle(1) { Box(p) => p.y, _ => 0 }"),
+    # `geo.label(s)` types as the service declares it, so `.length` on its
+    # `Str` field is the sized read
+    ("fn m(s: Str) -> Int", "fn m(s) = geo.label(s).text.length"),
+])
+def test_native_ir_matches_provide_records_shapes(lower_to_ir, sig, method):
+    """Issue #1845: two nodes of comp_provide_records differed from the
+    reference: a `Box(_)` arm bound `_` where the reference binds `__`, and a
+    `.length` read off a required service's returned record was not marked
+    `sized_length`. A `match` scrutinee read off a service call still carries
+    no `payload_type`: the reference types it without the services."""
+    source = ("type Point = { x: Int, y: Int } "
+              "type Label = { text: Str, size: Int } "
+              "type Shape = Dot | Circle(Int) | Box(Point) "
+              "service Geo { fn label(s: Str) -> Label fn circle(r: Int) -> Shape } "
+              f"service S {{ {sig} }} "
+              f"component C requires geo: Geo provides p: S {{ provide p {{ {method} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
+@pytest.mark.parametrize("method", [
+    "fn go(n) = [1, 2].map((x) => x + n).length",
+    "fn go(n) { let ys = [n, 2].map((x) => x * 2) return n }",
+    "fn go(n) = (n + 1).frob(2)",
+    # the receiver types off the required service's declared return
+    "fn go(n) = geo.pts(n).map((x) => x + 1).length",
+])
+def test_native_ir_lowers_a_method_call_on_an_in_place_receiver(lower_to_ir, method):
+    """Issue #1935: `cir_call` read a field callee only off a bare name, so a
+    method on a receiver written in place (a list literal, a parenthesised
+    expression, a service call) refused and the whole component `body` was
+    dropped. A non-builtin method there takes the reference's generic tail, a
+    `call` on the `field` read."""
+    source = ("service Geo { fn pts(n: Int) -> List[Int] } "
+              "service Math { fn go(n: Int) -> Int } "
+              f"component C requires geo: Geo provides math: Math {{ provide math {{ {method} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
+@pytest.mark.parametrize("returns,body", [
+    ("Opt[Int]", "None"),
+    ("Opt[Int]", "Some(1)"),
+    ("Opt[Opt[Int]]", "Some(None)"),
+    ("Result[Int, Str]", "Ok(1)"),
+])
+def test_native_ir_lowers_an_option_constructor_in_a_component(
+        lower_to_ir, returns, body):
+    """Issue #1818: a component-position `None` or `Some(x)` made `cir_expr`
+    fail, and a failed method drops the WHOLE component `body`, so the native
+    chain emitted the component with no provision. The reference writes a
+    `var` node for a bare `None` and a `call` on the constructor's `var` for
+    `Some(x)`. `Ok(1)` is the tagged case that already lowered, kept as the
+    control."""
+    source = (f"service S {{ fn w() -> {returns} }} "
+              f"component C provides s: S {{ provide s {{ fn w() = {body} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_services(lower_to_ir, rel):
     """The SERVICES table is byte-identical to the reference IR on every corpus
