@@ -162,9 +162,13 @@ def test_non_witnessed_method_effect_stays_refused():
 
 
 def test_method_time_compensation_stays_refused():
-    """item 301's soundness bar, unchanged by this slice: a compensation
-    attached inside a provide-method body is still a hard `EmitError`. This
-    slice lifts the witnessed position only, never the compensation one."""
+    """item 301's soundness bar, restated (not weakened) by #1979: a
+    compensation attached inside a provide-method body is still a hard
+    `EmitError`. This slice lifts the witnessed position only; #1979 lifts the
+    compensation position for exactly one shape — an extern's DECLARED
+    `compensate`, which registers into a runtime accumulator. A clause spelled
+    at the SITE is still refused, because the tier cannot know how many times
+    the site ran. Same refusal prefix, same `EmitError`."""
     src = '''
     service Bus { emission fn send(x: Int) -> Int }
     service S { emission fn f(x: Int) -> Int }

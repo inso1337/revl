@@ -367,6 +367,12 @@
       ],
       "The whole checked-division family is unported on this tier: selfhost/emit_wasm.rvl carries the $int_* arithmetic helper bodies but not the _builtin_expr arm that lowers checked_div_trunc/floor/euclid/mod into tagged Ok/Err cells, and no wasm corpus document spells a checked_* call. Only `checked_mod` shows up as a construct here because it is the one member the reference names by itself \u2014 it is the exception to the Int.MIN/-1 overflow Err the other three answer, since its own answer at that divisor is 0. The rest of the family reaches the reference through `method in _CHECKED_DIVS`, which is not a discriminant this census reads. A corpus case would need the tagged-union port first.": [
         "method=checked_mod"
+      ],
+      "Issues #1511, #1592 and #1979: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from \u2014 an activation `emit` compiles it into the activation's static `entries` list, and a provide-method `emit` appends it to the RUNTIME `$__mc_*` accumulator (a method body runs once per request, so a fixed entry list cannot hold it), which `deactivate` drains newest-first on abort and never walks on commit. A declared `compensate` this tier still cannot register is refused by name. All of it is _ComponentEmitter (live component) emission, which the module-only selfhost port does not instantiate, so no emit_wasm_corpus document can carry it; the runtime proof is backends/wasm/test_declared_compensate_1979.py.": [
+        "class=emission"
+      ],
+      "Issue #1979 (with #1369 item 522 slice 3): `_refuse_ui_transaction_units` reads the computer-use transaction units the frontend computes and refuses the whole document by name \u2014 this tier's method-time compensation is component-instance state drained by `deactivate` (session granularity), never at the unit boundary the frontend computes \u2014 while skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself). No wasm corpus document can carry it: a computer-use document is REFUSED rather than emitted, which is exactly what tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl records. The runtime proof is tests/test_selfhost_emit_wasm.py::test_a_ui_transaction_unit_is_refused_by_name_on_both_sides.": [
+        "key=<activation>"
       ]
     }
   }

@@ -24,6 +24,22 @@
 
 ["function", "demand-generated-float-formatting-and-k-ary-string", "_V3Emitter._interp_expr", 20, 20]
 
+["reason", "extern-declared-compensate-item-254-issue-1979-declared", "Extern-declared compensate (item 254, issue #1979): the wasm registration of a `compensate` an emission extern declares for itself. On this tier the declared form is registered in an activation body at COMPILE time (`entries`) and in a provide method at RUN time (the `$__mc_*` accumulator), so the whole path is reached only by a document whose emission extern carries its own `compensate` clause. No corpus document can be that document: `selfhost/emit_wasm.rvl` does not port the declared form, and its component path answers `;; <<UNSUPPORTED-COMPONENT:<name>>` instead, so adding one would flip the byte-agreement oracle RED. A refusal document cannot reach them either, because the reference now EMITS such a document rather than refusing it - the item's order is register what can be registered, and refuse by name what cannot, and the only declared-compensate shape this tier refuses is a UI transaction unit (recorded separately below). `_as_fn_call` re-spells the declared slot, lowered in the pure-expression call dialect, as the component `fn` node the registration renders; `_compensated_extern` is the name-to-declaration lookup; `_declared_compensation` picks the declared clause for a step, with a site-spelled clause taking precedence (issue #1902); `_plan_declared_compensations` walks the activation body and every provide-method body for those steps so the component knows it needs the accumulator; and `_method_comp_id`/`_method_compensation_step`/`_method_comp_drain` are the runtime list the method body pushes onto and `deactivate` drains, in LIFO order, only on the abort branch. The behaviour is pinned and executed against real wasmtime by backends/wasm/test_declared_compensate_1979.py (12 tests, two live-world proofs: three calls then ABORT runs all three compensations after the `$__mw_*` drains, and COMMIT runs none)."]
+
+["function", "extern-declared-compensate-item-254-issue-1979-declared", "_ComponentEmitter._compensated_extern", 5, 5]
+
+["function", "extern-declared-compensate-item-254-issue-1979-declared", "_ComponentEmitter._declared_compensation", 6, 6]
+
+["function", "extern-declared-compensate-item-254-issue-1979-declared", "_ComponentEmitter._method_comp_drain", 8, 8]
+
+["function", "extern-declared-compensate-item-254-issue-1979-declared", "_ComponentEmitter._method_comp_id", 7, 7]
+
+["function", "extern-declared-compensate-item-254-issue-1979-declared", "_ComponentEmitter._method_compensation_step", 4, 4]
+
+["function", "extern-declared-compensate-item-254-issue-1979-declared", "_ComponentEmitter._plan_declared_compensations", 5, 5]
+
+["function", "extern-declared-compensate-item-254-issue-1979-declared", "_as_fn_call", 5, 5]
+
 ["reason", "float-valued-module-signatures-operands-are-refused-by", "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float."]
 
 ["function", "float-valued-module-signatures-operands-are-refused-by", "_f64_literal", 1, 1]
@@ -45,6 +61,10 @@
 ["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_deferred_emissions", 8, 8]
 
 ["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_validated_emissions", 8, 8]
+
+["reason", "refuse-ui-transaction-units-fail-closed-frontend-absent", "`_refuse_ui_transaction_units` (item 522, issues #1369 item 3 and #1979): the 2 statements left are the `except Exception` fail-closed arm, which raises the named refusal when the `revl` frontend cannot be imported at all - an invocation mode (emit.py driven as a script with src/ off the path), not an input, so no corpus document and no refusal document can reach it. That is the same class the `refuse-deferred-emissions-and-refuse-validated-emissions-in` record covers, and this wrapper is deliberately not given that record's 8-statement `except ModuleNotFoundError` bootstrap because its message has to name the unit problem itself. The capability scan, the import and the by-name refusal ARE reached now, by tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl, which the tier oracle drives through both halves (it moved this function 7 -> 2) and whose text is asserted in tests/test_selfhost_emit_wasm.py::test_a_ui_transaction_unit_is_refused_by_name_on_both_sides."]
+
+["function", "refuse-ui-transaction-units-fail-closed-frontend-absent", "_refuse_ui_transaction_units", 2, 2]
 
 ["reason", "remaining-arms-cover-explicitly-deferred-coalescing-float-op", "Remaining arms cover explicitly deferred coalescing/Float operations, invalid/void operand refusals, and legacy List +. Current frontend rejects List + (only numeric or Str +), so that compatibility branch is not a missing accepted source corpus family. Item 458's `&&`/`||` short-circuit branch lives in the same function and is now reached: shortcircuit.rvl spells the trapping right operands and arith.rvl the trap-free ones, so only that branch's void-operand refusal stays unrun, alongside the other invalid-operand guards."]
 
@@ -244,7 +264,7 @@
 
 ["function", "tagged-value-reads-match-scrutinee-payload-temporaries-per", "_V3Emitter._opt_payload", 4, 4]
 
-["reason", "the-entire-componentemitter-is-instantiated-only-for-live-2", "The entire _ComponentEmitter is instantiated only for live components: it plans activation/provide calls, coeffect imports, spawn/instance handles, realm routing and witnessed undo/WAL custom sections. emit_wasm.rvl implements the separate pure _V3Emitter module ABI, not activation/deactivation or component service exports; even _delegate/_tail belong to that unentered component caller. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path. Issue #1601's refusal document, tests/fixtures/emit_wasm_refusals/compound_required_call.rvl, now emits a provider component and enters the consumer as far as the required call's refusal in `_op_spec`."]
+["reason", "the-entire-componentemitter-is-instantiated-only-for-live-2", "The entire _ComponentEmitter is instantiated only for live components: it plans activation/provide calls, coeffect imports, spawn/instance handles, realm routing and witnessed undo/WAL custom sections. emit_wasm.rvl implements the separate pure _V3Emitter module ABI, not activation/deactivation or component service exports; even _delegate/_tail belong to that unentered component caller. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path. Issue #1601's refusal document, tests/fixtures/emit_wasm_refusals/compound_required_call.rvl, now emits a provider component and enters the consumer as far as the required call's refusal in `_op_spec`. Issue #1979 raises three counts on this same unentered path, `_module` 64 -> 71, `_provide` 158 -> 161 and `emit` 39 -> 41: the `$__mc_*` accumulator globals, the `mc_live`/`abort` exports and the drain call the aborted `deactivate` walks are component-path code, and the `_provide`/`emit` statements register a declared `compensate` for a method step. No corpus document on this tier declares one, because the port refuses the whole component rather than registering it, so the bytes could not agree; see `extern-declared-compensate-item-254-issue-1979-declared`."]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.__init__", 21, 21]
 
@@ -268,7 +288,7 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._method_witnessed_step", 13, 13]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._module", 64, 64]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._module", 71, 71]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._module._dispatch", 13, 13]
 
@@ -278,7 +298,7 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._plan", 8, 8]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._provide", 158, 158]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._provide", 161, 161]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._realm_sections", 9, 9]
 
@@ -304,7 +324,7 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_extern", 2, 2]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.emit", 39, 39]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.emit", 41, 41]
 
 ["reason", "the-item-130-required-stream-t-coeffect-refusal", "The item 130 required-`Stream[T]` coeffect refusal (`_refuse_required_stream`). This tier refuses the whole stream surface by design, having no async host seam, and the coeffect is refused with it at the component's DECLARATION. A corpus document declaring `requires <k>: Stream[T]` would be refused here rather than emitted, so it cannot be a byte-agreement case; the refusal is pinned by tests/test_stream_reactive.py instead."]
 

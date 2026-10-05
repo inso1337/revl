@@ -5,8 +5,9 @@ compensation loop) and docs/design/243-witnessed-externs.md. The py reference
 tier proved the `transactional` entry kind (backends/python/runtime.py,
 `Frame`/`_Transactional`/`drain`); this is the wasm tier's own loop, built
 against the same contract: three entry kinds over ACTIVATION-REGISTERED
-entries (method-time compensation stays refused — the wasm accumulator is
-fixed at activation, docs/wasm-capabilities.md), a two-phase abort, and a
+entries (a method-time compensation stays refused unless it is the extern's own
+DECLARED `compensate`, which item 564/#1979 registers into a runtime
+accumulator — docs/wasm-capabilities.md), a two-phase abort, and a
 commit path that discharges `transactional`/`compensation` entries while a
 `bracket` still releases.
 
@@ -191,8 +192,15 @@ def test_method_time_compensation_stays_refused():
     this slice adds is over ACTIVATION-REGISTERED entries only (docs/design/
     teardown-contract.md, the wasm row) — a compensation attached inside a
     provide-method body (method-time) must still be a hard `EmitError`, not
-    silently admitted now that compensation entries are real. The wasm
-    accumulator is fixed at activation; nothing in this slice lifts that."""
+    silently admitted now that compensation entries are real.
+
+    Deliberately updated by #1979: the tier no longer refuses *every*
+    method-time compensation. An extern's DECLARED `compensate` now registers
+    into the runtime method-compensation accumulator (item 564) and lifts this
+    refusal for that shape; what this test pins is the shape that is still not
+    registrable — a compensation spelled at the SITE, where the tier cannot see
+    how many times it is owed. The prefix is unchanged; the tail now says which
+    spelling survives and why."""
     src = '''
     service Bus { emission fn send(x: Int) -> Int }
     service S { emission fn f(x: Int) -> Int }
