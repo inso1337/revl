@@ -567,12 +567,57 @@ fn has_field(fields: List[RecField], name: Str) -> Bool {
 
 // ---------------------------------------------------------------- join / widen
 
+// Port of typecheck._fill_unknown_args: `keep` with every type argument that is
+// only the UNRESOLVED placeholder `Any` replaced by `other`'s argument in the
+// same position.
+//
+// A lone builtin constructor cannot name the parameter its sibling fixes:
+// `Ok(7)` types as `Result[Int, Any]` and `Err(1)` as `Result[Any, Int]`,
+// because neither call mentions the other parameter. `join` returns one side
+// WHOLESALE when the two are compatible, so `ok ? Ok(7) : Err(1)` used to join
+// to `Result[Int, Any]` -- the first side's unresolved slot, kept -- and an
+// `Err(e)` arm then bound `e: Any`, where `0 - e` is refused. Filling the
+// placeholder from the side that DID resolve it is the join of the two,
+// position by position. `Opt` never showed this because it has a single
+// parameter, so `Some(5)` and `None` resolve it.
+//
+// Only the literal `Any` placeholder is filled, and only where the sibling
+// resolved that position: `Never` is the bottom and widen_bottom owns filling
+// it, POISON is absorbing and must stay, a `$`-prefixed implicit fn type
+// parameter belongs to the function, and `Value` (item 180) is a REAL dynamic
+// type rather than a placeholder, so narrowing it to a concrete type would
+// refuse programs the checker admits today.
+fn fill_unknown_args(keep: Str, other: Str) -> Str {
+  let kp = parse_type(keep)
+  let op = parse_type(other)
+  if (kp.head != op.head || kp.args.length() != op.args.length()) { return keep }
+  var filled: List[Str] = []
+  var changed = false
+  var i = 0
+  while (i < kp.args.length()) {
+    let arg = kp.args[i]
+    let other_arg = op.args[i]
+    if (arg == "Any" && other_arg != "Any") {
+      filled = filled.push(other_arg)
+      changed = true
+    } else {
+      let inner = fill_unknown_args(arg, other_arg)
+      filled = filled.push(inner)
+      if (inner != arg) { changed = true }
+    }
+    i += 1
+  }
+  if (changed) { return format_type(kp.head, filled) }
+  return keep
+}
+
 // Port of typecheck.join: the common type of two branches, "" (None) when
-// there is none.
+// there is none. The wholesale return of a compatible side fills that side's
+// unresolved `Any` slots from the other (see fill_unknown_args).
 pub fn join(a: Str, b: Str) -> Str {
   if (a == "" || b == "") { return "" }
-  if (compatible(a, b)) { return a }
-  if (compatible(b, a)) { return b }
+  if (compatible(a, b)) { return fill_unknown_args(a, b) }
+  if (compatible(b, a)) { return fill_unknown_args(b, a) }
   return ""
 }
 
@@ -583,6 +628,50 @@ pub fn join(a: Str, b: Str) -> Str {
 pub fn widen_bottom(declared: Str, actual: Str) -> Str {
   if (declared == "" || actual == "") { return "" }
   if (declared == "Never") { return actual }
+  // Port of the reference's structural-record branch. A record spelling has no
+  // parsed head/args to recurse into, so `var svc = { name: n, methods: [] }`
+  // (declared `{methods: List[Never], name: Str}`) was refused at its first
+  // reassignment where `var m = Map.empty()` is admitted — the same rule, one
+  // level in. Field-wise, with the same "only bottoms may be filled" test.
+  // The reference also tries `nominal_record_fields` on each side; this port
+  // has no declared-type table, so it takes the structural reading only, which
+  // is exactly the reference's `types = None` path.
+  let ds = structural_parse(declared)
+  let as0 = structural_parse(actual)
+  if (ds.is_rec && ds.fields.length() > 0
+      && as0.is_rec && as0.fields.length() > 0) {
+    var i = 0
+    while (i < ds.fields.length()) {
+      if (!has_field(as0.fields, ds.fields[i].name)) { return "" }
+      i += 1
+    }
+    var j = 0
+    while (j < as0.fields.length()) {
+      if (!has_field(ds.fields, as0.fields[j].name)) { return "" }
+      j += 1
+    }
+    var filled: List[RecField] = []
+    var grew_field = false
+    var k = 0
+    while (k < ds.fields.length()) {
+      let d = ds.fields[k].ty
+      let a = field_ty(as0.fields, ds.fields[k].name)
+      let inner = widen_bottom(d, a)
+      if (inner != "" && inner != d) {
+        filled = filled.push({ name: ds.fields[k].name, ty: inner })
+        grew_field = true
+      } else {
+        if (compatible(d, a)) {
+          filled = filled.push({ name: ds.fields[k].name, ty: d })
+        } else {
+          return ""
+        }
+      }
+      k += 1
+    }
+    if (grew_field) { return format_structural(filled) }
+    return ""
+  }
   let dp = parse_type(declared)
   let ap = parse_type(actual)
   if (dp.args.length() == 0 || dp.head != ap.head

@@ -31570,15 +31570,45 @@ fn has_field(fields: &[RecField], name: &str) -> bool {
     return false;
 }
 
+fn fill_unknown_args(keep: String, other: String) -> String {
+    let kp = parse_type(keep.clone());
+    let op = parse_type(other.clone());
+    if ((kp.head != op.head) || (kp.args.revl_length() != op.args.revl_length())) {
+        return keep;
+    }
+    let mut filled: Vec<String> = vec![];
+    let mut changed = false;
+    let mut i = 0i64;
+    while (i < kp.args.revl_length()) {
+        let arg = (kp.args)[(i) as usize].clone();
+        let other_arg = (op.args)[(i) as usize].clone();
+        if ((arg == "Any") && (other_arg != "Any")) {
+            filled.push(other_arg.clone());
+            changed = true;
+        } else {
+            let inner = fill_unknown_args(arg.clone(), other_arg.clone());
+            filled.push(inner.clone());
+            if (inner != arg) {
+                changed = true;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if changed {
+        return format_type(kp.head.clone(), filled.clone());
+    }
+    return keep;
+}
+
 pub fn join(a: String, b: String) -> String {
     if ((a == "") || (b == "")) {
         return String::from("");
     }
     if compatible(a.clone(), b.clone()) {
-        return a;
+        return fill_unknown_args(a.clone(), b.clone());
     }
     if compatible(b.clone(), a.clone()) {
-        return b;
+        return fill_unknown_args(b.clone(), a.clone());
     }
     return String::from("");
 }
@@ -31589,6 +31619,47 @@ pub fn widen_bottom(declared: String, actual: String) -> String {
     }
     if (declared == "Never") {
         return actual;
+    }
+    let ds = structural_parse(declared.clone());
+    let as0 = structural_parse(actual.clone());
+    if (((ds.is_rec && (ds.fields.revl_length() > 0i64)) && as0.is_rec) && (as0.fields.revl_length() > 0i64)) {
+        let mut i = 0i64;
+        while (i < ds.fields.revl_length()) {
+            if (!has_field(&as0.fields, &(ds.fields)[(i) as usize].name)) {
+                return String::from("");
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        let mut j = 0i64;
+        while (j < as0.fields.revl_length()) {
+            if (!has_field(&ds.fields, &(as0.fields)[(j) as usize].name)) {
+                return String::from("");
+            }
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        }
+        let mut filled: Vec<RecField> = vec![];
+        let mut grew_field = false;
+        let mut k = 0i64;
+        while (k < ds.fields.revl_length()) {
+            let d = (ds.fields)[(k) as usize].ty.clone();
+            let a = field_ty(&as0.fields, &(ds.fields)[(k) as usize].name);
+            let inner = widen_bottom(d.clone(), a.clone());
+            if ((inner != "") && (inner != d)) {
+                filled.push(Bind { name: (ds.fields)[(k) as usize].name.clone(), ty: inner.clone() });
+                grew_field = true;
+            } else {
+                if compatible(d.clone(), a.clone()) {
+                    filled.push(Bind { name: (ds.fields)[(k) as usize].name.clone(), ty: d.clone() });
+                } else {
+                    return String::from("");
+                }
+            }
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if grew_field {
+            return format_structural(filled.clone());
+        }
+        return String::from("");
     }
     let dp = parse_type(declared.clone());
     let ap = parse_type(actual.clone());
