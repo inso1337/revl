@@ -672,6 +672,10 @@ def _declared_call(node: dict, call: str, ctx: "_Ctx") -> str:
     name = node.get("name")
     if ctx.declared_statement is node:
         return call
+    if ctx.comp_frame is not None and name in ctx.ui_externs:
+        # issue #1369: a computer-use extern's `uiCrossing` wrapper registers
+        # its declared compensation in the call scope, so the site does not
+        return call
     if ctx.comp_frame is not None:
         ctx._counter[0] += 1
         site = f"{ctx.comp_site or 'provide'}#{ctx._counter[0]}"
@@ -1396,6 +1400,30 @@ def _replay_count(node: dict) -> Optional[int]:
     return int(replay["count"])
 
 
+def _statement(rendered: str) -> str:
+    """An expression rendered as a statement line. An awaited call renders as
+    `(await f(x))` so it stays atomic inside a larger expression, but a line
+    that STARTS with `(` continues the previous line under ASI (`const a = g()`
+    then `(await f(a))` parses as `g()(await f(a))`), so the statement form
+    drops the parentheses (issue #1369, an async method's `emit` statement)."""
+    if rendered.startswith("(await ") and rendered.endswith(")") \
+            and _balanced(rendered[1:-1]):
+        return rendered[1:-1]
+    return rendered
+
+
+def _balanced(text: str) -> bool:
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def _method_body(steps: list, ctx: "_Ctx", indent: str,
                  method_is_async: bool = False, frame_var: Optional[str] = None,
                  provide_name: Optional[str] = None,
@@ -1488,7 +1516,7 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             # then register one compensation per crossing: the site-spelled
             # clause, else the extern's own declared one (item 254, issues
             # #1592 and #1902).
-            lines.append(f"{indent}{_expr(step['expr'], _emit_ctx(step, ctx))}")
+            lines.append(f"{indent}{_statement(_expr(step['expr'], _emit_ctx(step, ctx)))}")
             for comp_node in _emit_compensations(step, ctx):
                 _register_compensation(
                     comp_node, ctx, lines, indent, frame_var,
@@ -1545,7 +1573,8 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
 
 
 def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
-                  frame_var: Optional[str] = None) -> list[str]:
+                  frame_var: Optional[str] = None,
+                  component_name: Optional[str] = None) -> list[str]:
     scope = ctx.component_scope
     service_name = step.get("service")
     service = services.get(service_name)
@@ -1607,11 +1636,32 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
         if frame_var is not None:
             method_ctx = method_ctx.with_compensation_frame(
                 frame_var, f"{service_name}.{name}")
+        # issue #1369: a method that crosses a computer-use verb is a UI
+        # transaction unit; one that only reaches such an extern runs in a call
+        # scope. Either way the body runs inside it, and a unit's failed call
+        # settles what it registered (`Frame.uiTransaction`), as py does.
+        scope_kind = ctx.ui_scopes.get(
+            (component_name, step.get("name"), method.get("name")))
+        body_indent = indent + "  "
+        if scope_kind is not None and frame_var is not None:
+            unit = _string(f"{step.get('name')}.{method.get('name')}")
+            if scope_kind == "ui_transaction":
+                opener = (f"return await {frame_var}.uiTransactionAsync({unit}, async () => {{"
+                          if method_is_async else
+                          f"return {frame_var}.uiTransaction({unit}, () => {{")
+            else:
+                opener = (f"return await {frame_var}.callScopeAsync({unit}, async () => {{"
+                          if method_is_async else
+                          f"return {frame_var}.callScope({unit}, () => {{")
+            lines.append(f"{indent}  {opener}")
+            body_indent = indent + "    "
         lines.extend(_method_body(method.get("body") or [],
                                   method_ctx,
-                                  indent + "  ", method_is_async,
+                                  body_indent, method_is_async,
                                   frame_var, provide_name=service_name,
                                   method_name=name))
+        if body_indent != indent + "  ":
+            lines.append(f"{indent}  }})")
         lines.append(f"{indent}}},")
     return lines
 
@@ -1810,6 +1860,10 @@ def _emit_compensations(step: dict, ctx: "_Ctx") -> list:
         return [step["compensate"]]
     ext = _compensated_extern(step.get("expr"), ctx)
     if ext is not None:
+        if ctx.comp_frame is not None and ext.get("name") in ctx.ui_externs:
+            # issue #1369: in a provide method the computer-use extern's
+            # `uiCrossing` wrapper registers it, so the statement does not
+            return []
         return [_as_fn_call(ext["compensate"])]
     return []
 
@@ -2046,6 +2100,10 @@ def _needs_frame(component: dict, ctx: "_Ctx") -> bool:
                 for method in step.get("methods") or []:
                     if _method_body_needs_frame(method.get("body") or [], ctx):
                         return True
+                    # issue #1369: a call scope lives on the frame
+                    if (component.get("name"), step.get("name"),
+                            method.get("name")) in ctx.ui_scopes:
+                        return True
         return False
 
     return walk(component.get("body") or [])
@@ -2267,7 +2325,8 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         # revertible); yielding the wrapper slots it into this body
         # effect's LIFO sequence.
         lines.append(f"{indent}yield ctx.provide({_string(name)}, {{")
-        lines.extend(_provide_impl(step, ctx, services, indent + "  ", frame_var))
+        lines.extend(_provide_impl(step, ctx, services, indent + "  ", frame_var,
+                                   component.get("name")))
         lines.append(f"{indent}}} satisfies {_ident(step['service'], 'service')})")
     elif kind == "if":
         # An activation guard (A8). Branches hold ordinary body steps, so a
@@ -2863,6 +2922,11 @@ class _Ctx:
         }
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # issue #1369: the computer-use externs and the provide methods that
+        # run in a call scope (`_ui_transaction_facts`), set on the document
+        # context; empty everywhere else, so emission is unaffected.
+        self.ui_externs: set = set()
+        self.ui_scopes: dict = {}
         # issue #273: local name -> TS type for the bindings of the body being
         # rendered that are introduced as `[]`. Empty in every context that has
         # not run the pre-pass, which emits exactly as before.
@@ -2939,6 +3003,8 @@ class _Ctx:
         view.types = self.types
         view.function_names = self.function_names
         view.extern_names = self.extern_names
+        view.ui_externs = self.ui_externs
+        view.ui_scopes = self.ui_scopes
         view.empty_list_types = (self.empty_list_types
                                  if empty_list_types is None else empty_list_types)
         view.witnessed = self.witnessed
@@ -4791,7 +4857,107 @@ def _reject_install_tree_reach(name: str, body: str) -> None:
         raise _door("createRequire")
 
 
-def _emit_ts_externs(externs: list) -> list[str]:
+def _ui_transaction_facts(ir: dict) -> tuple[set, dict]:
+    """Issue #1369 (item 522 slice 3): the computer-use externs of the
+    document, by name, and the provide methods that run in a call scope, as
+    `{(component, key, method): "ui_transaction" | "call_scope"}`.
+
+    The same derivation as backends/python/emit.py's `_crossing_facts`, from
+    `revl.ui_transaction`, the module `revl erase-report` prints the static
+    run from, so the unit this tier settles is the unit the report describes
+    and the unit py settles. A method that crosses a computer-use verb is its
+    UI transaction unit; one that only reaches such an extern gets a scope
+    that never settles. FAIL-CLOSED: without the frontend, a document that
+    declares a computer-use capability is refused rather than emitted with no
+    unit. A document with none gets `(set(), {})` and is emitted
+    byte-identically."""
+    roots = {str(cap).split(".", 1)[0]
+             for ext in ir.get("externs") or []
+             for cap in ext.get("capabilities") or []}
+    if not roots & {"ui", "screen"}:
+        return set(), {}
+    try:
+        try:
+            from revl import ui_family, ui_transaction  # noqa: PLC0415
+        except ModuleNotFoundError:  # standalone `python3 emit.py`: src/ on the path
+            import pathlib  # noqa: PLC0415
+            src = pathlib.Path(__file__).resolve().parents[2] / "src"
+            if src.is_dir() and str(src) not in sys.path:
+                sys.path.insert(0, str(src))
+            from revl import ui_family, ui_transaction  # noqa: PLC0415
+    except Exception as error:  # noqa: BLE001 - frontend absent
+        raise EmitError(
+            "a computer-use extern needs the revl frontend to find its "
+            "transaction unit (item 522), and it is not importable here: "
+            f"{error}") from error
+    index = ui_transaction._extern_index(ir)
+    ui_externs = {name for name, entry in index.items()
+                  if ui_family.reversibility(entry["token"]) is not None}
+    if not ui_externs:
+        return set(), {}
+    units = {(plan["component"], plan["key"], plan["method"])
+             for plan in ui_transaction.plans(ir)
+             if plan["key"] != "<activation>"}
+    scopes: dict = {}
+    for comp in ir.get("components") or []:
+        for entry in comp.get("body") or []:
+            if not isinstance(entry, dict) or entry.get("step") != "provide":
+                continue
+            for method in entry.get("methods") or []:
+                key = (comp.get("name"), entry.get("name"), method.get("name"))
+                if key in units:
+                    scopes[key] = "ui_transaction"
+                elif _calls_any(method.get("body"), ui_externs):
+                    scopes[key] = "call_scope"
+    return ui_externs, scopes
+
+
+def _calls_any(node: Any, names: set) -> bool:
+    """Whether *node* (any IR subtree) calls one of *names*."""
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in names:
+            return True
+        return any(_calls_any(value, names) for value in node.values())
+    if isinstance(node, list):
+        return any(_calls_any(item, names) for item in node)
+    return False
+
+
+def _ui_crossing_wrapper(ext: dict, name: str, impl: str, params: str,
+                         arg_list: str, returns: str) -> list[str]:
+    """The exported wrapper of a computer-use extern (issue #1369): the ts
+    analog of py's `@declared_crossing`. It runs the host body through
+    `uiCrossing`, which notes the crossing in the current call scope and
+    registers the extern's DECLARED `compensate` itself, wherever the call is
+    written and even when it throws. The slot runs with no variables in scope
+    (lower refuses one that names a parameter), so it is a closed thunk."""
+    comp = ext.get("compensate")
+    if comp is None:
+        thunk, crossing, method = "null", _crossing_literal("", "", [], ""), ""
+    else:
+        method = _call_method_name(comp)
+        ctx = _Ctx({}, [], [])
+        thunk = f"() => {_expr(comp, ctx)}"
+        crossing = _crossing_literal(method, method, [], ext.get("name") or name)
+    label = _string(ext.get("name") or name)
+    if ext.get("async"):
+        return [
+            f"export async function {name}({params}): Promise<{returns}> {{",
+            f"  return uiCrossingAsync({label}, () => {impl}({arg_list}), {thunk}, "
+            f"{crossing}, {_string(method)})",
+            "}",
+            "",
+        ]
+    return [
+        f"export function {name}({params}): {returns} {{",
+        f"  return uiCrossing({label}, () => {impl}({arg_list}), {thunk}, "
+        f"{crossing}, {_string(method)})",
+        "}",
+        "",
+    ]
+
+
+def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[str]:
     lines: list[str] = []
     # item 378 Stage 5: emit the config seam once, before the externs, when any
     # extern carries a config schema (byte-identical when none do).
@@ -4848,12 +5014,20 @@ def _emit_ts_externs(externs: list) -> list[str]:
         # every call site is covered without the body being rewritten. Absent
         # unless the author declared it, so every other module is byte-identical.
         secret_return = bool(ext.get("secret_return"))
-        impl = f"_revl_secret_{name}" if secret_return else name
-        export_kw = "" if secret_return else "export "
+        # issue #1369: a computer-use extern's exported name is its
+        # `uiCrossing` wrapper; everything below renders the implementation it
+        # wraps, unexported
+        public = name
+        if ext.get("name") in (ui_externs or set()):
+            public = f"_revl_ui_{name}"
+            lines.extend(_ui_crossing_wrapper(ext, name, public, params,
+                                              arg_list, returns))
+        impl = f"_revl_secret_{name}" if secret_return else public
+        export_kw = "" if secret_return or public != name else "export "
         if ext.get("async"):
             if secret_return:
                 lines.append(
-                    f"export async function {name}({params}): Promise<{returns}> {{")
+                    f"{'export ' if public == name else ''}async function {public}({params}): Promise<{returns}> {{")
                 lines.append(f"  return host.secretResult(await {impl}({arg_list}))")
                 lines.append("}")
                 lines.append("")
@@ -4873,7 +5047,7 @@ def _emit_ts_externs(externs: list) -> list[str]:
             lines.append("")
             continue
         if secret_return:
-            lines.append(f"export function {name}({params}): {returns} {{")
+            lines.append(f"{'export ' if public == name else ''}function {public}({params}): {returns} {{")
             lines.append(f"  return host.secretResult({impl}({arg_list}))")
             lines.append("}")
             lines.append("")
@@ -5139,6 +5313,13 @@ def _runtime_imports(ir: dict, runtime_import: str, doc_ctx: "_Ctx") -> str:
         # here reaches a witnessed/compensating extern's `@ts` body, so
         # `record` stays out.
         names.append("Frame")
+    # issue #1369: a computer-use extern's exported wrapper (`uiCrossing`)
+    if doc_ctx.ui_externs:
+        exts = {e.get("name"): e for e in ir.get("externs") or []}
+        if any(not exts.get(n, {}).get("async") for n in doc_ctx.ui_externs):
+            names.append("uiCrossing")
+        if any(exts.get(n, {}).get("async") for n in doc_ctx.ui_externs):
+            names.append("uiCrossingAsync")
     if _uses_routes(ir):
         # item 167: the router resolves its worker realms by label.
         names.append("realmLabel")
@@ -5238,6 +5419,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     # Document-level context for component bodies (see _emit_v1); pure fn/test
     # bodies build their own below, matching the pre-refactor per-pass split.
     doc_ctx = _Ctx(types, functions, externs, services=services)
+    doc_ctx.ui_externs, doc_ctx.ui_scopes = _ui_transaction_facts(ir)
 
     out: list[str] = [
         "// Generated by revl backends/typescript/emit.py — do not edit.",
@@ -5300,7 +5482,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     if types:
         out.extend(_emit_ts_types(types))
     if externs:
-        out.extend(_emit_ts_externs(externs))
+        out.extend(_emit_ts_externs(externs, doc_ctx.ui_externs))
     if functions:
         out.extend(_emit_ts_functions(functions, types, externs))
     if tests:

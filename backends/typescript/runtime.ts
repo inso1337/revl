@@ -1027,6 +1027,136 @@ interface _DeferredTransactional {
   replayed: boolean
 }
 
+/** One provide-method call's registration scope (issue #1369, item 522 slice
+ * 3): the ts analog of backends/python/runtime.py's `_CallScope`. It records
+ * which computer-use crossings started, which one raised, and the witnessed
+ * and compensation entries this call registered on its frame. `settles` is
+ * true for a UI transaction unit (a method that crosses a computer-use verb),
+ * whose failed call settles those entries itself (`Frame.uiTransaction`). */
+export interface UiScope {
+  frame: Frame
+  name: string
+  settles: boolean
+  crossed: string[]
+  failedStep: string | null
+  transactional: _DeferredTransactional[]
+  compensations: _PendingCompensation[]
+  labels: Map<_PendingCompensation, string>
+}
+
+/** The run a failed UI transaction unit performed, as py's
+ * `Frame.ui_transaction_runs` records it. */
+export interface UiTransactionRun {
+  unit: string
+  failedStep: string | null
+  crossed: string[]
+  error: { type: string; message: string }
+  ran: Array<{ step: string | null; compensation: string; failed: boolean }>
+  replayed: string[]
+  residue: ResidueRecord[]
+  halted: boolean
+}
+
+/** The current call scope. Node's `AsyncLocalStorage` when the host has it,
+ * so an awaited crossing in an async method stays in its own call's scope
+ * while another call runs; otherwise a stack, which is exact for a sync call.
+ * The storage is created on the first scope a call opens, never at module
+ * load: an `AsyncLocalStorage` instance changes how the process propagates
+ * async context, and a program with no computer-use verb must run exactly as
+ * before (backends/typescript/test_lifecycle_async_isolation.py). */
+type _Als = { getStore(): UiScope | undefined; run<T>(store: UiScope, fn: () => T): T }
+let _uiAls: _Als | null | undefined
+const _uiStack: UiScope[] = []
+
+function _uiStorage(): _Als | null {
+  if (_uiAls === undefined) {
+    const getBuiltin = (globalThis as any).process?.getBuiltinModule
+    const hooks = typeof getBuiltin === 'function' ? getBuiltin('node:async_hooks') : undefined
+    _uiAls = hooks?.AsyncLocalStorage ? new hooks.AsyncLocalStorage() : null
+  }
+  return _uiAls ?? null
+}
+
+function _currentUiScope(): UiScope | undefined {
+  // no scope was ever opened: nothing to read, and no storage to create
+  if (_uiAls === undefined) return undefined
+  return _uiAls !== null ? _uiAls.getStore() : _uiStack[_uiStack.length - 1]
+}
+
+function _inUiScope<T>(scope: UiScope, fn: () => T): T {
+  const storage = _uiStorage()
+  if (storage !== null) return storage.run(scope, fn)
+  _uiStack.push(scope)
+  try {
+    return fn()
+  } finally {
+    _uiStack.pop()
+  }
+}
+
+function _scopeFor(frame: Frame): UiScope | undefined {
+  const scope = _currentUiScope()
+  return scope !== undefined && scope.frame === frame ? scope : undefined
+}
+
+function _uiFailed(scope: UiScope, label: string): void {
+  if (scope.failedStep === null) scope.failedStep = label
+}
+
+/** A computer-use extern (item 522), wrapped where it is defined so the call
+ * scope sees the crossing wherever it is written (a statement, a `let`, a
+ * `return`, an argument): the ts analog of py's `declared_crossing`. Outside
+ * a call scope it is a pass-through, and the call site registers any declared
+ * compensation as before. Inside a scope it notes the crossing, registers the
+ * declared `compensate` after the host body returns, and on a throw marks this
+ * crossing as the step the call failed at and STILL registers its
+ * compensation: 538 §10's rule for the failing step, since a raise says the
+ * substrate could not confirm the effect, not that it did not land. */
+export function uiCrossing<T>(
+  label: string,
+  run: () => T,
+  compensate: (() => unknown) | null,
+  crossing: Crossing,
+  method: string,
+): T {
+  const scope = _currentUiScope()
+  if (scope === undefined) return run()
+  scope.crossed.push(label)
+  let value: T
+  try {
+    value = run()
+  } catch (err) {
+    _uiFailed(scope, label)
+    if (compensate !== null) scope.frame.uiRegister(scope, label, crossing, method, compensate)
+    throw err
+  }
+  if (compensate !== null) scope.frame.uiRegister(scope, label, crossing, method, compensate)
+  return value
+}
+
+/** `uiCrossing` for an async extern: the same rules, awaited. */
+export async function uiCrossingAsync<T>(
+  label: string,
+  run: () => Promise<T>,
+  compensate: (() => unknown) | null,
+  crossing: Crossing,
+  method: string,
+): Promise<T> {
+  const scope = _currentUiScope()
+  if (scope === undefined) return run()
+  scope.crossed.push(label)
+  let value: T
+  try {
+    value = await run()
+  } catch (err) {
+    _uiFailed(scope, label)
+    if (compensate !== null) scope.frame.uiRegister(scope, label, crossing, method, compensate)
+    throw err
+  }
+  if (compensate !== null) scope.frame.uiRegister(scope, label, crossing, method, compensate)
+  return value
+}
+
 /** ctx -> the activation `Frame` on that context (item 318). Weak-keyed so a
  * torn-down instance's frame is collected with its context. Mirrors
  * backends/python/runtime.py's `_FRAME_BY_CTX`: the session-level abort seam
@@ -1085,6 +1215,9 @@ export class Frame {
    * transactional entry — activation-body and method-deferred alike — replays
    * and the mutations revert. */
   private aborting = false
+  /** issue #1369: the runs failed UI transaction units performed, newest
+   * last, as py's `ui_transaction_runs`. */
+  readonly uiTransactionRuns: UiTransactionRun[] = []
 
   constructor(ctx: Context, name: string) {
     this.ctx = ctx
@@ -1248,6 +1381,7 @@ export class Frame {
       replayed: false,
     }
     this.deferredList.push(entry)
+    _scopeFor(this)?.transactional.push(entry)   // settled by a UI unit on failure
     return entry
   }
 
@@ -1334,7 +1468,120 @@ export class Frame {
       witness: null,
       idempotency: null,
     })
-    this.deferredCompensations.push({ seq, crossing, methodName: method, args, run })
+    const entry: _PendingCompensation = { seq, crossing, methodName: method, args, run }
+    this.deferredCompensations.push(entry)
+    _scopeFor(this)?.compensations.push(entry)   // settled by a UI unit on failure
+  }
+
+  /** Register a computer-use crossing's DECLARED compensation in its call
+   * scope (`uiCrossing`), through `compensationMethod`, and label the entry
+   * with the crossing it offsets. */
+  uiRegister(scope: UiScope, label: string, crossing: Crossing, method: string,
+             run: () => unknown): void {
+    this.compensationMethod(crossing, method, [], run)
+    const entry = scope.compensations[scope.compensations.length - 1]
+    if (entry !== undefined) scope.labels.set(entry, label)
+  }
+
+  /** The registration scope for one provide-method call that can reach a
+   * computer-use extern but does not cross one itself: it never settles; a
+   * failed call's entries stay parked for the activation's verdict. */
+  callScope<T>(name: string, body: () => T): T {
+    return _inUiScope(this.newScope(name, false), body)
+  }
+
+  /** `callScope` for an async provide method. */
+  async callScopeAsync<T>(name: string, body: () => Promise<T>): Promise<T> {
+    return _inUiScope(this.newScope(name, false), body)
+  }
+
+  /** The UI transaction unit for one provide-method call (item 522 slice 3,
+   * issue #1369): the ts analog of py's `Frame.ui_transaction`. The emitter
+   * wraps a provide method that crosses a computer-use verb in it. If the call
+   * throws, the unit settles the entries this call registered and the error
+   * propagates unchanged (`unwindUiUnit`). */
+  uiTransaction<T>(name: string, body: () => T): T {
+    const scope = this.newScope(name, true)
+    return _inUiScope(scope, () => {
+      try {
+        return body()
+      } catch (err) {
+        this.unwindUiUnit(scope, err)
+        throw err
+      }
+    })
+  }
+
+  /** `uiTransaction` for an async provide method. */
+  async uiTransactionAsync<T>(name: string, body: () => Promise<T>): Promise<T> {
+    const scope = this.newScope(name, true)
+    return _inUiScope(scope, async () => {
+      try {
+        return await body()
+      } catch (err) {
+        this.unwindUiUnit(scope, err)
+        throw err
+      }
+    })
+  }
+
+  private newScope(name: string, settles: boolean): UiScope {
+    return { frame: this, name, settles, crossed: [], failedStep: null,
+             transactional: [], compensations: [], labels: new Map() }
+  }
+
+  /** Settle the entries a FAILED unit registered, and record the run: the
+   * teardown contract's abort, scoped to this call. Phase 1 replays the call's
+   * witnessed inverses newest first, Phase 2 runs its compensations newest
+   * first, each continue-and-record. The entries leave the deferred lists
+   * first, so neither a later commit (which would discharge them) nor a later
+   * abort (which would run them again) reaches them. Mirrors py's
+   * `Frame._unwind_ui_unit`. */
+  private unwindUiUnit(unit: UiScope, error: unknown): void {
+    const transactional = unit.transactional.filter((e) => this.deferredList.includes(e))
+    const compensations = unit.compensations.filter((e) => this.deferredCompensations.includes(e))
+    this.deferredList = this.deferredList.filter((e) => !transactional.includes(e))
+    this.deferredCompensations = this.deferredCompensations.filter((e) => !compensations.includes(e))
+    const residueBefore = this.residue.length
+    const replayed: string[] = []
+    for (const entry of [...transactional].reverse()) {
+      entry.replayed = true
+      const undo = entry.undo
+      const witness = entry.witness
+      entry.undo = null
+      entry.witness = null
+      if (undo !== null) {
+        try {
+          undo(witness)
+        } catch (err) {
+          this.pushResidue('restore-residue', entry.crossing,
+            { call: entry.undoMethod, args: [witness], phase: 1 }, err)
+        }
+      }
+      replayed.push(entry.undoMethod)
+    }
+    const ran: UiTransactionRun['ran'] = []
+    for (const entry of [...compensations].reverse()) {
+      let failed = false
+      try {
+        entry.run()
+      } catch (err) {
+        failed = true
+        this.pushResidue('compensation-residue', entry.crossing,
+          { call: entry.methodName, args: entry.args, phase: 2 }, err)
+      }
+      ran.push({ step: unit.labels.get(entry) ?? null, compensation: entry.methodName, failed })
+    }
+    this.uiTransactionRuns.push({
+      unit: unit.name,
+      failedStep: unit.failedStep,
+      crossed: [...unit.crossed],
+      error: Frame.errorOf(error),
+      ran,
+      replayed,
+      residue: this.residue.slice(residueBefore),
+      halted: false,
+    })
   }
 
   /** A provide method crossed an extern that DECLARES its own compensation

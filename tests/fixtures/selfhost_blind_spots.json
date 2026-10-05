@@ -271,6 +271,9 @@
       ]
     },
     "unported": {
+      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and wraps each unit method in `Frame.uiTransaction` and each computer-use extern in `uiCrossing`. emit_ts.rvl carries no UI transaction unit (issue #1972). The corpus has no computer-use document with @ts bodies; #1972's done criterion adds one. The runtime proof is backends/typescript/tests/ui_transaction.test.ts.": [
+        "key=<activation>"
+      ],
       "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
         "kind=hole"
       ]
