@@ -273,6 +273,13 @@ CORPUS = [
     # emission of an async body). Added FAILING FIRST: the port rendered the
     # forward call alone at every site.
     "extern_compensate.rvl",
+    # Issue #1911 (item 377, self-host port): the `abort` lifecycle step — the
+    # frame-marking LIFO teardown that reverts a witnessed mutation instead of
+    # committing it, and the `frameForCtx` import the step alone needs. No
+    # other document reaches `abort`, so the port could refuse it silently
+    # (item 429's trap). Added FAILING FIRST: the port answered
+    # `<<UNSUPPORTED-LIFECYCLE-STEP:abort>>`.
+    "lifecycle_abort.rvl",
 ]
 
 def _load_reference_emit():
