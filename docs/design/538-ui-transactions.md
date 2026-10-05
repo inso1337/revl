@@ -462,6 +462,31 @@ Three rules, each pinned by `tests/test_ui_transaction_runtime_1369.py`:
   compensation that FAILED. Section 2's five states are still five: they
   describe a program, and this describes one execution of it.
 
+**The rust tier runs the unit too** (issue #1369, item 3 of the decision on
+the issue, one tier per pull request). `backends/rust/emit.py` derives the
+same units from `revl.ui_transaction`. A unit method opens
+`let _revl_ui = RevlUiScope::new("<key>.<method>", true);`, runs its body
+under `catch_unwind`, and closes the scope over the outcome; a method that
+only reaches a computer-use extern opens one with `settles` false. Every
+registration in the body goes through the scope, and every computer-use
+crossing renders as `revl_ui_cross`, the analog of py's `declared_crossing`:
+it notes the crossing, registers the crossing's compensation (the
+site-spelled one, else the declared one) after the call returns, and still
+registers it when the call panics. A call that returns flushes the scope onto
+the activation as the same disposers a method body registers outside a unit.
+A unit whose call panics settles the scope instead, witnessed inverses newest
+first, then compensations newest first under `REVL_COMPENSATION_BUDGET_MS`,
+each caught, records the run (`revl_ui_transaction_runs(<activation label>)`),
+and resumes the panic. Settling runs after the unwind has been caught, never
+in a destructor, so a compensation that panics is caught like any other. The
+entries never reach the activation, so the clean unload after the failed call
+discharges nothing of them and a later `revl_abort` does not run them twice.
+rust erases the async color, has no E-Stop and records no residue schema (a
+failed compensation is the run entry's `failed`), and a document with no
+computer-use extern is emitted byte-identically.
+`backends/rust/test_ui_transaction_rust_1369.py` is the py suite's oracle,
+its control and its rules on this tier, against the real cordis-rs crate.
+
 The compensating host bodies are still the substrate's (item 539), exactly as
 the actuations are. What revl owns and now runs is the order and the
 membership, which is section 3's `compensate` row.
