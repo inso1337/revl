@@ -224,6 +224,15 @@ def _go_type(t) -> str:
         # the surface spelling into a service signature (`Raw(v Any) Any`) and
         # the package did not build (`undefined: Any`).
         return "any"
+    if t == "Value":
+        # issue #1923, the same defect one name over: `Value` (stdlib/value.rvl,
+        # docs/stdlib-value.md) is the stdlib erased-dynamic type, a reserved
+        # builtin that is never DECLARED — so it fell through to `_camel`, which
+        # printed the surface spelling into a record field (`Value Value`) and
+        # the package did not build (`undefined: Value`). Go's `any` is this
+        # tier's spelling of the erased dynamic value, as it is for `Any` above
+        # (rust's tier already erases `Value` to `cordis::Value`).
+        return "any"
     if t.startswith("Result[") and t.endswith("]"):
         # issue #1892: a Result in value (parameter) position is the package's
         # `RevlResult[T, E]`, as `_go_v3_type` spells it. Return position
@@ -5407,6 +5416,12 @@ def _go_v3_type(t, types: dict) -> str:
         # to `any` here and NOT fall through to `_v3_ident`, which — since
         # #680 added `any` to `_GO_RESERVED` to escape a USER identifier named
         # `any` — would mangle it to the undefined `any_`.
+        return "any"
+    if t == "Value":
+        # issue #1923: as in `_go_type` above, `Value` is a reserved builtin with
+        # no declaration to point at, so a record field of that type rendered the
+        # surface spelling (`Value Value`) and `go build` answered
+        # `undefined: Value`. Erase the erased-dynamic type to Go's `any`.
         return "any"
     fn = _v3_split_fn_type(t)
     if fn is not None:

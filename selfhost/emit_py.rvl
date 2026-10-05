@@ -3401,14 +3401,18 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   // slice 4: the resolved-config schema, emitted BEFORE the apply closure and
   // rehung on the plugin dict below. `_<SNAKE>_CONFIG = _revl_ConfigSchema([…])`
   // — one `(field, type, default)` tuple per declared config field; the runtime
-  // validates/resolves it before apply runs. The field name is mangled (as the
-  // reference `_ident`s it); type/default are repr'd verbatim.
+  // validates/resolves it before apply runs. The field name is the RAW declared
+  // one — it is a runtime dict KEY (the same string a `load … with {…}` step
+  // plugs in and the body reads back out of `_revl_config`, both raw), not a
+  // python binding, so it is never `mangle`d; mangling it renamed a field
+  // spelled after a python keyword in the schema ALONE, so the schema refused
+  // the key the author wrote and the fiber landed FAILED (issue #1915). The
+  // `secret` list below has always been raw for the same reason.
   let config_fields = value_list(value_field(comp, "config"))
   if (config_fields.length() > 0) {
     out = out.push(`_${upper(sn)}_CONFIG = _revl_ConfigSchema([`)
     for (spec of config_fields) {
-      let field = mangle(value_str(value_field(spec, "name")))
-      out = out.push(line(1, `(${py_repr(field)}, ${py_repr(value_field(spec, "type"))}, ${py_repr(value_field(spec, "default"))}),`))
+      out = out.push(line(1, `(${py_repr(value_field(spec, "name"))}, ${py_repr(value_field(spec, "type"))}, ${py_repr(value_field(spec, "default"))}),`))
     }
     // item 256 Slice 3: the config fields declared `Secret[T]`. The qualifier is
     // stripped off the declared type before lowering, so a field's `secret`
@@ -3650,6 +3654,12 @@ fn py_type(raw: Str) -> Str {
   if (name == "Str") { return "str" }
   if (name == "Bytes") { return "bytes" }
   if (name == "Unit") { return "None" }
+  // `Value` is the NAMED erased-dynamic builtin (never a DECLARED type, so the
+  // bare-name return below emits an annotation nothing defines and Python
+  // raises `NameError` on the class body — issue #1923). It erases to the
+  // native object graph, which no single annotation names: `Any`, the same
+  // erasure `Result[…]` takes above.
+  if (name == "Value") { return "Any" }
   return name
 }
 

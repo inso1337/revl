@@ -124,6 +124,12 @@ CORPUS = [
     "../emit_py_corpus/declared_type_shapes.rvl",
     "../emit_py_corpus/optionals.rvl",
     "../emit_py_corpus/maps.rvl",
+    # issue #1923: `Value`, the stdlib erased-dynamic type, is a reserved builtin
+    # with no declaration — the record field and its uses must erase to Go's
+    # `any` on both type paths (`_go_type`, v3, and `_go_v3_type`) rather than
+    # print the surface spelling that `go build` rejects. A config field named
+    # after a Python keyword rides along (#1915).
+    "../emit_py_corpus/keyword_config_value_field.rvl",
     # issue #1631: a built-in Ok/Err/None whose type the argument does not
     # fully say takes the missing part from where it flows (a declared return
     # or parameter, or the other operand of an `==`), and a call through a
