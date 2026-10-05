@@ -712,6 +712,33 @@ def _run_import(args) -> int:
     return 0
 
 
+def _run_gen_types(args) -> int:
+    """`revl gen-types <model.json>`: a typed model document becomes revl types
+    and a service signature, with the model's sha256 in the header, which
+    `revl check` checks (docs/gen-types.md, issue #1896)."""
+    from ..gen_types import gen_types_file  # noqa: PLC0415
+    try:
+        source = gen_types_file(args.model, args.output)
+    except OSError as error:
+        print(f"error: cannot read {args.model}: {error}", file=sys.stderr)
+        return 1
+    except RevlError as error:
+        if args.json_diagnostics:
+            print(json.dumps(report(error), indent=2))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.output:
+        try:
+            Path(args.output).write_text(source, encoding="utf-8")
+        except OSError as error:
+            print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+            return 1
+    else:
+        print(source, end="")
+    return 0
+
+
 def _run_export(args) -> int:
     """`revl export {wit,client}` — project a compiled IR into an external face.
 

@@ -129,6 +129,9 @@ def audit_report(ir: dict) -> dict:
         # proof of retention, and an ABSENT row is never a proof of the
         # opposite - see `resources.retention_surface`.
         **_retention_surface(ir),
+        # issue #1896: each `revl gen-types` file's model document and digest,
+        # checked at load. ADDITIVE and present only when one was compiled.
+        **_generated_surface(ir),
     }
 
 
@@ -185,6 +188,14 @@ def _secrets_surface(ir: dict) -> dict:
     (the same conditional-presence discipline as `_parallel_plan_surface`)."""
     table = _secrets_table(ir)
     return {"secrets": table} if table else {}
+
+
+def _generated_surface(ir: dict) -> dict:
+    """The additive `generated_from` audit key (issue #1896): the model document
+    and sha256 behind each generated types file, or `{}` when none was
+    compiled, so every other composition's audit is byte-identical."""
+    rows = ir.get("generated_from")
+    return {"generated_from": [dict(row) for row in rows]} if rows else {}
 
 
 def _retention_surface(ir: dict) -> dict:

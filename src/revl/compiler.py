@@ -19,6 +19,7 @@ from .admit_profile import enforce_document_per_root as _enforce_document_per_ro
 from .admit_profile import enforce_source as _enforce_source
 from . import operator_text as _operator_text
 from .errors import RevlError
+from . import gen_types as _gen_types
 from .holes import refuse_admission
 from .hostfile import _contained
 from .hostfile import program_has_body_file as _program_has_body_file
@@ -262,6 +263,9 @@ class _ModuleLoader:
         # land on the stdlib this compiler ships, as
         # `{"written", "resolved", "origin"}`. See `stdlib_shadow`.
         self.stdlib_shadow: list[dict] = []
+        # issue #1896: each `revl gen-types` file the compile loaded, as
+        # `{"file", "model", "sha256"}`, its model digest checked at load.
+        self.generated_from: list[dict] = []
 
     def _profile_for(self, abs_path: str) -> AdmissionProfile | None:
         """The admission profile the root at `abs_path` compiles under (item 426
@@ -311,6 +315,23 @@ class _ModuleLoader:
                       os.path.realpath(str(stdlib_root()))):
             return str(stdlib_root().parent)
         return None
+
+    def _check_generated(self, abs_path: str, virtual: str | None) -> None:
+        """Issue #1896: a `revl gen-types` file is refused once its model
+        document no longer has the digest its header carries, and recorded
+        otherwise. Only the head of a disk module is read for the header."""
+        if virtual is not None:
+            head = virtual
+        else:
+            try:
+                with open(abs_path, encoding="utf-8", errors="replace") as handle:
+                    head = handle.read(4096)
+            except OSError:
+                return
+        row = _gen_types.check_generated_header(head, abs_path, self._sources,
+                                                virtual is not None)
+        if row is not None and row not in self.generated_from:
+            self.generated_from.append(row)
 
     def has_source(self, path: str) -> bool:
         return os.path.abspath(path) in self._sources
@@ -512,6 +533,7 @@ class _ModuleLoader:
             virtual = self._sources.get(abs_path)
             program = (Parser(virtual, abs_path).parse() if virtual is not None
                        else parse_file(abs_path))
+            self._check_generated(abs_path, virtual)
             # item 396: for a ROOT module under a no-extern profile, refuse
             # BEFORE any body file is resolved, read, or stat'd, so the refusal
             # is byte-identical whether or not the named file exists (no
@@ -696,6 +718,17 @@ def compile_source(source: str, filename: str = "<string>",
                 hint="a bare source string has no root compile tree to jail the "
                      "ref against, and `compile_source` reads nothing from disk "
                      "(item 396 option B)")
+        # issue #1896: a `revl gen-types` file is checked against its model
+        # document, which a bare source string has no directory to find.
+        if _gen_types.generated_header(source) is not None:
+            raise RevlError(
+                filename, 1,
+                "a `revl gen-types` file needs `modules=` (in-memory sources, "
+                "with its model document) or `compile_files` with a real source "
+                "path, so its model digest can be checked",
+                hint="a bare source string has no directory to find the model "
+                     "document in, and `compile_source` reads nothing from disk "
+                     "(issue #1896)")
         # item 459 F1: an `asset "..."` needs a root tree to jail against and a
         # module directory to resolve relative to; a bare source string has
         # neither. Refuse structurally (no IO), mirroring the ref refusal above.
@@ -1199,6 +1232,11 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # IR key and every existing audit is byte-identical.
     if loader.stdlib_shadow:
         document["stdlib_shadow"] = loader.stdlib_shadow
+    # issue #1896: the model digest of each generated types file, checked at
+    # load. ADDITIVE and present only when one was loaded.
+    if loader.generated_from:
+        document["generated_from"] = sorted(
+            loader.generated_from, key=lambda row: (row["file"], row["model"]))
     if manifest is not None:
         # The admission gate. Compiling a draft is fine — that is how an
         # agent gets a verdict on the parts it has written — but admitting

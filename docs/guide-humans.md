@@ -311,6 +311,7 @@ below; the exhaustive per-command flag reference is
 | `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp proxy -- COMMAND` | gate an existing MCP server with no `.rvl` written: its tools classified as `revl mcp import` classifies them, approval, WAL and declared undos applied at call time | [mcp-proxy.md](mcp-proxy.md) |
 | `revl import wit\|openapi\|cordis\|a2a FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) · [import-a2a.md](import-a2a.md) |
+| `revl gen-types MODEL` | turn a typed model document into revl types and a service signature, with the model's digest checked at compile | [gen-types.md](gen-types.md) |
 | `revl export wit FILES --service N\|--composition` | generate the standard WIT interface for a revl service/composition | [wit-bridge.md](wit-bridge.md) |
 | `revl export client FILES --lang ts --service N\|--composition` | generate a typed remote client (TypeScript) over the canonical wire encoding; carries the gate frontier, claims nothing about the callee | [interop-bridge.md](interop-bridge.md) |
 | `revl sourcemap compose MAP --through [NAME=]MAP` | chain a generated file's own source map into the bundler's, so a bundled stack trace walks back to the template that produced the generated file instead of stopping at it | [frontend-assets.md](frontend-assets.md) |
