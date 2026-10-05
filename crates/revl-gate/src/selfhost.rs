@@ -22921,11 +22921,33 @@ fn cir_builtin(root_: &str, meth: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: 
     return mk_irres(true, s.revl_concat("}"));
 }
 
+fn cir_inplace_call(fl: FieldN, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
+    if is_builtin_method(&fl.name) {
+        return mk_irres(false, String::from(""));
+    }
+    if (!cir_plain_value_head(&parse_head(infer(fl.target.clone(), cenv_ir(cx.clone(), sc.clone()))))) {
+        return mk_irres(false, String::from(""));
+    }
+    let callee = cir_field(fl.clone(), sc.clone(), hostSc.clone(), cx.clone());
+    if (!callee.ok) {
+        return mk_irres(false, String::from(""));
+    }
+    let a = cir_args(args.clone(), 0i64, sc.clone(), hostSc.clone(), cx.clone(), String::from(""));
+    if (!a.ok) {
+        return mk_irres(false, String::from(""));
+    }
+    return mk_irres(true, (((String::from("{\"kind\": \"call\", \"callee\": ").revl_concat(&callee.js)).revl_concat(", \"args\": [")).revl_concat(&a.js)).revl_concat("]}"));
+}
+
+fn cir_plain_value_head(h: &str) -> bool {
+    return ((((((((h == "List") || (h == "Map")) || (h == "Str")) || (h == "Bytes")) || (h == "Int")) || (h == "Int32")) || (h == "Float")) || (h == "Bool"));
+}
+
 fn cir_call(tg: Expr, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     return match tg {
     Expr::Field(fl) => { let fl = *fl; if is_instance_call(fl.clone(), &sc) { cir_instance_call(fl.clone(), args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { match fl.target.clone() {
     Expr::Var(root_) => if contains__m2(&cx.reqs, &root_) { cir_reqcall(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if contains__m2(&hostSc, &root_) { cir_hostverb(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if is_host_root(&root_) { cir_hostacq(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (instance_comp(&sc, fl.target.clone()) != "") { cir_hostverb(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (scope_has(&sc, &root_) && is_builtin_method(&fl.name)) { cir_builtin(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { mk_irres(false, String::from("")) } } } } },
-    _ => mk_irres(false, String::from("")),
+    _ => cir_inplace_call(fl.clone(), args.clone(), sc.clone(), hostSc.clone(), cx.clone()),
 } } },
     Expr::Var(nm) => if (tagged_case_adt(&cx.cases, &nm) != "") { cir_adt(&tagged_case_adt(&cx.cases, &nm), &nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if cir_calls_a_value(&nm, &sc, cx.clone()) { cir_value_call(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { cir_fncall(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } },
     _ => mk_irres(false, String::from("")),
@@ -30480,6 +30502,11 @@ fn lower_to_ir_binds_a_discarded_payload_as____in_a_provide_method() {
 #[test]
 fn lower_to_ir_emits_the_services_table_for_a_simple_provider() {
     assert!((lower_to_ir(String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")) == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}, \"body\": [{\"step\": \"provide\", \"name\": \"cache\", \"service\": \"Cache\", \"methods\": [{\"name\": \"put\", \"params\": [\"key\", \"value\"], \"body\": [{\"step\": \"let\", \"name\": \"k\", \"value\": {\"kind\": \"name\", \"id\": \"key\"}, \"mutable\": false}]}]}]}]}"));
+}
+
+#[test]
+fn lower_to_ir_lowers_a_method_call_on_a_list_literal_in_a_provide_method() {
+    assert!(str_has(&lower_to_ir(String::from("service Math { fn go(n: Int) -> Int } component C provides math: Math { provide math { fn go(n: Int) = [1, 2].map((x) => x + n).length } }")), "{\"kind\": \"call\", \"callee\": {\"kind\": \"field\", \"target\": {\"kind\": \"list\", \"items\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 2}]}, \"name\": \"map\"}, \"args\": [{\"kind\": \"arrow\", \"params\": [\"x\"], \"captures\": [], \"body\": "));
 }
 
 #[test]
