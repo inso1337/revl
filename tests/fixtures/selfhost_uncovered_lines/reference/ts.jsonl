@@ -24,7 +24,7 @@
 
 ["function", "component-header-refusals-component-rejects-an-unknown-servi", "_context_augmentation", 2, 2]
 
-["function", "component-header-refusals-component-rejects-an-unknown-servi", "_provide_impl", 3, 3]
+["function", "component-header-refusals-component-rejects-an-unknown-servi", "_provide_impl", 10, 10]
 
 ["reason", "do-expression-refusals-and-one-annotation-v3-do", "`do` expression refusals and one annotation: `_v3_do_expr` rejects a `do` block outside a component/method body and a non-`let` statement in one, and annotates an empty-list binding inside the block. The frontend lowers `do` only in method bodies and only with `let` statements, and no corpus block binds `[]`. The block itself is covered (issue #106)"]
 
@@ -58,13 +58,13 @@
 
 ["reason", "extern-declared-compensations-issue-1511-declared-call-rende", "Extern-declared compensations (issue #1511): `_declared_call` renders a call to an extern that declares its own `compensate` as `Frame.declared(..)` in any non-statement position inside a provide method (a `let`, a `return`, an argument, a nested operand), renders an `emit` statement's own call bare (the statement registers it, issue #1592; `_emit_ctx` and `_Ctx.with_declared_statement` mark that node), and refuses any other component position by name; `_reaches_declared` walks a method body for such a call so the component builds a Frame. The ts corpus document tests/fixtures/emit_ts_corpus/extern_compensate.rvl (issue #1592) reaches only the `emit`-statement path, the call rendered bare, which selfhost/emit_ts.rvl ports. The non-statement positions stay unreached: no corpus document crosses one, and one that did would flip the byte-agreement oracle RED, because selfhost/emit_ts.rvl does not port `Frame.declared`. The behaviour is pinned and executed against real cordis by backends/typescript/tests/declared_compensate.test.ts."]
 
-["function", "extern-declared-compensations-issue-1511-declared-call-rende", "_declared_call", 13, 13]
+["function", "extern-declared-compensations-issue-1511-declared-call-rende", "_declared_call", 15, 15]
 
 ["function", "extern-declared-compensations-issue-1511-declared-call-rende", "_reaches_declared", 7, 7]
 
 ["reason", "extern-residuals-emit-ts-externs-rejects-an-extern", "Extern residuals: `_emit_ts_externs` rejects an extern with neither a @ts body nor a @ts ref, and writes the empty-body comment for an async extern whose @ts body is empty. Verbatim bodies, `@ts ref` thunks, config scaffolding and binding, and Secret result marking are covered (issue #106) Issue #1936 (c) adds three: the statement that emits the bound-secret seam and the two that append a secret's first local (sync and async), reached only by an extern bound with `secret NAME for CAP`. No emit_ts corpus document binds a secret, because selfhost/emit_ts.rvl does not port the injection and such a document would make the byte-agreement oracle diverge; backends/typescript/test_secret_bound_ts.py runs the emitted seam under node and through the node runner."]
 
-["function", "extern-residuals-emit-ts-externs-rejects-an-extern", "_emit_ts_externs", 5, 5]
+["function", "extern-residuals-emit-ts-externs-rejects-an-extern", "_emit_ts_externs", 7, 7]
 
 ["reason", "frame-allocation-invariants-and-declared-transaction-paths-b", "Frame allocation invariants and declared transaction paths: `_bracket_yield`'s bare-arrow branch requires a bracket while `_has_bracket` reported false, which cannot occur for lowered activation effects; `_guard_frame_neutral_loop` rejects frame-owning loop steps, but G6 keeps activation effects out of source loop bodies. `_has_bracket.walk`'s recursive true return requires an effect or timer inside a component guard, which G6 rejects. `_needs_frame.walk`'s remaining true returns require a witnessed acquisition or compensation nested in such a guard; `_method_body_needs_frame`'s remaining true return requires a witnessed method acquisition. Witnessed transactions are explicitly refused by the port"]
 
@@ -76,7 +76,7 @@
 
 ["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_method_body_needs_frame", 1, 1]
 
-["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_needs_frame.walk", 2, 2]
+["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_needs_frame.walk", 3, 3]
 
 ["reason", "in-file-test-pass-over-emit-ts-tests", "In-file test pass-over: `_emit_ts_tests` skips a lifecycle test and `_emit_ts_lifecycle_tests` skips a plain one, but `_emit_v3` splits the list before calling either, so neither `continue` has an input. Both drivers are otherwise covered (issue #106)"]
 
@@ -161,6 +161,22 @@
 ["function", "ts-reactive-tier-refusals-item-130-stream-iter", "_refuse_required_stream", 1, 1]
 
 ["function", "ts-reactive-tier-refusals-item-130-stream-iter", "_stream_iter", 1, 1]
+
+["reason", "ui-transaction-unit-item-522-issue-1369", "The UI transaction unit (item 522 slice 3, issue #1369): `_ui_transaction_facts` and `_calls_any` derive the per-method units from revl.ui_transaction, `_runtime_imports` imports the scope runtime, `_ui_crossing_wrapper` exports each computer-use extern as a `uiCrossing` wrapper, and `_emit_compensations` skips the call-site registration a wrapper makes itself. `_statement` and `_balanced` drop the parentheses of an async `(await f(x))` emit statement, which a unit's `uiCrossingAsync` exposed to ASI. The same branches raise `_declared_call`, `_emit_ts_externs`, `_needs_frame.walk` and `_provide_impl`. selfhost/emit_ts.rvl does not port the unit (issue #1972), and the corpus has no computer-use document with @ts bodies; #1972's done criterion adds one. The runtime proof is backends/typescript/tests/ui_transaction.test.ts."]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_balanced", 9, 9]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_calls_any", 7, 7]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_emit_compensations", 1, 1]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_runtime_imports", 5, 5]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_statement", 1, 1]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_crossing_wrapper", 11, 11]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_transaction_facts", 28, 28]
 
 ["reason", "unselected-async-call-shapes-is-async-fn-type", "Unselected async-call shapes: `_is_async_fn_type` returns false for non-string legacy types; `_ts_emission_is_async` returns false for a call whose target is not a requirement and tests a variable callee. A timer body admits only emissions, and each lowers to a requirement-target `call` or a component-dialect `fn` node; an async extern reached from a timer is refused earlier (\"called outside an async context\")"]
 

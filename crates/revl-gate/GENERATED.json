@@ -74,6 +74,7 @@
     "externs",
     "fault_tests",
     "functions",
+    "generated_from",
     "holes",
     "ir_version",
     "manifest",

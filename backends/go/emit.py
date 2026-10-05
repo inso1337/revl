@@ -198,9 +198,13 @@ def _reset_v3_typed_component_state() -> None:
     emitted before it. Every entry point re-initialises them on entry, so
     resetting to defaults here never changes a real emit's output."""
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
+    global _UI_EXTERNS, _UI_METHOD_SCOPES, _COMP_NEEDS_UI
     _V3_MODE = False
     _V3_TYPES = {}
     _V3_TYPED_COMPONENTS = False
+    _UI_EXTERNS = {}
+    _UI_METHOD_SCOPES = {}
+    _COMP_NEEDS_UI = False
 
 
 def _go_type(t) -> str:
@@ -332,6 +336,10 @@ class _Env:
         # twice).
         self.declared_frame: str | None = None
         self.declared_skip = None
+        # issue #1369: inside a provide method that runs in a UI scope, the
+        # local holding that scope (`_revlUi`). Its registrations and its
+        # computer-use crossings go through it instead of the frame.
+        self.ui_scope: str | None = None
 
     def _prefix(self) -> str:
         return (self.receiver + ".") if self.receiver else ""
@@ -683,7 +691,11 @@ def _expr(node, env: _Env, expected=None) -> str:
         # tier limit beats a fall-through.
         name = _v3_ident(node.get("name"), "function")
         args = ", ".join(_expr(a, env) for a in node.get("args") or [])
-        return _declared_call(node, "%s(%s)" % (name, args), env)
+        call = "%s(%s)" % (name, args)
+        if _is_ui_crossing(node, env) and node is not env.declared_skip:
+            # issue #1369: a computer-use crossing in a value position
+            return _ui_cross_call(node, call, env, _declared_comp(node))
+        return _declared_call(node, call, env)
     if kind == "record":
         # v3 typed-core only: a record literal needs the document's declared
         # record type for its field set (the v1/v2 tier carries none).
@@ -1327,6 +1339,14 @@ _COMP_NEEDS_METHOD_WITNESSED = False
 # issue #1592: whether some provide method calls an extern that declares its
 # own `compensate` in a value position, so `revlDeclared` is emitted.
 _COMP_NEEDS_DECLARED = False
+# issue #1369 (item 522 slice 3): the document's computer-use externs, by name,
+# and its provide methods that run in a UI scope, keyed by the identity of the
+# method dict (see `_set_ui_facts`). `_COMP_NEEDS_UI` emits the scope runtime
+# (`_REVL_UI_TRANSACTION`). A document with no computer-use extern leaves all
+# three empty and emits byte-identically.
+_UI_EXTERNS: dict = {}
+_UI_METHOD_SCOPES: dict = {}
+_COMP_NEEDS_UI = False
 # Per-emit counter for unique witnessed-step local names (`_revlWit1`, …).
 _WITNESSED_COUNTER = 0
 # item 322 Slice 1: record mode. When True, a witnessed transactional step also
@@ -1664,6 +1684,7 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
     has_method_frame = any(
         _method_body_has_witnessed(m.get("body"))
         or _method_body_has_compensate(m.get("body"))
+        or _ui_method_scope(m) is not None
         for m in methods)
 
     # struct fields: ctx + config + every bind + every req (over-capture ok).
@@ -1716,12 +1737,31 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
                    params=m.get("params", []), receiver=_METHOD_RECEIVER)
         if has_method_frame:
             env.declared_frame = "%s.revlFrame" % _METHOD_RECEIVER
+        _open_ui_scope(m, env, out)
         for pn in m.get("params", []):
             env.var_types[pn] = ptypes.get(pn)
         _emit_method_body(m.get("body", []), env, out, 1,
                           ret_surface=decl.get("returns"))
         out.append("}")
         out.append("")
+
+
+def _open_ui_scope(method, env, out) -> None:
+    """Open the UI scope a provide method runs in, if any (issue #1369): the
+    UI transaction unit (`settles` true) or a call scope. The deferred `exit`
+    settles a failed unit and flushes everything else onto the frame."""
+    scope = _ui_method_scope(method)
+    if scope is None:
+        return
+    global _COMP_NEEDS_UI, _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
+    _COMP_NEEDS_UI = True
+    _COMP_NEEDS_TEARDOWN = True
+    _COMP_NEEDS_METHOD_WITNESSED = True
+    name, settles = scope
+    env.ui_scope = "_revlUi"
+    out.append("\t_revlUi := %s.revlFrame.uiScope(%s, %s)"
+               % (_METHOD_RECEIVER, _go_string(name), "true" if settles else "false"))
+    out.append("\tdefer _revlUi.exit()")
 
 
 def _emit_go_router_struct(cname, key, service_name, route, services, out):
@@ -1899,15 +1939,22 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             # The frame is reached the same way as the witnessed seam
             # (`receiver.revlFrame`, wired at provide construction).
             env.declared_skip = step.get("expr")
-            out.append("%s%s" % (pad, _expr(step["expr"], env)))
+            emit_call = _expr(step["expr"], env)
             env.declared_skip = None
+            if _is_ui_crossing(step.get("expr"), env):
+                # issue #1369: a computer-use crossing registers its own
+                # compensation, the site-spelled one or else the declared one,
+                # even when it panics (`revlUiCross`)
+                _emit_ui_crossing_step(step, emit_call, env, out, pad)
+                continue
+            out.append("%s%s" % (pad, emit_call))
             # one compensation per crossing, registered after the fire: the
             # site-spelled clause, else the extern's own declared one (item
             # 254, issues #1592 and #1902).
             for comp_node in _emit_compensations(step):
                 compensate_call = _expr(comp_node, env)
                 key, method = _call_descriptor(comp_node)
-                frame = "%s.revlFrame" % env.receiver
+                frame = env.ui_scope or "%s.revlFrame" % env.receiver
                 # By-value capture for the offset, on the same footing as an
                 # `undo` (see `_emit_pins`). The offset runs in Phase 2 of an
                 # abort, so a `var` the body reassigns afterwards would move what
@@ -2683,6 +2730,379 @@ func revlDeclared[T any](f *RevlFrame, v T, key, method string, run func() error
 '''
 
 
+_REVL_UI_TRANSACTION = '''// ---- the UI transaction unit (item 522 slice 3, issue #1369) ----
+// The go mirror of backends/python/runtime.py's `Frame.ui_transaction` and
+// `declared_crossing`. A provide method that crosses a computer-use verb is
+// one unit. The method holds its scope explicitly (`_revlUi`), since go has
+// no context-local storage: every registration and every computer-use
+// crossing in the method body goes through it, so two concurrent calls on
+// one activation never see each other's entries.
+//
+// The scope buffers what the call registers. A call that returns flushes the
+// buffer onto the activation frame in registration order, where the entries
+// wait for the activation's verdict as before. A unit whose call panics
+// settles its own entries instead: Phase 1 replays its witnessed inverses
+// newest first, Phase 2 runs its compensations newest first, each
+// continue-and-record, the run is recorded, and the panic propagates
+// unchanged. The entries never reach the frame, so neither the clean unload
+// after the failed call (which would discharge them) nor a later Abort()
+// (which would run them twice) sees them. A call scope (`settles` false)
+// flushes on a panic too.
+
+// RevlUiRan is one compensation a settled unit ran: the crossing it offsets
+// ("" for an entry with no crossing), the compensation, and whether it failed.
+type RevlUiRan struct {
+	Step         string
+	Compensation string
+	Failed       bool
+}
+
+// RevlUiRun is the record a settled unit leaves, the go form of the py
+// tier's `Frame.ui_transaction_runs` entry.
+type RevlUiRun struct {
+	Unit       string   // "<key>.<method>"
+	FailedStep string   // the crossing the call failed at, "" for none
+	Crossed    []string // the computer-use crossings started, in order
+	Error      string   // the panic value, rendered
+	Ran        []RevlUiRan
+	Replayed   []string // the witnessed inverses replayed, newest first
+	Residue    []RevlTeardownRecord
+}
+
+type revlUiEntry struct {
+	step      string
+	witnessed func() error // a Phase-1 entry; nil for a compensation
+	comp      revlCompEntry
+}
+
+type revlUiScope struct {
+	frame      *RevlFrame
+	name       string
+	settles    bool
+	crossed    []string
+	failedStep string
+	entries    []revlUiEntry
+}
+
+var (
+	_revlUiRunsMu sync.Mutex
+	_revlUiRuns   = map[*RevlFrame][]RevlUiRun{}
+)
+
+// UiTransactionRuns is a snapshot of the runs this activation's settled
+// units recorded, oldest first.
+func (f *RevlFrame) UiTransactionRuns() []RevlUiRun {
+	_revlUiRunsMu.Lock()
+	defer _revlUiRunsMu.Unlock()
+	return append([]RevlUiRun(nil), _revlUiRuns[f]...)
+}
+
+func (f *RevlFrame) uiScope(name string, settles bool) *revlUiScope {
+	return &revlUiScope{frame: f, name: name, settles: settles}
+}
+
+// registerWitnessed buffers a witnessed inverse the call registered.
+func (s *revlUiScope) registerWitnessed(method string, run func() error) {
+	s.entries = append(s.entries, revlUiEntry{witnessed: run, comp: revlCompEntry{method: method}})
+}
+
+// registerMethodCompensation buffers a compensation that offsets no
+// computer-use crossing (a site-spelled one, or another extern's declared one).
+func (s *revlUiScope) registerMethodCompensation(key, method string, run func() error) {
+	s.entries = append(s.entries, revlUiEntry{comp: revlCompEntry{key: key, method: method, run: run}})
+}
+
+func (s *revlUiScope) registerCrossing(step string, comp *revlCompEntry) {
+	if comp != nil {
+		s.entries = append(s.entries, revlUiEntry{step: step, comp: *comp})
+	}
+}
+
+// revlUiDeclared is revlDeclared inside a scope.
+func revlUiDeclared[T any](s *revlUiScope, v T, key, method string, run func() error) T {
+	s.registerMethodCompensation(key, method, run)
+	return v
+}
+
+// revlUiCross runs one computer-use crossing. It notes the crossing, and
+// registers its compensation after the call returns. A crossing that panics
+// is the step the call failed at, and still registers its own compensation:
+// the panic says the substrate could not confirm the effect, which is not
+// knowing it did not land.
+func revlUiCross[T any](s *revlUiScope, step string, comp *revlCompEntry, call func() T) T {
+	s.crossed = append(s.crossed, step)
+	returned := false
+	defer func() {
+		if !returned {
+			if s.failedStep == "" {
+				s.failedStep = step
+			}
+			s.registerCrossing(step, comp)
+		}
+	}()
+	v := call()
+	returned = true
+	s.registerCrossing(step, comp)
+	return v
+}
+
+// revlUiCrossVoid is revlUiCross for a crossing that returns nothing.
+func revlUiCrossVoid(s *revlUiScope, step string, comp *revlCompEntry, call func()) {
+	revlUiCross(s, step, comp, func() struct{} { call(); return struct{}{} })
+}
+
+// exit is the scope's deferred close. It must be deferred directly, so its
+// recover sees the method's panic.
+func (s *revlUiScope) exit() {
+	r := recover()
+	if r == nil || !s.settles {
+		s.flush()
+		if r != nil {
+			panic(r)
+		}
+		return
+	}
+	s.frame.uiSettle(s, r)
+	panic(r)
+}
+
+// flush parks the buffered entries on the frame, in registration order.
+func (s *revlUiScope) flush() {
+	for _, e := range s.entries {
+		if e.witnessed != nil {
+			s.frame.registerMethodWitnessed(e.witnessed)
+		} else {
+			s.frame.registerMethodCompensation(e.comp.key, e.comp.method, e.comp.run)
+		}
+	}
+	s.entries = nil
+}
+
+func (f *RevlFrame) residueCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.residue)
+}
+
+// uiSettle settles a failed unit's entries and records the run.
+func (f *RevlFrame) uiSettle(s *revlUiScope, r any) {
+	before := f.residueCount()
+	run := RevlUiRun{
+		Unit:       s.name,
+		FailedStep: s.failedStep,
+		Crossed:    append([]string{}, s.crossed...),
+		Error:      fmt.Sprint(r),
+	}
+	run.Replayed = f.uiReplay(s.entries)
+	run.Ran = f.uiCompensate(s.entries)
+	run.Residue = f.Residue()[before:]
+	_revlUiRunsMu.Lock()
+	_revlUiRuns[f] = append(_revlUiRuns[f], run)
+	_revlUiRunsMu.Unlock()
+}
+
+// uiReplay is the unit's Phase 1: its witnessed inverses, newest first. Each
+// one records its own restore-residue on a panic.
+func (f *RevlFrame) uiReplay(entries []revlUiEntry) []string {
+	replayed := []string{}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].witnessed != nil {
+			_ = entries[i].witnessed()
+			replayed = append(replayed, entries[i].comp.method)
+		}
+	}
+	return replayed
+}
+
+// uiCompensate is the unit's Phase 2: its compensations, newest first, under
+// the same per-call bound and budget as an abort's Phase 2.
+func (f *RevlFrame) uiCompensate(entries []revlUiEntry) []RevlUiRan {
+	ran := []RevlUiRan{}
+	budget := revlEnvDurationMS("REVL_COMPENSATION_BUDGET_MS", 5000)
+	perCall := revlEnvDurationMS("REVL_COMPENSATION_PER_CALL_MS", 1000)
+	deadline := time.Now().Add(budget)
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if e.witnessed != nil {
+			continue
+		}
+		bound := revlNoCompensationBound
+		if perCall != 0 {
+			bound = perCall
+		}
+		if budget != 0 {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				f.uiNotAttempted(e.comp)
+				continue
+			}
+			if remaining < bound {
+				bound = remaining
+			}
+		}
+		before := f.residueCount()
+		f.runOneCompensation(e.comp, bound)
+		ran = append(ran, RevlUiRan{Step: e.step, Compensation: e.comp.method,
+			Failed: f.residueCount() > before})
+	}
+	return ran
+}
+
+func (f *RevlFrame) uiNotAttempted(entry revlCompEntry) {
+	f.recordResidue(RevlTeardownRecord{
+		Kind: "compensation-residue", CrossingKey: entry.key, CrossingMethod: entry.method,
+		ErrorType: "deadline-expired",
+		ErrorMessage: "the phase-2 compensation budget (REVL_COMPENSATION_BUDGET_MS) expired " +
+			"before this compensation started",
+		Outcome: "not-attempted", AttemptedPhase: 2, Referent: entry.key,
+		Hint: "the phase-2 budget expired before " + entry.key + "." + entry.method +
+			" ran; verify and finish by hand",
+	})
+}
+'''
+
+
+def _ui_transaction_facts(ir: dict) -> tuple[set, dict]:
+    """Issue #1369 (item 522 slice 3): the computer-use externs of the
+    document, by name, and the provide methods that run in a scope, as
+    `{(component, key, method): "ui_transaction" | "call_scope"}`.
+
+    The same derivation as the py and ts emitters, from `revl.ui_transaction`,
+    the module `revl erase-report` prints the static run from, so the unit
+    this tier settles is the unit the report describes. A method that crosses
+    a computer-use verb is its UI transaction unit; one that only reaches such
+    an extern gets a scope that never settles. FAIL-CLOSED: without the
+    frontend, a document that declares a computer-use capability is refused
+    rather than emitted with no unit. A document with none gets `(set(), {})`
+    and is emitted byte-identically."""
+    roots = {str(cap).split(".", 1)[0]
+             for ext in ir.get("externs") or []
+             for cap in ext.get("capabilities") or []}
+    if not roots & {"ui", "screen"}:
+        return set(), {}
+    try:
+        try:
+            from revl import ui_family, ui_transaction  # noqa: PLC0415
+        except ModuleNotFoundError:  # standalone `python3 emit.py`: src/ on the path
+            import pathlib  # noqa: PLC0415
+            src = pathlib.Path(__file__).resolve().parents[2] / "src"
+            if src.is_dir() and str(src) not in sys.path:
+                sys.path.insert(0, str(src))
+            from revl import ui_family, ui_transaction  # noqa: PLC0415
+    except Exception as error:  # noqa: BLE001 - frontend absent
+        raise EmitError(
+            "a computer-use extern needs the revl frontend to find its "
+            "transaction unit (item 522), and it is not importable here: "
+            f"{error}") from error
+    index = ui_transaction._extern_index(ir)
+    ui_externs = {name for name, entry in index.items()
+                  if ui_family.reversibility(entry["token"]) is not None}
+    if not ui_externs:
+        return set(), {}
+    units = {(plan["component"], plan["key"], plan["method"])
+             for plan in ui_transaction.plans(ir)
+             if plan["key"] != "<activation>"}
+    scopes: dict = {}
+    for comp in ir.get("components") or []:
+        for entry in comp.get("body") or []:
+            if not isinstance(entry, dict) or entry.get("step") != "provide":
+                continue
+            for method in entry.get("methods") or []:
+                key = (comp.get("name"), entry.get("name"), method.get("name"))
+                if key in units:
+                    scopes[key] = "ui_transaction"
+                elif _calls_any(method.get("body"), ui_externs):
+                    scopes[key] = "call_scope"
+    return ui_externs, scopes
+
+
+def _calls_any(node, names: set) -> bool:
+    """Whether *node* (any IR subtree) calls one of *names*."""
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in names:
+            return True
+        return any(_calls_any(value, names) for value in node.values())
+    if isinstance(node, list):
+        return any(_calls_any(item, names) for item in node)
+    return False
+
+
+def _set_ui_facts(ir: dict) -> None:
+    """Issue #1369: compute this document's computer-use externs and scoped
+    provide methods. The scopes are keyed by the identity of the method dict
+    the renderer walks, so `_emit_provide_impl` needs no component name."""
+    global _UI_EXTERNS, _UI_METHOD_SCOPES, _COMP_NEEDS_UI
+    names, scopes = _ui_transaction_facts(ir)
+    _UI_EXTERNS = {ext.get("name"): ext for ext in ir.get("externs") or []
+                   if ext.get("name") in names}
+    _UI_METHOD_SCOPES = {}
+    _COMP_NEEDS_UI = False
+    for comp in ir.get("components") or []:
+        for entry in comp.get("body") or []:
+            if not isinstance(entry, dict) or entry.get("step") != "provide":
+                continue
+            for method in entry.get("methods") or []:
+                kind = scopes.get((comp.get("name"), entry.get("name"), method.get("name")))
+                if kind is not None:
+                    _UI_METHOD_SCOPES[id(method)] = (
+                        "%s.%s" % (entry.get("name"), method.get("name")),
+                        kind == "ui_transaction")
+
+
+def _ui_method_scope(method):
+    """`(unit name, settles)` for a provide method that runs in a scope, else None."""
+    return _UI_METHOD_SCOPES.get(id(method))
+
+
+def _ui_comp_literal(comp_node, env) -> str:
+    """The `*revlCompEntry` a computer-use crossing registers, or `nil`."""
+    if comp_node is None:
+        return "nil"
+    key, method = _call_descriptor(comp_node)
+    return "&revlCompEntry{key: %s, method: %s, run: func() error { %s; return nil }}" % (
+        _go_string(key), _go_string(method), _expr(comp_node, env))
+
+
+def _ui_cross_call(node, call: str, env, comp_node) -> str:
+    """A call to a computer-use extern inside a scoped provide method (issue
+    #1369): it renders through `revlUiCross`, which notes the crossing in the
+    method's scope and registers `comp_node`, the crossing's compensation."""
+    global _COMP_NEEDS_UI
+    _COMP_NEEDS_UI = True
+    ext = _UI_EXTERNS[node.get("name")]
+    step = _go_string(node.get("name"))
+    comp = _ui_comp_literal(comp_node, env)
+    if ext.get("returns") is None:
+        return "revlUiCrossVoid(%s, %s, %s, func() { %s })" % (env.ui_scope, step, comp, call)
+    ret = _go_v3_type(ext.get("returns"), _V3_TYPES)
+    return "revlUiCross(%s, %s, %s, func() %s { return %s })" % (
+        env.ui_scope, step, comp, ret, call)
+
+
+def _emit_ui_crossing_step(step, call: str, env, out, pad) -> None:
+    """An `emit` statement whose call is a computer-use crossing inside a UI
+    scope (issue #1369). One compensation per crossing (issue #1902): the
+    site-spelled clause, else the extern's declared one. A site clause's
+    by-value pins (see `_emit_pins`) go in a nothing-taking closure, as on the
+    plain path."""
+    comps = _emit_compensations(step)
+    pins: list = []
+    _emit_pins(step, "compensate", pins, pad + "\t")
+    line = _ui_cross_call(step.get("expr"), call, env, comps[0] if comps else None)
+    if not pins:
+        out.append(pad + line)
+        return
+    out.append("%sfunc() {" % pad)
+    out.extend(pins)
+    out.append("%s\t%s" % (pad, line))
+    out.append("%s}()" % pad)
+
+
+def _is_ui_crossing(node, env) -> bool:
+    return (bool(env.ui_scope) and isinstance(node, dict) and node.get("kind") == "fn"
+            and node.get("name") in _UI_EXTERNS)
+
+
 def _declared_call(node, call: str, env) -> str:
     """A call to an extern that declares its own `compensate`, in a value
     position of a provide method (issue #1592; the positions of #1511): it
@@ -2700,8 +3120,19 @@ def _declared_call(node, call: str, env) -> str:
     _COMP_NEEDS_METHOD_WITNESSED = True
     comp = _as_fn_call(ext["compensate"])
     key, method = _call_descriptor(comp)
+    if env.ui_scope:
+        # issue #1369: inside a UI scope the offset is the scope's until the
+        # call returns
+        return "revlUiDeclared(%s, %s, %s, %s, func() error { %s; return nil })" % (
+            env.ui_scope, call, _go_string(key), _go_string(method), _expr(comp, env))
     return "revlDeclared(%s, %s, %s, %s, func() error { %s; return nil })" % (
         env.declared_frame, call, _go_string(key), _go_string(method), _expr(comp, env))
+
+
+def _declared_comp(node):
+    """The compensation the extern *node* calls declares, as a `fn` node, or None."""
+    ext = _COMPENSATED_EXTERNS.get(node.get("name"))
+    return _as_fn_call(ext["compensate"]) if ext is not None else None
 
 
 def _reaches_declared(node) -> bool:
@@ -2786,6 +3217,7 @@ def _provide_has_method_frame(provide_step) -> bool:
     provide impl struct need a `revlFrame` field and the frame be handed to it."""
     return any(_method_body_has_witnessed(m.get("body"))
                or _method_body_has_compensate(m.get("body"))
+               or _ui_method_scope(m) is not None
                for m in provide_step.get("methods", []) or [])
 
 
@@ -3017,7 +3449,12 @@ def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
                (pad, ok_var, isok_var, result_var, ok_t_full, isok_var))
     out.append("%sresult := %s.Value" % (inner, ok_var))
     out.append("%s_ = result" % inner)
-    out.append("%s%s.registerMethodWitnessed(func() (_revlErr error) {" % (inner, frame))
+    if env.ui_scope:
+        # issue #1369: the inverse is the UI scope's until the call returns
+        out.append("%s%s.registerWitnessed(%s, func() (_revlErr error) {"
+                   % (inner, env.ui_scope, _go_string(undo_name)))
+    else:
+        out.append("%s%s.registerMethodWitnessed(func() (_revlErr error) {" % (inner, frame))
     out.append("%sif %s.committed {" % (inner2, frame))
     out.append("%s\t// item 318 a5a: discharge — the mutation is the deliverable" % inner2)
     out.append("%s\t// and persists; witness GC'd (out of scope)." % inner2)
@@ -10231,6 +10668,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         if ext.get("class") == "witnessed"
     }
     _COMPENSATED_EXTERNS = _compensated_table(ir.get("externs") or [])
+    _set_ui_facts(ir)
     # item 320: declared return types of every top-level fn and extern, so a
     # value-typed `let x = effect <fn call>` bracket acquisition can be
     # declared by its ACTUAL return type instead of `*T`. Empty for a document
@@ -10400,6 +10838,8 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
         if _COMP_NEEDS_DECLARED:
             out.append(_REVL_DECLARED)
+        if _COMP_NEEDS_UI:
+            out.append(_REVL_UI_TRANSACTION)
         if _RECORD_MODE:
             out.append(_RECORD_PREAMBLE)
     if _COMP_NEEDS_TIMER:
@@ -11030,6 +11470,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         if ext.get("class") == "witnessed"
     }
     _COMPENSATED_EXTERNS = _compensated_table(externs)
+    _set_ui_facts(ir)
     _WITNESSED_COUNTER = 0
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
@@ -11348,6 +11789,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
         if _COMP_NEEDS_DECLARED:
             out.append(_REVL_DECLARED)
+        if _COMP_NEEDS_UI:
+            out.append(_REVL_UI_TRANSACTION)
         if _RECORD_MODE:
             # item 322 Slice 1: the durable WAL sink the teardown records
             # through. `_emit` appends it beside the teardown preamble; a

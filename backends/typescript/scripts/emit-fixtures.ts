@@ -145,6 +145,13 @@ export function emitFixtures(): void {
   // the pair off `generated_coverage.test.ts`'s scan, like the fixtures above.
   const emitExternCompensate = emitFixture
   emitExternCompensate('extern_compensate.ir.json', 'extern_compensate.ts')
+  // issue #1369 (item 522 slice 3): the UI transaction unit. A provide method
+  // that crosses a computer-use verb settles what it registered when its call
+  // fails, as py does (ui_transaction.test.ts). Carries no `test` blocks, so
+  // the alias keeps the pair off `generated_coverage.test.ts`'s scan, like the
+  // fixtures above.
+  const emitUiTransaction = emitFixture
+  emitUiTransaction('ui_transaction.ir.json', 'ui_transaction.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone

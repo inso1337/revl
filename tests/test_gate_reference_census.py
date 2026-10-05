@@ -94,6 +94,30 @@ def test_no_bypass_and_no_new_divergence(census, measured):
         name.split("/", 1)[0] in census.TRACKED for name in buckets)
 
 
+# The LINE ledger (issue #1965). The comparison above sees tag and message; a
+# refusal both sides agree on can still be anchored at a different line, and
+# `admit_src` orders a multi-defect program by line. Every such refusal is named
+# in `tools/gate_reference_line_ledger.json` with its `[reference, gate]` pair,
+# and this fails on a mismatch not listed there, a pair that moved, and an entry
+# that no longer mismatches, so the list only shrinks.
+def test_every_line_mismatch_is_named_on_the_ledger(census, measured):
+    cases, (buckets, _) = measured
+    pairs = census.line_pairs(cases, buckets, census.SelfhostEngine())
+    ledger = json.loads(census.LINE_LEDGER.read_text())
+    problems = census.compare_lines(pairs, ledger)
+    assert not problems, "\n  ".join(
+        ["the gate/reference line ledger moved:"] + problems[:40])
+
+
+def test_the_line_ratchet_fails_in_all_three_directions(census):
+    ledger = {"mismatches": {"a.rvl": [3, 2], "b.rvl": [9, 7]}}
+    problems = census.compare_lines({"a.rvl": [3, 1], "c.rvl": [4, 2]}, ledger)
+    assert any(p.startswith("new line mismatch: c.rvl") for p in problems)
+    assert any(p.startswith("line pair moved: a.rvl") for p in problems)
+    assert any(p.startswith("no longer a line mismatch: b.rvl") for p in problems)
+    assert census.compare_lines({"a.rvl": [3, 2], "b.rvl": [9, 7]}, ledger) == []
+
+
 # The OPEN BYPASS SURFACE, named case by case.
 #
 # Each of these is a program the reference refuses under a guarantee this gate

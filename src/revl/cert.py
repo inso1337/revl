@@ -1100,6 +1100,11 @@ def make_certificate(ir: dict, key: bytes, *, verdict=None,
         "composition_hash": ir_hash,
         "guarantees": guarantees,
     }
+    # issue #1896: the model document behind each generated types file, next
+    # to the source digest. The compile checked each digest against its model,
+    # and the IR (so `composition_hash`) carries the same rows.
+    if ir.get("generated_from"):
+        subject["generated_from"] = [dict(row) for row in ir["generated_from"]]
     body = {
         "kind": CERT_KIND,
         "version": CERT_VERSION,
@@ -1191,6 +1196,15 @@ def _validate_envelope(cert: dict) -> str:
         if not _HEX64.match(str(subject.get(member))):
             return (f"envelope refused: subject.{member} is not a sha256 digest "
                     f"({subject.get(member)!r})")
+    generated = subject.get("generated_from")
+    if generated is not None and (
+            not isinstance(generated, list) or not generated
+            or not all(isinstance(row, dict) and isinstance(row.get("file"), str)
+                       and isinstance(row.get("model"), str)
+                       and _HEX64.match(str(row.get("sha256")))
+                       for row in generated)):
+        return ("envelope refused: subject.generated_from is not a list of "
+                f"{{file, model, sha256}} rows ({generated!r})")
     guarantees = subject.get("guarantees")
     known = attest.catalogued_guarantees()
     if (not isinstance(guarantees, list) or not guarantees

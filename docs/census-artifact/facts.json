@@ -24,7 +24,7 @@
   "probe_case": "census-artifact-probe:synthetic-false-admission",
   "record_refuses_to_write_it": true
  },
- "note": "The measured facts of a census run that are neither a per-case verdict (cases.jsonl) nor a pinned file (pins.jsonl). Written by `python3 tools/census_artifact.py --write`; every count, digest and claim in the report is computed from these three files and the checkout when it is rendered, and none is stored. On a merge conflict, run that command again.",
+ "note": "The measured facts of a census run that are neither a per-case verdict (cases/) nor a pinned file (pins.jsonl). Written by `python3 tools/census_artifact.py --write`; every count, digest and claim in the report is computed from these records and the checkout when it is rendered, and none is stored. On a merge conflict, run that command again.",
  "reference_faults": [],
  "schema": "GATE-CENSUS-RECORDS-1"
 }

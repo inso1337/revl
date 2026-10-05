@@ -448,6 +448,30 @@ The entries leave the frame's deferred lists first, so a later commit does not
 discharge them and a later abort does not run them twice. Under an E-Stop
 nothing runs and the halt strands them, as it strands every other entry.
 
+**The java tier runs the unit too** (issue #1369, item 3 of the decision on
+the issue, one tier per pull request). `backends/java/emit.py` derives the
+same units from `revl.ui_transaction`. A unit method opens
+`RevlUi _revlUi = new RevlUi(fx, frame, "<key>.<method>", true);` and runs its
+body in a `try` whose `catch` settles the unit and rethrows and whose
+`finally` flushes; a method that only reaches a computer-use extern opens one
+with `settles` false. Every registration in the body goes through the scope,
+and every computer-use crossing renders as `_revlUi.cross` (`crossUnit` for no
+value), the analog of py's `declared_crossing`: it notes the crossing,
+registers the crossing's compensation (the site-spelled one, else the
+declared one) after the call returns, and still registers it when the call
+throws. A call that returns tracks the scope's entries into the activation's
+`fx` in registration order, as the same entries a method body tracks outside
+a unit. A unit whose call throws settles them instead, witnessed inverses
+newest first, then compensations newest first through `RevlFrame.runPhase2`'s
+per-call bound under one budget, each continue-and-record into the merged
+residue schema, records the run (`RevlUi.runs(activation)`), and rethrows.
+The entries never reach `fx`, so the clean unload after the failed call
+discharges nothing of them and a later `abort()` does not run them twice.
+java erases the async color and its components carry no E-Stop, and a
+document with no computer-use extern is emitted byte-identically.
+`backends/java/test_ui_transaction_java_1369.py` is the py suite's oracle,
+its control and its rules on this tier, on a JVM.
+
 Three rules, each pinned by `tests/test_ui_transaction_runtime_1369.py`:
 
 - the run the tier performs is the run `compensation_run` computes. On the
@@ -462,9 +486,54 @@ Three rules, each pinned by `tests/test_ui_transaction_runtime_1369.py`:
   compensation that FAILED. Section 2's five states are still five: they
   describe a program, and this describes one execution of it.
 
+**The rust tier runs the unit too** (issue #1369, item 3 of the decision on
+the issue, one tier per pull request). `backends/rust/emit.py` derives the
+same units from `revl.ui_transaction`. A unit method opens
+`let _revl_ui = RevlUiScope::new("<key>.<method>", true);`, runs its body
+under `catch_unwind`, and closes the scope over the outcome; a method that
+only reaches a computer-use extern opens one with `settles` false. Every
+registration in the body goes through the scope, and every computer-use
+crossing renders as `revl_ui_cross`, the analog of py's `declared_crossing`:
+it notes the crossing, registers the crossing's compensation (the
+site-spelled one, else the declared one) after the call returns, and still
+registers it when the call panics. A call that returns flushes the scope onto
+the activation as the same disposers a method body registers outside a unit.
+A unit whose call panics settles the scope instead, witnessed inverses newest
+first, then compensations newest first under `REVL_COMPENSATION_BUDGET_MS`,
+each caught, records the run (`revl_ui_transaction_runs(<activation label>)`),
+and resumes the panic. Settling runs after the unwind has been caught, never
+in a destructor, so a compensation that panics is caught like any other. The
+entries never reach the activation, so the clean unload after the failed call
+discharges nothing of them and a later `revl_abort` does not run them twice.
+rust erases the async color, has no E-Stop and records no residue schema (a
+failed compensation is the run entry's `failed`), and a document with no
+computer-use extern is emitted byte-identically.
+`backends/rust/test_ui_transaction_rust_1369.py` is the py suite's oracle,
+its control and its rules on this tier, against the real cordis-rs crate.
+
 The compensating host bodies are still the substrate's (item 539), exactly as
 the actuations are. What revl owns and now runs is the order and the
 membership, which is section 3's `compensate` row.
+
+**The typescript tier runs it too** (issue #1369, item 3 of the decision on
+the issue, one tier per pull request). `backends/typescript/emit.py` derives
+the same units from `revl.ui_transaction` and wraps each one in
+`Frame.uiTransaction` (`uiTransactionAsync` for an async method); a method
+that only reaches a computer-use extern runs in `Frame.callScope`, which never
+settles. Each computer-use extern's exported name is a `uiCrossing` wrapper,
+the analog of py's `declared_crossing`: inside a scope it notes the crossing
+and registers the extern's declared compensation wherever the call is written,
+and a crossing that throws still registers its own. A failed unit settles what
+the call registered, witnessed inverses newest first, then compensations
+newest first, each continue-and-record, records the run on
+`Frame.uiTransactionRuns`, and rethrows; the entries leave the frame's
+deferred lists first, so the clean unload after the failed call discharges
+nothing of them and a later abort does not run them twice. The scope is a
+node `AsyncLocalStorage` when the host has one, created on the first call
+that opens a scope, so a program with no computer-use verb runs exactly as
+before. `backends/typescript/tests/ui_transaction.test.ts` is the py suite's
+oracle, its control and its rules, on this tier. The ts runtime has no E-Stop,
+so there is no halted run here.
 
 What is still not here. The unit is INFERRED from a method body that crosses a
 computer-use verb; there is no `transaction` construct an author writes, and
@@ -473,12 +542,40 @@ which should then be its own method. The inference is now in the IR: the
 frontend marks such a method `"unit": "ui"` (docs/backend-ir.md), absent on
 every other method so other IR is byte-identical, and `selfhost/lower.rvl`
 computes the same mark, held to the reference on
-`tests/fixtures/emit_py_corpus/ui_unit.rvl`. The other five tiers have no unit
-yet; settling a failed call the way the python tier does is the next slice,
-typescript first. The unit writes no WAL record of its own: its entries are
+`tests/fixtures/emit_py_corpus/ui_unit.rvl`. The typescript tier now settles a
+failed call the way the python tier does (below); the other four tiers have no
+unit yet, one per pull request. The unit writes no WAL record of its own: its entries are
 named in the discharge record a later commit writes, so a crash between the
 unit's run and the session's verdict leaves their descriptors open, and what
 `revl recover` then does with them was not measured.
+
+**The go tier runs the unit too** (issue #1369, item 3 of the decision on the
+issue, one tier per pull request). `backends/go/emit.py` derives the same
+units from `revl.ui_transaction`. Go has no context-local storage, so the
+scope is lexical: a unit method opens `_revlUi := revlSelf.revlFrame.uiScope(
+"<key>.<method>", true)` and defers `_revlUi.exit()`, and a method that only
+reaches a computer-use extern opens one with `settles` false. Every
+registration in the method body goes through the scope, and every
+computer-use crossing renders as `revlUiCross` (`revlUiCrossVoid` for no
+value), the analog of py's `declared_crossing`: it notes the crossing,
+registers the crossing's compensation (the site-spelled one, else the
+declared one) after the call returns, and still registers it when the call
+panics. The scope buffers what the call registers. A call that returns
+flushes the buffer onto the activation frame in registration order. A unit
+whose call panics settles the buffer instead, witnessed inverses newest
+first, then compensations newest first under the same per-call bound and
+budget as an abort's Phase 2, records the run on
+`RevlFrame.UiTransactionRuns()`, and re-panics with the same value. The
+entries never reach the frame, so the clean unload after the failed call
+discharges nothing of them and a later `Abort()` does not run them twice.
+Two concurrent calls on one activation each hold their own scope. go erases
+the async color, so an async unit is the same unit. A document with no
+computer-use extern is emitted byte-identically.
+`backends/go/scenarios/emitted/ui_transaction/exec_test.go` is the py suite's
+oracle, its control and its rules on this tier, plus a unit holding a
+witnessed inverse, a non-computer-use declared compensation and a
+site-spelled one. The go runtime has no E-Stop, so there is no halted run
+here.
 
 **Slice 4: `uncompensated` on the residue report. LANDED** (PR #1287 and
 #1296 for the states and the DOES NOT PROVE clauses, PR #1386 for the run the
