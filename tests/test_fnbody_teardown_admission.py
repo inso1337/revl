@@ -80,16 +80,38 @@ def test_399_acquire_undo_allowed_in_provide_method():
     # (only `spawn` may be bound in a provide-method body, and `result` is not
     # in scope in a site `undo`), which is item 420's design half; releasing
     # exactly the acquired handle at a seam is what `witnessed` spells, covered
-    # in tests/test_site_undo_argument_typecheck.py.
+    # in tests/test_site_undo_argument_typecheck.py. Since issue #1859 the site
+    # `undo` must also be the inverse the extern DECLARES, so the admitted
+    # spelling is an extern whose declared inverse does not take the handle.
     ir = _compile(_ACQ_UNDO + (
         "extern pure fn r_forget(tag: Str) = @py { return }\n"
+        "extern acquire fn r_tag(n: Int) -> RHandle undo r_forget(\"h\")"
+        ' = @py { return "h" }\n'
         "service Res { fn take() }\n"
         "component R provides res: Res {\n"
         "  provide res {\n"
-        "    fn take() { effect r_open(0) undo r_forget(\"h\") }\n"
+        "    fn take() { effect r_tag(0) undo r_forget(\"h\") }\n"
         "  }\n"
         "}\n"))
     assert any(c["name"] == "R" for c in ir["components"])
+
+
+def test_399_a_seam_acquire_whose_inverse_takes_the_handle_names_witnessed():
+    # issue #1859: `r_open` declares `undo r_close(result)`, and a provide
+    # method cannot bind the handle to pass, so no site `undo` releases it.
+    # The refusal names the spelling that does: a `witnessed` extern.
+    with pytest.raises(RevlError) as ei:
+        _compile(_ACQ_UNDO + (
+            "extern pure fn r_forget(tag: Str) = @py { return }\n"
+            "service Res { fn take() }\n"
+            "component R provides res: Res {\n"
+            "  provide res {\n"
+            "    fn take() { effect r_open(0) undo r_forget(\"h\") }\n"
+            "  }\n"
+            "}\n"))
+    msg = str(ei.value)
+    assert "in a provide method cannot name its handle" in msg
+    assert "declare `r_open` `witnessed`" in msg
 
 
 # -- item 400: deferred emission refused in a fn/test body ------------------

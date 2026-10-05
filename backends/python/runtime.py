@@ -3297,6 +3297,12 @@ class Frame:
         # that failed on this activation, in the order they failed. Written by
         # `_unwind_ui_unit`; a unit that returned cleanly writes nothing.
         self.ui_transaction_runs: list = []
+        # issue #1945: the journal stack from before the effect bracket now
+        # running its forward write, until `_guard` takes it (None: none open),
+        # and every (map, key) this frame's brackets touched, with the value
+        # before the frame's first write to it.
+        self._open_journal: Any = None
+        self._journal: dict = {}
         # Phase-2 residue (teardown-contract.md's `compensation-residue`):
         # one record per compensation that raised or was skipped past the
         # budget. Best-effort introspection for this activation; the merged
@@ -3551,6 +3557,34 @@ class Frame:
                         else "compensation" if isinstance(entry, _Compensation)
                         else "bracket")))
 
+    def _journal_begin(self) -> None:
+        """Open the write journal of the effect bracket about to run its
+        forward write (issue #1945). `_guard` closes it when the bracket yields
+        its `undo`, and reopens it while that `undo` runs."""
+        if self._open_journal is not None:
+            self._take_journal()      # a forward that raised left it open
+        prev = _JOURNAL.get()
+        self._open_journal = prev
+        _JOURNAL.set(prev + (self,))
+
+    def _take_journal(self) -> bool:
+        """Close the open write journal, if any; whether one was open."""
+        prev, self._open_journal = self._open_journal, None
+        if prev is None:
+            return False
+        _JOURNAL.set(prev)
+        return True
+
+    def _judge_frame(self) -> None:
+        """At the end of this frame's teardown: every key its brackets touched,
+        in a map still open, back to its value before the frame's first
+        bracketed write to it (issue #1945)."""
+        for store, key, prior, verb in self._journal.values():
+            if store.closed:
+                continue      # released: the map's own check judged it
+            _not_reversed(self, store, key, prior, verb, "when it unloaded")
+        self._journal.clear()
+
     def _guard(self, value: Any) -> Any:
         """Wrap one disposer the activation body yielded so a raise out of it
         is CAUGHT, RECORDED and does not abort the rest of Phase 1.
@@ -3587,6 +3621,7 @@ class Frame:
           (see `drain`).
         * a non-callable yield (an A1 iteration boundary) is not a disposer.
         """
+        journal = self._take_journal()
         if getattr(value, "__self__", None) is self:
             return value
         if not (isinstance(value, types.FunctionType)
@@ -3609,11 +3644,17 @@ class Frame:
                            seq=getattr(getattr(_disposer, "_revl_entry", _disposer),
                                        "seq", None),
                            entry="inverse"):
+                # issue #1945: the undo of a journaled effect writes inside
+                # the journal too, so a key only the undo touches is judged
+                token = _JOURNAL.set(_JOURNAL.get() + (frame,)) if journal else None
                 try:
                     return _disposer()
                 except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
                     frame._record_phase1_residue(_disposer, error)
                     return None
+                finally:
+                    if token is not None:
+                        _JOURNAL.reset(token)
 
         _guarded._revl_entry = getattr(value, "_revl_entry", value)
         return _guarded
@@ -3636,6 +3677,9 @@ class Frame:
                         value = await iterator.__anext__()
                     except StopAsyncIteration:
                         break
+                    except BaseException:
+                        frame._take_journal()   # a forward that raised (issue #1945)
+                        raise
                     finally:
                         _ACTIVATING.pop()
                     yield frame._guard(value)
@@ -3649,6 +3693,9 @@ class Frame:
                     value = next(iterator)
                 except StopIteration:
                     break
+                except BaseException:
+                    frame._take_journal()   # a forward that raised (issue #1945)
+                    raise
                 finally:
                     _ACTIVATING.pop()
                 yield frame._guard(value)
@@ -4213,9 +4260,11 @@ class Frame:
         call `_drain_phase2`, which single-flights `_pending_compensations` by
         swapping it to `[]`, so whichever runs first drains and the other finds
         nothing."""
-        if self._committed:
-            return
-        self._drain_phase2()
+        try:
+            if not self._committed:
+                self._drain_phase2()
+        finally:
+            self._judge_frame()      # issue #1945: every undo of this frame has run
 
     def drain(self) -> Any:
         """Dispose every adopted effect, newest first (yielded last by the
@@ -7253,6 +7302,90 @@ def schedule_after(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:
     return TimerHandle("after", interval_ms, body)
 
 
+# ---------------------------------------------------------------------------
+# issue #1945: did a frame's bracketed writes into a host Map get reversed?
+# ---------------------------------------------------------------------------
+#
+# Every effect bracket, in an activation body (`effect kv.set(..) undo ..`) or
+# a provide method (`effect store.insert(k, v) undo store.remove(k)`), opens a
+# journal around its forward write (`Frame._journal_begin`, the first line the
+# emitter writes for it), and `Frame._guard` reopens it around the bracket's
+# `undo`. The journal is a STACK of the frames whose brackets are running, so a
+# write a provider makes while serving a consumer's bracket belongs to both
+# frames. Each frame notes, per (map, key), the value the key held before that
+# frame's first bracketed write to it.
+#
+# Two judgments, both net (two brackets of one frame that together restore a
+# key are clean):
+#
+# * per frame, when the frame's teardown completes (`Frame.begin`, disposed
+#   last): every key the frame's brackets touched, in a map still open, must
+#   hold its value from before the frame's first bracketed write. This is the
+#   one that sees a consumer unloaded while the provider's map lives on: the
+#   consumer's `undo` wrote `""` where the key was absent, and nothing else
+#   would ever release it;
+# * per map, when the map is released (`drop`): every bracketed key must hold
+#   its value from before the first bracketed write to it at all.
+#
+# A miss is `bracket-fault` residue, `NotReversed`, naming the map and the key.
+# A write no bracket journals (an operator call into a provider that writes
+# its own handle, decision D6; an `emit`) is never noted and never judged.
+
+_ABSENT = object()
+
+#: The frames whose brackets are writing right now, innermost last.
+_JOURNAL: contextvars.ContextVar = contextvars.ContextVar("_revl_journal", default=())
+
+
+def _journal_note(store: Any, key: Any, verb: str) -> None:
+    """Note `key`'s value before each journaling frame's first write to it."""
+    stack = _JOURNAL.get()
+    if not stack:
+        return
+    prior = store.data.get(key, _ABSENT)
+    for frame in stack:
+        frame._journal.setdefault((id(store), key), (store, key, prior, verb))
+    if key not in store._journaled:
+        store._journaled[key] = (prior, stack[0], verb)
+
+
+def _not_reversed(frame: Any, store: Any, key: Any, prior: Any, verb: str,
+                  when: str) -> None:
+    now = store.data.get(key, _ABSENT)
+    if _same_value(prior, now):
+        return
+    store._reported.add(key)
+    frame.compensation_residue.append(_residue_record(
+        None, kind=_BRACKET_FAULT, component=frame.name, method=verb,
+        outcome="failed", attempted_flag=True, attempted={"phase": 1},
+        error={"type": "NotReversed",
+               "message": f"{store._tag} key {key!r} held {_shown(prior)} "
+                          f"before the first bracketed `{verb}` of it and "
+                          f"{_shown(now)} {when}: an undo did not reverse "
+                          f"its write"}))
+
+
+def _judge_journal(store: Any) -> None:
+    """At release: every bracketed key back to its value before the first
+    bracketed write to it, or residue on the frame that acquired the map."""
+    for key, (prior, frame, verb) in store._journaled.items():
+        if key in store._reported:
+            continue
+        owner = getattr(store, "_owner", None) or frame
+        _not_reversed(owner, store, key, prior, verb, "when the map was released")
+    store._journaled.clear()
+
+
+def _shown(value: Any) -> str:
+    return "absent" if value is _ABSENT else repr(value)
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    if a is _ABSENT or b is _ABSENT:
+        return a is b
+    return a == b
+
+
 class Map(_Closable):
     """In-memory key/value store with an explicit drop."""
 
@@ -7261,6 +7394,15 @@ class Map(_Closable):
     def __init__(self) -> None:
         super().__init__()
         self.data: dict = {}
+        # issue #1945: key -> (value before the first bracketed write, the
+        # frame that made it, its verb); judged when the map is released
+        self._journaled: dict = {}
+        # the keys a frame's own judgment already reported, so the release
+        # check does not report the same key twice
+        self._reported: set = set()
+        # the activation that acquired this map: a reversal failure found at
+        # release is recorded on it, because its teardown releases the map
+        self._owner = _ACTIVATING[-1] if _ACTIVATING else None
 
     @classmethod
     def new(cls) -> "Map":
@@ -7270,6 +7412,7 @@ class Map(_Closable):
 
     def drop(self) -> None:
         self._check_open("drop")
+        _judge_journal(self)
         self.closed = True
         self.data.clear()
         _record(f"{self._tag}.drop")
@@ -7296,6 +7439,7 @@ class Map(_Closable):
 
     def insert(self, key: Any, value: Any) -> None:
         self._check_open("insert")
+        _journal_note(self, key, "insert")
         self.data[key] = value
         _record(f"{self._tag}.insert {key}")
 
@@ -7310,6 +7454,7 @@ class Map(_Closable):
         # fold it into the outstanding-key fingerprint (a `true` counts the key
         # as set, a `false` counts nothing).
         self._check_open("insert_if_absent")
+        _journal_note(self, key, "insert_if_absent")
         if key in self.data:
             _record(f"{self._tag}.insert_if_absent {key} -> false")
             return False
@@ -7319,6 +7464,7 @@ class Map(_Closable):
 
     def remove(self, key: Any) -> None:
         self._check_open("remove")
+        _journal_note(self, key, "remove")
         self.data.pop(key, None)
         _record(f"{self._tag}.remove {key}")
 

@@ -4,10 +4,17 @@
 // read-through `get(k, v)` — read `k`, seeding it with `v` — so the same
 // acquisition can be written inside either entry point. Every store here keeps
 // the acquisition on the WRITE path, where a consumer expects it.
+//
+// Each app undoes its seed with `kv.unset("who")`. Before issue #1945 it was
+// `kv.set("who", "")`, which leaves the key present and empty where it was
+// absent: not the inverse, and residue the moment the app unloads while its
+// store lives on. Each store's `unset` is an operator write into its own
+// handle, which the caller brackets (decision D6).
 
 service Kv {
   fn get(k: Str, v: Str) -> Opt[Str]
   fn set(k: Str, v: Str)
+  fn unset(k: Str)
 }
 
 component TenantAStore provides kv: Kv {
@@ -19,12 +26,13 @@ component TenantAStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
-  effect kv.set("who", "A") undo kv.set("who", "")
+  effect kv.set("who", "A") undo kv.unset("who")
 }
 
 component TenantBStore provides kv: Kv {
@@ -36,12 +44,13 @@ component TenantBStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantBApp requires kv: Kv {
   isolate kv in realm("tenant_b")
-  effect kv.set("who", "B") undo kv.set("who", "")
+  effect kv.set("who", "B") undo kv.unset("who")
 }
 
 component TenantCStore provides kv: Kv {
@@ -53,11 +62,12 @@ component TenantCStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantCApp requires kv: Kv {
   isolate kv in realm("tenant_c")
-  effect kv.set("who", "C") undo kv.set("who", "")
+  effect kv.set("who", "C") undo kv.unset("who")
 }
 

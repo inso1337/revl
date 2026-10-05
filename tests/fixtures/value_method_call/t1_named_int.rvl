@@ -1,0 +1,5 @@
+// issue #1942: a named Int receiver, checked like a named Str/List/Bytes one
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math { fn go(n) = n.frob() }
+}

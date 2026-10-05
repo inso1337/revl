@@ -1,0 +1,6 @@
+// the effect-acquire idiom with its acquisition written as a typed hole: the
+// handle is typed `Map[Str, Int]` with no host provenance, and its host verb
+// `drop` stays admitted
+component Counter {
+  let store = effect hole[Map[Str, Int]] "effect-acquire" undo store.drop()
+}

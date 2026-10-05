@@ -17,13 +17,14 @@ Two prelude statements, following syntax-2.0's reserved shapes:
 ```revl
 service Kv {
   fn set(key: Str, value: Str) -> Int
+  fn unset(key: Str)
 }
 
 component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
   intercept kv with { quota: 5, paths: ["a", "b"] }
 
-  effect kv.set("who", "alice") undo kv.set("who", "")
+  effect kv.set("who", "alice") undo kv.unset("who")
 }
 ```
 

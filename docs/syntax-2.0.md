@@ -849,7 +849,8 @@ Together the two halves catch the two ways a composition leaks:
 For a HOST acquisition (`Map.new`, `Pool.open`, `Stream.source`) the checker
 now proves the inverse statically: the `undo` must be the family's release
 on the bound handle (issue #1859), so a wrong host `undo` never reaches this
-assertion. What R1 still catches at runtime is a release that did not happen
+assertion. An `extern acquire`'s site `undo` is held to the inverse its
+declaration names the same way. What R1 still catches at runtime is a release that did not happen
 for another reason. `examples/lifecycle_leak.rvl` is a component that passes
 every static check and whose test never unloads it, so the pool it opened is
 still live; the assertion catches both halves.

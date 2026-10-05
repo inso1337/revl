@@ -6,10 +6,17 @@
 // of `kv` can only live in a different realm. A canary designates ONE realm
 // (say `tenant_a`) for a successor generation; the other N-1 are the baseline
 // the revert must leave provably untouched (`survivors`).
+//
+// Each app undoes its seed with `kv.unset("who")`. Before issue #1945 it was
+// `kv.set("who", "")`, which leaves the key present and empty where it was
+// absent: not the inverse, and residue the moment the app unloads while its
+// store lives on. Each store's `unset` is an operator write into its own
+// handle, which the caller brackets (decision D6).
 
 service Kv {
   fn get(k: Str) -> Opt[Str]
   fn set(k: Str, v: Str)
+  fn unset(k: Str)
 }
 
 component TenantAStore provides kv: Kv {
@@ -21,6 +28,7 @@ component TenantAStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
@@ -33,6 +41,7 @@ component TenantBStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
@@ -45,20 +54,21 @@ component TenantCStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
-  effect kv.set("who", "alice") undo kv.set("who", "")
+  effect kv.set("who", "alice") undo kv.unset("who")
 }
 
 component TenantBApp requires kv: Kv {
   isolate kv in realm("tenant_b")
-  effect kv.set("who", "bob") undo kv.set("who", "")
+  effect kv.set("who", "bob") undo kv.unset("who")
 }
 
 component TenantCApp requires kv: Kv {
   isolate kv in realm("tenant_c")
-  effect kv.set("who", "carol") undo kv.set("who", "")
+  effect kv.set("who", "carol") undo kv.unset("who")
 }

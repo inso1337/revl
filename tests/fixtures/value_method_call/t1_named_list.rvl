@@ -1,0 +1,10 @@
+// a named List receiver: refused before issue #1942 too, kept as the control
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math {
+    fn go(n) {
+      let xs = [1, 2]
+      return xs.map((x) => x).length
+    }
+  }
+}

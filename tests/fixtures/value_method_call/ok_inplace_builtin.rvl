@@ -1,0 +1,5 @@
+// a builtin method on an in-place receiver is still admitted
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math { fn go(n) = [1, 2].push(n).length }
+}
