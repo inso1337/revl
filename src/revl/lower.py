@@ -937,6 +937,19 @@ class Env:
         # a pass-through that only fails at the host runtime (item 401, the
         # item-84 crash shape).
         self.host_locals: dict[str, str] = {}
+        # HOST HANDLES (issue #1968). An activation `let <x> = effect <acq>
+        # undo <...>` whose acquisition yields a HOST family value binds a
+        # handle, not a stdlib value. `host_locals` above carries the family
+        # for the acquisitions spelled as a host call (`Map.new()`); this set
+        # is the same idea where the static type is the ONLY evidence:
+        # `let store = effect hole[Map[Str, Int]] "…" undo store.drop()` types
+        # `store` `Map[Str, Int]` with no host provenance, and `Map` is the one
+        # value head a host handle shares its name with, so the static type the
+        # stdlib value-method rule (`_VALUE_METHOD_HEADS`) reads cannot tell
+        # them apart. A binding recorded here is a handle and stands that rule
+        # aside. It grants no verb surface — only the leniency the handle had
+        # before `Map` joined the refused heads.
+        self.host_handles: set[str] = set()
         # PROVISION PROVENANCE (GHSA cluster, the aliasing arm). A spawn-handle
         # provision read (`w.task`) lowers to an `instance-get` node, and every
         # analysis that judges a crossing through a handle — the G4 marker
@@ -9488,7 +9501,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 # (host provenance is exempt — docs/stdlib-2.0.md).
                 recv_t = infer_ir({"kind": "name", "id": scope[root]},
                                   env.type_env, env.types, env.services)
-                _refuse_value_method(method, recv_t, filename, line)
+                _refuse_value_method(method, recv_t, filename, line,
+                                     host_handle=scope[root] in env.host_handles)
                 _refuse_record_method(method, recv_t, env, filename, line)
                 node = {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
@@ -9577,8 +9591,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             recv_t = infer_ir(callee_node["target"], env.type_env, env.types,
                               env.services)
             # a stdlib value written in place (`[1, 2].map(f)`, issue #1942):
-            # judged as the same value bound to a name is
-            _refuse_value_method(callee_node.get("name"), recv_t, filename, line)
+            # judged as the same value bound to a name is. A receiver this
+            # lowering reads back as a name is judged the same way the named
+            # path above judges it, host handle included (issue #1968).
+            _recv_node = callee_node["target"]
+            _refuse_value_method(
+                callee_node.get("name"), recv_t, filename, line,
+                host_handle=(_recv_node.get("kind") == "name"
+                             and _recv_node.get("id") in env.host_handles))
             # a record receiver read in place (`r.g.f(n)`, issue #1547)
             _refuse_record_method(callee_node.get("name"), recv_t, env,
                                   filename, line)
@@ -12677,6 +12697,16 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # `host_locals`), so the type is resolved here where it is known.
             if acquired_type is None:
                 acquired_type = _host_result_type(acquire, env)
+            # issue #1968: an effect-acquired binding whose type is a HOST
+            # family is a handle even when the acquisition spelled no host call
+            # (a typed hole, an extern's declared return). `Map` is the one
+            # family that is also a stdlib value head, so it is the one that
+            # needs the marking; the others are outside the value rule already.
+            if acquired_type:
+                _handle_head = parse_type(acquired_type)[0]
+                if _handle_head in _HOST_FAMILIES \
+                        and _handle_head in _VALUE_METHOD_HEADS:
+                    env.host_handles.add(safe)
             if acquired_type is not None:
                 env.type_env[safe] = acquired_type
             step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
@@ -15379,22 +15409,33 @@ def _is_record_type(ty, types: dict) -> bool:
 # typo or a misuse: no tier defines it, and py would raise AttributeError at
 # run time. The `fn` body refuses it on every receiver already.
 #
-# `Map` is left out on purpose: it is the one value head a HOST handle shares
-# its name with. `let store = effect <acq> undo store.drop()` whose acquisition
-# is typed `Map[K, V]` (a typed hole, an `acquire` extern's declared return)
-# gives `store` that static type with no host provenance, and its host verbs
-# (`insert`, `get`, `drop`) are not in the stdlib table. The static type cannot
-# tell the two apart, so a `Map` receiver keeps the lenient reading it had.
+# `Map` is the one value head a HOST handle shares its name with — which is
+# why issue #1942 left it out — but the shared NAME is the only thing the two
+# have in common: `let store = effect <acq> undo store.drop()` types `store`
+# `Map[K, V]` with no host provenance, and its host verbs (`insert`, `get`,
+# `drop`) are not in the stdlib table. So `Map` is refused too, and the
+# handle is told apart from the value by its BINDING rather than its type:
+# `Env.host_handles` records every effect-acquired handle whose acquisition
+# is a host value, and `_refuse_value_method` stands aside for those
+# (issue #1968).
 _VALUE_METHOD_HEADS = frozenset(
-    {"List", "Str", "Bytes", "Int", "Int32", "Float", "Bool"})
+    {"List", "Str", "Bytes", "Int", "Int32", "Float", "Bool", "Map"})
 
 
-def _refuse_value_method(method, recv_t, filename: str, line: int) -> None:
+def _refuse_value_method(method, recv_t, filename: str, line: int,
+                         host_handle: bool = False) -> None:
     """A non-builtin method on a receiver whose static type is a stdlib value,
     in a component body: refused with the message a named receiver has always
     had. Named and written-in-place receivers take the same rule (issue
-    #1942); before it, only a named Str/List/Bytes receiver was checked."""
-    if not method or method in _BUILTIN_METHODS or not recv_t:
+    #1942); before it, only a named Str/List/Bytes receiver was checked.
+
+    `host_handle` marks a receiver `Env.host_handles` names — a name bound by
+    an activation `let <x> = effect <acq> undo <...>` over a host value. Such
+    a handle is a value of a host family, not a stdlib value, and keeps the
+    lenient reading; the type it carries (`Map[K, V]`) is the same one a real
+    value `Map` carries, so the binding is the only thing that tells them
+    apart (issue #1968)."""
+    if not method or method in _BUILTIN_METHODS or not recv_t or host_handle:
         return
     if parse_type(recv_t)[0] not in _VALUE_METHOD_HEADS:
         return

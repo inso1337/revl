@@ -6622,11 +6622,23 @@ fn vm_parts(xs: List[PartN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
   return ct_first(v, vm_parts(xs, i + 1, cx, env))
 }
 // `lower._VALUE_METHOD_HEADS`: the stdlib values whose whole method surface is
-// the builtin table. Not `Map`, the one value head a host handle shares its
-// name with (a `Map[K, V]`-typed acquisition keeps its host verbs).
+// the builtin table. `Map` is included (issue #1968): it is the one value head
+// a host handle shares its name with, and the shared NAME is all they have in
+// common — a handle's host verbs (`insert`, `get`, `drop`) are not in the
+// builtin table, so `Map` cannot be told apart from a value by the type alone.
+//
+// The handle is spared by what its BINDING is, not what its type says: the
+// reference records an effect-acquired handle whose type is a host family in
+// `Env.host_handles` and stands its value-method rule aside for it. Here the
+// same bindings carry no type at all — `ct_crossing` above withholds the type
+// of every `effect` binding, since the reference's `infer_ir` answers nothing
+// for a host acquire node — so `tk_infer` on a handle answers `""` and
+// `vm_call` returns before this table is consulted, which is the same
+// leniency by the same route (`let store = effect hole[Map[Str, Int]] "…"
+// undo store.drop()` and `store.insert`/`store.get` after it stay admitted).
 fn value_method_head(h: Str) -> Bool {
   return h == "List" || h == "Str" || h == "Bytes"
-    || h == "Int" || h == "Int32" || h == "Float" || h == "Bool"
+    || h == "Int" || h == "Int32" || h == "Float" || h == "Bool" || h == "Map"
 }
 
 fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
