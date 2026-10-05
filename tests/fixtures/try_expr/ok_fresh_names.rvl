@@ -1,0 +1,25 @@
+// the desugar's locals never read or shadow a name the fn spells: `try_0` and
+// `try_1_ok` are the author's, and `try_2_err` is a module fn called only
+// inside an interpolation
+fn parse(n: Int) -> Result[Int, Str] {
+  return n > 0 ? Ok(n) : Err("neg")
+}
+
+fn try_2_err() -> Int { return 7 }
+
+fn names(n: Int) -> Result[Str, Str] {
+  let try_0 = n
+  let x = try parse(try_0)
+  let try_1_ok = 2
+  let y = try parse(x + try_1_ok)
+  return Ok(`${y}-${try_2_err()}`)
+}
+
+fn code(r: Result[Str, Str]) -> Int {
+  return match r { Ok(s) => s.length, Err(e) => 0 - e.length }
+}
+
+test "the author's names keep their values" {
+  assert code(names(1)) == 3
+  assert code(names(0)) == 0 - 3
+}

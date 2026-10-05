@@ -1,0 +1,20 @@
+// an annotated binding is checked against the Ok payload, and an Int payload
+// bound as Float is widened as any annotated `let` is
+fn parse(n: Int) -> Result[Int, Str] {
+  return n > 0 ? Ok(n) : Err("neg")
+}
+
+fn half(n: Int) -> Result[Float, Str] {
+  let x: Float = try parse(n)
+  return Ok(x / 2.0)
+}
+
+fn code(r: Result[Float, Str]) -> Int {
+  return match r { Ok(v) => v > 1.0 ? 1 : 2, Err(e) => 0 - e.length }
+}
+
+test "an annotated try binding" {
+  assert code(half(3)) == 1
+  assert code(half(1)) == 2
+  assert code(half(0)) == 0 - 3
+}

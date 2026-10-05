@@ -193,6 +193,7 @@ pub(crate) const REFERENCE_KEYWORDS: &[&str] = &[
     "subscribe",
     "test",
     "true",
+    "try",
     "type",
     "undo",
     "use",

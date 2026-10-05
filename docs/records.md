@@ -93,7 +93,11 @@ statement set a normal fn/block body accepts — `let`, `var`, `while`, `if`,
 `for`, assignments — so imperative logic can live where the value is
 destructured (roadmap 202). `return` is not a block-arm statement (the arm
 yields its final expression, not an early return from the enclosing fn), and
-the block is a pure value position, so effects are still refused. A `{` after
+the block is a pure value position, so effects are still refused. To stop at
+an `Err` instead of writing a placeholder arm, bind the `Result` with `try`
+before the `match` (docs/syntax-2.0.md §3.6). `try` itself is refused inside a
+block arm: the arm is lifted into a helper fn, so it could only return from
+that helper. A `{` after
 `=>` is a record only when it is empty, opens `ident :` (a record literal), or
 opens `base | …` (a record update); anything else is a block arm.
 

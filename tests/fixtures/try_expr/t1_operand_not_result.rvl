@@ -1,0 +1,4 @@
+fn f(n: Int) -> Result[Int, Str] {
+  let x = try n
+  return Ok(x)
+}

@@ -991,6 +991,16 @@ pub struct OwnMarks {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TryP {
+    ok: bool,
+    js: String,
+    okTy: String,
+    okB: String,
+    scr: String,
+    env: Vec<Bind>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PatR {
     kind: String,
     names: Vec<String>,
@@ -11083,7 +11093,7 @@ fn walk_expr(e: Expr, marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
     Expr::Asset(_) => a,
     Expr::Bad(_) => a,
     Expr::Bin(b) => { let b = *b; walk_expr(b.r.clone(), marked, cx.clone(), walk_expr(b.l.clone(), marked, cx.clone(), a.clone())) },
-    Expr::Un(u) => { let u = *u; walk_expr(u.e.clone(), marked, cx.clone(), a.clone()) },
+    Expr::Un(u) => { let u = *u; if (u.op == "try") { ac_refuse(a.clone(), String::from("T1"), try_component_msg()) } else { walk_expr(u.e.clone(), marked, cx.clone(), a.clone()) } },
     Expr::Emit(u) => { let u = *u; if (cx.emitPos == "args") { ac_refuse(a.clone(), String::from("G4"), nested_emit_msg()) } else { appr_check(u.e.clone(), "", cx.clone(), walk_expr(u.e.clone(), true, ctx_emit_pos(cx.clone(), emit_head_pos(marked, cx.clone())), a.clone())) } },
     Expr::Call(c) => { let c = *c; call_check(c.target.clone(), &c.args, marked, cx.clone(), a.clone()) },
     Expr::Field(f) => { let f = *f; field_check(f.target.clone(), marked, cx.clone(), a.clone()) },
@@ -17104,6 +17114,16 @@ fn tk_un(u: UnN, env: Vec<Bind>) -> TInf {
         return o;
     }
     let t = o.ty;
+    if (u.op == "try") {
+        if (t == "") {
+            return tk_ok(String::from(""));
+        }
+        let args = type_args(&t);
+        if ((parse_head(t.clone()) == "Result") && (args.revl_length() == 2i64)) {
+            return tk_ok((args)[(0i64) as usize].clone());
+        }
+        return tk_mismatch("the operand of `try`", String::from("Result[_, _]"), t.clone());
+    }
     if (u.op == "!") {
         if ((t != "") && (t != "Bool")) {
             return tk_mismatch("operand of `!`", String::from("Bool"), t.clone());
@@ -18555,7 +18575,7 @@ fn tk_low(e: Expr, env: Vec<Bind>) -> String {
     return match e {
     Expr::Var(n) => nr_refuse(&n, &env),
     Expr::Bin(b) => { let b = *b; tk_low2(b.l.clone(), b.r.clone(), env.clone()) },
-    Expr::Un(u) => { let u = *u; tk_low(u.e, env.clone()) },
+    Expr::Un(u) => { let u = *u; if (u.op == "try") { try_position_msg() } else { tk_low(u.e.clone(), env.clone()) } },
     Expr::Field(f) => { let f = *f; tk_low(f.target.clone(), env.clone()) },
     Expr::OptField(f) => { let f = *f; tk_low(f.target.clone(), env.clone()) },
     Expr::Index(x) => { let x = *x; tk_low2(x.target.clone(), x.idx.clone(), env.clone()) },
@@ -18948,6 +18968,9 @@ fn fb_walk(steps: Vec<FbStep>, i: i64, scope: Vec<Bind>, tys: Vec<Bind>, ret: St
         if (tenv_get(&scope, &s.name) != "") {
             return fb_refuse("G6", &fb_already_msg(&s.name), s.line, scope.clone(), tys.clone());
         }
+        if is_try(s.value.clone()) {
+            return fb_try_let(steps.clone(), i, s.clone(), scope.clone(), tys.clone(), ret.clone());
+        }
         let birth = if s.mutable { String::from("var") } else { if fb_host_value(s.value.clone(), &scope) { String::from("host") } else { String::from("let") } };
         let r = if (s.declTy == "") { tk_infer(s.value.clone(), tys.clone()) } else { tk_check(s.value.clone(), s.declTy.clone(), tys.clone(), &((((String::from("`let ").revl_concat(&s.name)).revl_concat(": ")).revl_concat(&tk_render(s.declTy.clone()))).revl_concat("`"))) };
         if (r.v != "") {
@@ -18984,6 +19007,20 @@ fn fb_walk(steps: Vec<FbStep>, i: i64, scope: Vec<Bind>, tys: Vec<Bind>, ret: St
     }
     if (s.kind == "return") {
         if (s.op == "bare") {
+            return fb_walk(steps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), scope.clone(), tys.clone(), ret.clone());
+        }
+        if is_try(s.value.clone()) {
+            let tv = fb_try(try_operand(s.value.clone()), tys.clone(), ret.clone());
+            if (tv.v != "") {
+                return fb_type_refuse(tv.v.clone(), s.line, scope.clone(), tys.clone());
+            }
+            if (!tk_compatible(ret.clone(), tv.ty.clone())) {
+                return fb_type_refuse(tk_mismatch("this function's return", ret.clone(), tv.ty.clone()).v, s.line, scope.clone(), tys.clone());
+            }
+            let tlo = tk_low(try_operand(s.value.clone()), tys.clone());
+            if (tlo != "") {
+                return fb_type_refuse(tlo.clone(), s.line, scope.clone(), tys.clone());
+            }
             return fb_walk(steps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), scope.clone(), tys.clone(), ret.clone());
         }
         let r = tk_check(s.value.clone(), ret.clone(), tys.clone(), "this function's return");
@@ -19073,6 +19110,82 @@ fn fb_walk(steps: Vec<FbStep>, i: i64, scope: Vec<Bind>, tys: Vec<Bind>, ret: St
         return fb_walk(steps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), scope.clone(), tys.clone(), ret.clone());
     }
     return fb_walk(steps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), scope.clone(), tys.clone(), ret.clone());
+}
+
+fn fb_try(opnd: Expr, tys: Vec<Bind>, ret: String) -> TInf {
+    let isEmit = match opnd.clone() {
+    Expr::Emit(_) => true,
+    _ => false,
+};
+    if isEmit {
+        return tk_no("T1", &(String::from("`try` cannot take an `emit` operand: bind the crossing's ").revl_concat("value with `let` first (issue #1900)")));
+    }
+    let o = tk_infer(opnd.clone(), tys.clone());
+    if (o.v != "") {
+        return o;
+    }
+    if (o.ty == "") {
+        return tk_ok(String::from(""));
+    }
+    let args = type_args(&o.ty);
+    if ((parse_head(o.ty.clone()) != "Result") || (args.revl_length() != 2i64)) {
+        return tk_mismatch("the operand of `try`", String::from("Result[_, _]"), o.ty.clone());
+    }
+    let errR = tk_render((args)[(1i64) as usize].clone());
+    let want = (String::from("Result[_, ").revl_concat(&errR)).revl_concat("]");
+    let where__ = (String::from("`try` propagates `Err(").revl_concat(&errR)).revl_concat(")`, so the enclosing fn's return");
+    if (ret == "") {
+        return tk_no("T1", &(((where__.revl_concat(" must be `")).revl_concat(&want)).revl_concat("`, but it declares none")));
+    }
+    let rargs = type_args(&ret);
+    if (((parse_head(ret.clone()) != "Result") || (rargs.revl_length() != 2i64)) || (ty_nospace(&(rargs)[(1i64) as usize]) != ty_nospace(&(args)[(1i64) as usize]))) {
+        return tk_mismatch(&where__, want.clone(), ret.clone());
+    }
+    return tk_ok((args)[(0i64) as usize].clone());
+}
+
+fn ty_nospace(t: &str) -> String {
+    return (t.revl_split(" ")).revl_join("");
+}
+
+fn fb_try_let(steps: Vec<FbStep>, i: i64, s: FbStep, scope: Vec<Bind>, tys: Vec<Bind>, ret: String) -> FbR {
+    let opnd = try_operand(s.value.clone());
+    let tv = fb_try(opnd.clone(), tys.clone(), ret.clone());
+    if (tv.v != "") {
+        return fb_type_refuse(tv.v.clone(), s.line, scope.clone(), tys.clone());
+    }
+    if (((s.declTy != "") && (tv.ty != "")) && (!tk_compatible(s.declTy.clone(), tv.ty.clone()))) {
+        let where__ = (((String::from("`let ").revl_concat(&s.name)).revl_concat(": ")).revl_concat(&tk_render(s.declTy.clone()))).revl_concat("`");
+        return fb_type_refuse(tk_mismatch(&where__, s.declTy.clone(), tv.ty.clone()).v, s.line, scope.clone(), tys.clone());
+    }
+    let lo = tk_low(opnd.clone(), tys.clone());
+    if (lo != "") {
+        return fb_type_refuse(lo.clone(), s.line, scope.clone(), tys.clone());
+    }
+    let bound = if (s.declTy == "") { tv.ty } else { s.declTy };
+    let tys2 = if (bound == "") { tys.clone() } else { tenv_put(&tys, s.name.clone(), bound.clone()) };
+    let birth = if s.mutable { String::from("var") } else { String::from("let") };
+    return fb_walk(steps.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), tenv_put(&scope, s.name.clone(), birth), tenv_put(&tys2, nr_bnd(&s.name), String::from("1")), ret.clone());
+}
+
+fn is_try(e: Expr) -> bool {
+    return match e {
+    Expr::Un(u) => { let u = *u; (u.op == "try") },
+    _ => false,
+};
+}
+
+fn try_payload(t: String) -> String {
+    let args = type_args(&t);
+    return if ((parse_head(t.clone()) == "Result") && (args.revl_length() == 2i64)) { (args)[(0i64) as usize].clone() } else { String::from("") };
+}
+
+fn try_position_msg() -> String {
+    return tagged("T1", &(String::from("`try` may only stand as a whole `let` initializer or ").revl_concat("`return` operand in a `fn` body (issue #1900)")));
+}
+
+fn try_component_msg() -> String {
+    return String::from("`try` is not allowed in a provide method or component body yet: ").revl_concat("a returned `Err` does not settle the unit there (issue #1900)");
 }
 
 fn fb_params_scope(ps: Vec<ParamN>, i: i64, acc: Vec<Bind>) -> Vec<Bind> {
@@ -24393,7 +24506,7 @@ fn infer(e: Expr, env: Vec<Bind>) -> String {
     Expr::NullLit => String::from(""),
     Expr::Var(n) => if (tenv_get(&env, &n) != "") { tenv_get(&env, &n) } else { infer_bare_case(&n, &env) },
     Expr::Bin(b) => { let b = *b; binop_ty(&b.op, infer(b.l.clone(), env.clone()), infer(b.r.clone(), env.clone())) },
-    Expr::Un(u) => { let u = *u; if (u.op == "!") { String::from("Bool") } else { infer(u.e.clone(), env.clone()) } },
+    Expr::Un(u) => { let u = *u; if (u.op == "!") { String::from("Bool") } else { if (u.op == "try") { try_payload(infer(u.e.clone(), env.clone())) } else { infer(u.e.clone(), env.clone()) } } },
     Expr::Emit(u) => { let u = *u; String::from("") },
     Expr::Call(c) => { let c = *c; infer_call_ty(c, env.clone()) },
     Expr::Field(f) => { let f = *f; infer_field(infer(f.target.clone(), env.clone()), &f.name, &env) },
@@ -26239,6 +26352,195 @@ fn own_birth_marker(births: std::collections::HashMap<String, String>, tok: i64)
 };
 }
 
+fn try_none(env: Vec<Bind>) -> TryP {
+    return TryP { ok: false, js: String::from(""), okTy: String::from(""), okB: String::from(""), scr: String::from(""), env: env.clone() };
+}
+
+fn try_ok_match(scr: &str, okB: &str, okTy: &str, body: &str) -> String {
+    return (((((((String::from("{\"kind\":\"match\",\"scrutinee\":").revl_concat(&scr)).revl_concat(",\"arms\":[{\"pattern\":\"Ok\",\"bind\":")).revl_concat(&jstr(okB))).revl_concat(",\"body\":")).revl_concat(&body)).revl_concat(",\"payload_type\":")).revl_concat(&jstr(okTy))).revl_concat("}]}");
+}
+
+fn try_ok_read(okB: &str) -> String {
+    return (String::from("{\"kind\":\"var\",\"name\":").revl_concat(&jstr(okB))).revl_concat("}");
+}
+
+fn is_null_lit(e: Expr) -> bool {
+    return match e {
+    Expr::NullLit => true,
+    _ => false,
+};
+}
+
+fn try_operand(e: Expr) -> Expr {
+    return match e {
+    Expr::Un(u) => { let u = *u; if (u.op == "try") { u.e } else { Expr::NullLit } },
+    _ => Expr::NullLit,
+};
+}
+
+fn ident_words(s: &str, acc: Vec<String>) -> Vec<String> {
+    let mut out = acc;
+    let mut w = String::from("");
+    let mut i = 0i64;
+    while (i <= s.revl_length()) {
+        let c = if (i < s.revl_length()) { s.revl_slice(i, (i).checked_add(1i64).expect("revl: Int overflow")) } else { String::from(" ") };
+        let alpha = ((((c >= String::from("a")) && (c <= String::from("z"))) || ((c >= String::from("A")) && (c <= String::from("Z")))) || (c == "_"));
+        let digit = ((c >= String::from("0")) && (c <= String::from("9")));
+        if (alpha || (digit && (w != ""))) {
+            w.push_str(&c);
+        } else {
+            if (w != "") {
+                out.push(w.clone());
+            }
+            w = String::from("");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn try_fn_idents(ts: &[Token], lo: i64, hi: i64) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut j = lo;
+    while ((j <= hi) && (j < ts.revl_length())) {
+        let t = tkc(ts, j);
+        if (t.kind == "ident") {
+            out.push(t.text.clone());
+        }
+        if ((t.kind == "template") && (t.text != "")) {
+            let parts = t.text.revl_split("|");
+            let mut q = 0i64;
+            while (q < parts.revl_length()) {
+                if starts_with__m2(&(parts)[(q) as usize], "v:") {
+                    out = ident_words(&unesc((parts)[(q) as usize].revl_slice(2i64, (parts)[(q) as usize].revl_length())), out.clone());
+                }
+                q = (q).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn try_k_free(k: i64, taken: &[String]) -> bool {
+    let b = String::from("try_").revl_concat(&(k).to_string());
+    return (((!contains__m2(taken, &b)) && (!contains__m2(taken, &(b.revl_concat("_err"))))) && (!contains__m2(taken, &(b.revl_concat("_ok")))));
+}
+
+fn try_k_at(ts: &[Token], at: i64, marks: std::collections::HashMap<String, i64>) -> i64 {
+    let lo = match marks.get(&String::from("@try_fn")).cloned() {
+    Some(v) => v,
+    None => (0i64).checked_sub(1i64).expect("revl: Int overflow"),
+    _ => unreachable!(),
+};
+    let hi = match marks.get(&String::from("@try_end")).cloned() {
+    Some(v) => v,
+    None => (0i64).checked_sub(1i64).expect("revl: Int overflow"),
+    _ => unreachable!(),
+};
+    if (lo < 0i64) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    let mut n = 0i64;
+    let mut j = lo.clone();
+    while (j < at) {
+        if atw(ts, j.clone(), "try") {
+            n = (n).checked_add(1i64).expect("revl: Int overflow");
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let taken = try_fn_idents(ts, lo.clone(), hi);
+    let mut k = 0i64;
+    let mut seen = 0i64;
+    while true {
+        if try_k_free(k, &taken) {
+            if (seen == n) {
+                return k;
+            }
+            seen = (seen).checked_add(1i64).expect("revl: Int overflow");
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+}
+
+fn try_prelude(ts: Vec<Token>, at: i64, operand: Expr, env: Vec<Bind>, marks: std::collections::HashMap<String, i64>, al: std::collections::HashMap<String, String>) -> TryP {
+    let k = try_k_at(&ts, at, marks.clone());
+    if (k < 0i64) {
+        return try_none(env.clone());
+    }
+    let opTy = infer(operand.clone(), env.clone());
+    if (parse_head(opTy.clone()) != "Result") {
+        return try_none(env.clone());
+    }
+    let targs = type_args(&opTy);
+    if (targs.revl_length() != 2i64) {
+        return try_none(env.clone());
+    }
+    let okTy = (targs)[(0i64) as usize].clone();
+    let errTy = (targs)[(1i64) as usize].clone();
+    let tmp = String::from("try_").revl_concat(&(k).to_string());
+    let errB = tmp.revl_concat("_err");
+    let okB = tmp.revl_concat("_ok");
+    let value = lir_expr(operand.clone(), env.clone(), al.clone());
+    let scr = (String::from("{\"kind\":\"var\",\"name\":").revl_concat(&jstr(&tmp))).revl_concat("}");
+    let letjs = (((String::from("{\"step\":\"let\",\"name\":").revl_concat(&jstr(&tmp))).revl_concat(",\"value\":")).revl_concat(&value)).revl_concat(",\"mutable\":false}");
+    let cond = (((((((((((String::from("{\"kind\":\"match\",\"scrutinee\":").revl_concat(&scr)).revl_concat(",\"arms\":[")).revl_concat("{\"pattern\":\"Ok\",\"bind\":")).revl_concat(&jstr(&okB))).revl_concat(",\"body\":{\"kind\":\"lit\",\"value\":false},\"payload_type\":")).revl_concat(&jstr(&okTy))).revl_concat("},")).revl_concat("{\"pattern\":\"Err\",\"bind\":")).revl_concat(&jstr(&errB))).revl_concat(",\"body\":{\"kind\":\"lit\",\"value\":true},\"payload_type\":")).revl_concat(&jstr(&errTy))).revl_concat("}]}");
+    let errEnv = tenv_put(&env_mut_put(&env, &errB, false), errB.clone(), errTy.clone());
+    let rebuilt = lir_expr(Expr::Call(Box::new(CallN { target: Expr::Var(String::from("Err")), args: vec![Expr::Var(errB.clone())] })), errEnv.clone(), al.clone());
+    let ifjs = (((((((((String::from("{\"step\":\"if\",\"cond\":").revl_concat(&cond)).revl_concat(",\"then\":[{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":")).revl_concat(&scr)).revl_concat(",\"arms\":[{\"pattern\":\"Err\",\"bind\":")).revl_concat(&jstr(&errB))).revl_concat(",\"body\":")).revl_concat(&rebuilt)).revl_concat(",\"payload_type\":")).revl_concat(&jstr(&errTy))).revl_concat("}]}}],\"else\":null}");
+    let env2 = tenv_put(&env_mut_put(&env, &tmp, false), tmp.clone(), opTy.clone());
+    return TryP { ok: true, js: (letjs.revl_concat(",")).revl_concat(&ifjs), okTy: okTy.clone(), okB: okB.clone(), scr: scr.clone(), env: env2.clone() };
+}
+
+fn lir_try_let(ts: Vec<Token>, i: i64, at: i64, name: String, declared: String, mutable: bool, env: Vec<Bind>, muts: Vec<String>, ret: &str, marks: std::collections::HashMap<String, i64>, births: std::collections::HashMap<String, String>, al: std::collections::HashMap<String, String>, hi: i64) -> StmtOne {
+    let r = expr_at(ts.clone(), at);
+    if is_bad(r.e.clone()) {
+        return mk_one(String::from(""), env.clone(), muts.clone(), hi);
+    }
+    let operand = try_operand(r.e.clone());
+    if is_null_lit(operand.clone()) {
+        return mk_one(String::from(""), env.clone(), muts.clone(), hi);
+    }
+    let tp = try_prelude(ts.clone(), at, operand.clone(), env.clone(), marks.clone(), al.clone());
+    if (!tp.ok) {
+        return mk_one(String::from(""), env.clone(), muts.clone(), hi);
+    }
+    let okTy = tp.okTy;
+    let okB = tp.okB;
+    let scr = tp.scr;
+    let pre = tp.js;
+    let tenv = tp.env;
+    let read = try_ok_read(&okB);
+    let bindty = if (declared != "") { declared.clone() } else { okTy.clone() };
+    let env1 = env_mut_put(&tenv, &name, mutable);
+    let env2 = if (bindty == "") { env1.clone() } else { tenv_put(&env1, name.clone(), bindty.clone()) };
+    let value = try_ok_match(&scr, &okB, &okTy, &(if (declared == "") { read.clone() } else { apply_arg_markers(read.clone(), &declared, &okTy) }));
+    let js = (((((((pre.revl_concat(",{\"step\":\"let\",\"name\":")).revl_concat(&jstr(&predeclared_mangle(name.clone())))).revl_concat(",\"value\":")).revl_concat(&value)).revl_concat(",\"mutable\":")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat(&own_birth_marker(births.clone(), i))).revl_concat("}");
+    return mk_one(js.clone(), env2, if mutable { muts.revl_push(name.clone()) } else { muts.clone() }, r.i);
+}
+
+fn lir_try_return(ts: Vec<Token>, at: i64, env: Vec<Bind>, muts: Vec<String>, ret: String, marks: std::collections::HashMap<String, i64>, al: std::collections::HashMap<String, String>, hi: i64) -> StmtOne {
+    let r = expr_at(ts.clone(), at);
+    if is_bad(r.e.clone()) {
+        return mk_one(String::from(""), env.clone(), muts.clone(), hi);
+    }
+    let operand = try_operand(r.e.clone());
+    if is_null_lit(operand.clone()) {
+        return mk_one(String::from(""), env.clone(), muts.clone(), hi);
+    }
+    let tp = try_prelude(ts.clone(), at, operand.clone(), env.clone(), marks.clone(), al.clone());
+    if (!tp.ok) {
+        return mk_one(String::from(""), env.clone(), muts.clone(), hi);
+    }
+    let okTy = tp.okTy;
+    let okB = tp.okB;
+    let scr = tp.scr;
+    let pre = tp.js;
+    let js = ((pre.revl_concat(",{\"step\":\"return\",\"expr\":")).revl_concat(&try_ok_match(&scr, &okB, &okTy, &apply_ret_markers(try_ok_read(&okB), ret.clone(), okTy.clone())))).revl_concat("}");
+    return mk_one(js.clone(), env.clone(), muts.clone(), r.i);
+}
+
 fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<String>, ret: String, marks: std::collections::HashMap<String, i64>, births: std::collections::HashMap<String, String>, al: std::collections::HashMap<String, String>) -> StmtOne {
     let t = tkc(&ts, i);
     if ((t.kind == "kw") && ((t.text == "let") || (t.text == "var"))) {
@@ -26285,6 +26587,9 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
         if (!atk(&ts, j, "=")) {
             return mk_one(String::from(""), env.clone(), muts.clone(), hi);
         }
+        if atw(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "try") {
+            return lir_try_let(ts.clone(), i, (j).checked_add(1i64).expect("revl: Int overflow"), name.clone(), declared.clone(), mutable.clone(), env.clone(), muts.clone(), &ret, marks.clone(), births.clone(), al.clone(), hi);
+        }
         let r = lir_rhs_exp(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), env.clone(), declared.clone(), al.clone());
         if (!r.ok) {
             return mk_one(String::from(""), env.clone(), muts.clone(), hi);
@@ -26302,6 +26607,9 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
         return mk_one(js.clone(), env2, if mutable { muts.revl_push(name.clone()) } else { muts.clone() }, r.i);
     }
     if ((t.kind == "kw") && (t.text == "return")) {
+        if atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "try") {
+            return lir_try_return(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), env.clone(), muts.clone(), ret.clone(), marks.clone(), al.clone(), hi);
+        }
         let r = lir_rhs_exp(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), env.clone(), ret.clone(), al.clone());
         if (!r.ok) {
             return mk_one(String::from("{\"step\":\"return\",\"expr\":null}"), env.clone(), muts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
@@ -26670,7 +26978,8 @@ fn lir_function(ts: Vec<Token>, i: i64, cases: Vec<Bind>, public_fn: bool, color
         return LirFn { js: String::from(""), i: ts.revl_length() };
     }
     let om = own_marks(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), sm.clone());
-    let bodyjs = lir_stmts(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), params_env(ps.ps.clone(), cases.clone(), tps.clone()), vec![], retTy.clone(), om.marks.clone(), om.births.clone(), al.clone());
+    let tmarks = { let mut c = ({ let mut c = om.marks.clone(); c.insert(String::from("@try_fn"), i); c }).clone(); c.insert(String::from("@try_end"), bend); c };
+    let bodyjs = lir_stmts(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), params_env(ps.ps.clone(), cases.clone(), tps.clone()), vec![], retTy.clone(), tmarks.clone(), om.births.clone(), al.clone());
     let js = ((((((((((((String::from("{\"name\":").revl_concat(&jstr(&nm))).revl_concat(",\"params\":[")).revl_concat(&ir_params_json(&ps.ps))).revl_concat("],\"returns\":")).revl_concat(&retJson)).revl_concat(",\"public\":")).revl_concat(&if public_fn { String::from("true") } else { String::from("false") })).revl_concat(",\"body\":[")).revl_concat(&bodyjs)).revl_concat("]")).revl_concat(&if cache_pure { String::from(",\"cache\":{\"class\":\"pure_fn\"}") } else { String::from("") })).revl_concat(&if contains__m2(&colored, &nm) { String::from(",\"async\":true") } else { String::from("") })).revl_concat("}");
     return LirFn { js: js.clone(), i: bend };
 }
@@ -27659,7 +27968,7 @@ fn is_space__m7(c: &str) -> bool {
 }
 
 fn keywords() -> Vec<String> {
-    return vec![String::from("service"), String::from("component"), String::from("requires"), String::from("provides"), String::from("config"), String::from("let"), String::from("effect"), String::from("undo"), String::from("emit"), String::from("emission"), String::from("provide"), String::from("fn"), String::from("return"), String::from("true"), String::from("false"), String::from("null"), String::from("isolate"), String::from("intercept"), String::from("realm"), String::from("in"), String::from("with"), String::from("handoff"), String::from("spawn"), String::from("every"), String::from("after"), String::from("subscribe"), String::from("type"), String::from("use"), String::from("pub"), String::from("var"), String::from("while"), String::from("for"), String::from("of"), String::from("if"), String::from("else"), String::from("break"), String::from("continue"), String::from("match"), String::from("test"), String::from("assert"), String::from("async"), String::from("as"), String::from("fail"), String::from("hole"), String::from("extern"), String::from("acquire"), String::from("pure"), String::from("compensate"), String::from("await"), String::from("verified"), String::from("commutative"), String::from("idempotent")];
+    return vec![String::from("service"), String::from("component"), String::from("requires"), String::from("provides"), String::from("config"), String::from("let"), String::from("effect"), String::from("undo"), String::from("emit"), String::from("emission"), String::from("provide"), String::from("fn"), String::from("return"), String::from("true"), String::from("false"), String::from("null"), String::from("isolate"), String::from("intercept"), String::from("realm"), String::from("in"), String::from("with"), String::from("handoff"), String::from("spawn"), String::from("every"), String::from("after"), String::from("subscribe"), String::from("type"), String::from("use"), String::from("pub"), String::from("var"), String::from("while"), String::from("for"), String::from("of"), String::from("if"), String::from("else"), String::from("break"), String::from("continue"), String::from("match"), String::from("test"), String::from("assert"), String::from("async"), String::from("as"), String::from("fail"), String::from("hole"), String::from("extern"), String::from("acquire"), String::from("pure"), String::from("compensate"), String::from("await"), String::from("verified"), String::from("commutative"), String::from("try"), String::from("idempotent")];
 }
 
 fn ops3() -> Vec<String> {
@@ -28809,6 +29118,13 @@ fn p_unary(ts: &[Token], i: i64, d: i64) -> PR {
         }
         return PR { i: em.i, e: Expr::Emit(Box::new(UnN { op: String::from("emit"), e: em.e.clone() })) };
     }
+    if at_kw(ts, i, "try") {
+        let r = p_unary(ts, (i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
+        if is_bad(r.e.clone()) {
+            return r;
+        }
+        return PR { i: r.i, e: Expr::Un(Box::new(UnN { op: String::from("try"), e: r.e.clone() })) };
+    }
     return p_postfix(ts, i, d);
 }
 
@@ -29213,7 +29529,7 @@ fn p_inits(ts: &[Token], i: i64, d: i64) -> Inits {
     return Inits { i: (jj).checked_add(1i64).expect("revl: Int overflow"), xs: fs.clone(), ok: fin, msg: String::from("") };
 }
 
-fn unesc(s: &str) -> String {
+pub fn unesc(s: String) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
     let n = s.revl_length();
@@ -29246,7 +29562,7 @@ fn p_template(text: &str, d: i64) -> Expr {
     while (ok && (i < raw.revl_length())) {
         let seg = (raw)[(i) as usize].clone();
         let tag = seg.revl_slice(0i64, 2i64);
-        let body = unesc(&(seg.revl_slice(2i64, seg.revl_length())));
+        let body = unesc(seg.revl_slice(2i64, seg.revl_length()));
         if (tag == "t:") {
             parts.push(PartN { kind: String::from("t"), text: body.clone(), e: Expr::NullLit });
         }
@@ -30358,8 +30674,18 @@ fn constructor_lowers_user_variants_and_built_ins() {
 }
 
 #[test]
+fn admit_src_refuses_a__try__that_is_not_a_whole_let_initializer_or_return_operand__t1_() {
+    assert!((admit_src(String::from("fn parse(n: Int) -> Result[Int, Str] { return n > 0 ? Ok(n) : Err(\"neg\") } fn f(n: Int) -> Result[Int, Str] { return Ok((try parse(n)) + 1) }")) == "T1|`try` may only stand as a whole `let` initializer or `return` operand in a `fn` body (issue #1900)"));
+}
+
+#[test]
 fn lower_to_ir_binds_a_discarded_payload_as____in_a_provide_method() {
     assert!(str_has(&lower_to_ir(String::from("type Shape = Dot | Box(Int) service S { fn m(s: Shape) -> Int } component C provides p: S { provide p { fn m(s) = match s { Box(_) => 4, _ => 0 } } }")), "{\"pattern\": \"Box\", \"bind\": \"__\", \"body\": {\"kind\": \"lit\", \"value\": 4}"));
+}
+
+#[test]
+fn lower_to_ir_desugars__let_x___try_e__into_a_let__an_if_and_an_ok_match() {
+    assert!(str_has(&lower_to_ir(String::from("fn parse(n: Int) -> Result[Int, Str] { return n > 0 ? Ok(n) : Err(\"neg\") } fn f(n: Int) -> Result[Int, Str] { let x = try parse(n) return Ok(x) }")), "{\"step\":\"let\",\"name\":\"x\",\"value\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"var\",\"name\":\"try_0\"},\"arms\":[{\"pattern\":\"Ok\",\"bind\":\"try_0_ok\",\"body\":{\"kind\":\"var\",\"name\":\"try_0_ok\"},\"payload_type\":\"Int\"}]},\"mutable\":false}"));
 }
 
 #[test]

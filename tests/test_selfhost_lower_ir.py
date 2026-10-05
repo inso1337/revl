@@ -770,6 +770,23 @@ def test_native_ir_lowers_an_option_constructor_in_a_component(
     assert native["body"] == reference["body"]
 
 
+TRY_EXPR_DIR = ROOT / "tests" / "fixtures" / "try_expr"
+
+
+@pytest.mark.parametrize("path", sorted(TRY_EXPR_DIR.glob("ok_*.rvl")),
+                         ids=lambda p: p.stem)
+def test_native_ir_desugars_try_byte_for_byte(lower_to_ir, path):
+    """Issue #1900: `let x = try e` and `return try e` desugar to a `let`, an
+    `if` over a two-arm match and two one-armed matches, with fresh `try_<k>`
+    locals that skip every name the fn spells. The native producer writes the
+    same steps and the same names."""
+    src = path.read_text(encoding="utf-8")
+    native = json.loads(lower_to_ir(src))
+    reference = compile_source(src)
+    assert '"try_' in json.dumps(reference["functions"])
+    assert native["functions"] == reference["functions"]
+
+
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_services(lower_to_ir, rel):
     """The SERVICES table is byte-identical to the reference IR on every corpus

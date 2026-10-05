@@ -89,6 +89,41 @@ fn render(node: Value) -> Str {
 }
 ```
 
+## Checked parsers over a `Value` list (issue #1900)
+
+A parser that turns a `Value` document into typed records returns
+`Result[T, Str]`, and a list of them should stop at the first `Err`. `try`
+(docs/syntax-2.0.md §3.6) is that stop: bind each element's result with
+`let x = try ...` and the enclosing fn returns the `Err` unchanged. There is no
+`Err` arm to write and no placeholder default to invent.
+
+```revl
+pub extern pure fn value_list(v: Value) -> List[Value] = @py {
+    return v if isinstance(v, list) else []
+}
+pub extern pure fn value_int(v: Value) -> Int = @py {
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+}
+
+type Field = { size: Int }
+
+fn parse_field(v: Value, path: Str) -> Result[Field, Str] {
+  let n = value_int(v)
+  return n > 0 ? Ok({ size: n }) : Err(`${path}: size must be positive`)
+}
+
+verified fn parse_fields(v: Value, path: Str) -> Result[List[Field], Str] {
+  var out: List[Field] = []
+  var i = 0
+  for (x of value_list(v)) {
+    let f = try parse_field(x, `${path}[${i}]`)
+    out = out.push(f)
+    i += 1
+  }
+  return Ok(out)
+}
+```
+
 ## Key enumeration — `value_keys` (item 188)
 
 The value-side accessors above reach a record's **values** (`value_field`,

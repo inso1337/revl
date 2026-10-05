@@ -234,7 +234,7 @@
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
                     is_bad, expr_at, params_at, type_at, nesting_limit,
-                    is_record_key }
+                    is_record_key, unesc }
 // The shared type-SPELLING algebra (docs/design/457-selfhost-type-layer.md
 // §3.1, slice T1). It is a leaf module with no AST dependency and its own
 // differential oracle against `src/revl/typecheck.py`, so the refusing walk
@@ -4559,7 +4559,8 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
     Asset(_)    => a,
     Bad(_)     => a,
     Bin(b)     => walk_expr(b.r, marked, cx, walk_expr(b.l, marked, cx, a)),
-    Un(u)      => walk_expr(u.e, marked, cx, a),
+    Un(u)      => u.op == "try" ? ac_refuse(a, "T1", try_component_msg())
+                                    : walk_expr(u.e, marked, cx, a),
     Emit(u)    => cx.emitPos == "args"
                     ? ac_refuse(a, "G4", nested_emit_msg())
                     : appr_check(u.e, "", cx,
@@ -12023,6 +12024,14 @@ fn tk_un(u: UnN, env: List[Bind]) -> TInf {
   let o = tk_infer(u.e, env)
   if (o.v != "") { return o }
   let t = o.ty
+  // issue #1900: `try e` is the `Ok` payload of `e` (`infer_ast`); where it
+  // may stand is `fb_try`'s and `tk_low`'s business
+  if (u.op == "try") {
+    if (t == "") { return tk_ok("") }
+    let args = type_args(t)
+    if (parse_head(t) == "Result" && args.length() == 2) { return tk_ok(args[0]) }
+    return tk_mismatch("the operand of `try`", "Result[_, _]", t)
+  }
   if (u.op == "!") {
     if (t != "" && t != "Bool") { return tk_mismatch("operand of `!`", "Bool", t) }
     return tk_ok("Bool")
@@ -13629,7 +13638,7 @@ fn tk_low(e: Expr, env: List[Bind]) -> Str {
   return match e {
     Var(n)      => nr_refuse(n, env),
     Bin(b)      => tk_low2(b.l, b.r, env),
-    Un(u)       => tk_low(u.e, env),
+    Un(u)       => u.op == "try" ? try_position_msg() : tk_low(u.e, env),
     Field(f)    => tk_low(f.target, env),
     OptField(f) => tk_low(f.target, env),
     Index(x)    => tk_low2(x.target, x.idx, env),
@@ -14070,6 +14079,7 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     if (tenv_get(scope, s.name) != "") {
       return fb_refuse("G6", fb_already_msg(s.name), s.line, scope, tys)
     }
+    if (is_try(s.value)) { return fb_try_let(steps, i, s, scope, tys, ret) }
     let birth = s.mutable ? "var" : (fb_host_value(s.value, scope) ? "host" : "let")
     // a WRITTEN annotation is the checking position for the initialiser and the
     // type the name takes; without one the name takes the inferred type.
@@ -14128,6 +14138,17 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     // a bare `return` writes no value; the reference's own bare-return-in-a-
     // typed-fn refusal is the totality slice's, not this one's.
     if (s.op == "bare") { return fb_walk(steps, i + 1, scope, tys, ret) }
+    if (is_try(s.value)) {
+      let tv = fb_try(try_operand(s.value), tys, ret)
+      if (tv.v != "") { return fb_type_refuse(tv.v, s.line, scope, tys) }
+      if (!tk_compatible(ret, tv.ty)) {
+        return fb_type_refuse(tk_mismatch("this function's return", ret, tv.ty).v,
+                              s.line, scope, tys)
+      }
+      let tlo = tk_low(try_operand(s.value), tys)
+      if (tlo != "") { return fb_type_refuse(tlo, s.line, scope, tys) }
+      return fb_walk(steps, i + 1, scope, tys, ret)
+    }
     let r = tk_check(s.value, ret, tys, "this function's return")
     if (r.v != "") { return fb_type_refuse(r.v, s.line, scope, tys) }
     let lo = tk_low(s.value, tys)
@@ -14189,6 +14210,80 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     return fb_walk(steps, i + 1, scope, tys, ret)
   }
   return fb_walk(steps, i + 1, scope, tys, ret)
+}
+
+// `try e` (issue #1900), `lower._try_types` in its order: an `emit` operand,
+// then the operand's own type (a `Result`), then the enclosing fn's return,
+// which must be `Result[_, E]` for the operand's `E`. The verdict, or the `Ok`
+// payload type `try e` has.
+fn fb_try(opnd: Expr, tys: List[Bind], ret: Str) -> TInf {
+  let isEmit = match opnd { Emit(_) => true, _ => false, }
+  if (isEmit) {
+    return tk_no("T1", "`try` cannot take an `emit` operand: bind the crossing's "
+                       .concat("value with `let` first (issue #1900)"))
+  }
+  let o = tk_infer(opnd, tys)
+  if (o.v != "") { return o }
+  // an operand this walk cannot type is the gradual frontier's: silent
+  if (o.ty == "") { return tk_ok("") }
+  let args = type_args(o.ty)
+  if (parse_head(o.ty) != "Result" || args.length() != 2) {
+    return tk_mismatch("the operand of `try`", "Result[_, _]", o.ty)
+  }
+  let errR = tk_render(args[1])
+  let want = "Result[_, ".concat(errR).concat("]")
+  let where_ = "`try` propagates `Err(".concat(errR)
+    .concat(")`, so the enclosing fn's return")
+  if (ret == "") {
+    return tk_no("T1", where_.concat(" must be `").concat(want)
+                         .concat("`, but it declares none"))
+  }
+  let rargs = type_args(ret)
+  if (parse_head(ret) != "Result" || rargs.length() != 2
+      || ty_nospace(rargs[1]) != ty_nospace(args[1])) {
+    return tk_mismatch(where_, want, ret)
+  }
+  return tk_ok(args[0])
+}
+
+fn ty_nospace(t: Str) -> Str { return t.split(" ").join("") }
+
+fn fb_try_let(steps: List[FbStep], i: Int, s: FbStep, scope: List[Bind],
+              tys: List[Bind], ret: Str) -> FbR {
+  let opnd = try_operand(s.value)
+  let tv = fb_try(opnd, tys, ret)
+  if (tv.v != "") { return fb_type_refuse(tv.v, s.line, scope, tys) }
+  if (s.declTy != "" && tv.ty != "" && !tk_compatible(s.declTy, tv.ty)) {
+    let where_ = "`let ".concat(s.name).concat(": ").concat(tk_render(s.declTy)).concat("`")
+    return fb_type_refuse(tk_mismatch(where_, s.declTy, tv.ty).v, s.line, scope, tys)
+  }
+  // the operand is lowered BEFORE the name is bound (`_lower_try_let`)
+  let lo = tk_low(opnd, tys)
+  if (lo != "") { return fb_type_refuse(lo, s.line, scope, tys) }
+  let bound = s.declTy == "" ? tv.ty : s.declTy
+  let tys2 = bound == "" ? tys : tenv_put(tys, s.name, bound)
+  let birth = s.mutable ? "var" : "let"
+  return fb_walk(steps, i + 1, tenv_put(scope, s.name, birth),
+                 tenv_put(tys2, nr_bnd(s.name), "1"), ret)
+}
+
+fn is_try(e: Expr) -> Bool {
+  return match e { Un(u) => u.op == "try", _ => false, }
+}
+
+fn try_payload(t: Str) -> Str {
+  let args = type_args(t)
+  return parse_head(t) == "Result" && args.length() == 2 ? args[0] : ""
+}
+
+fn try_position_msg() -> Str {
+  return tagged("T1", "`try` may only stand as a whole `let` initializer or "
+    .concat("`return` operand in a `fn` body (issue #1900)"))
+}
+
+fn try_component_msg() -> Str {
+  return "`try` is not allowed in a provide method or component body yet: "
+    .concat("a returned `Err` does not settle the unit there (issue #1900)")
 }
 
 // Every parameter, recorded NOT mutable — the reference's `scope[param] = False`,
@@ -20827,7 +20922,8 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     NullLit     => "",
     Var(n)      => tenv_get(env, n) != "" ? tenv_get(env, n) : infer_bare_case(n, env),
     Bin(b)      => binop_ty(b.op, infer(b.l, env), infer(b.r, env)),
-    Un(u)       => u.op == "!" ? "Bool" : infer(u.e, env),
+    Un(u)       => u.op == "!" ? "Bool"
+                   : (u.op == "try" ? try_payload(infer(u.e, env)) : infer(u.e, env)),
     Emit(u)     => "",
     Call(c)     => infer_call_ty(c, env),
     Field(f)    => infer_field(infer(f.target, env), f.name, env),
@@ -22800,6 +22896,202 @@ fn own_birth_marker(births: Map[Str, Str], tok: Int) -> Str {
   }
 }
 
+// ------------------------------------------------- `try e` (issue #1900)
+//
+// `let x = try e` and `return try e` desugar, as `lower._lower_try_prelude`
+// does, to steps that already exist:
+//
+//   let try_k = e
+//   if (match try_k { Ok(try_k_ok) => false, Err(try_k_err) => true }) {
+//     return match try_k { Err(try_k_err) => Err(try_k_err) }
+//   }
+//   ... match try_k { Ok(try_k_ok) => try_k_ok }
+//
+// `k` is the reference's per-fn counter: the n-th `try` of the fn takes the
+// n-th `k` none of whose three names the fn spells anywhere (`FnDecl.idents`:
+// every identifier token between `fn` and the body's `}`, and every
+// identifier-shaped word of a template's interpolations).
+
+type TryP = { ok: Bool, js: Str, okTy: Str, okB: Str, scr: Str, env: List[Bind] }
+
+fn try_none(env: List[Bind]) -> TryP {
+  return { ok: false, js: "", okTy: "", okB: "", scr: "", env: env }
+}
+
+// The `Ok` read with `body` as its arm body: the payload read, carrying any
+// coercion marker the binding or the return puts on it. Plain strings, not the
+// `TryP`: its fields are read once each into locals by the callers.
+fn try_ok_match(scr: Str, okB: Str, okTy: Str, body: Str) -> Str {
+  return "{\"kind\":\"match\",\"scrutinee\":".concat(scr)
+    .concat(",\"arms\":[{\"pattern\":\"Ok\",\"bind\":").concat(jstr(okB))
+    .concat(",\"body\":").concat(body)
+    .concat(",\"payload_type\":").concat(jstr(okTy)).concat("}]}")
+}
+
+fn try_ok_read(okB: Str) -> Str {
+  return "{\"kind\":\"var\",\"name\":".concat(jstr(okB)).concat("}")
+}
+
+fn is_null_lit(e: Expr) -> Bool { return match e { NullLit => true, _ => false, } }
+
+fn try_operand(e: Expr) -> Expr {
+  return match e { Un(u) => u.op == "try" ? u.e : NullLit, _ => NullLit, }
+}
+
+fn ident_words(s: Str, acc: List[Str]) -> List[Str] {
+  var out = acc
+  var w = ""
+  var i = 0
+  while (i <= s.length()) {
+    let c = i < s.length() ? s.slice(i, i + 1) : " "
+    let alpha = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_"
+    let digit = c >= "0" && c <= "9"
+    if (alpha || (digit && w != "")) {
+      w = w.concat(c)
+    } else {
+      if (w != "") { out = out.push(w) }
+      w = ""
+    }
+    i += 1
+  }
+  return out
+}
+
+fn try_fn_idents(ts: List[Token], lo: Int, hi: Int) -> List[Str] {
+  var out: List[Str] = []
+  var j = lo
+  while (j <= hi && j < ts.length()) {
+    let t = tkc(ts, j)
+    if (t.kind == "ident") { out = out.push(t.text) }
+    if (t.kind == "template" && t.text != "") {
+      let parts = t.text.split("|")
+      var q = 0
+      while (q < parts.length()) {
+        if (starts_with(parts[q], "v:")) {
+          out = ident_words(unesc(parts[q].slice(2, parts[q].length())), out)
+        }
+        q += 1
+      }
+    }
+    j += 1
+  }
+  return out
+}
+
+fn try_k_free(k: Int, taken: List[Str]) -> Bool {
+  let b = "try_".concat(k.to_str())
+  return !contains(taken, b) && !contains(taken, b.concat("_err"))
+    && !contains(taken, b.concat("_ok"))
+}
+
+// The `k` of the `try` at token `at`.
+fn try_k_at(ts: List[Token], at: Int, marks: Map[Str, Int]) -> Int {
+  let lo = match marks.lookup("@try_fn") { Some(v) => v, None => 0 - 1, }
+  let hi = match marks.lookup("@try_end") { Some(v) => v, None => 0 - 1, }
+  if (lo < 0) { return 0 - 1 }
+  var n = 0
+  var j = lo
+  while (j < at) {
+    if (atw(ts, j, "try")) { n += 1 }
+    j += 1
+  }
+  let taken = try_fn_idents(ts, lo, hi)
+  var k = 0
+  var seen = 0
+  while (true) {
+    if (try_k_free(k, taken)) {
+      if (seen == n) { return k }
+      seen += 1
+    }
+    k += 1
+  }
+  return 0 - 1
+}
+
+fn try_prelude(ts: List[Token], at: Int, operand: Expr, env: List[Bind],
+               marks: Map[Str, Int], al: Map[Str, Str]) -> TryP {
+  let k = try_k_at(ts, at, marks)
+  if (k < 0) { return try_none(env) }
+  let opTy = infer(operand, env)
+  if (parse_head(opTy) != "Result") { return try_none(env) }
+  let targs = type_args(opTy)
+  if (targs.length() != 2) { return try_none(env) }
+  let okTy = targs[0]
+  let errTy = targs[1]
+  let tmp = "try_".concat(k.to_str())
+  let errB = tmp.concat("_err")
+  let okB = tmp.concat("_ok")
+  let value = lir_expr(operand, env, al)
+  let scr = "{\"kind\":\"var\",\"name\":".concat(jstr(tmp)).concat("}")
+  let letjs = "{\"step\":\"let\",\"name\":".concat(jstr(tmp)).concat(",\"value\":")
+    .concat(value).concat(",\"mutable\":false}")
+  let cond = "{\"kind\":\"match\",\"scrutinee\":".concat(scr).concat(",\"arms\":[")
+    .concat("{\"pattern\":\"Ok\",\"bind\":").concat(jstr(okB))
+    .concat(",\"body\":{\"kind\":\"lit\",\"value\":false},\"payload_type\":")
+    .concat(jstr(okTy)).concat("},")
+    .concat("{\"pattern\":\"Err\",\"bind\":").concat(jstr(errB))
+    .concat(",\"body\":{\"kind\":\"lit\",\"value\":true},\"payload_type\":")
+    .concat(jstr(errTy)).concat("}]}")
+  let errEnv = tenv_put(env_mut_put(env, errB, false), errB, errTy)
+  let rebuilt = lir_expr(Call({ target: Var("Err"), args: [Var(errB)] }), errEnv, al)
+  let ifjs = "{\"step\":\"if\",\"cond\":".concat(cond)
+    .concat(",\"then\":[{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":")
+    .concat(scr).concat(",\"arms\":[{\"pattern\":\"Err\",\"bind\":").concat(jstr(errB))
+    .concat(",\"body\":").concat(rebuilt).concat(",\"payload_type\":").concat(jstr(errTy))
+    .concat("}]}}],\"else\":null}")
+  let env2 = tenv_put(env_mut_put(env, tmp, false), tmp, opTy)
+  return { ok: true, js: letjs.concat(",").concat(ifjs), okTy: okTy, okB: okB,
+           scr: scr, env: env2 }
+}
+
+fn lir_try_let(ts: List[Token], i: Int, at: Int, name: Str, declared: Str,
+               mutable: Bool, env: List[Bind], muts: List[Str], ret: Str,
+               marks: Map[Str, Int], births: Map[Str, Str], al: Map[Str, Str],
+               hi: Int) -> StmtOne {
+  let r = expr_at(ts, at)
+  if (is_bad(r.e)) { return mk_one("", env, muts, hi) }
+  let operand = try_operand(r.e)
+  if (is_null_lit(operand)) { return mk_one("", env, muts, hi) }
+  let tp = try_prelude(ts, at, operand, env, marks, al)
+  if (!tp.ok) { return mk_one("", env, muts, hi) }
+  // each field read ONCE into a local: a repeated field read is a move the
+  // rust tier cannot borrow after (the `rty`/`rjs` rule in `lir_one_stmt`)
+  let okTy = tp.okTy
+  let okB = tp.okB
+  let scr = tp.scr
+  let pre = tp.js
+  let tenv = tp.env
+  let read = try_ok_read(okB)
+  let bindty = declared != "" ? declared : okTy
+  let env1 = env_mut_put(tenv, name, mutable)
+  let env2 = bindty == "" ? env1 : tenv_put(env1, name, bindty)
+  let value = try_ok_match(scr, okB, okTy,
+                           declared == "" ? read : apply_arg_markers(read, declared, okTy))
+  let js = pre.concat(",{\"step\":\"let\",\"name\":").concat(jstr(predeclared_mangle(name)))
+    .concat(",\"value\":").concat(value).concat(",\"mutable\":")
+    .concat(mutable ? "true" : "false").concat(own_birth_marker(births, i)).concat("}")
+  return mk_one(js, env2, mutable ? muts.push(name) : muts, r.i)
+}
+
+fn lir_try_return(ts: List[Token], at: Int, env: List[Bind], muts: List[Str],
+                  ret: Str, marks: Map[Str, Int], al: Map[Str, Str],
+                  hi: Int) -> StmtOne {
+  let r = expr_at(ts, at)
+  if (is_bad(r.e)) { return mk_one("", env, muts, hi) }
+  let operand = try_operand(r.e)
+  if (is_null_lit(operand)) { return mk_one("", env, muts, hi) }
+  let tp = try_prelude(ts, at, operand, env, marks, al)
+  if (!tp.ok) { return mk_one("", env, muts, hi) }
+  let okTy = tp.okTy
+  let okB = tp.okB
+  let scr = tp.scr
+  let pre = tp.js
+  let js = pre.concat(",{\"step\":\"return\",\"expr\":")
+    .concat(try_ok_match(scr, okB, okTy, apply_ret_markers(try_ok_read(okB), ret, okTy)))
+    .concat("}")
+  return mk_one(js, env, muts, r.i)
+}
+
 fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
                 muts: List[Str], ret: Str, marks: Map[Str, Int],
                 births: Map[Str, Str], al: Map[Str, Str]) -> StmtOne {
@@ -22847,6 +23139,10 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
       j = tr.i
     }
     if (!atk(ts, j, "=")) { return mk_one("", env, muts, hi) }
+    if (atw(ts, j + 1, "try")) {
+      return lir_try_let(ts, i, j + 1, name, declared, mutable, env, muts, ret,
+                         marks, births, al, hi)
+    }
     let r = lir_rhs_exp(ts, j + 1, env, declared, al)
     if (!r.ok) { return mk_one("", env, muts, hi) }
     // read the rhs out of the step ONCE: both the type and the JSON are used
@@ -22876,6 +23172,9 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     // an rvalue, not only an expression: `return { r | class = r.class_ }` is a
     // record-update in return position, and the shared parser's grammar has no
     // node for it.
+    if (atw(ts, i + 1, "try")) {
+      return lir_try_return(ts, i + 1, env, muts, ret, marks, al, hi)
+    }
     let r = lir_rhs_exp(ts, i + 1, env, ret, al)
     if (!r.ok) {
       return mk_one("{\"step\":\"return\",\"expr\":null}", env, muts, i + 1)
@@ -23258,8 +23557,12 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
   let bend = close_brace(ts, reti)
   if (bend == 0 - 1) { return { js: "", i: ts.length() } }
   let om = own_marks(ts, reti + 1, bend - 1, sm)
+  // issue #1900: the fn's token span rides `marks` under two reserved keys (the
+  // ownership marks are keyed by token index, so no key can collide): a `try`
+  // names its fresh locals off the identifiers spelled inside it
+  let tmarks = om.marks.set("@try_fn", i).set("@try_end", bend)
   let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
-                         params_env(ps.ps, cases, tps), [], retTy, om.marks, om.births, al)
+                         params_env(ps.ps, cases, tps), [], retTy, tmarks, om.births, al)
   let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
@@ -23866,9 +24169,19 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
 
 // ================================================================ tests
 
+test "admit_src refuses a `try` that is not a whole let initializer or return operand (T1)" {
+  assert admit_src("fn parse(n: Int) -> Result[Int, Str] { return n > 0 ? Ok(n) : Err(\"neg\") } fn f(n: Int) -> Result[Int, Str] { return Ok((try parse(n)) + 1) }")
+    == "T1|`try` may only stand as a whole `let` initializer or `return` operand in a `fn` body (issue #1900)"
+}
+
 test "lower_to_ir binds a discarded payload as __ in a provide method" {
   assert str_has(lower_to_ir("type Shape = Dot | Box(Int) service S { fn m(s: Shape) -> Int } component C provides p: S { provide p { fn m(s) = match s { Box(_) => 4, _ => 0 } } }"),
     "{\"pattern\": \"Box\", \"bind\": \"__\", \"body\": {\"kind\": \"lit\", \"value\": 4}")
+}
+
+test "lower_to_ir desugars `let x = try e` into a let, an if and an Ok match" {
+  assert str_has(lower_to_ir("fn parse(n: Int) -> Result[Int, Str] { return n > 0 ? Ok(n) : Err(\"neg\") } fn f(n: Int) -> Result[Int, Str] { let x = try parse(n) return Ok(x) }"),
+    "{\"step\":\"let\",\"name\":\"x\",\"value\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"var\",\"name\":\"try_0\"},\"arms\":[{\"pattern\":\"Ok\",\"bind\":\"try_0_ok\",\"body\":{\"kind\":\"var\",\"name\":\"try_0_ok\"},\"payload_type\":\"Int\"}]},\"mutable\":false}")
 }
 
 test "lower_to_ir emits the services table for a simple provider" {

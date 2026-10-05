@@ -2396,6 +2396,40 @@
 
 ["tests/fixtures/triple_string.rvl", "refuse-out-of-slice/BAD"]
 
+["tests/fixtures/try_expr/ok_annotated.rvl", "agree-admit"]
+
+["tests/fixtures/try_expr/ok_branches.rvl", "agree-admit"]
+
+["tests/fixtures/try_expr/ok_fresh_names.rvl", "agree-admit"]
+
+["tests/fixtures/try_expr/ok_list_parser.rvl", "agree-admit"]
+
+["tests/fixtures/try_expr/ok_return_operand.rvl", "agree-admit"]
+
+["tests/fixtures/try_expr/ok_sequence.rvl", "agree-admit"]
+
+["tests/fixtures/try_expr/t1_annotation_mismatch.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_call_argument.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_condition.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_different_err.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_emit_operand.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_nested_operand.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_no_return_type.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_operand_not_result.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_provide_method.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_return_not_result.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/try_expr/t1_return_payload_mismatch.rvl", "agree-refuse/T1"]
+
 ["tests/fixtures/v2_math_lib.rvl", "agree-admit"]
 
 ["tests/fixtures/v2_math_main.rvl", "no-objection-out-of-slice"]

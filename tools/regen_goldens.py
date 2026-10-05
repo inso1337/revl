@@ -183,6 +183,10 @@ def produce_wasm() -> dict[str, str]:
     # branches) over top-level fns.
     src = (golden / "functions.revl").read_text(encoding="utf-8")
     out["backends/wasm/golden/functions.wat"] = emit.emit(revl.compile_source(src))["functions"]
+    # issue #1900: the `try` desugar, whose one-armed matches fall through to
+    # `unreachable` on this tier
+    src = (golden / "try_expr.revl").read_text(encoding="utf-8")
+    out["backends/wasm/golden/try_expr.wat"] = emit.emit(revl.compile_source(src))["functions"]
 
     # The component-tier modules, from the shipped examples.
     beacon = emit.emit(revl.compile_files([str(ROOT / "examples" / "beacon.rvl")]))
@@ -297,6 +301,7 @@ TARGETS: tuple[Target, ...] = (
         name="wasm",
         what="v3 functions, component modules and canonical-ABI goldens",
         files=("backends/wasm/golden/functions.wat",
+               "backends/wasm/golden/try_expr.wat",
                "backends/wasm/golden/Beacon.wat",
                "backends/wasm/golden/Auditor.wat",
                "backends/wasm/golden/Pulse.wat",

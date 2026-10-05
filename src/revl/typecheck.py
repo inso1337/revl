@@ -1980,6 +1980,16 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         return _binop_type(expr.op, lt, rt, filename, line, types)
     if isinstance(expr, ExprUn):
         t = infer_ast(expr.operand, tenv, types, filename)
+        if expr.op == "try":
+            # issue #1900: `try e` is the `Ok` payload of `e`; where it may
+            # stand, and the enclosing `Err` type, are decided in lower
+            head, args = parse_type(t)
+            if head == "Result" and len(args) == 2:
+                return args[0]
+            if filename and t:
+                raise mismatch(filename, line, "the operand of `try`",
+                               "Result[_, _]", t)
+            return None
         if expr.op == "!":
             if filename and t and t != "Bool":
                 raise mismatch(filename, line, "operand of `!`", "Bool", t)

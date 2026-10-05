@@ -1,0 +1,15 @@
+// idiom: try
+// summary: stop at a `Result`'s `Err` and keep its `Ok` payload, in a `fn` body
+// rule: T1: only as `let x = try e` or `return try e`; the fn returns `Result[_, E]` with the operand's own `E`
+// fill: let f = try parse_field(n)
+
+fn parse_field(n: Int) -> Result[Int, Str] = n > 0 ? Ok(n) : Err("size must be positive")
+
+fn parse_fields(ns: List[Int]) -> Result[List[Int], Str] {
+  var out: List[Int] = []
+  for (n of ns) {
+    let f = try parse_field(n)
+    out = out.push(f)
+  }
+  return Ok(out)
+}

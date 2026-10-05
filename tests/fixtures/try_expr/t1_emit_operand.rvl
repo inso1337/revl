@@ -1,0 +1,5 @@
+extern emission fn send(n: Int) -> Result[Int, Str] = @py { return n }
+fn f(n: Int) -> Result[Int, Str] {
+  let x = try emit send(n)
+  return Ok(x)
+}

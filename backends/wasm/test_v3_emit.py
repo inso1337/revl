@@ -166,6 +166,21 @@ def test_v3_functions_golden_is_byte_identical():
         "is intended: python3 tools/regen_goldens.py wasm, then review the diff.")
 
 
+def test_v3_try_expr_golden_is_byte_identical():
+    """Issue #1900: `try` desugars to two one-armed matches, and on this tier a
+    match with no matching arm falls through to `unreachable`. The `if` in
+    front of each has already decided the case, so the trap is never reached;
+    the golden pins the rendering."""
+    emit = _emitter()
+    ir = compile_source((BACKEND / "golden" / "try_expr.revl").read_text(encoding="utf-8"))
+    wat = emit.emit(ir)["functions"]
+    assert "unreachable" in wat
+    golden = (BACKEND / "golden" / "try_expr.wat").read_text()
+    assert wat == golden, (
+        "backends/wasm/golden/try_expr.wat drifted from the emitter. If the change "
+        "is intended: python3 tools/regen_goldens.py wasm, then review the diff.")
+
+
 def test_diverging_if_else_body_validates_and_runs(tmp_path):
     """A function whose whole body is a diverging `if/else` (both arms return)
     emitted wasm that fell through the result-less `if` to the function end,

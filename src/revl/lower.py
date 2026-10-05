@@ -2124,9 +2124,12 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
         check_list_index_bounds(decl.body, decl_file)
         body: list[dict] = []
+        # issue #1900: the fresh-name state `try` desugars through, for this fn
+        types[TRY_SINK] = {"taken": set(getattr(decl, "idents", ())), "n": 0}
         for stmt in decl.body:
             _lower_pure_stmt(stmt, scope, callables, alias_fns, body, decl_file, type_env, types,
                              expected_return=marked_returns)
+        types.pop(TRY_SINK, None)
         _check_returns_on_every_path(decl, decl_file)
         # phase-2 async coloring (docs/design/async-extern.md §3): a module
         # `fn` that reaches an async extern — directly or transitively — is no
@@ -2677,6 +2680,119 @@ def _block_arm_unimplemented(filename: str, line: int) -> RevlError:
 # under a private (`__`-prefixed, so never serialised) key on the shared
 # `types` dict. `_lower_fns` installs it and drains it into the functions list.
 LIFT_SINK = "__arm_lift__"
+TRY_SINK = "__try_names__"
+
+
+def _is_try(expr) -> bool:
+    return isinstance(expr, ExprUn) and expr.op == "try"
+
+
+def _try_position_error(filename: str, line: int) -> RevlError:
+    return RevlError(
+        filename, line,
+        "`try` may only stand as a whole `let` initializer or `return` operand "
+        "in a `fn` body (issue #1900)",
+        hint="bind it first: `let x = try e`, then use `x`",
+        code="T1", category="type-mismatch")
+
+
+def _try_fresh(types: dict, filename: str, line: int) -> tuple[str, str, str]:
+    """The three fresh locals one `try` desugars through: the operand
+    (`try_<k>`), its `Err` payload and its `Ok` payload. `k` counts the fn's
+    `try`s in source order, skipping any `k` whose names the fn already spells,
+    so the desugar can never read or shadow an author's binding."""
+    sink = types.get(TRY_SINK)
+    if sink is None:
+        raise _try_position_error(filename, line)
+    while True:
+        k = sink["n"]
+        sink["n"] += 1
+        names = (f"try_{k}", f"try_{k}_err", f"try_{k}_ok")
+        if not any(n in sink["taken"] for n in names):
+            sink["taken"].update(names)
+            return names
+
+
+def _try_types(stmt_expr, type_env: dict, types: dict, filename: str,
+               expected_return: str | None) -> tuple[str, str, str]:
+    """`(operand type, Ok payload T, Err payload E)` for `try e`, refusing an
+    `emit` operand, a non-`Result` operand, and an enclosing fn whose return is
+    not `Result[_, E]` for the operand's own `E`."""
+    from .parser import EmitExpr  # noqa: PLC0415
+    line = stmt_expr.line
+    if isinstance(stmt_expr.operand, EmitExpr):
+        raise RevlError(
+            filename, line,
+            "`try` cannot take an `emit` operand: bind the crossing's value "
+            "with `let` first (issue #1900)",
+            code="T1", category="type-mismatch")
+    operand_t = infer_ast(stmt_expr.operand, type_env, types, filename)
+    head, args = parse_type(operand_t)
+    if head != "Result" or len(args) != 2:
+        raise mismatch(filename, line, "the operand of `try`", "Result[_, _]",
+                       operand_t)
+    ok_t, err_t = args
+    want = f"Result[_, {render_type(err_t)}]"
+    where = (f"`try` propagates `Err({render_type(err_t)})`, so the enclosing "
+             "fn's return")
+    if expected_return is None:
+        raise RevlError(
+            filename, line,
+            f"{where} must be `{want}`, but it declares none",
+            hint="declare the fn `-> Result[T, E]` with the operand's `E`",
+            code="T1", category="type-mismatch")
+    rhead, rargs = parse_type(expected_return)
+    if (rhead != "Result" or len(rargs) != 2
+            or format_type(*parse_type(rargs[1])) != format_type(*parse_type(err_t))):
+        raise mismatch(filename, line, where, want, expected_return)
+    return operand_t, ok_t, err_t
+
+
+def _lower_try_prelude(stmt_expr, scope: dict, callables: set, alias_fns: dict,
+                       body: list, filename: str, type_env: dict, types: dict,
+                       operand_t: str, ok_t: str, err_t: str) -> dict:
+    """Append the steps `try e` desugars to (issue #1900) and return the node
+    that reads the `Ok` payload, all in IR that already exists:
+
+        let try_k = e
+        if (match try_k { Ok => false, Err => true }) {
+          return match try_k { Err(try_k_err) => Err(try_k_err) }
+        }
+        ... match try_k { Ok(try_k_ok) => try_k_ok }
+
+    The two single-arm matches never fall through: the `if` has already
+    decided which case `try_k` holds. The condition's arms bind nothing, since
+    a binder per arm would be one name at two types on wasm."""
+    tmp, err_b, ok_b = _try_fresh(types, filename, stmt_expr.line)
+    value = _lower_pure_expr(stmt_expr.operand, scope, callables, alias_fns,
+                             filename, type_env, types)
+    scope[tmp] = False
+    type_env[tmp] = operand_t
+    body.append({"step": "let", "name": tmp, "value": value, "mutable": False})
+    var = {"kind": "var", "name": tmp}
+    cond = {"kind": "match", "scrutinee": var, "arms": [
+        {"pattern": "Ok", "bind": ok_b, "body": {"kind": "lit", "value": False},
+         "payload_type": ok_t},
+        {"pattern": "Err", "bind": err_b, "body": {"kind": "lit", "value": True},
+         "payload_type": err_t},
+    ]}
+    err_scope = dict(scope)
+    err_scope[err_b] = False
+    err_env = dict(type_env)
+    err_env[err_b] = err_t
+    rebuilt = _lower_pure_expr(
+        ExprCall(ExprVar("Err", stmt_expr.line), [ExprVar(err_b, stmt_expr.line)],
+                 stmt_expr.line),
+        err_scope, callables, alias_fns, filename, err_env, types)
+    body.append({"step": "if", "cond": cond, "then": [{
+        "step": "return",
+        "expr": {"kind": "match", "scrutinee": dict(var), "arms": [
+            {"pattern": "Err", "bind": err_b, "body": rebuilt,
+             "payload_type": err_t}]},
+    }], "else": None})
+    return {"kind": "match", "scrutinee": dict(var), "arms": [
+        {"pattern": "Ok", "bind": ok_b, "body": {"kind": "var", "name": ok_b},
+         "payload_type": ok_t}]}
 
 
 def _pattern_binds(pattern) -> list[str]:
@@ -2786,6 +2902,13 @@ def _lift_block_arm(expr, scope: dict, callables: set, alias_fns: dict,
 
     arm_body: list = []
     for stmt in expr.stmts:
+        if isinstance(stmt, LetStmt) and _is_try(stmt.value):
+            raise RevlError(
+                filename, stmt.line,
+                "`try` is not allowed in a match block arm: the arm is lifted "
+                "into a helper fn, so it cannot return from this one (issue #1900)",
+                hint="bind the `try` before the `match`",
+                code="T1", category="type-mismatch")
         _lower_pure_stmt(stmt, arm_scope, callables, alias_fns, arm_body,
                          filename, arm_type_env, types)
     ret_type = infer_ast(expr.tail, arm_type_env, types, filename)
@@ -6290,6 +6413,51 @@ def _pattern_bound_names(pattern) -> list[str]:
     return []
 
 
+def _lower_try_let(stmt, scope: dict, callables: set, alias_fns: dict, body: list,
+                   filename: str, type_env: dict, types: dict,
+                   expected_return: str | None) -> None:
+    """`let x[: D] = try e` (issue #1900): the prelude, then `x` bound to the
+    `Ok` payload, checked against `D` when the author wrote one."""
+    operand_t, ok_t, err_t = _try_types(stmt.value, type_env, types, filename,
+                                        expected_return)
+    declared = getattr(stmt, "type", None)
+    if declared is not None:
+        check_type_wellformed(filename, stmt.line, declared)
+        if not compatible(declared, ok_t, types):
+            raise mismatch(filename, stmt.line,
+                           f"`let {stmt.name}: {render_type(declared)}`",
+                           declared, ok_t)
+    value = _lower_try_prelude(stmt.value, scope, callables, alias_fns, body,
+                               filename, type_env, types, operand_t, ok_t, err_t)
+    scope[stmt.name] = stmt.mutable
+    type_env[stmt.name] = declared if declared is not None else ok_t
+    # the coercion is marked on the payload read, inside the arm, where every
+    # tier's match renderer emits it (a marker on the match node itself is not
+    # one a tier reads)
+    _mark_widen(declared, ok_t if declared is not None else None,
+                value["arms"][0]["body"])
+    body.append({"step": "let", "name": _predeclared_mangle(stmt.name),
+                 "value": value, "mutable": stmt.mutable})
+
+
+def _lower_try_return(stmt, scope: dict, callables: set, alias_fns: dict,
+                      body: list, filename: str, type_env: dict, types: dict,
+                      expected_return: str | None) -> None:
+    """`return try e` (issue #1900): the prelude, then the `Ok` payload is
+    returned, checked against the fn's return as any returned value is."""
+    operand_t, ok_t, err_t = _try_types(stmt.expr, type_env, types, filename,
+                                        expected_return)
+    if not compatible(expected_return, ok_t, types):
+        raise mismatch(filename, stmt.line, "this function's return",
+                       expected_return, ok_t)
+    value = _lower_try_prelude(stmt.expr, scope, callables, alias_fns, body,
+                               filename, type_env, types, operand_t, ok_t, err_t)
+    arm = value["arms"][0]
+    _mark_widen(expected_return, ok_t, arm["body"])
+    arm["body"] = _inject_opt(expected_return, ok_t, arm["body"])
+    body.append({"step": "return", "expr": value})
+
+
 def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: list, filename: str,
                      type_env: dict | None = None, types: dict | None = None,
                      expected_return: str | None = None) -> None:
@@ -6303,6 +6471,10 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
                                  "binding, or use `=` to reassign an existing `var`. "
                                  "(Disjoint sibling blocks — the two arms of an "
                                  "if/else — may reuse a name, since only one is live.)")
+        if _is_try(stmt.value):
+            _lower_try_let(stmt, scope, callables, alias_fns, body, filename,
+                           type_env, types, expected_return)
+            return
         # host provenance: a let bound to a host constructor call carries
         # host-object methods, exempt from the stdlib method table
         if not stmt.mutable and _is_host_valued(stmt.value, scope):
@@ -6378,6 +6550,9 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         _mark_widen(declared, inferred, lowered_value)
         body.append({"step": "assign", "name": _predeclared_mangle(stmt.name),
                      "value": lowered_value})
+    elif isinstance(stmt, ReturnStmt) and _is_try(stmt.expr):
+        _lower_try_return(stmt, scope, callables, alias_fns, body, filename,
+                          type_env, types, expected_return)
     elif isinstance(stmt, ReturnStmt):
         if stmt.expr is not None:
             check_ast(stmt.expr, expected_return, type_env, types, filename, "this function's return")
@@ -6867,6 +7042,8 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 node["operands"] = "Str"
         return node
     if isinstance(expr, ExprUn):
+        if expr.op == "try":
+            raise _try_position_error(filename, expr.line)
         node = {"kind": "un", "op": expr.op,
                 "operand": _lower_pure_expr(expr.operand, scope, callables, alias_fns, filename, type_env, types)}
         # Unary minus is arithmetic too: negating Int.MIN overflows, and a
@@ -9547,6 +9724,13 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 node["operands"] = "Str"
         return node
     if isinstance(expr, ExprUn):
+        if expr.op == "try":
+            raise RevlError(
+                filename, line,
+                "`try` is not allowed in a provide method or component body yet: "
+                "a returned `Err` does not settle the unit there (issue #1900)",
+                hint="match on the `Result` instead",
+                code="T1", category="type-mismatch")
         return {"kind": "un", "op": expr.op,
                 "operand": _lower_component_pure_expr(expr.operand, env, scope, callables,
                                                       pure_only)}
