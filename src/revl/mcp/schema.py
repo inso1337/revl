@@ -77,6 +77,11 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
     # a capability-scoped `emission[db]` is a *checked* upper bound on where
     # this operation may reach; `None` is bare `emission` — "any capability"
     scope = op.get("capabilities")
+    # a `witnessed[db]` operation is the reversible class: its body may write
+    # through a tracked inverse, so it is not read-only — but it is not
+    # destructive either, since an abort reverts every write it made. `None` is
+    # bare `witnessed`; the key is absent on a plain operation.
+    witnessed = op.get("witnessed")
     uses_extern = observed["uses_extern"]
     params = op.get("params") or []
     properties, required = {}, []
@@ -99,6 +104,16 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
         else:
             behaviour += (" Unscoped: the declaration names no capability, so it "
                           "promises nothing about where the emission goes.")
+    elif witnessed is not None:
+        behaviour = ("Reversible: the compiler proved every mutation here carries a "
+                     "tracked inverse, and refused any provider that reaches an "
+                     "emission. A commit settles these writes; an abort reverts them.")
+        if witnessed:
+            behaviour += (" Capability-scoped: the compiler refused any provider "
+                          f"writing outside [{', '.join(witnessed)}].")
+        else:
+            behaviour += (" Unscoped: the declaration names no capability, so it "
+                          "promises nothing about where the writes go.")
     else:
         behaviour = ("Read-only: the compiler refused any unreverted mutation here, "
                      "and a service declaration bounds what its providers may do — "
@@ -120,8 +135,11 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
         **({"outputSchema": json_schema_for(returns, types)} if returns else {}),
         "annotations": {
             "title": f"{key}.{op_name}",
-            # derived from the checker, not asserted by an author:
-            "readOnlyHint": not emission,
+            # derived from the checker, not asserted by an author. `readOnlyHint`
+            # is a proof that the body mutates NOTHING — a witnessed operation
+            # writes (reversibly), so it may not claim it; `destructiveHint`
+            # stays false because the checker refuses anything it cannot revert.
+            "readOnlyHint": not emission and witnessed is None,
             "destructiveHint": emission,
             "idempotentHint": bool(op.get("commutative")),
             "openWorldHint": uses_extern,
@@ -133,10 +151,15 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
             "key": key,
             "service": service_name,
             "operation": op_name,
-            "classification": "emission" if emission else "checked",
+            "classification": ("emission" if emission else
+                               "witnessed" if witnessed is not None else "checked"),
             # `["*"]` is bare `emission` — any capability. A named list is an
             # upper bound the checker enforces (docs/capabilities.md).
             "capabilities": list(scope) if scope else (["*"] if emission else []),
+            # the same shape for the reversible class: `["*"]` is bare
+            # `witnessed`, and `[]` means the operation is plain.
+            "witnessed": (list(witnessed) if witnessed else
+                          (["*"] if witnessed is not None else [])),
             "async": bool(op.get("async")),
             "commutative": bool(op.get("commutative")),
             "annotationsDerivedFrom": "compiler",
@@ -156,6 +179,13 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
                 if emission and scope else
                 "G4 — an emission is the language's admission of irreversibility"
                 if emission else
+                f"G4 — a witnessed bound to [{', '.join(witnessed)}]: every "
+                f"mutation carries a tracked inverse, and no provider can reach "
+                f"an emission"
+                if witnessed else
+                "G4 — a bare `witnessed` bound: every mutation carries a tracked "
+                "inverse, and no provider can reach an emission"
+                if witnessed is not None else
                 "G4 — every mutation in this operation carries a tracked inverse"
             ),
         },
