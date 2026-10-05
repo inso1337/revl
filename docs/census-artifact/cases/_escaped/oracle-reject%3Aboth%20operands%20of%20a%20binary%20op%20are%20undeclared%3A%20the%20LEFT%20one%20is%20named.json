@@ -1,0 +1,1 @@
+{"case": "oracle-reject:both operands of a binary op are undeclared: the LEFT one is named", "buckets": ["agree-refuse/G1", "agree-refuse/G1"]}

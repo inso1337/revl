@@ -188,11 +188,17 @@ DATA_INPUTS = (
 # about what is drawn or what counts as a divergence, and a candidate that
 # adds a test has to be able to change it, which is the line
 # `test_the_fence_is_not_the_subject` draws.
+#
+# `gate_reference_line_ledger.json` (issue #1965) is read by the census's
+# `--check` / `--record-lines` and by `tests/test_gate_reference_census.py`,
+# never by `run()`: the scorer counts verdict divergences, not lines, so the
+# ledger decides nothing a scoring run draws.
 SCORING_UNREACHED = (
     "tools/fuzz_frontend.py",
     "tools/corpus_provenance.py",
     "tools/affected_tests.py",
     "pyproject.toml",
+    "tools/gate_reference_line_ledger.json",
 )
 
 

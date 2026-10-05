@@ -41,8 +41,8 @@ from .cli.change import (
     _run_apply, _run_branch, _run_canary, _run_compare, _run_estop, _run_plan,
     _run_quarantine, _run_recover, _run_repair, _run_replay, _run_undo)
 from .cli.interop import (
-    _run_contract, _run_export, _run_fmt, _run_import, _run_mcp, _run_serve,
-    _run_sourcemap)
+    _run_contract, _run_export, _run_fmt, _run_gen_types, _run_import, _run_mcp,
+    _run_serve, _run_sourcemap)
 from .cli.observe import (
     _run_attest, _run_changelog, _run_dash, _run_diff, _run_explain,
     _run_history_query, _run_metrics, _run_profile, _run_trace, _run_why)
@@ -518,8 +518,8 @@ def _run_audit(args, ir: dict) -> int:
         # audit_report; the interchange body must carry them too so it stays the
         # byte-for-byte unstamped audit report (test_version_is_additive_body_unchanged).
         from .audit_diff import (  # noqa: PLC0415
-            _capability_registers, _env_surface, _recovery_surface,
-            _retention_surface, _secrets_surface)
+            _capability_registers, _env_surface, _generated_surface,
+            _recovery_surface, _retention_surface, _secrets_surface)
         from .cardinality import cardinality  # noqa: PLC0415
         print(json.dumps(stamp(
             {"manifest": manifest, "boundary": boundary,
@@ -546,9 +546,15 @@ def _run_audit(args, ir: dict) -> int:
              # and present only when a resource handle reaches a non-inverse
              # callee; must match audit_report byte-for-byte
              # (test_version_is_additive_body_unchanged), so it is the same call.
-             **_retention_surface(ir)}), indent=2))
+             **_retention_surface(ir),
+             # issue #1896: the model digest behind each generated types file;
+             # must match audit_report byte-for-byte, so it is the same call.
+             **_generated_surface(ir)}), indent=2))
         return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
+    for row in ir.get("generated_from") or []:
+        print(f"generated: {row['file']} from {row['model']} "
+              f"(sha256 {row['sha256'][:12]}, checked against the model)")
     # item 350: the environment contract, printed before the components — it is
     # what the host must inject BEFORE any of them can load. Name, type,
     # requiredness and the author-written bound only; a value never reaches the
@@ -1389,6 +1395,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_mcp(args)
     if args.command == "import":
         return _run_import(args)
+    if args.command == "gen-types":
+        return _run_gen_types(args)
     if args.command == "export":
         return _run_export(args)
     if args.command == "sourcemap":

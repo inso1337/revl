@@ -818,7 +818,7 @@ def test_the_diff_filter_names_every_kind_of_input(artifact):
               "tools/gate_reference_census_baseline.json", "examples/a.rvl",
               "tests/fixtures/brand_new.rvl", "crates/revl-gate/src/admission.rs",
               "crates/revl-gate/Cargo.toml", "tools/census_artifact.py",
-              "docs/census-artifact/cases.jsonl", "selfhost/lower.rvl"]
+              "docs/census-artifact/cases/examples/a.rvl.json", "selfhost/lower.rvl"]
     assert artifact.moved_inputs(inputs, committed) == inputs
 
 
@@ -914,20 +914,22 @@ def _with(records, *, add=(), bucket=None):
     return out
 
 
-def test_the_committed_records_are_sorted_one_per_line_and_canonical(
+def test_the_committed_records_are_one_file_per_program_and_canonical(
         artifact, records):
-    """Sorted, one record per line, a blank line between records, and byte
-    for byte what `--write` produces from them. A hand-merged or reordered
-    file fails here before CI's `--verify --strict` names it too."""
-    for rel, text in _texts(artifact, records).items():
+    """One file per program at its `case_path`, every one byte for byte what
+    `--write` produces, no file for a program the records do not carry, and
+    pins one record per line. A hand-merged file fails here before CI's
+    `--verify --strict` names it too."""
+    texts = _texts(artifact, records)
+    for rel, text in texts.items():
         assert (ROOT / rel).read_text(encoding="utf-8") == text, (
             f"{rel} is not in canonical record form; regenerate it: "
             f"python3 tools/census_artifact.py --write")
-    for name in (artifact.CASES_RECORDS, artifact.PINS_RECORDS):
-        lines = (artifact.RECORDS / name).read_text().split("\n")
-        assert all(line == "" for line in lines[1::2]), (
-            f"{name}: records are not separated by a blank line")
-        assert all(line.startswith("[") for line in lines[0:-1:2])
+    on_disk = {f"docs/census-artifact/{rel}" for rel in artifact.case_files()}
+    assert on_disk == {rel for rel in texts if "/cases/" in rel}
+    lines = (artifact.RECORDS / artifact.PINS_RECORDS).read_text().split("\n")
+    assert all(line == "" for line in lines[1::2])
+    assert all(line.startswith("[") for line in lines[0:-1:2])
     ids = [row[0] for row in records["cases"]]
     assert ids == sorted(ids)
     for group in artifact.VERDICT_PIN_GROUPS:
@@ -941,7 +943,8 @@ def test_the_records_store_no_aggregate_and_no_digest(artifact, records,
     import re  # noqa: PLC0415
     c = committed["census"]
     stored = "".join((artifact.RECORDS / name).read_text()
-                     for name in artifact.RECORD_FILES)
+                     for name in (*artifact.RECORD_FILES,
+                                  *artifact.case_files()))
     for derived in (c["run"], c["compiler_tree_digest"], c["checker_version"],
                     committed["claims"][0]["text"]):
         assert derived not in stored, f"{derived!r} is stored in the records"
@@ -982,7 +985,10 @@ def test_a_report_rendered_from_records_is_the_report_a_run_builds(
                                   probe=probe)
     texts = artifact.record_texts(measured, probe)
     parsed = {
-        "cases": [json.loads(x) for x in texts["cases.jsonl"].split("\n") if x],
+        "cases": sorted(([r["case"], b] for name, t in texts.items()
+                         if name.startswith(artifact.CASES_DIR + "/")
+                         for r in [json.loads(t)] for b in r["buckets"]),
+                        key=lambda row: row[0]),
         "pins": {g: [] for g in artifact.VERDICT_PIN_GROUPS},
         "facts": json.loads(texts["facts.json"]),
     }
@@ -1019,8 +1025,7 @@ def test_two_independent_census_changes_merge_in_the_new_layout_only(
 
     Two pull requests, built the way the conflicting ones in the issue were:
     each adds a program to the corpus and edits a different module the census
-    opens. In the records each adds one line, at different places, and they
-    merge. In the layout they replace, the same two changes collide on the
+    opens. In the records each adds one file, and they merge. In the layout they replace, the same two changes collide on the
     run id, `n`, the bucket counts and the claims, and conflict in both
     files."""
     left = _with(records, add=[("examples/zz_merge_probe_left.rvl",
@@ -1047,19 +1052,26 @@ def test_two_independent_census_changes_merge_in_the_new_layout_only(
 @_needs_merge_tree
 def test_neighbouring_verdicts_merge_and_the_same_verdict_conflicts(
         artifact, records):
-    """The blank line between records is what lets two pull requests that
-    move the verdicts of neighbouring programs merge; moving the same
-    program's verdict two ways is a real conflict and stays one."""
+    """Two pull requests that move the verdicts of neighbouring programs, or
+    add programs that sort next to each other (the same-gap insert a single
+    sorted file still conflicted on), merge; moving the same program's
+    verdict two ways is a real conflict and stays one."""
     base = _texts(artifact, records)
     left = _with(records, bucket={10: "agree-refuse/G1"})
     right = _with(records, bucket={11: "agree-refuse/G4"})
     clean, conflicted = merge(base, _texts(artifact, left),
                               _texts(artifact, right))
     assert clean, conflicted
+    near = records["cases"][20][0]
+    clean, conflicted = merge(
+        base, _texts(artifact, _with(records, add=[(near + "a", "agree-admit")])),
+        _texts(artifact, _with(records, add=[(near + "b", "agree-admit")])))
+    assert clean, conflicted
     clean, conflicted = merge(
         base, _texts(artifact, left),
         _texts(artifact, _with(records, bucket={10: "agree-refuse/T1"})))
-    assert not clean and conflicted == ["docs/census-artifact/cases.jsonl"]
+    target = "docs/census-artifact/" + artifact.case_path(records["cases"][10][0])
+    assert not clean and conflicted == [target]
 
 
 def test_a_forgotten_regeneration_still_fails_the_strict_check(
@@ -1097,20 +1109,28 @@ def test_a_forgotten_regeneration_still_fails_the_strict_check(
     assert artifact.current_problems(result) == [
         "the verdict is different-inputs, not reproduced"]
 
-    for name in artifact.RECORD_FILES:
+    for name in (*artifact.RECORD_FILES, *artifact.case_files()):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(
             (artifact.RECORDS / name).read_text(encoding="utf-8"),
             encoding="utf-8")
-    fresh = {name.split("/")[-1]: text
+    fresh = {name.split("docs/census-artifact/", 1)[1]: text
              for name, text in _texts(artifact, added).items()}
     problems = artifact.record_problems(fresh, tmp_path)
-    assert problems and all("cases.jsonl" in p for p in problems)
+    assert problems == ["cases/examples/zz_unrecorded.rvl.json does not exist"]
+    # and a stale file for a program no longer run is named too
+    (tmp_path / "cases" / "examples" / "zz_gone.rvl.json").write_text(
+        artifact.case_text("examples/zz_gone.rvl", ["agree-admit"]))
+    assert any("zz_gone" in p for p in artifact.record_problems(
+        {**fresh, "cases/examples/zz_unrecorded.rvl.json":
+         fresh["cases/examples/zz_unrecorded.rvl.json"]}, tmp_path))
 
 
 def test_verify_reads_the_records_directory(artifact, tmp_path):
     """`--verify` defaults to the records; an unreadable directory is
     unusable input (exit 2) before any census runs."""
-    (tmp_path / "cases.jsonl").write_text("not json\n")
+    (tmp_path / "cases" / "x").mkdir(parents=True)
+    (tmp_path / "cases" / "x" / "y.rvl.json").write_text("not json\n")
     code, text = artifact.verify(tmp_path)
     assert code == 2 and "cannot read the records" in text
 
@@ -1318,3 +1338,50 @@ def test_a_current_record_still_asserts_the_limit_sentence(artifact):
     with pytest.raises(AssertionError):
         test_the_reproduction_states_its_own_limit(
             artifact, {"census": {"reproduction": {"does_not_establish": "x"}}})
+
+
+# --- one record file per program: the path rule (issue #1768) ---------------
+
+
+@pytest.mark.parametrize("case_id,path", [
+    ("tests/fixtures/value_method_call/t1_x.rvl",
+     "cases/tests/fixtures/value_method_call/t1_x.rvl.json"),
+    ("examples/app/notes.rvl", "cases/examples/app/notes.rvl.json"),
+    ("admission:comment_only", "cases/_escaped/admission%3Acomment_only.json"),
+    ("oracle-reject:a b/c", "cases/_escaped/oracle-reject%3Aa%20b%2Fc.json"),
+    ("_escaped/x.rvl", "cases/_escaped/_escaped%2Fx.rvl.json"),
+    ("../x.rvl", "cases/_escaped/..%2Fx.rvl.json"),
+    ("a//b.rvl", "cases/_escaped/a%2F%2Fb.rvl.json"),
+    ("caf\u00e9.rvl", "cases/_escaped/caf%C3%A9.rvl.json"),
+])
+def test_a_case_id_maps_to_one_readable_path(artifact, case_id, path):
+    assert artifact.case_path(case_id) == path
+
+
+def test_every_committed_case_id_has_its_own_file(artifact, records):
+    ids = {row[0] for row in records["cases"]}
+    paths = {artifact.case_path(i) for i in ids}
+    assert len(paths) == len(ids), "two case ids share a record file"
+    assert len({p.lower() for p in paths}) == len(paths), (
+        "two record paths differ only in case (a case-insensitive filesystem "
+        "would merge them)")
+
+
+def test_a_record_filed_at_the_wrong_path_is_refused(artifact, tmp_path):
+    (tmp_path / "cases" / "examples").mkdir(parents=True)
+    (tmp_path / "cases" / "examples" / "a.rvl.json").write_text(
+        artifact.case_text("examples/b.rvl", ["agree-admit"]))
+    with pytest.raises(ValueError, match="whose file is"):
+        artifact._read_cases(tmp_path)
+
+
+def test_write_deletes_the_file_of_a_program_no_longer_run(artifact, tmp_path):
+    fresh = {"pins.jsonl": "", "facts.json": "{}\n",
+             "cases/examples/a.rvl.json": artifact.case_text("examples/a.rvl",
+                                                             ["agree-admit"])}
+    artifact.write_records(fresh, tmp_path)
+    (tmp_path / "cases" / "old" / "gone.rvl.json").parent.mkdir(parents=True)
+    (tmp_path / "cases" / "old" / "gone.rvl.json").write_text("{}\n")
+    artifact.write_records(fresh, tmp_path)
+    assert artifact.case_files(tmp_path) == ["cases/examples/a.rvl.json"]
+    assert not (tmp_path / "cases" / "old").exists()

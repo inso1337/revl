@@ -39,6 +39,7 @@
     "class=witnessed",
     "fn=Map.new",
     "has_config=<true>",
+    "key=<activation>",
     "kind=bool",
     "kind=hole",
     "kind=host",
@@ -81,6 +82,7 @@
     "class=emission",
     "class=witnessed",
     "interp_type=Float",
+    "key=<activation>",
     "kind=arrow",
     "kind=hole",
     "kind=instance-get",
@@ -127,6 +129,7 @@
     "class=emission",
     "class=witnessed",
     "interp_type=Float",
+    "key=<activation>",
     "kind=format",
     "kind=hole",
     "kind=instance-get",
@@ -160,6 +163,7 @@
     "step=unload"
   ],
   "emit_ts": [
+    "key=<activation>",
     "kind=hole",
     "name=Err",
     "name=Ok",

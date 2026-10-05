@@ -458,6 +458,7 @@ IR_TOPLEVEL_FIELDS = frozenset({
     "fault_tests",    # lowered fault-injection tests
     "holes",          # the obligation ledger (present only for a draft)
     "stdlib_shadow",  # item 422: a shadowed stdlib module, when one was used
+    "generated_from",  # issue #1896: each gen-types file's model digest
     "rows",           # item 426 S1: the composition row table, emitted onto the
                       # document and copied onto the manifest, so it re-enters
                       # the frontend at the S3 admit round-trip
@@ -10442,11 +10443,13 @@ def _refuse_leaky_arrow(node, env, source: str, line: int = 0) -> None:
                     code="A1", category="async-propagation",
                 )
             # its own body still walked below (a sync inner arrow may leak)
+        # issue #1965: the caller's line (the method's) is carried down, so
+        # a nested arrow is reported there rather than at line 0
         for value in node.values():
-            _refuse_leaky_arrow(value, env, source)
+            _refuse_leaky_arrow(value, env, source, line)
     elif isinstance(node, list):
         for value in node:
-            _refuse_leaky_arrow(value, env, source)
+            _refuse_leaky_arrow(value, env, source, line)
 
 
 def _coerce_async_args(callee_name, args, env, line):
@@ -13099,6 +13102,25 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     return lowered
 
 
+def _crosses_computer_use(body: list, env: "Env") -> bool:
+    """Whether a provide-method body crosses a computer-use verb (issue #1369).
+
+    The method call is the unit of a UI transaction (docs/design/538-ui-
+    transactions.md §0: "a UI transaction is not a new effect construct"), so
+    the IR marks the method rather than adding a construct. The question is
+    asked of the same capability set the G4 provider upper bound reads
+    (`_method_emissions`): a token whose root is in `ui_family.ROOTS`
+    (`screen.observe`, `ui.click`, a deeper rung) is a computer-use crossing. A
+    call through a required key contributes the KEY, not the providing
+    method's verbs, so the mark sits on the method whose own body performs the
+    verb. Additive: a method that crosses none carries no key, so every other
+    program's IR is byte-identical."""
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+    _, caps = _method_emissions(body, env)
+    return any(cap.split(".", 1)[0] in ui_family.ROOTS for cap in caps
+               if isinstance(cap, str))
+
+
 def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: set[str], env: Env) -> dict:
     filename = env.filename
     comp = env.component
@@ -13828,6 +13850,13 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     code="G4", category="emission-capability",
                 )
 
+        # issue #1369 (item 522 slice 3): the provide-method call is the UI
+        # transaction unit, so a method whose body crosses a computer-use verb
+        # carries `"unit": "ui"`. Computed here, while the body's resolved
+        # crossings are still in scope, and stamped where the method is
+        # appended.
+        ui_unit = _crosses_computer_use(mbody, env)
+
         env.resolved_crossings = {}
 
         # sync/async arrow polymorphism (item 342): in a SYNC method, redirect
@@ -13968,7 +13997,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # the value its effect used, so name those locals for the emitters.
         _pin_inverse_captures(mbody)
 
-        methods.append({"name": method.name, "params": safe_params, "body": mbody})
+        lowered = {"name": method.name, "params": safe_params, "body": mbody}
+        if ui_unit:
+            lowered["unit"] = "ui"
+        methods.append(lowered)
 
     missing = set(svc.methods) - implemented
     if missing:

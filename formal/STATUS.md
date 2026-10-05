@@ -1251,18 +1251,19 @@ not that it disagrees.
 
 An absence cannot disagree, so the two buckets aimed at a row the model
 does carry are `ratcheted` instead: `out-of-fragment-G5` and
-`out-of-fragment-G6` and `out-of-fragment-inverse` are held to the names
-in `formal/out_of_fragment_ledger.json`, which shrinks only. A file that
-JOINS one fails the gate, and a line no longer in its bucket fails it
-until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
-a new G6 purity fixture, cannot arrive while the model stays silent
-about it. `agree-*` and the generic `out-of-fragment` stay
-informational; that one collects every refusal under a rule the model
-states no row about, so it is the list of unbuilt work. `out-of-scope`
-is informational too and is not a hole: a type-checker refusal (T1, T2,
-T3) or name resolution of declarations and of the lifecycle test DSL,
-routed by an explicit rule (`out_of_scope`), so it grows with corpus
-work that never touched this layer.
+`out-of-fragment-G6` and `out-of-fragment-inverse` and
+`out-of-fragment-witnessed` are held to the names in
+`formal/out_of_fragment_ledger/`, which shrinks only. A file that JOINS
+one fails the gate, and a record no longer in its bucket fails it until
+it is deleted. So a new `undo` shape the `Prog` cannot resolve, or a new
+G6 purity fixture, cannot arrive while the model stays silent about it.
+`agree-*` and the generic `out-of-fragment` stay informational; that one
+collects every refusal under a rule the model states no row about, so it
+is the list of unbuilt work. `out-of-scope` is informational too and is
+not a hole: a type-checker refusal (T1, T2, T3) or name resolution of
+declarations and of the lifecycle test DSL, routed by an explicit rule
+(`out_of_scope`), so it grows with corpus work that never touched this
+layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1295,25 +1296,18 @@ work that never touched this layer.
 | `missed-intercept` | 0 | **FATAL** |
 | `missed-prelude` | 0 | **FATAL** |
 | `out-of-fragment` | printed by the gate | informational |
-| `out-of-fragment-G5` | 0 | ratcheted |
-| `out-of-fragment-G6` | 0 | ratcheted |
-| `out-of-fragment-inverse` | 1 | ratcheted |
+| `out-of-fragment-G5` | in the ledger | ratcheted |
+| `out-of-fragment-G6` | in the ledger | ratcheted |
+| `out-of-fragment-inverse` | in the ledger | ratcheted |
+| `out-of-fragment-witnessed` | in the ledger | ratcheted |
 | `out-of-scope` | printed by the gate | informational |
 
-Nothing is counted without being named; the files in the non-`agree`
-buckets are:
-
-`out-of-fragment-G5`:
-
-- none
-
-`out-of-fragment-G6`:
-
-- none
-
-`out-of-fragment-inverse`:
-
-- `examples/rejections/g4_undo_not_release.rvl`
+The members of the ratcheted buckets are not listed here. Each is one
+file under `formal/out_of_fragment_ledger/<bucket>/`, which the gate
+holds equal to its bucket in both directions; `python3
+formal/harness/diff_corpus.py --show-ledger` prints them, sorted,
+without running the corpus. A list here put two pull requests that each
+added a name next to the other's in conflict (issue #1768).
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.

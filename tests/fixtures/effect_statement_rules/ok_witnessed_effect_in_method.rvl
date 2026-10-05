@@ -1,0 +1,17 @@
+// Admitted (issue #1963): a witnessed effect with no site `undo` in a
+// provide method, the shape the site-undo rule must leave alone.
+type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      effect put_w(k)
+  } }
+}

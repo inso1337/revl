@@ -32,9 +32,9 @@
 
 ["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component", 2, 2]
 
-["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component_new", 7, 7]
+["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component_new", 12, 12]
 
-["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_components", 4, 4]
+["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_components", 5, 5]
 
 ["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_req_bindings", 2, 2]
 
@@ -66,9 +66,9 @@
 
 ["function", "extern-declared-compensate-item-254-issue-1592-emit", "_as_fn_call", 5, 5]
 
-["function", "extern-declared-compensate-item-254-issue-1592-emit", "_component_has_effectful_methods", 1, 1]
+["function", "extern-declared-compensate-item-254-issue-1592-emit", "_component_has_effectful_methods", 2, 2]
 
-["function", "extern-declared-compensate-item-254-issue-1592-emit", "_declared_call", 7, 7]
+["function", "extern-declared-compensate-item-254-issue-1592-emit", "_declared_call", 16, 16]
 
 ["function", "extern-declared-compensate-item-254-issue-1592-emit", "_emit_compensations", 3, 3]
 
@@ -256,6 +256,26 @@
 
 ["function", "stream-runtime-boundary-these-paths-recognize-subscribe-merg", "_stream_stage_arrow", 1, 1]
 
+["reason", "ui-transaction-unit-item-522-issue-1369", "The UI transaction unit (item 522 slice 3, issue #1369): `_ui_transaction_facts` and `_calls_any` derive the per-method units from revl.ui_transaction, `_ui_method_scope` and `_ui_scoped_method_body` run a unit method's body under `catch_unwind` in a `RevlUiScope`, and `_emit_ui_crossing_step`, `_ui_cross`, `_ui_comp` and `_comp_name` render each computer-use crossing through `revl_ui_cross`; `_emit_compensation_registration` registers into the scope. The same branches raise `_component_has_effectful_methods`, `_declared_call`, `_emit_component_new`, `_emit_components`, `_emit_method_witnessed_step` and `_method_body_lines`. selfhost/emit_rust.rvl does not port the unit (the self-host gap of issue #1972, which names py and ts), and the corpus has no computer-use document with @rs bodies. The runtime proof is backends/rust/test_ui_transaction_rust_1369.py."]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_calls_any", 7, 7]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_comp_name", 6, 6]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_emit_compensation_registration", 2, 2]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_emit_ui_crossing_step", 12, 12]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_comp", 1, 1]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_cross", 1, 1]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_method_scope", 1, 1]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_scoped_method_body", 9, 9]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_transaction_facts", 29, 29]
+
 ["reason", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `_rust_type`'s statements."]
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_arg_ref_name", 2, 2]
@@ -304,7 +324,7 @@
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_dedup_colour_erased_poly_externs._rewrite", 6, 6]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_method_witnessed_step", 19, 19]
+["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_method_witnessed_step", 24, 24]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_setup_step", 22, 22]
 
@@ -316,7 +336,7 @@
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_bodies_have_witnessed", 1, 1]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_body_lines", 27, 27]
+["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_body_lines", 29, 29]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_step_is_witnessed_effect", 2, 2]
 

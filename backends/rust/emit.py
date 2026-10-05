@@ -1902,11 +1902,23 @@ def _declared_call(node: dict, call: str, ctx) -> str:
     if not ctx.declared_ctx or node is ctx.declared_skip:
         return call
     ext = ctx.compensated.get(node.get("name"))
+    if _is_ui_crossing(node, ctx):
+        # issue #1369: a computer-use crossing in a value position
+        comp = "None"
+        if ext is not None:
+            comp_node = _as_fn_call(ext["compensate"])
+            comp = _ui_comp(ctx.declared_label, comp_node, _render_expr(comp_node, ctx, {}))
+        return _ui_cross(ctx, node, call, comp)
     if ext is None:
         return call
     offset = _render_expr(_as_fn_call(ext["compensate"]), ctx, {})
     owner = ctx.declared_ctx
     label = _string(ctx.declared_label)
+    if ctx.ui_scope:
+        # issue #1369: inside a UI scope the offset is the scope's until the
+        # call returns
+        comp = _ui_comp(ctx.declared_label, _as_fn_call(ext["compensate"]), offset)
+        return f"{{ let _revl_dv = {call}; {ctx.ui_scope}.register(\"\", {comp}); _revl_dv }}"
     return (f"{{ let _revl_dv = {call}; "
             f"let _revl_state = revl_teardown_of(&{owner}); "
             f"let _revl_call: Box<dyn FnOnce() + Send> = Box::new(move || {{ let _ = {offset}; }}); "
@@ -1970,7 +1982,8 @@ def _component_needs_teardown(component: dict, witnessed: dict,
     return (_body_has_witnessed(body, witnessed)
             or _body_has_compensation(body, compensated)
             or _method_bodies_have_compensation(component, compensated)
-            or _method_bodies_have_witnessed(component, witnessed))
+            or _method_bodies_have_witnessed(component, witnessed)
+            or _component_ui_scoped(component))
 
 
 # item 322 Slice 2: record mode. When True, a witnessed transactional step also
@@ -1979,6 +1992,14 @@ def _component_needs_teardown(component: dict, witnessed: dict,
 # False -> byte-identical output (every existing golden is the guard). Mirrors
 # backends/go/emit.py's `_RECORD_MODE`.
 _RECORD_MODE = False
+
+# issue #1369 (item 522 slice 3): the document's computer-use externs, by name,
+# and its provide methods that run in a UI scope, keyed by
+# `(component, key, method)`. Set per `emit()` from `_ui_transaction_facts`
+# and restored after; both empty for a document with no computer-use extern,
+# which then emits byte-identically.
+_UI_EXTERNS: dict = {}
+_UI_SCOPES: dict = {}
 
 # The placeholder a confidential witness is written as in the durable WAL. Must
 # equal `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the
@@ -4491,9 +4512,19 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
     return parts
 
 
+def _req_ident(local: str) -> str:
+    """A requirement key as a Rust identifier: its local, its provider-struct
+    field and its `self.` capture. A key that is a Rust keyword (`box`,
+    `type`, `match`) takes the same `_` ladder every other user identifier
+    does (`box` -> `box_`), as `_render_expr`'s `req` arm already spells it.
+    The STRING key (`ctx.require::<..>("box")`, the inject gate) stays the
+    surface spelling (issue #1927)."""
+    return _ident(local, "requirement")
+
+
 def _method_body(env: _Env, method: dict) -> str:
     rename = {b: _self_bind(env, b) for b in _binds(env.component)}
-    rename.update({local: f"self.{local}" for local in env.reqs})
+    rename.update({local: f"self.{_req_ident(local)}" for local in env.reqs})
     if _has_config(env.component):
         rename["config"] = "self.config"
     return _pure_method_statements(env, method, rename)
@@ -4521,6 +4552,8 @@ def _iter_method_steps(steps):
 
 
 def _component_has_effectful_methods(component: dict, compensated: dict | None = None) -> bool:
+    if _component_ui_scoped(component):
+        return True  # issue #1369: a UI scope flushes onto the activation
     for step in component.get("body") or []:
         if step.get("step") != "provide":
             continue
@@ -4612,15 +4645,16 @@ def _self_bind(env: _Env, bind: str) -> str:
     """A provide method's read of an activation bind. A value-held bind
     (issues #1920, #1931) is read through `&self`, so a read of it is a clone;
     a shared resource is an `Arc` whose verbs borrow it."""
+    field = _ident(bind, "binding")
     if _held_bind_type(env, bind) is not None:
-        return f"self.{bind}.clone()"
-    return f"self.{bind}"
+        return f"self.{field}.clone()"
+    return f"self.{field}"
 
 
 def _method_scope_rename(env: _Env) -> dict[str, str]:
     rename = {b: _self_bind(env, b) for b in _binds(env.component)}
     for req in env.reqs:
-        rename[req] = f"self.{req}"
+        rename[req] = f"self.{_req_ident(req)}"
     if _has_config(env.component):
         rename["config"] = "self.config"
     return rename
@@ -4705,9 +4739,9 @@ def _bare_param(node: object, method: dict) -> str | None:
 def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) -> None:
     pad = "    " * indent
     for bind in _binds(env.component):
-        out.append(f"{pad}let {bind}_undo = self.{bind}.clone();")
+        out.append(f"{pad}let {bind}_undo = self.{_ident(bind, 'binding')}.clone();")
     for req in env.reqs:
-        out.append(f"{pad}let {req}_undo = self.{req}.clone();")
+        out.append(f"{pad}let {req}_undo = self.{_req_ident(req)}.clone();")
     for param in method.get("params") or []:
         out.append(f"{pad}let {param}_undo = {param}.clone();")
 
@@ -4735,6 +4769,26 @@ def _provide_let_type(env: _Env, value: object, ctx: "_V3Ctx") -> str | None:
                 methods = env.services[service].get("methods") or {}
                 return (methods.get(method) or {}).get("returns")
     return None
+
+
+def _ui_scoped_method_body(env: "_Env", method: dict, scope: tuple, ret: str,
+                           out: list[str]) -> None:
+    """A provide method that runs in a UI scope (issue #1369): open the
+    scope, run the body under `catch_unwind`, and close the scope over the
+    outcome, which settles a failed unit and flushes everything else onto the
+    activation. The body is the ordinary method body, one level deeper."""
+    name, settles = scope
+    out.append(f"        let _revl_ui = RevlUiScope::new({_string(name)}, "
+               f"{'true' if settles else 'false'});")
+    out.append("        let _revl_out = std::panic::catch_unwind("
+               f"std::panic::AssertUnwindSafe(|| -> {ret} {{")
+    env.v3_ctx().ui_scope = "_revl_ui"
+    try:
+        _method_body_lines(env, method, out, indent=3)
+    finally:
+        env.v3_ctx().ui_scope = None
+    out.append("        }));")
+    out.append("        _revl_ui.close(&self.ctx, _revl_out)")
 
 
 def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> None:
@@ -4791,7 +4845,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             # borrows (`prev.push(..)`) or clones stay bare.
             for local in sorted(_undo_reclone_locals(
                     acquire_node, undo_node, body_locals, env.v3_ctx())):
-                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
                 undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
             out.append(f"{pad}let _ = {acquire};")
@@ -4807,8 +4861,15 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             env.v3_ctx().declared_skip = acquire_node
             acquire = _expr(acquire_node, env, acquire_rename)
             env.v3_ctx().declared_skip = None
-            out.append(f"{pad}let _ = {acquire};")
             compensations = _emit_compensations(step, env.compensated)
+            if _is_ui_crossing(acquire_node, env.v3_ctx()):
+                # issue #1369: a computer-use crossing registers its own
+                # compensation, the site-spelled one or else the declared
+                # one, even when it panics (`revl_ui_cross`)
+                _emit_ui_crossing_step(env, method, step, index, acquire, compensations,
+                                       body_locals, out, indent)
+                continue
+            out.append(f"{pad}let _ = {acquire};")
             if not compensations:
                 continue
             # `compensation` (item 247 / the teardown-contract two-phase
@@ -4822,9 +4883,10 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 _method_undo_clones(env, method, out, indent)
                 for local in sorted(_undo_reclone_locals(
                         acquire_node, compensate_node, body_locals, env.v3_ctx())):
-                    out.append(f"{pad}let {local}_undo = {local}.clone();")
+                    out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
                     undo_rename[local] = f"{local}_undo"
-                out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
+                if not env.v3_ctx().ui_scope:
+                    out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
                 _emit_compensation_registration(
                     env, compensate_node, f"{env.name}.{method.get('name')}.compensate.{index}",
                     out, indent, undo_rename, ctx_expr="self.ctx", propagate=False)
@@ -4884,7 +4946,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             _method_undo_clones(env, method, out, indent)
             for local in sorted(_undo_reclone_locals(
                     acquire_node, undo_node, body_locals, env.v3_ctx())):
-                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
                 undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
             out.append(f"{pad}let {bind} = {acquire};")
@@ -4975,7 +5037,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             out.append(f"    {_ident(b, 'binding')}: {_bind_field_type(env, b, map_values)},")
         if env.reqs:
             for local, req_service in env.reqs.items():
-                out.append(f"    {local}: Arc<Box<dyn {_svc(req_service)}>>,")
+                out.append(f"    {_req_ident(local)}: Arc<Box<dyn {_svc(req_service)}>>,")
         out.extend(_config_struct_field(component, key))
         if has_effectful:
             out.append("    ctx: Arc<cordis::Context>,")
@@ -5014,7 +5076,14 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             if has_effectful:
                 env.v3_ctx().declared_ctx = "self.ctx"
                 env.v3_ctx().declared_label = f"{env.name}.{original_mname}.declared.compensate"
-            if _method_has_effectful_steps(method):
+            scope = _ui_method_scope(env, key, original_mname)
+            if scope is not None:
+                out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
+                if secret_params:
+                    out.append(f"        {mark.rstrip()}")
+                _ui_scoped_method_body(env, method, scope, ret, out)
+                out.append("    }")
+            elif _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
                 if secret_params:
                     out.append(f"        {mark.rstrip()}")
@@ -5084,8 +5153,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             service = step.get("service")
             struct = f"{env.name}{_camel(key)}"
             fields = ", ".join(
-                [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
-                + [f"{local}: {local}.clone()" for local in env.reqs]
+                [f"{_ident(b, 'binding')}: {_ident(b, 'binding')}.clone()" for b in _binds(env.component)]
+                + [f"{_req_ident(local)}: {_req_ident(local)}.clone()" for local in env.reqs]
                 + _config_ctor_field(env.component, key)
                 + (["ctx: Arc::new(ctx.clone())"] if has_effectful else [])
             )
@@ -5341,7 +5410,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         # a provide-method may call a required service, so the provider owns
         # the same bindings the effectful path captures (java does this too)
         for local, req_service in env.reqs.items():
-            out.append(f"    {local}: Arc<Box<dyn {_svc(req_service)}>>,")
+            out.append(f"    {_req_ident(local)}: Arc<Box<dyn {_svc(req_service)}>>,")
         out.extend(_config_struct_field(component, key))
         out.append("}")
         out.append(f"impl {_svc(service)} for {struct} {{")
@@ -5456,10 +5525,10 @@ def _emit_req_bindings(env: "_Env", cname: str, out: list[str], indent: int) -> 
     for local, service in env.reqs.items():
         if local in env.routes:
             struct = f"RevlRouter{cname}{_camel(local)}"
-            out.append(f"{pad}let {local}: std::sync::Arc<Box<dyn {_svc(service)}>> = "
+            out.append(f"{pad}let {_req_ident(local)}: std::sync::Arc<Box<dyn {_svc(service)}>> = "
                        f"{struct}::_revl_new(ctx.clone());")
         else:
-            out.append(f"{pad}let {local} = ctx.require::<Box<dyn {_svc(service)}>>({_string(local)})?;")
+            out.append(f"{pad}let {_req_ident(local)} = ctx.require::<Box<dyn {_svc(service)}>>({_string(local)})?;")
 
 
 def _emit_setup_value(node: dict, env: _Env) -> str:
@@ -5605,6 +5674,15 @@ def _emit_method_witnessed_step(env: "_Env", method: dict, step: dict, ext: dict
     undo = _expr(ext["undo"], env)
     out.append(f"{pad}if let Ok(ref {witv}) = {tmp} {{")
     out.append(f"{pad}    let result: {witness_ty} = {witv}.clone();")
+    if env.v3_ctx().ui_scope:
+        # issue #1369: inside a UI scope the inverse is the scope's until the
+        # call returns
+        undo_node = ext["undo"]
+        out.append(f"{pad}    {env.v3_ctx().ui_scope}.witnessed({label}, "
+                   f"{_string(_comp_name(_as_fn_call(undo_node)))}, "
+                   f"Box::new(move || {{ let _ = {undo}; }}));")
+        out.append(f"{pad}}}")
+        return
     out.append(f"{pad}    let _revl_state = revl_teardown_of(&self.ctx);")
     out.append(f"{pad}    let _ = self.ctx.effect({label}, move || {{")
     out.append(f"{pad}        if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{")
@@ -5613,6 +5691,30 @@ def _emit_method_witnessed_step(env: "_Env", method: dict, step: dict, ext: dict
     out.append(f"{pad}        Ok(())")
     out.append(f"{pad}    }});")
     out.append(f"{pad}}}")
+
+
+def _emit_ui_crossing_step(env: "_Env", method: dict, step: dict, index: int, acquire: str,
+                           compensations: list, body_locals: set, out: list[str],
+                           indent: int) -> None:
+    """An `emit` statement whose call is a computer-use crossing inside a UI
+    scope (issue #1369). One compensation per crossing (issue #1902): the
+    site-spelled clause, else the extern's declared one. The locals the
+    compensation reads are cloned first, as on the plain path, so its `move`
+    closure owns them."""
+    pad = "    " * indent
+    comp = "None"
+    if compensations:
+        compensate_node = compensations[0]
+        undo_rename = _method_undo_rename(env, method)
+        _method_undo_clones(env, method, out, indent)
+        for local in sorted(_undo_reclone_locals(
+                step.get("expr"), compensate_node, body_locals, env.v3_ctx())):
+            out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
+            undo_rename[local] = f"{local}_undo"
+        call = _expr(compensate_node, env, rename=undo_rename)
+        comp = _ui_comp(f"{env.name}.{method.get('name')}.compensate.{index}",
+                        compensate_node, call)
+    out.append(f"{pad}let _ = {_ui_cross(env.v3_ctx(), step.get('expr'), acquire, comp)};")
 
 
 def _emit_compensation_registration(env: "_Env", compensate_node: dict, label_text: str,
@@ -5631,6 +5733,12 @@ def _emit_compensation_registration(env: "_Env", compensate_node: dict, label_te
     other method-body registration) inside a provide method."""
     pad = "    " * indent
     call = _expr(compensate_node, env, rename=rename)
+    if env.v3_ctx().ui_scope:
+        # issue #1369: inside a UI scope the entry is the scope's until the
+        # call returns
+        out.append(f"{pad}{env.v3_ctx().ui_scope}.register(\"\", "
+                   f"{_ui_comp(label_text, compensate_node, call)});")
+        return
     label = _string(label_text)
     tail = "?;" if propagate else ";"
     lead = "" if propagate else "let _ = "
@@ -5659,11 +5767,11 @@ def _emit_activation_compensation(env: "_Env", compensate_node: dict, out: list[
     rename: dict[str, str] = {}
     for req in env.reqs:
         req_c = f"{req}_comp"
-        out.append(f"{pad}let {req_c} = {req}.clone();")
+        out.append(f"{pad}let {req_c} = {_req_ident(req)}.clone();")
         rename[req] = req_c
     for local in sorted(referenced & set(env.activation_binds)):
         local_c = f"{local}_comp"
-        out.append(f"{pad}let {local_c} = {local}.clone();")
+        out.append(f"{pad}let {local_c} = {_ident(local, 'binding')}.clone();")
         rename[local] = local_c
     _emit_compensation_registration(
         env, compensate_node, env.name + ".compensate", out, indent, rename)
@@ -5699,7 +5807,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         undo_rename = {step["bind"]: undo_name}
         for req in env.reqs:
             req_undo = f"{req}_undo"
-            out.append(f"{pad}let {req_undo} = {req}.clone();")
+            out.append(f"{pad}let {req_undo} = {_req_ident(req)}.clone();")
             undo_rename[req] = req_undo
         is_cas = _is_map_cas(step.get("acquire"))
         if is_cas:
@@ -5715,7 +5823,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                 if local == step["bind"]:
                     continue
                 local_undo = f"{local}_undo"
-                out.append(f"{pad}let {local_undo} = {local}.clone();")
+                out.append(f"{pad}let {local_undo} = {_ident(local, 'binding')}.clone();")
                 undo_rename[local] = local_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         label = _string(env.name + "." + step["bind"] + ".undo")
@@ -5739,7 +5847,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         undo_rename: dict[str, str] = {}
         for req in env.reqs:
             req_undo = f"{req}_undo"
-            out.append(f"{pad}let {req_undo} = {req}.clone();")
+            out.append(f"{pad}let {req_undo} = {_req_ident(req)}.clone();")
             undo_rename[req] = req_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         out.append(f"{pad}let _ = {acquire};")
@@ -5776,7 +5884,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         rename: dict[str, str] = {}
         for req in env.reqs:
             cloned = f"{req}_t{n}"
-            out.append(f"{pad}let {cloned} = {req}.clone();")
+            out.append(f"{pad}let {cloned} = {_req_ident(req)}.clone();")
             rename[req] = cloned
         # a firing that emits an extern declaring its own `compensate` registers
         # it on the activation's accumulator, once per firing, after the fire
@@ -5852,8 +5960,8 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         service = step.get("service")
         struct = f"{env.name}{_camel(key)}"
         fields = ", ".join(
-            [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
-            + [f"{local}: {local}.clone()" for local in env.reqs]
+            [f"{_ident(b, 'binding')}: {_ident(b, 'binding')}.clone()" for b in _binds(env.component)]
+            + [f"{_req_ident(local)}: {_req_ident(local)}.clone()" for local in env.reqs]
             + _config_ctor_field(env.component, key)
         )
         out.append(f"{pad}let {key}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
@@ -6490,6 +6598,10 @@ class _V3Ctx:
         self.declared_ctx: str | None = None
         self.declared_label: str = ""
         self.declared_skip = None
+        # issue #1369: inside a provide method that runs in a UI scope, the
+        # local holding that scope (`_revl_ui`); its registrations and its
+        # computer-use crossings go through it instead of `self.ctx`.
+        self.ui_scope: str | None = None
         # Declared return type of every free function / extern, so a `let`
         # binding to a call can be typed (`let dec = decode(..)` -> `Reply`) and
         # a later by-value use knows to clone (see `_by_value_arg`).
@@ -9335,6 +9447,359 @@ def _revl_teardown_preamble() -> list[str]:
     ]
 
 
+_REVL_UI_TRANSACTION = r'''// ---- the UI transaction unit (item 522 slice 3, issue #1369) ----
+// The rust mirror of backends/python/runtime.py's `Frame.ui_transaction` and
+// `declared_crossing`. A provide method that crosses a computer-use verb is
+// one unit. The method holds its scope explicitly (`_revl_ui`) and runs its
+// body under `catch_unwind`: every registration and every computer-use
+// crossing in the body goes through the scope, so two concurrent calls on
+// one activation never see each other's entries.
+//
+// The scope buffers what the call registers. A call that returns flushes the
+// buffer onto the activation in registration order, as the same disposers a
+// method body registers outside a unit. A unit whose call panics settles its
+// own entries instead: Phase 1 replays its witnessed inverses newest first,
+// Phase 2 runs its compensations newest first under the compensation budget,
+// each caught and recorded, the run is recorded, and the panic resumes
+// unchanged. The entries never reach the activation, so neither the clean
+// unload after the failed call nor a later `revl_abort` runs them. A call
+// scope (`settles` false) flushes on a panic too. Settling runs after the
+// body's unwind has been caught, never inside a destructor, so a panicking
+// compensation is caught like any other.
+
+/// One compensation a settled unit ran: the crossing it offsets ("" for an
+/// entry with no crossing), the compensation, and whether it panicked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevlUiRan {
+    pub step: String,
+    pub compensation: String,
+    pub failed: bool,
+}
+
+/// The record a settled unit leaves, the rust form of the py tier's
+/// `Frame.ui_transaction_runs` entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevlUiRun {
+    pub unit: String,
+    pub failed_step: String,
+    pub crossed: Vec<String>,
+    pub error: String,
+    pub ran: Vec<RevlUiRan>,
+    pub replayed: Vec<String>,
+}
+
+/// A compensation a crossing or a statement registers in a scope.
+struct RevlUiComp {
+    label: &'static str,
+    compensation: &'static str,
+    call: Box<dyn FnOnce() + Send>,
+}
+
+enum RevlUiEntry {
+    Witnessed { label: &'static str, undo: &'static str, replay: Box<dyn FnOnce() + Send> },
+    Compensation { step: String, comp: RevlUiComp },
+}
+
+struct RevlUiScope {
+    name: &'static str,
+    settles: bool,
+    crossed: std::cell::RefCell<Vec<String>>,
+    failed_step: std::cell::RefCell<String>,
+    entries: std::cell::RefCell<Vec<RevlUiEntry>>,
+}
+
+#[allow(clippy::type_complexity)]
+static REVL_UI_RUNS: std::sync::OnceLock<
+    std::sync::Mutex<Vec<(std::sync::Weak<RevlTeardown>, RevlUiRun)>>> = std::sync::OnceLock::new();
+
+/// The runs the settled units of the live activations under `label` recorded,
+/// oldest first. Read it while the activation is live.
+#[allow(dead_code)]
+pub fn revl_ui_transaction_runs(label: &str) -> Vec<RevlUiRun> {
+    let live: Vec<std::sync::Arc<RevlTeardown>> = revl_teardown_registry().lock().unwrap()
+        .iter()
+        .filter(|(entry, _)| entry == label)
+        .filter_map(|(_, weak)| weak.upgrade())
+        .collect();
+    let runs = REVL_UI_RUNS.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap();
+    runs.iter()
+        .filter(|(weak, _)| live.iter().any(|s| std::ptr::eq(weak.as_ptr(), std::sync::Arc::as_ptr(s))))
+        .map(|(_, run)| run.clone())
+        .collect()
+}
+
+fn revl_ui_record(ctx: &cordis::Context, run: RevlUiRun) {
+    let state = revl_teardown_of(ctx);
+    REVL_UI_RUNS.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap()
+        .push((std::sync::Arc::downgrade(&state), run));
+}
+
+fn revl_panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return s.to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    String::from("panic")
+}
+
+/// A witnessed inverse parked on the activation, as a method body parks one
+/// outside a unit: discharged on commit, replayed on abort.
+fn revl_park_witnessed(ctx: &cordis::Context, label: &'static str, replay: Box<dyn FnOnce() + Send>) {
+    let state = revl_teardown_of(ctx);
+    let _ = ctx.effect(label, move || {
+        if !state.committed.load(std::sync::atomic::Ordering::Acquire) {
+            replay();
+        }
+        Ok(())
+    });
+}
+
+/// A compensation parked on the activation: discharged on commit, queued for
+/// Phase 2 on abort.
+fn revl_park_compensation(ctx: &cordis::Context, comp: RevlUiComp) {
+    let state = revl_teardown_of(ctx);
+    let label = comp.label;
+    let call = comp.call;
+    let _ = ctx.effect(label, move || {
+        if !state.committed.load(std::sync::atomic::Ordering::Acquire) {
+            state.phase2.lock().unwrap().push(
+                RevlPendingCompensation { label: label.to_string(), call });
+        }
+        Ok(())
+    });
+}
+
+impl RevlUiScope {
+    fn new(name: &'static str, settles: bool) -> Self {
+        RevlUiScope {
+            name,
+            settles,
+            crossed: std::cell::RefCell::new(Vec::new()),
+            failed_step: std::cell::RefCell::new(String::new()),
+            entries: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn witnessed(&self, label: &'static str, undo: &'static str, replay: Box<dyn FnOnce() + Send>) {
+        self.entries.borrow_mut().push(RevlUiEntry::Witnessed { label, undo, replay });
+    }
+
+    fn register(&self, step: &str, comp: Option<RevlUiComp>) {
+        if let Some(comp) = comp {
+            self.entries.borrow_mut().push(RevlUiEntry::Compensation { step: step.to_string(), comp });
+        }
+    }
+
+    /// Close the scope over the body's outcome: the body's value, or the
+    /// body's panic resumed after the unit settled.
+    fn close<T>(self, ctx: &cordis::Context, outcome: std::thread::Result<T>) -> T {
+        match outcome {
+            Ok(value) => {
+                self.flush(ctx);
+                value
+            }
+            Err(payload) => {
+                if self.settles {
+                    self.settle(ctx, payload.as_ref());
+                } else {
+                    self.flush(ctx);
+                }
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    fn flush(self, ctx: &cordis::Context) {
+        for entry in self.entries.into_inner() {
+            match entry {
+                RevlUiEntry::Witnessed { label, replay, .. } => revl_park_witnessed(ctx, label, replay),
+                RevlUiEntry::Compensation { comp, .. } => revl_park_compensation(ctx, comp),
+            }
+        }
+    }
+
+    fn settle(self, ctx: &cordis::Context, payload: &(dyn std::any::Any + Send)) {
+        let mut run = RevlUiRun {
+            unit: self.name.to_string(),
+            failed_step: self.failed_step.borrow().clone(),
+            crossed: self.crossed.borrow().clone(),
+            error: revl_panic_text(payload),
+            ran: Vec::new(),
+            replayed: Vec::new(),
+        };
+        let mut compensations = Vec::new();
+        for entry in self.entries.into_inner().into_iter().rev() {
+            match entry {
+                RevlUiEntry::Witnessed { undo, replay, .. } => {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(replay)).is_err() {
+                        eprintln!("revl: witnessed inverse {:?} failed", undo);
+                    }
+                    run.replayed.push(undo.to_string());
+                }
+                RevlUiEntry::Compensation { step, comp } => compensations.push((step, comp)),
+            }
+        }
+        run.ran = revl_ui_compensate(compensations);
+        revl_ui_record(ctx, run);
+    }
+}
+
+/// The unit's Phase 2: its compensations, already newest first, bounded by
+/// `REVL_COMPENSATION_BUDGET_MS` between calls as an abort's Phase 2 is.
+fn revl_ui_compensate(compensations: Vec<(String, RevlUiComp)>) -> Vec<RevlUiRan> {
+    let budget_ms = revl_compensation_budget_ms();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(budget_ms);
+    let mut ran = Vec::new();
+    for (step, comp) in compensations {
+        if budget_ms != 0 && std::time::Instant::now() >= deadline {
+            eprintln!("revl: compensation {:?} skipped (deadline-expired, budget={}ms)",
+                comp.label, budget_ms);
+            continue;
+        }
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(comp.call)).is_err();
+        if failed {
+            eprintln!("revl: compensation {:?} failed", comp.label);
+        }
+        ran.push(RevlUiRan { step, compensation: comp.compensation.to_string(), failed });
+    }
+    ran
+}
+
+/// One computer-use crossing. It notes the crossing, and registers its
+/// compensation after the call returns. A crossing that panics is the step
+/// the call failed at, and still registers its own compensation: the panic
+/// says the substrate could not confirm the effect, which is not knowing it
+/// did not land.
+fn revl_ui_cross<T>(scope: &RevlUiScope, step: &str, comp: Option<RevlUiComp>,
+                    call: impl FnOnce() -> T) -> T {
+    scope.crossed.borrow_mut().push(step.to_string());
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+        Ok(value) => {
+            scope.register(step, comp);
+            value
+        }
+        Err(payload) => {
+            if scope.failed_step.borrow().is_empty() {
+                *scope.failed_step.borrow_mut() = step.to_string();
+            }
+            scope.register(step, comp);
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
+'''
+
+
+def _ui_transaction_facts(ir: dict) -> tuple[dict, dict]:
+    """Issue #1369 (item 522 slice 3): the computer-use externs of the
+    document, by name, and the provide methods that run in a scope, as
+    `{(component, key, method): "ui_transaction" | "call_scope"}`.
+
+    The same derivation as the py, ts and go emitters, from
+    `revl.ui_transaction`, the module `revl erase-report` prints the static
+    run from, so the unit this tier settles is the unit the report describes.
+    A method that crosses a computer-use verb is its UI transaction unit; one
+    that only reaches such an extern gets a scope that never settles.
+    FAIL-CLOSED: without the frontend, a document that declares a
+    computer-use capability is refused rather than emitted with no unit. A
+    document with none gets `({}, {})` and is emitted byte-identically."""
+    roots = {str(cap).split(".", 1)[0]
+             for ext in ir.get("externs") or []
+             for cap in ext.get("capabilities") or []}
+    if not roots & {"ui", "screen"}:
+        return {}, {}
+    try:
+        try:
+            from revl import ui_family, ui_transaction  # noqa: PLC0415
+        except ModuleNotFoundError:  # standalone `python3 emit.py`: src/ on the path
+            import pathlib  # noqa: PLC0415
+            src = pathlib.Path(__file__).resolve().parents[2] / "src"
+            if src.is_dir() and str(src) not in sys.path:
+                sys.path.insert(0, str(src))
+            from revl import ui_family, ui_transaction  # noqa: PLC0415
+    except Exception as error:  # noqa: BLE001 - frontend absent
+        raise EmitError(
+            "a computer-use extern needs the revl frontend to find its "
+            "transaction unit (item 522), and it is not importable here: "
+            f"{error}") from error
+    index = ui_transaction._extern_index(ir)
+    names = {name for name, entry in index.items()
+             if ui_family.reversibility(entry["token"]) is not None}
+    if not names:
+        return {}, {}
+    units = {(plan["component"], plan["key"], plan["method"])
+             for plan in ui_transaction.plans(ir)
+             if plan["key"] != "<activation>"}
+    scopes: dict = {}
+    for comp in ir.get("components") or []:
+        for entry in comp.get("body") or []:
+            if not isinstance(entry, dict) or entry.get("step") != "provide":
+                continue
+            for method in entry.get("methods") or []:
+                key = (comp.get("name"), entry.get("name"), method.get("name"))
+                if key in units:
+                    scopes[key] = "ui_transaction"
+                elif _calls_any(method.get("body"), names):
+                    scopes[key] = "call_scope"
+    externs = {ext.get("name"): ext for ext in ir.get("externs") or []
+               if ext.get("name") in names}
+    return externs, scopes
+
+
+def _calls_any(node, names: set) -> bool:
+    """Whether *node* (any IR subtree) calls one of *names*."""
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in names:
+            return True
+        return any(_calls_any(value, names) for value in node.values())
+    if isinstance(node, list):
+        return any(_calls_any(item, names) for item in node)
+    return False
+
+
+def _component_ui_scoped(component: dict) -> bool:
+    """Whether some provide method of *component* runs in a UI scope."""
+    name = component.get("name")
+    return any(key[0] == name for key in _UI_SCOPES)
+
+
+def _ui_method_scope(env: "_Env", key: str, method: str):
+    """`(unit name, settles)` for a provide method that runs in a UI scope, else None."""
+    kind = _UI_SCOPES.get((env.name, key, method))
+    if kind is None:
+        return None
+    return f"{key}.{method}", kind == "ui_transaction"
+
+
+def _comp_name(node) -> str:
+    """The compensation a node calls, by name, for the unit's run record."""
+    if isinstance(node, dict):
+        if node.get("kind") == "fn":
+            return str(node.get("name"))
+        if node.get("method"):
+            return str(node.get("method"))
+    return "compensate"
+
+
+def _ui_comp(label: str, compensate_node, call: str) -> str:
+    """The `Some(RevlUiComp {..})` a scope registers for one compensation."""
+    return (f"Some(RevlUiComp {{ label: {_string(label)}, "
+            f"compensation: {_string(_comp_name(compensate_node))}, "
+            f"call: Box::new(move || {{ let _ = {call}; }}) }})")
+
+
+def _ui_cross(ctx, node, call: str, comp: str) -> str:
+    """A computer-use crossing inside a UI scope (issue #1369)."""
+    return f"revl_ui_cross(&{ctx.ui_scope}, {_string(node.get('name'))}, {comp}, || {call})"
+
+
+def _is_ui_crossing(node, ctx) -> bool:
+    return (bool(getattr(ctx, "ui_scope", None)) and isinstance(node, dict)
+            and node.get("kind") == "fn" and node.get("name") in _UI_EXTERNS)
+
+
 def _revl_record_preamble() -> list[str]:
     """item 322 Slice 2: the durable WAL recording sink — the rust host
     recording channel, the faithful mirror of backends/go/emit.py's
@@ -9973,6 +10438,8 @@ def _emit_components(ir: dict, components: list) -> list[str]:
         out.extend(_revl_spawn_handle())
     if _uses_teardown(components, ir.get("externs") or []):
         out.extend(_revl_teardown_preamble())
+        if _UI_SCOPES:
+            out.extend(_REVL_UI_TRANSACTION.splitlines() + [""])
         if _RECORD_MODE:
             # item 322 Slice 2: the durable WAL sink rides alongside the teardown
             # accumulator (a witnessed transactional step needs both). Gated so a
@@ -10236,6 +10703,9 @@ def emit(ir: dict, record: bool = False) -> str:
     # not left in secret mode by a previous one.
     saved_secret = _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
+    global _UI_EXTERNS, _UI_SCOPES
+    saved_ui = (_UI_EXTERNS, _UI_SCOPES)
+    _UI_EXTERNS, _UI_SCOPES = _ui_transaction_facts(ir)
     try:
         version = ir.get("ir_version")
         if version == 1:
@@ -10246,6 +10716,7 @@ def emit(ir: dict, record: bool = False) -> str:
             return _emit_v3(ir)
     finally:
         _SECRET_MODE = saved_secret
+        _UI_EXTERNS, _UI_SCOPES = saved_ui
     raise EmitError(
         f"unsupported ir_version: {version!r} — the Rust backend targets "
         f"ir_version 1, 2 (realms), and 3 (types/functions/match)"

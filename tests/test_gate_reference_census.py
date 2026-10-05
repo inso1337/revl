@@ -94,6 +94,30 @@ def test_no_bypass_and_no_new_divergence(census, measured):
         name.split("/", 1)[0] in census.TRACKED for name in buckets)
 
 
+# The LINE ledger (issue #1965). The comparison above sees tag and message; a
+# refusal both sides agree on can still be anchored at a different line, and
+# `admit_src` orders a multi-defect program by line. Every such refusal is named
+# in `tools/gate_reference_line_ledger.json` with its `[reference, gate]` pair,
+# and this fails on a mismatch not listed there, a pair that moved, and an entry
+# that no longer mismatches, so the list only shrinks.
+def test_every_line_mismatch_is_named_on_the_ledger(census, measured):
+    cases, (buckets, _) = measured
+    pairs = census.line_pairs(cases, buckets, census.SelfhostEngine())
+    ledger = json.loads(census.LINE_LEDGER.read_text())
+    problems = census.compare_lines(pairs, ledger)
+    assert not problems, "\n  ".join(
+        ["the gate/reference line ledger moved:"] + problems[:40])
+
+
+def test_the_line_ratchet_fails_in_all_three_directions(census):
+    ledger = {"mismatches": {"a.rvl": [3, 2], "b.rvl": [9, 7]}}
+    problems = census.compare_lines({"a.rvl": [3, 1], "c.rvl": [4, 2]}, ledger)
+    assert any(p.startswith("new line mismatch: c.rvl") for p in problems)
+    assert any(p.startswith("line pair moved: a.rvl") for p in problems)
+    assert any(p.startswith("no longer a line mismatch: b.rvl") for p in problems)
+    assert census.compare_lines({"a.rvl": [3, 2], "b.rvl": [9, 7]}, ledger) == []
+
+
 # The OPEN BYPASS SURFACE, named case by case.
 #
 # Each of these is a program the reference refuses under a guarantee this gate
@@ -297,6 +321,32 @@ def test_every_value_crossing_bounds_a_spawned_child_in_both(measured):
         if got.get(case) != want:
             wrong.append(f"{case}: {got.get(case)}, expected {want}")
     assert not wrong, "\n  ".join(["value-crossing documents moved:"] + wrong)
+
+
+# --- effect statement rules (issue #1963) ------------------------------------
+#
+# Three statement rules the gate did not decide: a witnessed extern called with
+# a site `undo`, an undo-less effect over a dotted call, and a
+# teardown-registering step inside a provide-method `if`/`while`/`for`. All were
+# false admissions. The arrow-method G1 document is here for the line the gate
+# now anchors it at, which this census does not compare (the in-file
+# `admit_all` test in selfhost/lower.rvl does). `g4_`/`t1_`/`g1_` both refuse
+# under that tag, `ok_` both admit.
+EFFECT_STATEMENT_RULES = ROOT / "tests" / "fixtures" / "effect_statement_rules"
+
+
+def test_every_effect_statement_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(EFFECT_STATEMENT_RULES.glob("*.rvl"))
+    assert len(docs) == 14, f"the effect-statement corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["effect-statement documents moved:"] + wrong)
 
 
 # --- the model reach fold (item 519, issue #1193 slice 2, issue #1451) --------
@@ -870,6 +920,16 @@ def test_the_frontier_mirror_matches_the_rust(census):
         "1" for _ in range(generator.MAX_LEVEL_ITEMS + 1))
     assert len(flat) < generator.MAX_SOURCE_BYTES // 10
     assert scan(flat) is not None
+    # a reserved capability namespace is a gap
+    # (`a_reserved_capability_namespace_is_a_gap`). The mirror lacked this arm
+    # until the corpus gained a computer-use document (issue #1369), when the
+    # cheap engine said no-objection where the crate declined.
+    if tables["capability_roots"]:
+        root = tables["capability_roots"][0]
+        assert scan(f"extern emission[{root}.click] fn c(t: Str) = @py {{ pass }}") \
+            is not None
+        # a root not followed by `.` is an ordinary word
+        assert scan(f"fn {root}(x: Int) -> Int {{ return x }}") is None
 
 
 def test_every_sibling_tool_is_loaded_relative_to_this_tool():

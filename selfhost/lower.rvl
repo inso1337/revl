@@ -407,7 +407,7 @@ type CfgDflt = { fname: Str, fty: Str, litTy: Str, line: Int }
 
 type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
                  reqMap: List[Bind], setup: List[Stmt], iso: List[ProvKey],
-                 routes: List[Route], hoff: Bind, refuse: Str, line: Int,
+                 routes: List[Route], hoff: Bind, refuse: Str, refuseLine: Int, line: Int,
                  svcRefs: List[SvcRef], cfgDflts: List[CfgDflt] }
 
 type Bind = { name: Str, ty: Str }
@@ -1079,6 +1079,17 @@ fn self_async_body(ss: List[Stmt], i: Int) -> Str {
   return self_async_body(ss, i + 1)
 }
 
+// The line of the statement `self_async_body` refuses: the reference's checker
+// raises rule C1 at the arrow's statement (issue #1965). 0 when none.
+fn self_async_line(ss: List[Stmt], i: Int) -> Int {
+  if (i >= ss.length()) { return 0 }
+  if (self_async_expr(ss[i].e) != "") { return ss[i].line }
+  return self_async_line(ss, i + 1)
+}
+
+// `a` when it is a real line, else the fallback `b`.
+fn first_line(a: Int, b: Int) -> Int { return a > 0 ? a : b }
+
 // The parameter INDICES whose declared type is an async function type — the
 // `Async[T]` slots a call-site coercion (lower.py's `_coerce_async_args`) stamps
 // its arrow argument async into.
@@ -1222,11 +1233,11 @@ fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool,
 
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
             rq: List[Bind], su: List[Stmt], iso: List[ProvKey],
-            rts: List[Route], ho: Bind, refuse: Str, ln: Int,
+            rts: List[Route], ho: Bind, refuse: Str, rln: Int, ln: Int,
             srefs: List[SvcRef], cdfs: List[CfgDflt]) -> CompD {
   return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su, iso: iso,
-           routes: rts, hoff: ho, refuse: refuse, line: ln, svcRefs: srefs,
-           cfgDflts: cdfs }
+           routes: rts, hoff: ho, refuse: refuse, refuseLine: rln, line: ln,
+           svcRefs: srefs, cfgDflts: cdfs }
 }
 
 fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
@@ -2109,8 +2120,23 @@ fn ba_arm(ts: List[Token], i: Int, e: Int) -> BaRw {
   arm = append_stmts(append_stmts(arm, p_stmts(ts, i + 2, t0, [])), tail.pre)
   let ln = tkc(ts, i).line
   let open: List[Token] = [ba_tok("(", ln)]
-  return { pre: arm_scoped(arm),
+  return { pre: arm_scoped_tail(arm, ba_one_line(tail.toks, tkc(ts, t0).line),
+                                tkc(ts, t0).line),
            toks: ba_append(open, tail.toks).push(ba_tok(")", ln)) }
+}
+
+// `arm_scoped`, with the arm's TAIL expression on the closing marker at the
+// tail's own source line (issue #1965). The tail is read once more there, where
+// it is written, so a refusal in it is anchored at the tail's line, as the
+// reference anchors it; the rewritten statement that carries the tail inline
+// reads it again on the statement's line, and agrees.
+fn arm_scoped_tail(ss: List[Stmt], tt: List[Token], tline: Int) -> List[Stmt] {
+  let open: List[Stmt] = [scope_stmt("arm_open")]
+  let r = expr_at(tt, 0)
+  if (is_bad(r.e) || r.i != tt.length()) { return arm_scoped(ss) }
+  let close = { kind: "arm_close", e: r.e, bind: "", spawnTarget: "",
+                awaited: false, line: tline, inTimer: false, bindTy: "", edge: "" }
+  return append_stmts(open, ss).push(close)
 }
 
 // `[lo, hi)` with every block arm in it rewritten (see above).
@@ -2796,8 +2822,12 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
     let le = line_end(ts, si + 1, end)
     let r = p_stmt_run(ts, si + 1, le)
     let nx = r.i > si + 1 ? r.i : le
+    // issue #1963: the arrow's statement carries the line its expression is
+    // written on, as a block body's statements do (`p_stmts`), so a refusal
+    // in it is anchored there rather than falling back to the component line
+    let abody = arrow_body(stamp_lines(r.ss, tkc(ts, si + 1).line))
     return p_prov_methods(ts, nx, end,
-                          acc.push({ name: nm, params: pnames, body: arrow_body(r.ss),
+                          acc.push({ name: nm, params: pnames, body: abody,
                                      isAsync: masync, ps: ps.ps, ret: pret,
                                      isArrow: true, line: mline,
                                      mayRet: true }))
@@ -2843,7 +2873,8 @@ fn bind_has(env: List[Bind], n: Str) -> Bool { return bind_lookup(env, n, 0) != 
 // declares no hand-off", which is what every component that does not write one
 // carries and what makes the check a no-op for them.
 type ProvR = { provs: List[Provide], setup: List[Stmt], iso: List[ProvKey],
-               routes: List[Route], hoff: Bind, refuse: Str, i: Int, ok: Bool }
+               routes: List[Route], hoff: Bind, refuse: Str, i: Int, ok: Bool,
+               rline: Int }
 
 fn no_hoff() -> Bind { return { name: "", ty: "" } }
 
@@ -2854,14 +2885,22 @@ fn no_hoff() -> Bind { return { name: "", ty: "" } }
 fn mk_provr(pv: List[Provide], su: List[Stmt], iso: List[ProvKey],
             rts: List[Route], refuse: Str, i: Int, ok: Bool) -> ProvR {
   return { provs: pv, setup: su, iso: iso, routes: rts, hoff: no_hoff(),
-           refuse: refuse, i: i, ok: ok }
+           refuse: refuse, i: i, ok: ok, rline: 0 }
+}
+
+// A metadata refusal of the statement headed at `i`, carrying that statement's
+// line: the reference raises it there, not at the component (issue #1965).
+fn mk_refuse(pv: List[Provide], su: List[Stmt], iso: List[ProvKey],
+             rts: List[Route], refuse: Str, ts: List[Token], i: Int) -> ProvR {
+  return { provs: pv, setup: su, iso: iso, routes: rts, hoff: no_hoff(),
+           refuse: refuse, i: skip_line(ts, i), ok: true, rline: tkc(ts, i).line }
 }
 
 // The clean exit, which is the one that carries the declared hand-off up.
 fn mk_provr_h(pv: List[Provide], su: List[Stmt], iso: List[ProvKey],
               rts: List[Route], ho: Bind, i: Int) -> ProvR {
   return { provs: pv, setup: su, iso: iso, routes: rts, hoff: ho,
-           refuse: "", i: i, ok: true }
+           refuse: "", i: i, ok: true, rline: 0 }
 }
 
 // The prelude rule (lower.py `_lower_component`): realm/metadata declarations
@@ -3078,25 +3117,24 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                           rts, icept, hoff, action)
     }
     if (action) {
-      return mk_provr(provs, setup, iso, rts,
-                      tagged("PRELUDE", prelude_msg("isolate")),
-                      skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("isolate")), ts, i)
     }
     let key = tkc(ts, i + 1).text
     // kw `in`, kw `realm`, `(`, string label, `)` — the single-realm pin form.
     if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
         && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")) {
       if (!bind_has(reqh, key) && !bind_has(provh, key)) {
-        return mk_provr(provs, setup, iso, rts,
-          tagged("G1", isolate_target_msg(key, cname)), skip_line(ts, i), true)
+        return mk_refuse(provs, setup, iso, rts,
+          tagged("G1", isolate_target_msg(key, cname)), ts, i)
       }
       // only the pin table is consulted, exactly as the reference's IsolateStmt
       // branch does: the pin-after-route direction is NOT a refusal there (the
       // routed key resolves through `routes`, which shadows the single-realm
       // table at link), so mirroring it would over-refuse.
       if (iso_has(iso, key, 0)) {
-        return mk_provr(provs, setup, iso, rts,
-          tagged("G1", isolate_twice_msg(key, cname)), skip_line(ts, i), true)
+        return mk_refuse(provs, setup, iso, rts,
+          tagged("G1", isolate_twice_msg(key, cname)), ts, i)
       }
       let rlm = tkc(ts, i + 5).text
       // advance past the closing `)` STRUCTURALLY (item 168): a line-based skip
@@ -3115,18 +3153,17 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   // target/uniqueness validation. It is not an action (the reference `continue`s).
   if (atw(ts, i, "handoff")) {
     if (action) {
-      return mk_provr(provs, setup, iso, rts,
-                      tagged("PRELUDE", prelude_msg("handoff")),
-                      skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("handoff")), ts, i)
     }
     let key = tkc(ts, i + 1).text
     if (!bind_has(provh, key)) {
-      return mk_provr(provs, setup, iso, rts,
-        tagged("HANDOFF", handoff_target_msg(key, cname)), skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+        tagged("HANDOFF", handoff_target_msg(key, cname)), ts, i)
     }
     if (hoff.name != "") {
-      return mk_provr(provs, setup, iso, rts,
-        tagged("HANDOFF", handoff_twice_msg(cname)), skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+        tagged("HANDOFF", handoff_twice_msg(cname)), ts, i)
     }
     // the declared SHAPE (item 186, wave part 2). The reference keeps the
     // annotation verbatim (`HandoffStmt.state_type`, no alias erasure), so the
@@ -3144,19 +3181,17 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   // in the reference), so `action` is threaded unchanged.
   if (atw(ts, i, "intercept")) {
     if (action) {
-      return mk_provr(provs, setup, iso, rts,
-                      tagged("PRELUDE", prelude_msg("intercept")),
-                      skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("intercept")), ts, i)
     }
     let key = tkc(ts, i + 1).text
     if (!bind_has(reqh, key)) {
-      return mk_provr(provs, setup, iso, rts,
-        tagged("G1", intercept_target_msg(key, cname, bind_has(provh, key))),
-        skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+        tagged("G1", intercept_target_msg(key, cname, bind_has(provh, key))), ts, i)
     }
     if (contains(icept, key)) {
-      return mk_provr(provs, setup, iso, rts,
-        tagged("G1", intercept_twice_msg(key, cname)), skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+        tagged("G1", intercept_twice_msg(key, cname)), ts, i)
     }
     var k = i + 1
     while (k < end && !atk(ts, k, "{")) { k += 1 }
@@ -3185,9 +3220,8 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   // too, and a valid block is not an action (the reference `continue`s).
   if (ati(ts, i, "route") && ati(ts, i + 1, "model")) {
     if (action) {
-      return mk_provr(provs, setup, iso, rts,
-                      tagged("PRELUDE", prelude_msg("route model")),
-                      skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("route model")), ts, i)
     }
     var rk = i + 2
     while (rk < end && !atk(ts, rk, "{")) { rk += 1 }
@@ -3219,8 +3253,12 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   let le = line_end(ts, i, end)
   let r = p_run(ts, i, le)
   let nx = r.i > i ? r.i : le
+  // issue #1965: stamp the run with its source line, as `p_stmts` does for a
+  // method body, so a setup refusal is anchored at its statement rather than
+  // falling back to the component line
   return p_comp_body(ts, nx, end, provh, reqh, cname, provs,
-                     append_stmts(setup, r.ss), iso, rts, icept, hoff, true)
+                     append_stmts(setup, stamp_lines(r.ss, tkc(ts, i).line)),
+                     iso, rts, icept, hoff, true)
 }
 
 // `isolate <key> in realms("a","b") [strategy(<s>)]` — the multi-realm bind
@@ -3236,25 +3274,25 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                 setup: List[Stmt], iso: List[ProvKey], rts: List[Route],
                 icept: List[Str], hoff: Bind, action: Bool) -> ProvR {
   if (action) {
-    return mk_provr(provs, setup, iso, rts,
-                    tagged("PRELUDE", route_prelude_msg()), skip_line(ts, i), true)
+    return mk_refuse(provs, setup, iso, rts,
+                    tagged("PRELUDE", route_prelude_msg()), ts, i)
   }
   let key = tkc(ts, i + 1).text
   if (!bind_has(reqh, key)) {
     if (bind_has(provh, key)) {
-      return mk_provr(provs, setup, iso, rts,
-        tagged("ROUTE", route_provision_msg(key, cname)), skip_line(ts, i), true)
+      return mk_refuse(provs, setup, iso, rts,
+        tagged("ROUTE", route_provision_msg(key, cname)), ts, i)
     }
-    return mk_provr(provs, setup, iso, rts,
-      tagged("G1", route_undeclared_msg(key, cname)), skip_line(ts, i), true)
+    return mk_refuse(provs, setup, iso, rts,
+      tagged("G1", route_undeclared_msg(key, cname)), ts, i)
   }
   if (iso_has(iso, key, 0)) {
-    return mk_provr(provs, setup, iso, rts,
-      tagged("ROUTE", route_pinned_msg(key, cname)), skip_line(ts, i), true)
+    return mk_refuse(provs, setup, iso, rts,
+      tagged("ROUTE", route_pinned_msg(key, cname)), ts, i)
   }
   if (routes_has(rts, key, 0)) {
-    return mk_provr(provs, setup, iso, rts,
-      tagged("ROUTE", route_twice_msg(key, cname)), skip_line(ts, i), true)
+    return mk_refuse(provs, setup, iso, rts,
+      tagged("ROUTE", route_twice_msg(key, cname)), ts, i)
   }
   let rc = p_route_clause(ts, i + 3)
   if (!rc.ok) {
@@ -3262,9 +3300,8 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        setup, iso, rts, icept, hoff, action)
   }
   if (rc.strat != "" && !contains(known_strategies(), rc.strat)) {
-    return mk_provr(provs, setup, iso, rts,
-      tagged("ROUTE", route_strategy_msg(rc.strat, key, cname)),
-      skip_line(ts, i), true)
+    return mk_refuse(provs, setup, iso, rts,
+      tagged("ROUTE", route_strategy_msg(rc.strat, key, cname)), ts, i)
   }
   return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso,
                      rts.push({ key: key, rlms: rc.rlms, strat: rc.strat }),
@@ -3338,7 +3375,7 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   return mk_step(push_comp(pg,
                  mk_compd(nm, pks, body.provs, reqs, body.setup, body.iso,
-                          body.routes, body.hoff, body.refuse,
+                          body.routes, body.hoff, body.refuse, body.rline,
                           tkc(ts, i).line,
                           concat_refs(reqRefs, provRefs, 0),
                           cfg_defaults_in(ts, j + 1, end - 1))),
@@ -5994,8 +6031,9 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   var na = a
   var k = i
   while (k < j) {
+    let before = na
     na = walk_one_stmt(ss[k], cx, na)
-    if (na.msg != "") { return ss[k].line }
+    if (na.msg != "") { return applied_arrow_line(ss, k, cx, before) }
     k += 1
   }
   // the approval floor is judged once the group is walked, and the reference
@@ -6007,6 +6045,33 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   na = release_group(ss, i, na)
   if (na.msg != "") { return ss[i - 1].line }
   return refusal_line(ss, j, cx, na)
+}
+
+// Issue #1965: a refusal raised while walking a local arrow's body at its
+// application (`let f = (p: Pay, k) => emit p.charge(k)` then `f(w.pay, n)`)
+// is the reference's at the ARROW's statement, where the offending crossing is
+// written, not at the application. The application statement `k` refuses only
+// through such an arrow when it no longer refuses with the local arrows taken
+// away; the line is then that of the statement binding the first applied
+// arrow. Otherwise it is the statement's own.
+fn applied_arrow_line(ss: List[Stmt], k: Int, cx: Ctx, a: Ac) -> Int {
+  if (cx.localArrows.keys().length() == 0) { return ss[k].line }
+  if (walk_one_stmt(ss[k], ctx_arrows(cx, Map.empty()), a).msg != "") {
+    return ss[k].line
+  }
+  let names = calls_in(ss[k].e, [])
+  var n = 0
+  while (n < names.length()) {
+    if (cx.localArrows.has(names[n])) {
+      var j = k - 1
+      while (j >= 0) {
+        if (ss[j].bind == names[n]) { return ss[j].line }
+        j -= 1
+      }
+    }
+    n += 1
+  }
+  return ss[k].line
 }
 
 // ============================ the provide-method SIGNATURE (docs/design/457)
@@ -6593,6 +6658,15 @@ fn stmt_a1_verdict(comp: CompD, ss: List[Stmt], i: Int, scx: Ctx) -> Str {
   return stmt_a1_verdict(comp, ss, i + 1, scx)
 }
 
+// The line of the statement `stmt_a1_verdict` refuses: the reference raises
+// each effect-composition rule while lowering that statement (issue #1965).
+// 0 when none refuses.
+fn stmt_a1_line(comp: CompD, ss: List[Stmt], i: Int, scx: Ctx) -> Int {
+  if (i >= ss.length()) { return 0 }
+  if (stmt_a1_check(comp, ss[i], scx) != "") { return ss[i].line }
+  return stmt_a1_line(comp, ss, i + 1, scx)
+}
+
 // The services-2.0 signature-parity verdict (lower.py's `method.async_ !=
 // decl.async_`): the `async` marker is part of the service interface, so an
 // `async fn` op must be implemented by an `async fn` method, and vice-versa.
@@ -6612,6 +6686,14 @@ fn has_await(ss: List[Stmt], i: Int) -> Bool {
   if (i >= ss.length()) { return false }
   if (ss[i].kind == "await" || ss[i].awaited) { return true }
   return has_await(ss, i + 1)
+}
+
+// The line of the first statement `has_await` finds: the reference's parser
+// refuses the `await` where it is written (issue #1965). 0 when none.
+fn await_line(ss: List[Stmt], i: Int) -> Int {
+  if (i >= ss.length()) { return 0 }
+  if (ss[i].kind == "await" || ss[i].awaited) { return ss[i].line }
+  return await_line(ss, i + 1)
 }
 
 // ============================================================ arrow-color leak
@@ -7125,6 +7207,14 @@ fn acq_body(ss: List[Stmt], i: Int) -> Str {
   return acq_body(ss, i + 1)
 }
 
+// The line of the statement `acq_body` finds: the reference reports the host
+// acquisition where it is called, inside the fn (issue #1965). 0 when none.
+fn acq_body_line(ss: List[Stmt], i: Int) -> Int {
+  if (i >= ss.length()) { return 0 }
+  if (acq_in(ss[i].e) != "") { return ss[i].line }
+  return acq_body_line(ss, i + 1)
+}
+
 // The declaration line of the named fn (item 419c: the anchor for a module-fn
 // and reachable-fn refusal), 0 if the name is not a declared fn.
 fn fnd_line(fns: List[FnD], n: Str, i: Int) -> Int {
@@ -7143,7 +7233,7 @@ fn check_fn_acquire(fns: List[FnD], reached: List[Str], i: Int) -> Verd {
       hit.slice(0, dot), hit.slice(dot + 1, hit.length()),
       host_acquire_release(hit.slice(0, dot), hit.slice(dot + 1, hit.length())),
       "`fn ".concat(n).concat("`, which a component body reaches"))),
-      fnd_line(fns, n, 0))
+      first_line(acq_body_line(fnd_body(fns, n, 0), 0), fnd_line(fns, n, 0)))
   }
   return check_fn_acquire(fns, reached, i + 1)
 }
@@ -7182,7 +7272,13 @@ fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
 fn first_module_fn(fns: List[FnD], i: Int, base: Ctx) -> Verd {
   if (i >= fns.length()) { return no_verd() }
   let v = fn_a1_verdict(fns[i], base)
-  if (v != "") { return mk_verd(v, fns[i].line) }
+  if (v != "") {
+    // rule C1 is the checker's, at the arrow's statement; the value and leak
+    // twins are reported at the declaration
+    let sl = self_async_body(fns[i].body, 0) != ""
+             ? self_async_line(fns[i].body, 0) : 0
+    return mk_verd(v, first_line(sl, fns[i].line))
+  }
   return first_module_fn(fns, i + 1, base)
 }
 
@@ -7401,7 +7497,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // (`_admit_effect_async` / `_admit_emit_async`, run during lowering): the
   // exact await/async pairing and a suspending teardown, statement by statement.
   let sA1 = stmt_a1_verdict(comp, comp.setup, 0, scx)
-  if (sA1 != "") { return mk_verd(tagged("A1", sA1), comp.line) }
+  if (sA1 != "") {
+    let sl = stmt_a1_line(comp, comp.setup, 0, scx)
+    return mk_verd(tagged("A1", sA1), sl == 0 ? comp.line : sl)
+  }
   let pcx = cx
   // the component-scope names a provide-method binding may not reuse
   // (`_check_rebind`'s `env.locals`): the activation body's own `let`s.
@@ -7419,7 +7518,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // method, and vice-versa.
       if (decl.name != "" && pm.isAsync != decl.isAsync) {
         return mk_verd(tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
-                                          pm.isAsync, decl.isAsync)), comp.line)
+                                          pm.isAsync, decl.isAsync)), pm.line)
       }
       // the two RESTATED-annotation rules, decided where the reference decides
       // them: after the colour parity above and before a single body statement
@@ -7481,27 +7580,30 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // resolved decl, so this is equivalent to `!decl.isAsync` when the service
       // is known and adds the unresolved-service surface the decl gate dropped.
       if (!pm.isAsync && has_await(pm.body, 0)) {
+        let al = await_line(pm.body, 0)
         return mk_verd(tagged("A1", "`await` is only allowed in a component body"),
-                       comp.line)
+                       al == 0 ? comp.line : al)
       }
       // the rebind again, now against the POST-BODY verdicts below: the
       // reference raises it while lowering, ahead of every aggregate the walk
       // can only decide once the body is finished.
       if (rb.v != "") { return rb }
       if (decl.name != "") {
+        // issue #1965: the reference raises these three at `method.line`
         let g4 = g4_verdict(pv.svcName, pm.name, decl, a)
-        if (g4 != "") { return mk_verd(tagged("G4", g4), comp.line) }
+        if (g4 != "") { return mk_verd(tagged("G4", g4), pm.line) }
         let pa = passed_async_verdict(pv.svcName, pm.name, a, cx)
-        if (pa != "") { return mk_verd(tagged("A1", pa), comp.line) }
+        if (pa != "") { return mk_verd(tagged("A1", pa), pm.line) }
         let a1 = a1_verdict(pv.svcName, pm.name, decl, a, cx)
-        if (a1 != "") { return mk_verd(tagged("A1", a1), comp.line) }
+        if (a1 != "") { return mk_verd(tagged("A1", a1), pm.line) }
       }
       // the arrow-color LEAK (lower.py's `_refuse_leaky_arrow`) runs last and
       // for EVERY method, sync or async: a sync-typed (non-coerced) arrow whose
       // body reaches async has no color to carry the suspension. A coerced arrow
       // (in an `Async[T]` slot) is admitted.
       let leak = leaky_body(pm.body, 0, pcx, true)
-      if (leak != "") { return mk_verd(tagged("A1", leak), comp.line) }
+      // issue #1965: the reference reports the leak at the method's line
+      if (leak != "") { return mk_verd(tagged("A1", leak), pm.line) }
       mi += 1
     }
     pi += 1
@@ -8653,57 +8755,61 @@ fn held_caps_pairs(comp: CompD, cx: Ctx, base: List[Str]) -> List[Str] {
 
 // G4/G6 spawn-emission bounds. For every provide-method spawn, the target's
 // (closed) emission surface must fit the method's declared bound.
-fn bounds_method(pv: Provide, m: ProvM, cx: Ctx, closed: SurfMap) -> Str {
+fn bounds_method(pv: Provide, m: ProvM, cx: Ctx, closed: SurfMap) -> Verd {
   let decl = find_msig(svc_of(cx, pv.svcName), m.name, 0)
-  if (decl.name == "") { return "" }
+  if (decl.name == "") { return no_verd() }
   let where = pv.svcName.concat(".").concat(m.name)
-  let tgts = stmt_spawns(m.body, 0, [])
   var i = 0
-  while (i < tgts.length()) {
-    let tsurf = surf_get(closed, tgts[i])
+  while (i < m.body.length()) {
+    let st = m.body[i]
+    let tsurf = st.spawnTarget != "" && st.kind == "effect"
+                ? surf_get(closed, st.spawnTarget) : []
     if (tsurf.length() > 0) {
+      // issue #1965: the reference anchors the bound at the spawn's own line
       if (!decl.isEm) {
-        return "`".concat(where)
-          .concat("` is declared plain, but it spawns `").concat(tgts[i])
-          .concat("`, which emits through ").concat(quote_join(sort_strs(tsurf)))
+        return mk_verd(tagged("G4", "`".concat(where)
+          .concat("` is declared plain, but it spawns `").concat(st.spawnTarget)
+          .concat("`, which emits through ").concat(quote_join(sort_strs(tsurf)))),
+          st.line)
       }
       if (decl.caps.length() > 0) {
         let extra = sort_strs(minus_list(tsurf, decl.caps))
         if (extra.length() > 0) {
           let declared = comma_join(decl.caps)
           let dstr = declared == "" ? "no capabilities" : declared
-          return "`".concat(where)
+          return mk_verd(tagged("G4", "`".concat(where)
             .concat("` is declared `emission[").concat(dstr)
-            .concat("]`, but it spawns `").concat(tgts[i])
-            .concat("`, which emits through ").concat(offending_join(extra))
+            .concat("]`, but it spawns `").concat(st.spawnTarget)
+            .concat("`, which emits through ").concat(offending_join(extra))),
+            st.line)
         }
       }
     }
     i += 1
   }
-  return ""
+  return no_verd()
 }
 
-fn bounds_comp(comp: CompD, cx: Ctx, closed: SurfMap) -> Str {
+fn bounds_comp(comp: CompD, cx: Ctx, closed: SurfMap) -> Verd {
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
     var mi = 0
     while (mi < pv.methods.length()) {
       let r = bounds_method(pv, pv.methods[mi], cx, closed)
-      if (r != "") { return r }
+      if (r.v != "") { return r }
       mi += 1
     }
     pi += 1
   }
-  return ""
+  return no_verd()
 }
 
 fn check_spawn_bounds(comps: List[CompD], ci: Int, cx: Ctx, closed: SurfMap) -> Verd {
   if (ci >= comps.length()) { return no_verd() }
+  // item 419c, issue #1965: the spawn statement's line anchors the bound
   let r = bounds_comp(comps[ci], cx, closed)
-  // item 419c: the spawner component's declaration line anchors the bound.
-  if (r != "") { return mk_verd(tagged("G4", r), comps[ci].line) }
+  if (r.v != "") { return r }
   return check_spawn_bounds(comps, ci + 1, cx, closed)
 }
 
@@ -8716,36 +8822,42 @@ fn check_spawn_bounds(comps: List[CompD], ci: Int, cx: Ctx, closed: SurfMap) -> 
 // resource-only projection, which is ceiling-blind by construction; then the
 // dedicated BUDGET attenuation over the unstripped pairs, which is the only
 // thing that can see a ceiling widen.
-fn atten_comp(comp: CompD, cx: Ctx, base: SurfMap, closed: SurfMap) -> Str {
+fn atten_comp(comp: CompD, cx: Ctx, base: SurfMap, closed: SurfMap) -> Verd {
   let held = held_caps_pairs(comp, cx, surf_get(base, comp.name))
   let heldRes = cap_strip_all(held)
-  let tgts = stmt_spawns(comp.setup, 0, [])
   var i = 0
-  while (i < tgts.length()) {
-    let child = tgts[i]
-    let reach = surf_get(closed, child)
-    let extra = sort_strs(cap_covers_set(heldRes, cap_strip_all(reach)))
-    if (extra.length() > 0) {
-      let hs = sort_strs(cap_render_all(heldRes))
-      let heldStr = hs.length() == 0 ? "no capabilities" : quote_join(hs)
-      return "`".concat(comp.name).concat("` spawns `").concat(child)
-        .concat("`, granting it ").concat(cap_offending_join(extra))
-        .concat(", but `").concat(comp.name).concat("` holds only ").concat(heldStr)
-        .concat(" — a spawn may narrow a child's capabilities, never widen them")
+  while (i < comp.setup.length()) {
+    let st = comp.setup[i]
+    if (st.spawnTarget != "" && st.kind == "effect") {
+      let child = st.spawnTarget
+      let reach = surf_get(closed, child)
+      let extra = sort_strs(cap_covers_set(heldRes, cap_strip_all(reach)))
+      // issue #1965: the reference anchors the attenuation at the spawn's line
+      if (extra.length() > 0) {
+        let hs = sort_strs(cap_render_all(heldRes))
+        let heldStr = hs.length() == 0 ? "no capabilities" : quote_join(hs)
+        return mk_verd(tagged("G4", "`".concat(comp.name).concat("` spawns `").concat(child)
+          .concat("`, granting it ").concat(cap_offending_join(extra))
+          .concat(", but `").concat(comp.name).concat("` holds only ").concat(heldStr)
+          .concat(" — a spawn may narrow a child's capabilities, never widen them")),
+          st.line)
+      }
+      let bad = ceil_atten(held, reach)
+      if (bad.length() > 0) {
+        return mk_verd(tagged("G4", budget_msg(comp.name, child, bad)), st.line)
+      }
     }
-    let bad = ceil_atten(held, reach)
-    if (bad.length() > 0) { return budget_msg(comp.name, child, bad) }
     i += 1
   }
-  return ""
+  return no_verd()
 }
 
 fn check_spawn_atten(comps: List[CompD], ci: Int, cx: Ctx, base: SurfMap,
                      closed: SurfMap) -> Verd {
   if (ci >= comps.length()) { return no_verd() }
+  // item 419c, issue #1965: the spawn statement's line anchors the attenuation
   let r = atten_comp(comps[ci], cx, base, closed)
-  // item 419c: the spawner component's declaration line anchors the attenuation.
-  if (r != "") { return mk_verd(tagged("G4", r), comps[ci].line) }
+  if (r.v != "") { return r }
   return check_spawn_atten(comps, ci + 1, cx, base, closed)
 }
 
@@ -8778,28 +8890,30 @@ fn spawn_form_stmt(s: Stmt, names: List[Str]) -> Str {
   return ""
 }
 
-fn spawn_form_stmts(ss: List[Stmt], i: Int, names: List[Str]) -> Str {
-  if (i >= ss.length()) { return "" }
+// The first spawn-form refusal at its statement's line, which is where the
+// reference raises it while lowering the spawn (issue #1965).
+fn spawn_form_line(ss: List[Stmt], i: Int, names: List[Str]) -> Verd {
+  if (i >= ss.length()) { return no_verd() }
   let r = spawn_form_stmt(ss[i], names)
-  if (r != "") { return r }
-  return spawn_form_stmts(ss, i + 1, names)
+  if (r != "") { return mk_verd(r, ss[i].line) }
+  return spawn_form_line(ss, i + 1, names)
 }
 
-fn spawn_form_comp(comp: CompD, names: List[Str]) -> Str {
-  let sv = spawn_form_stmts(comp.setup, 0, names)
-  if (sv != "") { return sv }
+fn spawn_form_at(comp: CompD, names: List[Str]) -> Verd {
+  let sv = spawn_form_line(comp.setup, 0, names)
+  if (sv.v != "") { return sv }
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
     var mi = 0
     while (mi < pv.methods.length()) {
-      let r = spawn_form_stmts(pv.methods[mi].body, 0, names)
-      if (r != "") { return r }
+      let r = spawn_form_line(pv.methods[mi].body, 0, names)
+      if (r.v != "") { return r }
       mi += 1
     }
     pi += 1
   }
-  return ""
+  return no_verd()
 }
 
 // The spawn-boundary gate: bounds then attenuation, both `code="G4"`, run only
@@ -17174,17 +17288,25 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
       // poisons for the same reason the three below it do (issue #1127).
       poisoned = poisoned.push(comp.name)
     } else if (comp.refuse != "") {
-      refs = refs.push(mk_verd(comp.refuse, comp.line))
+      // issue #1965: at the offending clause's line, where the reference raises it
+      refs = refs.push(mk_verd(comp.refuse,
+                               comp.refuseLine > 0 ? comp.refuseLine : comp.line))
       poisoned = poisoned.push(comp.name)
     } else {
-      let sf = spawn_form_comp(comp, cnames)
+      let sfv = spawn_form_at(comp, cnames)
+      let sf = sfv.v
       if (sf != "") {
-        refs = refs.push(mk_verd(sf, comp.line))
+        refs = refs.push(mk_verd(sf, sfv.line > 0 ? sfv.line : comp.line))
         poisoned = poisoned.push(comp.name)
       } else {
         let cx = ctx_for(base, comp)
-        let v = verified_or(verified_method_verd(ts, comp.name, wit),
-                            check_component(comp, cx, gtys), comp.line)
+        // issue #1897 (`verified` in a method) and issue #1963 (the
+        // effect-statement rules): statement refusals the walk does not
+        // decide, raised during the reference's lowering in source order, so
+        // the earlier line of the two is the component's
+        let sv = effect_stmt_or(effect_stmt_verd(ts, comp.name, wit),
+                                verified_method_verd(ts, comp.name, wit), comp.line)
+        let v = effect_stmt_or(sv, check_component(comp, cx, gtys), comp.line)
         if (v.v != "") {
           refs = refs.push(v)
           poisoned = poisoned.push(comp.name)
@@ -17256,9 +17378,10 @@ pub fn admit_src(src: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
-  // issue #1897: `verified` heading anything but `effect`, a parser refusal.
-  let vps = verified_parse_scan(ts)
-  if (vps.v != "") { return vps.v }
+  // issue #1897 (`verified` heading anything but `effect`) and issue #1963
+  // (an undo-less dotted `effect`): parser refusals, the earlier line first.
+  let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
+  if (pps.v != "") { return pps.v }
   // issue #1728: an unbound realm placeholder is refused before lowering.
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return rph.v }
@@ -17291,8 +17414,8 @@ pub fn admit_all(src: Str) -> Str {
   if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
-  let vps = verified_parse_scan(ts)
-  if (vps.v != "") { return fmt_all([mk_verd(vps.v, 0)]) }
+  let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
+  if (pps.v != "") { return fmt_all([mk_verd(pps.v, 0)]) }
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return fmt_all([rph]) }
   let refs = collect_refusals(ts, pg)
@@ -18185,9 +18308,9 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
-  // issue #1897: `verified` heading anything but `effect`, a parser refusal.
-  let vps = verified_parse_scan(ts)
-  if (vps.v != "") { return vps.v }
+  // issues #1897 and #1963, as in `admit_src`: parser refusals.
+  let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
+  if (pps.v != "") { return pps.v }
   // issue #1728, as in `admit_src`: no binding reaches the gate.
   let rph = realm_placeholder_scan(ts)
   if (rph.v != "") { return rph.v }
@@ -19045,6 +19168,320 @@ fn cenv(cx: CCtx, sc: List[Bind]) -> List[Bind] {
 // no arm `payload_type`. The keys hold a space, so no scope name shadows one.
 fn cenv_ir(cx: CCtx, sc: List[Bind]) -> List[Bind] {
   return concat_binds(cx.reqops, cenv(cx, sc))
+}
+
+// ================================================== effect statements (issue #1963)
+//
+// Three statement rules the reference decides over an `effect` statement, which
+// this gate did not decide at all. Its statement reader reads a provide-method
+// `if`/`while`/`for` body as one `skip` and carries no rule for these shapes, so
+// all three were false admissions. Each is decided here over the token stream,
+// the way `verified` in a provide method is, and spelled byte for byte:
+//
+//   * PARSE stage: an `effect` with no `undo` whose acquisition is a dotted call
+//     or path (`effect store.insert(k, v)`). The reference's parser refuses it
+//     before any lowering (parser.py `missing_undo_refusal`): no `use` can turn
+//     a dotted path into a witnessed call, so nothing is deferred. A bare-name
+//     acquisition is deferred to the lowering, which knows the extern table, and
+//     this gate leaves that case alone. Tagged G4, the guarantee the reference's
+//     own `revl.diagnostics.classify` files the message under.
+//   * COMPONENT stage, a top-level activation or provide-method statement: a
+//     witnessed extern called with a site `undo` (lower.py
+//     `_lower_effect_step`, G4). A witnessed extern's declared inverse is the one
+//     the teardown accumulator registers, so the call site may not spell one.
+//   * COMPONENT stage, a provide-method `if`/`while`/`for` body: a
+//     teardown-registering step (`effect`, `let … = effect`, a statement
+//     `await`) is refused at its own line (lower.py's method control-flow
+//     lowering). Code-less in the reference; tagged T1 as the other code-less
+//     method-statement refusals are (`tests/test_selfhost_lower.py::_classify`).
+//
+// The two component-stage rules are raised during the reference's component
+// lowering, in source order, so the first one by token order is the
+// component's, and `effect_stmt_or` decides it against the component walk's
+// own verdict the way `_lower_component` would have raised them.
+
+// A token that begins a statement: the first token of a line, or one right
+// after a `{`, `}` or `;`.
+fn es_head_at(ts: List[Token], i: Int) -> Bool {
+  let p = tkc(ts, i - 1)
+  if (p.kind == "{" || p.kind == "}" || p.kind == ";") { return true }
+  return p.line < tkc(ts, i).line
+}
+
+// The first token of the statement the token at `i` sits in, scanning back
+// along its line (an annotated `let x: T = effect …` keeps one line).
+fn es_line_head(ts: List[Token], i: Int) -> Int {
+  var j = i
+  while (j > 0 && !es_head_at(ts, j)) { j -= 1 }
+  return j
+}
+
+// The statement head of the `effect` at `i`, or -1 when `i` is not an
+// `effect` the parser reads as an effect statement: the statement's first
+// token, after `verified`, or the right-hand side of `let <x> [: T] =`.
+fn es_effect_head(ts: List[Token], i: Int) -> Int {
+  if (!atw(ts, i, "effect")) { return 0 - 1 }
+  if (es_head_at(ts, i)) { return i }
+  if (atw(ts, i - 1, "verified") && es_head_at(ts, i - 1)) { return i - 1 }
+  let k = atw(ts, i - 1, "verified") ? i - 2 : i - 1
+  if (!atk(ts, k, "=")) { return 0 - 1 }
+  let h = es_line_head(ts, k)
+  if (atw(ts, h, "let") && atk(ts, h + 1, "ident")) { return h }
+  return 0 - 1
+}
+
+// Whether the effect statement whose `effect` sits at `i` carries a site
+// `undo`: one at bracket depth 0 before the statement ends, at a depth-0 `}`,
+// `;` or the first depth-0 token on a later line that is not `undo` (the
+// reference reads an `undo` on the next line as the same statement's).
+fn es_has_undo(ts: List[Token], i: Int, hi: Int) -> Bool {
+  let ln = tkc(ts, i).line
+  var depth = 0
+  var j = i + 1
+  while (j < hi) {
+    let k = tkc(ts, j).kind
+    if (depth == 0) {
+      if (atw(ts, j, "undo")) { return true }
+      if (k == "}" || k == ";") { return false }
+      if (tkc(ts, j).line > ln) { return false }
+    }
+    if (k == "(" || k == "[" || k == "{") { depth += 1 }
+    if (k == ")" || k == "]" || k == "}") {
+      if (depth == 0) { return false }
+      depth -= 1
+    }
+    j += 1
+  }
+  return false
+}
+
+// The described acquisition of the `effect` at `i` when it is a dotted call or
+// path that ends the statement (`store.insert(k, v)` -> "`store.insert`", the
+// reference's `_describe_expr` over a postfix chain), else "". Anything else —
+// a bare name, a literal, an operator, a block — is not this rule's to decide.
+fn es_dotted_acq(ts: List[Token], i: Int, hi: Int) -> Str {
+  var j = i + 1
+  if (!atk(ts, j, "ident") || !atk(ts, j + 1, ".")) { return "" }
+  var names: List[Str] = [tkc(ts, j).text]
+  j += 1
+  var ok = true
+  while (ok && atk(ts, j, ".")) {
+    if (!atk(ts, j + 1, "ident")) { return "" }
+    names = names.push(tkc(ts, j + 1).text)
+    j += 2
+    if (atk(ts, j, "(")) {
+      let e = close_paren(ts, j)
+      if (e == 0 - 1) { return "" }
+      j = e
+    }
+  }
+  // the chain must end the acquisition: an operator or anything else after it
+  // makes it an expression the reference describes differently
+  let ln = tkc(ts, i).line
+  if (j < hi && tkc(ts, j).line == ln && !atk(ts, j, "}") && !atk(ts, j, ";")
+      && !atw(ts, j, "undo") && !ati(ts, j, "replay")) { return "" }
+  return "`".concat(names.join(".")).concat("`")
+}
+
+fn es_no_undo_msg(head: Str) -> Str {
+  return "effect has no `undo` and ".concat(head).concat(" is not pure")
+}
+
+// The PARSE-stage rule: the first undo-less dotted effect in any component
+// body, in source order, as the reference's parser raises it.
+fn effect_no_undo_scan(ts: List[Token]) -> Verd {
+  let spans = model_comp_spans(ts)
+  var s = 0
+  while (s < spans.length()) {
+    var i = spans[s].slo
+    while (i < spans[s].shi) {
+      let h = es_effect_head(ts, i)
+      if (h != 0 - 1 && !es_has_undo(ts, i, spans[s].shi + 1)) {
+        let head = es_dotted_acq(ts, i, spans[s].shi + 1)
+        if (head != "") {
+          return mk_verd(tagged("G4", es_no_undo_msg(head)), tkc(ts, h).line)
+        }
+      }
+      i += 1
+    }
+    s += 1
+  }
+  return no_verd()
+}
+
+fn es_wit_site_undo_msg(name: Str) -> Str {
+  return "witnessed extern `".concat(name).concat("` cannot declare a site `undo`")
+}
+
+fn es_teardown_in_flow_msg() -> Str {
+  return "a teardown-registering step (`effect`/`let-effect`/`await`) is not allowed inside a provide-method `if`/`while`/`for` body"
+}
+
+// The witnessed-site-undo refusal for the effect statement at `i` (a top-level
+// one), or no verdict.
+fn es_wit_verd(ts: List[Token], i: Int, hi: Int, wit: List[Str]) -> Verd {
+  let h = es_effect_head(ts, i)
+  if (h == 0 - 1) { return no_verd() }
+  let c = tkc(ts, i + 1)
+  if (c.kind != "ident" || !atk(ts, i + 2, "(") || !contains(wit, c.text)) {
+    return no_verd()
+  }
+  if (!es_has_undo(ts, i, hi)) { return no_verd() }
+  return mk_verd(tagged("G4", es_wit_site_undo_msg(c.text)), tkc(ts, h).line)
+}
+
+// The first teardown-registering step inside the control-flow block `{lo ..
+// hi}` (`hi` just past its `}`), at any depth inside it.
+fn es_flow_block_verd(ts: List[Token], lo: Int, hi: Int) -> Verd {
+  var i = lo + 1
+  while (i < hi - 1) {
+    let h = es_effect_head(ts, i)
+    if (h != 0 - 1) {
+      return mk_verd(tagged("T1", es_teardown_in_flow_msg()), tkc(ts, h).line)
+    }
+    if (atw(ts, i, "await") && es_head_at(ts, i)) {
+      return mk_verd(tagged("T1", es_teardown_in_flow_msg()), tkc(ts, i).line)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// A control-flow statement headed at `i` (`if`/`while`/`for`): the first
+// refusal inside its blocks, `else if` and `else` included, and the index just
+// past it, carried as a Verd whose `line` is the verdict's and a separate end.
+type EsFlow = { v: Verd, end: Int }
+
+fn es_flow_at(ts: List[Token], i: Int, hi: Int) -> EsFlow {
+  var j = i + 1
+  if (!atk(ts, j, "(")) { return { v: no_verd(), end: i + 1 } }
+  j = close_paren(ts, j)
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return { v: no_verd(), end: i + 1 } }
+  var e = close_brace(ts, j)
+  if (e == 0 - 1) { return { v: no_verd(), end: hi } }
+  let v = es_flow_block_verd(ts, j, e)
+  if (v.v != "") { return { v: v, end: e } }
+  if (atw(ts, i, "if") && atw(ts, e, "else")) {
+    if (atw(ts, e + 1, "if")) { return es_flow_at(ts, e + 1, hi) }
+    if (atk(ts, e + 1, "{")) {
+      let e2 = close_brace(ts, e + 1)
+      if (e2 == 0 - 1) { return { v: no_verd(), end: hi } }
+      return { v: es_flow_block_verd(ts, e + 1, e2), end: e2 }
+    }
+  }
+  return { v: no_verd(), end: e }
+}
+
+// The first component-stage refusal in one brace-bodied method body `{lo ..
+// hi}`, read in source order: a top-level witnessed site `undo`, or a
+// teardown-registering step inside a control-flow block.
+fn es_method_body(ts: List[Token], lo: Int, hi: Int, wit: List[Str]) -> Verd {
+  var depth = 0
+  var i = lo + 1
+  while (i < hi - 1) {
+    if (depth == 0 && es_head_at(ts, i)
+        && (atw(ts, i, "if") || atw(ts, i, "while") || atw(ts, i, "for"))) {
+      let f = es_flow_at(ts, i, hi - 1)
+      if (f.v.v != "") { return f.v }
+      i = f.end
+    } else {
+      if (depth == 0) {
+        let w = es_wit_verd(ts, i, hi - 1, wit)
+        if (w.v != "") { return w }
+      }
+      let k = tkc(ts, i).kind
+      if (k == "(" || k == "[" || k == "{") { depth += 1 }
+      if (k == ")" || k == "]" || k == "}") { depth -= 1 }
+      i += 1
+    }
+  }
+  return no_verd()
+}
+
+// The first refusal across the `fn` methods of one `provide` block `{lo .. hi}`.
+// An arrow method (`fn m() = …`) has no statement body, so it is stepped over.
+fn es_provide(ts: List[Token], lo: Int, hi: Int, wit: List[Str]) -> Verd {
+  var depth = 0
+  var i = lo + 1
+  while (i < hi - 1) {
+    if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")
+        && atk(ts, i + 2, "(")) {
+      var j = close_paren(ts, i + 2)
+      if (j == 0 - 1) { return no_verd() }
+      while (j < hi - 1 && !atk(ts, j, "{") && !atk(ts, j, "=")) { j += 1 }
+      if (atk(ts, j, "{")) {
+        let e = close_brace(ts, j)
+        if (e == 0 - 1) { return no_verd() }
+        let v = es_method_body(ts, j, e, wit)
+        if (v.v != "") { return v }
+        i = e
+      } else {
+        i = j
+      }
+    } else {
+      let k = tkc(ts, i).kind
+      if (k == "{") { depth += 1 }
+      if (k == "}") { depth -= 1 }
+      i += 1
+    }
+  }
+  return no_verd()
+}
+
+// The component-stage half for the component named `cname`: the first refusal
+// over its top-level activation statements and its `provide` blocks, in source
+// order, or no verdict.
+fn effect_stmt_verd(ts: List[Token], cname: Str, wit: List[Str]) -> Verd {
+  let spans = model_comp_spans(ts)
+  var s = 0
+  while (s < spans.length()) {
+    if (spans[s].sname == cname) {
+      var depth = 0
+      var i = spans[s].slo
+      while (i < spans[s].shi) {
+        if (depth == 0 && atw(ts, i, "provide") && atk(ts, i + 1, "ident")) {
+          var j = i + 2
+          while (j < spans[s].shi && !atk(ts, j, "{")) { j += 1 }
+          let e = close_brace(ts, j)
+          if (e == 0 - 1) { return no_verd() }
+          let v = es_provide(ts, j, e, wit)
+          if (v.v != "") { return v }
+          i = e
+        } else {
+          if (depth == 0) {
+            let w = es_wit_verd(ts, i, spans[s].shi + 1, wit)
+            if (w.v != "") { return w }
+          }
+          let k = tkc(ts, i).kind
+          if (k == "{") { depth += 1 }
+          if (k == "}") { depth -= 1 }
+          i += 1
+        }
+      }
+      return no_verd()
+    }
+    s += 1
+  }
+  return no_verd()
+}
+
+// The component's one verdict when a component-stage effect rule also fires.
+// The reference raises it while lowering the statement, so it beats a verdict
+// the gate anchors at the component line (a post-walk one: aggregate G4/A1,
+// signature parity, `await`, setup reach) and an inline one on a later line;
+// an inline refusal on an earlier line was raised first.
+// The first of two parse-stage refusals by line: the reference's parser
+// raises whichever it reaches first in the file.
+fn first_parse_verd(a: Verd, b: Verd) -> Verd {
+  if (a.v == "") { return b }
+  if (b.v == "") { return a }
+  return a.line <= b.line ? a : b
+}
+
+fn effect_stmt_or(ev: Verd, v: Verd, compLine: Int) -> Verd {
+  if (ev.v == "") { return v }
+  if (v.v == "" || v.line == compLine || ev.line <= v.line) { return ev }
+  return v
 }
 
 // The `witnessed` externs a program declares. A witnessed acquisition registers
@@ -20382,12 +20819,138 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
   return mk_irres(false, "")
 }
 
+// ---- the UI transaction unit (issue #1369) --------------------------------
+//
+// lower.py `_crosses_computer_use`: a provide method whose body crosses a
+// computer-use verb carries `"unit": "ui"` after its `body`, the key absent
+// otherwise. The verb table is `ui_family.ROOTS`, the two reserved roots of
+// the closed computer-use capability namespace; a token is a computer-use
+// crossing when its first dotted segment is one of them (`screen.observe`,
+// `ui.click`, a deeper rung such as `ui.click.pixel`).
+//
+// The reference reads the method's capability set, the one the G4 provider
+// upper bound reads: what its `emit` steps and the functions it calls reach.
+// Read here at the token level: the `extern emission[…]` declarations whose
+// scope names a computer-use token, closed over the module `fn`s that call one
+// of them, and then whether the method's body calls any name in that set. A
+// call through a required key contributes the key, not the providing method's
+// verbs, so neither side marks it.
+fn cu_roots() -> List[Str] { return ["screen", "ui"] }
+
+fn cu_token(cap: Str) -> Bool {
+  return contains(cu_roots(), cap.split(".")[0])
+}
+
+fn cu_any(caps: List[Str]) -> Bool {
+  for (c of caps) { if (cu_token(c)) { return true } }
+  return false
+}
+
+// The externs whose declared emission scope names a computer-use token.
+fn cu_externs(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var i = 0
+  while (i < ts.length()) {
+    if (atk(ts, i, "{")) {
+      depth += 1
+    } else if (atk(ts, i, "}")) {
+      depth -= 1
+    } else if (depth == 0 && atw(ts, i, "extern")) {
+      var j = i + 1
+      var cu = false
+      while (j < ts.length() && !atw(ts, j, "fn") && !atk(ts, j, "eof")) {
+        if (atk(ts, j, "[")) {
+          let cl = cap_list_at(ts, j, ts.length())
+          if (cu_any(cl.xs)) { cu = true }
+          j = cl.i
+        } else {
+          j += 1
+        }
+      }
+      if (cu && atk(ts, j + 1, "ident")) { out = out.push(tkc(ts, j + 1).text) }
+    }
+    i += 1
+  }
+  return out
+}
+
+// Whether the tokens in [lo, hi) call a name in `names` (a bare call, not a
+// method call through a receiver).
+fn cu_calls(ts: List[Token], lo: Int, hi: Int, names: List[Str]) -> Bool {
+  var i = lo
+  while (i < hi) {
+    if (atk(ts, i, "ident") && atk(ts, i + 1, "(") && !atk(ts, i - 1, ".")
+        && contains(names, tkc(ts, i).text)) {
+      return true
+    }
+    i += 1
+  }
+  return false
+}
+
+// One pass over the top-level `fn`s: the set grown by every fn whose body
+// calls a member.
+fn cu_grow(ts: List[Token], names: List[Str]) -> List[Str] {
+  var out = names
+  var depth = 0
+  var i = 0
+  while (i < ts.length()) {
+    if (atk(ts, i, "{")) {
+      depth += 1
+      i += 1
+    } else if (atk(ts, i, "}")) {
+      depth -= 1
+      i += 1
+    } else if (depth == 0 && atw(ts, i, "extern")) {
+      // an extern's `fn` has no revl body to read: step past its name
+      var j = i + 1
+      while (j < ts.length() && !atw(ts, j, "fn") && !atk(ts, j, "eof")) { j += 1 }
+      i = j + 2
+    } else if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")) {
+      let nm = tkc(ts, i + 1).text
+      var k = i + 2
+      while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "=")
+             && !atk(ts, k, "eof")) { k += 1 }
+      if (!atk(ts, k, "{")) {
+        i = k
+      } else {
+        let e = close_brace(ts, k)
+        if (e == 0 - 1) { return out }
+        if (!contains(out, nm) && cu_calls(ts, k + 1, e, out)) { out = out.push(nm) }
+        i = e
+      }
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
+fn cu_close(ts: List[Token], names: List[Str]) -> List[Str] {
+  let grown = cu_grow(ts, names)
+  return grown.length() == names.length() ? names : cu_close(ts, grown)
+}
+
+// Every name whose call crosses a computer-use verb: [] for a program that
+// declares none, which is every program but a computer-use one.
+fn cu_names(ts: List[Token]) -> List[Str] {
+  let seed = cu_externs(ts)
+  return seed.length() == 0 ? seed : cu_close(ts, seed)
+}
+
+// The `, "unit": "ui"` suffix of a method entry whose body [lo, hi) calls one.
+fn cu_unit(ts: List[Token], lo: Int, hi: Int, names: List[Str]) -> Str {
+  if (names.length() == 0 || !cu_calls(ts, lo, hi, names)) { return "" }
+  return ", \"unit\": \"ui\""
+}
+
 // A `provide <key> { … }` method table -> `[{name, params, body}]`. The method's
 // parameters are the surface names; their TYPES come from the provided
 // service's declaration (`svc`, A6), which is what a `match` in the body needs
 // to stamp its arms' `payload_type`. The shorthand `= expr` becomes a single
 // `return`.
-fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], svc: Str, acc: Str) -> IrRes {
+fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], svc: Str, cu: List[Str], acc: Str) -> IrRes {
   if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
   // item 219 async coloring. `async fn <m>(…)` is the SAME method entry as the
   // sync spelling: the reference lowers a provide method to `{name, params,
@@ -20421,9 +20984,10 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
     if (!be.ok) { return mk_irres(false, "") }
     let bj = cir_widen(be.js, mret, infer(r.e, cenv_ir(cx, bsc)))
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
-      .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(bj).concat("}]}")
+      .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(bj).concat("}]")
+      .concat(cu_unit(ts, h + 1, r.i, cu)).concat("}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-    return cir_prov_methods(ts, r.i, end, cx, sc, hostSc, svc, nacc)
+    return cir_prov_methods(ts, r.i, end, cx, sc, hostSc, svc, cu, nacc)
   }
   if (atk(ts, h, "{")) {
     let bend = close_brace(ts, h)
@@ -20433,9 +20997,10 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
                               hostSc, "")
     if (!br.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
-      .concat("], \"body\": [").concat(br.js).concat("]}")
+      .concat("], \"body\": [").concat(br.js).concat("]")
+      .concat(cu_unit(ts, h + 1, bend, cu)).concat("}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-    return cir_prov_methods(ts, bend, end, cx, sc, hostSc, svc, nacc)
+    return cir_prov_methods(ts, bend, end, cx, sc, hostSc, svc, cu, nacc)
   }
   return mk_irres(false, "")
 }
@@ -20615,7 +21180,8 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let pend = close_brace(ts, i + 2)
     if (pend == 0 - 1) { return mk_irres(false, "") }
     let svc = bind_lookup(provs, key, 0)
-    let ms = cir_prov_methods(ts, i + 3, pend - 1, cx, sc, hostSc, svc, "")
+    let ms = cir_prov_methods(ts, i + 3, pend - 1, cx, sc, hostSc, svc,
+                              cu_names(ts), "")
     if (!ms.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"provide\", \"name\": ".concat(jstr(key))
       .concat(", \"service\": ").concat(jstr(svc))
@@ -24801,6 +25367,19 @@ test "a Stream requirement is not a service lookup" {
     == ""
 }
 
+test "a bare emit in a provide-method if is admitted" {
+  let v = admit_src("""service Bus { emission fn send(k: Str) }
+service W { emission fn put(k: Str) }
+component C requires bus: Bus provides w: W {
+  provide w { fn put(k) {
+      if (k == "a") {
+        emit bus.send(k)
+      }
+  } }
+}""")
+  assert v == ""
+}
+
 test "a block match arm in a provide method is read as the arm's scope" {
   let v = admit_src("""service S { fn go(n: Int) -> Int }
 component C provides s: S {
@@ -25867,6 +26446,23 @@ component Classifier provides out: Answer {
   assert v == ""
 }
 
+test "a provide method is the ui unit only when it crosses a computer-use verb" {
+  let ui = lower_to_ir("""extern emission[ui.click] fn actuate(t: Str) = @py { return None }
+service D { emission fn act(t: Str) -> Int }
+component A provides d: D { provide d { fn act(t) {
+  emit actuate(t)
+  return 1
+} } }""")
+  assert ui.indexOf("\"unit\": \"ui\"") >= 0
+  let db = lower_to_ir("""extern emission[db.write] fn put(t: Str) = @py { return None }
+service D { emission fn act(t: Str) -> Int }
+component A provides d: D { provide d { fn act(t) {
+  emit put(t)
+  return 1
+} } }""")
+  assert db.indexOf("\"unit\"") == 0 - 1
+}
+
 test "a provision the running manifest already holds conflicts (ambient G2)" {
   let v = admit_ambient("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }", "OldStore/db/")
   assert v == "G2|provision conflict: key `db` is provided by both OldStore and NewStore (G2)"
@@ -26394,6 +26990,35 @@ test "a successor that cannot hold the running state is refused (handoff)" {
     == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Int`, but `OldStore` exports `Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"
 }
 
+test "a teardown-registering step in a provide-method if carries its own line" {
+  let v = admit_all("""service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      var n = 0
+      while (n < 2) {
+        effect store.insert(k, "1") undo store.remove(k)
+        n += 1
+      }
+  } }
+}""")
+  assert v == "7|T1|a teardown-registering step (`effect`/`let-effect`/`await`) is not allowed inside a provide-method `if`/`while`/`for` body"
+}
+
+// issue #1963: the effect-statement rules (the section above `witnessed_extern_names`).
+test "a teardown-registering step in a provide-method if is refused (T1)" {
+  let v = admit_src("""service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      if (k == "a") {
+        effect store.insert(k, "1") undo store.remove(k)
+      }
+  } }
+}""")
+  assert v == "T1|a teardown-registering step (`effect`/`let-effect`/`await`) is not allowed inside a provide-method `if`/`while`/`for` body"
+}
+
 test "a typed hole in a host acquisition's undo is not refused" {
   let v = admit_src("""service S { fn go(k: Str) -> Int }
 component C provides s: S {
@@ -26514,6 +27139,59 @@ test "a withdrawn provision a retained running consumer requires is refused" {
   let x = "component Old provides other: C { provide other { fn g(k) { return k } } }"
   assert admit_ambient(svc.concat(x), "Old/db/;Store/cache/;Store<db")
     == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"
+}
+
+test "a witnessed effect with a site undo in the activation body is refused (G4)" {
+  let v = admit_src("""type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  effect put_w("a") undo unput("a")
+  provide w { fn put(k) { } }
+}""")
+  assert v == "G4|witnessed extern `put_w` cannot declare a site `undo`"
+}
+
+test "a witnessed effect with a site undo is refused (G4)" {
+  let v = admit_all("""type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      effect put_w(k) undo unput(k)
+  } }
+}""")
+  assert v == "12|G4|witnessed extern `put_w` cannot declare a site `undo`"
+}
+
+test "a witnessed effect with no site undo is admitted" {
+  let v = admit_src("""type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      effect put_w(k)
+  } }
+}""")
+  assert v == ""
 }
 
 // Exit test 3: admission against a halted composition refuses every incoming
@@ -26686,6 +27364,15 @@ test "an arrow in an emit head's arguments leaves the argument position (G4)" {
   assert admit_src(pre.concat("return emit gt.decide(true, emit ap.approve(k, k)) } } }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
 }
 
+test "an arrow method's refusal carries its expression's line" {
+  let v = admit_all("""service R { fn get() -> Str }
+component D provides r: R {
+  provide r { fn get() =
+    db.get() }
+}""")
+  assert v == "4|G1|`db` is not a declared requirement of D"
+}
+
 test "an arrow parameter resolves in its body (no false G1)" {
   assert admit_src("fn apply(f: (Int) -> Int, x: Int) -> Int { return f(x) } service S { fn go(n: Int) -> Int } component C provides s: S { provide s { fn go(n) { let r = apply(x => x, n)   return r } } }") == ""
 }
@@ -26726,6 +27413,29 @@ component Worker requires kv2: Kv2 provides task: Task { provide task { fn go() 
 component Old provides other: C { provide other { fn g(k) { return k } } }"""
   assert admit_ambient(src, "Old/db/;Store/cache/;Store<db")
     == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv2`"
+}
+
+test "an effect whose undo is on the next line is admitted" {
+  let v = admit_src("""service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      effect store.insert(k, "1")
+        undo store.remove(k)
+  } }
+}""")
+  assert v == ""
+}
+
+test "an effect with no undo over a dotted call is refused (G4)" {
+  let v = admit_src("""service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      effect store.insert(k, "1")
+  } }
+}""")
+  assert v == "G4|effect has no `undo` and `store.insert` is not pure"
 }
 
 // issue #1427: the same rule on the HOST EMISSION EXTERN carrier. Both of the
