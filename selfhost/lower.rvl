@@ -1079,6 +1079,17 @@ fn self_async_body(ss: List[Stmt], i: Int) -> Str {
   return self_async_body(ss, i + 1)
 }
 
+// The line of the statement `self_async_body` refuses: the reference's checker
+// raises rule C1 at the arrow's statement (issue #1965). 0 when none.
+fn self_async_line(ss: List[Stmt], i: Int) -> Int {
+  if (i >= ss.length()) { return 0 }
+  if (self_async_expr(ss[i].e) != "") { return ss[i].line }
+  return self_async_line(ss, i + 1)
+}
+
+// `a` when it is a real line, else the fallback `b`.
+fn first_line(a: Int, b: Int) -> Int { return a > 0 ? a : b }
+
 // The parameter INDICES whose declared type is an async function type — the
 // `Async[T]` slots a call-site coercion (lower.py's `_coerce_async_args`) stamps
 // its arrow argument async into.
@@ -2109,8 +2120,23 @@ fn ba_arm(ts: List[Token], i: Int, e: Int) -> BaRw {
   arm = append_stmts(append_stmts(arm, p_stmts(ts, i + 2, t0, [])), tail.pre)
   let ln = tkc(ts, i).line
   let open: List[Token] = [ba_tok("(", ln)]
-  return { pre: arm_scoped(arm),
+  return { pre: arm_scoped_tail(arm, ba_one_line(tail.toks, tkc(ts, t0).line),
+                                tkc(ts, t0).line),
            toks: ba_append(open, tail.toks).push(ba_tok(")", ln)) }
+}
+
+// `arm_scoped`, with the arm's TAIL expression on the closing marker at the
+// tail's own source line (issue #1965). The tail is read once more there, where
+// it is written, so a refusal in it is anchored at the tail's line, as the
+// reference anchors it; the rewritten statement that carries the tail inline
+// reads it again on the statement's line, and agrees.
+fn arm_scoped_tail(ss: List[Stmt], tt: List[Token], tline: Int) -> List[Stmt] {
+  let open: List[Stmt] = [scope_stmt("arm_open")]
+  let r = expr_at(tt, 0)
+  if (is_bad(r.e) || r.i != tt.length()) { return arm_scoped(ss) }
+  let close = { kind: "arm_close", e: r.e, bind: "", spawnTarget: "",
+                awaited: false, line: tline, inTimer: false, bindTy: "", edge: "" }
+  return append_stmts(open, ss).push(close)
 }
 
 // `[lo, hi)` with every block arm in it rewritten (see above).
@@ -6004,8 +6030,9 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   var na = a
   var k = i
   while (k < j) {
+    let before = na
     na = walk_one_stmt(ss[k], cx, na)
-    if (na.msg != "") { return ss[k].line }
+    if (na.msg != "") { return applied_arrow_line(ss, k, cx, before) }
     k += 1
   }
   // the approval floor is judged once the group is walked, and the reference
@@ -6017,6 +6044,33 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   na = release_group(ss, i, na)
   if (na.msg != "") { return ss[i - 1].line }
   return refusal_line(ss, j, cx, na)
+}
+
+// Issue #1965: a refusal raised while walking a local arrow's body at its
+// application (`let f = (p: Pay, k) => emit p.charge(k)` then `f(w.pay, n)`)
+// is the reference's at the ARROW's statement, where the offending crossing is
+// written, not at the application. The application statement `k` refuses only
+// through such an arrow when it no longer refuses with the local arrows taken
+// away; the line is then that of the statement binding the first applied
+// arrow. Otherwise it is the statement's own.
+fn applied_arrow_line(ss: List[Stmt], k: Int, cx: Ctx, a: Ac) -> Int {
+  if (cx.localArrows.keys().length() == 0) { return ss[k].line }
+  if (walk_one_stmt(ss[k], ctx_arrows(cx, Map.empty()), a).msg != "") {
+    return ss[k].line
+  }
+  let names = calls_in(ss[k].e, [])
+  var n = 0
+  while (n < names.length()) {
+    if (cx.localArrows.has(names[n])) {
+      var j = k - 1
+      while (j >= 0) {
+        if (ss[j].bind == names[n]) { return ss[j].line }
+        j -= 1
+      }
+    }
+    n += 1
+  }
+  return ss[k].line
 }
 
 // ============================ the provide-method SIGNATURE (docs/design/457)
@@ -7152,6 +7206,14 @@ fn acq_body(ss: List[Stmt], i: Int) -> Str {
   return acq_body(ss, i + 1)
 }
 
+// The line of the statement `acq_body` finds: the reference reports the host
+// acquisition where it is called, inside the fn (issue #1965). 0 when none.
+fn acq_body_line(ss: List[Stmt], i: Int) -> Int {
+  if (i >= ss.length()) { return 0 }
+  if (acq_in(ss[i].e) != "") { return ss[i].line }
+  return acq_body_line(ss, i + 1)
+}
+
 // The declaration line of the named fn (item 419c: the anchor for a module-fn
 // and reachable-fn refusal), 0 if the name is not a declared fn.
 fn fnd_line(fns: List[FnD], n: Str, i: Int) -> Int {
@@ -7170,7 +7232,7 @@ fn check_fn_acquire(fns: List[FnD], reached: List[Str], i: Int) -> Verd {
       hit.slice(0, dot), hit.slice(dot + 1, hit.length()),
       host_acquire_release(hit.slice(0, dot), hit.slice(dot + 1, hit.length())),
       "`fn ".concat(n).concat("`, which a component body reaches"))),
-      fnd_line(fns, n, 0))
+      first_line(acq_body_line(fnd_body(fns, n, 0), 0), fnd_line(fns, n, 0)))
   }
   return check_fn_acquire(fns, reached, i + 1)
 }
@@ -7209,7 +7271,13 @@ fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
 fn first_module_fn(fns: List[FnD], i: Int, base: Ctx) -> Verd {
   if (i >= fns.length()) { return no_verd() }
   let v = fn_a1_verdict(fns[i], base)
-  if (v != "") { return mk_verd(v, fns[i].line) }
+  if (v != "") {
+    // rule C1 is the checker's, at the arrow's statement; the value and leak
+    // twins are reported at the declaration
+    let sl = self_async_body(fns[i].body, 0) != ""
+             ? self_async_line(fns[i].body, 0) : 0
+    return mk_verd(v, first_line(sl, fns[i].line))
+  }
   return first_module_fn(fns, i + 1, base)
 }
 
@@ -7533,7 +7601,8 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // body reaches async has no color to carry the suspension. A coerced arrow
       // (in an `Async[T]` slot) is admitted.
       let leak = leaky_body(pm.body, 0, pcx, true)
-      if (leak != "") { return mk_verd(tagged("A1", leak), comp.line) }
+      // issue #1965: the reference reports the leak at the method's line
+      if (leak != "") { return mk_verd(tagged("A1", leak), pm.line) }
       mi += 1
     }
     pi += 1

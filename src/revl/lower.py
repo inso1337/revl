@@ -10258,11 +10258,13 @@ def _refuse_leaky_arrow(node, env, source: str, line: int = 0) -> None:
                     code="A1", category="async-propagation",
                 )
             # its own body still walked below (a sync inner arrow may leak)
+        # issue #1965: the caller's line (the method's) is carried down, so
+        # a nested arrow is reported there rather than at line 0
         for value in node.values():
-            _refuse_leaky_arrow(value, env, source)
+            _refuse_leaky_arrow(value, env, source, line)
     elif isinstance(node, list):
         for value in node:
-            _refuse_leaky_arrow(value, env, source)
+            _refuse_leaky_arrow(value, env, source, line)
 
 
 def _coerce_async_args(callee_name, args, env, line):
