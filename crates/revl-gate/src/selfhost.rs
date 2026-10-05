@@ -5476,25 +5476,26 @@ fn component_map_values(comp: Value, services: Value, functions: Vec<Value>, ctx
     return out;
 }
 
-fn call_bind_type(comp: Value, bind: &str, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> String {
+fn held_bind_type(comp: Value, bind: &str, services: Value, ctx_: Ctx__m1) -> String {
     for s in value_list(value_field(comp.clone(), String::from("body"))) {
         if ((value_str(value_field(s.clone(), String::from("step"))) == "let-effect") && (value_str(value_field(s.clone(), String::from("bind"))) == bind)) {
             let acq = value_field(s.clone(), String::from("acquire"));
-            if (node_kind(acq.clone()) != "fn") {
+            let k = node_kind(acq.clone());
+            if ((((k == "host") || (k == "spawn")) || (k == "subscribe")) || is_map_cas(acq.clone())) {
                 return String::from("");
             }
-            let r = map_get(fr.clone(), value_str(value_field(acq.clone(), String::from("name"))));
-            if ((r == "") || (r == "Unit")) {
+            let surface = provide_let_type(acq.clone(), ctx_.clone(), comp.clone(), services.clone());
+            if ((surface == "") || (surface == "Unit")) {
                 return String::from("");
             }
-            return rust_type_t(Value::new(serde_json::Value::from(r.clone())), tn.clone());
+            return rust_type_t(Value::new(serde_json::Value::from(surface.clone())), ctx_.tn.clone());
         }
     }
     return String::from("");
 }
 
-fn bind_field_type(comp: Value, bind: String, map_values: std::collections::HashMap<String, String>, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> String {
-    let held = call_bind_type(comp.clone(), &bind, fr.clone(), tn.clone());
+fn bind_field_type(comp: Value, bind: String, map_values: std::collections::HashMap<String, String>, services: Value, ctx_: Ctx__m1) -> String {
+    let held = held_bind_type(comp.clone(), &bind, services.clone(), ctx_.clone());
     if (held != "") {
         return held;
     }
@@ -5800,10 +5801,10 @@ fn is_stream_next(comp: Value, expr: Value) -> bool {
     return is_subscription_bind(comp.clone(), &name);
 }
 
-fn method_scope_rename(comp: Value, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
+fn method_scope_rename(comp: Value, services: Value, ctx_: Ctx__m1) -> std::collections::HashMap<String, String> {
     let mut rn = std::collections::HashMap::new();
     for b in binds(comp.clone()) {
-        if (call_bind_type(comp.clone(), &b, fr.clone(), tn.clone()) != "") {
+        if (held_bind_type(comp.clone(), &b, services.clone(), ctx_.clone()) != "") {
             rn.insert(b.clone(), format!("self.{}.clone()", b));
         } else {
             rn.insert(b.clone(), format!("self.{}", b));
@@ -5959,7 +5960,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
     let pad = ind(indent);
     let name = value_str(value_field(comp.clone(), String::from("name")));
     let mnm = value_str(value_field(method.clone(), String::from("name")));
-    let scope = method_scope_rename(comp.clone(), ctx_.fr.clone(), ctx_.tn.clone());
+    let scope = method_scope_rename(comp.clone(), services.clone(), ctx_.clone());
     let mut c = set_rn(ctx_.clone(), scope.clone());
     let mut out: Vec<String> = vec![];
     let mut index = 0i64;
@@ -6099,7 +6100,7 @@ fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, ta
             out.extend((bl.lines).iter().cloned());
             out.push(String::from("    }"));
         } else {
-            let ctxr = set_rn(ctx_.clone(), method_scope_rename(comp.clone(), fr.clone(), tables.tn.clone()));
+            let ctxr = set_rn(ctx_.clone(), method_scope_rename(comp.clone(), services.clone(), ctx_.clone()));
             out.push(format!("    fn {}(&self, {}) -> {} {{ {} }}", mn, ps.revl_join(", "), ret, pure_method_statements(method.clone(), ctxr.clone())));
         }
     }
@@ -6214,7 +6215,7 @@ fn emit_let_effect_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_
         }
         acq_src = format!("Map::<{}>::new()", v);
     }
-    if (call_bind_type(comp.clone(), &raw_bind, ctx_.fr.clone(), ctx_.tn.clone()) != "") {
+    if (held_bind_type(comp.clone(), &raw_bind, value_field(ir.clone(), String::from("services")), ctx_.clone()) != "") {
         out.push(format!("{}let {} = {};", pad, bind, acq_src));
     } else {
         out.push(format!("{}let {} = Arc::new({});", pad, bind, acq_src));
@@ -6438,7 +6439,7 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
         let struct_ = format!("{}{}", cname, camel(key.clone()));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), fr.clone(), tables.tn.clone())));
+            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone()))));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", local, require_ty(value_str(value_field(reqs.clone(), local.clone())))));
@@ -6506,7 +6507,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
         let struct_ = format!("{}{}", cname, camel(key.clone()));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), fr.clone(), tables.tn.clone())));
+            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone()))));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", local, require_ty(value_str(value_field(reqs.clone(), local.clone())))));

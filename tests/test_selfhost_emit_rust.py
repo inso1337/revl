@@ -296,6 +296,9 @@ CORPUS = [
                              #   slug rules (snake, sanitised, digit prefix, bumped
                              #   against functions and each other), an empty body,
                              #   and #1734's tests half (a Str builtin only in a test)
+    "held_acquire_binds.rvl",  # issue #1931: an activation bind is held by
+                             #   value as the type its acquisition evaluates to,
+                             #   unless it is a shared resource (a host Map)
     "prelude_names.rvl",     # issue #1920: a service named `Box` takes the
                              #   type-name reservation (`Box_`), and a captured
                              #   `extern acquire` handle is held by value

@@ -80,8 +80,6 @@
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "by_value_reuse", 2, 2]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "component_map_values", 1, 1]
-
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "emit_comp_step", 8, 8]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "emit_let_effect_step", 6, 6]
@@ -92,8 +90,6 @@
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_expr_type", 75, 75]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_surface_type", 1, 1]
-
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "steps_use_timer", 2, 2]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "witnessed_acquire", 1, 1]
@@ -102,9 +98,9 @@
 
 ["function", "host-object-blocks-no-corpus-document-acquires-the", "is_map_cas_verb", 1, 1]
 
-["reason", "issue-1920-call-acquired-binds-and-service-trait-names", "Issue #1920, the port of the same two changes. `call_bind_type` mirrors `_call_bind_type` and records the same unreachable arms (a call with no declared or a `Unit` return). `svc_ident`'s loop-exhausted `return mangle(name)` is reached only by a name of nothing but underscores, which is not a valid service name; emit_rust_corpus/prelude_names.rvl reaches the reserved rung and the `Box_` -> `Box__` ladder step."]
+["reason", "issue-1920-call-acquired-binds-and-service-trait-names", "Issue #1920, the port of the same two changes. `held_bind_type` mirrors `_held_bind_type` (issue #1931 generalised it from calls to every value acquisition) and records the same unreachable arms: an acquisition whose type cannot be named or is `Unit`, and the loop-exhausted return. `svc_ident`'s loop-exhausted `return mangle(name)` is reached only by a name of nothing but underscores, which is not a valid service name; emit_rust_corpus/prelude_names.rvl reaches the reserved rung and the `Box_` -> `Box__` ladder step."]
 
-["function", "issue-1920-call-acquired-binds-and-service-trait-names", "call_bind_type", 2, 2]
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "held_bind_type", 2, 2]
 
 ["function", "issue-1920-call-acquired-binds-and-service-trait-names", "svc_ident", 1, 1]
 
@@ -184,7 +180,7 @@
 
 ["function", "the-port-s-stream-typed-event-host-dialect", "stream_stage_arrow", 1, 1]
 
-["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements."]
+["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements. emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `v3_infer_type`'s statements, 3 -> 2."]
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "build_type_tables", 2, 2]
 
@@ -208,4 +204,4 @@
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "split_fn_ret", 2, 2]
 
-["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "v3_infer_type", 3, 3]
+["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "v3_infer_type", 2, 2]
