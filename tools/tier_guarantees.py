@@ -1,6 +1,6 @@
 """The guarantee x tier support matrix, derived rather than authored.
 
-    python3 tools/tier_guarantees.py [--json] [--check]
+    python3 tools/tier_guarantees.py [--json] [--show] [--check]
 
 `tools/conformance.py` answers "does every CONSTRUCT survive every tier?".
 This answers the question an adopter actually asks before shipping: **what is
@@ -377,7 +377,7 @@ def _selfhost_admit():
     return admit
 
 
-def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]:
+def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple]:
     """code -> (verdict, reason) for the `revl` column.
 
     `admit_src` answers `"<TAG>|<message>"` or `""` for no objection. Three
@@ -410,9 +410,14 @@ def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]
             "so the `revl` column cannot be measured. Refusing to generate a "
             "matrix with an unmeasured column rather than render it blank.")
 
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[str, str] | tuple[str, str, list[str]]] = {}
     for code, paths in index.items():
         agreed = 0
+        # each reproducer the gate does NOT refuse under this code, with what
+        # it did instead. A divergence names these rather than counting them,
+        # so two branches that each fix a different reproducer change two
+        # different lines of the generated block (issue #1768).
+        missed: list[str] = []
         other_tags: set[str] = set()
         # the tag the gate actually spelled, when it is not the code itself
         # (`SELFHOST_TAG_CODES`), so the generated sentence names what a reader
@@ -433,17 +438,18 @@ def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]
                 under.add(tag)
             elif tag:
                 other_tags.add(tag)
+                missed.append(f"`{rel}`: answered under {tag}")
+            else:
+                missed.append(f"`{rel}`: admitted")
         if agreed == len(paths):
             spelling = ", ".join(sorted(under)) or code
             out[code] = (PROVED, "the self-host gate refuses every reproducer "
                                  f"for {code} under {spelling}")
         elif agreed:
-            rest = ("answers under " + ", ".join(sorted(other_tags))
-                    if other_tags else "admits")
             out[code] = (DIVERGENCE,
-                         f"the self-host gate agrees on {agreed} of "
-                         f"{len(paths)} {code} reproducers; the rest it "
-                         f"{rest}")
+                         f"the self-host gate refuses every other {code} "
+                         f"reproducer, and not these",
+                         sorted(missed))
         else:
             answered = ("answers every " + code + " reproducer under "
                         + ", ".join(sorted(other_tags)) if other_tags
@@ -575,7 +581,8 @@ def matrix() -> dict:
     Returns
 
         {"tiers": [...], "rows": [{"code", "text", "evidence", "sites",
-                                   "cells": {tier: {"verdict", "why"}}}, ...],
+                                   "cells": {tier: {"verdict", "why",
+                                                    "names"?}}}, ...],
          "acknowledged": {...}}
     """
     tiers = host_tiers()
@@ -639,12 +646,14 @@ def matrix() -> dict:
                 why = f"{why}; and {base[1]}"
             row["cells"][short] = {"verdict": DIVERGENCE, "why": why}
 
-        verdict, why = selfhost.get(
+        verdict, why, *names = selfhost.get(
             code, (UNIMPLEMENTED, "no reproducer reaches the self-host gate, "
                                   "so its verdict on this code is unmeasured"))
         if not paths:
-            verdict, why = base[0], base[1]
+            verdict, why, names = base[0], base[1], []
         row["cells"][SELFHOST_TIER] = {"verdict": verdict, "why": why}
+        if names:
+            row["cells"][SELFHOST_TIER]["names"] = names[0]
         rows.append(row)
 
     if missing:
@@ -748,34 +757,24 @@ def markdown(data: dict | None = None) -> str:
         link = f"[`{evidence}`](../{evidence})" if evidence else "–"
         out.append(f"| `{row['code']}` | " + " | ".join(cells) + f" | {link} |")
 
-    out.append("")
-    out.append("| tier | " + " | ".join(_CELL[v].replace("**", "")
-                                        for v in (PROVED, DIVERGENCE,
-                                                  NO_REPRODUCER, UNIMPLEMENTED))
-               + " |")
-    out.append("|---|---|---|---|---|")
-    for tier in tiers:
-        counts = {v: 0 for v in _CELL}
-        for row in data["rows"]:
-            counts[row["cells"][tier]["verdict"]] += 1
-        out.append(f"| {tier} | " + " | ".join(
-            str(counts[v]) for v in (PROVED, DIVERGENCE, NO_REPRODUCER,
-                                     UNIMPLEMENTED)) + " |")
-
     explained: list[str] = []
     for row in data["rows"]:
-        seen: dict[str, list[str]] = {}
+        seen: dict[tuple[str, str, tuple[str, ...]], list[str]] = {}
         for tier in tiers:
             cell = row["cells"][tier]
             if cell["verdict"] == PROVED:
                 continue
-            why = cell["why"].rstrip(".")
-            seen.setdefault(f"{cell['verdict']}: {why}", []).append(tier)
-        for why, where in seen.items():
-            verdict, _, detail = why.partition(": ")
+            key = (cell["verdict"], cell["why"].rstrip("."),
+                   tuple(cell.get("names", ())))
+            seen.setdefault(key, []).append(tier)
+        for (verdict, detail, names), where in seen.items():
             explained.append(f"- `{row['code']}` on {', '.join(where)} "
                              f"{_PHRASE[verdict]} "
-                             f"{detail[:1].upper()}{detail[1:]}.")
+                             f"{detail[:1].upper()}{detail[1:]}"
+                             + (":" if names else "."))
+            # one reproducer per line, sorted, so a branch that moves one
+            # program's verdict touches that program's line only
+            explained.extend(f"  - {name}" for name in names)
     if explained:
         out.append("")
         out.append("**Why a cell is not `proved`.** Every non-`proved` cell "
@@ -790,12 +789,40 @@ def block(data: dict | None = None) -> str:
     return f"{START}\n{markdown(data)}\n{END}"
 
 
+def totals(data: dict | None = None) -> str:
+    """How many cells of each verdict every tier has, for `--show`.
+
+    Not part of the committed block (issue #1768): a per-tier count changes
+    on every branch that moves any one cell, so two branches that each move a
+    different cell both rewrite the same table row and conflict under a plain
+    3-way merge. The rows above already carry every cell; this sums them on
+    demand.
+    """
+    data = data or matrix()
+    order = (PROVED, DIVERGENCE, NO_REPRODUCER, UNIMPLEMENTED)
+    out = ["| tier | " + " | ".join(_CELL[v].replace("**", "") for v in order)
+           + " |", "|---|---|---|---|---|"]
+    for tier in data["tiers"]:
+        counts = {v: 0 for v in _CELL}
+        for row in data["rows"]:
+            counts[row["cells"][tier]["verdict"]] += 1
+        out.append(f"| {tier} | "
+                   + " | ".join(str(counts[v]) for v in order) + " |")
+    return "\n".join(out)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--json", action="store_true",
                     help="the matrix as data, evidence and reasons included")
+    ap.add_argument("--show", action="store_true",
+                    help="the per-tier verdict totals, which the committed "
+                         "block leaves out")
     args = ap.parse_args(argv)
     data = matrix()
+    if args.show:
+        print(totals(data))
+        return 0
     print(json.dumps(data, indent=2) if args.json else markdown(data))
     return 0
 

@@ -38,7 +38,6 @@ here when `lake` is on PATH, and by `make formal` always.
 from __future__ import annotations
 
 import io
-import json
 import re
 import shutil
 import sys
@@ -57,7 +56,7 @@ ORACLE = ROOT / "formal" / "harness" / "Oracle.lean"
 GATE = ROOT / "formal" / "scripts" / "run_gate.sh"
 CHECK = ROOT / "formal" / "CheckAxioms.lean"
 REGISTRY = ROOT / "formal" / "scripts" / "nonvacuity.tsv"
-LEDGER = ROOT / "formal" / "out_of_fragment_ledger.json"
+LEDGER = ROOT / "formal" / "out_of_fragment_ledger"
 
 SCOPED = "examples/rejections/g4_approval_scoped_extern.rvl"
 HELPER = "examples/rejections/g4_approval_helper_reach.rvl"
@@ -499,8 +498,11 @@ def test_a_blind_row_is_filed_under_missed_g4(harness, verdicts, tmp_path):
 
 def test_the_out_of_fragment_approval_bucket_is_gone(harness):
     assert "out-of-fragment-approval" not in harness.OOF_RATCHET_BUCKETS
-    ledger = json.loads(LEDGER.read_text(encoding="utf-8"))
+    ledger = harness.load_out_of_fragment_ledger(LEDGER)
     assert "out-of-fragment-approval" not in ledger
+    assert not any("out-of-fragment-approval" in p.read_text(encoding="utf-8")
+                   or "out-of-fragment-approval" in p.as_posix()
+                   for p in LEDGER.rglob("*") if p.is_file())
     assert "out-of-fragment-approval" not in (
         ROOT / "formal" / "STATUS.md").read_text(encoding="utf-8").split(
             "<!-- BEGIN GENERATED alignment")[1]

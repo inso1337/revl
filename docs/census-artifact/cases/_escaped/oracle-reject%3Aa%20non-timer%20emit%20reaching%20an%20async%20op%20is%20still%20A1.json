@@ -1,0 +1,1 @@
+{"case": "oracle-reject:a non-timer emit reaching an async op is still A1", "buckets": ["agree-refuse/A1"]}

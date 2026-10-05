@@ -14,11 +14,11 @@ report is rendered from a run.
 
 The repository commits the records of the last run, in `docs/census-artifact/`:
 
-| file | one record per line |
+| file | holds |
 |---|---|
-| `cases.jsonl` | `[case id, bucket]` for every program run, sorted by case id |
-| `pins.jsonl` | `[group, file]` for every file a verdict or the report depends on, sorted |
-| `facts.json` | the engine, the admissions the gate issued, the reference faults, and the driven `NEVER_BASELINED` probe |
+| `cases/<case id>.json` | one file per program run: its case id and its buckets. The path mirrors the case id (`tests/fixtures/value_method_call/t1_x.rvl` is at `cases/tests/fixtures/value_method_call/t1_x.rvl.json`); an id that is not a clean path is escaped under `cases/_escaped/`, and `cases/README.md` states the rule |
+| `pins.jsonl` | `[group, file]` for every file a verdict or the report depends on, one per line, sorted |
+| `facts.json` | the engine, the admissions the gate issued, the reference faults, and the driven `NEVER_BASELINED` probe, one record per line |
 
 Records are separated by a blank line, and nothing in these files is derived
 from anything else in them or from the checkout. The sha256 of every program and
@@ -33,8 +33,9 @@ program or touched a reference module rewrote the same aggregate lines, so each
 landing left most open pull requests in conflict. Now a pull request that edits
 a pinned module or a program without moving a verdict leaves the records alone,
 and two pull requests conflict in `docs/census-artifact/` only when both moved
-the verdict of the same program, added programs at the same place, or changed
-which files the census run reads.
+the verdict of the same program or changed which files the census run reads.
+Each program has its own file, so two pull requests that add programs, even
+next to each other, add different files.
 
 ## Getting the report
 
