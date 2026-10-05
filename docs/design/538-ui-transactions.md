@@ -493,9 +493,9 @@ which should then be its own method. The inference is now in the IR: the
 frontend marks such a method `"unit": "ui"` (docs/backend-ir.md), absent on
 every other method so other IR is byte-identical, and `selfhost/lower.rvl`
 computes the same mark, held to the reference on
-`tests/fixtures/emit_py_corpus/ui_unit.rvl`. The other five tiers have no unit
-yet; settling a failed call the way the python tier does is the next slice,
-typescript first. The unit writes no WAL record of its own: its entries are
+`tests/fixtures/emit_py_corpus/ui_unit.rvl`. The typescript tier now settles a
+failed call the way the python tier does (below); the other four tiers have no
+unit yet, one per pull request. The unit writes no WAL record of its own: its entries are
 named in the discharge record a later commit writes, so a crash between the
 unit's run and the session's verdict leaves their descriptors open, and what
 `revl recover` then does with them was not measured.
