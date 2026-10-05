@@ -193,7 +193,8 @@ def test_lowered_shell_ops_revert_on_abort(workspace):
     session = _session()
 
     report = session.load(_compile(_MV_RM_ABORT_SRC))
-    assert report["components"] == [{"name": "Shell", "state": "FAILED"}]
+    assert report["components"] == [{"name": "Shell", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     # the witnessed inverses ran: mv undone (b gone, a back), rm undone (doomed
     # back), residue-free.

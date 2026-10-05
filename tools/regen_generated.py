@@ -220,10 +220,14 @@ TRANSITIONS = [
     {"paths": ["tests/fixtures/selfhost_uncovered_lines.json"],
      "marker": "tests/fixtures/selfhost_uncovered_lines/README.md",
      "group": "ledger", "before": {"rule": LEDGER_RULE}},
-    # the recorded crate reproduction, a directory since issue #1768: its
-    # stored program count was the line every corpus-moving branch rewrote
-    {"paths": ["tests/fixtures/census_crate_reproduction.json"],
-     "marker": "tests/fixtures/census_crate_reproduction/programs.jsonl",
+    # the recorded crate reproduction (issue #1768): a single json until its
+    # stored program count churned, then reproduction.json + programs.jsonl
+    # until its checker_version line churned, now one `<checker version>.json`
+    # per record. A branch from either earlier layout crosses to this one once.
+    {"paths": ["tests/fixtures/census_crate_reproduction.json",
+               "tests/fixtures/census_crate_reproduction/reproduction.json",
+               "tests/fixtures/census_crate_reproduction/programs.jsonl"],
+     "marker": "tests/fixtures/census_crate_reproduction/README.md",
      "group": "census", "before": {"group": "census"}},
 ]
 
@@ -620,12 +624,21 @@ def _resolve_group(group: dict, paths: list, ctx: Context) -> list:
 
 
 def _changed(root: str) -> list:
-    """Every modified, added or deleted path in the worktree, conflicts aside."""
+    """Every path with an UNSTAGED change in the worktree (modified, added,
+    untracked or deleted), conflicts aside.
+
+    A change already staged and untouched since (`D ` after a transition's
+    `git rm`, `M ` after `_take_theirs`) is left out: it has nothing more to
+    stage, and `git add -A -- <path>` on a path deleted from both the index
+    and the worktree fails with "pathspec did not match" (#1917's two-file
+    layout, which main deleted inside the census generator's own directory)."""
     out = _git(root, "status", "--porcelain", "--untracked-files=all")
     paths = []
     for line in out.splitlines():
         status, path = line[:2], line[3:]
         if "U" in status or status in ("AA", "DD"):
+            continue
+        if status[1] == " ":
             continue
         paths.append(path.split(" -> ")[-1])
     return paths

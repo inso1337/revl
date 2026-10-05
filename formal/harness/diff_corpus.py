@@ -138,6 +138,7 @@ from revl.parser import (
     EmitExpr,
     EmitStmt,
     ExprArrow,
+    ExprBlockArm,
     ExprCall,
     ExprField,
     ExprIf,
@@ -150,6 +151,7 @@ from revl.parser import (
     IsolateStmt,
     LetApprovalStmt,
     LetEffect,
+    LetStmt,
     Parser,
     ProvideStmt,
     RouteStmt,
@@ -937,6 +939,15 @@ def _value_provision(value, handles: dict, aliases: dict):
         then = _value_provision(value.then, handles, aliases)
         return then if then is not None and then == _value_provision(
             value.otherwise, handles, aliases) else None
+    if isinstance(value, ExprBlockArm):
+        # a statement-block match arm (issue #1729): its value is its tail,
+        # read with the arm's own `let`s in scope, as `infer_ir` types the
+        # `do` node the checker lowers it to
+        inner = dict(aliases)
+        for st in value.stmts:
+            if isinstance(st, LetStmt):
+                _note_value_aliases(st.name, st.value, handles, inner)
+        return _value_provision(value.tail, handles, inner)
     if isinstance(value, ExprMatch):
         arms = [_value_provision(arm[-1], handles, aliases) for arm in value.arms]
         return arms[0] if arms and arms[0] is not None \
@@ -1859,14 +1870,39 @@ def _file_resolved_names(prog) -> set[str]:
 _ACCESS_DROPPED: dict = {}
 
 
+def _value_names(node) -> set[str]:
+    """The root of every name the component reads (`ExprVar`), dotted names
+    by their first segment."""
+    out: set[str] = set()
+
+    def walk(n) -> None:
+        if n is None or isinstance(n, (str, int, float, bool)):
+            return
+        if isinstance(n, ExprVar):
+            out.add(n.name.partition(".")[0])
+            return
+        if dataclasses.is_dataclass(n) and not isinstance(n, type):
+            for f in dataclasses.fields(n):
+                walk(getattr(n, f.name))
+        elif isinstance(n, (list, tuple)):
+            for x in n:
+                walk(x)
+
+    walk(node)
+    return out
+
+
 def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
                 callables: set[str]) -> list[str]:
-    """The `GA` rows of one component from the call-head roots it makes."""
+    """The `GA` rows of one component from the call-head roots it makes and
+    the names it reads in value position (`nope + v` in a provide body is
+    refused as `nope` is not a declared requirement, issue #1699's block-arm
+    fixture), less the roots the checker resolves without a requirement."""
     local = _component_locals(comp)
     provided = {key for key, _svc, _line in comp.provides}
     access: set[str] = set()
     dropped: set[str] = set()
-    for root in roots:
+    for root in set(roots) | (_value_names(comp.body) - {"config"}):
         if not root or root.startswith("@"):
             continue  # a receiver written in place: its own heads are walked
         if root in local:
@@ -5185,6 +5221,16 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # the DF row that must see it: a checker refusal the row does not
             # fail is the model being weaker than revl, and fatal.
             record("agree-G4" if df_fail else "missed-G4", rel)
+        elif code == "G4" and category == "inverse":
+            # The host release rule (issue #1859, `lower._check_host_release`)
+            # carries the G4 code, but it is not the marker rule the `G` row
+            # states: it asks whether a host bracket's `undo` is the family's
+            # release on the bound handle, and the model's HA row carries no
+            # inverse fact yet (issue #1859's formal slice adds the `inv`
+            # column). Absence of fact, ratcheted by name as the approval
+            # floor is, until that column lands.
+            record("out-of-fragment-inverse" if formal_clean
+                   else "formal-found-other", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -5395,10 +5441,12 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # the `C` confinement surface — so "no fact about this file" is a claim
 # about a specific row that exists, and that is the claim worth pinning.
 OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
-OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6")
+OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
+                       "out-of-fragment-inverse")
 OOF_LEDGER_ABOUT = [
-    "The corpus files the checker refuses G5 or G6 and the model has NO",
-    "fact about: `out-of-fragment-G5` and `out-of-fragment-G6` in",
+    "The corpus files the checker refuses G5, G6 or with the G4 host",
+    "release rule, and the model has NO fact about: `out-of-fragment-G5`,",
+    "`out-of-fragment-G6` and `out-of-fragment-inverse` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "(The G4 deferred-position rule left this ledger in issue #1742: the",
     "model states it as `RevL.G4Deferred`, decided as the `DF` row. The",
@@ -5409,8 +5457,8 @@ OOF_LEDGER_ABOUT = [
     "row). Both buckets stay, so a new unresolvable `undo` or a new G6",
     "purity refusal still reds the gate.)",
     "",
-    "Both buckets record an absence, so neither can disagree with anything",
-    "and neither could fail the gate on its own (issue #1169). This ledger",
+    "Each bucket records an absence, so none can disagree with anything",
+    "and none could fail the gate on its own (issue #1169). This ledger",
     "is what makes them fire: MEMBERSHIP is checkable even when the",
     "contents are not. A file that joins a bucket without a line here is a",
     "gate failure, and a line that is no longer in its bucket is a gate",

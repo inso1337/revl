@@ -272,7 +272,8 @@ def test_py_multi_op_same_path_abort_replays_lifo(tmp_path, monkeypatch):
     from revl.mcp.session import Session
 
     report = Session().load(ir)
-    assert report["components"] == [{"name": "FsAbortSamePath", "state": "FAILED"}]
+    assert report["components"] == [{"name": "FsAbortSamePath", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     assert (tmp_path / "A.txt").read_text() == "orig", "py abort corrupted the overwritten path (LIFO violation)"
     assert not (tmp_path / "B.txt").exists(), "py abort left a created-then-overwritten file behind (LIFO violation)"

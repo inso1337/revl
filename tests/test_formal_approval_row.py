@@ -3,7 +3,7 @@
 The checker refuses a marked crossing of an approval-required capability
 that carries no covering `with` edge (item 246, `lower.
 _require_declared_approval`, code G4, category `approval`). The formal model
-had no fact about approvals, so the 34 corpus documents refused that way sat
+had no fact about approvals, so the corpus documents refused that way sat
 in a ratcheted `out-of-fragment-approval` bucket, which records an absence
 and proves nothing about the rule.
 
@@ -96,11 +96,13 @@ APPROVAL_FIXTURES = (
     "tests/fixtures/approval_service_locals/g4_if_local_step.rvl",
     "tests/fixtures/approval_service_locals/g4_if_local_value.rvl",
     "tests/fixtures/approval_service_locals/g4_list_element_step.rvl",
+    "tests/fixtures/approval_service_locals/g4_match_block_local_step.rvl",
     "tests/fixtures/approval_service_locals/g4_record_alias_step.rvl",
     "tests/fixtures/approval_service_locals/g4_record_field_step.rvl",
     "tests/fixtures/service_receiver_expressions/g4_if_marked.rvl",
     "tests/fixtures/service_receiver_expressions/g4_list_marked.rvl",
     "tests/fixtures/service_receiver_expressions/g4_match_marked.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_match_block_marked.rvl",
     "tests/fixtures/service_receiver_expressions/g4_record_marked.rvl",
     "tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl",
 )

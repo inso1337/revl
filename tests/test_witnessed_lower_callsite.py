@@ -313,7 +313,8 @@ def test_witnessed_reverts_on_abort_from_source(target):
     session = _session()
 
     report = session.load(_ir("StashAbort"))
-    assert report["components"] == [{"name": "StashAbort", "state": "FAILED"}]
+    assert report["components"] == [{"name": "StashAbort", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     assert os.path.exists(target), "abort did not replay the inverse — mutation stuck"
     assert open(target).read() == "the deliverable"

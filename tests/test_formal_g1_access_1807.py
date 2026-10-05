@@ -248,8 +248,8 @@ def test_the_coverage_ratchet_is_satisfied(harness, rows):
 def test_the_ratchet_bites_without_a_refused_component(harness, rows):
     with redirect_stdout(io.StringIO()):
         harness.export()
-    refused = {r.split("\t")[1] for r in rows if r.startswith("GA\t")
-               and r.split("\t")[1] in G1_FIXTURES}
+    verdicts = harness.reference_from_tsv(rows)
+    refused = {k[0] for k, x in verdicts.access.items() if x == "fail"}
     without = [r for r in rows if not (r.startswith("GA\t")
                                        and r.split("\t")[1] in refused)]
     harness.reference_from_tsv(without)

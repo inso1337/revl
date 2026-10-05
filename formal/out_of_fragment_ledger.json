@@ -1,7 +1,8 @@
 {
   "_about": [
-    "The corpus files the checker refuses G5 or G6 and the model has NO",
-    "fact about: `out-of-fragment-G5` and `out-of-fragment-G6` in",
+    "The corpus files the checker refuses G5, G6 or with the G4 host",
+    "release rule, and the model has NO fact about: `out-of-fragment-G5`,",
+    "`out-of-fragment-G6` and `out-of-fragment-inverse` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "(The G4 deferred-position rule left this ledger in issue #1742: the",
     "model states it as `RevL.G4Deferred`, decided as the `DF` row. The",
@@ -12,8 +13,8 @@
     "row). Both buckets stay, so a new unresolvable `undo` or a new G6",
     "purity refusal still reds the gate.)",
     "",
-    "Both buckets record an absence, so neither can disagree with anything",
-    "and neither could fail the gate on its own (issue #1169). This ledger",
+    "Each bucket records an absence, so none can disagree with anything",
+    "and none could fail the gate on its own (issue #1169). This ledger",
     "is what makes them fire: MEMBERSHIP is checkable even when the",
     "contents are not. A file that joins a bucket without a line here is a",
     "gate failure, and a line that is no longer in its bucket is a gate",
@@ -28,5 +29,8 @@
     "is identical under CI's python 3.11 and a 3.14 developer venv."
   ],
   "out-of-fragment-G5": [],
-  "out-of-fragment-G6": []
+  "out-of-fragment-G6": [],
+  "out-of-fragment-inverse": [
+    "examples/rejections/g4_undo_not_release.rvl"
+  ]
 }

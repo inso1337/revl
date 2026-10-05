@@ -336,7 +336,7 @@ def test_every_service_local_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(APPROVAL_SERVICE_LOCALS.glob("*.rvl"))
-    assert len(docs) == 18, f"the service-local corpus has {len(docs)} documents"
+    assert len(docs) == 21, f"the service-local corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))
@@ -358,7 +358,7 @@ def test_every_receiver_expression_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(SERVICE_RECEIVER_EXPRESSIONS.glob("*.rvl"))
-    assert len(docs) == 18, f"the receiver-expression corpus has {len(docs)} documents"
+    assert len(docs) == 22, f"the receiver-expression corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))
@@ -454,6 +454,29 @@ def test_every_deferred_reach_document_is_decided_alike_by_both(measured):
         if got.get(case) != want:
             wrong.append(f"{case}: {got.get(case)}, expected {want}")
     assert not wrong, "\n  ".join(["deferred-reach documents moved:"] + wrong)
+
+
+# --- a block `match` arm in a component body (issue #1699) ------------------
+#
+# The gate's statement reader did not read a block arm: the reference admitted
+# every `ok_` document and the gate refused it G1 on the arm's names, and each
+# refusal came back on the wrong name. `ok_` both admit, `g1_`/`g4_` both refuse
+# under that tag.
+MATCH_BLOCK_ARMS = ROOT / "tests" / "fixtures" / "match_block_arms"
+
+
+def test_every_match_block_arm_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(MATCH_BLOCK_ARMS.glob("*.rvl"))
+    assert len(docs) == 16, f"the match-block-arm corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["match-block-arm documents moved:"] + wrong)
 
 
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
@@ -692,6 +715,67 @@ def test_the_admission_mirror_matches_the_rust(census):
     # `an_unterminated_declaration_leaves_the_surface`
     for source in ("service S {", "service S {\n  fn f(x: Int\n}", "type A =", "service"):
         assert not certify(source), source
+
+    # --- the provide-method half (issue #346, docs/design/457 T6) ---
+    # `a_self_contained_component_is_certified`
+    assert certify(
+        "service Store {\n  fn get(key: Str) -> Str\n}\n"
+        "service Cache {\n  fn lookup(key: Str) -> Str\n}\n"
+        "component Kv provides store: Store {\n"
+        "  provide store { fn get(key) = key }\n}\n"
+        "component CacheLayer requires store: Store provides cache: Cache {\n"
+        "  provide cache { fn lookup(key) = store.get(key) }\n}\n")
+    # The RETURN obligation. This one is NOT in `ADMISSION_PROGRAMS`: the
+    # reference refuses it `T1` and `admit_src` raises no objection, so as a
+    # corpus entry it would widen the fail-open `false-admit` baseline with a
+    # program that is not in the tree. The certifier's duty to withhold it is
+    # real either way, so it is held here by hand.
+    assert not certify(
+        "service S {\n  fn a(x: Int) -> Str\n}\n"
+        "component C provides s: S {\n  provide s { fn a(x) = x }\n}\n")
+    # ... and its argument, arity and member twins, which need a second service
+    # to reach
+    for body in ("fn a(x) = p.two(x, x)", "fn a(x) = p.two(x)",
+                 "fn a(x) = p.missing(x)", "fn a(x) = q.one(x)"):
+        assert not certify(
+            "service P {\n  fn one(n: Int) -> Int\n  fn two(n: Int, m: Str) -> Int\n}\n"
+            "service S {\n  fn a(x: Int) -> Int\n}\n"
+            f"component C requires p: P provides s: S {{\n  provide s {{ {body} }}\n}}\n"
+        ), body
+    assert certify(
+        "service P {\n  fn one(n: Int) -> Int\n  fn two(n: Int, m: Str) -> Int\n}\n"
+        "service S {\n  fn a(x: Int) -> Int\n}\n"
+        "component C requires p: P provides s: S {\n  provide s { fn a(x) = p.one(x) }\n}\n")
+    # `a_provide_block_must_implement_exactly_the_declared_operations`
+    for source in (
+        "service S {\n  fn a(x: Int) -> Int\n  fn b(x: Int) -> Int\n}\n"
+        "component C provides s: S {\n  provide s { fn a(x) = x }\n}\n",
+        "service S {\n  fn a(x: Int) -> Int\n}\n"
+        "component C provides s: S {\n  provide s { fn a(x) = x\n fn c(x) = x }\n}\n",
+        "service S {\n  fn a(x: Int) -> Int\n}\n"
+        "component C provides s: S {\n}\n",
+    ):
+        assert not certify(source), source
+    # `a_body_form_the_surface_does_not_type_is_not_certified`
+    for body in ("fn a(x) = 1", "fn a(x) { return x }", "fn a(x) -> Int = x",
+                 "fn a(x: Int) = x", "fn a(y) = y", "fn a(x) = other",
+                 "fn a(x) = { x }"):
+        assert not certify(
+            "service S {\n  fn a(x: Int) -> Int\n}\n"
+            f"component C provides s: S {{\n  provide s {{ {body} }}\n}}\n"), body
+    # `a_marked_service_operation_is_unspellable_in_a_certified_source`
+    for source in ("service S {\n  emission fn put(key: Str, value: Str)\n}\n",
+                   "service S {\n  async fn go(n: Int) -> Int\n}\n"):
+        assert not certify(source), source
+    # `a_name_repeated_across_two_namespaces_is_left_to_the_reference`
+    for source in ("service A {\n  fn f(x: Int) -> Int\n}\ncomponent A {\n}\n",
+                   "type A = Str\ncomponent A {\n}\n",
+                   "component A {\n}\ncomponent A {\n}\n"):
+        assert not certify(source), source
+    # `an_alias_in_an_implemented_signature_is_left_to_the_reference`
+    assert not certify(
+        "type Key = Str\nservice Cache {\n  fn lookup(key: Key) -> Key\n}\n"
+        "component C provides cache: Cache {\n  provide cache { fn lookup(key) = key }\n}\n")
 
     # and the tables the walk is written over are the generator's own, carried
     # into the rust verbatim

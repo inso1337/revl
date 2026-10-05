@@ -9181,8 +9181,7 @@ class Session:
         return {
             "loaded": True,
             "components": [
-                {"name": name,
-                 "state": driver.FiberState(fiber.state).name}
+                _component_state(driver, name, fiber)
                 for name, fiber in driver.fibers.items()
             ],
             "loadOrder": manifest.get("loadOrder") or [],
@@ -9358,11 +9357,47 @@ def _ir_has_approval_edges(ir: dict) -> bool:
     return walk(ir.get("components") or [])
 
 
+def _fiber_activation_error(fiber) -> dict | None:
+    """The error a FAILED fiber's activation raised, as `{type, message}`, or
+    None. cordis records it on the fiber (`_error`, fiber.py) and lands the
+    fiber FAILED; it is the only place the exception survives (issue #1895)."""
+    err = getattr(fiber, "_error", None)
+    if err is None:
+        return None
+    return {"type": type(err).__name__, "message": str(err)}
+
+
+def _component_state(driver, name: str, fiber) -> dict:
+    """One `components` row of `state()`. A FAILED component also carries the
+    error its activation raised, so the state that says it failed says why
+    (issue #1895); every other row is unchanged."""
+    row = {"name": name, "state": driver.FiberState(fiber.state).name}
+    error = _fiber_activation_error(fiber)
+    if error is not None:
+        row["error"] = error
+    return row
+
+
+def _failed_provider_reason(driver, key: str) -> str | None:
+    """Why a key has no provider when the reason is that its provider's
+    activation raised: the provider and the error, not "inactive" (issue
+    #1895)."""
+    from ..run import provision_placements  # noqa: PLC0415 (lazy: run pulls cordis)
+    for name, _realm in provision_placements(driver.ir or {}, key):
+        error = _fiber_activation_error(driver.fibers.get(name))
+        if error is not None:
+            return (f"key {key!r} has no provider: its provider `{name}` failed "
+                    f"to activate: {error['type']}: {error['message']}")
+    return None
+
+
 def _unserved_key_message(driver, key: str) -> str:
     """Why a declared key has no value to call (issue #1513), naming the
-    provider and its realm rather than guessing "inactive"."""
+    provider and its realm rather than guessing "inactive", and the error its
+    provider's activation raised when that is the reason (issue #1895)."""
     from ..run import unserved_key_reason  # noqa: PLC0415 (lazy: run pulls cordis)
-    return (unserved_key_reason(driver.ir or {}, key)
+    return (_failed_provider_reason(driver, key)
+            or unserved_key_reason(driver.ir or {}, key)
             or f"key {key!r} is declared but not currently provided "
                "— its provider is inactive")
 

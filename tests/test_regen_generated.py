@@ -470,7 +470,9 @@ def test_the_real_registry_lists_every_generator_in_dependency_order():
                      "conformance", "ledger", "docgen"]
     assert "layout move: tests/fixtures/selfhost_uncovered_lines.json -> ledger" in result.stdout
     assert "layout move: docs/census-artifact.json, docs/census-artifact.md -> census" in result.stdout
-    assert ("layout move: tests/fixtures/census_crate_reproduction.json -> census"
+    assert ("layout move: tests/fixtures/census_crate_reproduction.json, "
+            "tests/fixtures/census_crate_reproduction/reproduction.json, "
+            "tests/fixtures/census_crate_reproduction/programs.jsonl -> census"
             in result.stdout)
     assert "left alone unless --bench: bench/results/*" in result.stdout
 
@@ -652,3 +654,81 @@ def test_run_gate_finds_lake_in_the_elan_home(tmp_path):
     assert "SKIP (loud)" not in result.stdout, result.stdout
     assert marker.read_text().startswith("fake lake build"), result.stdout + result.stderr
     assert result.returncode != 0
+
+
+# The #1917 shape: the OLD files and the NEW layout live in the SAME directory,
+# inside the generator's own `paths` glob (`tests/fixtures/census_crate_
+# reproduction/*`). The transition stages main's deletion of the old files,
+# and the generator's output staging must not then try to `git add` those
+# already-deleted paths, which fails with "pathspec did not match".
+DIR_REC = '''import json, os, sys
+rows = open("src.txt").read().splitlines()
+new = os.path.exists("rec/README.md")
+if new:
+    path, want = "rec/v-" + str(len(rows)) + ".json", json.dumps(rows) + "\\n"
+else:
+    path, want = "rec/facts.json", json.dumps(rows) + "\\n"
+if "--check" in sys.argv:
+    sys.exit(0 if os.path.exists(path) and open(path).read() == want else 1)
+open(path, "w").write(want)
+if not new:
+    open("rec/programs.jsonl", "w").write("".join(json.dumps(r) + "\\n" for r in rows))
+'''
+
+
+def _dir_layout_repo(tmp_path) -> Path:
+    """`feature` regenerates the two-file layout in rec/; `main` moves rec/ to
+    one file per version beside a README, deleting both old files. The merge
+    conflicts on the old files inside the directory the generator owns."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "rec.py").write_text(DIR_REC, encoding="utf-8")
+    (repo / "rec").mkdir()
+    (repo / "src.txt").write_text("a\nm\nb\n", encoding="utf-8")
+    subprocess.run([sys.executable, "rec.py"], cwd=repo, check=True)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "src.txt").write_text("a-feature\nm\nb\n", encoding="utf-8")
+    subprocess.run([sys.executable, "rec.py"], cwd=repo, check=True)
+    _git(repo, "commit", "-q", "-am", "feature")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "src.txt").write_text("a\nm\nb-main\nc-main\n", encoding="utf-8")
+    _git(repo, "rm", "-q", "rec/facts.json", "rec/programs.jsonl")
+    (repo / "rec").mkdir(exist_ok=True)
+    (repo / "rec" / "README.md").write_text("one file per version\n")
+    subprocess.run([sys.executable, "rec.py"], cwd=repo, check=True)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "main")
+    _git(repo, "checkout", "-q", "feature")
+    assert _git(repo, "merge", "main", check=False).returncode != 0
+    assert {"rec/facts.json", "rec/programs.jsonl"} & _unmerged(repo)
+    return repo
+
+
+def test_a_move_inside_the_generators_own_directory_completes(tmp_path):
+    repo = _dir_layout_repo(tmp_path)
+    data = {
+        "registry": [{"name": "rec", "paths": ["rec/*"], "merge": "theirs",
+                      "write": [{"run": ["{python}", "rec.py"]}],
+                      "check": [{"run": ["{python}", "rec.py", "--check"]}]}],
+        "transitions": [{"paths": ["rec/facts.json", "rec/programs.jsonl"],
+                         "marker": "rec/README.md", "group": "rec",
+                         "before": {"group": "rec"}}],
+    }
+    registry = repo.parent / "registry.json"
+    registry.write_text(json.dumps(data), encoding="utf-8")
+    result = _tool(repo, registry)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "pathspec" not in result.stdout + result.stderr
+    assert not _unmerged(repo)
+    assert not (repo / "rec" / "facts.json").exists()
+    assert not (repo / "rec" / "programs.jsonl").exists()
+    staged = _git(repo, "diff", "--cached", "--name-status").stdout
+    assert "rec/v-4.json" in staged or (repo / "rec" / "v-4.json").exists()
+    # every check ran, so the run did not stop at the staging step
+    assert "rec check" in result.stdout
+    assert _git(repo, "status", "--porcelain").stdout.strip() == "" or \
+        not [l for l in _git(repo, "status", "--porcelain").stdout.splitlines()
+             if l[1] != " "]
