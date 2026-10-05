@@ -165,6 +165,9 @@
       ],
       "Issue #1511: an extern of `class=emission` that declares `compensate` is registered at every crossing in a component through `RevlDeclared`. selfhost/emit_java.rvl does not port the registration, so a corpus document declaring one would make the byte-agreement oracle diverge; the runtime proof is backends/java/test_declared_compensate_java.py.": [
         "class=emission"
+      ],
+      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method runs its body in a `RevlUi` scope, each computer-use crossing through `RevlUi.cross`. emit_java.rvl carries no UI transaction unit (the self-host gap of issue #1972). The corpus has no computer-use document with @java bodies. The runtime proof is backends/java/test_ui_transaction_java_1369.py.": [
+        "key=<activation>"
       ]
     }
   },
