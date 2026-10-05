@@ -19224,6 +19224,39 @@ fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Bind], hostSc: L
   return mk_irres(true, s.concat("}"))
 }
 
+// A method call on a receiver written in place rather than named
+// (`[1, 2].map((x) => x + n)`, issue #1935). `map` is not a stdlib builtin, so
+// the reference takes its generic call tail: `{"kind": "call", "callee": <the
+// field read>, "args"}`. Before this every non-name receiver refused here, and
+// the refused method dropped the whole component `body`.
+//
+// The reference guards that tail with two refusals: a method on a RECORD
+// receiver (`_refuse_record_method`, #1547) and an unmarked call through a
+// SERVICE-typed receiver (`_refuse_unmarked_local_crossing`, #1509). The
+// receiver is typed as the reference types it (`infer_ir`, so `cenv_ir`), and
+// the call lowers only when that type is a plain value head, which is neither;
+// a receiver the env cannot type keeps refusing. A builtin method name on an
+// in-place receiver also keeps refusing: the reference writes a `builtin` node
+// there, with the `recv` tag and wildcard rules this arm does not apply.
+fn cir_inplace_call(fl: FieldN, args: List[Expr], sc: List[Bind], hostSc: List[Str],
+                    cx: CCtx) -> IrRes {
+  if (is_builtin_method(fl.name)) { return mk_irres(false, "") }
+  if (!cir_plain_value_head(parse_head(infer(fl.target, cenv_ir(cx, sc))))) {
+    return mk_irres(false, "")
+  }
+  let callee = cir_field(fl, sc, hostSc, cx)
+  if (!callee.ok) { return mk_irres(false, "") }
+  let a = cir_args(args, 0, sc, hostSc, cx, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"call\", \"callee\": ".concat(callee.js)
+    .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
+fn cir_plain_value_head(h: Str) -> Bool {
+  return h == "List" || h == "Map" || h == "Str" || h == "Bytes"
+    || h == "Int" || h == "Int32" || h == "Float" || h == "Bool"
+}
+
 fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   return match tg {
     // `<handle>.<key>.<op>(…)` is read first: its head is a provision read, and
@@ -19252,7 +19285,7 @@ fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: C
                     : (scope_has(sc, root) && is_builtin_method(fl.name)
                         ? cir_builtin(root, fl.name, args, sc, hostSc, cx)
                         : mk_irres(false, ""))))),
-      _ => mk_irres(false, ""),
+      _ => cir_inplace_call(fl, args, sc, hostSc, cx),
     },
     // A bare-name callee. A tagged ADT constructor beats every other shape: it
     // is a case, not a callable, and no host runtime defines a function for it.
@@ -23841,6 +23874,11 @@ test "lower_to_ir binds a discarded payload as __ in a provide method" {
 test "lower_to_ir emits the services table for a simple provider" {
   assert lower_to_ir("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")
     == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}, \"body\": [{\"step\": \"provide\", \"name\": \"cache\", \"service\": \"Cache\", \"methods\": [{\"name\": \"put\", \"params\": [\"key\", \"value\"], \"body\": [{\"step\": \"let\", \"name\": \"k\", \"value\": {\"kind\": \"name\", \"id\": \"key\"}, \"mutable\": false}]}]}]}]}"
+}
+
+test "lower_to_ir lowers a method call on a list literal in a provide method" {
+  assert str_has(lower_to_ir("service Math { fn go(n: Int) -> Int } component C provides math: Math { provide math { fn go(n: Int) = [1, 2].map((x) => x + n).length } }"),
+    "{\"kind\": \"call\", \"callee\": {\"kind\": \"field\", \"target\": {\"kind\": \"list\", \"items\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 2}]}, \"name\": \"map\"}, \"args\": [{\"kind\": \"arrow\", \"params\": [\"x\"], \"captures\": [], \"body\": ")
 }
 
 test "lower_to_ir lowers an arrow bound in a provide method" {

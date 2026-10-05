@@ -3963,7 +3963,7 @@ fn emit_service_traits(services: Value, tnames: std::collections::HashMap<String
     let mut out: Vec<String> = vec![];
     for sname in value_keys(services.clone()) {
         let srv = value_field(services.clone(), sname.clone());
-        out.push(format!("pub trait {}: Send + Sync {{", sname));
+        out.push(format!("pub trait {}: Send + Sync {{", svc_ident(sname.clone())));
         let methods = value_field(srv.clone(), String::from("methods"));
         for mn in value_keys(methods.clone()) {
             let method = value_field(methods.clone(), mn.clone());
@@ -6045,6 +6045,31 @@ fn component_map_values(comp: Value, services: Value, functions: Vec<Value>, ctx
     return out;
 }
 
+fn call_bind_type(comp: Value, bind: &str, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> String {
+    for s in value_list(value_field(comp.clone(), String::from("body"))) {
+        if ((value_str(value_field(s.clone(), String::from("step"))) == "let-effect") && (value_str(value_field(s.clone(), String::from("bind"))) == bind)) {
+            let acq = value_field(s.clone(), String::from("acquire"));
+            if (node_kind(acq.clone()) != "fn") {
+                return String::from("");
+            }
+            let r = map_get(fr.clone(), value_str(value_field(acq.clone(), String::from("name"))));
+            if ((r == "") || (r == "Unit")) {
+                return String::from("");
+            }
+            return rust_type_t(Value::new(serde_json::Value::from(r.clone())), tn.clone());
+        }
+    }
+    return String::from("");
+}
+
+fn bind_field_type(comp: Value, bind: String, map_values: std::collections::HashMap<String, String>, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> String {
+    let held = call_bind_type(comp.clone(), &bind, fr.clone(), tn.clone());
+    if (held != "") {
+        return held;
+    }
+    return format!("Arc<{}>", host_of(comp.clone(), bind.clone(), map_values.clone()));
+}
+
 fn host_of(comp: Value, bind: String, map_values: std::collections::HashMap<String, String>) -> String {
     for s in value_list(value_field(comp.clone(), String::from("body"))) {
         if ((value_str(value_field(s.clone(), String::from("step"))) == "let-effect") && (value_str(value_field(s.clone(), String::from("bind"))) == bind)) {
@@ -6246,11 +6271,30 @@ fn rust_inject(reqs: Vec<String>) -> String {
     return format!("Inject::new([{}])", parts.revl_join(", "));
 }
 
+fn type_reserved() -> Vec<String> {
+    return vec![String::from("Arc"), String::from("Box"), String::from("Clone"), String::from("Copy"), String::from("Debug"), String::from("Default"), String::from("Drop"), String::from("Eq"), String::from("Err"), String::from("EventContract"), String::from("Fn"), String::from("FnMut"), String::from("FnOnce"), String::from("From"), String::from("Into"), String::from("Iterator"), String::from("Job"), String::from("JobHandle"), String::from("JobToken"), String::from("Map"), String::from("None"), String::from("Ok"), String::from("Option"), String::from("PartialEq"), String::from("Pool"), String::from("PoolState"), String::from("Result"), String::from("RevlClock"), String::from("RevlListOps"), String::from("RevlListSearchOps"), String::from("RevlPendingCompensation"), String::from("RevlSpawnHandle"), String::from("RevlStrListOps"), String::from("RevlStrOps"), String::from("RevlTeardown"), String::from("RevlTimer"), String::from("RevlWal"), String::from("Send"), String::from("Sized"), String::from("Some"), String::from("Stream"), String::from("StreamInner"), String::from("StreamNext"), String::from("StreamRegistry"), String::from("StreamState"), String::from("String"), String::from("Subscription"), String::from("SubscriptionInner"), String::from("SubscriptionState"), String::from("Sync"), String::from("ToString"), String::from("Value"), String::from("Vec")];
+}
+
+fn svc_ident(name: String) -> String {
+    let reserved = type_reserved();
+    let mut root_ = name.clone();
+    while (root_ != "") {
+        if (reserved.revl_index_of(&root_) >= 0i64) {
+            return name.revl_concat("_");
+        }
+        if (!root_.revl_ends_with("_")) {
+            return mangle(name.clone());
+        }
+        root_ = root_.revl_slice(0i64, (root_.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+    }
+    return mangle(name.clone());
+}
+
 fn require_ty(svc: String) -> String {
     if svc.revl_starts_with("Stream[") {
         return format!("<<DEFER-required-stream:{}>>", svc);
     }
-    return svc;
+    return svc_ident(svc.clone());
 }
 
 fn emit_req_bindings(reqs: Value, indent: i64) -> Vec<String> {
@@ -6338,10 +6382,14 @@ fn is_stream_next(comp: Value, expr: Value) -> bool {
     return is_subscription_bind(comp.clone(), &name);
 }
 
-fn method_scope_rename(comp: Value) -> std::collections::HashMap<String, String> {
+fn method_scope_rename(comp: Value, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
     let mut rn = std::collections::HashMap::new();
     for b in binds(comp.clone()) {
-        rn.insert(b.clone(), format!("self.{}", mangle(b.clone())));
+        if (call_bind_type(comp.clone(), &b, fr.clone(), tn.clone()) != "") {
+            rn.insert(b.clone(), format!("self.{}.clone()", mangle(b.clone())));
+        } else {
+            rn.insert(b.clone(), format!("self.{}", mangle(b.clone())));
+        }
     }
     for req in value_keys(value_field(comp.clone(), String::from("requires"))) {
         rn.insert(req.clone(), format!("self.{}", mangle(req.clone())));
@@ -6493,7 +6541,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
     let pad = ind(indent);
     let name = value_str(value_field(comp.clone(), String::from("name")));
     let mnm = value_str(value_field(method.clone(), String::from("name")));
-    let scope = method_scope_rename(comp.clone());
+    let scope = method_scope_rename(comp.clone(), ctx_.fr.clone(), ctx_.tn.clone());
     let mut c = set_rn(ctx_.clone(), scope.clone());
     let mut out: Vec<String> = vec![];
     let mut index = 0i64;
@@ -6598,6 +6646,13 @@ fn fr_map(ir: Value) -> std::collections::HashMap<String, String> {
             fr.insert(value_str(value_field(fnode.clone(), String::from("name"))), value_str(r.clone()));
         }
     }
+    for ext in value_list(value_field(ir.clone(), String::from("externs"))) {
+        let en = value_str(value_field(ext.clone(), String::from("name")));
+        let er = value_field(ext.clone(), String::from("returns"));
+        if ((!value_is_null(er.clone())) && (!fr.contains_key(&en))) {
+            fr.insert(en.clone(), value_str(er.clone()));
+        }
+    }
     return fr;
 }
 
@@ -6635,7 +6690,7 @@ fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, ta
             out.extend((bl.lines).iter().cloned());
             out.push(String::from("    }"));
         } else {
-            let ctxr = set_rn(ctx_.clone(), method_scope_rename(comp.clone()));
+            let ctxr = set_rn(ctx_.clone(), method_scope_rename(comp.clone(), fr.clone(), tables.tn.clone()));
             out.push(format!("    fn {}(&self, {}) -> {} {{ {} }}", mn, ps.revl_join(", "), ret, pure_method_statements(method.clone(), ctxr.clone())));
         }
     }
@@ -6660,7 +6715,7 @@ fn emit_provide_construction(comp: Value, step: Value, effectful: bool, indent: 
         fields.push(String::from("ctx: Arc::new(ctx.clone())"));
     }
     let mut out: Vec<String> = vec![];
-    out.push(format!("{}let {}_box: Box<dyn {}> = Box::new({} {{ {} }});", pad, key, svc, struct_, fields.revl_join(", ")));
+    out.push(format!("{}let {}_box: Box<dyn {}> = Box::new({} {{ {} }});", pad, key, svc_ident(svc.clone()), struct_, fields.revl_join(", ")));
     out.push(format!("{}ctx.provide({}, {}_box)?;", pad, string_lit(Value::new(serde_json::Value::from(key.clone()))), key));
     return out;
 }
@@ -6856,7 +6911,11 @@ fn emit_let_effect_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_
         }
         acq_src = format!("Map::<{}>::new()", v);
     }
-    out.push(format!("{}let {} = Arc::new({});", pad, bind, acq_src));
+    if (call_bind_type(comp.clone(), &raw_bind, ctx_.fr.clone(), ctx_.tn.clone()) != "") {
+        out.push(format!("{}let {} = {};", pad, bind, acq_src));
+    } else {
+        out.push(format!("{}let {} = Arc::new({});", pad, bind, acq_src));
+    }
     let undo_name = format!("{}_undo", bind);
     out.push(format!("{}let {} = {}.clone();", pad, undo_name, bind));
     let mut undoR = std::collections::HashMap::new();
@@ -7089,14 +7148,14 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
         let struct_ = format!("{}{}", cname, camel(key.clone()));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: Arc<{}>,", mangle(b.clone()), host_of(comp.clone(), b.clone(), map_values.clone())));
+            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), fr.clone(), tables.tn.clone())));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(local.clone()), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
         }
         out.extend((config_struct_field(comp.clone(), &key)).iter().cloned());
         out.push(String::from("}"));
-        out.push(format!("impl {} for {} {{", srv, struct_));
+        out.push(format!("impl {} for {} {{", svc_ident(srv.clone()), struct_));
         out.extend((emit_provide_methods(comp.clone(), services.clone(), &key, srv.clone(), tables.clone(), fr.clone(), compute_str_param_borrows(functions.clone()), compute_list_param_borrows(functions.clone()), false, false, map_values.clone())).iter().cloned());
         out.push(String::from("}"));
         out.push(String::from(""));
@@ -7163,7 +7222,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
         let struct_ = format!("{}{}", cname, camel(key.clone()));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: Arc<{}>,", mangle(b.clone()), host_of(comp.clone(), b.clone(), map_values.clone())));
+            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), fr.clone(), tables.tn.clone())));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(local.clone()), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
@@ -7173,7 +7232,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
             out.push(String::from("    ctx: Arc<cordis::Context>,"));
         }
         out.push(String::from("}"));
-        out.push(format!("impl {} for {} {{", srv, struct_));
+        out.push(format!("impl {} for {} {{", svc_ident(srv.clone()), struct_));
         out.extend((emit_provide_methods(comp.clone(), services.clone(), &key, srv.clone(), tables.clone(), fr.clone(), compute_str_param_borrows(functions.clone()), compute_list_param_borrows(functions.clone()), true, true, map_values.clone())).iter().cloned());
         out.push(String::from("}"));
         out.push(String::from(""));
@@ -7564,7 +7623,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
         let srv = value_field(services.clone(), sname.clone());
         let methods = value_field(srv.clone(), String::from("methods"));
         out.push(format!("pub struct {}Proxy {{ pub socket: String, pub key: String }}", sname));
-        out.push(format!("impl {} for {}Proxy {{", sname, sname));
+        out.push(format!("impl {} for {}Proxy {{", svc_ident(sname.clone()), sname));
         for mn in value_keys(methods.clone()) {
             let method = value_field(methods.clone(), mn.clone());
             let params = value_list(value_field(method.clone(), String::from("params")));
@@ -7592,7 +7651,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             out.push(String::from("    }"));
         }
         out.push(String::from("}"));
-        out.push(format!("fn _revl_dispatch_{}(svc: &dyn {}, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {{", snake(sname.clone()), sname));
+        out.push(format!("fn _revl_dispatch_{}(svc: &dyn {}, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {{", snake(sname.clone()), svc_ident(sname.clone())));
         out.push(String::from("    match method {"));
         for mn in value_keys(methods.clone()) {
             let method = value_field(methods.clone(), mn.clone());
@@ -7643,7 +7702,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
         out.push(format!("            \"{}Proxy\",", sname));
         out.push(String::from("            cordis::Inject::none(),"));
         out.push(String::from("            move |ctx, _config| {"));
-        out.push(format!("                let proxy: Box<dyn {}> = Box::new({}Proxy {{ socket: socket.clone(), key: key_string.clone() }});", sname, sname));
+        out.push(format!("                let proxy: Box<dyn {}> = Box::new({}Proxy {{ socket: socket.clone(), key: key_string.clone() }});", svc_ident(sname.clone()), sname));
         out.push(String::from("                ctx.provide(key_string.as_str(), proxy)?;"));
         out.push(String::from("                Ok(cordis::PluginOutput::none())"));
         out.push(String::from("            },"));
@@ -7659,7 +7718,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
     while (pi < pkeys.revl_length()) {
         let key = (pkeys)[(pi) as usize].clone();
         let srv = (psvcs)[(pi) as usize].clone();
-        out.push(format!("        \"{}\" => match ctx.require::<Box<dyn {}>>(\"{}\") {{", key, srv, key));
+        out.push(format!("        \"{}\" => match ctx.require::<Box<dyn {}>>(\"{}\") {{", key, svc_ident(srv.clone()), key));
         out.push(format!("            Ok(svc) => _revl_dispatch_{}(&**svc, method, args),", snake(srv.clone())));
         out.push(format!("            Err(_) => Err(\"no provider for key '{}' right now\".to_string()),", key));
         out.push(String::from("        },"));
@@ -22784,11 +22843,33 @@ fn cir_builtin(root_: &str, meth: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: 
     return mk_irres(true, s.revl_concat("}"));
 }
 
+fn cir_inplace_call(fl: FieldN, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
+    if is_builtin_method(&fl.name) {
+        return mk_irres(false, String::from(""));
+    }
+    if (!cir_plain_value_head(&parse_head(infer(fl.target.clone(), cenv_ir(cx.clone(), sc.clone()))))) {
+        return mk_irres(false, String::from(""));
+    }
+    let callee = cir_field(fl.clone(), sc.clone(), hostSc.clone(), cx.clone());
+    if (!callee.ok) {
+        return mk_irres(false, String::from(""));
+    }
+    let a = cir_args(args.clone(), 0i64, sc.clone(), hostSc.clone(), cx.clone(), String::from(""));
+    if (!a.ok) {
+        return mk_irres(false, String::from(""));
+    }
+    return mk_irres(true, (((String::from("{\"kind\": \"call\", \"callee\": ").revl_concat(&callee.js)).revl_concat(", \"args\": [")).revl_concat(&a.js)).revl_concat("]}"));
+}
+
+fn cir_plain_value_head(h: &str) -> bool {
+    return ((((((((h == "List") || (h == "Map")) || (h == "Str")) || (h == "Bytes")) || (h == "Int")) || (h == "Int32")) || (h == "Float")) || (h == "Bool"));
+}
+
 fn cir_call(tg: Expr, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     return match tg {
     Expr::Field(fl) => { let fl = *fl; if is_instance_call(fl.clone(), &sc) { cir_instance_call(fl.clone(), args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { match fl.target.clone() {
     Expr::Var(root_) => if contains__m2(&cx.reqs, &root_) { cir_reqcall(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if contains__m2(&hostSc, &root_) { cir_hostverb(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if is_host_root(&root_) { cir_hostacq(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (instance_comp(&sc, fl.target.clone()) != "") { cir_hostverb(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (scope_has(&sc, &root_) && is_builtin_method(&fl.name)) { cir_builtin(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { mk_irres(false, String::from("")) } } } } },
-    _ => mk_irres(false, String::from("")),
+    _ => cir_inplace_call(fl.clone(), args.clone(), sc.clone(), hostSc.clone(), cx.clone()),
 } } },
     Expr::Var(nm) => if (tagged_case_adt(&cx.cases, &nm) != "") { cir_adt(&tagged_case_adt(&cx.cases, &nm), &nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if cir_calls_a_value(&nm, &sc, cx.clone()) { cir_value_call(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { cir_fncall(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } },
     _ => mk_irres(false, String::from("")),
@@ -30343,6 +30424,11 @@ fn lower_to_ir_binds_a_discarded_payload_as____in_a_provide_method() {
 #[test]
 fn lower_to_ir_emits_the_services_table_for_a_simple_provider() {
     assert!((lower_to_ir(String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")) == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}, \"body\": [{\"step\": \"provide\", \"name\": \"cache\", \"service\": \"Cache\", \"methods\": [{\"name\": \"put\", \"params\": [\"key\", \"value\"], \"body\": [{\"step\": \"let\", \"name\": \"k\", \"value\": {\"kind\": \"name\", \"id\": \"key\"}, \"mutable\": false}]}]}]}]}"));
+}
+
+#[test]
+fn lower_to_ir_lowers_a_method_call_on_a_list_literal_in_a_provide_method() {
+    assert!(str_has(&lower_to_ir(String::from("service Math { fn go(n: Int) -> Int } component C provides math: Math { provide math { fn go(n: Int) = [1, 2].map((x) => x + n).length } }")), "{\"kind\": \"call\", \"callee\": {\"kind\": \"field\", \"target\": {\"kind\": \"list\", \"items\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 2}]}, \"name\": \"map\"}, \"args\": [{\"kind\": \"arrow\", \"params\": [\"x\"], \"captures\": [], \"body\": "));
 }
 
 #[test]

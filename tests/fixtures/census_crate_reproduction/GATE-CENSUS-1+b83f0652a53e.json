@@ -926,6 +926,7 @@
   "tests/fixtures/emit_rust_corpus/perf_index.rvl",
   "tests/fixtures/emit_rust_corpus/perf_iter.rvl",
   "tests/fixtures/emit_rust_corpus/perf_shapes.rvl",
+  "tests/fixtures/emit_rust_corpus/prelude_names.rvl",
   "tests/fixtures/emit_rust_corpus/records.rvl",
   "tests/fixtures/emit_rust_corpus/requires.rvl",
   "tests/fixtures/emit_rust_corpus/reserved_names.rvl",

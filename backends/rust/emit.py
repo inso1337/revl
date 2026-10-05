@@ -121,6 +121,12 @@ _EMITTER_RESERVED = {"ctx", "config", "root", "plugin"}
 # `Map_` -> `Map__`).
 _RUST_TYPE_RESERVED = frozenset({
     "Vec", "String", "Box", "Option", "Send", "Value",
+    # the rest of the prelude and std names the emitted module spells as bare
+    # tokens (`Arc<..>`, `Result<..>`, `Ok(..)`, `Some(..)`, a `Sync` bound,
+    # `#[derive(Clone, Debug, PartialEq)]`, `impl Default`), issue #1920
+    "Result", "Ok", "Err", "Some", "None", "Arc", "Sync", "Sized", "Copy",
+    "Clone", "Debug", "PartialEq", "Eq", "Default", "Drop", "Fn", "FnMut",
+    "FnOnce", "Iterator", "ToString", "From", "Into",
     # host runtime (emitted as `pub struct Map<V>`, `pub struct Pool`,
     # `struct PoolState`, `pub struct Job`, `pub struct JobToken(..)`,
     # `pub struct JobHandle`)
@@ -1548,6 +1554,15 @@ def _ident(name: object, role: str) -> str:
     return _mangle(name, extra)
 
 
+def _svc(name: str) -> str:
+    """A service's TRAIT identifier. A service is a Rust type (`pub trait S`,
+    `Box<dyn S>`), so it takes the type-name reservation: a service named
+    `Box` must not shadow `std::boxed::Box` in `Box<dyn Box>` (issue #1920).
+    Only the type positions move; the service's NAME stays the surface
+    spelling in every string the bridge and the runner key on."""
+    return _ident(name, "type name")
+
+
 def _snake(name: str) -> str:
     out = []
     for i, ch in enumerate(name):
@@ -2414,7 +2429,7 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
     out: list[str] = []
     for sname, service in services.items():
         _ident(sname, "service")
-        out.append(f"pub trait {sname}: Send + Sync {{")
+        out.append(f"pub trait {_svc(sname)}: Send + Sync {{")
         for mname, method in (service.get("methods") or {}).items():
             # The trait DECLARATION must carry the SAME `_mname` rename the impl
             # blocks, bridge proxy/dispatch, and every call site use (line ~3696,
@@ -4077,6 +4092,37 @@ def _emit_provide_config_local(component: dict, indent: int) -> list[str]:
     return [f"{'    ' * indent}let {_PROVIDE_CONFIG_LOCAL} = config.clone();"]
 
 
+def _call_bind_type(env: "_Env", bind: str) -> str | None:
+    """The Rust type of a `let`-effect bind whose acquisition is a CALL (an
+    `extern acquire` or a module fn), or None for any other bind (issue #1920).
+
+    A host acquisition (`Map.new()`, `Pool.open(..)`) is a shared resource
+    whose verbs borrow it, so it is held as `Arc<Host>`. A call returns a
+    VALUE, the handle its declared return names, and the extern's undo takes
+    that value. Wrapping it in `Arc` typed the capture `Arc<Value>` and handed
+    the undo an `Arc` where the handle was declared, so the crate did not
+    build. It is held by value instead, and every capture clones it."""
+    for s in env.component.get("body") or []:
+        if s.get("step") == "let-effect" and s.get("bind") == bind:
+            acquire = s.get("acquire") or {}
+            if acquire.get("kind") != "fn":
+                return None
+            returns = env.v3_ctx().fn_returns.get(acquire.get("name"))
+            if not returns or returns == "Unit":
+                return None
+            return _rust_type(returns, env.types)
+    return None
+
+
+def _bind_field_type(env: "_Env", bind: str, map_values: dict[str, str] | None) -> str:
+    """A provider struct's field for an activation bind: the call's declared
+    handle type by value, or `Arc<host>` for a host resource."""
+    held = _call_bind_type(env, bind)
+    if held is not None:
+        return held
+    return f"Arc<{_host_of(env.component, bind, map_values)}>"
+
+
 def _host_of(component: dict, bind: str, map_values: dict[str, str] | None = None) -> str:
     for s in component.get("body") or []:
         if s.get("step") == "let-effect" and s.get("bind") == bind:
@@ -4446,7 +4492,7 @@ def _req_ident(local: str) -> str:
 
 
 def _method_body(env: _Env, method: dict) -> str:
-    rename = {b: f"self.{_ident(b, 'binding')}" for b in _binds(env.component)}
+    rename = {b: _self_bind(env, b) for b in _binds(env.component)}
     rename.update({local: f"self.{_req_ident(local)}" for local in env.reqs})
     if _has_config(env.component):
         rename["config"] = "self.config"
@@ -4562,8 +4608,18 @@ def _method_has_effectful_steps(method: dict) -> bool:
     )
 
 
+def _self_bind(env: _Env, bind: str) -> str:
+    """A provide method's read of an activation bind. A call-acquired handle
+    is held by value (issue #1920), and a method has only `&self`, so a read
+    of it is a clone; a host resource is an `Arc` whose verbs borrow it."""
+    field = _ident(bind, "binding")
+    if _call_bind_type(env, bind) is not None:
+        return f"self.{field}.clone()"
+    return f"self.{field}"
+
+
 def _method_scope_rename(env: _Env) -> dict[str, str]:
-    rename = {b: f"self.{_ident(b, 'binding')}" for b in _binds(env.component)}
+    rename = {b: _self_bind(env, b) for b in _binds(env.component)}
     for req in env.reqs:
         rename[req] = f"self.{_req_ident(req)}"
     if _has_config(env.component):
@@ -4917,15 +4973,15 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
         for b in _binds(component):
-            out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b, map_values)}>,")
+            out.append(f"    {_ident(b, 'binding')}: {_bind_field_type(env, b, map_values)},")
         if env.reqs:
             for local, req_service in env.reqs.items():
-                out.append(f"    {_req_ident(local)}: Arc<Box<dyn {req_service}>>,")
+                out.append(f"    {_req_ident(local)}: Arc<Box<dyn {_svc(req_service)}>>,")
         out.extend(_config_struct_field(component, key))
         if has_effectful:
             out.append("    ctx: Arc<cordis::Context>,")
         out.append("}")
-        out.append(f"impl {service} for {struct} {{")
+        out.append(f"impl {_svc(service)} for {struct} {{")
         provide = next(
             (s for s in component.get("body") or []
              if s.get("step") == "provide" and s.get("name") == key),
@@ -5034,7 +5090,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 + _config_ctor_field(env.component, key)
                 + (["ctx: Arc::new(ctx.clone())"] if has_effectful else [])
             )
-            out.append(f"            let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
+            out.append(f"            let {key}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
             out.append(f"            ctx.provide({_string(key)}, {key}_box)?;")
         else:
             _emit_step(step, env, out, indent=3)
@@ -5134,7 +5190,7 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
     `<key>.<op>(…)` forwards straight through it (G2: one provider downstream).
     """
     struct = f"RevlRouter{cname}{_camel(key)}"
-    boxed = f"std::sync::Arc<Box<dyn {service}>>"
+    boxed = f"std::sync::Arc<Box<dyn {_svc(service)}>>"
     realms = list(route.get("realms") or [])
     strategy = route.get("strategy") or "round_robin"
     realm_lits = ", ".join(f"{_string(r)}.to_string()" for r in realms)
@@ -5165,7 +5221,7 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
         "        for realm in &self.realms {",
         "            let scoped = self.ctx.isolate_with("
         "self.key.as_str(), _revl_realm(realm.as_str()));",
-        f"            if let Ok(Some(handle)) = scoped.get::<Box<dyn {service}>>"
+        f"            if let Ok(Some(handle)) = scoped.get::<Box<dyn {_svc(service)}>>"
         "(self.key.as_str()) {",
         "                out.push((realm.clone(), handle));",
         "            }",
@@ -5209,7 +5265,7 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
         "        }",
         "    }",
         "}",
-        f"impl {service} for {struct} {{",
+        f"impl {_svc(service)} for {struct} {{",
     ]
     for mname, method in methods.items():
         rmname = _method_ident(mname)
@@ -5282,14 +5338,14 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
         for b in _binds(component):
-            out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b, map_values)}>,")
+            out.append(f"    {_ident(b, 'binding')}: {_bind_field_type(env, b, map_values)},")
         # a provide-method may call a required service, so the provider owns
         # the same bindings the effectful path captures (java does this too)
         for local, req_service in env.reqs.items():
-            out.append(f"    {_req_ident(local)}: Arc<Box<dyn {req_service}>>,")
+            out.append(f"    {_req_ident(local)}: Arc<Box<dyn {_svc(req_service)}>>,")
         out.extend(_config_struct_field(component, key))
         out.append("}")
-        out.append(f"impl {service} for {struct} {{")
+        out.append(f"impl {_svc(service)} for {struct} {{")
         provide = next(
             (s for s in component.get("body") or []
              if s.get("step") == "provide" and s.get("name") == key),
@@ -5401,10 +5457,10 @@ def _emit_req_bindings(env: "_Env", cname: str, out: list[str], indent: int) -> 
     for local, service in env.reqs.items():
         if local in env.routes:
             struct = f"RevlRouter{cname}{_camel(local)}"
-            out.append(f"{pad}let {_req_ident(local)}: std::sync::Arc<Box<dyn {service}>> = "
+            out.append(f"{pad}let {_req_ident(local)}: std::sync::Arc<Box<dyn {_svc(service)}>> = "
                        f"{struct}::_revl_new(ctx.clone());")
         else:
-            out.append(f"{pad}let {_req_ident(local)} = ctx.require::<Box<dyn {service}>>({_string(local)})?;")
+            out.append(f"{pad}let {_req_ident(local)} = ctx.require::<Box<dyn {_svc(service)}>>({_string(local)})?;")
 
 
 def _emit_setup_value(node: dict, env: _Env) -> str:
@@ -5635,7 +5691,10 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         if acq.get("kind") == "host" and acq.get("fn") == "Map.new":
             v = _component_map_values(env).get(step["bind"], "String")
             acquire = f"Map::<{v}>::new()"
-        out.append(f"{pad}let {bind} = Arc::new({acquire});")
+        if _call_bind_type(env, step["bind"]) is not None:
+            out.append(f"{pad}let {bind} = {acquire};")
+        else:
+            out.append(f"{pad}let {bind} = Arc::new({acquire});")
         undo_name = f"{bind}_undo"
         out.append(f"{pad}let {undo_name} = {bind}.clone();")
         undo_rename = {step["bind"]: undo_name}
@@ -5798,7 +5857,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             + [f"{_req_ident(local)}: {_req_ident(local)}.clone()" for local in env.reqs]
             + _config_ctor_field(env.component, key)
         )
-        out.append(f"{pad}let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
+        out.append(f"{pad}let {key}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
         out.append(f"{pad}ctx.provide({_string(key)}, {key}_box)?;")
     elif kind == "stream-iter":
         # item 130 Slice 4: `every <x> in <sub> { … }` on this blocking tier is
@@ -7370,7 +7429,7 @@ def _v3_instance_get(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
     if not isinstance(key, str) or not key.isidentifier():
         raise EmitError(f"instance-get: bad key {key!r}")
     return (
-        f"{handle}.get::<Box<dyn {service}>>({_string(key)})"
+        f"{handle}.get::<Box<dyn {_svc(service)}>>({_string(key)})"
         '.expect("revl: instance-get resolution failed")'
         '.expect("revl: instance provision absent")'
     )
@@ -8751,7 +8810,7 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                     raise EmitError(f"{where}: unknown method {step['method']!r}")
                 args = ", ".join(_render_expr(arg, ctx, {})
                                  for arg in step.get("args") or [])
-                call = (f'root.require::<Box<dyn {service}>>({_string(key)})'
+                call = (f'root.require::<Box<dyn {_svc(service)}>>({_string(key)})'
                         f".expect({_string(where + ': ' + key + ' is ACTIVE (R2)')})"
                         f".{method_name}({args})")
                 bind = step.get("bind")
@@ -9721,7 +9780,7 @@ def _emit_bridge(ir: dict) -> list[str]:
         methods = service.get("methods") or {}
         # consumer-side proxy
         out.append(f"pub struct {sname}Proxy {{ pub socket: String, pub key: String }}")
-        out.append(f"impl {sname} for {sname}Proxy {{")
+        out.append(f"impl {_svc(sname)} for {sname}Proxy {{")
         for mname, method in methods.items():
             params = method.get("params") or []
             plist = ", ".join(f"{p['name']}: {_rust_type(p.get('type'), types)}" for p in params)
@@ -9738,7 +9797,7 @@ def _emit_bridge(ir: dict) -> list[str]:
         out.append("}")
         # provider-side dispatch. Issue #1634: a call this cannot make is an
         # `Err`, never `null` (which the runner used to send as `ok: true`).
-        out.append(f"fn _revl_dispatch_{_snake(sname)}(svc: &dyn {sname}, method: &str, "
+        out.append(f"fn _revl_dispatch_{_snake(sname)}(svc: &dyn {_svc(sname)}, method: &str, "
                    "args: &[serde_json::Value]) -> Result<serde_json::Value, String> {")
         out.append("    match method {")
         for mname, method in methods.items():
@@ -9776,7 +9835,7 @@ def _emit_bridge(ir: dict) -> list[str]:
         out.append(f'            "{sname}Proxy",')
         out.append("            cordis::Inject::none(),")
         out.append("            move |ctx, _config| {")
-        out.append(f"                let proxy: Box<dyn {sname}> = Box::new({sname}Proxy "
+        out.append(f"                let proxy: Box<dyn {_svc(sname)}> = Box::new({sname}Proxy "
                    "{ socket: socket.clone(), key: key_string.clone() });")
         out.append("                ctx.provide(key_string.as_str(), proxy)?;")
         out.append("                Ok(cordis::PluginOutput::none())")
@@ -9794,7 +9853,7 @@ def _emit_bridge(ir: dict) -> list[str]:
                "args: &[serde_json::Value]) -> Result<serde_json::Value, String> {")
     out.append("    match key {")
     for key, service in provided.items():
-        out.append(f'        "{key}" => match ctx.require::<Box<dyn {service}>>("{key}") {{')
+        out.append(f'        "{key}" => match ctx.require::<Box<dyn {_svc(service)}>>("{key}") {{')
         out.append(f"            Ok(svc) => _revl_dispatch_{_snake(service)}(&**svc, method, args),")
         out.append(f'            Err(_) => Err("no provider for key \'{key}\' right now".to_string()),')
         out.append("        },")

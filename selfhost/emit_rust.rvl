@@ -2549,7 +2549,7 @@ fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
   var out = []
   for (sname of value_keys(services)) {
     let srv = value_field(services, sname)
-    out = out.push(`pub trait ${sname}: Send + Sync {`)
+    out = out.push(`pub trait ${svc_ident(sname)}: Send + Sync {`)
     let methods = value_field(srv, "methods")
     for (mn of value_keys(methods)) {
       let method = value_field(methods, mn)
@@ -4664,6 +4664,31 @@ fn component_map_values(comp: Any, services: Any, functions: List[Any], ctx: Ctx
 // binds a live-instance handle, a result-declared CAS binds the atomic `bool`
 // result, and a host root binds that object — the Map generically, with the
 // value type learned above (defaulting to the historical `String`).
+// `_call_bind_type` (issue #1920): the Rust type of an activation bind whose
+// acquisition is a CALL (an `extern acquire` or a module fn), its declared
+// return, held by value; "" for any other bind. A host resource stays an
+// `Arc<host>`, but a call returns the handle its undo takes, and wrapping it
+// in `Arc` handed the undo an `Arc` and typed the capture `Arc<Value>`.
+fn call_bind_type(comp: Any, bind: Str, fr: Map[Str, Str], tn: Map[Str, Str]) -> Str {
+  for (s of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(s, "step")) == "let-effect" && value_str(value_field(s, "bind")) == bind) {
+      let acq = value_field(s, "acquire")
+      if (node_kind(acq) != "fn") { return "" }
+      let r = map_get(fr, value_str(value_field(acq, "name")))
+      if (r == "" || r == "Unit") { return "" }
+      return rust_type_t(r, tn)
+    }
+  }
+  return ""
+}
+
+// `_bind_field_type`: a provider struct's field for an activation bind.
+fn bind_field_type(comp: Any, bind: Str, map_values: Map[Str, Str], fr: Map[Str, Str], tn: Map[Str, Str]) -> Str {
+  let held = call_bind_type(comp, bind, fr, tn)
+  if (held != "") { return held }
+  return `Arc<${host_of(comp, bind, map_values)}>`
+}
+
 fn host_of(comp: Any, bind: Str, map_values: Map[Str, Str]) -> Str {
   for (s of value_list(value_field(comp, "body"))) {
     if (value_str(value_field(s, "step")) == "let-effect" && value_str(value_field(s, "bind")) == bind) {
@@ -4816,9 +4841,41 @@ fn rust_inject(reqs: List[Str]) -> Str {
 // requirement AS A RUST TYPE goes through here; the sites that render it as a
 // KEY (the `Inject` gate, the `_undo`/`_t<n>` clones) are unaffected, because
 // the key is a string either way and naming it twice would say nothing extra.
+// `_RUST_TYPE_RESERVED`: the prelude, std and generated names the emitted
+// module spells as bare type tokens, so a user type or SERVICE name must not
+// take one (#552 B2, issue #1920).
+fn type_reserved() -> List[Str] {
+  return [
+    "Arc", "Box", "Clone", "Copy", "Debug", "Default", "Drop", "Eq", "Err",
+    "EventContract", "Fn", "FnMut", "FnOnce", "From", "Into", "Iterator", "Job",
+    "JobHandle", "JobToken", "Map", "None", "Ok", "Option", "PartialEq", "Pool",
+    "PoolState", "Result", "RevlClock", "RevlListOps", "RevlListSearchOps",
+    "RevlPendingCompensation", "RevlSpawnHandle", "RevlStrListOps",
+    "RevlStrOps", "RevlTeardown", "RevlTimer", "RevlWal", "Send", "Sized",
+    "Some", "Stream", "StreamInner", "StreamNext", "StreamRegistry",
+    "StreamState", "String", "Subscription", "SubscriptionInner",
+    "SubscriptionState", "Sync", "ToString", "Value", "Vec"
+  ]
+}
+
+// `_svc` / `_ident(name, "type name")`: a service's TRAIT identifier. The same
+// injective `_` ladder as `mangle`, over the type-reserved names too: a
+// service named `Box` becomes `Box_`, so `Box<dyn Box_>` still names
+// `std::boxed::Box`. The surface name stays in every string.
+fn svc_ident(name: Str) -> Str {
+  let reserved = type_reserved()
+  var root = name
+  while (root != "") {
+    if (reserved.indexOf(root) >= 0) { return name.concat("_") }
+    if (!root.endsWith("_")) { return mangle(name) }
+    root = root.slice(0, root.length() - 1)
+  }
+  return mangle(name)
+}
+
 fn require_ty(svc: Str) -> Str {
   if (svc.startsWith("Stream[")) { return `<<DEFER-required-stream:${svc}>>` }
-  return svc
+  return svc_ident(svc)
 }
 
 // `_emit_req_bindings`: bind each required service through the Inject gate
@@ -4901,11 +4958,16 @@ fn is_stream_next(comp: Any, expr: Any) -> Bool {
 
 // The capture rename maps: a provide-method reads binds/reqs/config off `self`;
 // an undo closure re-reads pre-cloned `<name>_undo` copies.
-fn method_scope_rename(comp: Any) -> Map[Str, Str] {
+// `_method_scope_rename`. A provide method has only `&self`, so a read of a
+// call-acquired handle, held by value (issue #1920), is a clone.
+fn method_scope_rename(comp: Any, fr: Map[Str, Str], tn: Map[Str, Str]) -> Map[Str, Str] {
   var rn: Map[Str, Str] = Map.empty()
   // a key or bind that is a Rust keyword is captured under its mangled name,
   // the one its field and its local carry (issue #1927)
-  for (b of binds(comp)) { rn = rn.set(b, `self.${mangle(b)}`) }
+  for (b of binds(comp)) {
+    if (call_bind_type(comp, b, fr, tn) != "") { rn = rn.set(b, `self.${mangle(b)}.clone()`) }
+    else { rn = rn.set(b, `self.${mangle(b)}`) }
+  }
   for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `self.${mangle(req)}`) }
   if (has_config(comp)) { rn = rn.set("config", "self.config") }
   return rn
@@ -5033,7 +5095,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
   let pad = ind(indent)
   let name = value_str(value_field(comp, "name"))
   let mnm = value_str(value_field(method, "name"))
-  let scope = method_scope_rename(comp)
+  let scope = method_scope_rename(comp, ctx.fr, ctx.tn)
   var c = set_rn(ctx, scope)
   var out = []
   var index = 0
@@ -5127,6 +5189,14 @@ fn fr_map(ir: Any) -> Map[Str, Str] {
     let r = value_field(fnode, "returns")
     if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
   }
+  // `_V3Ctx.fn_returns` takes an extern's declared return too, a module fn of
+  // the same name winning (`setdefault`), so a component can type a call to
+  // one (issue #1920)
+  for (ext of value_list(value_field(ir, "externs"))) {
+    let en = value_str(value_field(ext, "name"))
+    let er = value_field(ext, "returns")
+    if (!value_is_null(er) && !fr.has(en)) { fr = fr.set(en, value_str(er)) }
+  }
   return fr
 }
 
@@ -5167,7 +5237,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
       out = out.concat(bl.lines)
       out = out.push("    }")
     } else {
-      let ctxr = set_rn(ctx, method_scope_rename(comp))
+      let ctxr = set_rn(ctx, method_scope_rename(comp, fr, tables.tn))
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} { ${pure_method_statements(method, ctxr)} }`)
     }
   }
@@ -5188,7 +5258,7 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
   fields = fields.concat(config_ctor_field(comp, key))
   if (effectful) { fields = fields.push("ctx: Arc::new(ctx.clone())") }
   var out = []
-  out = out.push(`${pad}let ${key}_box: Box<dyn ${svc}> = Box::new(${struct} { ${fields.join(", ")} });`)
+  out = out.push(`${pad}let ${key}_box: Box<dyn ${svc_ident(svc)}> = Box::new(${struct} { ${fields.join(", ")} });`)
   out = out.push(`${pad}ctx.provide(${string_lit(key)}, ${key}_box)?;`)
   return out
 }
@@ -5419,7 +5489,8 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     if (v == "") { v = "String" }
     acq_src = `Map::<${v}>::new()`
   }
-  out = out.push(`${pad}let ${bind} = Arc::new(${acq_src});`)
+  if (call_bind_type(comp, raw_bind, ctx.fr, ctx.tn) != "") { out = out.push(`${pad}let ${bind} = ${acq_src};`) }
+  else { out = out.push(`${pad}let ${bind} = Arc::new(${acq_src});`) }
   let undo_name = `${bind}_undo`
   out = out.push(`${pad}let ${undo_name} = ${bind}.clone();`)
   var undoR: Map[Str, Str] = Map.empty()
@@ -5757,11 +5828,11 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, fr, tables.tn)},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
-    out = out.push(`impl ${srv} for ${struct} {`)
+    out = out.push(`impl ${svc_ident(srv)} for ${struct} {`)
     out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), false, false, map_values))
     out = out.push("}")
     out = out.push("")
@@ -5837,12 +5908,12 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, fr, tables.tn)},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")
-    out = out.push(`impl ${srv} for ${struct} {`)
+    out = out.push(`impl ${svc_ident(srv)} for ${struct} {`)
     out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), true, true, map_values))
     out = out.push("}")
     out = out.push("")
@@ -6199,7 +6270,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
     let methods = value_field(srv, "methods")
     // consumer-side proxy
     out = out.push(`pub struct ${sname}Proxy { pub socket: String, pub key: String }`)
-    out = out.push(`impl ${sname} for ${sname}Proxy {`)
+    out = out.push(`impl ${svc_ident(sname)} for ${sname}Proxy {`)
     for (mn of value_keys(methods)) {
       let method = value_field(methods, mn)
       let params = value_list(value_field(method, "params"))
@@ -6226,7 +6297,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
     }
     out = out.push("}")
     // provider-side dispatch
-    out = out.push(`fn _revl_dispatch_${snake(sname)}(svc: &dyn ${sname}, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {`)
+    out = out.push(`fn _revl_dispatch_${snake(sname)}(svc: &dyn ${svc_ident(sname)}, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {`)
     out = out.push("    match method {")
     for (mn of value_keys(methods)) {
       let method = value_field(methods, mn)
@@ -6277,7 +6348,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
     out = out.push(`            "${sname}Proxy",`)
     out = out.push("            cordis::Inject::none(),")
     out = out.push("            move |ctx, _config| {")
-    out = out.push(`                let proxy: Box<dyn ${sname}> = Box::new(${sname}Proxy { socket: socket.clone(), key: key_string.clone() });`)
+    out = out.push(`                let proxy: Box<dyn ${svc_ident(sname)}> = Box::new(${sname}Proxy { socket: socket.clone(), key: key_string.clone() });`)
     out = out.push("                ctx.provide(key_string.as_str(), proxy)?;")
     out = out.push("                Ok(cordis::PluginOutput::none())")
     out = out.push("            },")
@@ -6295,7 +6366,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
   while (pi < pkeys.length()) {
     let key = pkeys[pi]
     let srv = psvcs[pi]
-    out = out.push(`        "${key}" => match ctx.require::<Box<dyn ${srv}>>("${key}") {`)
+    out = out.push(`        "${key}" => match ctx.require::<Box<dyn ${svc_ident(srv)}>>("${key}") {`)
     out = out.push(`            Ok(svc) => _revl_dispatch_${snake(srv)}(&**svc, method, args),`)
     out = out.push(`            Err(_) => Err("no provider for key '${key}' right now".to_string()),`)
     out = out.push("        },")

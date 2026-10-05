@@ -726,6 +726,28 @@ def test_native_ir_matches_provide_records_shapes(lower_to_ir, sig, method):
     assert native["body"] == reference["body"]
 
 
+@pytest.mark.parametrize("method", [
+    "fn go(n) = [1, 2].map((x) => x + n).length",
+    "fn go(n) { let ys = [n, 2].map((x) => x * 2) return n }",
+    "fn go(n) = (n + 1).frob(2)",
+    # the receiver types off the required service's declared return
+    "fn go(n) = geo.pts(n).map((x) => x + 1).length",
+])
+def test_native_ir_lowers_a_method_call_on_an_in_place_receiver(lower_to_ir, method):
+    """Issue #1935: `cir_call` read a field callee only off a bare name, so a
+    method on a receiver written in place (a list literal, a parenthesised
+    expression, a service call) refused and the whole component `body` was
+    dropped. A non-builtin method there takes the reference's generic tail, a
+    `call` on the `field` read."""
+    source = ("service Geo { fn pts(n: Int) -> List[Int] } "
+              "service Math { fn go(n: Int) -> Int } "
+              f"component C requires geo: Geo provides math: Math {{ provide math {{ {method} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
 @pytest.mark.parametrize("returns,body", [
     ("Opt[Int]", "None"),
     ("Opt[Int]", "Some(1)"),
