@@ -4526,6 +4526,58 @@ def _route_response_ir(returns: str | None, types: dict, refuse, where: str) -> 
     return {"kind": "plain", "type": stripped}
 
 
+def _param_names(params) -> set[str]:
+    """The declared parameter names of a signature, whichever shape the parser
+    handed it: an extern's `Param` objects, a service operation's `(name, type)`
+    pairs, or bare names."""
+    names: set[str] = set()
+    for p in params or ():
+        if isinstance(p, str):
+            names.add(p)
+        elif isinstance(p, tuple):
+            names.add(p[0])
+        else:
+            names.add(p.name)
+    return names
+
+
+def _check_argument_bound_scopes(where: str, source: str, line: int,
+                                 capabilities, params) -> None:
+    """issue #1985: an argument-bound destination must name one of the
+    declaration's OWN parameters.
+
+    `emission[network.call(host=host)] fn get(url: Str, host: Str)` binds the
+    declaration's parameter into the token, so the declared destination is the
+    CALLER's value rather than a compile-time constant nothing relates to the
+    body. The binding is only as honest as the name it carries, so the name is
+    resolved HERE, against the signature, exactly as the item-373
+    `confined: <param>` and item-309 `idempotent(key: <param>)` role
+    annotations are (they are not resolved at parse either - the parameter list
+    is below). A binding naming no parameter is a destination nothing
+    enforces: fail closed rather than store an opaque token no caller can ever
+    satisfy."""
+    if not capabilities:
+        return
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    names = _param_names(params)
+    for cap, arg in cap_order.argument_bindings(capabilities):
+        if arg in names:
+            continue
+        declared = ", ".join(sorted(names)) or "(none)"
+        raise RevlError(
+            source, line,
+            f"{where} declares the argument-bound destination `{cap}`, but "
+            f"`{arg}` is not one of its parameters ({declared})",
+            hint="an argument binding names the PARAMETER that carries the "
+                 "destination, so the destination is caller-supplied data the "
+                 "host body cannot swap for a literal; a name that is not a "
+                 "parameter is a destination nothing enforces (item 294, "
+                 'issue #1985). A CONSTANT destination is spelled '
+                 '`network.call(host="api.example.test")` (item 246)',
+            code="G4", category="emission-scope",
+        )
+
+
 def _lower_externs(program: Program, filename: str, types: dict,
                    fns: list | None = None) -> list:
     externs: list[dict] = []
@@ -4720,6 +4772,13 @@ def _lower_externs(program: Program, filename: str, types: dict,
                          "body cannot swap for a literal, or the reach claim is "
                          "unreviewable (item 373)",
                 )
+        # issue #1985: the same rule for the emission SCOPE's own destination
+        # claim - `emission[network.call(host=host)]` names the declaration's
+        # parameter, so the name is resolved against the signature here, next
+        # to the sibling role annotations above.
+        _check_argument_bound_scopes(
+            f"{decl.classification} extern `{decl.name}`", filename, decl.line,
+            decl.capabilities, decl.params)
         # item 309: the `idempotent` emission modifier and its `idempotent(key: p)`
         # keyed form. Two rules, enforced here next to the sibling reach checks:
         #   (1) `idempotent`/`idempotent(key:)` is EMISSION-ONLY. It is item-44's
@@ -8291,6 +8350,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         for method in (svc.methods or {}).values():
             _reject_dunder_name(method.name, "method", f"service `{svc.name}`",
                                 program.filename, getattr(method, "line", svc.line))
+            # issue #1985: an argument-bound scope names the METHOD's own
+            # parameter, resolved against this signature (the same place the
+            # extern half is resolved in `_lower_externs`).
+            _check_argument_bound_scopes(
+                f"service method `{svc.name}.{method.name}`", program.filename,
+                getattr(method, "line", svc.line), method.capabilities,
+                method.params)
         services[svc.name] = svc
     for name, svc in ambient_services.items():
         services.setdefault(name, svc)
@@ -16573,6 +16639,16 @@ def _widening_reason(cap: "object", held: set) -> str | None:
     # config field to a literal at the spawn site so it resolves into the cone.
     for name, cval in cap.params:
         if isinstance(cval, cap_order.Symbol):
+            if cval.is_arg:
+                # issue #1985: an argument-bound destination is supplied by the
+                # CALLER, not by a spawn `with { }` block, so there is no
+                # spawn-site fix to name - the parent must hold the same binding
+                # or the bare token (`substitute` never resolves an argument).
+                return (f"a destination bound to the argument `{cval.ref}` on "
+                        f"`{cap.token}` is supplied by the CALLER, so it is not "
+                        f"covered by the parent's constant destination "
+                        f"(`{_cap_render(same_token[0])}`); hold the same "
+                        f"argument binding, or the bare `{cap.token}`")
             return (f"a per-instance value `{cval.ref}` on `{cap.token}` is "
                     f"unresolved, so it is incomparable to the parent's cone "
                     f"(`{_cap_render(same_token[0])}`); bind `{cval.field}` to a "

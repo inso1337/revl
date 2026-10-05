@@ -1,1 +1,1 @@
-{"case": "tests/fixtures/emit_go_corpus/stdlib_surface.rvl", "buckets": ["agree-admit"]}
+{"case": "tests/fixtures/emit_go_corpus/stdlib_surface.rvl", "buckets": ["recursion"]}

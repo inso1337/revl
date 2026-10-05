@@ -1,1 +1,1 @@
-{"case": "stdlib/template.rvl", "buckets": ["no-objection-out-of-slice"]}
+{"case": "stdlib/template.rvl", "buckets": ["recursion"]}
