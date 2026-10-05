@@ -1826,7 +1826,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../../../backends/go/testdata/opt_gaps_280.rvl`
 - `../../../backends/go/testdata/result_erased_1631.rvl`
 - `comp_provide_pure.rvl`
-- `comp_provide_records.rvl`
 - `../../../src/revl/truc/components/cli.rvl`
 
 `java`:

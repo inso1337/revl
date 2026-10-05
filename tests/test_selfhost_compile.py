@@ -662,12 +662,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # gap (the issue #1823 provide-block drop is fixed, #1867). The other
         # combined documents are byte-exact through the native chain.
         "comp_provide_pure.rvl",
-        # the second slice (the issue #1840 provide-block drop is fixed, #1867),
-        # issue #1894:
-        # lower.rvl sets no `widen` marker on an Int returned as a Float from a
-        # provide method (the frontend's issue #1838 fix), and its match arm
-        # `Box(_)` carries a different payload binding than the frontend's
-        "comp_provide_records.rvl",
         # `compile_to` takes one source string and resolves no `use`, so the
         # services this document imports from assembler.rvl and shipper.rvl
         # are missing from the native output (not a lower.rvl defect)
