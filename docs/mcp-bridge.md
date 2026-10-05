@@ -605,7 +605,9 @@ gap. A revl-served tool is the only kind whose hint is *compiler-derived*:
 - `readOnlyHint: true` appears only where the checker **refused** any
   unreverted mutation, and a service declaration is a checked upper bound on
   every provider's effects (G4), so no provider can exceed what the tool
-  advertises;
+  advertises — the hint is a proof that the body mutates *nothing*, so an
+  operation declared `witnessed[C]` (a reversible write, docs/capabilities.md
+  §3) reports `readOnlyHint: false` beside `destructiveHint: false`;
 - a `destructiveHint: true` tool names, in its `x-revl.effects`, the exact
   emissions and capabilities the operation crosses — a declared inverse or
   `compensate` where one exists;
