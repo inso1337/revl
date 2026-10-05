@@ -3471,6 +3471,16 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # somebody models the floor.
             record("out-of-fragment-approval" if formal_clean
                    else "formal-found-other", rel)
+        elif code == "G4" and category == "inverse":
+            # The host release rule (issue #1859, `lower._check_host_release`)
+            # carries the G4 code, but it is not the marker rule the `G` row
+            # states: it asks whether a host bracket's `undo` is the family's
+            # release on the bound handle, and the model's HA row carries no
+            # inverse fact yet (issue #1859's formal slice adds the `inv`
+            # column). Absence of fact, ratcheted by name as the approval
+            # floor is, until that column lands.
+            record("out-of-fragment-inverse" if formal_clean
+                   else "formal-found-other", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -3633,11 +3643,12 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # about a specific row that exists, and that is the claim worth pinning.
 OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
 OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
-                       "out-of-fragment-approval")
+                       "out-of-fragment-approval", "out-of-fragment-inverse")
 OOF_LEDGER_ABOUT = [
-    "The corpus files the checker refuses G5, G6 or with the G4 approval",
-    "floor, and the model has NO fact about: `out-of-fragment-G5`,",
-    "`out-of-fragment-G6` and `out-of-fragment-approval` in",
+    "The corpus files the checker refuses G5, G6, with the G4 approval",
+    "floor or with the G4 host release rule, and the model has NO fact",
+    "about: `out-of-fragment-G5`, `out-of-fragment-G6`,",
+    "`out-of-fragment-approval` and `out-of-fragment-inverse` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "",
     "Each bucket records an absence, so none can disagree with anything",

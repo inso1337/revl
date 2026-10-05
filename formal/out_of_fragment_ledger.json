@@ -1,8 +1,9 @@
 {
   "_about": [
-    "The corpus files the checker refuses G5, G6 or with the G4 approval",
-    "floor, and the model has NO fact about: `out-of-fragment-G5`,",
-    "`out-of-fragment-G6` and `out-of-fragment-approval` in",
+    "The corpus files the checker refuses G5, G6, with the G4 approval",
+    "floor or with the G4 host release rule, and the model has NO fact",
+    "about: `out-of-fragment-G5`, `out-of-fragment-G6`,",
+    "`out-of-fragment-approval` and `out-of-fragment-inverse` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "",
     "Each bucket records an absence, so none can disagree with anything",
@@ -72,5 +73,8 @@
     "tests/fixtures/service_receiver_expressions/g4_match_marked.rvl",
     "tests/fixtures/service_receiver_expressions/g4_record_marked.rvl",
     "tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl"
+  ],
+  "out-of-fragment-inverse": [
+    "examples/rejections/g4_undo_not_release.rvl"
   ]
 }
