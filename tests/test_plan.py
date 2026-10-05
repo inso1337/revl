@@ -277,7 +277,8 @@ component TenantAStore provides kv: Kv {
   isolate kv in realm("tenant_a")
   let store = effect Map.new() undo store.drop()
   provide kv { fn get(k) = store.get(k)
-               fn set(k, v) { effect store.insert(k, v) undo store.remove(k) } }
+               fn set(k, v) { effect store.insert(k, v) undo store.remove(k) }
+               fn unset(k) = store.remove(k) }
 }
 """, manifest=running)
 
