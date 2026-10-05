@@ -264,15 +264,23 @@ def build_frontier_scan():
     tables = generator.frontier_tables()
     return make_frontier_scan(tables["keywords"], tables["builtins"],
                               max_bytes=generator.MAX_SOURCE_BYTES,
-                              max_level_items=generator.MAX_LEVEL_ITEMS)
+                              max_level_items=generator.MAX_LEVEL_ITEMS,
+                              capability_roots=tables["capability_roots"])
 
 
 def make_frontier_scan(keywords, builtins, max_bytes: int = 262144,
-                       max_level_items: int = 1024):
+                       max_level_items: int = 1024, capability_roots=()):
     """The scan itself, over the given tables. Split out so a test can drive it
-    with the rust's own table values."""
+    with the rust's own table values.
+
+    `capability_roots` is the rust's `EXCLUDED_CAPABILITY_ROOTS`: a reserved
+    capability namespace (the computer-use roots) whose admission rules the
+    self-host gate does not run, declined where its root is followed by `.`.
+    The mirror lacked it, which no census program noticed until the corpus
+    gained a computer-use document (issue #1369)."""
     excluded_keywords = set(keywords)
     excluded_builtins = set(builtins)
+    excluded_roots = set(capability_roots)
 
     def _strip_literals(raw: bytes) -> bytes:
         """`"..."` and `//` blanked to spaces — replaced, not deleted, so the
@@ -349,6 +357,8 @@ def make_frontier_scan(keywords, builtins, max_bytes: int = 262144,
                     return f"`.{word}()` is outside the covered surface"
             elif word in excluded_keywords:
                 return f"`{word}` is outside the covered surface"
+            elif word in excluded_roots and i < n and text[i] == 0x2E:
+                return f"`{word}.` is a reserved capability namespace"
         return None
 
     return scan

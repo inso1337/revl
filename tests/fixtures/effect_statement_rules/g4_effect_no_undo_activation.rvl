@@ -1,0 +1,7 @@
+// G4 (issue #1963): the same undo-less dotted effect, in the activation body.
+service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  effect store.insert("k", "1")
+  provide w { fn put(k) { } }
+}

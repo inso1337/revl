@@ -1251,8 +1251,9 @@ not that it disagrees.
 
 An absence cannot disagree, so the two buckets aimed at a row the model
 does carry are `ratcheted` instead: `out-of-fragment-G5` and
-`out-of-fragment-G6` and `out-of-fragment-inverse` are held to the names
-in `formal/out_of_fragment_ledger.json`, which shrinks only. A file that
+`out-of-fragment-G6` and `out-of-fragment-inverse` and
+`out-of-fragment-witnessed` are held to the names in
+`formal/out_of_fragment_ledger.json`, which shrinks only. A file that
 JOINS one fails the gate, and a line no longer in its bucket fails it
 until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
 a new G6 purity fixture, cannot arrive while the model stays silent
@@ -1298,6 +1299,7 @@ work that never touched this layer.
 | `out-of-fragment-G5` | 0 | ratcheted |
 | `out-of-fragment-G6` | 0 | ratcheted |
 | `out-of-fragment-inverse` | 2 | ratcheted |
+| `out-of-fragment-witnessed` | 2 | ratcheted |
 | `out-of-scope` | printed by the gate | informational |
 
 Nothing is counted without being named; the files in the non-`agree`
@@ -1315,6 +1317,11 @@ buckets are:
 
 - `examples/rejections/g4_extern_undo_not_declared.rvl`
 - `examples/rejections/g4_undo_not_release.rvl`
+
+`out-of-fragment-witnessed`:
+
+- `tests/fixtures/effect_statement_rules/g4_witnessed_site_undo_activation.rvl`
+- `tests/fixtures/effect_statement_rules/g4_witnessed_site_undo_method.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.
