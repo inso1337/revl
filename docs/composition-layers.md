@@ -214,6 +214,53 @@ refused**: a layer granting itself keys is a layer raising its own authority.
 This is the third of the clause's three rules, and it is the one that needed
 layers to exist before it could be enforced.
 
+## `grant`: the owner or the operator grants a confined row its reach
+
+A row a stack layer adds is non-first-party (design §4.1), so under confinement
+it admits under the untrusted-author profile and its reach is its granted set,
+which defaults to empty. The `granted { ... }` clause cannot reach that row: a
+stack layer may not write it, and the base composition or the site layer can
+only write it on a row they declare themselves, which makes that row
+first-party. `grant` names an existing row instead of declaring one, the way
+`place` does, so the row keeps the trust class of the layer that contributed it:
+
+```revl
+site layer Ops for Demo {
+  grant records_kit::@records with { approvals, writer }
+}
+```
+
+```revl
+composition Demo {
+  row @approvals from "approvals.rvl" provides approvals
+  row @writer    from "writer.rvl"    provides writer
+  stack "trucs/records_kit/layer.rvl"
+  grant records_kit::@records with { approvals, writer }
+}
+```
+
+- `grant` is written in the base composition or the site layer. A stack layer
+  that writes one is refused at parse, for the same reason as `granted`.
+- The keys are `requires` KEYS, the spelling `granted { ... }` uses. The row is
+  confined under `AdmissionProfile.untrusted_author` with the SERVICE each
+  granted key is typed as, because that is what the allowlist compares.
+- A row that requires a key its grant does not list is refused at resolution,
+  naming the key.
+- The grant is reach only. A granted row whose source declares host code is
+  still refused by the profile; `--trust-host-code` is the separate, louder door
+  for that.
+- The target must be a row a stack layer contributed. Granting a first-party row
+  would confine nothing, so it is a refusal, like an address that names nothing.
+- The base composition's grants apply first and the site layer's after them, so
+  a site `grant` of a row replaces the base `grant` of it. Two grants of one row
+  in one document refuse.
+- The keys go in a `with` block for the reason `configure` uses one: `@row {`
+  lexes as a host body.
+
+The grant shows up in the row's provenance as `grant` and in the row table's
+`granted` list, and the authority panel reports a newly granted key as a
+widening.
+
 ## The fold, and why the gate is never inside it
 
 Resolution is a pure fold:

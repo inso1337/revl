@@ -226,7 +226,8 @@ def test_h1_reverts_residue_free_on_abort_from_imported_source(workspace):
     session = _session()
 
     report = session.load(_compile(_IMPORT_ABORT_SRC))
-    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     assert art.read_text() == "v1", "abort did not restore the imported write's preimage"
     assert stale.read_text() == "junk", "abort did not un-remove the imported rm"

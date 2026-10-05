@@ -1,0 +1,96 @@
+// item 391 (#106), held to byte agreement by tests/test_selfhost_emit_rust.py:
+// control flow inside a provide method (issue #548, item 458 / issue #721).
+// selfhost/emit_rust.rvl rendered every `if`/`while`/`for`/`break`/`continue`
+// in a method body as a `DEFER-method-step` marker, and a bare `emit` inside an
+// arm did not make the method effectful.
+//
+//   - `Pure` has no crossing: its `if`/`else`, `while` with `break`, and `for`
+//     with `continue` go through the pure-statement renderer, a `let` inside an
+//     arm staying inside it, and a void method returns bare from an arm;
+//   - `Guarded` returns early from a top-level `if`, then emits, so the `if`
+//     sits beside an effectful step;
+//   - `Nested` emits only inside `if`/`else` arms, which alone makes the method
+//     effectful (the provider struct carries the activation ctx) and clones the
+//     method params into each emission; beside it a `while` that emits nothing
+//     (an emission inside a loop is refused at lowering).
+
+service Sink {
+  emission fn put(k: Str) -> Int
+  fn size() -> Int
+}
+
+service Calc {
+  fn score(n: Int, tags: List[Str]) -> Int
+  fn check(n: Int)
+}
+
+service Api {
+  emission fn store(k: Str) -> Int
+}
+
+service Batch {
+  emission fn flush(k: Str, n: Int) -> Int
+}
+
+component Pure provides calc: Calc {
+  provide calc {
+    fn score(n, tags) {
+      var total = 0
+      if (n > 10) {
+        let big = n * 2
+        total = big
+      } else {
+        total = n
+      }
+      var i = 0
+      while (i < n) {
+        if (i > 3) {
+          break
+        }
+        total = total + i
+        i = i + 1
+      }
+      for (t of tags) {
+        if (t == "") {
+          continue
+        }
+        total = total + 1
+      }
+      return total
+    }
+    fn check(n) {
+      if (n > 0) {
+        return
+      }
+    }
+  }
+}
+
+component Guarded requires sink: Sink provides api: Api {
+  provide api {
+    fn store(k) {
+      if (k == "") {
+        return 0
+      }
+      emit sink.put(k)
+      return sink.size()
+    }
+  }
+}
+
+component Nested requires sink: Sink provides batch: Batch {
+  provide batch {
+    fn flush(k, n) {
+      if (n > 0) {
+        emit sink.put(k)
+      } else {
+        emit sink.put("none")
+      }
+      var i = 0
+      while (i < n) {
+        i = i + 1
+      }
+      return i
+    }
+  }
+}

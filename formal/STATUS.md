@@ -1084,7 +1084,7 @@ with corpus work that never touched this layer.
 | `out-of-fragment` | printed by the gate | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
-| `out-of-fragment-approval` | 34 | ratcheted |
+| `out-of-fragment-approval` | 36 | ratcheted |
 | `out-of-fragment-inverse` | 2 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
@@ -1116,6 +1116,7 @@ buckets are:
 - `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_if_local_step.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_if_local_value.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_list_element_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_match_block_local_step.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_record_alias_step.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_record_field_step.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl`
@@ -1132,6 +1133,7 @@ buckets are:
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_if_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_list_marked.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_match_block_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_match_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_record_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl`
