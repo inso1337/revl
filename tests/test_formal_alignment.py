@@ -28,7 +28,8 @@ revl:
     for a G5 or a G6 checker code, so `g5_undo_handle_emission.rvl` landed
     in `formal-found-other` and eleven more G5 refusals in the generic
     `out-of-fragment`. There is a G5 arm now, and a documented reason there
-    is no `agree-G6` (below).
+    is no `agree-G6` keyed on the `C` row (below); since issue #1812 the
+    G6 binding refusal has its own row, `BU`.
 
 And the promotion the first four were the precondition for: `formal-strict`
 and `formal-found-other` are in `FATAL_BUCKETS`. Informational is how the
@@ -390,9 +391,24 @@ G5_BY_U5 = "examples/rejections/g5_undo_fn_emission.rvl"
 #: row: an unmarked call to a method the service declares `emission`. This is
 #: the file that sat in `formal-found-other`.
 G5_BY_G_ROW = "examples/rejections/g5_undo_handle_emission.rvl"
-#: A G5 fixture no row sees: `undo dispatch1(ref)`, where `dispatch1` calls
-#: its own parameter, so the reach fold leaves the `Prog` at the first hop.
-G5_OUT_OF_PROG = "examples/rejections/g5_undo_handle_ref_arg.rvl"
+#: A G5 program no row sees: `undo f(key)` calls a function-typed PARAMETER,
+#: so the checker refuses it as an indirection it cannot bound, and the reach
+#: fold has no declaration to follow. Synthetic: since issue #1792 every G5
+#: fixture in the corpus is resolved, so the out-of-fragment arm is exercised
+#: by a program written here.
+G5_OPAQUE_SOURCE = """\
+service Cache { fn set(key: Str, f: (Str) -> Int) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key, f) {
+      effect store.insert(key, "v")
+      undo   f(key)
+    }
+  }
+}
+"""
+G5_OUT_OF_PROG = "corpus/g5_undo_opaque_param.rvl"
 #: The corpus's only G6-coded file.
 G6 = "examples/rejections/g6_method_local_shadows_component.rvl"
 
@@ -408,17 +424,30 @@ component C provides k: K {
 """
 
 
+@pytest.fixture(scope="module")
+def opaque(harness, tmp_path_factory):
+    """`G5_OPAQUE_SOURCE` exported as a corpus of its own:
+    `(root, rows, reference verdicts)`."""
+    root = tmp_path_factory.mktemp("g5_opaque")
+    rows, ref, _formal = _synthetic_corpus(
+        harness, root, {"g5_undo_opaque_param.rvl": G5_OPAQUE_SOURCE})
+    return root, ["\t".join(r) for r in rows], ref
+
+
 @pytest.fixture
 def align(harness, monkeypatch, tmp_path):
     """Run `checker_alignment` over ONE corpus file, with its no-manifest
     writer pointed at a scratch directory, and return
-    `(non-zero bucket counts, fatal findings, the printed report)`."""
+    `(non-zero bucket counts, fatal findings, the printed report)`. `repo`
+    compiles the file from a synthetic corpus root instead of the tree."""
     (tmp_path / "harness" / "out").mkdir(parents=True)
     monkeypatch.setattr(harness, "FORMAL", tmp_path)
 
-    def run(rel, verdicts, rows):
+    def run(rel, verdicts, rows, repo=None):
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with redirect_stdout(buf), pytest.MonkeyPatch.context() as mp:
+            if repo is not None:
+                mp.setattr(harness, "REPO", repo)
             fatal = harness.checker_alignment({rel: {}}, [], verdicts, rows)
         out = buf.getvalue()
         counts = {k: int(n) for k, n in re.findall(
@@ -428,11 +457,14 @@ def align(harness, monkeypatch, tmp_path):
     return run
 
 
-def test_the_checker_refuses_each_g5_fixture_with_code_g5(harness):
+def test_the_checker_refuses_each_g5_fixture_with_code_g5(harness, opaque):
     """The premise. All three arms below are about files revl answers `G5`
     for; if one stops being a G5 the test under it is measuring nothing."""
-    for rel in (G5_BY_U5, G5_BY_G_ROW, G5_OUT_OF_PROG):
+    for rel in (G5_BY_U5, G5_BY_G_ROW):
         assert harness.checker_code(rel)[0] == "G5", rel
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(harness, "REPO", opaque[0])
+        assert harness.checker_code(G5_OUT_OF_PROG)[0] == "G5"
 
 
 def test_a_resolvable_undo_agrees_by_the_u5_row(align, verdicts, rows):
@@ -454,13 +486,14 @@ def test_a_handle_undo_agrees_by_the_marker_row(align, verdicts, rows):
 
 
 def test_an_undo_that_leaves_the_prog_is_out_of_fragment_not_missed(
-        harness, align, verdicts, rows):
+        harness, align, opaque):
     """`missed-G5` would be a claim that the model went blind. Here the model
-    has no fact at all: `dispatch1` calls its own parameter, which is not a
-    declared fn or extern, so the reach fold has nothing to follow. Named,
-    not counted, and not fatal."""
+    has no fact at all: `f` is a function-typed parameter, not a declared fn
+    or extern or a binding in view, so the reach fold has nothing to follow.
+    Named, not counted, and not fatal."""
+    root, rows, verdicts = opaque
     assert G5_OUT_OF_PROG not in harness.g5_files_the_prog_resolves(rows)
-    counts, fatal, out = align(G5_OUT_OF_PROG, verdicts, rows)
+    counts, fatal, out = align(G5_OUT_OF_PROG, verdicts, rows, repo=root)
     assert counts == {"out-of-fragment-G5": 1}
     assert fatal == []
     assert f"ALIGN out-of-fragment-G5: {G5_OUT_OF_PROG}" in out
@@ -501,16 +534,38 @@ def test_the_confinement_row_fails_on_a_program_the_checker_accepts(
     assert any(x == "fail" for x in ref.confinements.values())
 
 
-def test_a_g6_refusal_is_out_of_fragment_with_the_model_clean(
+def test_a_g6_binding_refusal_agrees_by_the_binding_row(
         align, verdicts, rows, harness):
     """revl's G6 is purity outside effect forms and the duplicate-binding
-    refusal; the model states neither. Its verdicts on the file are all
-    `ok`, and the `C` rows that do `fail` are about something else."""
-    assert harness.checker_code(G6)[0] == "G6"
+    refusal. The file is a binding refusal, and the `BU` row (issue #1812)
+    is what agrees with it: the `G` row is `ok`, and the `C` rows that do
+    `fail` are about something else."""
+    assert harness.checker_code(G6) == ("G6", "binding")
     assert verdicts.comps[(G6, "C")] == "ok"
     assert any(x == "fail" for k, x in verdicts.confinements.items()
                if k[0] == G6)
-    counts, fatal, out = align(G6, verdicts, rows)
+    assert verdicts.bindings[(G6, "C", "cache.set")] == "fail"
+    counts, fatal, _out = align(G6, verdicts, rows)
+    assert counts == {"agree-G6": 1}
+    assert fatal == []
+
+
+def _as_purity_refusal(harness, monkeypatch):
+    """Report the G6 file as a PURITY refusal, the G6 category the model
+    still states no rule about. No corpus file outside the parse refusals
+    has one, so the arm is exercised on the one G6 file the checker sees."""
+    real = harness.checker_code
+    monkeypatch.setattr(harness, "checker_code", lambda rel: (
+        ("G6", "purity") if rel == G6 else real(rel)))
+
+
+def test_a_g6_purity_refusal_is_out_of_fragment_with_the_model_clean(
+        align, verdicts, rows, harness, monkeypatch):
+    """The model states nothing about purity outside an effect form, so a
+    purity refusal with every row `ok` is an absence, ratcheted by name."""
+    _as_purity_refusal(harness, monkeypatch)
+    clean = verdicts._replace(bindings={k: "ok" for k in verdicts.bindings})
+    counts, fatal, out = align(G6, clean, rows)
     assert counts == {"out-of-fragment-G6": 1}
     assert fatal == []
     assert f"ALIGN out-of-fragment-G6: {G6}" in out
@@ -536,11 +591,15 @@ def test_a_model_refusal_on_an_accepted_file_fails_the_gate(
 
 
 def test_a_model_refusal_under_an_unmodelled_code_fails_the_gate(
-        align, verdicts, rows):
+        align, verdicts, rows, harness, monkeypatch):
     """The input that still FAILS for `formal-found-other`: revl refuses the
-    G6 file for a rule the model does not state, and a model row refuses it
-    for some other reason. `out-of-fragment-G6` is only for a CLEAN model."""
-    dirty = verdicts._replace(comps={**verdicts.comps, (G6, "C"): "fail"})
+    G6 file for a rule the model does not state (purity), and a model row
+    refuses it for some other reason. `out-of-fragment-G6` is only for a
+    CLEAN model."""
+    _as_purity_refusal(harness, monkeypatch)
+    dirty = verdicts._replace(
+        comps={**verdicts.comps, (G6, "C"): "fail"},
+        bindings={k: "ok" for k in verdicts.bindings})
     counts, fatal, _out = align(G6, dirty, rows)
     assert counts == {"formal-found-other": 1}
     assert fatal == [f"formal-found-other: {G6}"]
@@ -758,7 +817,8 @@ def test_a_file_joining_an_out_of_fragment_bucket_fails_the_gate(
     write(samples)
     assert check(samples) == []
     joined = {**samples,
-              "out-of-fragment-G5": [*samples["out-of-fragment-G5"], NEWCOMER]}
+              "out-of-fragment-G5": [
+                  *samples.get("out-of-fragment-G5", []), NEWCOMER]}
     findings = check(joined)
     assert findings == [f for f in findings if f.startswith(
         "joined out-of-fragment-G5: ")]
@@ -774,7 +834,7 @@ def test_a_file_joining_the_g6_bucket_fails_the_gate(harness, status, ledger):
     write(samples)
     newcomer = "examples/rejections/g6_new_shape.rvl"
     findings = check({**samples, "out-of-fragment-G6": [
-        *samples["out-of-fragment-G6"], newcomer]})
+        *samples.get("out-of-fragment-G6", []), newcomer]})
     assert len(findings) == 1
     assert findings[0].startswith(f"joined out-of-fragment-G6: {newcomer}")
 
@@ -787,15 +847,14 @@ def test_a_stale_ledger_line_fails_the_gate_and_must_be_deleted(
     so each one reds until it is removed."""
     _block, _fatal, _align, samples = status
     write, check = ledger
-    write(samples)
-    shrunk = {**samples,
-              "out-of-fragment-G5": samples["out-of-fragment-G5"][1:]}
-    findings = check(shrunk)
+    held = {**samples, "out-of-fragment-G5": [
+        *samples.get("out-of-fragment-G5", []), NEWCOMER]}
+    write(held)
+    findings = check(samples)
     assert len(findings) == 1
-    assert findings[0].startswith(
-        f"left out-of-fragment-G5: {samples['out-of-fragment-G5'][0]}")
-    write(shrunk)
-    assert check(shrunk) == []
+    assert findings[0].startswith(f"left out-of-fragment-G5: {NEWCOMER}")
+    write(samples)
+    assert check(samples) == []
 
 
 def test_a_missing_ledger_is_a_failure_not_a_pass(harness, status, ledger):
@@ -860,7 +919,7 @@ def test_the_alignment_arms_do_not_run_the_ratchet(align, verdicts, rows):
     """The ratchet is a statement about the WHOLE corpus, so it lives in
     `main()`. Run over one file it would read every other name in the
     ledger as stale, which is why `checker_alignment` does not call it."""
-    _counts, fatal, _out = align(G5_OUT_OF_PROG, verdicts, rows)
+    _counts, fatal, _out = align(G5_BY_U5, verdicts, rows)
     assert fatal == []
 
 

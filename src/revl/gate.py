@@ -908,7 +908,8 @@ class Gate:
 
     def propose(self, source: str,
                 granted: list[str] | tuple[str, ...] = (),
-                *, providers: Mapping[str, str] | None = None) -> "ProposeResult":
+                *, providers: Mapping[str, str] | None = None,
+                realm_bindings: Mapping[str, str] | None = None) -> "ProposeResult":
         """Admit an AGENT-authored component under the untrusted-author profile
         AND hot-swap the running composition to it — the item-334 self-extending
         crossing. The one verb neither `admit` (additive, refuses replacement)
@@ -1021,7 +1022,12 @@ class Gate:
         #    own realm picks which of them cover its class-(c) crossings. The
         #    component-glob half of that scope is no bound on an author who names
         #    its own components, so the realm was the only half left.
-        profile = AdmissionProfile.self_extension(granted)
+        # issue #1728: `realm_bindings` is the OPERATOR's map from the realm
+        # placeholders the candidate writes (`realm(?tenant)`) to the realms they
+        # stand for. The embedder calling `propose` is the operator, not the
+        # agent whose source this is, so it is the admission call that binds.
+        bindings = tuple(sorted((realm_bindings or {}).items()))
+        profile = AdmissionProfile.self_extension(granted, bindings)
         try:
             compile_source(source, "<candidate>.rvl",
                            modules=dict(providers) if providers else None,
@@ -1039,7 +1045,7 @@ class Gate:
         #    source validated above, plus the trusted granted providers), then
         #    hand it to the health-gated swap.
         try:
-            ir = self._compile_candidate_composition(source, providers)
+            ir = self._compile_candidate_composition(source, providers, bindings)
         except RevlError as error:
             return ProposeResult(False, code=getattr(error, "code", None),
                                  message=str(error),
@@ -1151,8 +1157,8 @@ class Gate:
                              migration=migration)
 
     def _compile_candidate_composition(self, source: str,
-                                       providers: Mapping[str, str] | None
-                                       ) -> dict:
+                                       providers: Mapping[str, str] | None,
+                                       bindings: tuple = ()) -> dict:
         """Compile the candidate as a COMPLETE self-contained composition for the
         swap transition: the agent `source` as the root, plus any trusted
         `providers` as co-roots. Compiled WITHOUT the untrusted profile — the
@@ -1163,10 +1169,13 @@ class Gate:
         provider the candidate requires or the successor faults and reverts."""
         from .compiler import compile_files, compile_source  # noqa: PLC0415
         import os  # noqa: PLC0415
+        from .admit_profile import AdmissionProfile  # noqa: PLC0415
+        # the decision compile's realm bindings, and nothing else of its profile
+        bound = AdmissionProfile(realm_bindings=bindings) if bindings else None
         if not providers:
             # a fully self-contained pure-revl candidate: the source IS the whole
             # composition (it composes only providers it declares itself).
-            return compile_source(source, "candidate.rvl")
+            return compile_source(source, "candidate.rvl", profile=bound)
         cand_abs = os.path.abspath("candidate.rvl")
         virtual = {cand_abs: source}
         paths = [cand_abs]
@@ -1174,7 +1183,7 @@ class Gate:
             abs_path = os.path.abspath(path)
             virtual[abs_path] = text
             paths.append(abs_path)
-        return compile_files(paths, sources=virtual)
+        return compile_files(paths, sources=virtual, profile=bound)
 
     def call(self, key: str, method: str, args: list | None = None) -> dict:
         """Invoke a provided operation on the running composition, gated by the

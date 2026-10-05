@@ -80,9 +80,9 @@
 
 ["function", "extern-only-boundary-these-statements-build-extern-config", "_rust_extern_config_bind", 9, 9]
 
-["reason", "host-map-binding-inference-these-functions-scan-let", "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs. emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 1 more of `_host_of`'s statements."]
+["reason", "host-map-binding-inference-these-functions-scan-let", "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs. emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 1 more of `_host_of`'s statements. emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `_map_value_rust_type`'s statements, 2 -> 1. Issue #1931 holds every value acquisition by its type, so `_host_of` is now asked only about a shared resource or an acquisition whose type cannot be named: the arms that a value bind used to reach through it (the item-391 teardown document's required-service acquisition among them) are unreached, 3 -> 4."]
 
-["function", "host-map-binding-inference-these-functions-scan-let", "_host_of", 3, 3]
+["function", "host-map-binding-inference-these-functions-scan-let", "_host_of", 4, 4]
 
 ["function", "host-map-binding-inference-these-functions-scan-let", "_map_expr_inserts", 1, 1]
 
@@ -90,7 +90,7 @@
 
 ["function", "host-map-binding-inference-these-functions-scan-let", "_map_value_expr_type", 67, 67]
 
-["function", "host-map-binding-inference-these-functions-scan-let", "_map_value_rust_type", 2, 2]
+["function", "host-map-binding-inference-these-functions-scan-let", "_map_value_rust_type", 1, 1]
 
 ["reason", "in-file-test-and-lifecycle-harness-generation-is", "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions. Since item 391 the pure `test` section is ported: selfhost/emit_rust.rvl emits each block as a `#[test] fn`, held to byte agreement by emit_rust_corpus/in_file_tests.rvl, so `_emit_v3_tests` keeps only its `continue` past a lifecycle test, which `_emit_v3` never hands it (it splits the lifecycle tests off first)."]
 
@@ -102,9 +102,9 @@
 
 ["function", "in-file-test-and-lifecycle-harness-generation-is", "_refuse_fault_tests", 2, 2]
 
-["reason", "issue-1920-call-acquired-binds-and-service-trait-names", "Issue #1920: `_call_bind_type` holds a call-acquired activation bind by its declared handle type. Its two `return None` arms for a call with no declared return or a `Unit` one, and the loop-exhausted `return None`, are unreachable from an accepted program: an `extern acquire` must return a nominal opaque handle (item 308), and the bind it is asked about always exists, so two of its statements are recorded. emit_rust_corpus/prelude_names.rvl holds the reached half to byte agreement and builds it under cargo."]
+["reason", "issue-1920-call-acquired-binds-and-service-trait-names", "Issues #1920 and #1931: `_held_bind_type` holds an activation bind by value, typed by what its acquisition evaluates to, unless it is a shared resource. Its `return None` for an acquisition whose type cannot be named (or is `Unit`) and its loop-exhausted `return None` are unreachable from the corpus: every value acquisition in an accepted rust corpus document has a nameable type, and the bind it is asked about always exists. emit_rust_corpus/prelude_names.rvl and held_acquire_binds.rvl hold the reached half to byte agreement and build it under cargo."]
 
-["function", "issue-1920-call-acquired-binds-and-service-trait-names", "_call_bind_type", 2, 2]
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "_held_bind_type", 2, 2]
 
 ["reason", "item-421-f5-a-document-that-declares-a", "Item 421 F5: a document that declares a `Secret[T]` AND returns a `Result` from a provided method serializes the Err half through this funnel rather than `_result_to_json`, because the failure text is the one thing crossing the seam that has to be scrubbed. No corpus document does both: the rust byte-agreement corpus reaches the bridge (service.rvl, services_multi.rvl) but holds no document declaring a `Secret[T]` at all, and the port (selfhost/emit_rust.rvl) carries no `_SECRET_MODE` and emits no funnel call, so a secret-bearing bridge document could not be a byte-identical corpus case. The reference half is pinned by tests/test_rust_seam_failure_scrub.py::test_secret_mode_emits_the_funnel_and_the_shared_marker."]
 
@@ -152,7 +152,7 @@
 
 ["function", "ownership-and-string-view-alternatives-residuals-are-the", "_v3_self_append_inplace", 19, 19]
 
-["reason", "pure-v3-expression-and-statement-residuals-explicit-refusals", "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. The stdlib-method result table (`_v3_builtin_return_type`) joins this bucket: it names the surface type of a `kind == \"builtin\"` node, so a `let` bound to a method call carries a type instead of none. Driving `_v3_infer_type` over the receivers it now asks about is what pulls `_v3_infer_type` 11 -> 4, `_v3_is_float` 4 -> 1 and `_v3_is_str` 2 -> 1. Its own residual statement is the `@self` fallback for a receiver the corpus never leaves untyped; the same missing mirror keeps a corpus document from reaching it, because `selfhost/emit_rust.rvl` carries no inference layer of its own. emit_rust_corpus/by_value_reuse.rvl (item 391) reaches one more `_v3_infer_type` arm (the `match` arm-body type), 4 -> 3: selfhost/emit_rust.rvl now mirrors the inference arms the by-value rules read (literal, index, field, record, `match`, stdlib-method result)."]
+["reason", "pure-v3-expression-and-statement-residuals-explicit-refusals", "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. The stdlib-method result table (`_v3_builtin_return_type`) joins this bucket: it names the surface type of a `kind == \"builtin\"` node, so a `let` bound to a method call carries a type instead of none. Driving `_v3_infer_type` over the receivers it now asks about is what pulls `_v3_infer_type` 11 -> 4, `_v3_is_float` 4 -> 1 and `_v3_is_str` 2 -> 1. Its own residual statement is the `@self` fallback for a receiver the corpus never leaves untyped; the same missing mirror keeps a corpus document from reaching it, because `selfhost/emit_rust.rvl` carries no inference layer of its own. emit_rust_corpus/by_value_reuse.rvl (item 391) reaches one more `_v3_infer_type` arm (the `match` arm-body type), 4 -> 3: selfhost/emit_rust.rvl now mirrors the inference arms the by-value rules read (literal, index, field, record, `match`, stdlib-method result). emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `_v3_infer_type`'s statements, 3 -> 2."]
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_emit_v3_functions", 8, 8]
 
@@ -164,7 +164,7 @@
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_empty_vec_elem_types.collect", 1, 1]
 
-["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_infer_type", 3, 3]
+["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_infer_type", 2, 2]
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_inplace_persistent", 12, 12]
 

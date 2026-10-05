@@ -464,7 +464,8 @@ IR_TOPLEVEL_FIELDS = frozenset({
 })
 
 
-def _ir_params(named_types, secret_params=()) -> list:
+def _ir_params(named_types, secret_params=(), trusted_params=(),
+               untrusted_params=()) -> list:
     """The IR `params` list for a declaration, carrying the `Secret[T]` marking.
 
     `named_types` yields `(name, type)` pairs; `secret_params` is the index set
@@ -479,10 +480,19 @@ def _ir_params(named_types, secret_params=()) -> list:
     confidentiality from a value.
 
     Additive: absent unless the author wrote `Secret[T]`, so every existing IR
-    document stays byte-identical."""
+    document stays byte-identical.
+
+    Issue #1937: a service operation's `Trusted[T]` and `Untrusted[T]`
+    parameters are carried the same way (`trusted`, `untrusted`), so a unit
+    compiled against this IR as a manifest still sees the sink and the
+    untrusted input. Absent unless declared."""
     secret = frozenset(secret_params or ())
+    trusted = frozenset(trusted_params or ())
+    untrusted = frozenset(untrusted_params or ())
     return [{"name": name, "type": type_name,
-             **({"secret": True} if index in secret else {})}
+             **({"secret": True} if index in secret else {}),
+             **({"trusted": True} if index in trusted else {}),
+             **({"untrusted": True} if index in untrusted else {})}
             for index, (name, type_name) in enumerate(named_types)]
 
 
@@ -2062,6 +2072,21 @@ def _check_fn_extern_collisions(program: Program) -> None:
         if decl.name in externs_at:
             raise _fn_extern_collision(decl, decl.source or program.filename,
                                        *externs_at[decl.name])
+
+
+def _verified_method_refusal(filename: str, line: int) -> RevlError:
+    """`verified` on a provide-method statement that is not a witnessed effect.
+    Issue #1897 lifts the refusal for a witnessed method effect only, whose
+    round trip is call-then-abort (docs/verified-effect.md)."""
+    return RevlError(
+        filename, line,
+        "`verified effect` in a provide-method body is only allowed on a witnessed "
+        "effect (issue #1897)",
+        hint="a method effect's round trip calls the method and then aborts, which "
+             "replays a witnessed effect's declared inverse. A plain effect's "
+             "site `undo` is not verified there: move it to the component "
+             "activation body to verify it, or drop `verified` "
+             "(docs/verified-effect.md)")
 
 
 def _lower_fns(program: Program, filename: str, types: dict | None = None) -> list:
@@ -8777,8 +8802,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                 "methods": {
                     m.name: {
                         "params": _ir_params(
-                            m.params, getattr(m, "secret_params", ())),
+                            m.params, getattr(m, "secret_params", ()),
+                            getattr(m, "trusted_params", ()),
+                            getattr(m, "untrusted_params", ())),
                         "returns": m.returns,
+                        # issue #1937: the qualifier stripped off `returns`
+                        # (`Untrusted` or `Secret`), so a unit compiled against
+                        # this IR reads the operation's data as tainted.
+                        # Absent unless declared, so existing IR is unchanged.
+                        **({"returns_qualifier": m.returns_qualifier}
+                           if getattr(m, "returns_qualifier", None) else {}),
                         # roadmap item 441 / issue #120 (L5,
                         # docs/design/458-termination-language-surface.md §3, §6):
                         # which operations are termination criteria/guards is a
@@ -13460,21 +13493,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         for mstmt in method.body:
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
-            if getattr(mstmt, "verified", False):
-                # `verified effect` is inverse round-trip tested by activating
-                # the component and tearing it down (roadmap item 26); that
-                # round-trip is only well-defined for an *activation-body*
-                # effect, whose inverse the fiber's teardown runs. A
-                # method-body effect runs per request, so it has no such
-                # closed activate/teardown window — reject rather than accept
-                # a marker the runner cannot honour.
-                raise RevlError(
-                    filename, mstmt.line,
-                    "`verified effect` is only allowed in a component activation body",
-                    hint="inverse round-trip testing activates the component and tears it "
-                         "down; a provide-method effect runs per request and has no such "
-                         "window (docs/verified-effect.md). Drop `verified`, or move the "
-                         "effect to the activation body.")
+            verified_here = getattr(mstmt, "verified", False)
+            if verified_here and not isinstance(mstmt, EffectStmt):
+                raise _verified_method_refusal(filename, mstmt.line)
             if isinstance(mstmt, LetEffect) and not isinstance(mstmt.acquire, SpawnExpr):
                 # item 397: the NARROW lift of the phase-1 spawn-only rule. A
                 # let-effect in a provide-method body is additionally admitted
@@ -13560,9 +13581,20 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # missing-undo effect raises the unchanged G4 refusal.
                 with _acquire_position(env, mstmt.acquire):
                     acquire = _lower_expr(mstmt.acquire, env, mode="setup")
-                mbody.append(_lower_effect_step(
+                step = _lower_effect_step(
                     acquire, mstmt.undo, env, filename, mstmt.line,
-                    bind=None, raw_acquire=mstmt.acquire))
+                    bind=None, raw_acquire=mstmt.acquire)
+                if verified_here:
+                    # issue #1897: a WITNESSED method effect may be verified.
+                    # Its round trip is the method's own window: activate,
+                    # call the method, abort (the declared inverse replays),
+                    # compare (`fault.roundtrip_units`). A plain method effect
+                    # keeps the refusal: its inverse is the site `undo`, and
+                    # the decision scopes the lift to witnessed effects.
+                    if "undo" in step:
+                        raise _verified_method_refusal(filename, mstmt.line)
+                    step["verified"] = True
+                mbody.append(step)
             elif isinstance(mstmt, EmitStmt):
                 mbody.append(_lower_emit_step(mstmt, env))
             elif isinstance(mstmt, AwaitStmt):

@@ -1100,6 +1100,14 @@
 
 ["oracle-reject:an iteration body is still walked for its own refusal", "agree-refuse/G4"]
 
+["oracle-reject:an unbound realm placeholder", "agree-refuse/G2"]
+
+["oracle-reject:an unbound realm placeholder ahead of a lowering refusal", "agree-refuse/G2"]
+
+["oracle-reject:an unbound realm placeholder in a route", "agree-refuse/G2"]
+
+["oracle-reject:an unbound route placeholder ahead of a route refusal", "agree-refuse/G2"]
+
 ["oracle-reject:an undeclared name in an argument", "agree-refuse/G1"]
 
 ["oracle-reject:an undeclared name left of an unmarked emission is still G1", "agree-refuse/G1"]
@@ -1498,6 +1506,24 @@
 
 ["tests/fixtures/canary_tenants.rvl", "agree-admit"]
 
+["tests/fixtures/deferred_reach/g4_call_in_arrow_in_fn_body.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/deferred_reach/g4_call_in_fn_body.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/deferred_reach/g4_call_in_test_body.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/deferred_reach/g4_value_in_component.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/deferred_reach/g4_value_in_fn_body.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/deferred_reach/g4_value_in_test_body.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/deferred_reach/ok_emit_step.rvl", "agree-admit"]
+
+["tests/fixtures/deferred_reach/ok_emit_tail.rvl", "agree-admit"]
+
+["tests/fixtures/deferred_reach/ok_plain_value_in_fn_body.rvl", "agree-admit"]
+
 ["tests/fixtures/embedded_frontend_document_1120.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_go_corpus/accumulator_hygiene.rvl", "agree-admit"]
@@ -1518,7 +1544,17 @@
 
 ["tests/fixtures/emit_go_corpus/calls.rvl", "agree-admit"]
 
+["tests/fixtures/emit_go_corpus/comp_provide_any_result.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/comp_provide_builtins.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/comp_provide_config.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/comp_provide_emit.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_go_corpus/comp_provide_pure.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/comp_provide_records.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_go_corpus/control.rvl", "agree-admit"]
 
@@ -1845,6 +1881,8 @@
 ["tests/fixtures/emit_rust_corpus/externs.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/float_pub.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/held_acquire_binds.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/in_file_tests.rvl", "agree-admit"]
 
