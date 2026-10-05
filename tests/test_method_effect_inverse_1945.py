@@ -18,6 +18,13 @@ The rule now (decisions D1 to D3 on the issue):
 - every method-body effect whose `undo` is written records how far that check
   reached: `inverse: table | declared | asserted`.
 
+The extern-acquire half of the same bracket was closed after D1 to D3, by
+#1885's slice 3 (landed on main as f8b49436e, and inside the merge this branch
+carries): an `extern acquire` that DECLARES its `undo` has exactly one legal
+site spelling, so `effect lock_row(k) undo forget(k)` is refused with G4 rather
+than reported `asserted`. An extern that declares no inverse keeps the
+`asserted` classification.
+
 Each refusal is mirrored in selfhost/lower.rvl; the census holds the gate to
 examples/rejections/g4_method_write_not_inverse.rvl.
 """
