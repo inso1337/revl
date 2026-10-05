@@ -1596,7 +1596,11 @@ _ROUNDTRIP_HEADER = (
     "component,\n"
     "  tear it down so the inverse runs, and assert the observable-state fingerprint "
     "returned\n"
-    "  to baseline — {n} randomized rounds.\n"
+    "  to baseline, {n} randomized rounds. A witnessed provide-method effect is "
+    "round-tripped\n"
+    "  in the method's own window instead: call the method, abort, and assert the "
+    "fingerprint\n"
+    "  returned and the declared inverse ran without restore-residue (issue #1897).\n"
     "  IN SCOPE: in-process observable state only — the runtime's mutation ledger "
     "(host\n"
     "  acquire/release, map keys, pool connections). OUT OF REACH (replay.md §4.1), "
@@ -1894,16 +1898,30 @@ def _verified_effect_labels(body: list) -> list:
 
 
 def roundtrip_units(ir: dict) -> list:
-    """One unit per component that has a `verified` activation-body effect.
+    """One unit per component that has a `verified` activation-body effect, and
+    one per provide method that has a `verified` witnessed effect (issue #1897).
 
     The marker is threaded by the frontend (`step["verified"]`), so a hand- or
-    import-produced IR gets round-trip tested too.  Shape mirrors a fault unit.
+    import-produced IR gets round-trip tested too.  Shape mirrors a fault unit;
+    a method unit adds `key` and `method`, and its round trip is the method's
+    own window, call-then-abort (`_drive_method_roundtrip`).
     """
     units: list = []
     for component in ir.get("components") or []:
-        labels = _verified_effect_labels(component.get("body") or [])
+        body = component.get("body") or []
+        labels = _verified_effect_labels(body)
         if labels:
             units.append({"component": component.get("name"), "verified": labels})
+        for step in body:
+            if step.get("step") != "provide":
+                continue
+            for method in step.get("methods") or []:
+                labels = _verified_effect_labels(method.get("body") or [])
+                if labels:
+                    units.append({"component": component.get("name"),
+                                  "key": step.get("name"),
+                                  "method": method.get("name"),
+                                  "verified": labels})
     return units
 
 
@@ -2013,12 +2031,121 @@ async def _drive_roundtrip(ir: dict, component: str, configs: dict,
     return (True, None)
 
 
+async def _drive_method_roundtrip(ir: dict, unit: dict, configs: dict, rng,
+                                  emit, runtime_mod, Context, FiberState) -> tuple:
+    """One round of a METHOD unit (issue #1897): the method's own window.
+
+    Bring up the providers, snapshot the ledger, activate the component, call
+    the method with type-directed random arguments, then ABORT the component's
+    activation frame and dispose it, so its witnessed inverses replay; the
+    fingerprint must be back at the snapshot and the abort must leave no
+    `restore-residue`. Returns ``(ok, detail, args)``.
+
+    A round where the call did not register the effect's inverse (it returned
+    `Err`, or raised) proves nothing, and fails as inconclusive, as an
+    activation that never reached ACTIVE does."""
+    component, key, method = unit["component"], unit["key"], unit["method"]
+    order = ((ir.get("manifest") or {}).get("loadOrder")
+             or [c["name"] for c in ir.get("components") or []])
+    service = next((step.get("service") for c in ir.get("components") or []
+                    if c.get("name") == component for step in c.get("body") or []
+                    if step.get("step") == "provide" and step.get("name") == key),
+                   None)
+    params = (((ir.get("services") or {}).get(service) or {}).get("methods")
+              or {}).get(method, {}).get("params") or []
+
+    module = types.ModuleType(f"revl_roundtrip_{abs(hash((component, method))):x}")
+    sys.modules[module.__name__] = module
+    events: list = []
+    args: list = []
+    try:
+        source = emit.emit(ir)
+        exec(compile(source, f"<revl-roundtrip {component}.{method}>", "exec"),
+             module.__dict__)
+        args = [_gen_random(p.get("type"), ir.get("types") or {}, module, rng)
+                for p in params]
+        root = Context()
+        fibers: dict = {}
+        runtime_mod.set_trace(events.append)
+        try:
+            for name in order:
+                if name == component:
+                    continue
+                fibers[name] = runtime_mod.plug(root, getattr(module, name),
+                                                configs.get(name) or {})
+                await _flush()
+            await _flush()
+            # the snapshot is taken before the component activates, as the
+            # activation round trip's is: the abort tears it down, so its own
+            # activation inverses run too and the ledger must come back here
+            baseline = _outstanding(list(events))
+            fiber = runtime_mod.plug(root, getattr(module, component),
+                                     configs.get(component) or {})
+            await _flush()
+            if fiber.state == FiberState.LOADING:
+                try:
+                    await asyncio.wait_for(asyncio.shield(fiber), 5)
+                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    pass
+                await _flush()
+            if fiber.state != FiberState.ACTIVE:
+                state = getattr(fiber.state, "name", fiber.state)
+                return (False, f"the component did not reach ACTIVE (it is {state}), "
+                               "so the method could not be called", args)
+            frame = runtime_mod._frame_for_ctx(fiber.ctx)
+            before = len(getattr(frame, "_transactional", ()))
+            impl = root.get(key)
+            try:
+                result = getattr(impl, method)(*args)
+                if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+                    await result
+            except Exception as error:  # noqa: BLE001 - inconclusive, reported
+                return (False, f"the call raised {type(error).__name__}: {error}, so "
+                               "the verified effect never registered its inverse",
+                        args)
+            await _flush()
+            if len(getattr(frame, "_transactional", ())) == before:
+                return (False, "the call registered no inverse (the witnessed effect "
+                               "returned `Err`), so the round trip is inconclusive",
+                        args)
+            # the method's window closes with an abort: the frame reverts
+            # rather than commits, so the witnessed inverse replays
+            frame.abort()
+            await fiber.dispose()
+            await _flush()
+            final = _outstanding(list(events))
+            residue = [r for r in getattr(frame, "compensation_residue", ())
+                       if r.get("kind") == "restore-residue"]
+        finally:
+            runtime_mod.set_trace(None)
+            for name in reversed(order):
+                other = fibers.pop(name, None)
+                if other is not None:
+                    try:
+                        await other.dispose()
+                    except Exception:  # noqa: BLE001 - cleanup must not mask a result
+                        pass
+            await _flush()
+    finally:
+        sys.modules.pop(module.__name__, None)
+
+    if residue:
+        error = residue[0].get("error") or {}
+        return (False, f"the abort left restore-residue: the inverse raised "
+                       f"{error.get('type')}: {error.get('message')}", args)
+    diffs = _fingerprint_delta(baseline, final)
+    if diffs:
+        return (False, "; ".join(diffs), args)
+    return (True, None, args)
+
+
 def _roundtrip_dossier(results: list, rounds: int) -> dict:
-    """Aggregate ``(component, labels, round_results)`` into a gauntlet-shaped
-    dossier.  ``round_results`` is ``[(ok, detail, config)]``.  Pure."""
+    """Aggregate ``(component, labels, round_results[, method])`` into a
+    gauntlet-shaped dossier.  ``round_results`` is ``[(ok, detail, config)]``;
+    ``method`` (`key.method`) names a method unit (issue #1897).  Pure."""
     components = []
     total = passed = failed = 0
-    for component, labels, round_results in results:
+    for component, labels, round_results, *method in results:
         first_fail = next(((detail, cfg) for ok, detail, cfg in round_results if not ok),
                           None)
         ok = first_fail is None
@@ -2027,6 +2154,7 @@ def _roundtrip_dossier(results: list, rounds: int) -> dict:
         failed += not ok
         entry = {
             "component": component,
+            **({"method": method[0]} if method else {}),
             "verifiedEffects": list(labels),
             "rounds": len(round_results),
             "status": "pass" if ok else "fail",
@@ -2041,7 +2169,8 @@ def _roundtrip_dossier(results: list, rounds: int) -> dict:
         "title": _ROUNDTRIP_TITLE,
         "tier": "py",
         "note": "each `verified effect` was round-tripped (activate, tear down, "
-                "compare the observable-state fingerprint) over "
+                "compare the observable-state fingerprint; a witnessed method "
+                "effect: call the method, abort, compare) over "
                 f"{rounds} randomized rounds; a test the author did not write, not a "
                 "proof — in-process state only, aliases/emissions/clock out of reach "
                 "(docs/verified-effect.md).",
@@ -2097,7 +2226,9 @@ def run_roundtrip_units(ir: dict, units: list, out=None,
     for unit in units:
         component = unit["component"]
         labels = unit["verified"]
-        rng = random.Random(f"revl-roundtrip:{component}")
+        method = (f"{unit['key']}.{unit['method']}" if unit.get("method") else None)
+        rng = random.Random(f"revl-roundtrip:{component}"
+                            + (f":{method}" if method else ""))
         round_results: list = []
         for round_index in range(rounds):
             # a fresh, valid, randomized config for every component (the
@@ -2107,24 +2238,33 @@ def run_roundtrip_units(ir: dict, units: list, out=None,
                        for name in all_components}
             config = configs[component]
             try:
-                ok, detail = asyncio.run(_drive_roundtrip(
-                    ir, component, configs, emit, runtime_mod, Context, FiberState))
+                if method:
+                    ok, detail, args = asyncio.run(_drive_method_roundtrip(
+                        ir, unit, configs, rng, emit, runtime_mod, Context,
+                        FiberState))
+                    config = {"config": config, "args": args}
+                else:
+                    ok, detail = asyncio.run(_drive_roundtrip(
+                        ir, component, configs, emit, runtime_mod, Context,
+                        FiberState))
             except Exception as error:  # noqa: BLE001 — a driver crash is a failure
                 ok, detail = False, _driver_failure(emit, error, "round-trip")
             round_results.append((ok, detail, config))
             if not ok:
                 break  # a shrinking-free counterexample: report the first failing config
-        results.append((component, labels, round_results))
+        results.append((component, labels, round_results)
+                       + ((method,) if method else ()))
 
     dossier = _roundtrip_dossier(results, rounds)
     for entry in dossier["components"]:
         effects = ", ".join(entry["verifiedEffects"])
+        name = entry["component"] + (f" {entry['method']}" if entry.get("method") else "")
         if entry["status"] == "pass":
-            printer(f"PASS {entry['component']}: {entry['rounds']} round(s), "
+            printer(f"PASS {name}: {entry['rounds']} round(s), "
                     f"inverse held for [{effects}]")
         else:
             ce = entry.get("counterexample") or {}
-            printer(f"FAIL {entry['component']}: inverse round-trip broke for [{effects}]")
+            printer(f"FAIL {name}: inverse round-trip broke for [{effects}]")
             printer(f"    - config {ce.get('config')!r}: {ce.get('reason')}")
     counts = dossier["counts"]
     printer(f"round-tripped {counts['effects']} verified effect(s): "

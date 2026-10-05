@@ -1,0 +1,53 @@
+// issue #106: the v3 COMBINED path, fifth slice. `emit` steps in provide-method
+// bodies: a plain emission fired inline, several in one body, an emission
+// before a `return`, and an `emit .. compensate ..` whose offset is parked on
+// the component's activation frame through `registerMethodCompensation`. A
+// component with a compensation opens the frame first in Apply, hands it only
+// to the provide block that registers on it, and commits it as its returned
+// inverse; the frame teardown preamble and its `time`/`os`/`strconv` imports
+// come in with it. A component without one stays frame-free.
+fn quoted(s: Str) -> Str { return `'${s}'` }
+
+service Store {
+  fn count() -> Int
+  emission fn put(k: Str, v: Int) -> Int
+  emission fn drop(k: Str) -> Int
+}
+
+service Ledger {
+  emission fn record(k: Str, v: Int)
+  emission fn move(a: Str, b: Str, v: Int) -> Int
+  fn total() -> Int
+}
+
+service Log {
+  emission fn note(m: Str)
+}
+
+component Books requires store: Store provides ledger: Ledger, log: Log {
+  provide ledger {
+    fn record(k, v) {
+      emit store.put(k, v) compensate store.drop(k)
+    }
+    fn move(a, b, v) {
+      emit store.put(a, 0 - v) compensate store.put(a, v)
+      emit store.put(b, v) compensate store.drop(b)
+      return v
+    }
+    fn total() = store.count()
+  }
+  provide log {
+    fn note(m) {
+      emit store.put(quoted(m), m.length())
+    }
+  }
+}
+
+component Tally requires store: Store provides tally: Log {
+  provide tally {
+    fn note(m) {
+      emit store.put(`note ${m}`, 1)
+      emit store.put(m, 2)
+    }
+  }
+}

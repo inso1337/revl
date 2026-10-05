@@ -27,16 +27,14 @@
       ],
       "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support. Issue #106: a v3 provide method's own body does spell `name` and `fn` (a parameter, a module fn call), and the combined slice ports and reaches both, so they left this list.": [
         "kind=bool",
-        "kind=format",
         "kind=int",
         "kind=str"
       ],
       "Lifecycle fault/teardown harness assertion checks runtime residue; in-file lifecycle tests and the live component teardown ABI are outside emit_go.rvl.": [
         "step=assert_no_residue"
       ],
-      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all. Issue #106 ports the combined path's provide-only slice (a `provide` block of single-`return` methods, required services and the service interfaces), so `step=provide`, `kind=req` and `idempotent` left this list; the rest of the live ABI stays here.": [
+      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all. Issue #106 ports the combined path's provide-only slice (a `provide` block of single-`return` methods, required services and the service interfaces), so `step=provide`, `kind=req` and `idempotent` left this list. Its fourth slice ports a component `config` block read from provide bodies, so `kind=config` left too, and its fifth slice ports `emit` steps in provide bodies (a site `compensate` clause on the activation frame included), so `step=emit` left as well; the rest of the live ABI stays here.": [
         "has_config=<true>",
-        "kind=config",
         "kind=host",
         "kind=instance-get",
         "kind=spawn",
@@ -52,7 +50,6 @@
         "step=await",
         "step=call",
         "step=effect",
-        "step=emit",
         "step=fail",
         "step=intercept",
         "step=let-effect",
@@ -63,11 +60,10 @@
         "step=var",
         "subscribe=<true>"
       ],
-      "Spellings of the built-in constructors the frontend never produces in pure v3 IR, so the reference's arms for them are unreachable and the port does not branch on them (issue #106 ported the built-in Opt/Result surface itself: construction, `??`, `match` on the two-value structs and optional chaining are all in the corpus). `Some`/`None` never lower to a tagged `adt` node (src/revl/lower.py keeps Opt untagged, so there is no `case=Some`/`case=None`), and `Ok`/`Err` always lower to a tagged `adt` node, never to a call on a bare `var` callee (so there is no `name=Ok`/`name=Err`).": [
+      "Spellings of the built-in constructors the frontend never produces in pure v3 IR, so the reference's arms for them are unreachable and the port does not branch on them (issue #106 ported the built-in Opt/Result surface itself: construction, `??`, `match` on the two-value structs and optional chaining are all in the corpus). `Some`/`None` never lower to a tagged `adt` node (src/revl/lower.py keeps Opt untagged, so there is no `case=Some`/`case=None`), and `Ok`/`Err` always lower to a tagged `adt` node, never to a call on a bare `var` callee (so there is no `name=Ok`/`name=Err` from either). A user variant can still declare its own case named `Ok`: backends/java/scenarios/runtime_values.rvl's `Outcome` does, and that document joined the go corpus with issue #106's fifth slice, so `name=Ok` left this list.": [
         "case=None",
         "case=Some",
-        "name=Err",
-        "name=Ok"
+        "name=Err"
       ],
       "Surviving service/config/extern secret markings select runtime redaction through _declares_secret only after Go's pure-module early return. The corpus already covers a Secret extern return wrapper, but it does not establish parameter/call-descriptor or secret-witness WAL redaction parity (roadmap 421F6).": [
         "secret=<true>"

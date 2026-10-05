@@ -680,6 +680,12 @@ class IsolateStmt:
     key: str
     realm: str
     line: int
+    # issue #1728: `isolate <key> in realm(?<name>)` names a PLACEHOLDER the
+    # operator binds at admission, not a realm. `realm` holds `?<name>` until
+    # `realm_placeholders.bind` replaces it with the bound realm, which every
+    # compile does before lowering (an unbound placeholder is refused there).
+    # None for a literal `realm("<label>")`, so every existing node is unchanged.
+    placeholder: str | None = None
 
 
 @dataclass
@@ -695,6 +701,12 @@ class RouteStmt:
     realms: list[str]
     strategy: str | None
     line: int
+    # issue #1728: the realm placeholders in the list, as `[(index, name)]`. A
+    # placeholder entry of `realms` holds `?<name>` until
+    # `realm_placeholders.bind` replaces it with the operator's realm, which
+    # every compile does before lowering. Empty for an all-literal route, so
+    # every existing node is unchanged.
+    placeholders: list = field(default_factory=list)
 
 
 @dataclass
@@ -6225,8 +6237,11 @@ class Parser:
             # so a program using either as a name stays valid and the reference
             # KEYWORDS set (and the selfhosted lexer that mirrors it) is untouched.
             if self.at("ident", "realms"):
-                realms, strategy = self.realms_route()
-                return RouteStmt(key, realms, strategy, tok.line)
+                realms, strategy, held = self.realms_route()
+                return RouteStmt(key, realms, strategy, tok.line, placeholders=held)
+            if self._at_realm_placeholder():
+                name = self.realm_placeholder()
+                return IsolateStmt(key, f"?{name}", tok.line, placeholder=name)
             return IsolateStmt(key, self.realm_label(), tok.line)
         if tok.kind == "ident" and tok.value == "route" \
                 and self.peek_ahead(1).kind == "ident" \
@@ -7243,6 +7258,29 @@ class Parser:
         self.expect("}")
         return stmts
 
+    def _at_realm_placeholder(self) -> bool:
+        """`realm(?<name>)`, the issue-#1728 placeholder, at the cursor."""
+        return (self.at("kw", "realm") and self.peek_ahead(1).kind == "("
+                and self.peek_ahead(2).kind == "?")
+
+    def realm_placeholder(self) -> str:
+        """`realm(?<name>)`: a realm the operator binds at admission (issue
+        #1728). The author names the placeholder, never the realm, so the
+        untrusted-author profile's G9 refusal of a literal realm does not apply;
+        `realm_placeholders.bind` maps it to a realm or refuses it by name."""
+        line = self.expect("kw", "realm").line
+        self.expect("(")
+        self.expect("?")
+        tok = self.peek()
+        if tok.kind != "ident":
+            raise self.err(
+                line,
+                "a realm placeholder is `?` followed by a name, as in `realm(?tenant)`",
+                hint="the operator binds the name to a realm at admission")
+        self.next()
+        self.expect(")")
+        return tok.value
+
     def realm_label(self) -> str:
         """`realm("<label>")` — static string literals only (v2)."""
         line = self.expect("kw", "realm").line
@@ -7271,13 +7309,20 @@ class Parser:
         self.expect(")")
         return label
 
-    def realms_route(self) -> tuple[list[str], str | None]:
+    def realms_route(self) -> tuple[list[str], str | None, list]:
         """`realms("w1", "w2", ...) [strategy(<ident>)]` — the multi-realm bind
         (item 162), the plural of `realm("<label>")`. Same static-string-literal
         rule as `realm_label` (a realm is not config-derived, else G2 would be
-        unsound). Returns the ordered realm list and the strategy name (or
-        `None`). The order is preserved as written — a router's rotation is
-        defined over the list in declaration order."""
+        unsound). Returns the ordered realm list, the strategy name (or
+        `None`), and the realm placeholders as `[(index, name)]`. The order is
+        preserved as written: a router's rotation is defined over the list in
+        declaration order.
+
+        An entry may be a realm placeholder `?<name>` (issue #1728), the
+        operator's to bind as in `realm(?<name>)`. Its entry holds `?<name>`
+        until `realm_placeholders.bind` replaces it. Two placeholders are not
+        refused here for sharing a name: what they mean is the binding's, so
+        the repeat is checked after binding, against the bound realms."""
         line = self.expect("ident", "realms").line
         self.expect("(")
         if self.at(")"):
@@ -7288,8 +7333,27 @@ class Parser:
                      "realm use `realm(\"<label>\")` (singular)",
             )
         realms: list[str] = []
+        held: list = []
         while True:
             tok = self.peek()
+            if tok.kind == "?":
+                self.next()
+                name = self.peek()
+                if name.kind != "ident":
+                    raise self.err(
+                        line,
+                        "a realm placeholder is `?` followed by a name, as in "
+                        "`realms(?a, ?b)`",
+                        hint="the operator binds the name to a realm at admission")
+                self.next()
+                held.append((len(realms), name.value))
+                realms.append(f"?{name.value}")
+                if self.at(","):
+                    self.next()
+                    if self.at(")"):
+                        break
+                    continue
+                break
             if tok.kind != "string":
                 raise self.err(
                     line,
@@ -7333,7 +7397,7 @@ class Parser:
             self.expect("(")
             strategy = self.expect("ident", what="a strategy name").value
             self.expect(")")
-        return realms, strategy
+        return realms, strategy, held
 
     def record_literal(self) -> dict:
         """`{ field: literal | [literal, ...], ... }` — static metadata (v2)."""
