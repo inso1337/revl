@@ -10,10 +10,13 @@
 // `type Holder = { value: Value }` is a record field of the NAMED erased-dynamic
 // builtin. `Value` is never a DECLARED type, so the annotation quoting that
 // holds forward references cannot reach it and the bare name emitted an
-// annotation nothing defines.
+// annotation nothing defines. `fn erased(v: Value) -> Value` puts the same name
+// in a service SIGNATURE, the value position the go tier renders through
+// `_go_type` rather than `_go_v3_type`, so the erasure is pinned on both.
 service Greeter {
   fn hello() -> Str
   fn holder(value: Str) -> Str
+  fn erased(v: Value) -> Value
 }
 
 type Holder = { name: Str, value: Value }
@@ -24,5 +27,6 @@ component Hello provides greeter: Greeter {
   provide greeter {
     fn hello() = `hello from ${config.from}`
     fn holder(value) = value
+    fn erased(v) = v
   }
 }
