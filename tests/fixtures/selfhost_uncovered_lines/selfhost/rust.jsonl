@@ -10,7 +10,7 @@
 
 ["function", "canonical-abi-bridge-boundary-these-residuals-emit-opaque", "emit_bridge", 1, 1]
 
-["reason", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming."]
+["reason", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming. `list_element_type` 3 -> 1 with item 391: the by-value port reads it from `v3_infer_type`'s index arm, which the corpus runs out of line."]
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "checked_method", 5, 5]
 
@@ -30,7 +30,7 @@
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "is_word_char", 1, 1]
 
-["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "list_element_type", 3, 3]
+["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "list_element_type", 1, 1]
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "resolved", 1, 1]
 
@@ -38,19 +38,15 @@
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "rstrip", 5, 5]
 
-["reason", "component-construction-and-provide-method-alternatives-these", "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered."]
+["reason", "component-construction-and-provide-method-alternatives-these", "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered. `method_body_lines` 5 -> 7 when item 391's teardown port met main's item-114 undo reclone: a provide method's `emit ... compensate` now reclones the locals its compensate reads that the emission moves (`_undo_reclone_locals`, as the reference does), and no corpus document has a compensating emission that moves a local, so the two statements of that loop are unreached. Item 391 (issue #548 in the port): `pure_method_statements` is reached in full, and `pure_stmt`'s fallback marker for a step kind the lowering never puts in a pure method body is the reference's own unreached `raise`. The control-flow arm then reaches one more of `method_body_lines`' statements, 7 -> 6."]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "config_default_lit", 1, 1]
-
-["function", "component-construction-and-provide-method-alternatives-these", "emit_component", 1, 1]
-
-["function", "component-construction-and-provide-method-alternatives-these", "emit_component_new", 1, 1]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "has_extra_linebreak", 1, 1]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "is_extra_linebreak", 3, 3]
 
-["function", "component-construction-and-provide-method-alternatives-these", "method_body_lines", 3, 3]
+["function", "component-construction-and-provide-method-alternatives-these", "method_body_lines", 5, 5]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "mname", 1, 1]
 
@@ -58,9 +54,11 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these", "provide_methods", 1, 1]
 
-["function", "component-construction-and-provide-method-alternatives-these", "pure_method_statements", 2, 2]
-
 ["function", "component-construction-and-provide-method-alternatives-these", "strip_spaces", 1, 1]
+
+["reason", "component-construction-and-provide-method-alternatives-these-2", "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered. Item 391 (issue #548 in the port): `pure_method_statements` is reached in full, `method_body_lines` 5 -> 4, and `pure_stmt`'s fallback marker for a step kind the lowering never puts in a pure method body is the reference's own unreached `raise`."]
+
+["function", "component-construction-and-provide-method-alternatives-these-2", "pure_stmt", 1, 1]
 
 ["reason", "declared-out-of-every-self-host-slice-realm", "declared out of every self-host slice: realm placements, routers, spawn/instances."]
 
@@ -72,19 +70,19 @@
 
 ["function", "deferred-in-file-test-section-marked-rather-than", "emit_rust_src", 1, 1]
 
+["reason", "extern-declared-compensate-item-254-issue-1592-declared", "Extern-declared compensate (item 254, issue #1592): `declared_compensate_marker` returns the `<<DEFER-declared-compensate>>` marker for a document whose emission extern declares its own `compensate`. The port lowers the site-spelled compensation (item 391) but not the declared one, so such a document cannot be a byte-agreement case, and the marker keeps it a loud divergence rather than a silently missing registration. The reference half is recorded under the same issue in the reference ledger."]
+
+["function", "extern-declared-compensate-item-254-issue-1592-declared", "declared_compensate_marker", 1, 1]
+
 ["reason", "extern-deferral-boundary-the-residual-branches-detect-absent", "Extern deferral boundary: the residual branches detect absent/non-Rust extern bodies and config/runtime extern scaffolding that the self-host pure-v3 module does not emit. Ordinary @rs externs are covered."]
 
 ["function", "extern-deferral-boundary-the-residual-branches-detect-absent", "emit_v3_externs", 4, 4]
 
 ["function", "extern-deferral-boundary-the-residual-branches-detect-absent", "extern_body_defer", 2, 2]
 
-["reason", "host-bind-and-realm-residuals-beyond-the-two", "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153)."]
+["reason", "host-bind-and-realm-residuals-beyond-the-two", "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153). emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 1 more of `emit_comp_step`'s statements and 2 more of `host_of`'s. `by_value_reuse` left this group with item 391: emit_rust_corpus/by_value_reuse.rvl reaches it in full. Issue #1931 holds every value acquisition by its type, so `host_of` is now asked only about a shared resource or an acquisition whose type cannot be named: the arms that a value bind used to reach through it (the item-391 teardown document's required-service acquisition among them) are unreached, 4 -> 6."]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "by_value_reuse", 2, 2]
-
-["function", "host-bind-and-realm-residuals-beyond-the-two", "component_map_values", 1, 1]
-
-["function", "host-bind-and-realm-residuals-beyond-the-two", "emit_comp_step", 8, 8]
+["function", "host-bind-and-realm-residuals-beyond-the-two", "emit_comp_step", 7, 7]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "emit_let_effect_step", 6, 6]
 
@@ -94,17 +92,35 @@
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_expr_type", 75, 75]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_surface_type", 1, 1]
-
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "steps_use_timer", 2, 2]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "witnessed_acquire", 5, 5]
+["function", "host-bind-and-realm-residuals-beyond-the-two", "witnessed_acquire", 1, 1]
 
 ["reason", "host-object-blocks-no-corpus-document-acquires-the", "Host-object blocks no corpus document acquires: the corpus declares a host `Map`, so the Pool and Job literal line lists (and the CAS verb test that selects `insert_if_absent`) are emitted by a branch the corpus never takes. Each is a verbatim transcription of the reference's own literal list, so there is nothing for a second implementation to get wrong beyond the gate on which block rides along, which the Map case does exercise (issue 1153)."]
 
 ["function", "host-object-blocks-no-corpus-document-acquires-the", "is_map_cas_verb", 1, 1]
 
-["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `render_var`'s statements."]
+["reason", "issue-1920-call-acquired-binds-and-service-trait-names", "Issue #1920, the port of the same two changes. `held_bind_type` mirrors `_held_bind_type` (issue #1931 generalised it from calls to every value acquisition) and records the same unreachable arms: an acquisition whose type cannot be named or is `Unit`, and the loop-exhausted return. `svc_ident`'s loop-exhausted `return mangle(name)` is reached only by a name of nothing but underscores, which is not a valid service name; emit_rust_corpus/prelude_names.rvl reaches the reserved rung and the `Box_` -> `Box__` ladder step."]
+
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "held_bind_type", 2, 2]
+
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "svc_ident", 1, 1]
+
+["reason", "item-391-by-value-reuse-residuals-emit-rust", "Item 391 by-value reuse residuals (emit_rust_corpus/by_value_reuse.rvl holds the rest of the port to byte agreement): `builtin_return_type` mirrors the reference's `_BUILTIN_RESULT` table, and its `to_int32`, `field` and `list` rows name methods this port renders `<<UNSUPPORTED-BUILTIN:...>>`, so no corpus document can bind one; its final `return \"\"` is reached only by a method the table does not name, and every method the port renders is named. `by_value_tail`'s borrowed-`&str` arm is the reference's own safety net (`_by_value_tail`, recorded there too): the borrow analysis keeps a borrowed param out of an owned position. `decl_site_names`' `let_pattern` arm declares destructured names, and the port renders destructuring as `<<UNSUPPORTED-STEP:let_pattern>>`."]
+
+["function", "item-391-by-value-reuse-residuals-emit-rust", "builtin_return_type", 4, 4]
+
+["function", "item-391-by-value-reuse-residuals-emit-rust", "by_value_tail", 1, 1]
+
+["function", "item-391-by-value-reuse-residuals-emit-rust", "decl_site_names", 1, 1]
+
+["reason", "item-391-intercept-metadata-shapes-the-surface-cannot-spell", "Item 391 intercept metadata (emit_rust_corpus/intercept_metadata.rvl holds the port to byte agreement): `ic_type`'s heterogeneous-array marker and `null` type, and `ic_lit`'s `null` literal, mirror the reference's `_intercept_json_type`/`_intercept_json_lit` arms for a value the `intercept <key> with { .. }` surface cannot spell (its literals take no `None` and no record), so no corpus document reaches them, and the reference half records the same arms."]
+
+["function", "item-391-intercept-metadata-shapes-the-surface-cannot-spell", "ic_lit", 1, 1]
+
+["function", "item-391-intercept-metadata-shapes-the-surface-cannot-spell", "ic_type", 2, 2]
+
+["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `render_var`'s statements. Item 391 (the by-value reuse port, emit_rust_corpus/by_value_reuse.rvl): `owned_borrowed_tail` is gone (its sites take the reference's `by_value_reuse`/`by_value_tail`), `v3_is_float` is reached in full and `render_builtin` 2 -> 1."]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "borrow_str_arg", 1, 1]
 
@@ -118,11 +134,9 @@
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "mentions_name", 1, 1]
 
-["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "owned_borrowed_tail", 1, 1]
-
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_bin", 1, 1]
 
-["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_builtin", 2, 2]
+["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_builtin", 1, 1]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "render_call", 1, 1]
 
@@ -139,8 +153,6 @@
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "str_param_readonly", 3, 3]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "v3_bin_ops", 3, 3]
-
-["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "v3_is_float", 3, 3]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "v3_is_str", 1, 1]
 
@@ -180,7 +192,7 @@
 
 ["function", "the-port-s-stream-typed-event-host-dialect", "stream_stage_arrow", 1, 1]
 
-["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements."]
+["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements. `v3_infer_type` 3 -> 4 with item 391: its new index arm's Map-subscript return (`value_type`, issue #957) is unreachable from the corpus because the port has no map-subscript rendering. emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `v3_infer_type`'s statements, 4 -> 3."]
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "build_type_tables", 2, 2]
 

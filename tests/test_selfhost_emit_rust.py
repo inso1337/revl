@@ -296,6 +296,29 @@ CORPUS = [
                              #   slug rules (snake, sanitised, digit prefix, bumped
                              #   against functions and each other), an empty body,
                              #   and #1734's tests half (a Str builtin only in a test)
+    "by_value_reuse.rvl",    # item 391: the by-value reuse analysis: the
+                             #   reused-name set, the reuse clones (scrutinee,
+                             #   list element, branch tail, `let`, iterable),
+                             #   the field and constructor clones, the moving
+                             #   iterable, and the inference behind them
+    "intercept_metadata.rvl",  # item 391: `intercept` metadata as a generated
+                             #   struct and the `require_with` gate, and the
+                             #   bridge tables over a key two realms provide
+    "method_control_flow.rvl",  # item 391: control flow in a provide method
+                             #   (issue #548): `if`/`else`, `while` + `break`,
+                             #   `for` + `continue`, a guard beside an emit, and
+                             #   an emit inside an arm (item 458)
+    "teardown_compensate.rvl",  # item 391: the per-activation teardown
+                             #   accumulator: `RevlTeardown` opened first and
+                             #   committed last, an activation `emit ...
+                             #   compensate` (on both provider paths) and a
+                             #   provide method's one queued for phase 2
+    "held_acquire_binds.rvl",  # issue #1931: an activation bind is held by
+                             #   value as the type its acquisition evaluates to,
+                             #   unless it is a shared resource (a host Map)
+    "prelude_names.rvl",     # issue #1920: a service named `Box` takes the
+                             #   type-name reservation (`Box_`), and a captured
+                             #   `extern acquire` handle is held by value
 ]
 
 

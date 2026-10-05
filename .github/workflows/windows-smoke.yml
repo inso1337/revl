@@ -1,0 +1,74 @@
+name: windows-smoke
+
+# A light Windows lane (issue #1950). revl is run on Windows by a customer of
+# the revl-harness, and three POSIX-only spellings reached them before any revl
+# job ran on Windows: `os.path.relpath` across drives (#1944), executing npm's
+# `.bin/vitest` shell shim (#1940) and the `.venv/bin/python` venv layout
+# (#1939). This lane runs exactly those paths on windows-latest: the
+# one-command python setup, a compile of a file on another drive than the
+# checkout, and one test on the ts tier and one on the py tier.
+#
+# DELIBERATELY not a PR gate and not on push: nightly at an off-peak hour and on
+# demand only, so it holds no job slot while PRs queue (one run is about 6 to 9
+# runner-minutes). It is not a required check. A failure is a red scheduled run,
+# read by whoever watches the nightly lanes; nothing files an issue.
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+# Least privilege: the smoke job only checks out and runs the toolchain.
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7 (v7.6.0)
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: "22"
+      # The documented one-command setup: clones cordis-py at its pin, makes
+      # backends/python/.venv (Scripts/ on Windows) and installs revl editable.
+      - name: python runtime setup (backends/python/setup.sh)
+        run: cd backends/python && sh ./setup.sh
+      - name: ts backend dependencies
+        run: cd backends/typescript && npm ci
+      # The venv interpreter setup.sh made, by the same rule it uses.
+      - name: locate the venv interpreter
+        run: |
+          if [ -f backends/python/.venv/Scripts/python.exe ]; then
+            echo "VPY=$PWD/backends/python/.venv/Scripts/python.exe" >> "$GITHUB_ENV"
+          else
+            echo "VPY=$PWD/backends/python/.venv/bin/python" >> "$GITHUB_ENV"
+          fi
+      # The checkout is on D: and the runner's temp directory on C:, which is
+      # the cross-drive case of #1944: compile a file that lives there.
+      - name: compile a source on another drive
+        run: |
+          cp examples/user_cache.rvl "$RUNNER_TEMP/user_cache.rvl"
+          "$VPY" -m revl compile "$RUNNER_TEMP/user_cache.rvl" -o "$RUNNER_TEMP/user_cache.ir.json"
+          test -s "$RUNNER_TEMP/user_cache.ir.json"
+      - name: one test on the ts tier
+        run: |
+          out=$("$VPY" -m revl test --backend ts examples/regressions/fuzz_go_6be27824.rvl 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q "^\[ts\] pass"
+      - name: one test on the py tier
+        run: |
+          out=$("$VPY" -m revl test --backend py examples/regressions/fuzz_go_6be27824.rvl 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q "^\[py\] pass"

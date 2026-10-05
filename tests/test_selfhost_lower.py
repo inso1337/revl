@@ -457,8 +457,17 @@ def _classify(e: RevlError) -> str:
     if ("unknown service `" in m
             and ("in `requires` of" in m or "in `provides` of" in m)):
         return "G1"
+    # issue #1847: a requirement key spelling a builtin type or a host root
+    # (`Env.__init__`, `_refuse_builtin_requirement_key`). The gate spells it
+    # byte for byte in the same header verdict as the unknown service above.
+    if m.startswith("requirement key `") and (
+            " shadows the builtin type `" in m or " shadows the host root `" in m):
+        return "G1"
     if ("cannot reassign" in m
             or "is already declared in this function" in m
+            # issue #1813: a module fn and an extern fn of one name
+            or ("is already declared as an extern on line " in m)
+            or ("is already declared as a function on line " in m)
             or "is bound here and called in this body" in m
             or "is already bound in" in m
             or "(G6)" in m):
@@ -1815,6 +1824,24 @@ component Store provides kv: KV {
 }
 component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
 """, "G2"),
+    # ---- issue #1813: a module fn and an extern fn of one name --------------
+    # The reference checks it once the program is otherwise admitted, so the
+    # second case's G1 is what both sides report; the third puts the extern
+    # second, and the refusal moves to the extern's line.
+    ("a fn that reuses an extern's name", """extern pure fn f(x: Int) -> Int = @py { return x }
+fn f(x: Int) -> Int { return x + 1 }
+fn g() -> Int { return f(1) }
+""", "G6"),
+    ("any other refusal outranks a fn reusing an extern's name", """service S { fn g() -> Int }
+component C provides s: S {
+  provide s { fn g() = db.get() }
+}
+extern pure fn f(x: Int) -> Int = @py { return x }
+fn f(x: Int) -> Int { return x + 1 }
+""", "G1"),
+    ("an extern that reuses a fn's name", """fn f(x: Int) -> Int { return x + 1 }
+pub extern pure fn f(x: Int) -> Int = @py { return x }
+""", "G6"),
     # ---- the qualified test heads, negative controls (item 391) ------------
     # Stepping over a test block must land on the NEXT declaration, not past
     # it: each of these puts a real refusal in the tail, so a step that
@@ -2043,13 +2070,15 @@ component Logger provides log: Log {
     # requirement" G1 refusal a bare `nope()` does. The gate's `type_ctors` used
     # to collect every Upper-cased name a `type` declaration mentioned, admitting
     # this whole family; it now follows the same alias/variant split.
+    # issue #1847: a builtin type head names the type rule (T1, "is a builtin
+    # type, not a value"), not the "add `requires`" G1 it drew before
     ("g1 bare call of a builtin type aliased single-case",
      """type Alias = Int
 service S { fn go() -> Int }
 component C provides s: S {
   provide s { fn go() { let x = Int("1")   return 0 } }
 }
-""", "G1"),
+""", "T1"),
     # G1 bare CALL head: a single-case type application (`type Rows = List[Row]`)
     # is an alias RHS too, so its head `List` is not a constructor.
     ("g1 bare call of a type-application alias head",
@@ -2058,7 +2087,7 @@ service S { fn go() -> Int }
 component C provides s: S {
   provide s { fn go() { let x = List(1)   return 0 } }
 }
-""", "G1"),
+""", "T1"),
     # The accepting twin: in a MULTI-case variant the same builtin name IS a
     # registered case, so `Str("a")` resolves and both admit. (Held in the
     # ACCEPTED corpus below so a future over-eager fix cannot silently start
@@ -2439,6 +2468,9 @@ component C requires kv: Kv {
      _fixture("g4_method_host_acquire"), "G4"),
     ("g4 host acquire in a teardown slot",
      _fixture("g4_undo_host_acquire"), "G4"),
+    # issue #1859: the undo of a host acquisition is not its release
+    ("g4 host undo that is not the release",
+     _fixture("g4_undo_not_release"), "G4"),
     ("g4 host acquire in a component-reachable fn body",
      _fixture("g4_fn_body_host_acquire"), "G4"),
     # the same rule at the two positions no checked-in fixture occupies
@@ -5420,14 +5452,21 @@ def test_manifest_wire_projects_the_service_block():
     (issue #346), one level of the same claim down: `pa()` says `pa` takes no
     parameter, while a bare `pa` says nothing about its arguments. That is what
     lets the call be TYPED against the running declaration and not only
-    resolved against it."""
+    resolved against it.
+
+    A PLAIN operation carries its declared RETURN after the list
+    (`pa():Int`, docs/design/457 T6), the last level of the same claim: it is
+    what lets a candidate's provide-method body be typed against the running
+    declaration. An operation carrying any marking has its return WITHHELD, so
+    silence there is silence about the result."""
     from revl import manifest_wire
 
     ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
-    assert manifest_wire(ir).endswith(";!services;:A,pa();:B,pb()"), manifest_wire(ir)
+    assert manifest_wire(ir).endswith(";!services;:A,pa():Int;:B,pb():Int"), \
+        manifest_wire(ir)
     rows = manifest_wire(ir, replacing=("A",)).split(";")
     assert rows[-1] == "-A"
-    assert rows[-4:-1] == ["!services", ":A,pa()", ":B,pb()"]
+    assert rows[-4:-1] == ["!services", ":A,pa():Int", ":B,pb():Int"]
     # the composition rows keep their exact positions and order, so the G3 DFS
     # seed order cannot have moved
     assert rows[:rows.index("!services")] == manifest_wire(ir).split(
@@ -5688,8 +5727,8 @@ def test_manifest_wire_renders_the_route_rows():
     assert rows.index("Router<*kv") < rows.index("Router>kv/r1,r2"), rows
     # ... and the whole ordering of the combined wire, in one line
     assert rows == ["StoreA/kv/r1", "StoreB/kv/r2", "Router/api/", "Router<*kv",
-                    "Router>kv/r1,r2", "!services", ":Kv,get(k:Str)",
-                    ":Api,go(k:Str)"], rows
+                    "Router>kv/r1,r2", "!services", ":Kv,get(k:Str):Str",
+                    ":Api,go(k:Str):Str"], rows
     # the withdrawal row stays last, after the service block
     assert manifest_wire(ir, replacing=("StoreB",)).split(";")[-1] == "-StoreB"
     # a composition with no route renders no route row (the earlier slices are

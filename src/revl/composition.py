@@ -38,11 +38,13 @@ from __future__ import annotations
 
 import os
 
+from ._paths import relpath_or_abs
 from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
-from .parser import (SLO_IR_KEYS, Address, CompositionDecl, IsolateStmt,
-                     LayerDecl, PlaceDecl, Program, RowDecl, parse_file)
+from .parser import (SLO_IR_KEYS, Address, CompositionDecl, GrantDecl,
+                     IsolateStmt, LayerDecl, PlaceDecl, Program, RowDecl,
+                     parse_file)
 from .synthesize import (
     HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
@@ -71,7 +73,7 @@ def origin_of(path: str, root: str | None = None) -> str:
     policy to write (426 §1.2).
     """
     root = os.path.abspath(root or os.getcwd())
-    rel = os.path.relpath(os.path.abspath(path), root)
+    rel = relpath_or_abs(os.path.abspath(path), root)
     parts = rel.split(os.sep)
     if len(parts) >= 3 and parts[0] == _VENDOR_DIR:
         return parts[1]
@@ -137,11 +139,12 @@ class Row:
     __slots__ = ("label", "origin", "source", "component", "claims",
                  "extra_claims", "requires", "config", "granted", "line",
                  "provenance", "remote", "seam", "open", "reach", "place",
-                 "host")
+                 "host", "services")
 
     def __init__(self, label, origin, source, component, claims, extra_claims,
                  requires, config, granted, line, provenance=None, remote=None,
-                 seam=None, open=None, reach=None, place=None, host=None):
+                 seam=None, open=None, reach=None, place=None, host=None,
+                 services=None):
         self.label = label
         self.origin = origin
         self.source = source
@@ -185,6 +188,13 @@ class Row:
         # process is a one-line composition edit and not a source edit across
         # every consumer.
         self.host = host              # dict | None
+        # issue #1921: `requires` key -> the SERVICE that key is typed as, read
+        # from the header. `granted` names KEYS (the same spelling as
+        # `requires`), while the untrusted-author allowlist compares SERVICE
+        # names, so the profile is built from the service bound to each granted
+        # key. Not in the IR: `requires` already lists the keys, and the
+        # service is the component header's own fact.
+        self.services = dict(services or {})  # dict[str, str]
 
     @property
     def qualified(self) -> str:
@@ -350,7 +360,7 @@ class RowTable:
 def _relative(path: str, root: str) -> str:
     """Provenance recorded relative to `root`, so an IR document stays
     machine-independent (the same rule `parse_file` follows)."""
-    return os.path.relpath(os.path.abspath(path), os.path.abspath(root)) \
+    return relpath_or_abs(os.path.abspath(path), os.path.abspath(root)) \
         .replace(os.sep, "/")
 
 
@@ -457,24 +467,39 @@ def _check_granted(row: RowDecl, header: _Header, doc: str) -> list[str] | None:
       layers, so it lands with S2; the clause and the subset check are here,
       which is exactly the split 424 §1.3 slice A1 states.
 
-    A row that writes NO clause is unconfined (first-party) and the subset check
-    does not apply to it: wiring the profile is 426 S4 and waits on 425 F1. A
-    row that writes `granted { }` is asking for the empty grant and gets it.
+    A row that writes NO clause has no subset check here. Whether a row is
+    confined is its trust class (`row_trust`), not the clause; a confined
+    stack-layer row gets its reach from a `grant` statement (`_apply_grants`,
+    issue #1921), since it cannot carry the clause itself. A row that writes
+    `granted { }` is asking for the empty grant and gets it.
     """
     if row.granted is None:
         return None
     allowed = [key for key, _ in row.granted]
-    for key, (_svc, line) in header.requires.items():
+    _require_granted(f"@{row.label}", header.requires, allowed, doc, row.line,
+                     "its `granted` clause")
+    return allowed
+
+
+def _dedupe(keys: list[str]) -> list[str]:
+    """`keys` in first-seen order, each once."""
+    return list(dict.fromkeys(keys))
+
+
+def _require_granted(label: str, requires, allowed: list[str], doc: str,
+                     line: int, where: str) -> None:
+    """The subset rule shared by the `granted` clause and the `grant` statement
+    (424 R2): every key the row `requires` is among its granted keys, or the
+    row is refused naming the first ungranted key."""
+    for key in requires:
         if key not in allowed:
             listed = ", ".join(f"`{k}`" for k in allowed) or "<empty>"
             raise RevlError(
-                doc, row.line,
-                f"row `@{row.label}` requires `{key}`, which its `granted` "
-                f"clause does not list",
-                hint=f"granted on `@{row.label}`: {listed}. `granted` defaults "
+                doc, line,
+                f"row `{label}` requires `{key}`, which {where} does not list",
+                hint=f"granted on `{label}`: {listed}. `granted` defaults "
                      "to EMPTY, so every key the row reaches is listed "
                      "explicitly (424 R2, 426 §9.3 Part 2)")
-    return allowed
 
 
 def _check_open_reach(row: RowDecl, header: _Header, doc: str,
@@ -648,7 +673,7 @@ def _vendor_truc_of(abspath: str, root: str) -> str | None:
     """The truc a source path is VENDORED under (`trucs/<truc>/...`), or `None`
     if the path is the project's own (426 §7). Distribution facts key off where
     the bytes physically live, not off which document named them."""
-    rel = os.path.relpath(abspath, root)
+    rel = relpath_or_abs(abspath, root)
     parts = rel.split(os.sep)
     if len(parts) >= 2 and parts[0] == _VENDOR_DIR and parts[1] not in ("", ".."):
         return parts[1]
@@ -757,6 +782,7 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
         line=row.line,
         open=open_fields,
         reach=reach,
+        services={key: svc for key, (svc, _line) in header.requires.items()},
     ), header
 
 
@@ -1455,6 +1481,14 @@ def resolve(decl: CompositionDecl, doc_path: str,
         rows_by_qual = {r.qualified: r for r in rows}
         for spec in decl.places:
             _record_place(spec, rows_by_qual, origin, doc, decl.name, 0, BASE_LAYER)
+    # issue #1921: a `grant` reaches a row a stack layer contributed, so it is
+    # applied by `fold`, over the folded rows. With a `stack` declared, this
+    # table is the PRE-layer base `admit_composition` admits first, and the
+    # grant's target is not in it yet. With none, every row here is
+    # first-party and a grant could only be a no-op, which refuses.
+    if decl.grants and not decl.stack:
+        _apply_grants([(spec, origin, doc, 0, BASE_LAYER) for spec in decl.grants],
+                      {r.qualified: r for r in rows}, decl.name)
     uses = _resolve_uses(decl, doc, base, root)
     sources = _resolve_remotes(decl, doc, origin, root, uses, rows)
     sources.update(_resolve_hosts(decl, doc, origin, root, uses, rows))
@@ -1637,7 +1671,7 @@ def _place_ir(spec: PlaceDecl) -> dict:
 
 
 def _place_target(address: Address, own_origin: str, rows_by_qual: dict,
-                  source: str, name: str) -> str:
+                  source: str, name: str, verb: str = "place") -> str:
     """The qualified label a `place` address names, refusing (426 §2.4) if it
     names nothing. Like `_resolve_address` but reports against the placing
     document/layer `source` rather than a `LayerDecl`, so a base-composition
@@ -1653,7 +1687,7 @@ def _place_target(address: Address, own_origin: str, rows_by_qual: dict,
                 + (", ".join(f"`{q}`" for q in rows_by_qual) or "<none>"))
         raise RevlError(
             source, address.line,
-            f"`place {address.spelling()}` names row `{address.spelling()}`, "
+            f"`{verb} {address.spelling()}` names row `{address.spelling()}`, "
             f"which is no row in composition {name}",
             hint=hint + " (426 §2.4: an address that resolves to nothing is a "
                         "refusal, never a no-op)")
@@ -1663,7 +1697,7 @@ def _place_target(address: Address, own_origin: str, rows_by_qual: dict,
             return qual
     raise RevlError(
         source, address.line,
-        f"`place {address.spelling()}` names a key no row claims in composition "
+        f"`{verb} {address.spelling()}` names a key no row claims in composition "
         f"{name}",
         hint="keys claimed here: "
              + (", ".join(sorted({claim_str(c) for row in rows_by_qual.values()
@@ -1693,6 +1727,56 @@ def _record_place(spec: PlaceDecl, rows_by_qual: dict, own_origin: str,
     row.place = _place_ir(spec)
     if level:
         row.provenance.append((level, layer_name, "place"))
+
+
+def _apply_grants(grants: list[tuple[GrantDecl, str, str, int, str]],
+                  rows_by_qual: dict, name: str) -> None:
+    """Issue #1921: set each `grant`'s keys on the row it names, then check the
+    424 R2 subset rule once over the final grants.
+
+    `grants` is `(spec, own origin, source document, level, layer name)` in
+    application order: the base composition's (level 0) before the site
+    layer's (level 2). A later level's grant of a row REPLACES an earlier one,
+    so the operator has the final say, as with `place`; two grants of one row
+    in the same document refuse. The subset check runs after every grant has
+    landed, so a site grant completing a partial base grant is judged as the
+    whole it is.
+
+    A grant never changes a row's trust class: it is recorded in provenance as
+    op `grant`, which `row_trust` does not read. Its target must be a row a
+    stack layer contributed (non-first-party), because that is the only row the
+    granted set confines; a grant of a first-party row would be a no-op, and a
+    no-op is a refusal here (426 §2.4).
+    """
+    granted_at: dict[str, tuple[int, str, int]] = {}
+    for spec, own_origin, source, level, layer_name in grants:
+        qual = _place_target(spec.address, own_origin, rows_by_qual, source,
+                             name, verb="grant")
+        row = rows_by_qual[qual]
+        prior = granted_at.get(qual)
+        if prior is not None and prior[0] == level:
+            raise RevlError(
+                source, spec.line,
+                f"`grant {spec.address.spelling()}` grants row `{qual}` a "
+                f"second time in `{layer_name}` (first on line {prior[2]})",
+                hint="one grant per row per document: write every key the row "
+                     "may reach in one `grant ... with { ... }`")
+        if row_trust(row) != "non-first-party":
+            raise RevlError(
+                source, spec.line,
+                f"`grant {spec.address.spelling()}` names row `{qual}`, which "
+                "is first-party and admits unconfined",
+                hint="a grant is the reach of a CONFINED row, one a stack layer "
+                     "contributed (426 §4.1), so granting a first-party row "
+                     "would do nothing. A first-party row's `granted { ... }` "
+                     "clause, if any, belongs on the row itself")
+        granted_at[qual] = (level, source, spec.line)
+        row.granted = _dedupe([key for key, _ in spec.keys])
+        row.provenance.append((level, layer_name, "grant"))
+    for qual, (_level, source, line) in granted_at.items():
+        row = rows_by_qual[qual]
+        _require_granted(qual, row.requires, row.granted, source, line,
+                         "its grant")
 
 
 def _refuse_peers(sides: list[tuple[LayerDecl, int]], what: str, subject: str,
@@ -1786,6 +1870,17 @@ def fold(decl: CompositionDecl, doc_path: str, root: str | None = None,
                 _record_place(op.place, rows_by_qual, site_origin,
                               site_layer.source or site_rel, decl.name,
                               2, site_layer.name)
+    # issue #1921: grants, applied over the folded rows exactly as placement
+    # is: base (level 0) first, then the site layer's (level 2). A stack layer
+    # may not grant at all (refused at parse).
+    grants = [(spec, origin, doc, 0, BASE_LAYER) for spec in decl.grants]
+    if site is not None:
+        site_layer, site_rel, site_origin = site
+        grants += [(op.grant, site_origin, site_layer.source or site_rel, 2,
+                    site_layer.name)
+                   for op in site_layer.ops if op.op == "grant"]
+    if grants:
+        _apply_grants(grants, rows_by_qual, decl.name)
     rows = [slot.row for slot in slots.values()]
 
     uses = _resolve_uses(decl, doc, base, root)
@@ -2182,6 +2277,10 @@ def _apply_site(site, slots, decl, doc, root) -> None:
             # placement. It is not a config-style patch, so it does not flow
             # through `_apply_op`. Its authority (site-only) is enforced at parse.
             continue
+        if op.op == "grant":
+            # issue #1921: like `place`, applied in `fold` over the folded rows
+            # (base grants first, then the site layer's). Site-only at parse.
+            continue
         if op.op == "resolve":
             # Already consumed: a `resolve` that decided nothing is still a
             # refusal, because an operator who wrote it believed there was a
@@ -2339,15 +2438,44 @@ def _row_profiles(table: RowTable, root: str,
     like first-party source, which is the SHAPE change §8.8 describes, and the
     panel forfeits `clean` for having done so.
     """
-    profiles: dict[str, AdmissionProfile] = {}
+    # The profile map is per SOURCE FILE, and one file can back several rows
+    # (`component <Name>` picks which) or hold components no row names. So the
+    # grant is key-precise (issue #1926): each confined row contributes the
+    # `(component, key)` pairs its grant names, and a granted service covers a
+    # requirement only for those pairs. A sibling component in the same file
+    # that requires the same service is refused unless it is granted itself,
+    # and two rows of one file each keep their own grant instead of the last
+    # one overwriting the first.
+    reach: dict[str, tuple[set, set]] = {}
     for row in table.rows:
         if row_trust(row) != "non-first-party":
             continue
         if _trusts(trust_host_code, row.qualified):
             continue
-        profiles[os.path.join(root, row.source)] = \
-            AdmissionProfile.untrusted_author(row.granted or ())
+        services, pairs = reach.setdefault(os.path.join(root, row.source),
+                                           (set(), set()))
+        services.update(_granted_services(row))
+        pairs.update(_granted_requires(row))
+    profiles = {path: AdmissionProfile.untrusted_author(services, requires=pairs)
+                for path, (services, pairs) in reach.items()}
     return profiles or None
+
+
+def _granted_services(row: Row) -> frozenset[str]:
+    """The SERVICE names a confined row's granted KEYS are bound to, which is
+    what the untrusted-author allowlist compares (`check_allowlist` tests the
+    service a `requires` names). `granted` holds `requires` keys; the fold has
+    already refused a row requiring a key outside it, so every granted key the
+    row requires maps to its service here (issue #1921)."""
+    return frozenset(row.services[key] for key in (row.granted or ())
+                     if key in row.services)
+
+
+def _granted_requires(row: Row) -> frozenset[tuple[str, str]]:
+    """The `(component, requires key)` pairs a confined row's grant covers: its
+    own component, under each granted key it requires (issue #1926)."""
+    return frozenset((row.component, key) for key in (row.granted or ())
+                     if key in row.services)
 
 
 def _admit_full(table: RowTable, root: str, **kwargs) -> dict:

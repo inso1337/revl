@@ -1,0 +1,23 @@
+// ADMITTED (issue #1699): an arm binds the same name twice. The reference gives each
+// `let` in an arm a fresh name (`_safe_name` in `_lower_component_block_arm`), so
+// this is not the G6 rebind.
+// The file name's prefix is the expected verdict (`ok_` admitted, `g1_`/`g4_` refused
+// under that tag); tests/test_gate_match_block_arms_1699.py holds it.
+
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let o = Some(n)
+      let x = match o {
+        Some(v) => {
+          let z = v + 1
+          let z = z + 1
+          z
+        },
+        None => 0
+      }
+      return x
+    }
+  }
+}

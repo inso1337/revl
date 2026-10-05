@@ -77,6 +77,7 @@ from .. import source_grammar as _source_grammar
 from . import fillspec
 from . import draft as _draft
 from . import proposal as _proposal
+from . import canonical as _canonical
 from . import edit as _edit
 from . import effect_classes as _effect_classes
 from . import leases as _leases
@@ -706,6 +707,15 @@ SESSION = Session()
 # `revl_step_back` with no arguments runs the last one.
 UNDO_STACK = _undo_record.UndoStack()
 
+# issue #1700: the verbs that store or check inline source answer with a digest
+# of its canonical form; this asks for the text as well
+_RETURN_CANONICAL = {
+    "returnCanonical": {"type": "boolean",
+                        "description": "true: include the canonical text of an "
+                                       "inline `source` in `canonicalSource` "
+                                       "(default: only its digest)"},
+}
+
 
 def _session_error(message: str | BaseException, category: str = "session",
                    **extra) -> dict:
@@ -893,6 +903,12 @@ def _tool_load(arguments: dict) -> dict:
         if _draft.pending(SESSION) is not None and not SESSION.loaded:
             return _draft.boot_held(SESSION, arguments, _boot_draft)
         return _nothing_to_load()
+    # issue #1700: terse punctuation completed before the compile; a draft is
+    # held canonical, a booting load holds the (completed) text as sent
+    sent, stored, canon = _canonical.prepare(arguments)
+    completed = canon if canon is not None and canon.get("completed") else None
+    arguments = sent
+    source, files, modules = _candidate_of(sent)
     origin = _origin(arguments)
     try:
         ir = compile_under_authoring(source, files, modules=modules)
@@ -902,13 +918,18 @@ def _tool_load(arguments: dict) -> dict:
         # issue #1727: a holed candidate opens a draft rather than failing.
         # Nothing boots, so nothing a lease fences happens yet: the lease is
         # checked when the draft boots (`_boot_draft`)
-        return _draft.open_draft(SESSION, arguments, ir)
+        # issue #1700: the draft is held canonical. Its hole lines cannot
+        # move (the IR records them, so the gate refuses any layout that would
+        # shift one), symbols are names, and an anchor copied from what was
+        # sent still matches by its tokens
+        return _canonical.attach(_draft.open_draft(SESSION, stored, ir), canon)
     if not SESSION.loaded:   # a load over a running composition is refused below
         refusal = _leases.check(SESSION, "load", arguments)
         if refusal is not None:
             return _refused_by_lease(refusal)
-    return _boot(ir, source, modules, arguments.get("config"),
-                 _load_records(arguments.get("record")), origin)
+    return _canonical.attach(
+        _boot(ir, source, modules, arguments.get("config"),
+              _load_records(arguments.get("record")), origin), completed)
 
 
 def _load_records(requested) -> bool:
@@ -1073,11 +1094,18 @@ def _tool_swap(arguments: dict) -> dict:
     if quarantined is not None:
         return quarantined
 
-    inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
     before = _edit.running_source(SESSION)
-    if not inline:
+    if all(part is None for part in _candidate_of(arguments)):
         return _with_touched(_swap_server_side(replacing), before)
 
+    # issue #1700: compiled as sent, stored canonical, and the answer says which
+    sent, stored, canon = _canonical.prepare(arguments)
+    return _canonical.attach(_swap_inline(sent, stored, replacing, before), canon)
+
+
+def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dict:
+    """The inline half of `revl_swap`: admit the candidate as sent, then swap it
+    in with `stored` (its canonical form) as the held source."""
     # issue #1446: like `revl_load` (#1444), a swap that does not succeed
     # changes nothing, so the candidate's host bodies are recorded only once it
     # is running. Compiled without `_compile`'s side effect for that reason.
@@ -1094,7 +1122,7 @@ def _tool_swap(arguments: dict) -> dict:
 
     # admitted: recompile the whole composition so the swap is a full
     # generation (the same shape `revl run --watch` reloads)
-    origin = _origin(arguments)
+    origin = _origin(stored)   # issue #1700: the held source is canonical
     try:
         full = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
@@ -1265,6 +1293,14 @@ def _tool_change(arguments: dict) -> dict:
         return _commit_held(arguments)
     try:
         intent = _change.intent_of(arguments)
+        if intent == "add" and isinstance(arguments["add"], dict) \
+                and arguments["add"].get("component") is not None:
+            # issue #1700: the server writes the component from the service
+            spec = arguments["add"]
+            vs = _proposal.base(SESSION) or _change_working_set()
+            arguments = {**arguments, "add": {
+                "source": _change.component_source(vs, spec),
+                **({"target": spec["target"]} if spec.get("target") else {})}}
         plan = None
         if intent == "withdraw":
             component, _ = _change._withdraw_spec(arguments["withdraw"])
@@ -1280,6 +1316,14 @@ def _tool_change(arguments: dict) -> dict:
     result = refused or _tool_edit(edit_arguments, verify=verifier)
     return _change.shape(intent, result, plan,
                          _change.withdrawn_names(edit_arguments), verifier)
+
+
+def _change_working_set() -> dict:
+    """The source set a change is read against: a held draft, or what runs."""
+    held = _draft.pending(SESSION)
+    if not SESSION.loaded and held is not None:
+        return held["vs"]
+    return _edit.virtual_source(SESSION)
 
 
 def _tool_export(arguments: dict) -> dict:
@@ -2253,6 +2297,13 @@ def _tool_history_lifetime(arguments: dict) -> dict:
 
 
 def _tool_check(arguments: dict) -> dict:
+    """Compile a candidate AS SENT, so every diagnostic names a line the agent
+    wrote, and say what its canonical form is (issue #1700)."""
+    sent, _stored, canon = _canonical.prepare(arguments)
+    return _canonical.attach(_check_as_sent(sent), canon)
+
+
+def _check_as_sent(arguments: dict) -> dict:
     try:
         ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
@@ -2694,7 +2745,7 @@ def _tool_fmt(arguments: dict) -> dict:
     the same IR-equivalence proof the CLI runs: a rewrite that would change
     what the compiler sees is refused, never silently written."""
     from ..fmt import migrate_source
-    from ..formatter import FormatError, ir_equivalent, format_source
+    from ..formatter import FormatError, format_admitted, ir_equivalent
 
     source = arguments.get("source")
     if source is None:
@@ -2710,7 +2761,7 @@ def _tool_fmt(arguments: dict) -> dict:
             return _session_error(f"cannot migrate: {error}")
     else:
         try:
-            rewritten = format_source(source, filename)
+            rewritten, _gate = format_admitted(source, filename)
         except FormatError as error:
             return _session_error(f"cannot format: {error}")
 
@@ -2766,7 +2817,7 @@ TOOLS = [
                        "refused at admission until every hole is filled. "
                        "`effectClasses` gives each provided operation's effect class "
                        "(a/b/c) and the crossings that set it.",
-        "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
+        "inputSchema": {"type": "object", "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
     },
@@ -2952,7 +3003,7 @@ TOOLS = [
                        "keys and the lifecycle trace.",
         "inputSchema": {
             "type": "object",
-            "properties": {**_SOURCE_INPUT,
+            "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
                            "config": {"type": "object",
                                       "description": "per-component config tables"},
                            "record": {"type": "boolean",
@@ -3055,7 +3106,7 @@ TOOLS = [
                        "revl_query_withdraw cascade for every component it touched.",
         "inputSchema": {
             "type": "object",
-            "properties": {**_SOURCE_INPUT,
+            "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
                            "replacing": {"type": "array", "items": {"type": "string"},
                                          "description": "components withdrawn in this swap"}},
         },
@@ -3089,9 +3140,14 @@ TOOLS = [
                        "is never written. With nothing loaded, pass `files` or `source` "
                        "and this loads it first, then edits it. {symbol, replacement} "
                        "replaces one top-level declaration by name (read it first with "
-                       "revl_source). A response that edited lists the `touched` "
-                       "symbols, plus `effectClassChanges` and `effectClassWarnings` "
-                       "against the running composition, as revl_swap does.",
+                       "revl_source); {symbol, body} replaces only a method's or "
+                       "fn's body, keeping its declared header (write the decision, "
+                       "not the frame); {append} adds new declarations at the end of "
+                       "the buffer, refusing a name already declared. Terse text is "
+                       "fine: it is stored as `revl fmt` writes it. A response "
+                       "that edited lists the `touched` symbols, plus "
+                       "`effectClassChanges` and `effectClassWarnings` against the "
+                       "running composition, as revl_swap does.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3126,6 +3182,16 @@ TOOLS = [
                                                       "whole top-level declaration "
                                                       "this names (as revl_source "
                                                       "addresses it)"},
+                            "body": {"type": "string",
+                                     "description": "with `symbol` naming a method "
+                                                    "or fn: its new body only (an "
+                                                    "expression, or statements); "
+                                                    "the header stays"},
+                            "append": {"type": "string",
+                                       "description": "new top-level declarations to "
+                                                      "add at the end of the buffer "
+                                                      "(no offset; a name already "
+                                                      "declared is refused)"},
                         },
                     },
                 },
@@ -3199,7 +3265,13 @@ TOOLS = [
                        "{withdraw: {component, cascade: true}} (remove a component; "
                        "the plan reports the cascade of dependents that would lose "
                        "a provider, and without `cascade: true` admission refuses "
-                       "it). Returns `committed`, `verified`, the `plan`, the "
+                       "it); {add: {source, target?}} (new declarations appended "
+                       "to the only buffer, or `target`; a name already declared "
+                       "is refused); {add: {component, provide, methods: {op: "
+                       "body}, config?}} (the server writes the component: the "
+                       "service, the method frames and `requires` from the "
+                       "composition). Returns `committed`, `verified` (admission, "
+                       "and `guarantees`: the G1-G9 self-check), the `plan`, the "
                        "`touched` symbols and every `component` the change touched. "
                        "A proposal and a commit both carry `blastRadius`, as "
                        "revl_edit does: the revl_query_withdraw cascade for every "
@@ -3213,6 +3285,11 @@ TOOLS = [
                 "replace": {"type": "object",
                             "description": "{component, source}: the declaration's "
                                            "name and its whole new text"},
+                "add": {"type": "object",
+                        "description": "{source, target?}: new declarations to "
+                                       "append to the only buffer, or `target`; "
+                                       "or {component, provide, methods, config?}: "
+                                       "the server writes the component"},
                 "withdraw": {"description": "a component name, or {component, "
                                             "cascade?: true}"},
                 "gauntlet": {"type": "boolean",

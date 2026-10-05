@@ -199,7 +199,8 @@ def test_witnessed_reverts_on_abort(target):
     # surfaces the mid-activation failure by landing the fiber FAILED (the
     # revert has already run by the time the state report comes back).
     report = session.load(_ir(_witnessed_component("StashAbort", abort=True)))
-    assert report["components"] == [{"name": "StashAbort", "state": "FAILED"}]
+    assert report["components"] == [{"name": "StashAbort", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     assert os.path.exists(target), "abort did not replay the inverse — mutation stuck"
     assert open(target).read() == "the deliverable"
@@ -381,7 +382,8 @@ def test_an_aborted_transactional_wal_descriptor_replays_on_recover(
     session = _session()
     loaded_report = session.load(
         _ir(_witnessed_component("StashAbort", abort=True)), record=True)
-    assert loaded_report["components"] == [{"name": "StashAbort", "state": "FAILED"}]
+    assert loaded_report["components"] == [{"name": "StashAbort", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     session.recorder.wal.close()  # <-- simulate the crash: no activation-complete
 
@@ -564,7 +566,8 @@ def test_compensation_runs_in_phase2_after_transactional_on_abort(target, order_
     session = _session()
 
     report = session.load(_comp_ir(_compensated_component("CompAbort", abort=True)))
-    assert report["components"] == [{"name": "CompAbort", "state": "FAILED"}]
+    assert report["components"] == [{"name": "CompAbort", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     # Phase 1 fully reverted the transactional witnessed effect: the file is
     # back and residue-free, exactly like test_witnessed_reverts_on_abort.
@@ -598,7 +601,8 @@ def test_a_failed_compensation_lands_as_residue_and_abort_still_succeeds(target,
     # the abort (teardown-contract.md's continue-and-record rule).
     report = session.load(_comp_ir(
         _compensated_component("CompFails", abort=True, offset_fails=True)))
-    assert report["components"] == [{"name": "CompFails", "state": "FAILED"}]
+    assert report["components"] == [{"name": "CompFails", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     # Phase 1 still ran to completion, unaffected by the Phase-2 failure that
     # comes after it.
@@ -689,7 +693,8 @@ def test_an_aborted_compensation_wal_descriptor_carries_no_discharge_record(
     session = _session()
     report = session.load(
         _comp_ir(_compensated_component("CompWalAbort", abort=True)), record=True)
-    assert report["components"] == [{"name": "CompWalAbort", "state": "FAILED"}]
+    assert report["components"] == [{"name": "CompWalAbort", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     session.recorder.wal.close()
 
@@ -737,7 +742,8 @@ def test_a_tiny_budget_skips_and_records_a_later_compensation(order_log, monkeyp
     session = _session()
 
     report = session.load(_comp_ir(_two_compensations_component("TinyBudget")))
-    assert report["components"] == [{"name": "TinyBudget", "state": "FAILED"}]
+    assert report["components"] == [{"name": "TinyBudget", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     # the newer (offset_slow) compensation ran; the older (offset) one was
     # skipped once its budget check found the deadline already past.
@@ -761,7 +767,8 @@ def test_a_zero_budget_means_unbounded(order_log, monkeypatch):
     session = _session()
 
     report = session.load(_comp_ir(_two_compensations_component("ZeroBudget")))
-    assert report["components"] == [{"name": "ZeroBudget", "state": "FAILED"}]
+    assert report["components"] == [{"name": "ZeroBudget", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     # `0` means no bound: both compensations ran despite the 50ms sleep.
     assert _order_lines(order_log) == ["compensate:second", "compensate:first"]

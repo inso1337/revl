@@ -102,9 +102,7 @@
 
 ["report_inputs", "crates/revl-gate/src/symbols.rs"]
 
-["report_inputs", "tests/fixtures/census_crate_reproduction/programs.jsonl"]
-
-["report_inputs", "tests/fixtures/census_crate_reproduction/reproduction.json"]
+["report_inputs", "tests/fixtures/census_crate_reproduction"]
 
 ["report_inputs", "tests/fixtures/corpus_provenance.json"]
 

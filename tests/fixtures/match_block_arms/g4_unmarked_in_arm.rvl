@@ -1,0 +1,22 @@
+// REFUSED G4 (issue #1699): an unmarked emission in a `let` inside the arm. The gate
+// refused G1 on `v` instead.
+// The file name's prefix is the expected verdict (`ok_` admitted, `g1_`/`g4_` refused
+// under that tag); tests/test_gate_match_block_arms_1699.py holds it.
+
+service Sink { emission fn put(n: Int) -> Int }
+service S { emission fn go(n: Int) -> Int }
+component C requires k: Sink provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let o = Some(n)
+      let x = match o {
+        Some(v) => {
+          let z = k.put(v)
+          z
+        },
+        None => 0
+      }
+      return x
+    }
+  }
+}

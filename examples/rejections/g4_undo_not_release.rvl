@@ -1,0 +1,18 @@
+// REJECTED — G4: a host acquisition's `undo` is not its release.
+//
+// `Map.new()` acquires a host map, and its one inverse is `drop()` on the
+// handle the bracket bound. `undo store.get("x")` reads the map at teardown and
+// releases nothing, so the map outlives the component while the teardown
+// reports a clean release. Before issue #1859 only a MISSING `undo` was
+// refused; any `undo` at all was taken for the inverse.
+//
+// expected error:
+//   the `undo` of `let store = effect Map.new(...)` must release THAT handle:
+//     write `undo store.drop()`
+
+service S { fn go(k: Str) -> Int }
+
+component C provides s: S {
+  let store = effect Map.new() undo store.get("x")
+  provide s { fn go(k) = 1 }
+}

@@ -280,30 +280,33 @@ def test_no_public_claim_stands_at_the_floor(committed):
 def test_a_stale_reproduction_lifts_no_claim(artifact, committed):
     """The recorded `--engine crate` reproduction is the only thing that lifts a
     claim from `measured` to `demonstrated`, and a recorded result rots. So the
-    rung is computed from whether the reproduction is current, never declared:
-    a reproduction recorded at another checker version must drop every lifted
-    claim back down."""
-    rep = committed["census"]["reproduction"]
-    assert rep is not None and rep["is_current"] is True, (
-        "the committed reproduction is stale; re-run "
-        "tools/gate_reference_census.py --engine crate and "
-        "tools/census_artifact.py --record-reproduction --write")
-    lifted = [c for c in committed["claims"] if c["rung"] == "demonstrated"]
-    assert lifted, "nothing was lifted, so this test measures nothing"
-    for claim in lifted:
-        assert "reproduced_by" in claim["evidence"]
+    rung is computed from whether a record at the CURRENT checker version
+    exists, never declared, in both directions: with one, the claims it backs
+    are lifted; without one, none is, and the stale records are named.
 
-    # and the drop actually happens: the same evidence at a version that is not
-    # the current one justifies only `measured`.
-    stale = dict(committed["census"]["reproduction"])
-    stale["recorded_at_checker_version"] = "GATE-CENSUS-1+000000000000"
-    assert stale["recorded_at_checker_version"] != stale["current_checker_version"]
+    Since issue #1768 a tree may briefly hold no current record (two pull
+    requests that each re-recorded land, and each record predates the other's
+    change). That is not a red here, because the report is still honest; it
+    is a red in `--verify --strict` (`reproduction_problems`), which names the
+    re-record."""
+    rep = committed["census"]["reproduction"]
+    lifted = [c for c in committed["claims"] if c["rung"] == "demonstrated"]
+    if rep is not None and rep["is_current"]:
+        assert lifted, "a current reproduction lifted nothing"
+        for claim in lifted:
+            assert "reproduced_by" in claim["evidence"]
+    else:
+        assert not lifted, "a claim was lifted with no current reproduction"
+        assert committed["census"]["stale_reproduction_records"] or rep is None
 
 
 def test_the_reproduction_fixture_matches_what_was_published(artifact,
                                                              committed):
     recorded = artifact.load_reproduction()
     rep = committed["census"]["reproduction"]
+    if recorded is None:
+        assert rep is None
+        return
     assert recorded["n"] == rep["n"] == len(recorded["programs"])
     assert recorded["engine"] == "crate"
     assert recorded["checker_version"] == rep["recorded_at_checker_version"]
@@ -321,11 +324,22 @@ def test_the_report_names_what_it_does_not_establish(committed, committed_md):
         assert line in committed_md
 
 
-def test_the_reproduction_states_its_own_limit(committed):
+def test_the_reproduction_states_its_own_limit(artifact, committed):
     """The crate is built FROM `selfhost/lower.rvl`, so it is the same source
     through a different toolchain and not a second specification. Publishing it
-    as an independent reproduction without that sentence would over-claim."""
+    as an independent reproduction without that sentence would over-claim.
+
+    With no record at the current checker version there is no reproduction to
+    state a limit for, and this SKIPS saying so, with the fix, the same words
+    `--verify --strict` uses. Currency is enforced there, in CI's
+    `census-artifact` job, and not in the root suite (#1917's design): CI tests
+    the merge ref, so a pull request's checker version is merge(main, branch),
+    and every checker-moving landing makes every other open pull request's
+    record stale. A root-suite failure on that would never converge."""
     rep = committed["census"]["reproduction"]
+    if rep is None:
+        pytest.skip("\n".join(artifact.reproduction_problems()
+                              or ["no crate reproduction is recorded"]))
     assert "not a second" in rep["does_not_establish"]
     assert "build_gate_crate" in rep["does_not_establish"]
 
@@ -1101,13 +1115,13 @@ def test_verify_reads_the_records_directory(artifact, tmp_path):
     assert code == 2 and "cannot read the records" in text
 
 
-# --- the crate reproduction stores no count (issue #1768) ---------------------
+# --- the crate reproduction, one record per checker version (issue #1768) ------
 #
-# `tests/fixtures/census_crate_reproduction.json` stored `n`, the number of
-# programs the crate run covered. It was the one line every corpus-moving pull
-# request that re-recorded rewrote, so any two of them conflicted on it. The
-# directory that replaces it records WHICH programs the run covered, one per
-# line, and the count is derived.
+# The record lived in one file whose `checker_version` line every pull request
+# that moved a checker source rewrote, so two such pull requests always
+# conflicted on it, and resolving that cost a crate run. One file per version
+# turns two re-recordings into two different added files and one shared
+# deletion, which git merges.
 
 
 def _reproduction(programs, version="GATE-CENSUS-1+aaaaaaaaaaaa"):
@@ -1116,21 +1130,57 @@ def _reproduction(programs, version="GATE-CENSUS-1+aaaaaaaaaaaa"):
             "programs": sorted(programs)}
 
 
-def _repro_files(artifact, recorded) -> dict[str, str]:
-    return {f"tests/fixtures/census_crate_reproduction/{name}": text
-            for name, text in artifact.reproduction_texts(recorded).items()}
+def _repro_tree(artifact, *recorded) -> dict[str, str]:
+    out = {"tests/fixtures/census_crate_reproduction/README.md": "readme\n"}
+    for r in recorded:
+        name = artifact.reproduction_name(r["checker_version"])
+        out[f"tests/fixtures/census_crate_reproduction/{name}"] = \
+            artifact.reproduction_text(r)
+    return out
 
 
-def test_the_committed_reproduction_is_canonical_and_stores_no_count(artifact):
-    recorded = artifact.load_reproduction()
-    assert recorded is not None and recorded["programs"]
-    facts = json.loads((artifact.CRATE_REPRODUCTION
-                        / artifact.REPRODUCTION_FACTS).read_text())
-    assert "n" not in facts and "programs" not in facts
-    for rel, text in _repro_files(artifact, recorded).items():
-        assert (ROOT / rel).read_text(encoding="utf-8") == text, (
-            f"{rel} is not in canonical form; re-record it")
-    assert recorded["programs"] == sorted(recorded["programs"])
+def test_the_committed_reproduction_is_one_canonical_record_per_version(artifact):
+    records = artifact.reproduction_records()
+    assert records, "no crate reproduction is recorded"
+    for version, recorded in records.items():
+        path = artifact.CRATE_REPRODUCTION / artifact.reproduction_name(version)
+        assert path.read_text(encoding="utf-8") == artifact.reproduction_text(
+            recorded), f"{path.name} is not in canonical form; re-record it"
+        assert recorded["programs"] == sorted(recorded["programs"])
+        assert "n" not in json.loads(path.read_text())
+    assert sorted(p.name for p in artifact.CRATE_REPRODUCTION.iterdir()
+                  if p.suffix != ".json") == [artifact.REPRODUCTION_README]
+
+
+def test_recording_adds_and_pruning_deletes_only_stale_records(artifact,
+                                                               tmp_path):
+    """A re-record adds its version's file and deletes nothing (a delete plus
+    a near-identical add is a rename to git, and two renames of one file
+    conflict). Pruning is its own step and keeps the current record."""
+    artifact.record_reproduction(_reproduction(["a.rvl"], "GATE-CENSUS-1+old"),
+                                 tmp_path)
+    (tmp_path / "README.md").write_text("kept\n")
+    artifact.record_reproduction(_reproduction(["a.rvl", "b.rvl"],
+                                               "GATE-CENSUS-1+new"), tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "GATE-CENSUS-1+new.json", "GATE-CENSUS-1+old.json", "README.md"]
+    loaded = artifact.load_reproduction(tmp_path, version="GATE-CENSUS-1+new")
+    assert loaded["n"] == 2
+    gone = artifact.prune_reproductions(tmp_path, version="GATE-CENSUS-1+new")
+    assert [p.name for p in gone] == ["GATE-CENSUS-1+old.json"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "GATE-CENSUS-1+new.json", "README.md"]
+    with pytest.raises(SystemExit):
+        artifact.prune_reproductions(tmp_path, version="GATE-CENSUS-1+absent")
+
+
+def test_a_record_filed_under_another_version_is_refused(artifact, tmp_path):
+    """One name per version, or "the record at the current version" would be
+    ambiguous."""
+    (tmp_path / "GATE-CENSUS-1+x.json").write_text(
+        artifact.reproduction_text(_reproduction(["a.rvl"], "GATE-CENSUS-1+y")))
+    with pytest.raises(ValueError):
+        artifact.reproduction_records(tmp_path)
 
 
 def test_trim_records_the_programs_and_derives_the_count(artifact, census,
@@ -1146,56 +1196,91 @@ def test_trim_records_the_programs_and_derives_the_count(artifact, census,
                                     "oracle-reject:twice"]
     assert recorded["tracked_buckets"] == {"false-admit/T1": ["c.rvl"]}
     assert "n" not in recorded
-    for name, text in artifact.reproduction_texts(recorded).items():
-        (tmp_path / name).write_text(text, encoding="utf-8")
-    loaded = artifact.load_reproduction(tmp_path)
+    artifact.record_reproduction(recorded, tmp_path)
+    loaded = artifact.load_reproduction(tmp_path,
+                                        version=recorded["checker_version"])
     assert loaded["n"] == 5 and loaded["programs"] == recorded["programs"]
 
 
 @_needs_merge_tree
-def test_two_re_recordings_that_add_programs_merge(artifact):
-    """The exit test for this file. Two pull requests each add a program and
-    re-record the crate run at the same checker version. In the directory
-    each adds one line and they merge; in the single file both rewrite `n`
-    and conflict."""
-    base = [f"examples/p{i:03d}.rvl" for i in range(0, 40, 2)]
-    left = base + ["examples/p011.rvl"]
-    right = base + ["examples/p031.rvl", "examples/p033.rvl"]
-    clean, conflicted = merge(_repro_files(artifact, _reproduction(base)),
-                              _repro_files(artifact, _reproduction(left)),
-                              _repro_files(artifact, _reproduction(right)))
+def test_two_re_recordings_at_different_versions_merge(artifact):
+    """The exit test for this file. Two pull requests each move a checker
+    source and re-record: each adds its own version's file. They merge. The
+    same two in the single-file layout conflict on the version line, and so
+    would two that also deleted main's record (git reads delete-plus-add of a
+    near-identical file as a rename, and two renames of one file conflict),
+    which is why a re-record only adds."""
+    old = _reproduction(["a.rvl"], "GATE-CENSUS-1+000000000000")
+    left = _reproduction(["a.rvl"], "GATE-CENSUS-1+111111111111")
+    right = _reproduction(["a.rvl", "b.rvl"], "GATE-CENSUS-1+222222222222")
+    base = _repro_tree(artifact, old)
+    left_tree = _repro_tree(artifact, left)
+    right_tree = _repro_tree(artifact, right)
+    clean, conflicted = merge(base, left_tree, right_tree)
+    assert clean, conflicted
+    gone = ("tests/fixtures/census_crate_reproduction/"
+            + artifact.reproduction_name(old["checker_version"]))
+    clean, _ = merge(base, {**left_tree, gone: None}, {**right_tree, gone: None})
+    assert not clean, "delete-plus-add no longer reads as a rename; revisit"
+    # a prune on its own merges with a re-record
+    clean, conflicted = merge(base, {gone: None}, right_tree)
     assert clean, conflicted
 
-    def old(programs):
-        recorded = _reproduction(programs)
-        recorded["n"] = len(recorded.pop("programs"))
-        return {"tests/fixtures/census_crate_reproduction.json":
-                json.dumps(recorded, indent=1, sort_keys=True) + "\n"}
+    def single(recorded):
+        return {"tests/fixtures/census_crate_reproduction/reproduction.json":
+                json.dumps({k: v for k, v in recorded.items()
+                            if k != "programs"}, indent=1, sort_keys=True) + "\n"}
 
-    clean, conflicted = merge(old(base), old(left), old(right))
+    clean, conflicted = merge(single(old), single(left), single(right))
     assert not clean and conflicted == [
-        "tests/fixtures/census_crate_reproduction.json"]
+        "tests/fixtures/census_crate_reproduction/reproduction.json"]
+
+
+def test_strict_names_a_missing_current_record_and_the_stale_ones(artifact,
+                                                                 tmp_path):
+    """After two re-recording pull requests land, no record is current. The
+    report lifts nothing, and `--verify --strict` names the re-record. Stale
+    records are not a problem in themselves: they lift nothing."""
+    version, _ = artifact.checker_version()
+    artifact.record_reproduction(_reproduction(["a.rvl"], "GATE-CENSUS-1+left"),
+                                 tmp_path)
+    (tmp_path / "GATE-CENSUS-1+right.json").write_text(artifact.reproduction_text(
+        _reproduction(["a.rvl"], "GATE-CENSUS-1+right")))
+    problems = artifact.reproduction_problems(tmp_path)
+    assert any(version in p and "regen_generated.py --only census" in p
+               for p in problems)
+    assert len(problems) == 1
+    artifact.record_reproduction(_reproduction(["a.rvl"], version), tmp_path)
+    assert artifact.reproduction_problems(tmp_path) == []
 
 
 def test_the_reproduction_check_is_as_strict_and_names_what_it_missed(
         artifact, census, records, sources):
     """A reproduction recorded at another checker version still lifts no
     claim, whatever it covered, and one at the current version over fewer
-    programs than the census now runs is reported with the gap counted."""
+    programs than the census now runs is reported with the gap counted.
+    With no current record at all, the stale ones are named."""
     provenance = _load("tools/corpus_provenance.py", "artifact_test_prov3")
     hydrated = artifact.hydrate(records, artifact.corpus_sources(sources))
     measured = artifact.measured_from_records(hydrated)
     version, _ = artifact.checker_version()
     ids = sorted({row[0] for row in measured["case_rows"]})
 
-    def report(recorded):
-        loaded = dict(recorded, n=len(recorded["programs"]))
+    def report(recorded, stale=()):
+        loaded = (None if recorded is None
+                  else dict(recorded, n=len(recorded["programs"])))
         return artifact.build_report(census, provenance, measured, loaded,
-                                     probe=records["facts"]["mechanism"])
+                                     probe=records["facts"]["mechanism"],
+                                     stale_records=list(stale))
 
     stale = report(_reproduction(ids))
     assert stale["census"]["reproduction"]["is_current"] is False
     assert all(c["rung"] != "demonstrated" for c in stale["claims"])
+
+    none = report(None, stale=["GATE-CENSUS-1+left", "GATE-CENSUS-1+right"])
+    assert all(c["rung"] != "demonstrated" for c in none["claims"])
+    md = artifact.render_markdown(none)
+    assert "`GATE-CENSUS-1+left`, `GATE-CENSUS-1+right`" in md
 
     short = report(_reproduction(ids[3:], version))
     rep = short["census"]["reproduction"]
@@ -1203,3 +1288,33 @@ def test_the_reproduction_check_is_as_strict_and_names_what_it_missed(
     assert rep["census_programs_not_in_reproduction"] == 3
     assert ("census programs this run read that the reproduction did not: "
             "**3**") in artifact.render_markdown(short)
+
+
+def test_a_missing_current_record_skips_and_names_the_fix(artifact, tmp_path,
+                                                         monkeypatch):
+    """With no record at the current checker version the limit test skips,
+    and its reason is the missing version and the command, the same text
+    `--verify --strict` reports, never a crash and never a silent pass."""
+    (tmp_path / "GATE-CENSUS-1+old.json").write_text(artifact.reproduction_text(
+        {"note": "n", "engine": "crate", "checker_version": "GATE-CENSUS-1+old",
+         "tracked_buckets": {}, "false_admissions": [], "programs": ["a.rvl"]}))
+    monkeypatch.setattr(artifact, "reproduction_problems",
+                        lambda base=tmp_path, _f=artifact.reproduction_problems:
+                        _f(base))
+    committed = {"census": {"reproduction": None}}
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        test_the_reproduction_states_its_own_limit(artifact, committed)
+    message = str(excinfo.value)
+    version, _ = artifact.checker_version()
+    assert version in message
+    assert "python3 tools/regen_generated.py --only census" in message
+    # and `--verify --strict` still treats the same state as a failure
+    assert artifact.reproduction_problems(tmp_path)
+
+
+def test_a_current_record_still_asserts_the_limit_sentence(artifact):
+    """The skip is only for a missing record: a reproduction that is present
+    and drops its limit sentence still fails."""
+    with pytest.raises(AssertionError):
+        test_the_reproduction_states_its_own_limit(
+            artifact, {"census": {"reproduction": {"does_not_establish": "x"}}})

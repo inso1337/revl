@@ -14,6 +14,9 @@ receiver is rooted at a `let`-bound local and its static type is a service. An
 arrow parameter is not such a local, because what flows into it is decided at
 the application, so an arrow never applied to a provision still compiles.
 
+A local bound by a `match` whose arm is a statement block had no type, because
+the arm's `do` node had none (issue #1729); it is typed by its tail now.
+
 tests/fixtures/approval_service_locals/ is the corpus: `g4_` is refused, `ok_`
 is admitted. The handle, alias and applied-arrow spellings were closed by PR
 #1519 and are pinned here beside the rest. tests/test_gate_reference_census.py
@@ -50,10 +53,12 @@ REFUSED = {
     "g4_handle_direct_value": APPROVAL,
     "g4_alias_step": APPROVAL,
     "g4_arrow_param_applied": APPROVAL,
+    "g4_match_block_local_step": APPROVAL,
+    "g4_match_block_local_unmarked": _marker("t.charge"),
 }
 ADMITTED = ("ok_if_local_step", "ok_record_field_step", "ok_record_alias_step",
             "ok_list_element_step", "ok_alias_step", "ok_if_local_no_approval",
-            "ok_arrow_param_unapplied")
+            "ok_arrow_param_unapplied", "ok_match_block_local_step")
 # each refusal's admitted spelling: the same crossing with the approval edge
 TWIN = {
     "g4_if_local_step": "ok_if_local_step",
@@ -67,6 +72,8 @@ TWIN = {
     "g4_handle_direct_value": "ok_alias_step",
     "g4_alias_step": "ok_alias_step",
     "g4_arrow_param_applied": "ok_arrow_param_unapplied",
+    "g4_match_block_local_step": "ok_match_block_local_step",
+    "g4_match_block_local_unmarked": "ok_match_block_local_step",
 }
 
 

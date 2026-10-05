@@ -3256,6 +3256,23 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         return join(infer_ir(node.get("then"), tenv, types, services, filename, line),
                     infer_ir(node.get("else"), tenv, types, services, filename, line),
                     types)
+    if kind == "do":
+        # A statement-block `match` arm in a component body lowers to a `do`
+        # node (lower.py `_lower_component_block_arm`): `let` steps, then a
+        # tail whose value is the arm's. Untyped, a `match` with a block arm
+        # had no type at all, so a service reached through the arm's value was
+        # not a service to the receiver resolvers, and a crossing on it was
+        # admitted unmarked and past the approval floor (issue #1729). The
+        # tail is read with the arm's own `let`s in scope, under the safe
+        # names the lowering gave them.
+        inner = dict(tenv)
+        for st in node.get("stmts") or []:
+            t = infer_ir(st.get("value"), inner, types, services, filename, line)
+            if t is not None:
+                inner[st.get("name")] = t
+            else:
+                inner.pop(st.get("name"), None)
+        return infer_ir(node.get("tail"), inner, types, services, filename, line)
     return None
 
 
