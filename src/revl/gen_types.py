@@ -50,12 +50,15 @@ import re
 from .errors import RevlError
 from .import_openapi import _comment_safe, _line_of, _pointer
 from .lexer import KEYWORDS
+from .type_schema import _JSON_TYPES
 
 MODEL_VERSION = 1
 
-#: The field types a model may name. Each is a revl primitive, so a generated
-#: record is plain data and needs no import.
-FIELD_TYPES = ("Str", "Int", "Float", "Bool", "Bytes")
+#: The field types a model may name: the revl scalars that have a JSON
+#: rendering (`type_schema._JSON_TYPES`, the one definition), without `Unit`,
+#: which carries no value. Each is a revl primitive, so a generated record is
+#: plain data and needs no import.
+FIELD_TYPES = tuple(name for name in _JSON_TYPES if name != "Unit")
 
 #: The generated header. The compiler reads these three lines back
 #: (`generated_header`), so their spelling is part of the format.
