@@ -523,7 +523,8 @@ class HttpComposedServer:
                 "params": params,
                 # compiler-derived, not author-asserted (the fourth-quadrant
                 # guarantee, carried onto HTTP): read-only iff the checker
-                # refused unreverted mutation.
+                # proved the body mutates nothing — a `witnessed[C]` write is
+                # a mutation with an inverse, so it is false there too.
                 "readOnly": annotations.get("readOnlyHint") is True,
                 "emission": provenance.get("classification") == "emission",
             })
