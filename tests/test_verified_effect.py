@@ -131,7 +131,7 @@ def test_verified_in_a_method_body_is_refused():
       provide w { fn put(k) { verified effect store.insert(k, "1") undo store.remove(k) } }
     }
     '''
-    with pytest.raises(RevlError, match="only allowed in a component activation body"):
+    with pytest.raises(RevlError, match="only allowed on a witnessed effect"):
         compile_source(src, "t.rvl")
 
 
