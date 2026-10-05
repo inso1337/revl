@@ -453,7 +453,8 @@ RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "typecheck", "lexer", "composition", "hostref", "hostfile",
                    "cap_order", "ui_family", "resources", "kernel_boundary",
                    "cardinality", "decode_grammar", "model_profile",
-                   "operator_text", "type_schema")
+                   "operator_text", "type_schema", "realm_placeholders",
+                   "gen_types")
 
 #: The sibling modules a rule module imports that are NOT rules, each with the
 #: reason it is not one. This is the argued half of the membership question and
@@ -506,6 +507,10 @@ NOT_A_RULE = {
                      "`placement`'s conductor at run time and read by "
                      "`revl recover`. It records crossings; it refuses no "
                      "program.",
+    "import_openapi": "`revl import openapi`, a generator. `gen_types` "
+                      "borrows its pointer, line and comment helpers for "
+                      "`revl gen-types`; the compile-time header check "
+                      "(`check_generated_header`) calls none of them.",
     "refusal": "tells a backend emitter's EmitError apart from its fault "
                "after the frontend has admitted the document; `placement` "
                "reads it only on the emit path. Measured: making "

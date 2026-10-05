@@ -40,6 +40,15 @@ component TenantAApp requires kv: Kv {
   Undeclared key → G1-shaped error. Duplicate isolate of one key →
   error (in-source reassignment is a bug even though Def. 29 permits
   runtime reassignment).
+- `isolate <key> in realm(?<name>)`: a realm PLACEHOLDER (issue #1728).
+  The author says the key is isolated and which placeholder it belongs to;
+  the operator binds the name to a realm (`--bind-realm <name>=<realm>` on
+  `revl compile` and `revl mcp serve`, or the admission profile). It is the
+  one realm form the untrusted-author profile accepts, binding happens before
+  lowering so G2 is checked over the bound realm, and an unbound placeholder
+  is refused by name. A `realms(...)` route takes placeholders too, one per
+  leg (`realms(?a, ?b)`), under the same binding; two legs bound to one realm
+  are refused G2. See [design/1728-realm-placeholder.md](design/1728-realm-placeholder.md).
 - `intercept <key> with { <field>: <literal|list-of-literals>, ... }` —
   **requires keys only**: this is the component-declared metadata `d(k)`
   of Def. 30, whose domain is the dependency set. The context-carried

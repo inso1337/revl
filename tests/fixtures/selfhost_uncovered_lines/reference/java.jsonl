@@ -64,7 +64,7 @@
 
 ["reason", "backends-java-emit-py-emit-component-modern-missing", "backends/java/emit.py::_emit_component_modern: Missing branches reject invalid isolate/intercept keys, bind a routed requirement and emit the router class. Frontend validates placement keys; routers remain an explicit boundary, not general realm exclusion. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d))."]
 
-["function", "backends-java-emit-py-emit-component-modern-missing", "_emit_component_modern", 7, 7]
+["function", "backends-java-emit-py-emit-component-modern-missing", "_emit_component_modern", 16, 16]
 
 ["reason", "backends-java-emit-py-emit-component-residual-requirement", "backends/java/emit.py::_emit_component: Residual requirement/bind fields and constructor assignments, config fields, ctx.get and let-effect/effect/emit branches are the nonsimple legacy effect/bind path, excluded by component_simple_ok. The final unsupported-step raise is refusal. Empty and provide-only legacy components are now covered."]
 
@@ -164,7 +164,7 @@
 
 ["reason", "backends-java-emit-py-emit-witnessed-step-witnessed", "backends/java/emit.py::_emit_witnessed_step: Witnessed Result acquisition, error propagation, witness secrecy/redaction and inverse registration require class=witnessed externs, explicitly deferred; method_witnessed.rvl is a strict divergent reproduction."]
 
-["function", "backends-java-emit-py-emit-witnessed-step-witnessed", "_emit_witnessed_step", 21, 21]
+["function", "backends-java-emit-py-emit-witnessed-step-witnessed", "_emit_witnessed_step", 23, 23]
 
 ["reason", "backends-java-emit-py-empty-map-decl-type", "backends/java/emit.py::_empty_map_decl_type: Remaining branches read writer-inferred pins for an unannotated VALUE Map.empty local or use raw java.util.Map when unpinned. The port explicitly defers unannotated value-Map inference, distinct from covered host Map.new inference."]
 
@@ -172,7 +172,7 @@
 
 ["reason", "backends-java-emit-py-expr-residual-successful-arms", "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered, and so, since item 429's java blind-spot closure, are the builtin/len and sized-length arms (tests/fixtures/emit_java_corpus/stdlib_builtins.rvl). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1511 (declared compensations, java tier) adds one: the branch that sends a component crossing an extern that declares `compensate` through `RevlDeclared` from the `fn` arm. selfhost/emit_java.rvl does not port that registration and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge."]
 
-["function", "backends-java-emit-py-expr-residual-successful-arms", "_expr", 33, 33]
+["function", "backends-java-emit-py-expr-residual-successful-arms", "_expr", 35, 35]
 
 ["reason", "backends-java-emit-py-finite-float-the-only", "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value."]
 
@@ -260,7 +260,7 @@
 
 ["reason", "backends-java-emit-py-method-body-lines-render", "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the two `void` return statements here: its return type lookup failed too, so `x + x` was emitted as a statement followed by `return;`. Its method now renders with its declared `long` signature."]
 
-["function", "backends-java-emit-py-method-body-lines-render", "_method_body_lines.render", 54, 54]
+["function", "backends-java-emit-py-method-body-lines-render", "_method_body_lines.render", 56, 56]
 
 ["reason", "backends-java-emit-py-method-body-residual-empty", "backends/java/emit.py::_method_body: Residual empty/multistep effectful-body traps and nonvoid bare-return refusal are outside the simple legacy method gate; a value expression discarded by a void method requires the nonsimple legacy effect/call path. Void bare returns and scalar/name returns are covered."]
 
@@ -442,11 +442,11 @@
 
 ["reason", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "Issue #1511, the java tier: an extern that declares `compensate` was registered in no position. `_reaches_declared` finds a component that crosses one, `_component_needs_frame` gives it the frame, `_declared_crossing` renders every crossing through `RevlDeclared.crossed`, and `_emit_revl_frame_runtime` appends `RevlDeclared`. selfhost/emit_java.rvl does not port it, and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge; the self-host port is the work that retires this entry. The input family is backends/java/test_declared_compensate_java.py."]
 
-["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_component_needs_frame", 1, 1]
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_component_needs_frame", 2, 2]
 
-["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_declared_crossing", 13, 13]
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_declared_crossing", 11, 11]
 
-["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_emit_revl_frame_runtime", 1, 1]
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_emit_revl_frame_runtime", 2, 2]
 
 ["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_reaches_declared", 7, 7]
 
@@ -473,3 +473,17 @@
 ["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_deferred_emissions", 8, 8]
 
 ["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_validated_emissions", 8, 8]
+
+["reason", "ui-transaction-unit-item-522-issue-1369", "The UI transaction unit (item 522 slice 3, issue #1369): `_ui_transaction_facts` and `_calls_any` derive the per-method units from revl.ui_transaction, `_emit_component_modern` wraps a unit method's body in a `RevlUi` scope, and `_ui_cross`, `_ui_crossing_statement` and `_declared_compensate` render each computer-use crossing through `RevlUi.cross`; `_emit_compensation_track` registers into the scope. The same branches raise `_component_needs_frame`, `_emit_revl_frame_runtime`, `_emit_witnessed_step`, `_expr` and `_method_body_lines.render` (`_declared_crossing` fell, its compensate rendering moved to `_declared_compensate`). selfhost/emit_java.rvl does not port the unit (the self-host gap of issue #1972), and the corpus has no computer-use document with @java bodies. The runtime proof is backends/java/test_ui_transaction_java_1369.py."]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_calls_any", 7, 7]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_declared_compensate", 7, 7]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_emit_compensation_track", 2, 2]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_cross", 8, 8]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_crossing_statement", 13, 13]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_transaction_facts", 29, 29]

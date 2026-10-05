@@ -1,0 +1,60 @@
+// A witnessed effect marked `verified` in a provide method: admitted. Its
+// round trip calls the method, aborts, and replays the declared inverse.
+type Row = { id: Str, name: Str }
+type Before = { id: Str, existed: Bool, name: Str }
+type BatchWitness = { entries: List[Before] }
+type StoreError = { code: Str }
+
+extern pure fn restore_batch(w: BatchWitness) -> Unit = @py {
+    store = globals().setdefault('_revl_batch_store', {})
+    for entry in reversed(w['entries']):
+        if entry['existed']:
+            store[entry['id']] = entry['name']
+        else:
+            store.pop(entry['id'], None)
+    return
+}
+
+extern witnessed[store] fn write_batch(rows: List[Row]) -> Result[BatchWitness, StoreError]
+  undo restore_batch(result) = @py {
+    store = globals().setdefault('_revl_batch_store', {})
+    entries = []
+    for row in rows:
+        existed = row['id'] in store
+        entries.append({'id': row['id'], 'existed': existed,
+                        'name': store.get(row['id'], '')})
+        store[row['id']] = row['name']
+    return Ok({'entries': entries})
+}
+
+extern pure fn store_size() -> Int = @py {
+    return len(globals().setdefault('_revl_batch_store', {}))
+}
+
+service Data {
+  emission fn import_rows(rows: List[Row])
+  fn size() -> Int
+}
+
+component Store provides data: Data {
+  provide data {
+    fn import_rows(rows) {
+      verified effect write_batch(rows)
+    }
+    fn size() = store_size()
+  }
+}
+
+lifecycle test "a verified batch write reverts on abort" {
+  load Store
+  let pre = call data.size()
+  call data.import_rows([{ id: "a", name: "A" }, { id: "b", name: "B" }])
+  let during = call data.size()
+  assert during == pre + 2
+  abort
+  load Store
+  let post = call data.size()
+  assert post == pre
+  unload Store
+  assert no_residue
+}

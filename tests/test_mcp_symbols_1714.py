@@ -198,3 +198,16 @@ def test_revl_source_is_advertised_read_only():
     assert tools["revl_source"]["inputSchema"]["required"] == ["symbol"]
     edit_items = tools["revl_edit"]["inputSchema"]["properties"]["edits"]["items"]
     assert "symbol" in edit_items["properties"]
+
+
+def test_the_server_installs_its_hooks_on_the_shared_symbol_model():
+    """The symbol model lives in `revl.symbols`, off the compile graph's
+    `revl.mcp` (issue #1780); `revl.mcp.symbols` is the same module object with
+    the server's canonical-form hook (issue #1700) and buffer resolver
+    installed."""
+    import revl.symbols as model
+    import revl.mcp.symbols as served
+
+    assert served is model
+    assert model.CANONICALISE is served.canonical
+    assert model.BUFFER_RESOLVER is not None

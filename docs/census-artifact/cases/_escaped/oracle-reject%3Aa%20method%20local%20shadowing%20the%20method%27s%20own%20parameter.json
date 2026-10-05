@@ -1,0 +1,1 @@
+{"case": "oracle-reject:a method local shadowing the method's own parameter", "buckets": ["agree-refuse/G6"]}

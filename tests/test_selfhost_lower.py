@@ -323,6 +323,11 @@ def _classify(e: RevlError) -> str:
     # does not exist.
     if "state hand-off on `" in m:
         return "G2"
+    # issue #1728: an unbound realm placeholder, refused before lowering by
+    # `realm_placeholders.bind` with code G2, and spelled byte for byte by the
+    # gate's `realm_placeholder_scan`.
+    if m.startswith("realm placeholder `?") and " is not bound: the operator binds it" in m:
+        return "G2"
     # G3 (dependency-cycle / self-provision) and G1 (undeclared access) set no
     # code, so their message markers classify them. G3's two shapes both end
     # "(G3)"; G1 is the reference's postfix/var head-resolution refusal.
@@ -407,6 +412,12 @@ def _classify(e: RevlError) -> str:
     # as an agreement.
     if "unclassified extern" in m:
         return "G8"
+    # issue #1963: the parser's undo-less effect over a dotted acquisition
+    # (`missing_undo_refusal`). Code-less there; `revl.diagnostics.classify`
+    # files it under G4, and the gate spells it byte for byte. The lowering's
+    # bare-name twin carries the G4 code and is named by the code arm above.
+    if m.startswith("effect has no `undo` and ") and m.endswith(" is not pure"):
+        return "G4"
     if ("slot of extern" in m
             or "declares no return type, so there is no acquired value to bind" in m
             or "cannot call the extern itself" in m
@@ -476,7 +487,19 @@ def _classify(e: RevlError) -> str:
             # Code-less in the reference, but `revl.diagnostics.classify`
             # already files it as a type mismatch, so it carries the T1 the
             # design's §4.3 vocabulary gives it (slice T2a).
-            or "has no field" in m):
+            or "has no field" in m
+            # issue #1897: `verified` in a provide method on anything but a
+            # witnessed effect, and the parser's `verified` head before
+            # anything but `effect`. Both code-less; the gate spells each byte
+            # for byte (selfhost/lower.rvl's `verified` section).
+            or ("`verified effect` in a provide-method body is only allowed "
+                "on a witnessed effect") in m
+            or "expected `effect` after `verified`, found " in m
+            # issue #1963: a teardown-registering step inside a provide-method
+            # `if`/`while`/`for` body. Code-less; the gate spells it byte for
+            # byte (selfhost/lower.rvl's effect-statement section).
+            or ("a teardown-registering step (`effect`/`let-effect`/`await`) "
+                "is not allowed inside a provide-method ") in m):
         return "T1"
     if ("is not a case of" in m
             or "record update names" in m
@@ -725,7 +748,25 @@ component Mailer provides ops: Ops {{
 }}
 """
 
+# issue #1897: a witnessed extern a provide method may mark `verified`.
+_VERIFIED_WIT = """type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+"""
+
 ACCEPTED_PROGRAMS = [
+    # Issue #1897: a provide method may mark a WITNESSED effect `verified`.
+    ("a verified witnessed effect in a provide method", _VERIFIED_WIT + """service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      verified effect put_w(k)
+  } }
+}"""),
     # Issue #1508: a spawn-handle crossing is read by the provider bound at the
     # op's declared scope, a fact the spawned provider is held to by its own
     # bound. `Task.go` is `emission[net]` and `Sup.run` declares
@@ -1799,6 +1840,71 @@ component Supervisor requires net: Kv provides sup: Sup {
 # reference's own text is the ground truth. Several are the documented
 # `expected error` of a checked-in rejection fixture.
 REJECTED_PROGRAMS = [
+    # ---- issue #1728: an unbound realm placeholder ---------------------------
+    # The reference binds `realm(?<name>)` before lowering and refuses an
+    # unbound one by name; the gate takes no bindings, so it refuses every one,
+    # with the same sentence. The second case puts a lowering refusal (G4) on a
+    # LATER component: the placeholder refusal still wins on both sides, since
+    # the binding runs before any of lowering does.
+    ("an unbound realm placeholder", """service KV { fn get(k: Str) -> Str }
+component Store provides kv: KV {
+  isolate kv in realm(?tenant)
+  provide kv { fn get(k) = k }
+}
+""", "G2"),
+    ("an unbound realm placeholder ahead of a lowering refusal", """service KV { fn get(k: Str) -> Str }
+service Bus { emission fn publish(topic: Str) }
+component Store provides kv: KV {
+  isolate kv in realm(?tenant)
+  provide kv { fn get(k) = k }
+}
+component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
+""", "G2"),
+    # The `realms(...)` route takes placeholders too (#1728, routes): the first
+    # unbound leg is refused in list order, after any literal before it.
+    ("an unbound realm placeholder in a route", """service KV { fn get(k: Str) -> Str }
+service Api { fn read(k: Str) -> Str }
+component Front requires kv: KV provides api: Api {
+  isolate kv in realms("w1", ?b) strategy(round_robin)
+  provide api { fn read(k) = kv.get(k) }
+}
+""", "G2"),
+    ("an unbound route placeholder ahead of a route refusal", """service KV { fn get(k: Str) -> Str }
+service Api { fn read(k: Str) -> Str }
+component Front requires kv: KV provides api: Api {
+  isolate kv in realms(?a, ?b) strategy(no_such_strategy)
+  provide api { fn read(k) = kv.get(k) }
+}
+""", "G2"),
+    # ---- issue #1897: `verified` in a provide method ------------------------
+    # Only a witnessed effect may be verified there. The gate used to skip a
+    # `verified` line whole and admit every one of these; the corpus documents
+    # are tests/fixtures/verified_method_effect/, these are the edge controls.
+    ("a verified method effect whose undo is on the next line", '''service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      verified effect store.insert(k, "1")
+        undo store.remove(k)
+  } }
+}''', "T1"),
+    ("a let-bound verified method effect on a witnessed extern", _VERIFIED_WIT + '''service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      let r = verified effect put_w(k)
+  } }
+}''', "T1"),
+    ("a let-bound verified call that is not an effect", '''service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      let r = verified store.insert(k, "1")
+  } }
+}''', "T1"),
+    ("verified emit in an activation body", '''service Bus { emission fn send(k: Str) }
+component C requires bus: Bus {
+  verified emit bus.send("a")
+}''', "T1"),
     # ---- issue #1813: a module fn and an extern fn of one name --------------
     # The reference checks it once the program is otherwise admitted, so the
     # second case's G1 is what both sides report; the third puts the extern
@@ -7605,3 +7711,49 @@ def test_a_bare_return_in_a_provide_method_is_not_typed(admit):
              "component C provides s: S {\n"
              "  provide s { fn put(k) { return k } }\n}\n")
     assert admit(typed) == "T1|`put` returns expects `Int`, got `Str`"
+
+
+# ---- issue #1897: `verified` in a provide method, the LINE and the sink -----
+#
+# The census compares tag and message. These hold the line as well: the method
+# refusal is collected per component at the statement's line, as the reference's
+# component loop collects it, and the parse-stage one rides alone (line 0 on the
+# gate's wire, as every parse refusal does).
+_VERIFIED_CORPUS = ROOT / "tests" / "fixtures" / "verified_method_effect"
+
+
+@pytest.mark.parametrize("stem", ["t1_plain_site_undo", "t1_let_bound"])
+def test_verified_method_refusal_carries_the_statement_line(admit_all, stem):
+    src = (_VERIFIED_CORPUS / f"{stem}.rvl").read_text()
+    ref = _ref_all(src)
+    assert ref == [(8, "T1")], ref
+    assert admit_all(src) == (
+        "8|T1|`verified effect` in a provide-method body is only allowed on a "
+        "witnessed effect (issue #1897)")
+
+
+def test_verified_parse_refusal_rides_alone(admit_all):
+    src = (_VERIFIED_CORPUS / "t1_emit.rvl").read_text()
+    assert _ref_all(src) == [(7, "T1")]
+    assert admit_all(src) == "0|T1|expected `effect` after `verified`, found 'emit'"
+
+
+def test_verified_method_refusal_is_collected_beside_another_component(admit_all):
+    src = '''service W { fn put(k: Str) }
+service R { fn get() -> Str }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      verified effect store.insert(k, "1") undo store.remove(k)
+  } }
+}
+component D provides r: R {
+  provide r { fn get() = db.get() }
+}
+'''
+    assert _ref_all(src) == [(6, "T1"), (10, "G1")]
+    # `admit_all` joins rows with a literal backslash-n. Only the tags of the
+    # second row are compared: D's arrow-body G1 line is not this rule's.
+    rows = [r.split("|", 2) for r in admit_all(src).split("\\n")]
+    assert rows[0][:2] == ["6", "T1"], rows
+    assert [r[1] for r in rows] == ["T1", "G1"], rows

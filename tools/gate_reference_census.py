@@ -119,9 +119,15 @@ USAGE
     python3 tools/gate_reference_census.py                  # the census
     python3 tools/gate_reference_census.py --check          # the CI gate
     python3 tools/gate_reference_census.py --record         # re-baseline
+    python3 tools/gate_reference_census.py --record-lines   # the line ledger
     python3 tools/gate_reference_census.py --all            # + bench artifacts
     python3 tools/gate_reference_census.py --fuzz 20000 --seed 7
     python3 tools/gate_reference_census.py --engine crate --check
+
+`--check` also holds the selfhost engine's refusal LINES to
+`tools/gate_reference_line_ledger.json` (issue #1965): a refusal both sides
+agree on by tag and message must carry the reference's line, or be named on
+the ledger with its `[reference, gate]` pair. The ledger only shrinks.
 
 Exit status is 1 when `--check` finds any difference from the baseline.
 """
@@ -219,7 +225,13 @@ def _reference():
 # ------------------------------------------------------------ the fast engine
 
 def build_selfhost_admit():
-    """`selfhost/lower.rvl`'s `admit_src`, emitted to python and executed.
+    """`selfhost/lower.rvl`'s `admit_src`, emitted to python and executed."""
+    return build_selfhost_namespace()["admit_src"]
+
+
+def build_selfhost_namespace():
+    """`selfhost/lower.rvl` emitted to python and executed: its namespace, so a
+    caller can reach `admit_src` and `admit_all` from one build.
 
     The `_exec_emitted` shape every `tests/test_selfhost_*.py` uses: the
     component in the file makes the emitted module import the cordis-py
@@ -246,7 +258,7 @@ def build_selfhost_admit():
             sys.modules["runtime"] = previous
         else:
             del sys.modules["runtime"]
-    return namespace["admit_src"]
+    return namespace
 
 
 def build_frontier_scan():
@@ -264,15 +276,23 @@ def build_frontier_scan():
     tables = generator.frontier_tables()
     return make_frontier_scan(tables["keywords"], tables["builtins"],
                               max_bytes=generator.MAX_SOURCE_BYTES,
-                              max_level_items=generator.MAX_LEVEL_ITEMS)
+                              max_level_items=generator.MAX_LEVEL_ITEMS,
+                              capability_roots=tables["capability_roots"])
 
 
 def make_frontier_scan(keywords, builtins, max_bytes: int = 262144,
-                       max_level_items: int = 1024):
+                       max_level_items: int = 1024, capability_roots=()):
     """The scan itself, over the given tables. Split out so a test can drive it
-    with the rust's own table values."""
+    with the rust's own table values.
+
+    `capability_roots` is the rust's `EXCLUDED_CAPABILITY_ROOTS`: a reserved
+    capability namespace (the computer-use roots) whose admission rules the
+    self-host gate does not run, declined where its root is followed by `.`.
+    The mirror lacked it, which no census program noticed until the corpus
+    gained a computer-use document (issue #1369)."""
     excluded_keywords = set(keywords)
     excluded_builtins = set(builtins)
+    excluded_roots = set(capability_roots)
 
     def _strip_literals(raw: bytes) -> bytes:
         """`"..."` and `//` blanked to spaces — replaced, not deleted, so the
@@ -349,6 +369,8 @@ def make_frontier_scan(keywords, builtins, max_bytes: int = 262144,
                     return f"`.{word}()` is outside the covered surface"
             elif word in excluded_keywords:
                 return f"`{word}` is outside the covered surface"
+            elif word in excluded_roots and i < n and text[i] == 0x2E:
+                return f"`{word}.` is a reserved capability namespace"
         return None
 
     return scan
@@ -732,8 +754,22 @@ class SelfhostEngine:
 
     def __init__(self):
         self._scan = build_frontier_scan()
-        self._admit = build_selfhost_admit()
+        namespace = build_selfhost_namespace()
+        self._admit = namespace["admit_src"]
+        self._admit_all = namespace["admit_all"]
         self._certify = build_admission_certify()
+
+    def line(self, src: str) -> int:
+        """The line of the refusal `admit_src` reports for `src`: its row in
+        `admit_all`'s sink (the minimum by `(line, seq)`, as `admit_src` picks
+        it). 0 for a parse-stage refusal, which rides alone with no line."""
+        wire = self._admit(src)
+        rows = self._admit_all(src).split("\\n")
+        for row in rows:
+            line, _, rest = row.partition("|")
+            if rest == wire:
+                return int(line)
+        return 0
 
     def verdicts(self, sources):
         for src in sources:
@@ -1183,6 +1219,84 @@ def compare(buckets: dict[str, list[str]], baseline: dict) -> list[str]:
     return problems
 
 
+# ------------------------------------------------------------ the line ledger
+#
+# Issue #1965. A refusal both sides agree on (tag and message) can still be
+# anchored at a different line, and `admit_src` orders a multi-defect program by
+# line, so a refusal anchored early can outrank one the reference reports first.
+# `compare` above sees tag and message only. The LEDGER names every agreed
+# refusal whose lines differ, with the `[reference, gate]` pair, and
+# `compare_lines` fails on a mismatch that is not on it, on one whose pair moved,
+# and on an entry that no longer mismatches: so the list only shrinks, in a diff
+# somebody reads. A parse-stage refusal is excluded by rule (the gate carries no
+# line for one, by design). Selfhost engine only: the crate's wire has no line.
+LINE_LEDGER = ROOT / "tools" / "gate_reference_line_ledger.json"
+
+LINE_LEDGER_NOTE = (
+    "Recorded by `python3 tools/gate_reference_census.py --record-lines` (issue "
+    "#1965). Every entry is a refusal the gate and the reference agree on by "
+    "tag and message but anchor at different lines: `[reference line, gate "
+    "line]`. `--check` and tests/test_gate_reference_census.py fail on a "
+    "mismatch that is not here, on an entry whose pair moved, and on an entry "
+    "that no longer mismatches, so the list can only shrink. Names and line "
+    "pairs only, no counts."
+)
+
+
+def reference_line(src: str) -> int:
+    """The line the reference's refusal of `src` carries, 0 when it admits."""
+    from revl.compiler import compile_source
+    from revl.errors import RevlError
+
+    try:
+        compile_source(src, "census.rvl")
+    except RevlError as exc:
+        return int(exc.line or 0)
+    return 0
+
+
+def line_pairs(cases, buckets: dict[str, list[str]], engine) -> dict:
+    """`{case_id: [reference line, gate line]}` for every agreed refusal whose
+    lines differ. The gate's line is 0 for a parse-stage refusal, which is
+    excluded."""
+    agreed = {cid for name, ids in buckets.items()
+              if name.startswith("agree-refuse/") for cid in ids}
+    out: dict = {}
+    for case_id, src in cases:
+        if case_id not in agreed:
+            continue
+        gate = engine.line(src)
+        if gate == 0:
+            continue
+        ref = reference_line(src)
+        if ref != gate:
+            out[case_id] = [ref, gate]
+    return out
+
+
+def compare_lines(pairs: dict, ledger: dict) -> list[str]:
+    """The line ratchet: a NEW mismatch, a CHANGED pair, a STALE entry."""
+    want = ledger.get("mismatches", {})
+    problems = []
+    for case_id in sorted(set(pairs) - set(want)):
+        ref, gate = pairs[case_id]
+        problems.append(f"new line mismatch: {case_id} (reference line {ref}, "
+                        f"gate line {gate})")
+    for case_id in sorted(set(pairs) & set(want)):
+        if list(pairs[case_id]) != list(want[case_id]):
+            problems.append(f"line pair moved: {case_id} {want[case_id]} -> "
+                            f"{pairs[case_id]}; re-record with --record-lines")
+    for case_id in sorted(set(want) - set(pairs)):
+        problems.append(f"no longer a line mismatch: {case_id}; delete it "
+                        f"(python3 tools/gate_reference_census.py --record-lines)")
+    return problems
+
+
+def record_lines_payload(pairs: dict) -> dict:
+    return {"note": LINE_LEDGER_NOTE,
+            "mismatches": {k: list(v) for k, v in sorted(pairs.items())}}
+
+
 def bypasses(buckets: dict[str, list[str]]) -> list[str]:
     """Every case in a `false-admit` bucket, sorted. The open bypass surface.
 
@@ -1248,6 +1362,8 @@ def main(argv: list[str]) -> int:
                     help="fail on any difference from the baseline")
     ap.add_argument("--record", action="store_true",
                     help="rewrite the baseline from this run")
+    ap.add_argument("--record-lines", action="store_true",
+                    help="rewrite the line ledger from this run (issue #1965)")
     ap.add_argument("--json", type=Path, help="write the full census here")
     ap.add_argument("--examples", type=int, default=4)
     ap.add_argument("--since-generation", type=int, default=1,
@@ -1281,15 +1397,26 @@ def main(argv: list[str]) -> int:
             {"engine": engine.name, "buckets": buckets, "details": details},
             indent=1, sort_keys=True) + "\n")
 
+    with_lines = args.engine == "selfhost" and (args.check or args.record_lines)
+    pairs = line_pairs(cases, buckets, engine) if with_lines else {}
+    if args.record_lines:
+        LINE_LEDGER.write_text(json.dumps(
+            record_lines_payload(pairs), indent=1, sort_keys=True) + "\n")
+        print(f"\nrecorded {LINE_LEDGER.relative_to(ROOT)}")
+
     if args.record:
         BASELINE.write_text(json.dumps(
             record_payload(buckets, details), indent=1, sort_keys=True) + "\n")
         print(f"\nrecorded {BASELINE.relative_to(ROOT)}")
         return 0
+    if args.record_lines:
+        return 0
 
     if args.check:
         baseline = json.loads(BASELINE.read_text())
         problems = compare(buckets, baseline)
+        if with_lines:
+            problems += compare_lines(pairs, json.loads(LINE_LEDGER.read_text()))
         if problems:
             print("\ngate/reference census FAILED:")
             for line in problems:

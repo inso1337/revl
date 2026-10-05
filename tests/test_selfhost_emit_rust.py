@@ -313,9 +313,15 @@ CORPUS = [
                              #   committed last, an activation `emit ...
                              #   compensate` (on both provider paths) and a
                              #   provide method's one queued for phase 2
+    "held_acquire_binds.rvl",  # issue #1931: an activation bind is held by
+                             #   value as the type its acquisition evaluates to,
+                             #   unless it is a shared resource (a host Map)
     "prelude_names.rvl",     # issue #1920: a service named `Box` takes the
                              #   type-name reservation (`Box_`), and a captured
                              #   `extern acquire` handle is held by value
+    "keyword_keys.rvl",      # issue #1927: a requirement key that is a Rust
+                             #   keyword (`box`) takes the mangled spelling as
+                             #   an identifier, the surface key as a string
 ]
 
 

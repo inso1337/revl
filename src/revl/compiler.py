@@ -17,8 +17,10 @@ from .admit_profile import check_no_host_extern_reach as _check_no_host_extern_r
 from .admit_profile import enforce_document as _enforce_document
 from .admit_profile import enforce_document_per_root as _enforce_document_per_root
 from .admit_profile import enforce_source as _enforce_source
+from .realm_placeholders import bind as _bind_realm_placeholders
 from . import operator_text as _operator_text
 from .errors import RevlError
+from . import gen_types as _gen_types
 from .holes import refuse_admission
 from .hostfile import _contained
 from .hostfile import program_has_body_file as _program_has_body_file
@@ -262,6 +264,9 @@ class _ModuleLoader:
         # land on the stdlib this compiler ships, as
         # `{"written", "resolved", "origin"}`. See `stdlib_shadow`.
         self.stdlib_shadow: list[dict] = []
+        # issue #1896: each `revl gen-types` file the compile loaded, as
+        # `{"file", "model", "sha256"}`, its model digest checked at load.
+        self.generated_from: list[dict] = []
 
     def _profile_for(self, abs_path: str) -> AdmissionProfile | None:
         """The admission profile the root at `abs_path` compiles under (item 426
@@ -311,6 +316,23 @@ class _ModuleLoader:
                       os.path.realpath(str(stdlib_root()))):
             return str(stdlib_root().parent)
         return None
+
+    def _check_generated(self, abs_path: str, virtual: str | None) -> None:
+        """Issue #1896: a `revl gen-types` file is refused once its model
+        document no longer has the digest its header carries, and recorded
+        otherwise. Only the head of a disk module is read for the header."""
+        if virtual is not None:
+            head = virtual
+        else:
+            try:
+                with open(abs_path, encoding="utf-8", errors="replace") as handle:
+                    head = handle.read(4096)
+            except OSError:
+                return
+        row = _gen_types.check_generated_header(head, abs_path, self._sources,
+                                                virtual is not None)
+        if row is not None and row not in self.generated_from:
+            self.generated_from.append(row)
 
     def has_source(self, path: str) -> bool:
         return os.path.abspath(path) in self._sources
@@ -512,6 +534,7 @@ class _ModuleLoader:
             virtual = self._sources.get(abs_path)
             program = (Parser(virtual, abs_path).parse() if virtual is not None
                        else parse_file(abs_path))
+            self._check_generated(abs_path, virtual)
             # item 396: for a ROOT module under a no-extern profile, refuse
             # BEFORE any body file is resolved, read, or stat'd, so the refusal
             # is byte-identical whether or not the named file exists (no
@@ -664,6 +687,10 @@ def compile_source(source: str, filename: str = "<string>",
         # no-extern refusal first (structural, no IO), so an untrusted author's
         # refusal is unchanged and precedes any body-file concern (item 396).
         _enforce_source([program], profile)
+        # issue #1728: the operator's realm bindings, after the profile's
+        # structural checks (a placeholder is not a literal realm) and before
+        # lowering (G2 and the manifest then read an ordinary realm).
+        _bind_realm_placeholders(program, profile.bindings if profile else None)
         _check_user_py_body_imports(program, False)
         # item 396: a bare in-memory source has no module directory and no
         # sources map, so a body file cannot resolve without opening disk, which
@@ -696,6 +723,17 @@ def compile_source(source: str, filename: str = "<string>",
                 hint="a bare source string has no root compile tree to jail the "
                      "ref against, and `compile_source` reads nothing from disk "
                      "(item 396 option B)")
+        # issue #1896: a `revl gen-types` file is checked against its model
+        # document, which a bare source string has no directory to find.
+        if _gen_types.generated_header(source) is not None:
+            raise RevlError(
+                filename, 1,
+                "a `revl gen-types` file needs `modules=` (in-memory sources, "
+                "with its model document) or `compile_files` with a real source "
+                "path, so its model digest can be checked",
+                hint="a bare source string has no directory to find the model "
+                     "document in, and `compile_source` reads nothing from disk "
+                     "(issue #1896)")
         # item 459 F1: an `asset "..."` needs a root tree to jail against and a
         # module directory to resolve relative to; a bare source string has
         # neither. Refuse structurally (no IO), mirroring the ref refusal above.
@@ -1146,14 +1184,26 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     included_host = _included_host_externs(included)
     for module in root_modules:
         root_profile = per_root_profiles.get(os.path.abspath(module.path), profile)
+        # the author's delta is taken BEFORE the placeholders are bound: a
+        # bound `?<name>` is the operator's value, not the author's text
         authored = loader.delta_for(os.path.abspath(module.path), module.program)
         _enforce_source([authored], root_profile)
+        # issue #1728, as in `compile_source`: bound with THIS root's profile.
+        _bind_realm_placeholders(module.program,
+                                 root_profile.bindings if root_profile else None)
         if root_profile is not None and root_profile.no_extern:
             _check_no_host_extern_reach(
                 [authored], merged.fn_decls, included_host, root_profile)
     if loader.diffs_operator_text:
         _enforce_authored_imports(loader, included, root_modules, merged,
                                   included_host, profile)
+    # ...and an imported module's placeholders with the compile's own profile, so
+    # no `?<name>` realm ever reaches lowering unbound.
+    root_ids = {id(module) for module in root_modules}
+    for module in included:
+        if id(module) not in root_ids:
+            _bind_realm_placeholders(module.program,
+                                     profile.bindings if profile else None)
     # The two genuinely whole-compile analysis flags (DESIGN §9.3 Part 3) take the
     # JOIN across roots, in the safe (over-refusing) direction. `taint_strict`
     # only ADDS taint edges, so a composition containing any taint-strict root
@@ -1199,6 +1249,11 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # IR key and every existing audit is byte-identical.
     if loader.stdlib_shadow:
         document["stdlib_shadow"] = loader.stdlib_shadow
+    # issue #1896: the model digest of each generated types file, checked at
+    # load. ADDITIVE and present only when one was loaded.
+    if loader.generated_from:
+        document["generated_from"] = sorted(
+            loader.generated_from, key=lambda row: (row["file"], row["model"]))
     if manifest is not None:
         # The admission gate. Compiling a draft is fine — that is how an
         # agent gets a verdict on the parts it has written — but admitting

@@ -659,10 +659,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # ... and on the issue #1631 erased-Result document
         "../../../backends/go/testdata/result_erased_1631.rvl",
         # issue #106, the combined path's first slice: the same `tests` section
-        # gap, and issue #1823, a provide method that calls a function-valued
-        # parameter (`f(f(n))`), whose whole `provide` block lower.rvl drops.
-        # The other combined documents are byte-exact through the native chain.
+        # gap (the issue #1823 provide-block drop is fixed, #1867). The other
+        # combined documents are byte-exact through the native chain.
         "comp_provide_pure.rvl",
+        # `compile_to` takes one source string and resolves no `use`, so the
+        # services this document imports from assembler.rvl and shipper.rvl
+        # are missing from the native output (not a lower.rvl defect)
+        "../../../src/revl/truc/components/cli.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two

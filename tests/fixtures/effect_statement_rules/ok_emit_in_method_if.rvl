@@ -1,0 +1,11 @@
+// Admitted (issue #1963): a bare `emit` inside a provide-method `if`, the
+// crossing alone, which the control-flow rule allows.
+service Bus { emission fn send(k: Str) }
+service W { emission fn put(k: Str) }
+component C requires bus: Bus provides w: W {
+  provide w { fn put(k) {
+      if (k == "a") {
+        emit bus.send(k)
+      }
+  } }
+}

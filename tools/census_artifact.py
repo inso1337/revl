@@ -30,8 +30,9 @@ WHAT IS COMMITTED, AND WHAT IS RENDERED (issue #1768)
 The repository commits the RECORDS of a run, not the report. They live in
 `docs/census-artifact/`:
 
-  * `cases.jsonl` - one `[case id, bucket]` row per program run, sorted by
-    case id;
+  * `cases/`      - one file per program, `cases/<case id>.json`, holding the
+    bucket the program landed in (twice for a case id the corpus reaches twice);
+    a case id that is not a clean repo path is escaped, see `case_path`;
   * `pins.jsonl`  - one `[group, file]` row per file a verdict or the report
     depends on, sorted;
   * `facts.json`  - the handful of measured facts that are neither a row nor a
@@ -47,8 +48,10 @@ of the tree; storing one meant every pull request that edited a pinned module
 rewrote its line even when no verdict moved.
 A stored aggregate is a line every pull request that moves the corpus rewrites,
 so two independent pull requests used to conflict on it after every landing.
-Records merge under git's ordinary line merge unless two pull requests move the
-same program's verdict, which is a real conflict.
+One FILE per program, because a single sorted file still conflicted when two
+pull requests added programs that sort next to each other (issue #1768): git
+merges two added files, and two edits to one program's file are a real
+conflict, a verdict that moved on both sides.
 
 The report itself, `EVAL-REPORT-1` JSON or markdown, is rendered on demand:
 
@@ -190,10 +193,36 @@ ROOT = Path(__file__).resolve().parents[1]
 # The committed records of a run (issue #1768). The report is rendered from
 # them and is not committed; see "WHAT IS COMMITTED, AND WHAT IS RENDERED".
 RECORDS = ROOT / "docs" / "census-artifact"
-CASES_RECORDS = "cases.jsonl"
+CASES_DIR = "cases"
+CASES_README = "cases/README.md"
 PINS_RECORDS = "pins.jsonl"
 FACTS_RECORDS = "facts.json"
-RECORD_FILES = (CASES_RECORDS, PINS_RECORDS, FACTS_RECORDS)
+RECORD_FILES = (PINS_RECORDS, FACTS_RECORDS)
+
+# A case id that is a clean repo-relative path is mirrored as a path; every
+# other id (the inline programs, `admission:...`, `oracle-reject:...`) goes
+# under ESCAPED, its UTF-8 bytes outside `SAFE` written as `%XX`. A clean id
+# never starts with ESCAPED, so the two never collide.
+ESCAPED = "_escaped"
+SAFE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+_CLEAN_SEGMENT = set(SAFE + "+")
+
+
+def case_path(case_id: str) -> str:
+    """The record file for a case id, relative to the records directory.
+
+    `tests/fixtures/x.rvl` -> `cases/tests/fixtures/x.rvl.json`. An id with a
+    character outside `[A-Za-z0-9_.+-]` in a segment, an empty, `.` or `..`
+    segment, or a first segment of `_escaped` -> `cases/_escaped/<id>.json`
+    with every byte outside `[A-Za-z0-9_.-]` (including `/`) as `%XX`
+    (uppercase hex). Deterministic and injective."""
+    parts = case_id.split("/")
+    if (all(p and p not in (".", "..") and set(p) <= _CLEAN_SEGMENT for p in parts)
+            and parts[0] != ESCAPED):
+        return f"{CASES_DIR}/{case_id}.json"
+    escaped = "".join(chr(b) if chr(b) in SAFE else f"%{b:02X}"
+                      for b in case_id.encode("utf-8"))
+    return f"{CASES_DIR}/{ESCAPED}/{escaped}.json"
 RECORDS_SCHEMA = "GATE-CENSUS-RECORDS-1"
 
 # The pin groups `pins.jsonl` carries, in file order: `build_pins`'s groups.
@@ -436,9 +465,9 @@ def case_rows(measured: dict) -> list[list[str]]:
     grown can still check every published case whose bytes did not change. A
     repeated case id carries the same source both times, so it is assigned the
     buckets it landed in, in order, and the sort is stable so those rows keep
-    run order between themselves. Sorted rather than in run order so that two
-    pull requests adding different programs insert rows at different places
-    in `cases.jsonl` (issue #1768).
+    run order between themselves. Sorted rather than in run order, so the
+    combined view any tool builds from the per-program record files is the
+    same every time (issue #1768).
     """
     pending: dict[str, list[str]] = {}
     for name, ids in measured["buckets"].items():
@@ -1333,9 +1362,9 @@ def render_markdown(report: dict) -> str:
 
 FACTS_NOTE = (
     "The measured facts of a census run that are neither a per-case verdict "
-    "(cases.jsonl) nor a pinned file (pins.jsonl). Written by "
+    "(cases/) nor a pinned file (pins.jsonl). Written by "
     "`python3 tools/census_artifact.py --write`; every count, digest and claim "
-    "in the report is computed from these three files and the checkout when it "
+    "in the report is computed from these records and the checkout when it "
     "is rendered, and none is stored. On a merge conflict, run that command "
     "again.")
 
@@ -1345,8 +1374,14 @@ def _record_text(records) -> str:
     return "\n\n".join(json.dumps(r) for r in records) + "\n"
 
 
+def case_text(case_id: str, buckets: list[str]) -> str:
+    """One program's record file: its id and its buckets in run order."""
+    return json.dumps({"case": case_id, "buckets": buckets}) + "\n"
+
+
 def record_texts(measured: dict, mechanism: dict) -> dict[str, str]:
-    """`{file name: bytes}` for `docs/census-artifact/`, from one measurement."""
+    """`{path under docs/census-artifact/: bytes}`, from one measurement:
+    `pins.jsonl`, `facts.json` and one `cases/...json` per program."""
     pins = [[group, rel] for group in VERDICT_PIN_GROUPS
             for rel in sorted(measured["pins"][group])]
     facts = {
@@ -1357,13 +1392,46 @@ def record_texts(measured: dict, mechanism: dict) -> dict[str, str]:
         "reference_faults": sorted(measured["reference_faults"]),
         "mechanism": mechanism,
     }
-    rows = sorted(([row[0], row[2]] for row in measured["case_rows"]),
-                  key=lambda row: row[0])
-    return {
-        CASES_RECORDS: _record_text(rows),
+    buckets: dict[str, list[str]] = {}
+    for row in sorted(measured["case_rows"], key=lambda row: row[0]):
+        buckets.setdefault(row[0], []).append(row[2])
+    out = {
         PINS_RECORDS: _record_text(pins),
         FACTS_RECORDS: json.dumps(facts, indent=1, sort_keys=True) + "\n",
     }
+    for case_id in sorted(buckets):
+        path = case_path(case_id)
+        if path in out:
+            raise SystemExit(f"census_artifact: two case ids map to {path}")
+        out[path] = case_text(case_id, buckets[case_id])
+    return out
+
+
+def case_files(base: Path = RECORDS) -> list[str]:
+    """Every committed case record, as a path under `base`, sorted."""
+    base = Path(base)
+    root = base / CASES_DIR
+    if not root.is_dir():
+        return []
+    return sorted(p.relative_to(base).as_posix() for p in root.rglob("*.json"))
+
+
+def _read_cases(base: Path) -> list[list[str]]:
+    """`[case id, bucket]` rows from the per-program files, sorted by case id
+    (stable: a repeated id keeps its run order). A file whose path is not its
+    id's `case_path` is refused, so one id cannot be recorded twice."""
+    rows = []
+    for rel in case_files(base):
+        record = json.loads((Path(base) / rel).read_text(encoding="utf-8"))
+        case_id, buckets = record.get("case"), record.get("buckets")
+        if (not isinstance(case_id, str) or not isinstance(buckets, list)
+                or not buckets or not all(isinstance(b, str) for b in buckets)):
+            raise ValueError(f"{rel}: not a case record")
+        if case_path(case_id) != rel:
+            raise ValueError(f"{rel} records {case_id!r}, whose file is "
+                             f"{case_path(case_id)}")
+        rows += [[case_id, b] for b in buckets]
+    return sorted(rows, key=lambda row: row[0])
 
 
 def _read_records(path: Path, width: int) -> list[list[str]]:
@@ -1387,7 +1455,9 @@ def load_records(base: Path = RECORDS) -> dict:
     format, so a caller decides whether that is unusable input (`--verify`)
     or every path moving (the filter)."""
     base = Path(base)
-    cases = _read_records(base / CASES_RECORDS, 2)
+    cases = _read_cases(base)
+    if not cases:
+        raise ValueError(f"no case records under {base / CASES_DIR}")
     pins: dict[str, list[str]] = {g: [] for g in VERDICT_PIN_GROUPS}
     for group, rel in _read_records(base / PINS_RECORDS, 2):
         if group not in pins:
@@ -1520,10 +1590,11 @@ def record_problems(fresh: dict[str, str], base: Path = RECORDS) -> list[str]:
     """Each committed record file that is not byte for byte what `fresh`
     says. Pure apart from reading `base`."""
     problems = []
-    for name in RECORD_FILES:
-        path = Path(base) / name
+    base = Path(base)
+    for name in sorted(fresh):
+        path = base / name
         rel = (path.relative_to(ROOT).as_posix()
-               if path.is_relative_to(ROOT) else path.name)
+               if path.is_relative_to(ROOT) else name)
         if not path.is_file():
             problems.append(f"{rel} does not exist")
         elif path.read_text(encoding="utf-8") != fresh[name]:
@@ -1531,7 +1602,36 @@ def record_problems(fresh: dict[str, str], base: Path = RECORDS) -> list[str]:
                 f"{rel} differs from a fresh run; it was hand-edited, merged "
                 f"by hand, or the corpus, the checker or the baseline moved "
                 f"under it")
+    for name in case_files(base):
+        if name not in fresh:
+            problems.append(f"{name} records a program this run did not "
+                            f"read; regenerate to delete it")
     return problems
+
+
+def write_records(fresh: dict[str, str], base: Path = RECORDS) -> list[str]:
+    """Write `fresh` under `base` and delete every case file it does not name.
+    Returns the paths written or deleted."""
+    base = Path(base)
+    touched = []
+    for name in case_files(base):
+        if name not in fresh:
+            (base / name).unlink()
+            touched.append(f"deleted {name}")
+    for name, text in sorted(fresh.items()):
+        path = base / name
+        if path.is_file() and path.read_text(encoding="utf-8") == text:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        touched.append(f"wrote {name}")
+    # empty directories a deleted case left behind
+    root = base / CASES_DIR
+    if root.is_dir():
+        for d in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
+            if not any(d.iterdir()):
+                d.rmdir()
+    return touched
 
 
 # ------------------------------------------------------------ the verifier
@@ -1696,6 +1796,9 @@ def judge(published: dict, local: dict) -> dict:
 # lists above.
 OWN_FILES = ("tools/census_artifact.py",
              *(f"docs/census-artifact/{name}" for name in RECORD_FILES))
+# Every file under the records directory is the artifact's own (the case
+# records are one file per program).
+OWN_PREFIX = "docs/census-artifact/"
 
 
 def current_problems(result: dict) -> list[str]:
@@ -1769,6 +1872,7 @@ def moved_inputs(paths, committed: dict | None) -> list[str]:
     for rel in paths:
         parts = rel.split("/")
         if (rel in named or rel.startswith(pinned_dirs)
+                or rel.startswith(OWN_PREFIX)
                 or any(r.match(rel) for r in crate)
                 or (rel.endswith(".rvl") and rel.startswith(corpus_dirs)
                     and not skip & set(parts))):
@@ -2263,10 +2367,9 @@ def main(argv: list[str]) -> int:
     report, records = generate(args.engine, args.crate_json)
 
     if args.write:
-        RECORDS.mkdir(parents=True, exist_ok=True)
-        for name in RECORD_FILES:
-            (RECORDS / name).write_text(records[name], encoding="utf-8")
-            print(f"wrote {(RECORDS / name).relative_to(ROOT)}")
+        touched = write_records(records)
+        print(f"census artifact: {len(touched)} record file(s) written or "
+              f"deleted under {RECORDS.relative_to(ROOT)}/")
         return 0
 
     if args.check:

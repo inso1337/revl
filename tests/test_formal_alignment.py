@@ -28,7 +28,8 @@ revl:
     for a G5 or a G6 checker code, so `g5_undo_handle_emission.rvl` landed
     in `formal-found-other` and eleven more G5 refusals in the generic
     `out-of-fragment`. There is a G5 arm now, and a documented reason there
-    is no `agree-G6` (below).
+    is no `agree-G6` keyed on the `C` row (below); since issue #1812 the
+    G6 binding refusal has its own row, `BU`.
 
 And the promotion the first four were the precondition for: `formal-strict`
 and `formal-found-other` are in `FATAL_BUCKETS`. Informational is how the
@@ -38,8 +39,8 @@ And the level below that, which the F4 work could not reach: the two
 `out-of-fragment-G5` / `out-of-fragment-G6` buckets record an ABSENCE, so
 neither can disagree with anything and neither could fail. What is
 checkable without judging their contents is MEMBERSHIP, so both are held to
-`formal/out_of_fragment_ledger.json`, which shrinks only: a file joining a
-bucket without a line in it fails the gate, and a line no longer in its
+`formal/out_of_fragment_ledger/`, which shrinks only: a file joining a
+bucket without a record in it fails the gate, and a record no longer in its
 bucket fails the gate until it is deleted. The tests at the end name the
 input that makes each direction fire.
 
@@ -53,7 +54,6 @@ bound case that F3 must not cost.
 from __future__ import annotations
 
 import io
-import json
 import re
 import shutil
 import sys
@@ -390,9 +390,24 @@ G5_BY_U5 = "examples/rejections/g5_undo_fn_emission.rvl"
 #: row: an unmarked call to a method the service declares `emission`. This is
 #: the file that sat in `formal-found-other`.
 G5_BY_G_ROW = "examples/rejections/g5_undo_handle_emission.rvl"
-#: A G5 fixture no row sees: `undo dispatch1(ref)`, where `dispatch1` calls
-#: its own parameter, so the reach fold leaves the `Prog` at the first hop.
-G5_OUT_OF_PROG = "examples/rejections/g5_undo_handle_ref_arg.rvl"
+#: A G5 program no row sees: `undo f(key)` calls a function-typed PARAMETER,
+#: so the checker refuses it as an indirection it cannot bound, and the reach
+#: fold has no declaration to follow. Synthetic: since issue #1792 every G5
+#: fixture in the corpus is resolved, so the out-of-fragment arm is exercised
+#: by a program written here.
+G5_OPAQUE_SOURCE = """\
+service Cache { fn set(key: Str, f: (Str) -> Int) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key, f) {
+      effect store.insert(key, "v")
+      undo   f(key)
+    }
+  }
+}
+"""
+G5_OUT_OF_PROG = "corpus/g5_undo_opaque_param.rvl"
 #: The corpus's only G6-coded file.
 G6 = "examples/rejections/g6_method_local_shadows_component.rvl"
 
@@ -408,17 +423,30 @@ component C provides k: K {
 """
 
 
+@pytest.fixture(scope="module")
+def opaque(harness, tmp_path_factory):
+    """`G5_OPAQUE_SOURCE` exported as a corpus of its own:
+    `(root, rows, reference verdicts)`."""
+    root = tmp_path_factory.mktemp("g5_opaque")
+    rows, ref, _formal = _synthetic_corpus(
+        harness, root, {"g5_undo_opaque_param.rvl": G5_OPAQUE_SOURCE})
+    return root, ["\t".join(r) for r in rows], ref
+
+
 @pytest.fixture
 def align(harness, monkeypatch, tmp_path):
     """Run `checker_alignment` over ONE corpus file, with its no-manifest
     writer pointed at a scratch directory, and return
-    `(non-zero bucket counts, fatal findings, the printed report)`."""
+    `(non-zero bucket counts, fatal findings, the printed report)`. `repo`
+    compiles the file from a synthetic corpus root instead of the tree."""
     (tmp_path / "harness" / "out").mkdir(parents=True)
     monkeypatch.setattr(harness, "FORMAL", tmp_path)
 
-    def run(rel, verdicts, rows):
+    def run(rel, verdicts, rows, repo=None):
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with redirect_stdout(buf), pytest.MonkeyPatch.context() as mp:
+            if repo is not None:
+                mp.setattr(harness, "REPO", repo)
             fatal = harness.checker_alignment({rel: {}}, [], verdicts, rows)
         out = buf.getvalue()
         counts = {k: int(n) for k, n in re.findall(
@@ -428,11 +456,14 @@ def align(harness, monkeypatch, tmp_path):
     return run
 
 
-def test_the_checker_refuses_each_g5_fixture_with_code_g5(harness):
+def test_the_checker_refuses_each_g5_fixture_with_code_g5(harness, opaque):
     """The premise. All three arms below are about files revl answers `G5`
     for; if one stops being a G5 the test under it is measuring nothing."""
-    for rel in (G5_BY_U5, G5_BY_G_ROW, G5_OUT_OF_PROG):
+    for rel in (G5_BY_U5, G5_BY_G_ROW):
         assert harness.checker_code(rel)[0] == "G5", rel
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(harness, "REPO", opaque[0])
+        assert harness.checker_code(G5_OUT_OF_PROG)[0] == "G5"
 
 
 def test_a_resolvable_undo_agrees_by_the_u5_row(align, verdicts, rows):
@@ -454,13 +485,14 @@ def test_a_handle_undo_agrees_by_the_marker_row(align, verdicts, rows):
 
 
 def test_an_undo_that_leaves_the_prog_is_out_of_fragment_not_missed(
-        harness, align, verdicts, rows):
+        harness, align, opaque):
     """`missed-G5` would be a claim that the model went blind. Here the model
-    has no fact at all: `dispatch1` calls its own parameter, which is not a
-    declared fn or extern, so the reach fold has nothing to follow. Named,
-    not counted, and not fatal."""
+    has no fact at all: `f` is a function-typed parameter, not a declared fn
+    or extern or a binding in view, so the reach fold has nothing to follow.
+    Named, not counted, and not fatal."""
+    root, rows, verdicts = opaque
     assert G5_OUT_OF_PROG not in harness.g5_files_the_prog_resolves(rows)
-    counts, fatal, out = align(G5_OUT_OF_PROG, verdicts, rows)
+    counts, fatal, out = align(G5_OUT_OF_PROG, verdicts, rows, repo=root)
     assert counts == {"out-of-fragment-G5": 1}
     assert fatal == []
     assert f"ALIGN out-of-fragment-G5: {G5_OUT_OF_PROG}" in out
@@ -501,16 +533,38 @@ def test_the_confinement_row_fails_on_a_program_the_checker_accepts(
     assert any(x == "fail" for x in ref.confinements.values())
 
 
-def test_a_g6_refusal_is_out_of_fragment_with_the_model_clean(
+def test_a_g6_binding_refusal_agrees_by_the_binding_row(
         align, verdicts, rows, harness):
     """revl's G6 is purity outside effect forms and the duplicate-binding
-    refusal; the model states neither. Its verdicts on the file are all
-    `ok`, and the `C` rows that do `fail` are about something else."""
-    assert harness.checker_code(G6)[0] == "G6"
+    refusal. The file is a binding refusal, and the `BU` row (issue #1812)
+    is what agrees with it: the `G` row is `ok`, and the `C` rows that do
+    `fail` are about something else."""
+    assert harness.checker_code(G6) == ("G6", "binding")
     assert verdicts.comps[(G6, "C")] == "ok"
     assert any(x == "fail" for k, x in verdicts.confinements.items()
                if k[0] == G6)
-    counts, fatal, out = align(G6, verdicts, rows)
+    assert verdicts.bindings[(G6, "C", "cache.set")] == "fail"
+    counts, fatal, _out = align(G6, verdicts, rows)
+    assert counts == {"agree-G6": 1}
+    assert fatal == []
+
+
+def _as_purity_refusal(harness, monkeypatch):
+    """Report the G6 file as a PURITY refusal, the G6 category the model
+    still states no rule about. No corpus file outside the parse refusals
+    has one, so the arm is exercised on the one G6 file the checker sees."""
+    real = harness.checker_code
+    monkeypatch.setattr(harness, "checker_code", lambda rel: (
+        ("G6", "purity") if rel == G6 else real(rel)))
+
+
+def test_a_g6_purity_refusal_is_out_of_fragment_with_the_model_clean(
+        align, verdicts, rows, harness, monkeypatch):
+    """The model states nothing about purity outside an effect form, so a
+    purity refusal with every row `ok` is an absence, ratcheted by name."""
+    _as_purity_refusal(harness, monkeypatch)
+    clean = verdicts._replace(bindings={k: "ok" for k in verdicts.bindings})
+    counts, fatal, out = align(G6, clean, rows)
     assert counts == {"out-of-fragment-G6": 1}
     assert fatal == []
     assert f"ALIGN out-of-fragment-G6: {G6}" in out
@@ -536,11 +590,15 @@ def test_a_model_refusal_on_an_accepted_file_fails_the_gate(
 
 
 def test_a_model_refusal_under_an_unmodelled_code_fails_the_gate(
-        align, verdicts, rows):
+        align, verdicts, rows, harness, monkeypatch):
     """The input that still FAILS for `formal-found-other`: revl refuses the
-    G6 file for a rule the model does not state, and a model row refuses it
-    for some other reason. `out-of-fragment-G6` is only for a CLEAN model."""
-    dirty = verdicts._replace(comps={**verdicts.comps, (G6, "C"): "fail"})
+    G6 file for a rule the model does not state (purity), and a model row
+    refuses it for some other reason. `out-of-fragment-G6` is only for a
+    CLEAN model."""
+    _as_purity_refusal(harness, monkeypatch)
+    dirty = verdicts._replace(
+        comps={**verdicts.comps, (G6, "C"): "fail"},
+        bindings={k: "ok" for k in verdicts.bindings})
     counts, fatal, _out = align(G6, dirty, rows)
     assert counts == {"formal-found-other": 1}
     assert fatal == [f"formal-found-other: {G6}"]
@@ -632,26 +690,34 @@ def test_the_block_stores_no_count_that_moves_with_the_corpus(harness, exported)
     assert f"{census['files']} .rvl files" not in block
 
 
-def test_a_forgotten_regeneration_of_a_named_bucket_still_fails(
-        harness, status, monkeypatch):
-    """The currency check is as strict as before for everything the block
-    still holds: a file that joins a ratcheted bucket changes the block, and a
-    checkout that did not regenerate it fails `sync_status`."""
+def test_a_file_joining_a_ratcheted_bucket_fails_without_touching_the_block(
+        harness, status, ledger, monkeypatch):
+    """Since issue #1768 the block does not list the ratcheted buckets'
+    members, so a file joining one leaves the block as it was, and two pull
+    requests that each add one cannot conflict there. The check is as strict
+    as before: the ratchet fails the gate on the joined file until a ledger
+    record names it, and a stale block still fails `sync_status`."""
     block, _fatal, _align, samples = status
+    write, check = ledger
+    write(samples)
     bucket = harness.OOF_RATCHET_BUCKETS[0]
-    monkeypatch.setitem(harness._ALIGN_SAMPLES, bucket,
-                        list(samples.get(bucket, [])) + ["zz/joined.rvl"])
+    joined = list(samples.get(bucket, [])) + ["zz/joined.rvl"]
+    monkeypatch.setitem(harness._ALIGN_SAMPLES, bucket, joined)
     rows_block = harness.status_block({}, {}, [], {}, None, harness._ALIGN)
-    assert rows_block != block
-    assert harness.sync_status(rows_block, write=False) is not None
+    assert rows_block == block
+    findings = check({**samples, bucket: joined})
+    assert len(findings) == 1 and findings[0].startswith(f"joined {bucket}: zz/joined.rvl")
+    assert harness.sync_status(block.replace("ratcheted", "informational", 1),
+                               write=False) is not None
 
 
 def test_two_pull_requests_that_add_files_merge_in_the_block(harness, status):
     """The exit test of issue #1768 for this file. Two pull requests each add
     a file to a different ratcheted bucket, and so (in the corpus) a file to
-    the census. The block they write differs only in the named lines, which
-    git merges. The block they used to write also rewrote the census
-    paragraph and the count rows, and conflicted."""
+    the census. The block they write is the same block, since the members
+    live in the ledger directory, so git merges it. The block they used to
+    write also rewrote the census paragraph and the count rows, and
+    conflicted."""
     from _merge_tree import git_has_merge_tree, merge  # noqa: PLC0415
     if not git_has_merge_tree():
         pytest.skip("git merge-tree --write-tree needs git 2.38")
@@ -720,7 +786,7 @@ NEWCOMER = "examples/rejections/g5_undo_method_ref_map.rvl"
 def ledger(harness, tmp_path, monkeypatch):
     """Point the ratchet at a scratch ledger and return
     `(write(samples), check(samples))`."""
-    path = tmp_path / "out_of_fragment_ledger.json"
+    path = tmp_path / "out_of_fragment_ledger"
     monkeypatch.setattr(harness, "OOF_LEDGER_PATH", path)
 
     def write(samples):
@@ -741,8 +807,7 @@ def test_the_committed_ledger_is_this_corpus_s_membership(harness, status):
     _block, _fatal, _align, samples = status
     with redirect_stdout(io.StringIO()):
         assert harness.out_of_fragment_ratchet(samples) == []
-    committed = json.loads(
-        harness.OOF_LEDGER_PATH.read_text(encoding="utf-8"))
+    committed = harness.load_out_of_fragment_ledger()
     for bucket in harness.OOF_RATCHET_BUCKETS:
         assert committed[bucket] == sorted(samples.get(bucket, [])), bucket
 
@@ -758,7 +823,8 @@ def test_a_file_joining_an_out_of_fragment_bucket_fails_the_gate(
     write(samples)
     assert check(samples) == []
     joined = {**samples,
-              "out-of-fragment-G5": [*samples["out-of-fragment-G5"], NEWCOMER]}
+              "out-of-fragment-G5": [
+                  *samples.get("out-of-fragment-G5", []), NEWCOMER]}
     findings = check(joined)
     assert findings == [f for f in findings if f.startswith(
         "joined out-of-fragment-G5: ")]
@@ -774,7 +840,7 @@ def test_a_file_joining_the_g6_bucket_fails_the_gate(harness, status, ledger):
     write(samples)
     newcomer = "examples/rejections/g6_new_shape.rvl"
     findings = check({**samples, "out-of-fragment-G6": [
-        *samples["out-of-fragment-G6"], newcomer]})
+        *samples.get("out-of-fragment-G6", []), newcomer]})
     assert len(findings) == 1
     assert findings[0].startswith(f"joined out-of-fragment-G6: {newcomer}")
 
@@ -787,15 +853,14 @@ def test_a_stale_ledger_line_fails_the_gate_and_must_be_deleted(
     so each one reds until it is removed."""
     _block, _fatal, _align, samples = status
     write, check = ledger
-    write(samples)
-    shrunk = {**samples,
-              "out-of-fragment-G5": samples["out-of-fragment-G5"][1:]}
-    findings = check(shrunk)
+    held = {**samples, "out-of-fragment-G5": [
+        *samples.get("out-of-fragment-G5", []), NEWCOMER]}
+    write(held)
+    findings = check(samples)
     assert len(findings) == 1
-    assert findings[0].startswith(
-        f"left out-of-fragment-G5: {samples['out-of-fragment-G5'][0]}")
-    write(shrunk)
-    assert check(shrunk) == []
+    assert findings[0].startswith(f"left out-of-fragment-G5: {NEWCOMER}")
+    write(samples)
+    assert check(samples) == []
 
 
 def test_a_missing_ledger_is_a_failure_not_a_pass(harness, status, ledger):
@@ -807,25 +872,148 @@ def test_a_missing_ledger_is_a_failure_not_a_pass(harness, status, ledger):
     assert len(findings) == 1 and "is missing" in findings[0]
 
 
-def test_a_ledger_without_a_name_list_is_a_failure(harness, status, ledger):
-    """A bucket key replaced by something that is not a list of names is not
-    an empty expectation; it is an unreadable ratchet."""
+def test_a_ledger_with_an_unreadable_record_is_a_failure(harness, status, ledger):
+    """A file that is not one record's canonical bytes at that record's own
+    path is not an empty expectation; it is an unreadable ratchet. That
+    covers a malformed record, a bucket the ratchet does not hold, a record
+    filed at another name's path, non-canonical bytes, and a stray file."""
     _block, _fatal, _align, samples = status
     write, check = ledger
-    path = write(samples)
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    doc["out-of-fragment-G6"] = 1
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    findings = check(samples)
-    assert len(findings) == 1 and "no list of names" in findings[0]
+    inverse = "out-of-fragment-inverse"
+    rel = "examples/rejections/x.rvl"
+    target = f"{inverse}/examples/rejections/x.rvl.json"
+    for name, bad in (
+            (target, '["out-of-fragment-inverse", 1]\n'),
+            ("out-of-fragment-nope/examples/rejections/x.rvl.json",
+             '["out-of-fragment-nope", "examples/rejections/x.rvl"]\n'),
+            (target, '{"out-of-fragment-inverse": []}\n'),
+            (target, '["out-of-fragment-inverse", "examples/rejections/y.rvl"]\n'),
+            (target, f'["{inverse}","{rel}"]\n'),
+            (f"{inverse}/README.md", "notes\n")):
+        path = write(samples)
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_text(bad, encoding="utf-8")
+        findings = check(samples)
+        assert len(findings) == 1 and "not a readable ledger" in findings[0], (
+            name, bad, findings)
+        (path / name).unlink()
+
+
+def test_a_ledger_name_maps_to_one_readable_path(harness):
+    """The record path mirrors the name, and a name that is not a clean
+    path is escaped, so two names never share a file."""
+    cases = {
+        "examples/rejections/g4_undo_not_release.rvl":
+            "out-of-fragment-inverse/examples/rejections/g4_undo_not_release.rvl.json",
+        "a b.rvl": "out-of-fragment-inverse/_escaped/a%20b.rvl.json",
+        "_escaped/x.rvl": "out-of-fragment-inverse/_escaped/_escaped%2Fx.rvl.json",
+        "../x.rvl": "out-of-fragment-inverse/_escaped/..%2Fx.rvl.json",
+        "a//b.rvl": "out-of-fragment-inverse/_escaped/a%2F%2Fb.rvl.json",
+    }
+    for rel, want in cases.items():
+        assert harness.ledger_record_path("out-of-fragment-inverse", rel) == want
+
+
+def test_the_committed_ledger_is_one_file_per_record(harness):
+    """Every committed record is at its own path with its canonical bytes:
+    the loader refuses anything else, so loading is the check."""
+    root = harness.OOF_LEDGER_PATH
+    doc = harness.load_out_of_fragment_ledger()
+    files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
+                   if p.is_file())
+    assert files == sorted(harness.ledger_files(doc))
+
+
+def test_write_deletes_a_closed_record_and_its_empty_directories(
+        harness, status, ledger):
+    _block, _fatal, _align, samples = status
+    write, check = ledger
+    held = {**samples, "out-of-fragment-G5": [NEWCOMER]}
+    path = write(held)
+    record = path / harness.ledger_record_path("out-of-fragment-G5", NEWCOMER)
+    assert record.is_file()
+    write(samples)
+    assert not record.exists()
+    assert not (path / "out-of-fragment-G5").exists()
+    assert check(samples) == []
+
+
+def test_records_added_beside_each_other_merge(harness, tmp_path):
+    """The property issue #1768 is about: two branches that each add a name
+    to the same bucket, next to each other in sort order, merge under a plain
+    3-way merge, and a branch that closes a name merges with one that adds
+    the name beside it."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+           "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], env=env,
+                              capture_output=True, text=True, check=True).stdout
+
+    bucket = "out-of-fragment-inverse"
+
+    def commit(names, message):
+        harness.write_out_of_fragment_ledger({bucket: names}, repo / "ledger")
+        git("add", "-A")
+        git("commit", "-q", "--allow-empty", "-m", message)
+        return git("rev-parse", "HEAD").strip()
+
+    git("init", "-q", "-b", "main")
+    base = commit(["a/m.rvl", "a/q.rvl"], "base")
+    one = commit(["a/m.rvl", "a/n.rvl", "a/q.rvl"], "one")
+    git("checkout", "-q", "--detach", base)
+    other = commit(["a/m.rvl", "a/o.rvl"], "other")
+    result = subprocess.run(["git", "-C", str(repo), "merge-tree",
+                             "--write-tree", one, other], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout
+    tree = result.stdout.split()[0]
+    listed = git("ls-tree", "-r", "--name-only", tree).split()
+    assert sorted(listed) == [f"ledger/{bucket}/a/{n}.rvl.json"
+                              for n in ("m", "n", "o")]
+
+
+def test_show_ledger_prints_bucket_and_name_sorted(harness, status, ledger):
+    _block, _fatal, _align, samples = status
+    write, _check = ledger
+    held = {**samples, "out-of-fragment-G5": [NEWCOMER]}
+    write(held)
+    shown = harness.show_ledger().splitlines()
+    assert shown == sorted(shown)
+    assert f"out-of-fragment-G5 {NEWCOMER}" in shown
+    write({})
+    assert harness.show_ledger() == "the out-of-fragment ledger is empty"
+
+
+def test_show_ledger_is_a_read_only_flag():
+    """`--show-ledger` prints the committed ledger and writes nothing."""
+    import subprocess
+
+    before = sorted(p.as_posix() for p in (ROOT / "formal").rglob("*")
+                    if "out_of_fragment_ledger" in p.as_posix())
+    out = subprocess.run([sys.executable, str(ROOT / "formal" / "harness" /
+                                              "diff_corpus.py"), "--show-ledger"],
+                         capture_output=True, text=True, check=True, cwd=ROOT)
+    assert out.stdout.splitlines() == sorted(out.stdout.splitlines())
+    assert all(line.split(" ", 1)[0].startswith("out-of-fragment-")
+               for line in out.stdout.splitlines())
+    after = sorted(p.as_posix() for p in (ROOT / "formal").rglob("*")
+                   if "out_of_fragment_ledger" in p.as_posix())
+    assert before == after
 
 
 def test_the_ledger_records_names_only(harness):
     """Names, never counts or line numbers, so a `--write-ledger` under the
     3.14 developer venv and under CI's 3.11 are the same bytes (the shape
     PR #1214's construct-reach ledger settled on)."""
-    doc = json.loads(harness.OOF_LEDGER_PATH.read_text(encoding="utf-8"))
-    assert set(doc) == {"_about", *harness.OOF_RATCHET_BUCKETS}
+    doc = harness.load_out_of_fragment_ledger()
+    assert set(doc) == set(harness.OOF_RATCHET_BUCKETS)
     for bucket in harness.OOF_RATCHET_BUCKETS:
         assert doc[bucket] == sorted(doc[bucket])
         for rel in doc[bucket]:
@@ -838,9 +1026,13 @@ def test_the_write_is_byte_stable(harness, status, ledger):
     in the tree are what this corpus writes."""
     _block, _fatal, _align, samples = status
     write, _check = ledger
-    first = write(samples).read_bytes()
-    assert write(samples).read_bytes() == first
-    assert harness.OOF_LEDGER_PATH.read_bytes() == first
+    def tree(root):
+        return {p.relative_to(root).as_posix(): p.read_bytes()
+                for p in root.rglob("*") if p.is_file()}
+
+    first = tree(write(samples))
+    assert tree(write(samples)) == first
+    assert tree(harness.OOF_LEDGER_PATH) == first
 
 
 def test_the_census_writer_does_not_widen_the_ratchet(harness):
@@ -860,7 +1052,7 @@ def test_the_alignment_arms_do_not_run_the_ratchet(align, verdicts, rows):
     """The ratchet is a statement about the WHOLE corpus, so it lives in
     `main()`. Run over one file it would read every other name in the
     ledger as stale, which is why `checker_alignment` does not call it."""
-    _counts, fatal, _out = align(G5_OUT_OF_PROG, verdicts, rows)
+    _counts, fatal, _out = align(G5_BY_U5, verdicts, rows)
     assert fatal == []
 
 
@@ -874,7 +1066,7 @@ def test_the_gate_reports_the_ratchet_as_a_gate_failure(harness):
     assert "return 1 if (mismatches or fatal) else 0" in body
 
 
-def test_status_md_calls_the_two_buckets_ratcheted(status):
+def test_status_md_calls_the_two_buckets_ratcheted(harness, status):
     """The document stops saying `out-of-fragment*` is informational for the
     two that are now held to a ledger.
 
@@ -892,15 +1084,18 @@ def test_status_md_calls_the_two_buckets_ratcheted(status):
     regeneration cannot repair.
     """
     block, _fatal, _align, _samples = status
-    ledger = json.loads(
-        (ROOT / "formal" / "out_of_fragment_ledger.json").read_text(
-            encoding="utf-8"))
-    for bucket in ("out-of-fragment-G5", "out-of-fragment-G6"):
-        assert f"| `{bucket}` | {len(ledger[bucket])} | ratcheted |" in block
+    ledger = harness.load_out_of_fragment_ledger()
+    # Since issue #1768 a ratcheted row carries neither a count nor its
+    # members: the block points at the ledger directory and `--show-ledger`.
+    for bucket in harness.OOF_RATCHET_BUCKETS:
+        assert f"| `{bucket}` | in the ledger | ratcheted |" in block
+        for rel in ledger[bucket]:
+            assert f"`{rel}`" not in block
+    assert "--show-ledger" in block
     # Since issue #1768 the plain bucket's count is not in the block at all:
     # the gate prints it, and a stored census count is what made every pull
     # request that added a `.rvl` conflict here.
     assert re.search(
         r"^\| `out-of-fragment` \| printed by the gate \| informational \|$",
         block, re.M), block
-    assert "out_of_fragment_ledger.json" in block
+    assert "`formal/out_of_fragment_ledger/<bucket>/`" in block
