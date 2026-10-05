@@ -434,6 +434,28 @@ def test_every_record_field_call_document_is_decided_alike_by_both(measured):
     assert not wrong, "\n  ".join(["record-field-call documents moved:"] + wrong)
 
 
+# --- a deferred extern reached outside an `emit` marker (item 400, #1688) -----
+#
+# The reference refused each `g4_` document under G4 and the gate raised no
+# objection, a gap no corpus document showed until these. `g4_` both refuse,
+# `ok_` both admit.
+DEFERRED_REACH = ROOT / "tests" / "fixtures" / "deferred_reach"
+
+
+def test_every_deferred_reach_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(DEFERRED_REACH.glob("*.rvl"))
+    assert len(docs) == 9, f"the deferred-reach corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["deferred-reach documents moved:"] + wrong)
+
+
 # --- `try e`, Result propagation in a `fn` body (issue #1900) ---------------
 #
 # `ok_` both admit; `t1_` both refuse T1 with the same message: an operand that

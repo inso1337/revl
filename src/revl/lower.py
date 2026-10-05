@@ -464,7 +464,8 @@ IR_TOPLEVEL_FIELDS = frozenset({
 })
 
 
-def _ir_params(named_types, secret_params=()) -> list:
+def _ir_params(named_types, secret_params=(), trusted_params=(),
+               untrusted_params=()) -> list:
     """The IR `params` list for a declaration, carrying the `Secret[T]` marking.
 
     `named_types` yields `(name, type)` pairs; `secret_params` is the index set
@@ -479,10 +480,19 @@ def _ir_params(named_types, secret_params=()) -> list:
     confidentiality from a value.
 
     Additive: absent unless the author wrote `Secret[T]`, so every existing IR
-    document stays byte-identical."""
+    document stays byte-identical.
+
+    Issue #1937: a service operation's `Trusted[T]` and `Untrusted[T]`
+    parameters are carried the same way (`trusted`, `untrusted`), so a unit
+    compiled against this IR as a manifest still sees the sink and the
+    untrusted input. Absent unless declared."""
     secret = frozenset(secret_params or ())
+    trusted = frozenset(trusted_params or ())
+    untrusted = frozenset(untrusted_params or ())
     return [{"name": name, "type": type_name,
-             **({"secret": True} if index in secret else {})}
+             **({"secret": True} if index in secret else {}),
+             **({"trusted": True} if index in trusted else {}),
+             **({"untrusted": True} if index in untrusted else {})}
             for index, (name, type_name) in enumerate(named_types)]
 
 
@@ -8944,8 +8954,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                 "methods": {
                     m.name: {
                         "params": _ir_params(
-                            m.params, getattr(m, "secret_params", ())),
+                            m.params, getattr(m, "secret_params", ()),
+                            getattr(m, "trusted_params", ()),
+                            getattr(m, "untrusted_params", ())),
                         "returns": m.returns,
+                        # issue #1937: the qualifier stripped off `returns`
+                        # (`Untrusted` or `Secret`), so a unit compiled against
+                        # this IR reads the operation's data as tainted.
+                        # Absent unless declared, so existing IR is unchanged.
+                        **({"returns_qualifier": m.returns_qualifier}
+                           if getattr(m, "returns_qualifier", None) else {}),
                         # roadmap item 441 / issue #120 (L5,
                         # docs/design/458-termination-language-surface.md §3, §6):
                         # which operations are termination criteria/guards is a

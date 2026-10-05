@@ -324,11 +324,22 @@ def test_the_report_names_what_it_does_not_establish(committed, committed_md):
         assert line in committed_md
 
 
-def test_the_reproduction_states_its_own_limit(committed):
+def test_the_reproduction_states_its_own_limit(artifact, committed):
     """The crate is built FROM `selfhost/lower.rvl`, so it is the same source
     through a different toolchain and not a second specification. Publishing it
-    as an independent reproduction without that sentence would over-claim."""
+    as an independent reproduction without that sentence would over-claim.
+
+    With no record at the current checker version there is no reproduction to
+    state a limit for, and this SKIPS saying so, with the fix, the same words
+    `--verify --strict` uses. Currency is enforced there, in CI's
+    `census-artifact` job, and not in the root suite (#1917's design): CI tests
+    the merge ref, so a pull request's checker version is merge(main, branch),
+    and every checker-moving landing makes every other open pull request's
+    record stale. A root-suite failure on that would never converge."""
     rep = committed["census"]["reproduction"]
+    if rep is None:
+        pytest.skip("\n".join(artifact.reproduction_problems()
+                              or ["no crate reproduction is recorded"]))
     assert "not a second" in rep["does_not_establish"]
     assert "build_gate_crate" in rep["does_not_establish"]
 
@@ -1277,3 +1288,33 @@ def test_the_reproduction_check_is_as_strict_and_names_what_it_missed(
     assert rep["census_programs_not_in_reproduction"] == 3
     assert ("census programs this run read that the reproduction did not: "
             "**3**") in artifact.render_markdown(short)
+
+
+def test_a_missing_current_record_skips_and_names_the_fix(artifact, tmp_path,
+                                                         monkeypatch):
+    """With no record at the current checker version the limit test skips,
+    and its reason is the missing version and the command, the same text
+    `--verify --strict` reports, never a crash and never a silent pass."""
+    (tmp_path / "GATE-CENSUS-1+old.json").write_text(artifact.reproduction_text(
+        {"note": "n", "engine": "crate", "checker_version": "GATE-CENSUS-1+old",
+         "tracked_buckets": {}, "false_admissions": [], "programs": ["a.rvl"]}))
+    monkeypatch.setattr(artifact, "reproduction_problems",
+                        lambda base=tmp_path, _f=artifact.reproduction_problems:
+                        _f(base))
+    committed = {"census": {"reproduction": None}}
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        test_the_reproduction_states_its_own_limit(artifact, committed)
+    message = str(excinfo.value)
+    version, _ = artifact.checker_version()
+    assert version in message
+    assert "python3 tools/regen_generated.py --only census" in message
+    # and `--verify --strict` still treats the same state as a failure
+    assert artifact.reproduction_problems(tmp_path)
+
+
+def test_a_current_record_still_asserts_the_limit_sentence(artifact):
+    """The skip is only for a missing record: a reproduction that is present
+    and drops its limit sentence still fails."""
+    with pytest.raises(AssertionError):
+        test_the_reproduction_states_its_own_limit(
+            artifact, {"census": {"reproduction": {"does_not_establish": "x"}}})

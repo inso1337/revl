@@ -1,0 +1,15 @@
+// REFUSED G4 (item 400): a test body calls the deferred extern by name. The
+// file name's prefix is the expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_gate_deferred_reach_1688.py holds it.
+
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops {
+    fn enqueue(sink, msg) { emit deliver(sink, msg) }
+  }
+}
+test "fires" {
+  let r = deliver("s", "m")
+  assert true
+}

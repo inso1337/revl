@@ -64,6 +64,7 @@ EXPECTED_WORKFLOWS = frozenset({
     "publish.yml",
     "release-dryrun.yml",
     "site-wheel.yml",
+    "windows-smoke.yml",
     "x64-smoke.yml",
 })
 

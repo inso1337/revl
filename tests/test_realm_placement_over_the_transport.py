@@ -388,9 +388,16 @@ def test_the_untrusted_author_profile_carries_every_author_flag():
     from revl.admit_profile import AdmissionProfile
 
     profile = AdmissionProfile.untrusted_author(["Ops"])
+    keyed = AdmissionProfile.untrusted_author(["Ops"], requires=[("A", "ops")])
     for field in fields(AdmissionProfile):
         if field.name == "granted":
             assert profile.granted == frozenset({"Ops"})
+            continue
+        if field.name == "granted_requires":
+            # issue #1926: part of the GRANT, not a property of the author. It
+            # can only narrow `granted`; `None` keeps the per-service allowlist.
+            assert profile.granted_requires is None
+            assert keyed.granted_requires == frozenset({("A", "ops")})
             continue
         assert getattr(profile, field.name) is True, (
             f"`untrusted_author` leaves `{field.name}` off. Every field here is "

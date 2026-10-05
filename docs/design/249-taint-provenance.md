@@ -311,6 +311,22 @@ provably reaches a shell sink in the visible source) is a new admission
 refusal in B: the declaration must carry the `Trusted[T]`, because consumers
 compiled against the declaration alone will rely on it.
 
+How the declaration crosses the boundary (issue #1937): the manifest is the
+running composition's IR, and the IR's types are stripped. So the IR carries
+what the strip removed, beside the bare type:
+- `"trusted": true` on a `Trusted[T]` parameter of a service operation;
+- `"untrusted": true` on an `Untrusted[T]` parameter;
+- `"returns_qualifier": "Untrusted"` (or `"Secret"`) on the operation.
+
+Each key is absent unless declared, so a program with no qualifier keeps its
+IR byte for byte. `taint.fold_ambient_composition` reads them back for every
+unit compiled against the manifest, with or without `taint_strict`, because a
+declared qualifier is a statement about the value, not a derived class. A unit
+that redeclares the service without the qualifier does not clean it: the
+running composition's declaration still mints at the operation. The self-host
+lowering (`selfhost/lower.rvl`, `ir_service_params_json`) writes the same
+keys.
+
 ### First-class function values
 
 G4 models a bare emitting-callable reference as the unnameable capability `*`.
