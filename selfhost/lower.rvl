@@ -4265,7 +4265,130 @@ fn nested_emit_msg() -> Str {
 fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (i >= ss.length() || a.msg != "") { return a }
   let j = group_end(ss, i)
-  return walk_stmts(ss, j, cx, appr_group(ss, i, cx, walk_span(ss, i, j, cx, a)))
+  return walk_stmts(ss, j, cx,
+    release_group(ss, i, appr_group(ss, i, cx, walk_span(ss, i, j, cx, a))))
+}
+
+// ---- a host acquisition's inverse is its release (issue #1859) ------------
+//
+// lower.py `_check_host_release`: for `Map.new`, `Pool.open` and
+// `Stream.source` the bracket's `undo` must be the family's release applied
+// to the handle the bracket bound (`undo store.drop()`), and an unbound host
+// acquisition is refused, since nothing names a handle to release. The
+// reference judges it after the undo is lowered (and after G5 and O1/B1), so
+// here it is judged at the `undo` statement once its own walk is clean, which
+// is where an earlier refusal in that slot would already have stopped the walk.
+fn host_acq_fn(s: Stmt) -> Str {
+  if (s.kind != "effect") { return "" }
+  return match s.e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        Var(v) => host_acquire_release(v, fl.name) != ""
+          ? v.concat(".").concat(fl.name) : "",
+        _ => "",
+      },
+      _ => "",
+    },
+    _ => "",
+  }
+}
+
+fn release_of_fn(hf: Str) -> Str {
+  if (hf == "Map.new") { return "drop" }
+  if (hf == "Pool.open" || hf == "Stream.source") { return "close" }
+  return ""
+}
+
+fn undo_releases(u: Expr, bind: Str, release: Str) -> Bool {
+  return match u {
+    Call(c) => c.args.length() == 0 && field_on_name(c.target, bind, release),
+    _ => false,
+  }
+}
+
+fn field_on_name(tg: Expr, bind: Str, release: Str) -> Bool {
+  return match tg {
+    Field(fl) => fl.name == release && is_var_named(fl.target, bind),
+    _ => false,
+  }
+}
+
+fn is_hole_expr(e: Expr) -> Bool {
+  return match e { Hole(h) => true, _ => false }
+}
+
+fn is_var_named(e: Expr, n: Str) -> Bool {
+  return match e { Var(v) => v == n, _ => false }
+}
+
+// The reference's whole stub surface of the three acquire families
+// (`_HOST_FAMILIES`), which is wider than `tk_host_verbs` lists for `Map`.
+fn release_fam_verbs(fam: Str) -> List[Str] {
+  if (fam == "Map") {
+    return ["drop", "get", "insert", "insert_if_absent", "keys", "new", "remove", "size"]
+  }
+  if (fam == "Pool") { return ["close", "execute", "open", "query"] }
+  if (fam == "Stream") { return ["close", "source"] }
+  return []
+}
+
+fn off_surface_on(u: Expr, bind: Str, fam: Str) -> Bool {
+  return match u {
+    Call(c) => match c.target {
+      Field(fl) => is_var_named(fl.target, bind)
+        && (!contains(release_fam_verbs(fam), fl.name)
+            || tk_host_params(fam, fl.name).length() != c.args.length()),
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn host_unbound_msg(hf: Str, release: Str) -> Str {
+  return "`effect ".concat(hf)
+    .concat("(...)` must bind its handle so its `undo` can release it: write `let <name> = effect ")
+    .concat(hf).concat("(...) undo <name>.").concat(release).concat("()`")
+}
+
+fn host_release_msg(bind: Str, hf: Str, release: Str) -> Str {
+  return "the `undo` of `let ".concat(bind).concat(" = effect ").concat(hf)
+    .concat("(...)` must release THAT handle: write `undo ").concat(bind)
+    .concat(".").concat(release).concat("()`")
+}
+
+// The verdict for the group at i, when it is the `undo` of a host acquisition.
+fn release_msg_at(ss: List[Stmt], i: Int) -> Str {
+  if (i == 0 || ss[i].kind != "undo") { return "" }
+  let hf = host_acq_fn(ss[i - 1])
+  if (hf == "") { return "" }
+  let release = release_of_fn(hf)
+  let bind = ss[i - 1].bind
+  if (bind == "") { return host_unbound_msg(hf, release) }
+  if (undo_releases(ss[i].e, bind, release)) { return "" }
+  // a typed hole is an unfilled obligation, judged when it is filled
+  if (is_hole_expr(ss[i].e)) { return "" }
+  // a verb the family does not have, or a wrong arity, on the bound handle:
+  // the reference refuses it while it lowers the undo (HOST-METHOD /
+  // HOST-ARITY), before this rule is reached, and this gate does not judge
+  // the host surface in a teardown slot, so it leaves that program alone
+  if (off_surface_on(ss[i].e, bind, hf.slice(0, hf.indexOf(".")))) { return "" }
+  return host_release_msg(bind, hf, release)
+}
+
+// The first release refusal over a provide-method body.
+fn method_release_msg(ss: List[Stmt], i: Int) -> Str {
+  if (i >= ss.length()) { return "" }
+  // only the UNBOUND form: a host acquisition bound in a method is the
+  // reference's "only `spawn` may be acquired" refusal, raised earlier
+  let m = ss[i - 1].bind == "" ? release_msg_at(ss, i) : ""
+  if (m != "") { return m }
+  return method_release_msg(ss, i + 1)
+}
+
+fn release_group(ss: List[Stmt], i: Int, a: Ac) -> Ac {
+  if (a.msg != "") { return a }
+  let m = release_msg_at(ss, i)
+  return m == "" ? a : ac_refuse(a, "G4", m)
 }
 
 // ---- one statement's evidence, in the reference's order (issue #1261) ------
@@ -4728,8 +4851,44 @@ fn call_head_declared(cx: Ctx, name: Str) -> Bool {
 }
 
 fn g1_refuse(cx: Ctx, name: Str, a: Ac) -> Ac {
+  // issue #1847: a builtin type named as a value (`List.reverse(xs)`) is the
+  // reference's `_refuse_builtin_type_value`, not a missing requirement: its
+  // "add `requires List`" hint could not be followed.
+  if (is_typecheck_builtin_type(name)) {
+    return ac_refuse(a, "T1", builtin_type_value_msg(name))
+  }
   return ac_refuse(a, "G1", "`".concat(name)
     .concat("` is not a declared requirement of ").concat(cx.compName))
+}
+
+// typecheck.py `_BUILTIN_TYPE_NAMES`, `Value` included (the older
+// `is_builtin_type_name` above predates it and is left as it is).
+fn is_typecheck_builtin_type(n: Str) -> Bool {
+  return contains(["Any", "Bool", "Bytes", "Float", "Int", "Int32", "List",
+                   "Map", "Never", "Opt", "Result", "Str", "Unit", "Value"], n)
+}
+
+fn builtin_type_value_msg(name: Str) -> Str {
+  return "`".concat(name)
+    .concat("` is a builtin type, not a value")
+}
+
+// lower.py `_RESERVED_REQUIREMENT_KEYS`: every builtin type and every host
+// root (issue #1847). A requirement key spelling one made `List.<op>`
+// resolve to the required service instead of the builtin.
+fn shadow_key_msg(key: Str, comp: Str) -> Str {
+  let what = is_typecheck_builtin_type(key) ? "builtin type" : "host root"
+  return "requirement key `".concat(key).concat("` of ").concat(comp)
+    .concat(" shadows the ").concat(what).concat(" `").concat(key).concat("`")
+}
+
+fn key_binding_of(key: Str) -> Str {
+  let parts = key.split("::")
+  return parts[parts.length() - 1]
+}
+
+fn shadow_key_reserved(b: Str) -> Bool {
+  return is_typecheck_builtin_type(b) || tk_is_host_family(b)
 }
 
 // A call through a receiver `root.meth`. When `root` is a required key this is
@@ -5631,6 +5790,10 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   // reports it at the `emit` step's own line
   na = appr_group(ss, i, cx, na)
   if (na.msg != "") { return ss[i].line }
+  // a host release refusal is reported at the bracket's own line, the
+  // acquisition's, as the reference reports it (`_check_host_release`)
+  na = release_group(ss, i, na)
+  if (na.msg != "") { return ss[i - 1].line }
   return refusal_line(ss, j, cx, na)
 }
 
@@ -6877,11 +7040,31 @@ fn unknown_svc_at(comp: CompD, names: List[Str], amb: List[Str],
                   i: Int) -> Verd {
   if (i >= comp.svcRefs.length()) { return no_verd() }
   let r = comp.svcRefs[i]
+  if (r.clause == "requires" && shadow_key_reserved(key_binding_of(r.key))) {
+    return mk_verd(tagged("G1", shadow_key_msg(key_binding_of(r.key), comp.name)),
+                   r.line)
+  }
   if (!svc_known(names, amb, r.svc)) {
     return mk_verd(tagged("G1", unknown_svc_msg(r.svc, r.clause, comp.name)),
                    r.line)
   }
   return unknown_svc_at(comp, names, amb, i + 1)
+}
+
+// The header verdict when the full service set is NOT known: a shadowing key
+// is decided only while every requirement before it names a service this
+// text declares, since an earlier unknown service would be the reference's
+// verdict and this gate cannot see it.
+fn shadow_key_at(comp: CompD, names: List[Str], i: Int) -> Verd {
+  if (i >= comp.svcRefs.length()) { return no_verd() }
+  let r = comp.svcRefs[i]
+  if (r.clause != "requires") { return no_verd() }
+  if (shadow_key_reserved(key_binding_of(r.key))) {
+    return mk_verd(tagged("G1", shadow_key_msg(key_binding_of(r.key), comp.name)),
+                   r.line)
+  }
+  if (!contains(names, r.svc)) { return no_verd() }
+  return shadow_key_at(comp, names, i + 1)
 }
 
 // The program's own declared service names.
@@ -7063,6 +7246,12 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // is lowered and so after every statement verdict above.
       let mrv = prov_missing_return(pv, mi, decl)
       if (mrv.v != "") { return mrv }
+      // issue #1859, the provide-method half: an unbound host acquisition in a
+      // method. The reference judges it in `_ownership_walk_method`, after the
+      // whole body is lowered and the missing-return rule has run, at the
+      // method's line.
+      let mrel = method_release_msg(pm.body, 1)
+      if (mrel != "") { return mk_verd(tagged("G4", mrel), pm.line) }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
       // restated because stratum 3 never runs the checker over arrows): a
       // provide-method arrow may not name its own async colour either.
@@ -16401,7 +16590,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
     // single body statement, so an unknown service beats every body verdict
     // `comp.refuse` and `check_component` carry.
     let usv = svcsDecidable ? unknown_svc_at(comp, sNames, ambSvcs, 0)
-                            : no_verd()
+                            : shadow_key_at(comp, sNames, 0)
     if (usv.v != "") {
       refs = refs.push(usv)
       // the header obligation is raised INSIDE `_lower_component` (`Env.__init__`
@@ -26585,6 +26774,59 @@ component C provides s: S {
       return g(n)
     }
   }
+}""")
+  assert v == ""
+}
+
+test "a host acquisition's undo that is not its release is refused" {
+  let v = admit_src("""service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let store = effect Map.new() undo store.get("x")
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == "G4|the `undo` of `let store = effect Map.new(...)` must release THAT handle: write `undo store.drop()`"
+}
+
+test "a host acquisition released by its own verb is admitted" {
+  let v = admit_src("""service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let pool = effect Pool.open("pg://x", 4) undo pool.close()
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == ""
+}
+
+test "an unbound host acquisition is refused" {
+  let v = admit_src("""service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  effect Map.new() undo 1
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == "G4|`effect Map.new(...)` must bind its handle so its `undo` can release it: write `let <name> = effect Map.new(...) undo <name>.drop()`"
+}
+
+test "a requirement key may not spell a builtin type" {
+  let v = admit_src("""service S { fn go(n: Int) -> Int }
+service Lst { fn drop(xs: List[Str]) }
+component C requires List: Lst provides s: S {
+  provide s { fn go(n) = n }
+}""")
+  assert v == "G1|requirement key `List` of C shadows the builtin type `List`"
+}
+
+test "a builtin type read as a value names the type rule" {
+  let v = admit_src("""service S { fn go(n: Int) -> List[Str] }
+component C provides s: S {
+  provide s { fn go(n) = List.reverse(["a"]) }
+}""")
+  assert v == "T1|`List` is a builtin type, not a value"
+}
+
+test "a typed hole in a host acquisition's undo is not refused" {
+  let v = admit_src("""service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let store = effect Map.new() undo hole[Unit] "release"
+  provide s { fn go(k) = 1 }
 }""")
   assert v == ""
 }

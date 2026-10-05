@@ -130,6 +130,15 @@ the language exists to close: the inverse becomes an unchecked function of
 mutable state, and no amount of LIFO ordering rescues it. So reference capture
 is not a feature revl is missing; it is a feature revl must not have.
 
+That is one half of the hypothesis, the CAPTURE half: what the inverse reads.
+The other half is the CHOICE: whether the `undo` written is the inverse at all.
+revl discharges that half only where it owns the stubs. For a host acquisition
+(`Map.new`, `Pool.open`, `Stream.source`) the `undo` must be the family's
+release on the handle the bracket bound, and anything else is refused (issue
+#1859, docs/rejections.md#g4--inverse-or-emit). For an `extern acquire` or a
+user `effect` over a service, which inverse is the right one is still the
+author's assertion, and nothing checks it yet.
+
 ## Why not just keep the silent snapshot
 
 Before item 129 the read-capture case was accepted and snapshotted silently,
