@@ -32,15 +32,7 @@
     "is identical under CI's python 3.11 and a 3.14 developer venv."
   ],
   "out-of-fragment-G5": [],
-  "out-of-fragment-G6": [
-    "tests/fixtures/value_method_call/t1_inplace_effect_arg.rvl",
-    "tests/fixtures/value_method_call/t1_inplace_list.rvl",
-    "tests/fixtures/value_method_call/t1_inplace_paren_int.rvl",
-    "tests/fixtures/value_method_call/t1_inplace_req_result.rvl",
-    "tests/fixtures/value_method_call/t1_inplace_str_call.rvl",
-    "tests/fixtures/value_method_call/t1_named_int.rvl",
-    "tests/fixtures/value_method_call/t1_named_list.rvl"
-  ],
+  "out-of-fragment-G6": [],
   "out-of-fragment-inverse": [
     "examples/rejections/g4_undo_not_release.rvl"
   ],

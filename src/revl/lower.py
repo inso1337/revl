@@ -15074,6 +15074,11 @@ def _refuse_value_method(method, recv_t, filename: str, line: int) -> None:
         f"no builtin method `{method}` on `{recv_t}` — the stdlib surface is "
         f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
         hint="records carry data, not methods; call functions as `f(x)` (G6)",
+        # a type-checker refusal, coded so: the `(G6)` in the hint is the
+        # purity pointer the named receiver always carried, not the verdict.
+        # Uncoded, `classify` read the hint's tag and filed it as a G6
+        # guarantee, which the formal G6 row (binding, #1812) never decides.
+        code="T1", category="stdlib",
     )
 
 

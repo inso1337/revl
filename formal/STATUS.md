@@ -1297,7 +1297,7 @@ work that never touched this layer.
 | `missed-prelude` | 0 | **FATAL** |
 | `out-of-fragment` | printed by the gate | informational |
 | `out-of-fragment-G5` | 0 | ratcheted |
-| `out-of-fragment-G6` | 7 | ratcheted |
+| `out-of-fragment-G6` | 0 | ratcheted |
 | `out-of-fragment-inverse` | 1 | ratcheted |
 | `out-of-fragment-witnessed` | 2 | ratcheted |
 | `out-of-scope` | printed by the gate | informational |
@@ -1311,13 +1311,7 @@ buckets are:
 
 `out-of-fragment-G6`:
 
-- `tests/fixtures/value_method_call/t1_inplace_effect_arg.rvl`
-- `tests/fixtures/value_method_call/t1_inplace_list.rvl`
-- `tests/fixtures/value_method_call/t1_inplace_paren_int.rvl`
-- `tests/fixtures/value_method_call/t1_inplace_req_result.rvl`
-- `tests/fixtures/value_method_call/t1_inplace_str_call.rvl`
-- `tests/fixtures/value_method_call/t1_named_int.rvl`
-- `tests/fixtures/value_method_call/t1_named_list.rvl`
+- none
 
 `out-of-fragment-inverse`:
 
