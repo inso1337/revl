@@ -46,7 +46,17 @@ git -C "$CORDIS_PY" checkout --quiet "$CORDIS_PY_PIN"
 # --allow-existing: re-running setup on an existing venv must work, since the
 # `revl run` diagnostic tells people to run exactly this line.
 uv venv --allow-existing .venv
-uv pip install --python .venv/bin/python pip
+# The venv's interpreter and scripts: `bin/` on POSIX, `Scripts/` on Windows,
+# where `uv venv` writes `Scripts/python.exe` (issue #1939). Picked once and
+# used everywhere below; src/revl/_paths.py's `venv_python` reads the same way.
+if [ -f .venv/Scripts/python.exe ]; then
+    VBIN=.venv/Scripts
+    VPY=.venv/Scripts/python.exe
+else
+    VBIN=.venv/bin
+    VPY=.venv/bin/python
+fi
+uv pip install --python "$VPY" pip
 # `coverage` is here for the same reason `pytest` is: this venv runs the WHOLE
 # `tests/` root in the `frontend-cordis` job, and that root includes the item
 # 429 self-host coverage ratchets, which need a real tracer. The names are
@@ -69,14 +79,14 @@ uv pip install --python .venv/bin/python pip
 # source grammar over the whole corpus with it and imports it hard, so without
 # it here that file ERRORS in this job (issue #1661), and the grammar-engine
 # checks in tests/test_constrained_decoding_1462.py skip.
-uv pip install --python .venv/bin/python pytest pytest-asyncio pyyaml watchdog coverage \
+uv pip install --python "$VPY" pytest pytest-asyncio pyyaml watchdog coverage \
     cryptography llguidance --editable "$CORDIS_PY"
 # Re-install revl through stock pip so `[project.scripts]` (the `revl` and
-# `truc` console-script entries) are written to .venv/bin/. `uv pip install -e`
+# `truc` console-script entries) are written to $VBIN. `uv pip install -e`
 # resolves the editable to a `.pth` and skips the entry-point step; issue #336.
-.venv/bin/python -m pip install --no-deps -e ../..
+"$VPY" -m pip install --no-deps -e ../..
 
 echo
-echo "setup complete — run the suite with:  .venv/bin/pytest"
-echo "                 run the demo with:   .venv/bin/python demo.py"
+echo "setup complete — run the suite with:  $VBIN/pytest"
+echo "                 run the demo with:   $VPY demo.py"
 echo "                 run a composition:   revl run ../../examples/user_cache.rvl"

@@ -66,7 +66,7 @@ import threading
 import time
 from pathlib import Path
 
-from ._paths import backends_root, stdlib_root
+from ._paths import backends_root, stdlib_root, venv_python
 from .activation import local_prereqs
 from .attest import canonical_hash
 from .deploy import (ADMISSION_PEER_BOUND, ADMISSION_SEALED,
@@ -2553,7 +2553,7 @@ def _rerun_hint(files, placement_path: str, once: bool) -> str:
     works because `drop_cwd_entry` scrubs the `-m`-injected working
     directory at entry. Both lines are copy-pasteable as-is.
     """
-    venv = _BACKENDS_DIR / "python" / ".venv" / "bin" / "python"
+    venv = venv_python(_BACKENDS_DIR / "python" / ".venv")
     parts = ["revl", "run", *[str(f) for f in files],
              "--placement", placement_path]
     if once:

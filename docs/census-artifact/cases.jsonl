@@ -1866,6 +1866,8 @@
 
 ["tests/fixtures/emit_rust_corpus/perf_shapes.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/prelude_names.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/records.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/requires.rvl", "agree-admit"]

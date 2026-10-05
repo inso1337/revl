@@ -42,8 +42,6 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these", "config_default_lit", 1, 1]
 
-["function", "component-construction-and-provide-method-alternatives-these", "emit_component", 1, 1]
-
 ["function", "component-construction-and-provide-method-alternatives-these", "has_extra_linebreak", 1, 1]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "is_extra_linebreak", 3, 3]
@@ -100,11 +98,17 @@
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "steps_use_timer", 2, 2]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "witnessed_acquire", 5, 5]
+["function", "host-bind-and-realm-residuals-beyond-the-two", "witnessed_acquire", 1, 1]
 
 ["reason", "host-object-blocks-no-corpus-document-acquires-the", "Host-object blocks no corpus document acquires: the corpus declares a host `Map`, so the Pool and Job literal line lists (and the CAS verb test that selects `insert_if_absent`) are emitted by a branch the corpus never takes. Each is a verbatim transcription of the reference's own literal list, so there is nothing for a second implementation to get wrong beyond the gate on which block rides along, which the Map case does exercise (issue 1153)."]
 
 ["function", "host-object-blocks-no-corpus-document-acquires-the", "is_map_cas_verb", 1, 1]
+
+["reason", "issue-1920-call-acquired-binds-and-service-trait-names", "Issue #1920, the port of the same two changes. `call_bind_type` mirrors `_call_bind_type` and records the same unreachable arms (a call with no declared or a `Unit` return). `svc_ident`'s loop-exhausted `return mangle(name)` is reached only by a name of nothing but underscores, which is not a valid service name; emit_rust_corpus/prelude_names.rvl reaches the reserved rung and the `Box_` -> `Box__` ladder step."]
+
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "call_bind_type", 2, 2]
+
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "svc_ident", 1, 1]
 
 ["reason", "item-391-by-value-reuse-residuals-emit-rust", "Item 391 by-value reuse residuals (emit_rust_corpus/by_value_reuse.rvl holds the rest of the port to byte agreement): `builtin_return_type` mirrors the reference's `_BUILTIN_RESULT` table, and its `to_int32`, `field` and `list` rows name methods this port renders `<<UNSUPPORTED-BUILTIN:...>>`, so no corpus document can bind one; its final `return \"\"` is reached only by a method the table does not name, and every method the port renders is named. `by_value_tail`'s borrowed-`&str` arm is the reference's own safety net (`_by_value_tail`, recorded there too): the borrow analysis keeps a borrowed param out of an owned position. `decl_site_names`' `let_pattern` arm declares destructured names, and the port renders destructuring as `<<UNSUPPORTED-STEP:let_pattern>>`."]
 
