@@ -66,6 +66,15 @@ is steps; a trailing `return` yields the method's value. Steps inside a method
 body run while the component is ACTIVE, and any `effect` steps there join the
 component's accumulator (coeffect operations are effects).
 
+A method whose body crosses a computer-use verb (a capability token rooted in
+`screen` or `ui`, such as `screen.observe` or `ui.click`, directly or through a
+module `fn`) also carries `"unit": "ui"`, after `body`. The method call is the
+unit of a UI transaction (docs/design/538-ui-transactions.md §0), and the mark
+says which calls are. It is computed by the frontend, the key is absent on
+every other method, and `ir_version` stays 3. A backend may ignore it; none of
+the six reads it yet, and their output is byte-identical with or without it
+(issue #1369).
+
 ## Expressions
 
 | kind | fields | meaning |

@@ -1798,6 +1798,8 @@
 
 ["tests/fixtures/emit_py_corpus/types.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_corpus/ui_unit.rvl", "frontier-declined"]
+
 ["tests/fixtures/emit_py_corpus/value_accessors.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_py_corpus/variant_multiline.rvl", "agree-admit"]

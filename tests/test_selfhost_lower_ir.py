@@ -167,6 +167,9 @@ COMPONENT_DOCS = [
     "services_basic.rvl", "services_config.rvl", "services_body.rvl",
     "services_methods.rvl", "services_method_effects.rvl", "services_timers.rvl",
     "provide_returns.rvl",
+    # issue #1369: the `"unit": "ui"` mark on a method that crosses a
+    # computer-use verb, and its absence on one that crosses none
+    "ui_unit.rvl",
 ]
 
 # The document whose `externs` section is lowered byte-exact (item 241): the
