@@ -2196,6 +2196,38 @@
 
 ["tests/fixtures/handle_provider_bound/ok_value_covered.rvl", "agree-admit"]
 
+["tests/fixtures/match_block_arms/g1_after_arm.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/match_block_arms/g1_undeclared_in_arm.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/match_block_arms/g1_undeclared_in_tail.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/match_block_arms/g4_unmarked_in_arm.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/match_block_arms/g4_unmarked_in_tail.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/match_block_arms/ok_in_if_body.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_let_bound.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_multiline.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_nested.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_rebind_after_arm.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_rebind_inside_arm.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_rebind_outer_name.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_record_arm.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_returned.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_semicolon.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_two_lets.rvl", "agree-admit"]
+
 ["tests/fixtures/model_reach_crossing/model_extern_block_value.rvl", "agree-refuse/MODEL"]
 
 ["tests/fixtures/model_reach_crossing/model_extern_no_block.rvl", "agree-refuse/MODEL"]
