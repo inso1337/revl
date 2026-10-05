@@ -1,0 +1,48 @@
+// Fixture for tests/test_canary.py — two generations of a slice provider whose
+// `set` is a SERVICE effect, `effect ledger.charge(k) undo ledger.refund(k)`.
+// Both acquire exactly the same thing; `InverseCandidate` refunds a key it never
+// charged. That is a divergence the canary must revert: the inverse is the half
+// a promote hands to teardown.
+//
+// A host Map write cannot carry this case any more: since issue #1945 a
+// provide-method `store.insert(k, v)` admits only its table inverse
+// `store.remove(k)`, so a candidate removing another key is refused at
+// admission (canary_candidate_inverse.rvl). A service reversal is the author's
+// word (`inverse: asserted`), so an inverse-only change is still writable here.
+//
+// The two providers sit in different realms only so one file can hold both
+// (G2). The test reads each one's recorded world with `slice_timeline`.
+
+service Kv {
+  fn get(k: Str) -> Str
+  fn set(k: Str, v: Str)
+}
+
+service Ledger {
+  fn charge(k: Str) -> Int
+  fn refund(k: Str) -> Int
+}
+
+component InverseBaseline requires ledger: Ledger provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  isolate ledger in realm("tenant_a")
+  provide kv {
+    fn get(k) = k
+    fn set(k, v) {
+      effect ledger.charge(k)
+      undo   ledger.refund(k)
+    }
+  }
+}
+
+component InverseCandidate requires ledger: Ledger provides kv: Kv {
+  isolate kv in realm("tenant_b")
+  isolate ledger in realm("tenant_b")
+  provide kv {
+    fn get(k) = k
+    fn set(k, v) {
+      effect ledger.charge(k)
+      undo   ledger.refund("some-other-key")
+    }
+  }
+}

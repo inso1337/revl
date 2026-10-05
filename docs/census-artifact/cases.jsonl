@@ -406,6 +406,8 @@
 
 ["examples/rejections/g4_method_host_acquire.rvl", "agree-refuse/G4"]
 
+["examples/rejections/g4_method_write_not_inverse.rvl", "agree-refuse/G4"]
+
 ["examples/rejections/g4_missing_undo.rvl", "no-objection-out-of-slice"]
 
 ["examples/rejections/g4_nested_approval_emission.rvl", "agree-refuse/G4"]
@@ -452,11 +454,11 @@
 
 ["examples/rejections/g4_unmarked_host_emission_helper.rvl", "agree-refuse/G4"]
 
-["examples/rejections/g5_undo_arrow_emission.rvl", "no-objection-out-of-slice"]
+["examples/rejections/g5_undo_arrow_emission.rvl", "refuse-out-of-slice/G4"]
 
 ["examples/rejections/g5_undo_fn_emission.rvl", "refuse-out-of-slice/G4"]
 
-["examples/rejections/g5_undo_fn_value_emission.rvl", "no-objection-out-of-slice"]
+["examples/rejections/g5_undo_fn_value_emission.rvl", "refuse-out-of-slice/G4"]
 
 ["examples/rejections/g5_undo_handle_emission.rvl", "refuse-out-of-slice/G4"]
 
@@ -1212,6 +1214,8 @@
 
 ["oracle-reject:g4 host undo that is not the release", "agree-refuse/G4"]
 
+["oracle-reject:g4 method write whose undo is not its inverse", "agree-refuse/G4"]
+
 ["oracle-reject:g4 multi-hop named-call chain", "agree-refuse/G4"]
 
 ["oracle-reject:g4 plain method spawns an emitting target", "agree-refuse/G4"]
@@ -1478,7 +1482,7 @@
 
 ["tests/fixtures/canary_candidate_diverge.rvl", "agree-admit"]
 
-["tests/fixtures/canary_candidate_inverse.rvl", "agree-admit"]
+["tests/fixtures/canary_candidate_inverse.rvl", "agree-refuse/G4"]
 
 ["tests/fixtures/canary_candidate_same.rvl", "agree-admit"]
 
@@ -1487,6 +1491,8 @@
 ["tests/fixtures/canary_emit_baseline.rvl", "agree-admit"]
 
 ["tests/fixtures/canary_emit_candidates.rvl", "agree-admit"]
+
+["tests/fixtures/canary_inverse_service.rvl", "agree-admit"]
 
 ["tests/fixtures/canary_moved_baseline.rvl", "agree-admit"]
 

@@ -4375,14 +4375,138 @@ fn release_msg_at(ss: List[Stmt], i: Int) -> Str {
   return host_release_msg(bind, hf, release)
 }
 
-// The first release refusal over a provide-method body.
-fn method_release_msg(ss: List[Stmt], i: Int) -> Str {
+// The first release refusal over a provide-method body. `maps` names the
+// component's host `Map` handles, so a write on one is held to its table
+// inverse at the same statement (issue #1945), after the release rule, in the
+// order the reference's `_ownership_walk_method` judges them.
+fn method_release_msg(ss: List[Stmt], i: Int, maps: List[Str]) -> Str {
   if (i >= ss.length()) { return "" }
   // only the UNBOUND form: a host acquisition bound in a method is the
   // reference's "only `spawn` may be acquired" refusal, raised earlier
   let m = ss[i - 1].bind == "" ? release_msg_at(ss, i) : ""
   if (m != "") { return m }
-  return method_release_msg(ss, i + 1)
+  let w = ss[i].kind == "undo" && ss[i - 1].kind == "effect"
+    ? write_inverse_msg(ss[i - 1].e, ss[i].e, maps) : ""
+  if (w != "") { return w }
+  return method_release_msg(ss, i + 1, maps)
+}
+
+// issue #1945: the component's host `Map` handles, each an activation-body
+// `let <name> = effect Map.new() undo ...` (the `Map` entries of the
+// reference's `env.host_locals`).
+fn map_handles(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  let s = ss[i]
+  let hit = s.bind != "" && host_acq_fn(s) == "Map.new"
+  return map_handles(ss, i + 1, hit ? acc.push(s.bind) : acc)
+}
+
+// The write verb `e` calls on one of `names`, when it is a host Map write
+// with a table inverse (`insert`, `insert_if_absent`, `remove`), else "".
+fn host_write_verb(e: Expr, names: List[Str]) -> Str {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        Var(v) => contains(names, v)
+          && (fl.name == "insert" || fl.name == "insert_if_absent"
+              || fl.name == "remove") ? fl.name : "",
+        _ => "",
+      },
+      _ => "",
+    },
+    _ => "",
+  }
+}
+
+// The reference's `_method_effect_inverse` refusal: a host Map write's `undo`
+// is its table inverse on the same handle with the same key expression.
+fn write_inverse_msg(acq: Expr, und: Expr, maps: List[Str]) -> Str {
+  let verb = host_write_verb(acq, maps)
+  if (verb == "" || is_hole_expr(und)) { return "" }
+  let inverse = verb == "remove" ? "insert" : "remove"
+  let recv = call_recv(acq)
+  let key = first_arg(acq)
+  if (call_recv(und) == recv && call_verb(und) == inverse
+      && key_expr_same(key, first_arg(und))) { return "" }
+  let k = key_spelling(key)
+  let spelled = inverse == "remove"
+    ? recv.concat(".remove(").concat(k).concat(")")
+    : recv.concat(".insert(").concat(k).concat(", <the value it held>)")
+  return "the `undo` of `effect ".concat(recv).concat(".").concat(verb)
+    .concat("(...)` must be its inverse on the same handle and key: write `undo ")
+    .concat(spelled).concat("`")
+}
+
+fn call_recv(e: Expr) -> Str {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target { Var(v) => v, _ => "", },
+      _ => "",
+    },
+    _ => "",
+  }
+}
+
+fn call_verb(e: Expr) -> Str {
+  return match e {
+    Call(c) => match c.target { Field(fl) => fl.name, _ => "", },
+    _ => "",
+  }
+}
+
+fn first_arg(e: Expr) -> Expr {
+  return match e {
+    Call(c) => c.args.length() > 0 ? c.args[0] : NullLit,
+    _ => NullLit,
+  }
+}
+
+// The key as the author wrote it: a name or a string literal, otherwise a
+// placeholder for the same expression (the reference's `_key_spelling`).
+fn key_spelling(e: Expr) -> Str {
+  return match e {
+    Var(v) => v,
+    StrLit(s) => jstr(s),
+    _ => "<the same key>",
+  }
+}
+
+// Whether two key expressions are the same, as the reference compares their
+// lowered nodes. Only the shapes a key takes are judged; any other shape is
+// answered `true`, so the gate under-refuses rather than refusing a program
+// the reference admits.
+fn key_expr_same(a: Expr, b: Expr) -> Bool {
+  if (!key_shape(a) || !key_shape(b)) { return true }
+  return match a {
+    Var(x) => match b { Var(y) => x == y, _ => false, },
+    StrLit(x) => match b { StrLit(y) => x == y, _ => false, },
+    IntLit(x) => match b { IntLit(y) => x == y, _ => false, },
+    BoolLit(x) => match b { BoolLit(y) => x == y, _ => false, },
+    Field(f) => match b {
+      Field(g) => f.name == g.name && key_expr_same(f.target, g.target),
+      _ => false,
+    },
+    Call(c) => match b {
+      Call(d) => key_expr_same(c.target, d.target)
+        && key_args_same(c.args, d.args, 0),
+      _ => false,
+    },
+    _ => true,
+  }
+}
+
+fn key_args_same(xs: List[Expr], ys: List[Expr], i: Int) -> Bool {
+  if (xs.length() != ys.length()) { return false }
+  if (i >= xs.length()) { return true }
+  return key_expr_same(xs[i], ys[i]) && key_args_same(xs, ys, i + 1)
+}
+
+fn key_shape(e: Expr) -> Bool {
+  return match e {
+    Var(v) => true, StrLit(s) => true, IntLit(n) => true, BoolLit(b) => true,
+    Field(f) => true, Call(c) => true,
+    _ => false,
+  }
 }
 
 fn release_group(ss: List[Stmt], i: Int, a: Ac) -> Ac {
@@ -7250,7 +7374,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // method. The reference judges it in `_ownership_walk_method`, after the
       // whole body is lowered and the missing-return rule has run, at the
       // method's line.
-      let mrel = method_release_msg(pm.body, 1)
+      let mrel = method_release_msg(pm.body, 1, map_handles(comp.setup, 0, []))
       if (mrel != "") { return mk_verd(tagged("G4", mrel), pm.line) }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
       // restated because stratum 3 never runs the checker over arrows): a
@@ -18361,13 +18485,13 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 type CCtx = { reqs: List[Str], cases: List[Bind], fns: List[Bind],
               fnps: List[Bind], wit: List[Str], al: Map[Str, Str],
               cprovs: List[Bind], cfg: Str, ln: Int, reqops: List[Bind],
-              handles: Bool }
+              handles: Bool, xundo: Map[Str, Str] }
 
 // `cx` re-stamped with the line of the statement now being lowered.
 fn cx_at(cx: CCtx, n: Int) -> CCtx {
   return { reqs: cx.reqs, cases: cx.cases, fns: cx.fns, fnps: cx.fnps,
            wit: cx.wit, al: cx.al, cprovs: cx.cprovs, cfg: cx.cfg, ln: n,
-           reqops: cx.reqops, handles: cx.handles }
+           reqops: cx.reqops, handles: cx.handles, xundo: cx.xundo }
 }
 
 // Membership in a lexical scope, INDEPENDENT of whether the name's type is
@@ -18437,6 +18561,27 @@ fn witnessed_extern_names(ts: List[Token]) -> List[Str] {
     } else { i += 1 }
   }
   return out
+}
+
+// issue #1945: extern name -> the bare callee of its DECLARED inverse, for
+// every extern that declares `undo` (the reference's `env.extern_undo`). A
+// provide-method effect whose site `undo` calls it is `declared`.
+fn extern_undo_names(ts: List[Token]) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "extern")) {
+      var j = i + 1
+      while (j < ts.length() && !atw(ts, j, "fn") && !atk(ts, j, "eof")) { j += 1 }
+      if (atw(ts, j, "fn")) {
+        let ps = params_at(ts, j + 3)
+        let k = ret_at(ts, ps.i)
+        if (atw(ts, k, "undo")) { m = m.set(tkc(ts, j + 1).text, tkc(ts, k + 1).text) }
+      }
+      i = j + 1
+    } else { i += 1 }
+  }
+  return m
 }
 
 // The module callables a component body may call by bare name, each bound to
@@ -18549,6 +18694,28 @@ fn svc_method_params(ts: List[Token], svc: Str, meth: Str) -> List[ParamN] {
 // undo-less acquisition keeps refusing — the fail-closed direction, since the
 // alternative is an acquisition lowered to a step that registers no teardown
 // at all.
+// issue #1945: the provenance of a provide-method effect, as the reference's
+// `_method_effect_inverse` stamps it: `table` for a host Map write undone by
+// its table inverse, `declared` for an extern's declared inverse, `asserted`
+// for everything else. A host write whose `undo` is not its table inverse is
+// refused (`write_inverse_msg`), so only an admitted shape is stamped here.
+fn method_inverse(acq: Expr, und: Expr, hostSc: List[Str], cx: CCtx) -> Str {
+  let w = host_write_verb(acq, hostSc)
+  if (w != "") { return w == "remove" ? "asserted" : "table" }
+  let x = bare_callee(acq)
+  let u = bare_callee(und)
+  let inv = match cx.xundo.lookup(x) { Some(v) => v, None => "" }
+  if (x != "" && inv != "" && inv == u) { return "declared" }
+  return "asserted"
+}
+
+fn bare_callee(e: Expr) -> Str {
+  return match e {
+    Call(c) => match c.target { Var(nm) => nm, _ => "", },
+    _ => "",
+  }
+}
+
 fn is_witnessed_acq(e: Expr, cx: CCtx) -> Bool {
   return match e {
     Call(c) => match c.target { Var(nm) => contains(cx.wit, nm), _ => false, },
@@ -19653,8 +19820,13 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (is_bad(und.e)) { return mk_irres(false, "") }
     let ue = cir_expr(und.e, sc, hostSc, cx_at(cx, tkc(ts, acq.i + 1).line))
     if (!ue.ok) { return mk_irres(false, "") }
+    // issue #1945: the inverse provenance the reference stamps on every
+    // provide-method effect whose `undo` is written (a hole is judged when
+    // it is filled, so it carries none)
+    let inv = is_hole_expr(und.e) ? ""
+      : ", \"inverse\": ".concat(jstr(method_inverse(acq.e, und.e, hostSc, cx)))
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
-      .concat(", \"undo\": ").concat(ue.js).concat("}")
+      .concat(", \"undo\": ").concat(ue.js).concat(inv).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_method_stmts(ts, und.i, hi, cx, sc, hostSc, nacc)
   }
@@ -20380,7 +20552,8 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
              wit: witnessed_extern_names(ts), al: al,
              cprovs: program_provisions(ts),
              cfg: comp_config_struct(ts, lo, hi, al), ln: 0,
-             handles: program_names_handles(ts) }
+             handles: program_names_handles(ts),
+             xundo: extern_undo_names(ts) }
   let sc0: List[Bind] = []
   let bodyRes = cir_body(ts, lo, hi, cx, provs, sc0, [], "")
   let isoJs = ir_isolate(ts, lo, hi, "")

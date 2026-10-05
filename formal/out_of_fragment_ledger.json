@@ -1,8 +1,9 @@
 {
   "_about": [
     "The corpus files the checker refuses G5, G6, with the G4 approval",
-    "floor or with the G4 host release rule, and the model has NO fact",
-    "about: `out-of-fragment-G5`, `out-of-fragment-G6`,",
+    "floor or with a G4 inverse rule (the host release, a provide-method",
+    "write's inverse), and the model has NO fact about:",
+    "`out-of-fragment-G5`, `out-of-fragment-G6`,",
     "`out-of-fragment-approval` and `out-of-fragment-inverse` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "",
@@ -75,6 +76,8 @@
     "tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl"
   ],
   "out-of-fragment-inverse": [
-    "examples/rejections/g4_undo_not_release.rvl"
+    "examples/rejections/g4_method_write_not_inverse.rvl",
+    "examples/rejections/g4_undo_not_release.rvl",
+    "tests/fixtures/canary_candidate_inverse.rvl"
   ]
 }

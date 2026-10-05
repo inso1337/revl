@@ -69,6 +69,30 @@ defined by a closed *activate → tear down* window, and the fiber runs an
 activation effect's inverse on teardown; a method effect runs per request and
 has no such window. The refusal is a compile error, not a silent no-op.
 
+### Which positions carry an inverse guarantee
+
+A method effect has no round trip, so its `undo` is judged statically instead
+(issue #1945), and its IR step says how far the judgment reaches with an
+`inverse` key:
+
+| position | `undo` checked against | guarantee |
+| --- | --- | --- |
+| activation body, `verified effect` | the round trip (this document) | measured, in-process state |
+| activation body, host acquisition (`Map.new`, `Pool.open`, `Stream.source`) | its family's release on the bound handle (#1859) | proven |
+| provide method, host Map `insert(k, v)` / `insert_if_absent(k, v)` | `remove(k)` on the same handle and key | `inverse: table`; `insert` also needs the key absent before it, which the runtime checks |
+| provide method, host Map `remove(k)` | `insert(k, e)` on the same handle and key | `inverse: asserted`: the restored value `e` is the author's word |
+| provide method, an extern with a declared `undo` | that declared inverse | `inverse: declared`: what the host body reverts is the declaration's word |
+| provide method, a service call, `Pool.execute`, any other effect | receiver, non-emission and by-value capture only | `inverse: asserted`: trust-the-author |
+
+A host Map write whose `undo` is not its table inverse (a read, `drop`, the
+same verb, another handle or another key) is refused with G4, naming the
+inverse it needs. The session's teardown report lists every `asserted` and
+`declared` method effect of the composition it tore down under
+`trustTheAuthor` (`{component, method, inverse}`), beside the verdict and never
+counted against it: `noResidue` judges what the runtime can observe. A write in a provide method that is not bracketed at all
+(`fn seed(k) = data.insert(k, 1)`) is legal: the caller brackets the crossing,
+as `Seeder` does above.
+
 ## 3. What the round trip actually measures
 
 The fingerprint is the runtime's **own observable-mutation ledger** — the same

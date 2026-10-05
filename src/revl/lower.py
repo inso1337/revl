@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import json
 import keyword
 import os
 import re
@@ -11827,6 +11828,101 @@ def _ownership_check_expr(node, env: "Env", filename: str, line: int,
     _d4_delegate_no_recrossing(node, env, filename, line)
 
 
+#: issue #1945: the declared inverse of each host WRITE verb, the method-body
+#: twin of `_HOST_ACQUIRE_VERBS`. `(verb, provenance)`: the `undo` must call
+#: `verb` on the same receiver with the same key expression (the first
+#: argument). `table` means revl owns the stub and the pair is the inverse:
+#: `insert` -> `remove` holds when the key was absent before the insert, which
+#: the runtime checks (it records an overwrite; part 2 of #1945), and the
+#: result-guarded `insert_if_absent` -> `remove` is exact (item 397). `asserted`
+#: means the shape is checked and the restored value is the author's word:
+#: `remove(k)` undone by `insert(k, e)` cannot prove `e` was the value removed.
+#: A write with no entry (`Pool.execute`) has no provable inverse and is
+#: `asserted` without a shape check.
+_HOST_WRITE_INVERSE: dict[str, tuple[str, str]] = {
+    "Map.insert": ("remove", "table"),
+    "Map.insert_if_absent": ("remove", "table"),
+    "Map.remove": ("insert", "asserted"),
+}
+
+
+def _host_write(acquire, env: "Env"):
+    """`(receiver, family, verb)` when *acquire* is a write verb on a host
+    local (`store.insert(k, v)` on a `Map.new()` handle), else None."""
+    if not isinstance(acquire, dict) or acquire.get("kind") != "call":
+        return None
+    target = acquire.get("target")
+    if not isinstance(target, dict) or target.get("kind") != "name":
+        return None
+    family = env.host_locals.get(target.get("id"))
+    verb = acquire.get("method")
+    if family is None or f"{family}.{verb}" not in _HOST_WRITE_INVERSE:
+        return None
+    return target.get("id"), family, verb
+
+
+def _method_effect_inverse(st: dict, env: "Env", filename: str, line: int) -> str:
+    """The inverse provenance of one provide-method effect (issue #1945):
+    `table` (a host write undone by its table inverse), `declared` (an
+    extern's declared inverse), or `asserted` (everything revl cannot prove:
+    a service or extern reversal, a SQL write). A host write whose `undo` is
+    not its table inverse is refused, naming the inverse it needs."""
+    acquire, undo = st.get("acquire"), st.get("undo")
+    write = _host_write(acquire, env)
+    if write is not None:
+        receiver, family, verb = write
+        inverse, provenance = _HOST_WRITE_INVERSE[f"{family}.{verb}"]
+        key = (acquire.get("args") or [None])[0]
+        target = undo.get("target") if isinstance(undo, dict) else None
+        if (isinstance(undo, dict) and undo.get("kind") == "call"
+                and undo.get("method") == inverse
+                and isinstance(target, dict) and target.get("kind") == "name"
+                and target.get("id") == receiver
+                and (undo.get("args") or [None])[0] == key):
+            return provenance
+        name = _source_spelling(receiver, env)
+        k = _key_spelling(key, env)
+        spelled = f"{name}.{inverse}({k})" if inverse == "remove" \
+            else f"{name}.{inverse}({k}, <the value it held>)"
+        raise RevlError(
+            filename, line,
+            f"the `undo` of `effect {name}.{verb}(...)` must be its inverse on "
+            f"the same handle and key: write `undo {spelled}`",
+            hint=f"a host write has one inverse, its table entry on the same "
+                 f"receiver with the same key expression ({family}.insert -> "
+                 f"remove, {family}.insert_if_absent -> remove, {family}.remove "
+                 f"-> insert). Any other `undo` (a read, `drop`, the same verb, "
+                 f"another handle or another key) runs at teardown and leaves "
+                 f"the write in place while the teardown reports a clean "
+                 f"release (issue #1945)",
+            code="G4", category="inverse")
+    if (isinstance(acquire, dict) and acquire.get("kind") == "fn"
+            and acquire.get("name") in env.extern_undo
+            and isinstance(undo, dict) and undo.get("kind") == "fn"
+            and undo.get("name") == env.extern_undo[acquire.get("name")]):
+        return "declared"
+    return "asserted"
+
+
+def _key_spelling(key, env: "Env") -> str:
+    """The key argument as the author wrote it, when it is a name or a literal;
+    otherwise a placeholder for the same expression."""
+    if isinstance(key, dict) and key.get("kind") == "name":
+        return _source_spelling(key.get("id"), env)
+    if isinstance(key, dict) and key.get("kind") == "lit" \
+            and isinstance(key.get("value"), str):
+        return json.dumps(key["value"])
+    return "<the same key>"
+
+
+def _source_spelling(safe: str, env: "Env") -> str:
+    """The source name a lowered (safe) local name was written as."""
+    for source, lowered in (getattr(env, "locals", None) or {}).items():
+        if lowered == safe:
+            return source
+    return safe
+
+
 def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
     """Apply the body-position O1/B1 checks over a lowered provide-METHOD body.
     A handle a service method parameter carries is a BORROW; an acquire bound
@@ -11859,6 +11955,13 @@ def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
             # in a method is refused earlier: only `spawn` may be.)
             if stp == "effect":
                 _check_host_release(st, env, filename, line, bind=None, safe=None)
+            # issue #1945: the provide-method bracket's inverse rule, and its
+            # provenance on the step. Judged after every check above, so a
+            # program they refuse keeps its message. A hole is an unfilled
+            # obligation, judged when it is filled.
+            if undo is not None and not (isinstance(undo, dict)
+                                         and undo.get("kind") == "hole"):
+                st["inverse"] = _method_effect_inverse(st, env, filename, line)
             if acq_res and bind:
                 method_owned.add(bind)
         elif stp == "emit":

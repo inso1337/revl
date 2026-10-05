@@ -1,0 +1,29 @@
+// REJECTED — G4: a provide-method write's `undo` is not its inverse.
+//
+// `store.insert(k, v)` writes the component's host map, and its one inverse is
+// `remove` on the same handle with the same key. `undo store.remove("not-the-key")`
+// removes a key the method never wrote, so the inserted key outlives the call
+// while the teardown reports a clean release: the enclosing bracket's
+// `store.drop()` releases the map and masks the lost inverse. Before issue
+// #1945 only an activation-body host acquisition had its `undo` checked.
+//
+// expected error:
+//   the `undo` of `effect store.insert(...)` must be its inverse on the same
+//     handle and key: write `undo store.remove(k)`
+
+service Kv {
+  fn get(k: Str) -> Str
+  fn set(k: Str, v: Str) -> Str
+}
+
+component Store provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove("not-the-key")
+      return v
+    }
+  }
+}

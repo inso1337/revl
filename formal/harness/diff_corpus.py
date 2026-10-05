@@ -3473,12 +3473,15 @@ def checker_alignment(file_facts: dict, componentless: list[str],
                    else "formal-found-other", rel)
         elif code == "G4" and category == "inverse":
             # The host release rule (issue #1859, `lower._check_host_release`)
-            # carries the G4 code, but it is not the marker rule the `G` row
-            # states: it asks whether a host bracket's `undo` is the family's
-            # release on the bound handle, and the model's HA row carries no
-            # inverse fact yet (issue #1859's formal slice adds the `inv`
-            # column). Absence of fact, ratcheted by name as the approval
-            # floor is, until that column lands.
+            # and the provide-method write inverse rule (issue #1945,
+            # `lower._method_effect_inverse`) carry the G4 code, but neither
+            # is the marker rule the `G` row states: they ask whether a
+            # bracket's `undo` is its table inverse (the family's release on
+            # the bound handle, a host write's inverse on the same handle and
+            # key), and the model's HA row carries no inverse fact yet (issue
+            # #1859's formal slice adds the `inv` column). Absence of fact,
+            # ratcheted by name as the approval floor is, until that column
+            # lands.
             record("out-of-fragment-inverse" if formal_clean
                    else "formal-found-other", rel)
         elif code == "G4":
@@ -3646,8 +3649,9 @@ OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
                        "out-of-fragment-approval", "out-of-fragment-inverse")
 OOF_LEDGER_ABOUT = [
     "The corpus files the checker refuses G5, G6, with the G4 approval",
-    "floor or with the G4 host release rule, and the model has NO fact",
-    "about: `out-of-fragment-G5`, `out-of-fragment-G6`,",
+    "floor or with a G4 inverse rule (the host release, a provide-method",
+    "write's inverse), and the model has NO fact about:",
+    "`out-of-fragment-G5`, `out-of-fragment-G6`,",
     "`out-of-fragment-approval` and `out-of-fragment-inverse` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "",

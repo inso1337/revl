@@ -66,6 +66,14 @@ is steps; a trailing `return` yields the method's value. Steps inside a method
 body run while the component is ACTIVE, and any `effect` steps there join the
 component's accumulator (coeffect operations are effects).
 
+A method-body `effect` whose `undo` is written also carries `inverse`, how far
+the compiler could check that `undo` (issue #1945): `"table"` (a host Map write
+undone by its table inverse on the same handle and key), `"declared"` (an
+extern's declared inverse) or `"asserted"` (a service, extern or SQL reversal
+revl cannot prove). It is metadata for audits and reports; no backend changes
+what it emits for it. See
+[verified effect](verified-effect.md#which-positions-carry-an-inverse-guarantee).
+
 ## Expressions
 
 | kind | fields | meaning |

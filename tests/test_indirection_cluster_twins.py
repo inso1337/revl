@@ -293,7 +293,9 @@ component Sup requires net: Net {
 def test_undo_through_a_pure_local_arrow_compiles():
     """Twin of `g5_undo_arrow_emission.rvl`. The arrow's BODY is walked, so a
     teardown dispatching through a pure local arrow is admitted — the arm
-    follows the indirection rather than refusing every indirect call."""
+    follows the indirection rather than refusing every indirect call. The
+    write is keyed by the same expression, so the `undo` is still its table
+    inverse (issue #1945)."""
     _ok("""
 service Cache { fn set(key: Str) }
 component C provides cache: Cache {
@@ -301,7 +303,7 @@ component C provides cache: Cache {
   provide cache {
     fn set(key) {
       let f = (x: Str) => x
-      effect store.insert(key, "v")
+      effect store.insert(f(key), "v")
       undo   store.remove(f(key))
       return
     }
@@ -348,15 +350,17 @@ def test_undo_of_a_computed_value_reached_through_a_container_compiles():
     """The record and list twins of `g5_undo_method_ref_record.rvl` and
     `g5_undo_method_ref_list.rvl`: a container of computed values projects out
     as a value, where a container of references projects out as an operation.
-    The container is a spelling, not a boundary, in both directions."""
+    The container is a spelling, not a boundary, in both directions. The write
+    is keyed by the same projection, so the `undo` is still its table inverse
+    (issue #1945)."""
     _ok(MINT + """
       let box = { k: emit mint_token(u) }
-      effect store.insert("k", "v")
+      effect store.insert(box.k, "v")
       undo   store.remove(box.k)
 """ + MINT_TAIL)
     _ok(MINT + """
       let ts = [emit mint_token(u)]
-      effect store.insert("k", "v")
+      effect store.insert(ts[0], "v")
       undo   store.remove(ts[0])
 """ + MINT_TAIL)
 

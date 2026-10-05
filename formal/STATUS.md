@@ -1085,7 +1085,7 @@ with corpus work that never touched this layer.
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 | `out-of-fragment-approval` | 36 | ratcheted |
-| `out-of-fragment-inverse` | 1 | ratcheted |
+| `out-of-fragment-inverse` | 3 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1137,7 +1137,9 @@ buckets are:
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_match_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_record_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl`
+- `out-of-fragment-inverse`: `examples/rejections/g4_method_write_not_inverse.rvl`
 - `out-of-fragment-inverse`: `examples/rejections/g4_undo_not_release.rvl`
+- `out-of-fragment-inverse`: `tests/fixtures/canary_candidate_inverse.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.

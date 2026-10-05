@@ -7,6 +7,12 @@
 // a key it never wrote. The recorded world therefore differs even though every
 // acquisition is byte-identical, and the canary must revert rather than promote
 // a generation whose rollback takes back different state.
+//
+// Since issue #1945 this candidate does not reach the canary at all: a
+// provide-method host write admits only its table inverse (`store.remove(k)`),
+// so admission refuses it, naming the inverse. The inverse-only divergence the
+// canary must revert is now exercised with a service reversal
+// (canary_inverse_service.rvl).
 
 service Kv {
   fn get(k: Str) -> Opt[Str]

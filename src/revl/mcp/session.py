@@ -39,6 +39,35 @@ from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
 
+
+def _trust_the_author(ir) -> list:
+    """The provide-method effects whose `undo` revl cannot prove reverses
+    them (issue #1945): every step the compiler stamped `inverse: asserted`
+    (a service, extern or SQL reversal) or `inverse: declared` (an extern's
+    declared inverse, whose host body is the declaration's word). They are
+    listed beside the verdict, never counted against it: `noResidue` judges
+    what the runtime can observe."""
+    out: list = []
+
+    def walk(steps, component, method):
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            if step.get("inverse") in ("asserted", "declared"):
+                out.append({"component": component, "method": method,
+                            "inverse": step["inverse"]})
+            for arm in ("then", "else", "body"):
+                walk(step.get(arm), component, method)
+
+    for comp in (ir or {}).get("components") or []:
+        for step in comp.get("body") or []:
+            if step.get("step") != "provide":
+                continue
+            for m in step.get("methods") or []:
+                walk(m.get("body"), comp.get("name"),
+                     f"{step.get('name')}.{m.get('name')}")
+    return out
+
 class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…).
 
@@ -4420,6 +4449,9 @@ class Session:
                   "trace": driver.drain_events()}
         if unverified:
             report["unverified"] = unverified
+        trusted = _trust_the_author(self.ir)
+        if trusted:
+            report["trustTheAuthor"] = trusted
         return report
 
     @staticmethod
