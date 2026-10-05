@@ -1076,14 +1076,52 @@ def compatible(expected: str | None, actual: str | None,
     return False
 
 
+def _fill_unknown_args(keep: str | None, other: str | None) -> str | None:
+    """`keep` with every type argument that is only the UNRESOLVED placeholder
+    `Any` replaced by `other`'s argument in the same position.
+
+    A lone builtin constructor cannot name the parameter its sibling fixes:
+    `Ok(7)` types as `Result[Int, Any]` and `Err(1)` as `Result[Any, Int]` (see
+    the constructor typing in `infer`), because neither call mentions the other
+    parameter. `join` returns one side WHOLESALE when the two are `compatible`,
+    so `ok ? Ok(7) : Err(1)` used to join to `Result[Int, Any]` -- the first
+    side's unresolved slot, kept -- and an `Err(e)` arm then bound `e: Any`,
+    where `0 - e` is refused ("operand of `-` expects `Int`, got `Any`").
+    Filling the placeholder from the side that DID resolve it is the join of
+    the two, position by position: `Result[Int, Int]`. `Opt` never showed this
+    because it has a single parameter, so `Some(5)` and `None` resolve it.
+
+    Only the literal `Any` placeholder is filled, and only where the sibling
+    resolved that position. `Never` is the bottom and `widen_bottom` owns
+    filling it; POISON is absorbing and must stay; a `$`-prefixed implicit fn
+    type parameter belongs to the function; and `Value` (item 180) is a REAL
+    dynamic type rather than a placeholder, so narrowing it to a concrete type
+    would refuse programs this checker admits today."""
+    keep_head, keep_args = parse_type(keep)
+    other_head, other_args = parse_type(other)
+    if keep_head != other_head or len(keep_args) != len(other_args):
+        return keep
+    filled = []
+    changed = False
+    for arg, other_arg in zip(keep_args, other_args):
+        if arg == "Any" and other_arg != "Any":
+            filled.append(other_arg)
+            changed = True
+            continue
+        inner = _fill_unknown_args(arg, other_arg)
+        filled.append(inner)
+        changed = changed or inner != arg
+    return format_type(keep_head, filled) if changed else keep
+
+
 def join(a: str | None, b: str | None, types: dict | None = None) -> str | None:
     """Common type of two branches, or None when unknown."""
     if a is None or b is None:
         return None
     if compatible(a, b, types):
-        return a
+        return _fill_unknown_args(a, b)
     if compatible(b, a, types):
-        return b
+        return _fill_unknown_args(b, a)
     return None
 
 
