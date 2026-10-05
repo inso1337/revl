@@ -2159,8 +2159,10 @@ component SessionLedger provides sessions: SessionStore {
     fn load(id) = store.get(id) ?? []
     fn append(id, msg) {
       let prev = store.get(id) ?? []
+      // issue #1945: a provide-method insert's undo is its table inverse,
+      // `remove` on the same key; restoring `prev` is not in the table
       effect store.insert(id, prev.push(msg))
-      undo   store.insert(id, prev)
+      undo   store.remove(id)
     }
   }
 }
@@ -2231,7 +2233,7 @@ def test_ledger_shape_carries_the_map_value_type():
     assert "store: Arc<Map<Vec<Msg>>>" in src
     assert "let store = Arc::new(Map::<Vec<Msg>>::new());" in src
     assert "self.store.get(&id).unwrap_or_else(|| vec![])" in src
-    assert "store_undo.insert(id_undo, prev);" in src
+    assert "store_undo.remove(&id_undo);" in src
     # the historical hardcoding is gone
     assert "HashMap<String, String>" not in src
 

@@ -151,7 +151,7 @@ the same code (`import cycle:`, v2_use_cycle.rvl).
 ## G4 — inverse or emit
 
 Every mutation carries an inverse, or admits irreversibility with `emit`.
-Six distinct shapes violate it, all in `examples/rejections/`.
+Seven distinct shapes violate it, all in `examples/rejections/`.
 
 **A bare acquisition** — `effect` without `undo` where the callee is not
 pure (g4_missing_undo.rvl):
@@ -221,6 +221,37 @@ the `undo` of `let h = effect open_h(...)` must be the inverse `open_h`
 For a user `effect` over a service, revl has no declaration to check the
 `undo` against, so a wrong inverse there is still the author's assertion, and
 nothing checks it yet.
+**A provide-method write whose `undo` is not its inverse** — a host Map
+write has one inverse on the same handle and key: `insert(k, v)` and
+`insert_if_absent(k, v)` are undone by `remove(k)`, and `remove(k)` by
+`insert(k, e)`. Any other `undo` leaves the write in place while the
+enclosing bracket's `drop()` releases the map and masks it, so it is refused
+(issue #1945, g4_method_write_not_inverse.rvl):
+
+```revl reject G4
+service Kv { fn set(k: Str, v: Str) -> Str }
+component Store provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove("not-the-key")
+      return v
+    }
+  }
+}
+```
+
+```
+the `undo` of `effect store.insert(...)` must be its inverse on the same
+  handle and key: write `undo store.remove(k)`
+```
+
+For an `extern acquire` or a user `effect` over a service, revl has no table
+to check the `undo` against, so a wrong inverse there is still the author's
+assertion. A provide-method step records how far the check reached as
+`inverse: table | declared | asserted` (see
+[verified effect](verified-effect.md#which-positions-carry-an-inverse-guarantee)).
 
 **An unmarked emission call** — the operation is declared `emission fn`,
 so the call site must say `emit` (g4_unmarked_emission.rvl):

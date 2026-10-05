@@ -5224,12 +5224,15 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         elif code == "G4" and category == "inverse":
             # The release rules (issue #1859, `lower._check_site_release`: the
             # host family's release, and an `extern acquire`'s declared
-            # inverse) carry the G4 code, but they are not the marker rule the
-            # `G` row states: they ask whether a bracket's `undo` is the
-            # inverse its acquisition owns, and the model's HA row carries no
-            # inverse fact yet (issue #1859's formal slice adds the `inv`
-            # column). Absence of fact, ratcheted by name as the approval
-            # floor is, until that column lands.
+            # inverse) and the provide-method write inverse rule (issue #1945,
+            # `lower._method_effect_inverse`) carry the G4 code, but none is
+            # the marker rule the `G` row states: they ask whether a bracket's
+            # `undo` is the inverse its acquisition owns (the family's release
+            # on the bound handle, a host write's inverse on the same handle
+            # and key), and the model's HA row carries no inverse fact yet
+            # (issue #1859's formal slice adds the `inv` column). Absence of
+            # fact, ratcheted by name as the approval floor is, until that
+            # column lands.
             record("out-of-fragment-inverse" if formal_clean
                    else "formal-found-other", rel)
         elif code == "G4" and category == "witnessed":

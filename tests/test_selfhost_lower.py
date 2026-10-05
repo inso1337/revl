@@ -2556,6 +2556,9 @@ component C requires kv: Kv {
     # inverse its declaration names
     ("g4 extern undo that is not the declared inverse",
      _fixture("g4_extern_undo_not_declared"), "G4"),
+    # issue #1945: a provide-method host write's undo is not its inverse
+    ("g4 method write whose undo is not its inverse",
+     _fixture("g4_method_write_not_inverse"), "G4"),
     ("g4 host acquire in a component-reachable fn body",
      _fixture("g4_fn_body_host_acquire"), "G4"),
     # the same rule at the two positions no checked-in fixture occupies

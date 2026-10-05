@@ -837,6 +837,7 @@ pub struct CCtx {
     ln: i64,
     reqops: Vec<Bind>,
     handles: bool,
+    xundo: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -11099,7 +11100,7 @@ fn release_msg_at(ss: &[Stmt], i: i64, cx: Ctx__m2, seam: bool) -> String {
     return host_release_msg(&bind, &hf, &release);
 }
 
-fn method_release_msg(ss: &[Stmt], i: i64, cx: Ctx__m2) -> String {
+fn method_release_msg(ss: &[Stmt], i: i64, cx: Ctx__m2, maps: &[String]) -> String {
     if (i >= ss.revl_length()) {
         return String::from("");
     }
@@ -11107,7 +11108,142 @@ fn method_release_msg(ss: &[Stmt], i: i64, cx: Ctx__m2) -> String {
     if (m != "") {
         return m;
     }
-    return method_release_msg(ss, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone());
+    let w = if (((ss)[(i) as usize].kind == "undo") && ((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].kind == "effect")) { write_inverse_msg((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].e.clone(), (ss)[(i) as usize].e.clone(), maps) } else { String::from("") };
+    if (w != "") {
+        return w;
+    }
+    return method_release_msg(ss, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), maps);
+}
+
+fn map_handles(ss: Vec<Stmt>, i: i64, acc: Vec<String>) -> Vec<String> {
+    if (i >= ss.revl_length()) {
+        return acc;
+    }
+    let s = (ss)[(i) as usize].clone();
+    let hit = ((s.bind != "") && (host_acq_fn(s.clone()) == "Map.new"));
+    return map_handles(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), if hit { acc.revl_push(s.bind.clone()) } else { acc.clone() });
+}
+
+fn host_write_verb(e: Expr, names: &[String]) -> String {
+    return match e {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
+    Expr::Var(v) => if (contains__m2(names, &v) && (((fl.name == "insert") || (fl.name == "insert_if_absent")) || (fl.name == "remove"))) { fl.name } else { String::from("") },
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+};
+}
+
+fn write_inverse_msg(acq: Expr, und: Expr, maps: &[String]) -> String {
+    let verb = host_write_verb(acq.clone(), maps);
+    if ((verb == "") || is_hole_expr(und.clone())) {
+        return String::from("");
+    }
+    let inverse = if (verb == "remove") { String::from("insert") } else { String::from("remove") };
+    let recv = call_recv(acq.clone());
+    let key = first_arg(acq.clone());
+    if (((call_recv(und.clone()) == recv) && (call_verb(und.clone()) == inverse)) && key_expr_same(key.clone(), first_arg(und.clone()))) {
+        return String::from("");
+    }
+    let k = key_spelling(key.clone());
+    let spelled = if (inverse == "remove") { ((recv.revl_concat(".remove(")).revl_concat(&k)).revl_concat(")") } else { ((recv.revl_concat(".insert(")).revl_concat(&k)).revl_concat(", <the value it held>)") };
+    return (((((String::from("the `undo` of `effect ").revl_concat(&recv)).revl_concat(".")).revl_concat(&verb)).revl_concat("(...)` must be its inverse on the same handle and key: write `undo ")).revl_concat(&spelled)).revl_concat("`");
+}
+
+fn call_recv(e: Expr) -> String {
+    return match e {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Field(fl) => { let fl = *fl; match fl.target {
+    Expr::Var(v) => v,
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+};
+}
+
+fn call_verb(e: Expr) -> String {
+    return match e {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Field(fl) => { let fl = *fl; fl.name },
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+};
+}
+
+fn first_arg(e: Expr) -> Expr {
+    return match e {
+    Expr::Call(c) => { let c = *c; if (c.args.revl_length() > 0i64) { (c.args)[(0i64) as usize].clone() } else { Expr::NullLit } },
+    _ => Expr::NullLit,
+};
+}
+
+fn key_spelling(e: Expr) -> String {
+    return match e {
+    Expr::Var(v) => v,
+    Expr::StrLit(s) => jstr(&s),
+    _ => String::from("<the same key>"),
+};
+}
+
+fn key_expr_same(a: Expr, b: Expr) -> bool {
+    if ((!key_shape(a.clone())) || (!key_shape(b.clone()))) {
+        return true;
+    }
+    return match a.clone() {
+    Expr::Var(x) => match b.clone() {
+    Expr::Var(y) => (x == y),
+    _ => false,
+},
+    Expr::StrLit(x) => match b.clone() {
+    Expr::StrLit(y) => (x == y),
+    _ => false,
+},
+    Expr::IntLit(x) => match b.clone() {
+    Expr::IntLit(y) => (x == y),
+    _ => false,
+},
+    Expr::BoolLit(x) => match b.clone() {
+    Expr::BoolLit(y) => (x == y),
+    _ => false,
+},
+    Expr::Field(f) => { let f = *f; match b.clone() {
+    Expr::Field(g) => { let g = *g; ((f.name == g.name) && key_expr_same(f.target.clone(), g.target.clone())) },
+    _ => false,
+} },
+    Expr::Call(c) => { let c = *c; match b.clone() {
+    Expr::Call(d) => { let d = *d; (key_expr_same(c.target.clone(), d.target.clone()) && key_args_same(&c.args, &d.args, 0i64)) },
+    _ => false,
+} },
+    _ => true,
+};
+}
+
+fn key_args_same(xs: &[Expr], ys: &[Expr], i: i64) -> bool {
+    if (xs.revl_length() != ys.revl_length()) {
+        return false;
+    }
+    if (i >= xs.revl_length()) {
+        return true;
+    }
+    return (key_expr_same((xs)[(i) as usize].clone(), (ys)[(i) as usize].clone()) && key_args_same(xs, ys, (i).checked_add(1i64).expect("revl: Int overflow")));
+}
+
+fn key_shape(e: Expr) -> bool {
+    return match e {
+    Expr::Var(v) => true,
+    Expr::StrLit(s) => true,
+    Expr::IntLit(n) => true,
+    Expr::BoolLit(b) => true,
+    Expr::Field(f) => { let f = *f; true },
+    Expr::Call(c) => { let c = *c; true },
+    _ => false,
+};
 }
 
 fn release_group(ss: &[Stmt], i: i64, cx: Ctx__m2, a: Ac) -> Ac {
@@ -13660,7 +13796,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind]) -> Verd {
             if (mrv.v != "") {
                 return mrv;
             }
-            let mrel = method_release_msg(&pm.body, 1i64, cx.clone());
+            let mrel = method_release_msg(&pm.body, 1i64, cx.clone(), &map_handles(comp.setup.clone(), 0i64, vec![]));
             if (mrel != "") {
                 return mk_verd(tagged("G4", &mrel), pm.line);
             }
@@ -22966,7 +23102,7 @@ fn duration_ms_str(numText: &str, unit: &str) -> String {
 }
 
 fn cx_at(cx: CCtx, n: i64) -> CCtx {
-    return CCtx { reqs: cx.reqs.clone(), cases: cx.cases.clone(), fns: cx.fns.clone(), fnps: cx.fnps.clone(), wit: cx.wit.clone(), al: cx.al.clone(), cprovs: cx.cprovs.clone(), cfg: cx.cfg.clone(), ln: n, reqops: cx.reqops.clone(), handles: cx.handles };
+    return CCtx { reqs: cx.reqs.clone(), cases: cx.cases.clone(), fns: cx.fns.clone(), fnps: cx.fnps.clone(), wit: cx.wit.clone(), al: cx.al.clone(), cprovs: cx.cprovs.clone(), cfg: cx.cfg.clone(), ln: n, reqops: cx.reqops.clone(), handles: cx.handles, xundo: cx.xundo.clone() };
 }
 
 fn scope_has(sc: &[Bind], n: &str) -> bool {
@@ -23349,6 +23485,30 @@ fn witnessed_extern_names(ts: &[Token]) -> Vec<String> {
     return out;
 }
 
+fn extern_undo_names(ts: Vec<Token>) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        if atw(&ts, i, "extern") {
+            let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
+            while (((j < ts.revl_length()) && (!atw(&ts, j.clone(), "fn"))) && (!atk(&ts, j.clone(), "eof"))) {
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if atw(&ts, j.clone(), "fn") {
+                let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
+                let k = ret_at(ts.clone(), ps.i);
+                if atw(&ts, k, "undo") {
+                    m.insert(tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text, tkc(&ts, (k).checked_add(1i64).expect("revl: Int overflow")).text);
+                }
+            }
+            i = (j).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return m;
+}
+
 fn module_callable_sigs(ts: Vec<Token>) -> Vec<Bind> {
     let fs = parse_prog_ts(ts.clone()).fns;
     let mut out: Vec<Bind> = vec![];
@@ -23426,6 +23586,34 @@ fn svc_method_params(ts: Vec<Token>, svc: &str, meth: &str) -> Vec<ParamN> {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     return vec![];
+}
+
+fn method_inverse(acq: Expr, und: Expr, hostSc: &[String], cx: CCtx) -> String {
+    let w = host_write_verb(acq.clone(), hostSc);
+    if (w != "") {
+        return if (w == "remove") { String::from("asserted") } else { String::from("table") };
+    }
+    let x = bare_callee(acq.clone());
+    let u = bare_callee(und.clone());
+    let inv = match cx.xundo.get(&x).cloned() {
+    Some(v) => v,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+    if (((x != "") && (inv != "")) && (inv == u)) {
+        return String::from("declared");
+    }
+    return String::from("asserted");
+}
+
+fn bare_callee(e: Expr) -> String {
+    return match e {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Var(nm) => nm,
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+};
 }
 
 fn is_witnessed_acq(e: Expr, cx: CCtx) -> bool {
@@ -24352,7 +24540,8 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         if (!ue.ok) {
             return mk_irres(false, String::from(""));
         }
-        let step = (((String::from("{\"step\": \"effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat("}");
+        let inv = if is_hole_expr(und.e.clone()) { String::from("") } else { String::from(", \"inverse\": ").revl_concat(&jstr(&method_inverse(acq.e.clone(), und.e.clone(), &hostSc, cx.clone()))) };
+        let step = ((((String::from("{\"step\": \"effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat(&inv)).revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
         return cir_method_stmts(ts.clone(), und.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
     }
@@ -25236,7 +25425,7 @@ fn ir_component(ts: Vec<Token>, i: i64, fname: &str, al: std::collections::HashM
     let lo = (j).checked_add(1i64).expect("revl: Int overflow");
     let hi = if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (j).checked_add(1i64).expect("revl: Int overflow") } else { (end).checked_sub(1i64).expect("revl: Int overflow") };
     let reqSet = bind_names(reqs.clone(), 0i64, vec![]);
-    let cx = CCtx { reqs: reqSet.clone(), cases: case_binds(ts.clone(), al.clone()), reqops: req_op_returns(ts.clone(), reqs.clone(), al.clone(), vec![]), fns: module_callable_sigs(ts.clone()), fnps: module_callable_ptypes(ts.clone(), al.clone()), wit: witnessed_extern_names(&ts), al: al.clone(), cprovs: program_provisions(ts.clone()), cfg: comp_config_struct(ts.clone(), lo.clone(), hi.clone(), al.clone()), ln: 0i64, handles: program_names_handles(&ts) };
+    let cx = CCtx { reqs: reqSet.clone(), cases: case_binds(ts.clone(), al.clone()), reqops: req_op_returns(ts.clone(), reqs.clone(), al.clone(), vec![]), fns: module_callable_sigs(ts.clone()), fnps: module_callable_ptypes(ts.clone(), al.clone()), wit: witnessed_extern_names(&ts), al: al.clone(), cprovs: program_provisions(ts.clone()), cfg: comp_config_struct(ts.clone(), lo.clone(), hi.clone(), al.clone()), ln: 0i64, handles: program_names_handles(&ts), xundo: extern_undo_names(ts.clone()) };
     let sc0: Vec<Bind> = vec![];
     let bodyRes = cir_body(ts.clone(), lo.clone(), hi.clone(), cx.clone(), provs.clone(), sc0.clone(), vec![], String::from(""));
     let isoJs = ir_isolate(&ts, lo.clone(), hi.clone(), String::from(""));

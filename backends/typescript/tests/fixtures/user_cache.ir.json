@@ -260,7 +260,8 @@
                         "id": "key"
                       }
                     ]
-                  }
+                  },
+                  "inverse": "table"
                 },
                 {
                   "step": "emit",

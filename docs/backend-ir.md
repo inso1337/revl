@@ -75,6 +75,14 @@ every other method, and `ir_version` stays 3. A backend may ignore it; none of
 the six reads it yet, and their output is byte-identical with or without it
 (issue #1369).
 
+A method-body `effect` whose `undo` is written also carries `inverse`, how far
+the compiler could check that `undo` (issue #1945): `"table"` (a host Map write
+undone by its table inverse on the same handle and key), `"declared"` (an
+extern's declared inverse) or `"asserted"` (a service, extern or SQL reversal
+revl cannot prove). It is metadata for audits and reports; no backend changes
+what it emits for it. See
+[verified effect](verified-effect.md#which-positions-carry-an-inverse-guarantee).
+
 ## Expressions
 
 | kind | fields | meaning |
