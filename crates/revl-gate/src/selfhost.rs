@@ -12190,7 +12190,7 @@ fn vm_parts(xs: Vec<PartN>, i: i64, cx: Ctx__m2, env: Vec<Bind>) -> String {
 }
 
 fn value_method_head(h: &str) -> bool {
-    return ((((((((h == "List") || (h == "Map")) || (h == "Str")) || (h == "Bytes")) || (h == "Int")) || (h == "Int32")) || (h == "Float")) || (h == "Bool"));
+    return (((((((h == "List") || (h == "Str")) || (h == "Bytes")) || (h == "Int")) || (h == "Int32")) || (h == "Float")) || (h == "Bool"));
 }
 
 fn ct_scan(e: Expr, cx: Ctx__m2, env: Vec<Bind>) -> String {

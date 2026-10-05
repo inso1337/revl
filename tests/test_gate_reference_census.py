@@ -447,7 +447,7 @@ def test_every_value_method_call_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(VALUE_METHOD_CALL.glob("*.rvl"))
-    assert len(docs) == 11, f"the value-method-call corpus has {len(docs)} documents"
+    assert len(docs) == 12, f"the value-method-call corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))

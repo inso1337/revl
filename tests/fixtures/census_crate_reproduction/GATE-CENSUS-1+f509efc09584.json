@@ -1,5 +1,5 @@
 {
- "checker_version": "GATE-CENSUS-1+c080cf571e83",
+ "checker_version": "GATE-CENSUS-1+f509efc09584",
  "engine": "crate",
  "false_admissions": [],
  "note": "A recorded `tools/gate_reference_census.py --engine crate` run, read by tools/census_artifact.py. It is recorded rather than re-run because it needs cargo and takes minutes. The checker version it was taken at is recorded with it, and a reproduction taken at a different version is reported as stale and lifts no claim.",
@@ -1209,14 +1209,15 @@
   "tests/fixtures/value_method_call/ok_arrow_param.rvl",
   "tests/fixtures/value_method_call/ok_host_map.rvl",
   "tests/fixtures/value_method_call/ok_inplace_builtin.rvl",
+  "tests/fixtures/value_method_call/ok_named_map.rvl",
+  "tests/fixtures/value_method_call/ok_typed_host_acquisition.rvl",
   "tests/fixtures/value_method_call/t1_inplace_effect_arg.rvl",
   "tests/fixtures/value_method_call/t1_inplace_list.rvl",
   "tests/fixtures/value_method_call/t1_inplace_paren_int.rvl",
   "tests/fixtures/value_method_call/t1_inplace_req_result.rvl",
   "tests/fixtures/value_method_call/t1_inplace_str_call.rvl",
   "tests/fixtures/value_method_call/t1_named_int.rvl",
-  "tests/fixtures/value_method_call/t1_named_list.rvl",
-  "tests/fixtures/value_method_call/t1_named_map.rvl"
+  "tests/fixtures/value_method_call/t1_named_list.rvl"
  ],
  "tracked_buckets": {}
 }

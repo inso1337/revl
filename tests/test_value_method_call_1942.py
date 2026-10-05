@@ -10,10 +10,12 @@ through as a generic method call no tier defines. A `fn` body refuses every
 such call already.
 
 The rule (`lower._refuse_value_method`) is one for both spellings: a
-non-builtin method on a receiver whose static type is List, Map, Str, Bytes,
-Int, Int32, Float or Bool is refused with the named receiver's message. A
-receiver with no static type (an arrow parameter, a host-acquired handle)
-stays lenient, as before.
+non-builtin method on a receiver whose static type is List, Str, Bytes, Int,
+Int32, Float or Bool is refused with the named receiver's message. A receiver
+with no static type (an arrow parameter, a host-acquired handle) stays
+lenient, as before, and so does a `Map`: it is the one value head a host
+handle shares its name with, so a `Map[K, V]`-typed acquisition keeps its host
+verbs (`drop`, `insert`, `get`).
 
 tests/fixtures/value_method_call/ is the corpus: `t1_` refused, `ok_`
 admitted. tests/test_gate_reference_census.py holds the self-host gate to the
@@ -51,9 +53,9 @@ REFUSED = {
     "t1_inplace_str_call": ("frob", "Str"),
     "t1_named_int": ("frob", "Int"),
     "t1_named_list": ("map", "List[Int]"),
-    "t1_named_map": ("frob", "Map[Str, Int]"),
 }
-ADMITTED = ("ok_arrow_param", "ok_host_map", "ok_inplace_builtin")
+ADMITTED = ("ok_arrow_param", "ok_host_map", "ok_inplace_builtin", "ok_named_map",
+            "ok_typed_host_acquisition")
 
 
 def _src(stem: str) -> str:

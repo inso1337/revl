@@ -6076,9 +6076,10 @@ fn vm_parts(xs: List[PartN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
   return ct_first(v, vm_parts(xs, i + 1, cx, env))
 }
 // `lower._VALUE_METHOD_HEADS`: the stdlib values whose whole method surface is
-// the builtin table.
+// the builtin table. Not `Map`, the one value head a host handle shares its
+// name with (a `Map[K, V]`-typed acquisition keeps its host verbs).
 fn value_method_head(h: Str) -> Bool {
-  return h == "List" || h == "Map" || h == "Str" || h == "Bytes"
+  return h == "List" || h == "Str" || h == "Bytes"
     || h == "Int" || h == "Int32" || h == "Float" || h == "Bool"
 }
 

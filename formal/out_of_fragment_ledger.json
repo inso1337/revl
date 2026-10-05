@@ -41,8 +41,7 @@
     "tests/fixtures/value_method_call/t1_inplace_req_result.rvl",
     "tests/fixtures/value_method_call/t1_inplace_str_call.rvl",
     "tests/fixtures/value_method_call/t1_named_int.rvl",
-    "tests/fixtures/value_method_call/t1_named_list.rvl",
-    "tests/fixtures/value_method_call/t1_named_map.rvl"
+    "tests/fixtures/value_method_call/t1_named_list.rvl"
   ],
   "out-of-fragment-approval": [
     "examples/rejections/g4_approval_compensate.rvl",

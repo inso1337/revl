@@ -2408,6 +2408,10 @@
 
 ["tests/fixtures/value_method_call/ok_inplace_builtin.rvl", "agree-admit"]
 
+["tests/fixtures/value_method_call/ok_named_map.rvl", "agree-admit"]
+
+["tests/fixtures/value_method_call/ok_typed_host_acquisition.rvl", "agree-admit"]
+
 ["tests/fixtures/value_method_call/t1_inplace_effect_arg.rvl", "agree-refuse/T1"]
 
 ["tests/fixtures/value_method_call/t1_inplace_list.rvl", "agree-refuse/T1"]
@@ -2421,5 +2425,3 @@
 ["tests/fixtures/value_method_call/t1_named_int.rvl", "agree-refuse/T1"]
 
 ["tests/fixtures/value_method_call/t1_named_list.rvl", "agree-refuse/T1"]
-
-["tests/fixtures/value_method_call/t1_named_map.rvl", "agree-refuse/T1"]

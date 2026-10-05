@@ -14988,8 +14988,15 @@ def _is_record_type(ty, types: dict) -> bool:
 # (issue #1942). A component-position call of any other method on one is a
 # typo or a misuse: no tier defines it, and py would raise AttributeError at
 # run time. The `fn` body refuses it on every receiver already.
+#
+# `Map` is left out on purpose: it is the one value head a HOST handle shares
+# its name with. `let store = effect <acq> undo store.drop()` whose acquisition
+# is typed `Map[K, V]` (a typed hole, an `acquire` extern's declared return)
+# gives `store` that static type with no host provenance, and its host verbs
+# (`insert`, `get`, `drop`) are not in the stdlib table. The static type cannot
+# tell the two apart, so a `Map` receiver keeps the lenient reading it had.
 _VALUE_METHOD_HEADS = frozenset(
-    {"List", "Map", "Str", "Bytes", "Int", "Int32", "Float", "Bool"})
+    {"List", "Str", "Bytes", "Int", "Int32", "Float", "Bool"})
 
 
 def _refuse_value_method(method, recv_t, filename: str, line: int) -> None:

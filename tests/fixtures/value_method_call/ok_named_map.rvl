@@ -1,4 +1,5 @@
-// issue #1942: a named Map receiver, at its declared type
+// a Map receiver keeps the lenient reading: `Map` is the one value head a host
+// handle shares its name with, so its static type cannot rule a method out
 service Math { fn go(n: Int) -> Int }
 component C provides math: Math {
   provide math {
