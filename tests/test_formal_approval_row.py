@@ -37,7 +37,6 @@ here when `lake` is on PATH, and by `make formal` always.
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import re
@@ -50,6 +49,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 LEAN = ROOT / "formal" / "RevL" / "Theorems" / "G4_ApprovalFloor.lean"
 ORACLE = ROOT / "formal" / "harness" / "Oracle.lean"
@@ -245,13 +246,8 @@ component Bank provides bank: Pay {
 
 @pytest.fixture(scope="module")
 def harness():
-    spec = importlib.util.spec_from_file_location(
-        "formal_diff_corpus_approval",
-        ROOT / "formal" / "harness" / "diff_corpus.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_by_path("formal_diff_corpus_approval",
+                        ROOT / "formal" / "harness" / "diff_corpus.py")
 
 
 @pytest.fixture(scope="module")
