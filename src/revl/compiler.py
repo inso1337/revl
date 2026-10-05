@@ -1655,10 +1655,17 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
             arm = bound | ({bind} if bind is not None else set())
             recur(body, arm)
             if isinstance(body, _ast.ExprBlockArm):
+                # issue #1913: a block arm accepts the same statement set a fn
+                # body does (`let`, `var`, `while`, `if`, `for`, assignments,
+                # ...), so walk it with the same statement walk and take the
+                # binders it threads out of the tail. Reading `s.value`/`s.name`
+                # assumed every statement was a `let`, so the first `ForStmt`,
+                # `WhileStmt` or `IfStmt` in an arm raised `AttributeError`; a
+                # statement the let-shaped walk happened to accept (an
+                # assignment) was also only half-walked.
                 inner = set(arm)
                 for s in body.stmts:
-                    recur(s.value, inner)
-                    inner.add(s.name)
+                    _rewrite_stmt(s, val_renames, type_renames, inner)
                 recur(body.tail, inner)
     elif isinstance(expr, _ast.ExprHole):
         expr.type = _subst_type(expr.type, type_renames)
