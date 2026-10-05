@@ -91,7 +91,67 @@ __all__ = [
     # item 443: the operator E-Stop (docs/design/443-estop.md)
     "arm_estop_latch", "clear_estop", "estop", "estop_engaged",
     "estop_from_latch", "estop_latch_path", "estop_residue", "estop_state",
+    # issue #1932: the built-in `Result` cases, defined ONCE for every module
+    "Ok", "Err",
 ]
+
+
+# ---------------------------------------------------------------------------
+# The built-in `Result` cases (issue #1932)
+# ---------------------------------------------------------------------------
+#
+# `Ok`/`Err` are defined HERE, once, and imported by every emitted module that
+# uses the built-in `Result`, rather than written into each module as
+# `class Ok:` / `class Err:` by the emitter.
+#
+# Why the module boundary forces this. Every emitted module is its own
+# `types.ModuleType` (`backends/python/loader.py`, `src/revl/run.py`), and a
+# class statement executed twice defines two *distinct* class objects. A
+# per-module `class Ok` therefore made each module's `Ok` a different type:
+# a `Result` a PRODUCER returns (`Ok("forty-two")` from another module) failed
+# `isinstance(value, Ok)` in the CONSUMER — `match` tests against its own `Ok`
+# — so no arm matched and the module raised
+# `TypeError: non-exhaustive match` on a value that was, in every sense the
+# program can express, an `Ok`. `Str`/`Int`/record/`List` values crossed the
+# same boundary unharmed precisely because they are host types with one
+# process-wide identity already; `Result` was the one builtin whose identity
+# was per-module. Importing the classes from this module gives the whole
+# process the single definition the driver itself holds
+# (`_Driver.runtime`, `src/revl/run.py`), which is also the module every
+# component-bearing emitted module already resolves `Frame`/`fmt`/… through.
+#
+# The classes are deliberately the same shape the emitter wrote per module
+# (`__slots__`, one `value` field, value equality, value hash), so only the
+# identity changes — the observable surface of an `Ok`/`Err` is otherwise
+# byte-for-byte what it was.
+class Ok:
+    """The success case of the built-in `Result[T, E]`."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value=None):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, Ok) and other.value == self.value
+
+    def __hash__(self):
+        return hash(("Ok", self.value))
+
+
+class Err:
+    """The failure case of the built-in `Result[T, E]`."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value=None):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, Err) and other.value == self.value
+
+    def __hash__(self):
+        return hash(("Err", self.value))
 
 
 # ---------------------------------------------------------------------------

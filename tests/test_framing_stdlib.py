@@ -54,6 +54,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
+from _builtin_cases import serve_builtin_cases  # noqa: E402
 
 STDLIB = ROOT / "stdlib" / "framing.rvl"
 
@@ -195,6 +196,10 @@ def _exec_python(ir: dict):
     spec.loader.exec_module(module)
     stub = types.ModuleType("runtime")
     stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    # issue #1932: the emitted module imports the builtin sum cases from the
+    # shared runtime instead of defining them itself, so the stub must serve
+    # the real Ok/Err (a None placeholder breaks the lowered match).
+    serve_builtin_cases(stub)
     had = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub

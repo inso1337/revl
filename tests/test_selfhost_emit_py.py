@@ -112,6 +112,7 @@ from revl import compile_files  # noqa: E402
 sys.path.insert(0, str(ROOT / "tests"))
 
 from _boundary_witness import shared_witness_token_reason  # noqa: E402
+from _builtin_cases import serve_builtin_cases  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_py_corpus"
 CORPUS = [
@@ -650,6 +651,10 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
 
     runtime = types.ModuleType("runtime")
     runtime.Frame = Frame
+    # issue #1932: `Ok`/`Err` are no longer written into the emitted module —
+    # it imports them from the shared runtime — so the stub serves the real
+    # classes rather than a second copy.
+    serve_builtin_cases(runtime)
     # issue #1504: a witnessed extern carries the E-Stop gate; no halt here
     runtime.estop_gated = lambda name: (lambda fn: fn)
     monkeypatch.setitem(sys.modules, "runtime", runtime)

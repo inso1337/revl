@@ -26,7 +26,8 @@ Checked here:
     the byte-identical result — the tier-divergence kill (skipped where `node`
     is absent);
   * byte-compat: `json_try_parse(valid).value` equals `json_parse(valid)`;
-  * the emitter defines `Ok`/`Err` for a program that only CALLS a
+  * the emitter IMPORTS `Ok`/`Err` (issue #1932: the shared runtime owns the
+    built-in Result cases) for a program that only CALLS a
     Result-returning extern, with no surface `match`/`adt` naming them;
   * `parse_engine_output` — the harness's per-engine final-answer extraction
     (revl-harness src/components/engine_run.rvl) — rewritten as a PURE revl fn
@@ -50,6 +51,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from _builtin_cases import serve_builtin_cases  # noqa: E402
 from revl import compile_files  # noqa: E402
 
 # stdlib modules the consumers import; copied beside each consumer fixture so
@@ -84,6 +86,10 @@ def _exec_py(ir: dict) -> dict:
     code = _emit("python", ir)
     stub = types.ModuleType("runtime")
     stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    # issue #1932: the module imports the built-in Result cases from the shared
+    # runtime, so the stub must serve the real ones (an `Ok(x)` that answered
+    # `None` would silently erase a Result the emitted code goes on to inspect).
+    serve_builtin_cases(stub)
     had, previous = "runtime" in sys.modules, sys.modules.get("runtime")
     sys.modules["runtime"] = stub
     try:
@@ -243,19 +249,27 @@ def test_ts_ok_err_channels_match_py(pair_ir):
     assert _run_ts(pair_ir, 'console.log(JSON.stringify(is_ok("not json")));') is False
 
 
-# ------------------------------------------------- the Ok/Err emit gate
+# --------------------------------------- the Ok/Err import (issue #1932)
 
-def test_result_returning_extern_emits_ok_err_classes():
+def test_result_returning_extern_imports_ok_err_cases():
     """A program that only CALLS a Result-returning extern — with no surface
-    `match` or `adt` naming Ok/Err — still gets the built-in Result classes
-    emitted, so the extern body's `Ok(..)`/`Err(..)` resolve. Regression for the
-    `_uses_builtin_result` gate extension (item 362)."""
+    `match` or `adt` naming Ok/Err — still has the built-in Result cases in
+    scope, so the extern body's `Ok(..)`/`Err(..)` resolve. Regression for the
+    `_uses_builtin_result` gate extension (item 362).
+
+    Since issue #1932 the names are IMPORTED from the shared runtime instead of
+    being re-declared per module, so one class object serves every emitted
+    module and a `Result` can cross a module boundary."""
     ir = _compile(
         'use "stdlib/json.rvl" { json_try_parse }\n'
         "fn passthrough(s: Str) -> Result[Any, Str] { return json_try_parse(s) }\n")
     py = _emit("python", ir)
-    assert "class Ok:" in py
-    assert "class Err:" in py
+    imports = [ln for ln in py.splitlines() if ln.startswith("from runtime import ")]
+    assert imports, py
+    names = {n.strip() for n in imports[0][len("from runtime import "):].split(",")}
+    assert {"Ok", "Err"} <= names, imports[0]
+    assert "class Ok:" not in py
+    assert "class Err:" not in py
 
 
 # ----------------------------------------- the payoff: parse_engine_output

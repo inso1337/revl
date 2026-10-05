@@ -396,9 +396,11 @@ _EMITTED_BUILTINS = frozenset({
 
 # Type names the python emitter injects at module scope, which a user *type* of
 # the same spelling therefore cannot keep. `Ok`/`Err` are the built-in `Result`
-# ADT's constructors: `_emit_builtin_result` writes `class Ok:`/`class Err:` at
-# the top of the module, but its guard only skipped a name a user had claimed as
-# a *variant case*, so `type Ok = { a: Int }` emitted a SECOND module-scope
+# ADT's constructors: a module that uses the built-in `Result` imports them from
+# the shared runtime (issue #1932 — they were once written into each module as
+# `class Ok:`/`class Err:` at the top of the module), and that import is
+# suppressed only for a name a user has claimed as a *variant case*, so a user
+# `type Ok = { a: Int }` added a SECOND module-scope
 # `class Ok` further down. Python class redefinition is silent and the later
 # class wins, so the runtime's constructor was gone: an accepted program that
 # built a `Result` then died at run time with `TypeError: Ok() takes no
@@ -5012,9 +5014,11 @@ def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) —
     an `adt` node typed Result, a `match` arm on Ok/Err, or a call to one of
     the total division forms (which *produce* a Result). Used to decide
-    whether to emit the built-in Result classes: emitting them into every
-    module would add classes no program references, so the gate is dead-code
-    hygiene — the emitted module carries only the names the program uses."""
+    whether the module needs the built-in Result cases, which it now IMPORTS
+    from the shared runtime (`_builtin_result_imports`, issue #1932): the gate
+    is dead-code hygiene — a module that never builds or matches a `Result`
+    carries neither the import nor the names."""
+
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
@@ -5031,18 +5035,46 @@ def _uses_builtin_result(ir: dict) -> bool:
 
     # item 243: a witnessed extern returns `Result[Witness, Error]` and its
     # emitted call site branches on `Ok` to register the transactional inverse,
-    # so the Result classes must be present even if no surface `match`/`adt`
+    # so the Result cases must be imported even if no surface `match`/`adt`
     # names them. Any witnessed extern is enough to require them.
     if any(ext.get("class") == "witnessed" for ext in ir.get("externs") or []):
         return True
     # item 362: a pure/total extern that RETURNS a Result builds `Ok(..)`/
-    # `Err(..)` in its host body (e.g. `json_try_parse`), so the classes must
-    # be present even when no surface `match`/`adt` names them — the same
+    # `Err(..)` in its host body (e.g. `json_try_parse`), so the cases must
+    # be imported even when no surface `match`/`adt` names them — the same
     # reasoning as the witnessed case, extended to any Result-returning extern.
     if any(str(ext.get("returns", "")).startswith("Result")
            for ext in ir.get("externs") or []):
         return True
     return walk(ir.get("components")) or walk(ir.get("functions")) or walk(ir.get("tests"))
+
+
+def _builtin_result_imports(ir: dict) -> "set[str]":
+    """The built-in `Result` case names this module must IMPORT from the shared
+    runtime — `{"Ok", "Err"}`, or the empty set when the module uses no
+    `Result` (issue #1932).
+
+    The cases are defined ONCE, in `backends/python/runtime.py`, because every
+    emitted module is its own `types.ModuleType`: a `class Ok` written into each
+    module is a DIFFERENT class object per module, so a `Result` a producer
+    returns failed `isinstance(value, Ok)` in a consumer (a hot-loaded plugin)
+    and its `match` fell through to `TypeError: non-exhaustive match` on a value
+    that was an `Ok`. Importing the runtime's cases is the one definition the
+    whole process shares — the same module the driver holds (`_Driver.runtime`),
+    which every component-bearing module already resolves `Frame`/`fmt`/… from.
+
+    A name a user ADT *case* shadows is not imported: the user's own case
+    emitter defines that class, which is what the old per-module emission did
+    for the same reason (and what keeps such a module byte-identical).
+    """
+    if not _uses_builtin_result(ir):
+        return set()
+    user_cases = {
+        case["name"]
+        for spec in (ir.get("types") or {}).values() if spec.get("kind") == "variant"
+        for case in spec.get("cases") or []
+    }
+    return {name for name in ("Ok", "Err") if name not in user_cases}
 
 
 # ------------------------------------------------------------ typed holes
@@ -5877,6 +5909,13 @@ def emit(ir: dict) -> str:
         # document HAS a validated crossing, so a document without one is
         # byte-identical to one compiled before this slice.
         | ({"register_grammars"} if grammar_registry else set())
+        # issue #1932: the built-in `Result` cases come from the shared runtime,
+        # so a module that uses `Result` imports them instead of defining its
+        # own — one class object per process, which is what lets a `Result`
+        # cross a module boundary and still match in the consumer. Gated on the
+        # same `_uses_builtin_result` the per-module class emission used, so a
+        # `Result`-free document's import line is unchanged.
+        | _builtin_result_imports(ir)
     )
 
     # Delivery semantics (item 44): the reference runtime driver may auto-retry
@@ -6182,30 +6221,16 @@ def emit(ir: dict) -> str:
         for line in _REVL_MEMO_SRC.splitlines():
             out.add(0, line)
         out.add(0)
-    # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
-    # unless a user type shadows the name. Opt stays host-None, so it needs
-    # no class. Emitted only when the IR actually uses Result — an unused
-    # Ok/Err class in every module would be dead code (docs/conformance.md,
-    # "Golden policy": output is right because it is right, not because a
-    # fixture wants the bytes).
-    if _uses_builtin_result(ir):
-        user_cases = {
-            case["name"]
-            for spec in types.values() if spec.get("kind") == "variant"
-            for case in spec.get("cases") or []
-        }
-        for builtin in ("Ok", "Err"):
-            if builtin in user_cases:
-                continue
-            out.add(0, f"class {builtin}:")
-            out.add(1, '__slots__ = ("value",)')
-            out.add(1, "def __init__(self, value=None):")
-            out.add(2, "self.value = value")
-            out.add(1, "def __eq__(self, other):")
-            out.add(2, f"return isinstance(other, {builtin}) and other.value == self.value")
-            out.add(1, "def __hash__(self):")
-            out.add(2, f"return hash(({builtin!r}, self.value))")
-            out.add(0)
+    # The built-in `Result` cases are NOT emitted here (issue #1932). They used
+    # to be written into every module that used `Result`, which gave each module
+    # its OWN `Ok` class object: a `Result` a producer returned failed the
+    # consumer's `isinstance(value, Ok)` and the consumer's `match` died with
+    # `TypeError: non-exhaustive match`. They are now defined once, in the
+    # shared runtime (`backends/python/runtime.py`), and imported via
+    # `_builtin_result_imports` above — the same module the driver holds and
+    # every component-bearing emitted module already imports from. `Opt` is
+    # unaffected: `Some`/`None` are host `None`/identity on this tier, so there
+    # is no per-module class to split.
     if types:
         # Only what the record annotations below actually mention (item 436
         # F9): `dataclasses` is no longer imported at all, `Union` never was
