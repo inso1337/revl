@@ -448,6 +448,30 @@ The entries leave the frame's deferred lists first, so a later commit does not
 discharge them and a later abort does not run them twice. Under an E-Stop
 nothing runs and the halt strands them, as it strands every other entry.
 
+**The java tier runs the unit too** (issue #1369, item 3 of the decision on
+the issue, one tier per pull request). `backends/java/emit.py` derives the
+same units from `revl.ui_transaction`. A unit method opens
+`RevlUi _revlUi = new RevlUi(fx, frame, "<key>.<method>", true);` and runs its
+body in a `try` whose `catch` settles the unit and rethrows and whose
+`finally` flushes; a method that only reaches a computer-use extern opens one
+with `settles` false. Every registration in the body goes through the scope,
+and every computer-use crossing renders as `_revlUi.cross` (`crossUnit` for no
+value), the analog of py's `declared_crossing`: it notes the crossing,
+registers the crossing's compensation (the site-spelled one, else the
+declared one) after the call returns, and still registers it when the call
+throws. A call that returns tracks the scope's entries into the activation's
+`fx` in registration order, as the same entries a method body tracks outside
+a unit. A unit whose call throws settles them instead, witnessed inverses
+newest first, then compensations newest first through `RevlFrame.runPhase2`'s
+per-call bound under one budget, each continue-and-record into the merged
+residue schema, records the run (`RevlUi.runs(activation)`), and rethrows.
+The entries never reach `fx`, so the clean unload after the failed call
+discharges nothing of them and a later `abort()` does not run them twice.
+java erases the async color and its components carry no E-Stop, and a
+document with no computer-use extern is emitted byte-identically.
+`backends/java/test_ui_transaction_java_1369.py` is the py suite's oracle,
+its control and its rules on this tier, on a JVM.
+
 Three rules, each pinned by `tests/test_ui_transaction_runtime_1369.py`:
 
 - the run the tier performs is the run `compensation_run` computes. On the

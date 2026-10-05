@@ -82,6 +82,7 @@
     "class=emission",
     "class=witnessed",
     "interp_type=Float",
+    "key=<activation>",
     "kind=arrow",
     "kind=hole",
     "kind=instance-get",
