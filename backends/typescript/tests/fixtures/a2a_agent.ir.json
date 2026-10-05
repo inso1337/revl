@@ -11,6 +11,7 @@
             }
           ],
           "returns": "Str",
+          "returns_qualifier": "Untrusted",
           "emission": true,
           "async": true
         },
@@ -22,6 +23,7 @@
             }
           ],
           "returns": "Str",
+          "returns_qualifier": "Untrusted",
           "emission": true,
           "async": true
         }

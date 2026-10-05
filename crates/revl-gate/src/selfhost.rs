@@ -21910,6 +21910,39 @@ fn ir_params_json(ps: &[ParamN]) -> String {
     return out;
 }
 
+fn taint_top_qualifier(ty: String) -> String {
+    if ((ty == "") || (!taint_has_qualifier(&ty))) {
+        return String::from("");
+    }
+    let p = ty_parse(ty.clone());
+    if (is_qual_head(&p.head) && (p.args.revl_length() == 1i64)) {
+        return p.head;
+    }
+    return String::from("");
+}
+
+fn ir_service_params_json(ps: &[ParamN], raw: &[ParamN]) -> String {
+    let mut out = String::from("");
+    let mut i = 0i64;
+    while (i < ps.revl_length()) {
+        let mut e = ((String::from("{\"name\": ").revl_concat(&jstr(&(ps)[(i) as usize].name))).revl_concat(", \"type\": ")).revl_concat(&jstr(&taint_strip((ps)[(i) as usize].ty.clone())));
+        if taint_mentions_secret((ps)[(i) as usize].ty.clone()) {
+            e.push_str(", \"secret\": true");
+        }
+        let q = if (i < raw.revl_length()) { taint_top_qualifier((raw)[(i) as usize].ty.clone()) } else { String::from("") };
+        if (q == "Trusted") {
+            e.push_str(", \"trusted\": true");
+        }
+        if (q == "Untrusted") {
+            e.push_str(", \"untrusted\": true");
+        }
+        e.push_str("}");
+        out = if (out == "") { e.clone() } else { (out.revl_concat(", ")).revl_concat(&e) };
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn ir_caps_json(cs: &[String]) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
@@ -21962,9 +21995,14 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
     let mut retJson = String::from("null");
     let mut term = String::from("");
+    let mut retQual = String::from("");
     let mut nexti = ps.i;
     if atk(&ts, ps.i, "arrow") {
         let tr = type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
+        let rq = taint_top_qualifier(tr.ty.clone());
+        if ((rq == "Untrusted") || (rq == "Secret")) {
+            retQual = rq.clone();
+        }
         let rawRet = taint_strip(alias_subst(tr.ty.clone(), al.clone()));
         if (rawRet == "Criterion") {
             term = String::from("criterion");
@@ -21979,7 +22017,10 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
         }
         nexti = tr.i;
     }
-    let mut mj = (((jstr(&nm).revl_concat(": {\"params\": [")).revl_concat(&ir_params_json(&alias_subst_params(ps.ps.clone(), al.clone())))).revl_concat("], \"returns\": ")).revl_concat(&retJson);
+    let mut mj = (((jstr(&nm).revl_concat(": {\"params\": [")).revl_concat(&ir_service_params_json(&alias_subst_params(ps.ps.clone(), al.clone()), &ps.ps))).revl_concat("], \"returns\": ")).revl_concat(&retJson);
+    if (retQual != "") {
+        mj = (mj.revl_concat(", \"returns_qualifier\": ")).revl_concat(&jstr(&retQual));
+    }
     if (term != "") {
         mj = (mj.revl_concat(", \"termination\": ")).revl_concat(&jstr(&term));
     }
