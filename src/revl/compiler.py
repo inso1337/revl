@@ -9,7 +9,7 @@ import textwrap
 from dataclasses import dataclass, field
 
 from . import parser as _ast
-from ._paths import backends_root, stdlib_root
+from ._paths import backends_root, relpath_or_abs, stdlib_root
 from .admit_profile import AdmissionProfile
 from .admit_profile import check_no_asset as _check_no_asset
 from .admit_profile import check_no_extern as _check_no_extern
@@ -517,7 +517,7 @@ class _ModuleLoader:
         if abs_path in self._stack:
             start = self._stack.index(abs_path)
             cycle = self._stack[start:] + [abs_path]
-            rendered = " -> ".join(os.path.relpath(p) for p in cycle)
+            rendered = " -> ".join(relpath_or_abs(p) for p in cycle)
             raise RevlError(
                 abs_path,
                 1,
@@ -638,7 +638,7 @@ class _ModuleLoader:
             importer.named_services.add(name)
             return
 
-        where = os.path.relpath(used.path)
+        where = relpath_or_abs(used.path)
         if any(fn.name == name and not fn.public for fn in used.program.fn_decls):
             raise RevlError(importer.path, line,
                             f"`{name}` is module-private in `{where}` and cannot be imported (G1)",

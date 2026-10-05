@@ -507,7 +507,9 @@ def check_mcp_runtime(prober: Prober, backends_dir: Path) -> Check:
     if prober.module_available("cordis"):
         return Check("mcp server runtime", OK, None,
                      "every MCP verb is available under this interpreter")
-    venv = backends_dir / "python" / ".venv" / "bin" / "python"
+    from ._paths import venv_python  # noqa: PLC0415
+
+    venv = venv_python(backends_dir / "python" / ".venv")
     if prober.run([str(venv), "-P", "-c", "import cordis, revl"]).ok:
         return Check("mcp server runtime", OK, None,
                      f"`revl mcp serve` re-executes under {venv}, which can "

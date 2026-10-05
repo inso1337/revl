@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 
+from ._paths import relpath_or_abs
 from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
@@ -72,7 +73,7 @@ def origin_of(path: str, root: str | None = None) -> str:
     policy to write (426 §1.2).
     """
     root = os.path.abspath(root or os.getcwd())
-    rel = os.path.relpath(os.path.abspath(path), root)
+    rel = relpath_or_abs(os.path.abspath(path), root)
     parts = rel.split(os.sep)
     if len(parts) >= 3 and parts[0] == _VENDOR_DIR:
         return parts[1]
@@ -359,7 +360,7 @@ class RowTable:
 def _relative(path: str, root: str) -> str:
     """Provenance recorded relative to `root`, so an IR document stays
     machine-independent (the same rule `parse_file` follows)."""
-    return os.path.relpath(os.path.abspath(path), os.path.abspath(root)) \
+    return relpath_or_abs(os.path.abspath(path), os.path.abspath(root)) \
         .replace(os.sep, "/")
 
 
@@ -672,7 +673,7 @@ def _vendor_truc_of(abspath: str, root: str) -> str | None:
     """The truc a source path is VENDORED under (`trucs/<truc>/...`), or `None`
     if the path is the project's own (426 §7). Distribution facts key off where
     the bytes physically live, not off which document named them."""
-    rel = os.path.relpath(abspath, root)
+    rel = relpath_or_abs(abspath, root)
     parts = rel.split(os.sep)
     if len(parts) >= 2 and parts[0] == _VENDOR_DIR and parts[1] not in ("", ".."):
         return parts[1]
