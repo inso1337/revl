@@ -160,6 +160,7 @@
     "step=unload"
   ],
   "emit_ts": [
+    "key=<activation>",
     "kind=hole",
     "name=Err",
     "name=Ok",
