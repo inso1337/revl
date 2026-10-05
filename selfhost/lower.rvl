@@ -6281,6 +6281,84 @@ fn ct_call(c: CallN, cx: Ctx, env: List[Bind]) -> Str {
   return ct_scan(c.target, cx, env)
 }
 
+// `lower._refuse_value_method` (issue #1942): a method outside the builtin
+// table on a receiver whose static type is a stdlib value, named or written in
+// place (`[1, 2].map(f)`, `(n + 1).frob()`), refused with the message a named
+// receiver has always had. The reference raises it while LOWERING the
+// statement, ahead of its type sweep and of a `return`'s check, so
+// `mth_type_verdict` asks this first, for every statement. Innermost first, as
+// the reference lowers the arguments and the receiver before the call.
+//
+// The receiver types over the type layer's env, or, for a requirement call,
+// at the operation's declared return (what `infer_ir` reads for a `req` call).
+// A receiver neither answers, or a host-family one, is left alone, as the
+// reference leaves an untyped receiver. An arrow's parameters and a match
+// arm's binder are untyped in the reference's component lowering, so they
+// shadow a same-named typed local here.
+fn vm_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
+  return match e {
+    Bin(b)      => vm_exprs([b.l, b.r], 0, cx, env),
+    Un(u)       => vm_scan(u.e, cx, env),
+    Emit(u)     => vm_scan(u.e, cx, env),
+    Call(c)     => ct_first(vm_exprs(c.args, 0, cx, env), vm_call(c.target, cx, env)),
+    Field(f)    => vm_scan(f.target, cx, env),
+    OptField(f) => vm_scan(f.target, cx, env),
+    OptCall(c)  => ct_first(vm_scan(c.target, cx, env), vm_exprs(c.args, 0, cx, env)),
+    Index(x)    => vm_exprs([x.target, x.idx], 0, cx, env),
+    If(x)       => vm_exprs([x.cond, x.then_, x.els], 0, cx, env),
+    Rec(r)      => vm_inits(r.fields, 0, cx, env),
+    Lst(l)      => vm_exprs(l.items, 0, cx, env),
+    Arrow(a)    => vm_scan(a.body, cx, svc_shadow(env, param_names(a.params))),
+    Match(m)    => ct_first(vm_scan(m.scrut, cx, env), vm_arms(m.arms, 0, cx, env)),
+    Templ(t)    => vm_parts(t.parts, 0, cx, env),
+    RecUpd(r)   => ct_first(vm_scan(r.base, cx, env), vm_inits(r.upds, 0, cx, env)),
+    _           => "",
+  }
+}
+
+fn vm_call(tg: Expr, cx: Ctx, env: List[Bind]) -> Str {
+  let f = match tg { Field(fd) => fd, _ => tk_no_field(), }
+  if (f.name == "") { return vm_scan(tg, cx, env) }
+  let inner = vm_scan(f.target, cx, env)
+  if (inner != "" || is_builtin_method(f.name)) { return inner }
+  var ty = tk_infer(f.target, env).ty
+  if (ty == "") { ty = tk_solid(ct_stmt_req_ret(f.target, cx), env) }
+  if (ty == "" || tk_wild(ty) || tk_is_host_family(ty)) { return "" }
+  if (!value_method_head(tkp_head(ty))) { return "" }
+  return tagged("T1", "no builtin method `".concat(f.name).concat("` on `")
+    .concat(tk_render(ty)).concat("` — the stdlib surface is ")
+    .concat(tk_stdlib_surface()).concat(" (docs/stdlib-2.0.md)"))
+}
+
+fn vm_exprs(xs: List[Expr], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  return ct_first(vm_scan(xs[i], cx, env), vm_exprs(xs, i + 1, cx, env))
+}
+
+fn vm_inits(xs: List[InitN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  return ct_first(vm_scan(xs[i].value, cx, env), vm_inits(xs, i + 1, cx, env))
+}
+
+fn vm_arms(xs: List[ArmN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let inner = xs[i].bind == "" ? env : svc_shadow(env, [xs[i].bind])
+  return ct_first(vm_scan(xs[i].body, cx, inner), vm_arms(xs, i + 1, cx, env))
+}
+
+fn vm_parts(xs: List[PartN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
+  if (i >= xs.length()) { return "" }
+  let v = xs[i].kind == "expr" ? vm_scan(xs[i].e, cx, env) : ""
+  return ct_first(v, vm_parts(xs, i + 1, cx, env))
+}
+// `lower._VALUE_METHOD_HEADS`: the stdlib values whose whole method surface is
+// the builtin table. Not `Map`, the one value head a host handle shares its
+// name with (a `Map[K, V]`-typed acquisition keeps its host verbs).
+fn value_method_head(h: Str) -> Bool {
+  return h == "List" || h == "Str" || h == "Bytes"
+    || h == "Int" || h == "Int32" || h == "Float" || h == "Bool"
+}
+
 fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
   return match e {
     IntLit(_)   => "",
@@ -6391,6 +6469,10 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
     return mth_type_verdict(body, i + 1, env, cx, ret, mname, fallback)
   }
   let ln = s.line == 0 ? fallback : s.line
+  // issue #1942: raised while the statement is lowered, so ahead of both the
+  // `return` check and the sweep below
+  let vm = is_bad(s.e) ? "" : vm_scan(s.e, cx, env)
+  if (vm != "") { return mk_verd(vm, ln) }
   // a `return` in a provide method is a CHECKING position against the service's
   // declared result (`_do_return`'s `check_ir`), exactly as a module `fn`'s is
   // against its own annotation. The activation body has no return to check, and
@@ -20197,39 +20279,6 @@ fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Bind], hostSc: L
   return mk_irres(true, s.concat("}"))
 }
 
-// A method call on a receiver written in place rather than named
-// (`[1, 2].map((x) => x + n)`, issue #1935). `map` is not a stdlib builtin, so
-// the reference takes its generic call tail: `{"kind": "call", "callee": <the
-// field read>, "args"}`. Before this every non-name receiver refused here, and
-// the refused method dropped the whole component `body`.
-//
-// The reference guards that tail with two refusals: a method on a RECORD
-// receiver (`_refuse_record_method`, #1547) and an unmarked call through a
-// SERVICE-typed receiver (`_refuse_unmarked_local_crossing`, #1509). The
-// receiver is typed as the reference types it (`infer_ir`, so `cenv_ir`), and
-// the call lowers only when that type is a plain value head, which is neither;
-// a receiver the env cannot type keeps refusing. A builtin method name on an
-// in-place receiver also keeps refusing: the reference writes a `builtin` node
-// there, with the `recv` tag and wildcard rules this arm does not apply.
-fn cir_inplace_call(fl: FieldN, args: List[Expr], sc: List[Bind], hostSc: List[Str],
-                    cx: CCtx) -> IrRes {
-  if (is_builtin_method(fl.name)) { return mk_irres(false, "") }
-  if (!cir_plain_value_head(parse_head(infer(fl.target, cenv_ir(cx, sc))))) {
-    return mk_irres(false, "")
-  }
-  let callee = cir_field(fl, sc, hostSc, cx)
-  if (!callee.ok) { return mk_irres(false, "") }
-  let a = cir_args(args, 0, sc, hostSc, cx, "")
-  if (!a.ok) { return mk_irres(false, "") }
-  return mk_irres(true, "{\"kind\": \"call\", \"callee\": ".concat(callee.js)
-    .concat(", \"args\": [").concat(a.js).concat("]}"))
-}
-
-fn cir_plain_value_head(h: Str) -> Bool {
-  return h == "List" || h == "Map" || h == "Str" || h == "Bytes"
-    || h == "Int" || h == "Int32" || h == "Float" || h == "Bool"
-}
-
 fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   return match tg {
     // `<handle>.<key>.<op>(…)` is read first: its head is a provision read, and
@@ -20258,7 +20307,10 @@ fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: C
                     : (scope_has(sc, root) && is_builtin_method(fl.name)
                         ? cir_builtin(root, fl.name, args, sc, hostSc, cx)
                         : mk_irres(false, ""))))),
-      _ => cir_inplace_call(fl, args, sc, hostSc, cx),
+      // a receiver written in place: the reference refuses a non-builtin
+      // method on a stdlib value there (issue #1942), so nothing this producer
+      // could type is a program it lowers
+      _ => mk_irres(false, ""),
     },
     // A bare-name callee. A tagged ADT constructor beats every other shape: it
     // is a case, not a callable, and no host runtime defines a function for it.
@@ -26899,6 +26951,11 @@ test "admission against a halted composition is refused (item 443)" {
     == "HALTED|admission against a halted composition is refused (item 443)"
 }
 
+test "admit_src refuses a non-builtin method on a list literal in a component (T1)" {
+  assert starts_with(admit_src("service Math { fn go(n: Int) -> Int } component C provides math: Math { provide math { fn go(n) = [1, 2].map((x) => x + n).length } }"),
+    "T1|no builtin method `map` on `List[Int]` — the stdlib surface is ")
+}
+
 test "admit_tag exposes the bare guarantee" {
   assert admit_tag("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } } component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }") == "G2"
 }
@@ -27753,11 +27810,6 @@ test "lower_to_ir keeps both fns around a one-line named test block" {
 test "lower_to_ir lowers a config read in a provide method (component spine)" {
   assert lower_to_ir("""service Conf { fn get() -> Str } component S provides conf: Conf { config { name: Str } provide conf { fn get() = config.name } }""")
     == """{"ir_version": 1, "services": {"Conf": {"methods": {"get": {"params": [], "returns": "Str", "emission": false}}}}, "components": [{"name": "S", "source": "<string>", "config": [{"name": "name", "type": "Str", "default": null}], "requires": {}, "provides": {"conf": "Conf"}, "body": [{"step": "provide", "name": "conf", "service": "Conf", "methods": [{"name": "get", "params": [], "body": [{"step": "return", "expr": {"kind": "config", "field": "name"}}]}]}]}]}"""
-}
-
-test "lower_to_ir lowers a method call on a list literal in a provide method" {
-  assert str_has(lower_to_ir("service Math { fn go(n: Int) -> Int } component C provides math: Math { provide math { fn go(n: Int) = [1, 2].map((x) => x + n).length } }"),
-    "{\"kind\": \"call\", \"callee\": {\"kind\": \"field\", \"target\": {\"kind\": \"list\", \"items\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 2}]}, \"name\": \"map\"}, \"args\": [{\"kind\": \"arrow\", \"params\": [\"x\"], \"captures\": [], \"body\": ")
 }
 
 test "lower_to_ir lowers a simple effect/provide body" {

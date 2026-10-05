@@ -1,0 +1,6 @@
+// issue #1942: a required service call's List result, read in place
+service Geo { fn pts(n: Int) -> List[Int] }
+service Math { fn go(n: Int) -> Int }
+component C requires geo: Geo provides math: Math {
+  provide math { fn go(n) = geo.pts(n).map((x) => x + 1).length }
+}

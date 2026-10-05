@@ -1,0 +1,7 @@
+// a host-acquired Map keeps its host verbs: it is not the stdlib value
+service Health { fn status() -> Int }
+component B provides health: Health {
+  let m = effect Map.new() undo m.drop()
+  effect m.insert("k", 1) undo m.remove("k")
+  provide health { fn status() = 1 }
+}
