@@ -1836,6 +1836,8 @@
 
 ["tests/fixtures/emit_rust_corpus/in_file_tests.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/keyword_keys.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/lengths.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/lists.rvl", "agree-admit"]

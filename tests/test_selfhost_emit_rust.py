@@ -296,6 +296,9 @@ CORPUS = [
                              #   slug rules (snake, sanitised, digit prefix, bumped
                              #   against functions and each other), an empty body,
                              #   and #1734's tests half (a Str builtin only in a test)
+    "keyword_keys.rvl",      # issue #1927: a requirement key that is a Rust
+                             #   keyword (`box`) takes the mangled spelling as
+                             #   an identifier, the surface key as a string
 ]
 
 

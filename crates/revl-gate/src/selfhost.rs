@@ -5695,7 +5695,7 @@ fn emit_req_bindings(reqs: Value, indent: i64) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for local in value_keys(reqs.clone()) {
         let svc = require_ty(value_str(value_field(reqs.clone(), local.clone())));
-        out.push(format!("{}let {} = ctx.require::<Box<dyn {}>>({})?;", pad, local, svc, string_lit(Value::new(serde_json::Value::from(local.clone())))));
+        out.push(format!("{}let {} = ctx.require::<Box<dyn {}>>({})?;", pad, mangle(local.clone()), svc, string_lit(Value::new(serde_json::Value::from(local.clone())))));
     }
     return out;
 }
@@ -5765,10 +5765,10 @@ fn is_stream_next(comp: Value, expr: Value) -> bool {
 fn method_scope_rename(comp: Value) -> std::collections::HashMap<String, String> {
     let mut rn = std::collections::HashMap::new();
     for b in binds(comp.clone()) {
-        rn.insert(b.clone(), format!("self.{}", b));
+        rn.insert(b.clone(), format!("self.{}", mangle(b.clone())));
     }
     for req in value_keys(value_field(comp.clone(), String::from("requires"))) {
-        rn.insert(req.clone(), format!("self.{}", req));
+        rn.insert(req.clone(), format!("self.{}", mangle(req.clone())));
     }
     if has_config(comp.clone()) {
         rn.insert(String::from("config"), String::from("self.config"));
@@ -5795,10 +5795,10 @@ fn method_undo_clones(comp: Value, method: Value, indent: i64) -> Vec<String> {
     let pad = ind(indent);
     let mut out: Vec<String> = vec![];
     for b in binds(comp.clone()) {
-        out.push(format!("{}let {}_undo = self.{}.clone();", pad, b, b));
+        out.push(format!("{}let {}_undo = self.{}.clone();", pad, b, mangle(b.clone())));
     }
     for req in value_keys(value_field(comp.clone(), String::from("requires"))) {
-        out.push(format!("{}let {}_undo = self.{}.clone();", pad, req, req));
+        out.push(format!("{}let {}_undo = self.{}.clone();", pad, req, mangle(req.clone())));
     }
     for p in value_list(value_field(method.clone(), String::from("params"))) {
         let pn = value_str(p.clone());
@@ -6065,10 +6065,10 @@ fn emit_provide_construction(comp: Value, step: Value, effectful: bool, indent: 
     let struct_ = format!("{}{}", name, camel(key.clone()));
     let mut fields: Vec<String> = vec![];
     for b in binds(comp.clone()) {
-        fields.push(format!("{}: {}.clone()", mangle(b.clone()), b));
+        fields.push(format!("{}: {}.clone()", mangle(b.clone()), mangle(b.clone())));
     }
     for local in value_keys(value_field(comp.clone(), String::from("requires"))) {
-        fields.push(format!("{}: {}.clone()", local, local));
+        fields.push(format!("{}: {}.clone()", mangle(local.clone()), mangle(local.clone())));
     }
     fields.extend((config_ctor_field(comp.clone(), &key)).iter().cloned());
     if effectful {
@@ -6171,7 +6171,7 @@ fn emit_let_effect_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_
     let mut undoR = std::collections::HashMap::new();
     undoR.insert(raw_bind.clone(), undo_name.clone());
     for req in value_keys(value_field(comp.clone(), String::from("requires"))) {
-        out.push(format!("{}let {}_undo = {}.clone();", pad, req, req));
+        out.push(format!("{}let {}_undo = {}.clone();", pad, req, mangle(req.clone())));
         undoR.insert(req.clone(), format!("{}_undo", req));
     }
     let undox = render_expr(value_field(step.clone(), String::from("undo")), set_rn(ctx_.clone(), undoR.clone()));
@@ -6229,7 +6229,7 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
         let acq_src = render_expr(value_field(step.clone(), String::from("acquire")), ctx_.clone());
         let mut undoR = std::collections::HashMap::new();
         for req in value_keys(value_field(comp.clone(), String::from("requires"))) {
-            out.push(format!("{}let {}_undo = {}.clone();", pad, req, req));
+            out.push(format!("{}let {}_undo = {}.clone();", pad, req, mangle(req.clone())));
             undoR.insert(req.clone(), format!("{}_undo", req));
         }
         let undox = render_expr(value_field(step.clone(), String::from("undo")), set_rn(ctx_.clone(), undoR.clone()));
@@ -6260,7 +6260,7 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
         let n = (tbase).checked_add(1i64).expect("revl: Int overflow");
         let mut tR = std::collections::HashMap::new();
         for req in value_keys(value_field(comp.clone(), String::from("requires"))) {
-            out.push(format!("{}let {}_t{} = {}.clone();", pad, req, n, req));
+            out.push(format!("{}let {}_t{} = {}.clone();", pad, req, n, mangle(req.clone())));
             tR.insert(req.clone(), format!("{}_t{}", req, n));
         }
         out.push(format!("{}let _revl_timer_{} = {}({}, move || {{", pad, n, schedule, interval));
@@ -6388,7 +6388,7 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
             out.push(format!("    {}: Arc<{}>,", mangle(b.clone()), host_of(comp.clone(), b.clone(), map_values.clone())));
         }
         for local in value_keys(reqs.clone()) {
-            out.push(format!("    {}: Arc<Box<dyn {}>>,", local, require_ty(value_str(value_field(reqs.clone(), local.clone())))));
+            out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(local.clone()), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
         }
         out.extend((config_struct_field(comp.clone(), &key)).iter().cloned());
         out.push(String::from("}"));
@@ -6456,7 +6456,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
             out.push(format!("    {}: Arc<{}>,", mangle(b.clone()), host_of(comp.clone(), b.clone(), map_values.clone())));
         }
         for local in value_keys(reqs.clone()) {
-            out.push(format!("    {}: Arc<Box<dyn {}>>,", local, require_ty(value_str(value_field(reqs.clone(), local.clone())))));
+            out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(local.clone()), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
         }
         out.extend((config_struct_field(comp.clone(), &key)).iter().cloned());
         if has_eff {
