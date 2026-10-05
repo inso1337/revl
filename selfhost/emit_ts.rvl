@@ -3714,6 +3714,8 @@ fn runtime_imports(ir: Any) -> Str {
     names = names.push("plug")
     names = names.push("snapshotRuntime")
     names = names.push("assertNoResidue")
+    // issue #1911: only an `abort` step reaches a live frame.
+    if (uses_lifecycle_abort(ir)) { names = names.push("frameForCtx") }
   }
   return `import { ${names.join(", ")} } from '../runtime.ts'`
 }
@@ -3903,6 +3905,19 @@ fn uses_lifecycle_tests(ir: Any) -> Bool {
   return false
 }
 
+// `_uses_lifecycle_abort`: only a `lifecycle test` that drives an `abort` step
+// (issue #1911) reads a live activation's frame to mark it rejecting, so only
+// such a module imports `frameForCtx`; every other document's import line stays
+// exactly what it was.
+fn uses_lifecycle_abort(ir: Any) -> Bool {
+  for (t of value_list(value_field(ir, "tests"))) {
+    for (step of value_list(value_field(t, "body"))) {
+      if (value_str(value_field(step, "step")) == "abort") { return true }
+    }
+  }
+  return false
+}
+
 fn pure_test_lines(tests: List[Any]) -> List[Str] {
   var out = []
   var c = 0
@@ -3991,6 +4006,31 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
       "  // R4 + R1: same introspection the py reference",
       "  // tier's `assert no_residue` performs.",
       "  assertNoResidue(root, _revl_baseline)"
+    ], counter: counter }
+  }
+  if (kind == "abort") {
+    // issue #1911 (the py reference tier's item 377): drive the enclosing
+    // session's 245 abort by marking every live activation's frame rejecting
+    // (`frameForCtx` -> `Frame.abort`, this tier's session-level reject seam)
+    // and THEN disposing LIFO, so each witnessed inverse replays instead of
+    // committing. Mark-all-first because a teardown that reaches another
+    // still-live component must already see it rejecting.
+    return { lines: [
+      "  // mark every live activation aborting, so its teardown",
+      "  // reverts rather than commits (item 245).",
+      "  for (const _fiber of Array.from(_revl_fibers.values())) {",
+      "    frameForCtx(_fiber.ctx)?.abort()",
+      "  }",
+      "  for (const _fiber of Array.from(_revl_fibers.values()).reverse()) {",
+      "    try {",
+      "      await _fiber.dispose()   // replay the witnessed inverses",
+      "    } catch {",
+      "      // a fiber whose teardown throws must not stop the",
+      "      // LIFO unwind; py's `abort` step swallows the same",
+      "    }",
+      "  }",
+      "  _revl_fibers.clear()",
+      "  await _revl_settle()"
     ], counter: counter }
   }
   return { lines: [`  <<UNSUPPORTED-LIFECYCLE-STEP:${kind}>>`], counter: counter }
