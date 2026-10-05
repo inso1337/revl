@@ -1,0 +1,75 @@
+// issue #106: the v3 COMBINED path, third slice. Stdlib builtins and `${..}`
+// interpolation in provide-method bodies: every ported builtin on its Str or
+// List receiver, the Int and Float renderings, the widen and narrow
+// conversions, and an interpolation typed piece by piece (a `+` chain) or not
+// (`fmt.Sprintf`), and a builtin and an interpolation whose type a ternary in
+// argument position infers. The builtins pull the stdlib preamble in, and the
+// renderings the `strconv` import.
+fn seed() -> Int { return 0 }
+fn anyText(x: List[Int]) -> List[Int] { return x }
+fn keep(n: Int) -> Int { return n }
+fn echo(s: Str) -> Str { return s }
+
+service Text {
+  fn size(s: Str) -> Int
+  fn count(xs: List[Int]) -> Int
+  fn both(a: Str, b: Str) -> Str
+  fn more(xs: List[Int], ys: List[Int]) -> List[Int]
+  fn cut(s: Str) -> Str
+  fn cutL(xs: List[Int]) -> List[Int]
+  fn find(s: Str) -> Int
+  fn findL(xs: List[Int]) -> Int
+  fn words(s: Str) -> List[Str]
+  fn glue(xs: List[Str]) -> Str
+  fn twice(s: Str) -> Str
+  fn first(s: Str) -> Str
+  fn code(s: Str) -> Int
+  fn point(s: Str) -> Int
+  fn starts(s: Str) -> Bool
+  fn ends(s: Str) -> Bool
+  fn add(xs: List[Int]) -> List[Int]
+  fn widen(n: Int32) -> Int
+  fn narrow(n: Int) -> Int32
+  fn show(n: Int) -> Str
+  fn showF(x: Float) -> Str
+  fn line(msg: Str, n: Int) -> Str
+  fn flags(ok: Bool, m: Int32) -> Str
+  fn only(msg: Str) -> Str
+  fn loose(xs: List[Int]) -> Str
+  fn plain() -> Str
+  fn pick(f: Bool, s: Str) -> Int
+  fn say(f: Bool, n: Int) -> Str
+}
+
+component Texts provides text: Text {
+  provide text {
+    fn size(s) = s.length()
+    fn count(xs) = xs.length()
+    fn both(a, b) = a.concat(b)
+    fn more(xs, ys) = xs.concat(ys)
+    fn cut(s) = s.slice(0, 2)
+    fn cutL(xs) = xs.slice(1, 2)
+    fn find(s) = s.indexOf("a")
+    fn findL(xs) = xs.indexOf(3)
+    fn words(s) = s.split(" ")
+    fn glue(xs) = xs.join(",")
+    fn twice(s) = s.repeat(2)
+    fn first(s) = s.charAt(0)
+    fn code(s) = s.charCodeAt(0)
+    fn point(s) = s.codepoint_at(0)
+    fn starts(s) = s.startsWith("a")
+    fn ends(s) = s.endsWith("z")
+    fn add(xs) = xs.push(4)
+    fn widen(n) = n.to_int()
+    fn narrow(n) = n.to_int32()
+    fn show(n) = n.to_str()
+    fn showF(x) = x.to_str()
+    fn line(msg, n) = `[req] ${msg} #${n} 100% end`
+    fn flags(ok, m) = `${ok}/${m}`
+    fn only(msg) = `${msg}`
+    fn loose(xs) = `xs=${anyText(xs)}`
+    fn plain() = `no fields`
+    fn pick(f, s) = keep(f ? s.length() : 0)
+    fn say(f, n) = echo(f ? `n=${n}` : "none")
+  }
+}

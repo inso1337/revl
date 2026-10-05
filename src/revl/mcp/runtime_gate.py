@@ -38,7 +38,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .._paths import backends_root
+from .._paths import backends_root, venv_python as _venv_python
 from . import remedy
 
 #: Verbs that need a live composition, which only the runtime can boot.
@@ -49,6 +49,7 @@ RUNTIME_VERBS = frozenset({
     "revl_edit", "revl_live_query", "revl_timeline", "revl_inspect_step",
     "revl_step_back", "revl_replay_bisect", "revl_replay_forward",
     "revl_fork", "revl_fork_confirm", "revl_change", "revl_export",
+    "revl_knowledge",
 })
 
 #: Verbs that still answer without the runtime, and what they lose.
@@ -88,8 +89,9 @@ def setup_command() -> str:
 
 
 def venv_python() -> Path:
-    """Where `backends/python/setup.sh` puts the runtime venv's interpreter."""
-    return backends_root() / "python" / ".venv" / "bin" / "python"
+    """Where `backends/python/setup.sh` puts the runtime venv's interpreter
+    (`Scripts/python.exe` on Windows, issue #1939)."""
+    return _venv_python(backends_root() / "python" / ".venv")
 
 
 def venv_has_cordis(python: Path) -> bool:

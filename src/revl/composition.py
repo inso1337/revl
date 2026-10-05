@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 
+from ._paths import relpath_or_abs
 from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
@@ -72,7 +73,7 @@ def origin_of(path: str, root: str | None = None) -> str:
     policy to write (426 §1.2).
     """
     root = os.path.abspath(root or os.getcwd())
-    rel = os.path.relpath(os.path.abspath(path), root)
+    rel = relpath_or_abs(os.path.abspath(path), root)
     parts = rel.split(os.sep)
     if len(parts) >= 3 and parts[0] == _VENDOR_DIR:
         return parts[1]
@@ -359,7 +360,7 @@ class RowTable:
 def _relative(path: str, root: str) -> str:
     """Provenance recorded relative to `root`, so an IR document stays
     machine-independent (the same rule `parse_file` follows)."""
-    return os.path.relpath(os.path.abspath(path), os.path.abspath(root)) \
+    return relpath_or_abs(os.path.abspath(path), os.path.abspath(root)) \
         .replace(os.sep, "/")
 
 
@@ -672,7 +673,7 @@ def _vendor_truc_of(abspath: str, root: str) -> str | None:
     """The truc a source path is VENDORED under (`trucs/<truc>/...`), or `None`
     if the path is the project's own (426 §7). Distribution facts key off where
     the bytes physically live, not off which document named them."""
-    rel = os.path.relpath(abspath, root)
+    rel = relpath_or_abs(abspath, root)
     parts = rel.split(os.sep)
     if len(parts) >= 2 and parts[0] == _VENDOR_DIR and parts[1] not in ("", ".."):
         return parts[1]
@@ -2437,14 +2438,26 @@ def _row_profiles(table: RowTable, root: str,
     like first-party source, which is the SHAPE change §8.8 describes, and the
     panel forfeits `clean` for having done so.
     """
-    profiles: dict[str, AdmissionProfile] = {}
+    # The profile map is per SOURCE FILE, and one file can back several rows
+    # (`component <Name>` picks which) or hold components no row names. So the
+    # grant is key-precise (issue #1926): each confined row contributes the
+    # `(component, key)` pairs its grant names, and a granted service covers a
+    # requirement only for those pairs. A sibling component in the same file
+    # that requires the same service is refused unless it is granted itself,
+    # and two rows of one file each keep their own grant instead of the last
+    # one overwriting the first.
+    reach: dict[str, tuple[set, set]] = {}
     for row in table.rows:
         if row_trust(row) != "non-first-party":
             continue
         if _trusts(trust_host_code, row.qualified):
             continue
-        profiles[os.path.join(root, row.source)] = \
-            AdmissionProfile.untrusted_author(_granted_services(row))
+        services, pairs = reach.setdefault(os.path.join(root, row.source),
+                                           (set(), set()))
+        services.update(_granted_services(row))
+        pairs.update(_granted_requires(row))
+    profiles = {path: AdmissionProfile.untrusted_author(services, requires=pairs)
+                for path, (services, pairs) in reach.items()}
     return profiles or None
 
 
@@ -2455,6 +2468,13 @@ def _granted_services(row: Row) -> frozenset[str]:
     already refused a row requiring a key outside it, so every granted key the
     row requires maps to its service here (issue #1921)."""
     return frozenset(row.services[key] for key in (row.granted or ())
+                     if key in row.services)
+
+
+def _granted_requires(row: Row) -> frozenset[tuple[str, str]]:
+    """The `(component, requires key)` pairs a confined row's grant covers: its
+    own component, under each granted key it requires (issue #1926)."""
+    return frozenset((row.component, key) for key in (row.granted or ())
                      if key in row.services)
 
 

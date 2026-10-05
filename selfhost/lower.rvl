@@ -5682,6 +5682,217 @@ fn svc_local_refusal(recv: Expr, op: Str, marked: Bool, cx: Ctx) -> Str {
   return "call to emission `".concat(spelled).concat("` must be marked `emit` (G4)")
 }
 
+// ============================================ item 400: deferred outside `emit`
+//
+// `lower.py::_refuse_effect_position_bound_externs_in_fn_body`, the `deferred`
+// arms (item 400, issues #1457 and #1688). A `deferred` emission extern is
+// enqueued only by an `emit`-marked call in a component; reached any other way
+// it would fire at once with no session commit, so the reference refuses:
+//
+//   * a direct call in a `fn` or `test` body ("cannot be called in the body of
+//     fn `f`"), and inside an arrow there ("cannot be called inside an arrow in
+//     the body of fn `f`");
+//   * the extern passed as a function VALUE, in a `fn`/`test` body or in a
+//     component ("is passed as a function value in component `C`").
+//
+// FAIL-FAST and first in walk order: `fn`s in declaration order, then `test`
+// blocks, then components; within a call, the call itself before its callee
+// and arguments. The reference reports a `witnessed` violation ahead of these,
+// and an `acquire`-with-`undo` call in the same first-of slot; the gate ports
+// neither, so a program that trips one of those together with a deferred one
+// may report a different first refusal (none in the corpus does).
+
+fn deferred_extern_names(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atk(ts, i, "{")) { depth += 1 }
+    if (atk(ts, i, "}")) { depth -= 1 }
+    if (depth == 0 && atw(ts, i, "extern")) {
+      var j = i + 1
+      var deferred = false
+      while (j < ts.length() && j < i + 16 && !atw(ts, j, "fn")) {
+        if (ati(ts, j, "deferred")) { deferred = true }
+        j += 1
+      }
+      if (deferred && atw(ts, j, "fn") && atk(ts, j + 1, "ident")) {
+        out = out.push(tkc(ts, j + 1).text)
+      }
+    }
+    i += 1
+  }
+  return out
+}
+
+fn dfr_call_msg(name: Str, where: Str, inArrow: Bool) -> Str {
+  let route = inArrow ? "inside an arrow in ".concat(where) : "in ".concat(where)
+  return "`deferred` emission extern `".concat(name)
+    .concat("` cannot be called ").concat(route)
+    .concat("; a fn/test body has no session commit for the deferral to fire at (G4)")
+}
+
+fn dfr_value_msg(name: Str, where: Str) -> Str {
+  return "`deferred` emission extern `".concat(name)
+    .concat("` is passed as a function value in ").concat(where)
+    .concat("; whoever calls the value fires it at once, with no session commit (G4)")
+}
+
+fn dfr_callee_name(e: Expr) -> Str {
+  return match e { Var(n) => n, _ => "", }
+}
+
+// The first refusal one expression holds, or "". `calls` is false in a
+// component, whose calls carry the `emit` marker and are enqueued.
+fn dfr_expr(e: Expr, dn: List[Str], where: Str, inArrow: Bool, calls: Bool) -> Str {
+  return match e {
+    Var(n) => contains(dn, n) ? dfr_value_msg(n, where) : "",
+    Call(c) => dfr_call(c.target, c.args, dn, where, inArrow, calls),
+    OptCall(c) => dfr_call(c.target, c.args, dn, where, inArrow, calls),
+    Field(f) => dfr_expr(f.target, dn, where, inArrow, calls),
+    OptField(f) => dfr_expr(f.target, dn, where, inArrow, calls),
+    Bin(b) => dfr_first(dfr_expr(b.l, dn, where, inArrow, calls),
+                        dfr_expr(b.r, dn, where, inArrow, calls)),
+    Un(u) => dfr_expr(u.e, dn, where, inArrow, calls),
+    Emit(u) => dfr_expr(u.e, dn, where, inArrow, calls),
+    Index(x) => dfr_first(dfr_expr(x.target, dn, where, inArrow, calls),
+                          dfr_expr(x.idx, dn, where, inArrow, calls)),
+    If(x) => dfr_first(dfr_expr(x.cond, dn, where, inArrow, calls),
+                       dfr_first(dfr_expr(x.then_, dn, where, inArrow, calls),
+                                 dfr_expr(x.els, dn, where, inArrow, calls))),
+    Lst(l) => dfr_list(l.items, 0, dn, where, inArrow, calls),
+    Rec(r) => dfr_inits(r.fields, 0, dn, where, inArrow, calls),
+    Arrow(ar) => dfr_expr(ar.body, dn, where, true, calls),
+    Match(m) => dfr_first(dfr_expr(m.scrut, dn, where, inArrow, calls),
+                          dfr_arms(m.arms, 0, dn, where, inArrow, calls)),
+    Templ(t) => dfr_parts(t.parts, 0, dn, where, inArrow, calls),
+    RecUpd(r) => dfr_first(dfr_expr(r.base, dn, where, inArrow, calls),
+                           dfr_inits(r.upds, 0, dn, where, inArrow, calls)),
+    _ => "",
+  }
+}
+
+fn dfr_first(a: Str, b: Str) -> Str { return a != "" ? a : b }
+
+fn dfr_call(target: Expr, args: List[Expr], dn: List[Str], where: Str,
+            inArrow: Bool, calls: Bool) -> Str {
+  let head = dfr_callee_name(target)
+  if (head != "" && contains(dn, head)) {
+    // the CALL position: refused in a fn/test body, enqueued in a component
+    if (calls) { return dfr_call_msg(head, where, inArrow) }
+    return dfr_list(args, 0, dn, where, inArrow, calls)
+  }
+  let t = head != "" ? "" : dfr_expr(target, dn, where, inArrow, calls)
+  if (t != "") { return t }
+  return dfr_list(args, 0, dn, where, inArrow, calls)
+}
+
+fn dfr_list(xs: List[Expr], i: Int, dn: List[Str], where: Str, inArrow: Bool,
+            calls: Bool) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = dfr_expr(xs[i], dn, where, inArrow, calls)
+  if (r != "") { return r }
+  return dfr_list(xs, i + 1, dn, where, inArrow, calls)
+}
+
+fn dfr_inits(xs: List[InitN], i: Int, dn: List[Str], where: Str, inArrow: Bool,
+             calls: Bool) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = dfr_expr(xs[i].value, dn, where, inArrow, calls)
+  if (r != "") { return r }
+  return dfr_inits(xs, i + 1, dn, where, inArrow, calls)
+}
+
+fn dfr_arms(xs: List[ArmN], i: Int, dn: List[Str], where: Str, inArrow: Bool,
+            calls: Bool) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = dfr_expr(xs[i].body, dn, where, inArrow, calls)
+  if (r != "") { return r }
+  return dfr_arms(xs, i + 1, dn, where, inArrow, calls)
+}
+
+fn dfr_parts(xs: List[PartN], i: Int, dn: List[Str], where: Str, inArrow: Bool,
+             calls: Bool) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = dfr_expr(xs[i].e, dn, where, inArrow, calls)
+  if (r != "") { return r }
+  return dfr_parts(xs, i + 1, dn, where, inArrow, calls)
+}
+
+fn dfr_stmts(ss: List[Stmt], i: Int, dn: List[Str], where: Str,
+             calls: Bool) -> Verd {
+  if (i >= ss.length()) { return no_verd() }
+  let r = dfr_expr(ss[i].e, dn, where, false, calls)
+  if (r != "") { return mk_verd(tagged("G4", r), ss[i].line) }
+  return dfr_stmts(ss, i + 1, dn, where, calls)
+}
+
+// The `test` blocks, in source order, as (name, body) pairs.
+type DfTest = { name: Str, body: List[Stmt] }
+
+fn dfr_tests(ts: List[Token]) -> List[DfTest] {
+  var out: List[DfTest] = []
+  var depth = 0
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (depth == 0 && atw(ts, i, "test") && atk(ts, i + 1, "string")
+        && atk(ts, i + 2, "{")) {
+      let e = close_brace(ts, i + 2)
+      if (e == 0 - 1) { return out }
+      let raw = tkc(ts, i + 1).text
+      out = out.push({ name: raw, body: p_stmts(ts, i + 3, e - 1, []) })
+      i = e + 1
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+fn deferred_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
+  let dn = deferred_extern_names(ts)
+  if (dn.length() == 0) { return no_verd() }
+  var i = 0
+  while (i < pg.fns.length()) {
+    let f = pg.fns[i]
+    if (!f.isEmExtern && !f.isAsyncExtern) {
+      let v = dfr_stmts(f.body, 0, dn,
+                        "the body of fn `".concat(f.name).concat("`"), true)
+      if (v.v != "") { return v }
+    }
+    i += 1
+  }
+  let tests = dfr_tests(ts)
+  i = 0
+  while (i < tests.length()) {
+    let v = dfr_stmts(tests[i].body, 0, dn,
+                      "the body of test `".concat(tests[i].name).concat("`"), true)
+    if (v.v != "") { return v }
+    i += 1
+  }
+  i = 0
+  while (i < pg.comps.length()) {
+    let c = pg.comps[i]
+    let where = "component `".concat(c.name).concat("`")
+    let sv = dfr_stmts(c.setup, 0, dn, where, false)
+    if (sv.v != "") { return sv }
+    var pi = 0
+    while (pi < c.provs.length()) {
+      var mi = 0
+      while (mi < c.provs[pi].methods.length()) {
+        let mv = dfr_stmts(c.provs[pi].methods[mi].body, 0, dn, where, false)
+        if (mv.v != "") { return mv }
+        mi += 1
+      }
+      pi += 1
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
 
 // ============================================================ refusal sink
@@ -16635,6 +16846,12 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   if (extv.v != "") { return { done: true, refs: [extv] } }
   let cachev = check_cache_fns(pg.fns)
   if (cachev.v != "") { return { done: true, refs: [cachev] } }
+  // item 400 (issues #1457, #1688): a `deferred` emission extern reached
+  // outside a component's `emit` marker, the reference's
+  // `_refuse_effect_position_bound_externs_in_fn_body`, which runs just ahead
+  // of the host-acquire walk below.
+  let dfv = deferred_reach_refusal(ts, pg)
+  if (dfv.v != "") { return { done: true, refs: [dfv] } }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`
   // places `_refuse_host_acquire_in_component_reachable_fn`.
@@ -18267,6 +18484,39 @@ fn ir_params_json(ps: List[ParamN]) -> Str {
   return out
 }
 
+// The outermost qualifier head of a DECLARED type (`Untrusted`, `Trusted` or
+// `Secret`) when it wraps exactly one type argument, else "": the reference's
+// `taint.top_qualifier` for the three heads the services IR stamps.
+fn taint_top_qualifier(ty: Str) -> Str {
+  if (ty == "" || !taint_has_qualifier(ty)) { return "" }
+  let p = ty_parse(ty)
+  if (is_qual_head(p.head) && p.args.length() == 1) { return p.head }
+  return ""
+}
+
+// A service operation's `params` list: `ir_params_json` plus the issue #1937
+// stamps `"trusted": true` / `"untrusted": true`, read off the DECLARED types
+// `raw` (before alias substitution, as the reference's `extract_and_normalize`
+// reads them). A unit compiled against this IR as a manifest gets its sinks and
+// untrusted inputs back from these. Absent unless declared, so every existing
+// IR document is byte-identical.
+fn ir_service_params_json(ps: List[ParamN], raw: List[ParamN]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ps.length()) {
+    var e = "{\"name\": ".concat(jstr(ps[i].name))
+      .concat(", \"type\": ").concat(jstr(taint_strip(ps[i].ty)))
+    if (taint_mentions_secret(ps[i].ty)) { e = e.concat(", \"secret\": true") }
+    let q = i < raw.length() ? taint_top_qualifier(raw[i].ty) : ""
+    if (q == "Trusted") { e = e.concat(", \"trusted\": true") }
+    if (q == "Untrusted") { e = e.concat(", \"untrusted\": true") }
+    e = e.concat("}")
+    out = out == "" ? e : out.concat(", ").concat(e)
+    i += 1
+  }
+  return out
+}
+
 fn ir_caps_json(cs: List[Str]) -> Str {
   var out = ""
   var i = 0
@@ -18322,9 +18572,13 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   // corpus document (L6). The reference erases in its parser and emits the key
   // between `returns` and `emission`; this mirrors both.
   var term = ""
+  // issue #1937: the qualifier stripped off the return (`Untrusted`/`Secret`)
+  var retQual = ""
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
+    let rq = taint_top_qualifier(tr.ty)
+    if (rq == "Untrusted" || rq == "Secret") { retQual = rq }
     let rawRet = taint_strip(alias_subst(tr.ty, al))
     if (rawRet == "Criterion") {
       term = "criterion"
@@ -18338,8 +18592,11 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
     nexti = tr.i
   }
   var mj = jstr(nm).concat(": {\"params\": [")
-    .concat(ir_params_json(alias_subst_params(ps.ps, al)))
+    .concat(ir_service_params_json(alias_subst_params(ps.ps, al), ps.ps))
     .concat("], \"returns\": ").concat(retJson)
+  if (retQual != "") {
+    mj = mj.concat(", \"returns_qualifier\": ").concat(jstr(retQual))
+  }
   if (term != "") {
     mj = mj.concat(", \"termination\": ").concat(jstr(term))
   }
@@ -27100,6 +27357,44 @@ component C provides s: S {
       return g(n)
     }
   }
+}""")
+  assert v == ""
+}
+
+// ---- item 400 (issue #1688): a deferred extern outside an `emit` marker ----
+
+test "a deferred extern called in a fn body is refused" {
+  let v = admit_src("""extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+fn bill(a: Str, b: Str) -> Unit {
+  return deliver(a, b)
+}
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops { fn enqueue(sink, msg) { emit bill(sink, msg) } }
+}""")
+  assert v == "G4|`deferred` emission extern `deliver` cannot be called in the body of fn `bill`; a fn/test body has no session commit for the deferral to fire at (G4)"
+}
+
+test "a deferred extern passed as a value in a provide method is refused" {
+  let v = admit_src("""extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+fn apply(f: (Str, Str) -> Unit, a: Str, b: Str) -> Unit { return f(a, b) }
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops {
+    fn enqueue(sink, msg) {
+      let r = apply(deliver, sink, msg)
+      return r
+    }
+  }
+}""")
+  assert v == "G4|`deferred` emission extern `deliver` is passed as a function value in component `Agent`; whoever calls the value fires it at once, with no session commit (G4)"
+}
+
+test "a deferred extern under its emit marker is admitted" {
+  let v = admit_src("""extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops { fn enqueue(sink, msg) = emit deliver(sink, msg) }
 }""")
   assert v == ""
 }

@@ -931,14 +931,18 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 model.declared_endorse[method.name] = frozenset(endorse_origins)
             new_params = []
             secret_indices: set = set()
+            trusted_indices: set = set()
+            untrusted_indices: set = set()
             for i, (pname, ptype) in enumerate(method.params):
                 qual = top_qualifier(ptype)
                 clean = strip_qualifiers(ptype)
                 if qual == "Trusted":
                     model.sinks.setdefault(method.name, {})[i] = clean
                     model.sink_kind[method.name] = _sink_kind_for(method.name, ())
+                    trusted_indices.add(i)
                 elif qual == "Untrusted":
                     model.untrusted_params.setdefault(method.name, {})[i] = "input"
+                    untrusted_indices.add(i)
                 elif qual == "Secret":
                     # the INSIDE half: the provide method implementing this
                     # operation sees the parameter as a `confidential` value, so
@@ -981,6 +985,16 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # reads it to decide what a crossing's argument may look like once it
             # is written to the WAL or handed to an MCP client.
             method.secret_params = frozenset(secret_indices)
+            # Issue #1937: the same for `Trusted[T]` (a sink) and `Untrusted[T]`
+            # parameters and for an `Untrusted[T]`/`Secret[T]` return. The
+            # qualifiers are stripped below, so these stamps are what the IR
+            # carries. A unit compiled against this composition as a manifest
+            # reaches the operation only through the IR (`fold_ambient_
+            # composition`), and without them it read the operation as clean.
+            method.trusted_params = frozenset(trusted_indices)
+            method.untrusted_params = frozenset(untrusted_indices)
+            _ret = top_qualifier(method.returns)
+            method.returns_qualifier = _ret if _ret in ("Untrusted", "Secret") else None
             # Slice D (D1/D3): a shell/exec/terminal-scoped service operation is a
             # derived sink under strict mode, exactly as an extern is — a granted
             # tool surface annotates nothing yet still refuses untrusted input.
@@ -1088,18 +1102,18 @@ def fold_ambient_composition(model: TaintModel, ambient_services,
     one. Keyed by operation name, exactly as the in-program service loop above and
     as the flow walk's call-site lookup (`_callee_name` returns the method name).
 
-    Only the DERIVED (capability-scoped) classes are folded, and only under
-    `taint_strict` — the explicit `Trusted[T]`/`Untrusted[T]` qualifiers are
-    already stripped from the IR by the time a composition is a manifest, so they
-    cannot be recovered here, and the profile that admits an untrusted author
-    (`AdmissionProfile.untrusted_author`) always sets `taint_strict`. With
-    `taint_strict` off this is a no-op, so a trusted `load`/`swap` against a
-    running manifest is byte-identical.
+    The DECLARED qualifiers come first and bind always: the IR keeps each
+    operation's `Trusted[T]`/`Untrusted[T]` parameters and its `Untrusted[T]`/
+    `Secret[T]` return as stamps beside the stripped types (issue #1937), and
+    `_fold_declared_qualifiers` reads them back. The DERIVED (capability-scoped)
+    classes are folded only under `taint_strict`, which the profile that admits
+    an untrusted author (`AdmissionProfile.untrusted_author`) always sets.
 
     `setdefault` throughout: a name the turn's own declarations already classified
     keeps that classification (the turn's extraction ran first), so re-declaring a
     service in the turn never loosens what the ambient surface contributes.
     """
+    _fold_declared_qualifiers(model, ambient_services)
     if not taint_strict:
         return
     for svc in (ambient_services or {}).values():
@@ -1124,6 +1138,45 @@ def fold_ambient_composition(model: TaintModel, ambient_services,
                 if origin in _SOURCE_CLASS_SCOPES \
                         and method.name not in model.sources:
                     model.sources[method.name] = origin
+
+
+def _fold_declared_qualifiers(model: TaintModel, ambient_services) -> None:
+    """The DECLARED qualifiers of the ambient composition's service operations,
+    folded into the turn's model whatever the turn's own declaration says
+    (issue #1937).
+
+    `extract_and_normalize` strips `Untrusted[T]`/`Trusted[T]` from a service
+    signature before lowering, and stamps what it stripped on the declaration
+    (`trusted_params`, `untrusted_params`, `returns_qualifier`), which the IR
+    carries as `trusted`/`untrusted` on a parameter and `returns_qualifier` on
+    the operation. A unit compiled against a running manifest reaches those
+    operations only through that IR, so this is the one place their taint can
+    come back. Unlike the derived classes below, a declared qualifier is a
+    statement about the value and binds with or without `taint_strict`: an
+    `Untrusted[Str]` return is a source, and a `Trusted[T]` parameter is a
+    sink, for every caller.
+
+    `setdefault` throughout, so a classification the turn's own declarations
+    already made is kept. A turn that redeclares the service without the
+    qualifier made none, so the running composition's declaration still
+    stands: a consumer cannot clean a provider's data by declaring its type
+    plain."""
+    for svc in (ambient_services or {}).values():
+        for method in getattr(svc, "methods", {}).values():
+            name = method.name
+            caps = getattr(method, "capabilities", None)
+            qual = getattr(method, "returns_qualifier", None)
+            if qual == "Untrusted":
+                model.sources.setdefault(name, _origin_of(caps))
+            elif qual == "Secret":
+                model.sources.setdefault(name, CONFIDENTIAL_ORIGIN)
+            params = list(getattr(method, "params", ()) or ())
+            for i in sorted(getattr(method, "trusted_params", ()) or ()):
+                ptype = params[i][1] if i < len(params) else None
+                model.sinks.setdefault(name, {}).setdefault(i, ptype)
+                model.sink_kind.setdefault(name, _sink_kind_for(name, ()))
+            for i in sorted(getattr(method, "untrusted_params", ()) or ()):
+                model.untrusted_params.setdefault(name, {}).setdefault(i, "input")
 
 
 def _warn_on_literal_secret_default(comp, cfield) -> None:

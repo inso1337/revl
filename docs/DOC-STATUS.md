@@ -172,7 +172,7 @@ was corrected by hand and had drifted back within a day.
 | queries.md | needs-work | 43 |  |
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
-| registry.md | needs-work | 46 | yes |
+| registry.md | needs-work | 47 | yes |
 | rejections.md | needs-work | 71 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |

@@ -220,6 +220,26 @@ function evalProbe(expr: string, scope: Record<string, unknown>): unknown {
 const typing = spec.typing ?? null
 
 const mod = await import(pathToFileURL(path.resolve(spec.module)).href)
+
+// item 256 / issue #1936: resolve each bound secret once at plug, from
+// `REVL_SECRET_<NAME>` (NAME upper-cased), and install it into the module's
+// `_REVL_SECRETS` before any component loads, as the py driver does
+// (src/revl/run.py `_resolve_secrets`). The value comes from this process's
+// environment, never from the spec file, and is never logged. A declared
+// secret with no value refuses the plug, naming the variable but never a value.
+// A module that binds no secret exports no `_REVL_SECRET_NAMES`.
+for (const name of (mod._REVL_SECRET_NAMES ?? []) as string[]) {
+  const envKey = 'REVL_SECRET_' + name.toUpperCase()
+  const value = process.env[envKey]
+  if (value === undefined) {
+    throw new Error(
+      `capability-bound secret \`${name}\` has no value at plug: set the ` +
+        `environment variable \`${envKey}\` (or supply it through the driver's ` +
+        'secret source). There is no default for a secret (item 256).',
+    )
+  }
+  mod._REVL_SECRETS[name] = value
+}
 const ctx = new Context()
 ctx.on('internal/status', (fiber: any, oldState: number) =>
   log('fiber', fiber.name, `${fiberStateName(oldState)} -> ${fiberStateName(fiber.state)}`),

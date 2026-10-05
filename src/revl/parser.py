@@ -9322,13 +9322,15 @@ def _dotted_path(expr) -> str | None:
 
 
 def parse_file(path: str) -> Program:
-    import os
-
     with open(path, encoding="utf-8") as handle:
         program = Parser(handle.read(), path).parse()
     # provenance is recorded relative to the invocation cwd so IR documents
-    # stay machine-independent when compiled from the project root
-    source = os.path.relpath(path)
+    # stay machine-independent when compiled from the project root; a file on
+    # another Windows drive has no relative path and keeps its absolute one
+    # (issue #1944)
+    from ._paths import relpath_or_abs  # noqa: PLC0415
+
+    source = relpath_or_abs(path)
     for component in program.components:
         component.source = source
     for composition in program.compositions:

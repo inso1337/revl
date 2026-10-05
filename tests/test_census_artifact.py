@@ -330,11 +330,15 @@ def test_the_reproduction_states_its_own_limit(artifact, committed):
     as an independent reproduction without that sentence would over-claim.
 
     With no record at the current checker version there is no reproduction to
-    state a limit for, and this fails saying so, with the fix, the same words
-    `--verify --strict` uses (issue #1768), rather than with a TypeError."""
+    state a limit for, and this SKIPS saying so, with the fix, the same words
+    `--verify --strict` uses. Currency is enforced there, in CI's
+    `census-artifact` job, and not in the root suite (#1917's design): CI tests
+    the merge ref, so a pull request's checker version is merge(main, branch),
+    and every checker-moving landing makes every other open pull request's
+    record stale. A root-suite failure on that would never converge."""
     rep = committed["census"]["reproduction"]
     if rep is None:
-        pytest.fail("\n".join(artifact.reproduction_problems()
+        pytest.skip("\n".join(artifact.reproduction_problems()
                               or ["no crate reproduction is recorded"]))
     assert "not a second" in rep["does_not_establish"]
     assert "build_gate_crate" in rep["does_not_establish"]
@@ -1286,25 +1290,31 @@ def test_the_reproduction_check_is_as_strict_and_names_what_it_missed(
             "**3**") in artifact.render_markdown(short)
 
 
-def test_a_missing_current_record_fails_with_the_fix_not_a_crash(artifact,
-                                                                 tmp_path,
-                                                                 monkeypatch):
-    """The failure a pull request that moved a checker source without
-    re-recording sees: the missing version and the command, not a TypeError
-    from a test that indexed the absent reproduction."""
-    import _pytest.outcomes  # noqa: PLC0415
-
+def test_a_missing_current_record_skips_and_names_the_fix(artifact, tmp_path,
+                                                         monkeypatch):
+    """With no record at the current checker version the limit test skips,
+    and its reason is the missing version and the command, the same text
+    `--verify --strict` reports, never a crash and never a silent pass."""
     (tmp_path / "GATE-CENSUS-1+old.json").write_text(artifact.reproduction_text(
         {"note": "n", "engine": "crate", "checker_version": "GATE-CENSUS-1+old",
          "tracked_buckets": {}, "false_admissions": [], "programs": ["a.rvl"]}))
-    monkeypatch.setattr(artifact, "CRATE_REPRODUCTION", tmp_path)
     monkeypatch.setattr(artifact, "reproduction_problems",
                         lambda base=tmp_path, _f=artifact.reproduction_problems:
                         _f(base))
     committed = {"census": {"reproduction": None}}
-    with pytest.raises(_pytest.outcomes.Failed) as excinfo:
+    with pytest.raises(pytest.skip.Exception) as excinfo:
         test_the_reproduction_states_its_own_limit(artifact, committed)
     message = str(excinfo.value)
     version, _ = artifact.checker_version()
     assert version in message
     assert "python3 tools/regen_generated.py --only census" in message
+    # and `--verify --strict` still treats the same state as a failure
+    assert artifact.reproduction_problems(tmp_path)
+
+
+def test_a_current_record_still_asserts_the_limit_sentence(artifact):
+    """The skip is only for a missing record: a reproduction that is present
+    and drops its limit sentence still fails."""
+    with pytest.raises(AssertionError):
+        test_the_reproduction_states_its_own_limit(
+            artifact, {"census": {"reproduction": {"does_not_establish": "x"}}})
