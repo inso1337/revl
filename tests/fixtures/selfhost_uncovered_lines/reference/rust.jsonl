@@ -30,9 +30,9 @@
 
 ["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_split_result", 1, 1]
 
-["reason", "component-construction-fallbacks-residuals-cover-absent-malf", "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls."]
+["reason", "component-construction-fallbacks-residuals-cover-absent-malf", "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls. emit_rust_corpus/prelude_names.rvl (issue #1920) reaches one more of `_emit_component`'s statements, 5 -> 4."]
 
-["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component", 5, 5]
+["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component", 4, 4]
 
 ["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component_new", 23, 23]
 
@@ -105,6 +105,10 @@
 ["function", "in-file-test-and-lifecycle-harness-generation-is", "_lifecycle_uses_advance", 1, 1]
 
 ["function", "in-file-test-and-lifecycle-harness-generation-is", "_refuse_fault_tests", 2, 2]
+
+["reason", "issue-1920-call-acquired-binds-and-service-trait-names", "Issue #1920: `_call_bind_type` holds a call-acquired activation bind by its declared handle type. Its two `return None` arms for a call with no declared return or a `Unit` one, and the loop-exhausted `return None`, are unreachable from an accepted program: an `extern acquire` must return a nominal opaque handle (item 308), and the bind it is asked about always exists, so two of its statements are recorded. emit_rust_corpus/prelude_names.rvl holds the reached half to byte agreement and builds it under cargo."]
+
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "_call_bind_type", 2, 2]
 
 ["reason", "item-421-f5-a-document-that-declares-a", "Item 421 F5: a document that declares a `Secret[T]` AND returns a `Result` from a provided method serializes the Err half through this funnel rather than `_result_to_json`, because the failure text is the one thing crossing the seam that has to be scrubbed. No corpus document does both: the rust byte-agreement corpus reaches the bridge (service.rvl, services_multi.rvl) but holds no document declaring a `Secret[T]` at all, and the port (selfhost/emit_rust.rvl) carries no `_SECRET_MODE` and emits no funnel call, so a secret-bearing bridge document could not be a byte-identical corpus case. The reference half is pinned by tests/test_rust_seam_failure_scrub.py::test_secret_mode_emits_the_funnel_and_the_shared_marker."]
 
