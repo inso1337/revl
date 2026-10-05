@@ -1,0 +1,28 @@
+// Two names the config and type surfaces spell but no earlier corpus document
+// did (item 550, issues #1915/#1923).
+//
+// `config { from: Str }` is a config field whose name is a Python KEYWORD. The
+// schema tuple's first element is a runtime DICT KEY, not a binding: the
+// `load … with {…}` plug site and the `config.from` read (`_revl_config['from']`)
+// both spell it raw, so a schema that mangled it demanded a field nothing
+// supplied.
+//
+// `type Holder = { value: Value }` is a record field of the NAMED erased-dynamic
+// builtin. `Value` is never a DECLARED type, so the annotation quoting that
+// holds forward references cannot reach it and the bare name emitted an
+// annotation nothing defines.
+service Greeter {
+  fn hello() -> Str
+  fn holder(value: Str) -> Str
+}
+
+type Holder = { name: Str, value: Value }
+
+component Hello provides greeter: Greeter {
+  config { from: Str }
+
+  provide greeter {
+    fn hello() = `hello from ${config.from}`
+    fn holder(value) = value
+  }
+}
