@@ -11389,7 +11389,8 @@ def _extern_acquire_of(acquire, env: "Env") -> tuple | None:
     acquire` that declares one, else None. Both spellings count: the call
     (`effect open_h()`, a `fn` node) and the bare name (`effect open_h`, a
     `var` node), which name the same declaration."""
-    if not isinstance(acquire, dict) or acquire.get("kind") not in ("fn", "var"):
+    from .gate import IR_NAMING_KINDS  # noqa: PLC0415 (lazy: keeps gate off lower's import path)
+    if not isinstance(acquire, dict) or acquire.get("kind") not in IR_NAMING_KINDS:
         return None
     name = acquire.get("name")
     if env.extern_class.get(name) != "acquire":
