@@ -928,6 +928,7 @@
   "tests/fixtures/emit_rust_corpus/float_pub.rvl",
   "tests/fixtures/emit_rust_corpus/in_file_tests.rvl",
   "tests/fixtures/emit_rust_corpus/intercept_metadata.rvl",
+  "tests/fixtures/emit_rust_corpus/keyword_keys.rvl",
   "tests/fixtures/emit_rust_corpus/lengths.rvl",
   "tests/fixtures/emit_rust_corpus/lists.rvl",
   "tests/fixtures/emit_rust_corpus/loop_moves.rvl",
