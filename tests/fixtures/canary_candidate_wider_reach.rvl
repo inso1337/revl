@@ -18,6 +18,7 @@
 service Kv {
   fn get(k: Str) -> Opt[Str]
   fn set(k: Str, v: Str)
+  fn unset(k: Str)
 }
 
 extern pure fn host_fmt(line: Opt[Str]) -> Opt[Str]
@@ -32,5 +33,6 @@ component TenantAStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }

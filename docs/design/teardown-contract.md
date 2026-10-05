@@ -451,6 +451,50 @@ empty, a fifth check, `compensations`, is now present and false, and
 the four checks as before. `aclose`'s `settled` stays physical settlement and
 reads the four R4 checks only.
 
+## An inverse that ran is not an inverse that reverted (issue #1945)
+
+The four R4 counters see a disposer RUN, and the host-resource pairing (#1859)
+sees a handle RELEASED. Neither sees whether a provide-method effect's `undo`
+put back what its forward write changed:
+`effect store.insert(k, v) undo store.remove("not-the-key")` ran its undo,
+the enclosing `store.drop()` released the map, and every check read clean
+while the inserted key was never removed.
+
+So every effect bracket, in an activation body or a provide method, journals
+the host Map keys its forward write and its `undo` touch
+(`Frame._journal_begin`, emitted as the first line of the bracket;
+`Frame._guard` reopens the journal while the `undo` runs). The journal is a
+stack of the frames whose brackets are running, so a write a provider makes
+while serving a consumer's bracket belongs to both frames. Each frame records,
+per key, the value from before that frame's first bracketed write to it.
+
+Two judgments follow, and both are net: two brackets of one frame that
+together restore a key are clean.
+
+- **Per frame, when its teardown completes** (`Frame.begin`, disposed last):
+  every key the frame's brackets touched, in a map that is still open, must
+  hold its value from before the frame's first bracketed write. This is the
+  case that matters most: a consumer unloaded while the provider's map lives
+  on, whose `undo` wrote `kv.set("who", "")` where the key was absent. Nothing
+  would ever release that key.
+- **Per map, when it is released** (`drop`): every bracketed key must hold its
+  value from before the first bracketed write to it at all. A key a frame
+  already reported is not reported twice.
+
+A miss is a `bracket-fault` record with `error.type` `NotReversed`, naming the
+map and the key. So `revl test`'s `assert no_residue` fails, and the session's
+`noResidue` is false. The `insert` over a value no bracket wrote, undone by
+`remove`, lands here too: the value the insert replaced is gone, and the
+record says what the key held.
+
+Only bracketed writes are judged. A write no bracket opened a journal for,
+such as a provider method writing its own handle on an operator call
+(`fn put(k, v) = store.insert(k, v)`) or an `emit`, is the intended form: the
+caller brackets the crossing, and the handle's release at unload is its end. The
+journal observes host Maps only; a service's own host state is observed when
+the service's provider writes a host Map, and otherwise stays the author's
+word.
+
 ## The merged residue schema (246 freezes this)
 
 One schema, one channel. 243 rule 6 (restore-residue feeds 246's prompt) and
@@ -480,7 +524,10 @@ not here is a change to THIS doc, not a tier-local addition:
 ```
 {
   "kind":      "restore-residue"      # witnessed inverse failed on abort (anticipated, 243 rule 6)
-             | "bracket-fault"        # bracket inverse failed on abort (CONTRACT-GRADE)
+             | "bracket-fault"        # bracket inverse failed on abort (CONTRACT-GRADE);
+                                      # also an inverse that RAN and did not reverse its
+                                      # effect's host Map write, error.type "NotReversed"
+                                      # (issue #1945)
              | "compensation-residue" # compensation failed / timed out / not attempted
              | "unreconstructible"    # recovery only: WAL descriptor could not be rebuilt
              | "estop-stranded"       # item 443: registered, NEVER attempted, still owed.
