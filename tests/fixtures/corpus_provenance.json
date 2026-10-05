@@ -897,6 +897,7 @@
    "tests/fixtures/emit_py_corpus/holes.rvl",
    "tests/fixtures/emit_py_corpus/hostroots.rvl",
    "tests/fixtures/emit_py_corpus/inline.rvl",
+   "tests/fixtures/emit_py_corpus/keyword_config_value_field.rvl",
    "tests/fixtures/emit_py_corpus/maps.rvl",
    "tests/fixtures/emit_py_corpus/match_binder_scan.rvl",
    "tests/fixtures/emit_py_corpus/mixed.rvl",
