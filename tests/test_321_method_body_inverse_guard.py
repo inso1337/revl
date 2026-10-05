@@ -49,7 +49,9 @@ _SOURCE = (
     "type H = { id: Int }\n"
     "extern pure fn boom() -> Unit = @py { raise RuntimeError('undo exploded') }\n"
     "extern pure fn rel(h: H) -> Unit = @py { return }\n"
-    "extern acquire fn acq(tag: Str) -> H undo rel(result)"
+    # the raising inverse is the DECLARED one: since issue #1859 a site `undo`
+    # of an `extern acquire` must be the inverse its declaration names
+    "extern acquire fn acq(tag: Str) -> H undo boom()"
     " = @py { return {'id': 1} }\n"
     "service Ops { fn run(tag: Str) -> Int }\n"
     "component Agent provides ops: Ops {\n"

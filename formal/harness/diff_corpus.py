@@ -5222,10 +5222,11 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # fail is the model being weaker than revl, and fatal.
             record("agree-G4" if df_fail else "missed-G4", rel)
         elif code == "G4" and category == "inverse":
-            # The host release rule (issue #1859, `lower._check_host_release`)
-            # carries the G4 code, but it is not the marker rule the `G` row
-            # states: it asks whether a host bracket's `undo` is the family's
-            # release on the bound handle, and the model's HA row carries no
+            # The release rules (issue #1859, `lower._check_site_release`: the
+            # host family's release, and an `extern acquire`'s declared
+            # inverse) carry the G4 code, but they are not the marker rule the
+            # `G` row states: they ask whether a bracket's `undo` is the
+            # inverse its acquisition owns, and the model's HA row carries no
             # inverse fact yet (issue #1859's formal slice adds the `inv`
             # column). Absence of fact, ratcheted by name as the approval
             # floor is, until that column lands.

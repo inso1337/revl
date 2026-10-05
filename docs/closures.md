@@ -135,7 +135,9 @@ The other half is the CHOICE: whether the `undo` written is the inverse at all.
 revl discharges that half only where it owns the stubs. For a host acquisition
 (`Map.new`, `Pool.open`, `Stream.source`) the `undo` must be the family's
 release on the handle the bracket bound, and anything else is refused (issue
-#1859, docs/rejections.md#g4--inverse-or-emit). For an `extern acquire` or a
+#1859, docs/rejections.md#g4--inverse-or-emit). For an `extern acquire` the
+`undo` must be the inverse the declaration names, on the handle the bracket
+bound; that the declared inverse reverts is the declaration's assertion. For a
 user `effect` over a service, which inverse is the right one is still the
 author's assertion, and nothing checks it yet.
 
