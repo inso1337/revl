@@ -1,0 +1,37 @@
+// issue #1920, held to byte agreement by tests/test_selfhost_emit_rust.py and
+// built and run under cargo by backends/rust/test_prelude_names_rust_1920.py.
+//
+//   - A service named `Box` is a Rust trait, so it takes the type-name
+//     reservation and emits as `Box_`: `Box<dyn Box_>` still names
+//     `std::boxed::Box`. The service's name stays `Box` in every string.
+//   - `h` is an `extern acquire` handle. A call returns a value, the handle
+//     its undo takes, so the bind holds the extern's declared handle type by
+//     value instead of an `Arc<Value>`, the provider captures a clone, and a
+//     provide method reads it as `self.h.clone()`.
+//   - A service named `Box_` shifts one rung up the same injective ladder,
+//     to `Box__`, so it never lands on `Box`'s `Box_`.
+//   - `Reader` requires the `Box` service, so its field and its gate name the
+//     mangled trait too.
+
+service Box { fn get() -> Int }
+service Box_ { fn put() -> Int }
+service Front { fn read() -> Int }
+
+extern acquire fn box_open() -> BoxHandle undo box_close(result)
+  = @rs { cordis::Value::new(41i64) }
+
+extern pure fn box_close(h: BoxHandle) -> Unit
+  = @rs { () }
+
+extern pure fn peek(h: BoxHandle) -> Int
+  = @rs { *h.downcast::<i64>().unwrap() + 1 }
+
+component BoxKit provides box: Box {
+  let h = effect box_open() undo box_close(h)
+  provide box { fn get() = peek(h) }
+}
+
+component Reader requires store: Box provides front: Front, spare: Box_ {
+  provide front { fn read() = 1 }
+  provide spare { fn put() = 2 }
+}
