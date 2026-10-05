@@ -426,6 +426,8 @@
 
 ["examples/rejections/g4_undo_host_acquire.rvl", "agree-refuse/G4"]
 
+["examples/rejections/g4_undo_not_release.rvl", "agree-refuse/G4"]
+
 ["examples/rejections/g4_unmarked_alias_emission.rvl", "agree-refuse/G4"]
 
 ["examples/rejections/g4_unmarked_emission.rvl", "agree-refuse/G4"]
@@ -446,7 +448,7 @@
 
 ["examples/rejections/g5_undo_handle_emission.rvl", "refuse-out-of-slice/G4"]
 
-["examples/rejections/g5_undo_handle_ref_arg.rvl", "no-objection-out-of-slice"]
+["examples/rejections/g5_undo_handle_ref_arg.rvl", "refuse-out-of-slice/G4"]
 
 ["examples/rejections/g5_undo_handle_ref_let.rvl", "no-objection-out-of-slice"]
 
@@ -1138,9 +1140,9 @@
 
 ["oracle-reject:extern with no classification is G8", "agree-refuse/G8"]
 
-["oracle-reject:g1 bare call of a builtin type aliased single-case", "agree-refuse/G1"]
+["oracle-reject:g1 bare call of a builtin type aliased single-case", "agree-refuse/T1"]
 
-["oracle-reject:g1 bare call of a type-application alias head", "agree-refuse/G1"]
+["oracle-reject:g1 bare call of a type-application alias head", "agree-refuse/T1"]
 
 ["oracle-reject:g1 required key used as a bare value", "agree-refuse/G1"]
 
@@ -1195,6 +1197,8 @@
 ["oracle-reject:g4 host acquire in an emit expression", "agree-refuse/G4"]
 
 ["oracle-reject:g4 host acquire wrapped inside an effect bracket's acquisition", "agree-refuse/G4"]
+
+["oracle-reject:g4 host undo that is not the release", "agree-refuse/G4"]
 
 ["oracle-reject:g4 multi-hop named-call chain", "agree-refuse/G4"]
 

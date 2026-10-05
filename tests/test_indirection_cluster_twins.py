@@ -274,11 +274,18 @@ component C provides s: S {
 
 def test_undo_through_a_handle_to_a_plain_operation_compiles():
     """Twin of `g5_undo_handle_emission.rvl`: the same handle, the same slot, a
-    NON-emission operation. What is refused is the crossing, not the handle."""
+    NON-emission operation. What is refused is the crossing, not the handle.
+
+    The bracket acquires through an `extern acquire`: since issue #1859 a host
+    `Map.new()` must be released by its own `drop()`, so it can no longer
+    carry a teardown through the handle at all."""
     _ok(WORKER + """
+type H = { id: Int }
+extern pure fn rel(h: H) -> Unit = @py { return None }
+extern acquire fn acq() -> H undo rel(result) = @py { return {"id": 1} }
 component Sup requires net: Net {
   let w = effect spawn Worker with { } undo w.dispose()
-  let m = effect Map.new() undo w.task.status()
+  let m = effect acq() undo w.task.status()
 }
 """)
 

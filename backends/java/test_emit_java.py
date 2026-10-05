@@ -1339,25 +1339,39 @@ def test_lifecycle_tests_run_on_the_jvm(tmp_path):
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_lifecycle_no_residue_catches_a_real_leak(tmp_path):
-    """The negative half, without which the positive one proves nothing:
-    examples/lifecycle_leak.rvl's `undo` runs a query instead of closing the
-    pool, so the composition leaves a live host resource behind. R1 must catch
-    it — a lifecycle test that cannot fail is not a test."""
+    """The negative half, without which the positive one proves nothing: a
+    composition that IS unloaded but leaves a live host resource behind. R1
+    must catch it — a lifecycle test that cannot fail is not a test.
+
+    Since issue #1859 no source program can spell that leak on a host stub: a
+    host acquisition's `undo` must be its release on the bound handle, so the
+    checker refuses the `undo pool.query(...)` this document used to carry.
+    The runtime R1 accounting is still the java tier's own, and still has to
+    fire, so the IR is built from the (sound) example, given back the unload
+    its test omits, and its pool's inverse is replaced by the query the old
+    document ran: exactly the program the checker now refuses, reached past
+    the checker."""
     ir = compile_files([str(ROOT / "examples" / "lifecycle_leak.rvl")])
+    [test] = ir["tests"]
+    test["body"].insert(-1, {"step": "unload", "component": "LeakyDatabase"})
+    [bracket] = [step for step in ir["components"][0]["body"]
+                 if step.get("step") == "let-effect"]
+    bracket["undo"] = {"kind": "call", "target": {"kind": "name", "id": "pool"},
+                       "method": "query",
+                       "args": [{"kind": "lit", "value": "SELECT 1"}]}
     run = _run_revl_tests(tmp_path, emit.emit(ir))
     assert run.returncode != 0, run.stdout
     assert "host resource(s) never released (R1)" in run.stderr
-    assert "a leaky undo leaves residue" in run.stderr
+    assert "a composition left loaded leaves residue" in run.stderr
 
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
 def test_lifecycle_no_residue_catches_a_component_left_loaded(tmp_path):
     """The R4 half: a composition that is never unloaded still holds its
     fiber, so `assert no_residue` has to fail on that too, not only on a
-    host-resource leak."""
+    host-resource leak. examples/lifecycle_leak.rvl is exactly that document."""
     text = (ROOT / "examples" / "lifecycle_leak.rvl").read_text(encoding="utf-8")
-    ir = compile_source(text.replace("  unload LeakyDatabase\n", ""),
-                        "left_loaded.rvl")
+    ir = compile_source(text, "left_loaded.rvl")
     run = _run_revl_tests(tmp_path, emit.emit(ir))
     assert run.returncode != 0, run.stdout
     assert "still loaded: [LeakyDatabase] (R4)" in run.stderr

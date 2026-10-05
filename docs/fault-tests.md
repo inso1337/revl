@@ -80,7 +80,9 @@ a real fault can have: a probe kills an activation at a step's boundary, never
 vacuous experiment — the acquisition whose unwind the test interrogates never
 executed, so a leaky undo on the very step the author pointed at passed
 `assert no residue` (roadmap item 68's false green, caught in review by
-`tests/test_fault_tests.py::test_a_non_inverse_undo_fails_under_an_injected_fault`).
+`tests/test_fault_tests.py::test_a_non_inverse_undo_fails_under_an_injected_fault`;
+since issue #1859 the checker refuses that `undo` outright, and the test reaches
+the program past the checker so the runtime accounting stays pinned).
 Under the current placement every `fail at step N` exercises the unwind of the
 named step itself; "die before step N" is expressed as `fail at step N-1`, and
 the empty prefix (die before anything ran) is no longer addressable — it
