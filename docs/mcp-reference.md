@@ -173,6 +173,7 @@ nothing and carries no undo field.
 | `revl_counterfactual` | yes | no | `at` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` (source) |
+| `revl_knowledge` | no | no | `op` |
 | `revl_export` | no | yes | - |
 | `revl_change` | no | yes | - (source) |
 | `revl_source` | yes | no | `symbol` (source) |
@@ -782,7 +783,118 @@ roots, checked before anything is written. A proposal is never exported; commit
 it first. After an export, the files on disk equal `revl_snapshot`'s
 `files_content`. Authorized as `snapshot`.
 
-- Inputs: `path` and `overwrite` (inline compositions).
+`with_knowledge: true` also writes the session's notes: each live note as a
+marked comment above its anchor, and every record not yet in the sidecar
+(`revl_knowledge`). A vendored truc's records and its `component.rvl` are left
+alone (issue #1769, see docs/registry.md §1.4).
+
+- Inputs: `path` and `overwrite` (inline compositions); `with_knowledge`.
+
+### The comment index (`knowledge` on responses)
+
+When a composition is loaded, and when `revl_check` reads a candidate, the
+server indexes the comments it already has (issue #1745; knowledge slice 2 of
+the design study). Each comment block is anchored to the declaration it
+describes (the symbol path `revl_source` uses), with a fingerprint of that
+declaration's canonical, comment-free code, and classified:
+
+| tier | when | what is kept |
+|---|---|---|
+| `derived` | an `expected error:` block, or a `REFUSED` / `REJECTED` / `ADMITTED` head | a reference to the diagnostic, re-checked against the compile: `live` if the compiler still says it, `refuted` if not. No body |
+| `served` | the block cites a guarantee code (`G4`, `T1`, ...) or a `docs/` path | a reference: `revl explain` the code, read the doc. No body |
+| `doc` | everything else | the body, bounded |
+
+An entry goes `stale` when its anchor's fingerprint changes. A comment-only
+edit or a `revl fmt` reformat changes no fingerprint, so it stales nothing; an
+edited comment is a new entry. The index rides on responses:
+
+- `revl_edit`, `revl_change` and `revl_swap` carry `knowledge: {touched, live,
+  stale, refuted}` for the symbols they touched (and the declarations that
+  contain them), at most 8 of each;
+- `revl_source {with: ["knowledge"]}` carries the entries about the symbol;
+- `revl_check` carries the candidate's counts and every `refuted` entry, so a
+  comment the compiler no longer agrees with is visible before anything loads;
+- `revl_load` and `revl_state` carry the counts (`entries`, `live`, `stale`,
+  `refuted`).
+
+On this tree, 158 of the 163 `expected error:` blocks are live and 5 are
+refuted: the drift the study measured.
+
+### `revl_knowledge`
+
+Agent NOTES about the running composition's declarations (issue #1754;
+knowledge slice 3). The comment index above is what the files already say;
+notes are what a session adds.
+
+- `op: "add"` `{symbol, kind, body, evidence?}`. The kind is one of
+  `rationale`, `invariant`, `trap`, `alternative-rejected`, `purpose`, `doc`.
+  A body over 2048 characters is refused, not truncated, and so is a 17th live
+  note on one declaration. Evidence is a list of read-only checks: `{kind:
+  diagnostic | query | audit | test | issue, ...}`; any other kind is refused.
+  `revl_edit` and `revl_change` take the same notes as `notes: [...]`,
+  recorded when the change lands and anchored to the one symbol it touched
+  (or the note's own `symbol`).
+- `op: "query"` `{symbol}` lists the notes about a declaration; `{id}`
+  returns one note in full.
+- `op: "confirm"` `{id}`: the note still holds after its declaration's code
+  changed. A note goes `stale` when its anchor's fingerprint changes, as a
+  comment entry does.
+- `op: "retire"` `{id, reason}`, `op: "supersede"` `{id, body}`.
+
+**Evidence is re-run (issue #1762).** Evidence of kind `diagnostic`,
+`query` or `audit` is a read-only check the server runs itself, at load and
+whenever the running composition changes, since a query's answer depends on
+the whole composition and not only on the note's anchor:
+
+| kind | shape | holds when |
+|---|---|---|
+| `query` | `{verb, args, expect}`, verb one of `emits-to`, `withdraw`, `depends-on`, `reaches`, `drift` | every field of `expect` equals the query's answer (a list of names compares against the answer's `component` / `key` / `name` fields) |
+| `diagnostic` | `{source, expect: {code}}` | compiling `source` is refused with that code |
+| `audit` | `{component, expect: {emissions?, capabilities?, ...}}` | the component's boundary row has those values |
+
+If every check holds, the note stays (or becomes) `live`, re-fingerprinted, so
+an edit of its own declaration does not stale it. If any check fails, the note
+is `refuted`. For example, a note on `MemStore` with `{kind: query, verb:
+withdraw, args: {component: MemStore}, expect: {cascade: [ApiImpl]}}` is
+refuted the moment `ApiImpl` stops requiring the store, though `MemStore`'s
+code never changed. `test` and `issue` evidence are citations, not re-run, so
+a note backed only by them goes `stale` on a code change. A spec that names
+anything else, or a `query` verb outside the five, is refused at `add`.
+
+**Trust.** A note is written under the same authoring trust as source: under
+the untrusted-author profile an agent's note is `trust: untrusted`. On
+responses (`knowledge.notes`), an untrusted note rides with its body only when
+it carries evidence; an evidence-free one rides as its id, kind and anchor,
+with `bodyWithheld`, and `query {id}` returns the body when the agent decides
+to read it. A note body is data, never instructions: notes change nothing that
+admits, plans or swaps, and a body never appears outside the `knowledge`
+field.
+
+**Storage.** Records are append-only (a confirm, a retire and a supersede are
+records of their own), one JSON file each under `<composition
+dir>/.revl/knowledge/<id>.json`, so two sessions never write the same file.
+`revl_load` reads them; only `revl_export {with_knowledge: true}` writes them.
+A loaded `trucs/<name>/component.rvl` also brings the records `truc add`
+vendored beside it, marked `vendored: <name>` and trusted as the publisher's
+only when the add measured a signature over them and nothing changed since
+(docs/registry.md §1.4).
+
+**Round trip.** `revl_export {with_knowledge: true}` also writes each live note
+into its file as a marked comment directly above its anchor:
+
+```
+// note k_1a2b3c4d5e6f:
+// create_note mints the id from the row count, so ids are not reused
+// [k_1a2b3c4d5e6f]
+```
+
+Loading that file reads it back: an unchanged block is the same note, so an
+export of the reloaded composition writes nothing (the round trip is byte
+stable); a body a human edited becomes a supersede by `author: {kind: human,
+trust: operator}`; a marked block with no record becomes a human note.
+
+- Inputs: `op` (required); `symbol`, `id`, `kind`, `body`, `evidence`,
+  `reason` per op.
 
 ### `revl_source`
 

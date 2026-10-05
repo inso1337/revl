@@ -107,6 +107,10 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_framework_bench.py",
     "tests/test_inprocess_gate.py",
     "tests/test_inprocess_gate_rust.py",
+    # Indexes every tracked `.rvl` outside `bench/results/` for its
+    # `// expected error:` blocks (issue #1745), bench's own sources included,
+    # so a bench change can change its verdict.
+    "tests/test_knowledge_index_1745.py",
     # Issue #1829: the bare-name guard walks every importable `.py` in the
     # repository, `bench/` included (five `bench/**/run.py` files are why it
     # exists), so a new or renamed bench module can change its verdict.

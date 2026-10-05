@@ -29,6 +29,7 @@ from .registry import (
     _provenance_document,
     _read,
     _write_evidence_file,
+    load_knowledge,
 )
 
 
@@ -98,6 +99,12 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
             facets.append(facet)
             if facet in _BOUND_FACETS:
                 bindings[facet] = _facet_hash(doc)
+        # knowledge slice 4 (issue #1762): the records the entry ships are bound
+        # too, so a signed entry vouches for them and a tampered one breaks it.
+        knowledge = load_knowledge(entry_dir)
+        if knowledge is not None:
+            bindings["knowledge"] = _facet_hash(knowledge)
+            facets.append("knowledge")
 
         # provenance - reproducible source/build facts (not itself bound: it
         # carries the source/manifest hashes the composition hash already roots).

@@ -514,6 +514,70 @@ def apply(project_dir: str, trust_host_code: bool) -> str:
 _VENDORED_FILES = ("component.rvl", "manifest.json", "dossier.json")
 
 
+#: where an entry keeps its knowledge records, in the registry and vendored
+_KNOWLEDGE_DIR = "knowledge"
+
+
+def _knowledge_copies(src_dir: pathlib.Path) -> list[tuple[str, pathlib.Path]]:
+    """(`knowledge/<file>`, source) for each record file the entry ships. A
+    symlinked record is not the registry's bytes, so it is not vendored."""
+    directory = src_dir / _KNOWLEDGE_DIR
+    if not directory.is_dir() or directory.is_symlink():
+        return []
+    return [(f"{_KNOWLEDGE_DIR}/{path.name}", path)
+            for path in sorted(directory.glob("*.json"))
+            if path.is_file() and not path.is_symlink()]
+
+
+def _clear_vendored_knowledge(dst_dir: pathlib.Path) -> None:
+    """Drop the records an earlier add vendored, so a re-add carries exactly the
+    entry's current set. The directory was checked not to be a link."""
+    directory = dst_dir / _KNOWLEDGE_DIR
+    if directory.is_dir():
+        for old in directory.glob("*.json"):
+            if old.is_file() or old.is_symlink():
+                old.unlink()
+
+
+def _knowledge_pin(src_dir: pathlib.Path, dst_dir: pathlib.Path) -> dict | None:
+    """The lock row's `knowledge` entry: the vendored records' hash, and whether
+    the entry's attestation binds them (issue #1769).
+
+    `signed` is measured here, at the add, because the attestation stays in the
+    registry: a vendored truc carries no `evidence/`. It is true only when a key
+    resolves (`REVL_ATTEST_KEY_FILE` or `REVL_ATTEST_KEY`, as `revl attest`
+    reads it), the attestation verifies against the entry's compiled source,
+    and it binds the very records that were vendored. No key means unsigned:
+    the records are then served untrusted, which is the honest default."""
+    from .. import registry  # noqa: PLC0415 - lazy, as the registry calls are
+
+    vendored = registry.load_knowledge(dst_dir, regular_only=True)
+    if vendored is None:
+        return None
+    digest = registry._facet_hash(vendored)
+    return {"hash": digest, "records": len(vendored["records"]),
+            "signed": _knowledge_signed(src_dir, digest)}
+
+
+def _knowledge_signed(src_dir: pathlib.Path, digest: str) -> bool:
+    from .. import attest, registry  # noqa: PLC0415
+    from ..compiler import compile_source  # noqa: PLC0415
+    from ..errors import RevlError  # noqa: PLC0415
+
+    bundle = registry.load_evidence_bundle(src_dir)
+    if bundle.attestation is None or bundle.knowledge is None \
+            or registry._facet_hash(bundle.knowledge) != digest:
+        return False
+    try:
+        key = attest.resolve_key(None)
+        source = (src_dir / "component.rvl").read_text(encoding="utf-8")
+        ir = registry._normalize_ir_for_attest(compile_source(source, "component.rvl"))
+    except (RevlError, OSError):
+        return False
+    verdict = registry.assess_evidence(bundle, key=key, ir=ir)
+    return verdict.verified.get("knowledge") is True
+
+
 def commit_add(project_dir: str, plan_json: str) -> str:
     """Execute an `add` commit plan: vendor the registry entry, write the
     lock row, append the `[trucs]` entry to `truc.toml`.
@@ -548,13 +612,22 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     dst_dir = _vendor_dir(project_dir, name)
     copies = [(fname, src_dir / fname) for fname in _VENDORED_FILES
               if (src_dir / fname).exists()]
+    # the entry's knowledge records travel with it (issue #1769), one file per
+    # record under `trucs/<name>/knowledge/`, as they sit in the registry
+    copies += _knowledge_copies(src_dir)
     # Every destination is checked before the first write, so a refusal leaves
     # nothing behind: no half-vendored directory, and no target written through.
+    if (dst_dir / _KNOWLEDGE_DIR).is_symlink():
+        raise _symlink_refusal(dst_dir / _KNOWLEDGE_DIR,
+                               f"trucs/{name}/{_KNOWLEDGE_DIR}")
     for fname, _ in copies:
         if (dst_dir / fname).is_symlink():
             raise _symlink_refusal(dst_dir / fname, f"trucs/{name}/{fname}")
     dst_dir.mkdir(parents=True, exist_ok=True)
+    _clear_vendored_knowledge(dst_dir)
     for fname, sp in copies:
+        if fname.startswith(_KNOWLEDGE_DIR + "/"):
+            (dst_dir / _KNOWLEDGE_DIR).mkdir(exist_ok=True)
         _write_no_follow(dst_dir / fname, sp.read_text(encoding="utf-8"),
                          f"trucs/{name}/{fname}")
 
@@ -576,6 +649,9 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         "emissions": row.get("emissions", 0),
         "admitted": {"at": now(), "indexVersion": index_version},
     }
+    knowledge = _knowledge_pin(src_dir, dst_dir)
+    if knowledge is not None:
+        lock_row["knowledge"] = knowledge
     lock_path = pathlib.Path(project_dir, "truc.lock")
     if lock_path.exists() and lock_path.read_text(encoding="utf-8").strip():
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -970,6 +1046,7 @@ def ship_context(project_dir: str) -> str:
             pathlib.Path(project_dir, ev_rel))
 
     tags = ship.get("tags") or []
+    _remember_ship_knowledge(project_dir)
     return json.dumps({
         "source": source,
         "description": str(ship.get("description", "")),
@@ -981,6 +1058,28 @@ def ship_context(project_dir: str) -> str:
         "evidenceVerdict": verdict,
         "evidenceLifecycle": lifecycle,
     })
+
+
+#: the knowledge records of the project `ship_context` last read, for `publish`
+#: in the same `truc ship` run (knowledge slice 4, issue #1762). They travel
+#: here rather than through the pure Shipper's plan because the Shipper decides
+#: nothing about them: the registry's write path checks their anchors itself.
+_SHIP_KNOWLEDGE: list | None = None
+
+
+def _remember_ship_knowledge(project_dir: str) -> None:
+    global _SHIP_KNOWLEDGE
+    directory = pathlib.Path(project_dir, ".revl", "knowledge")
+    records = []
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and isinstance(record.get("id"), str):
+                records.append(record)
+    _SHIP_KNOWLEDGE = records or None
 
 
 def gauntlet_evidence(source: str) -> str:
@@ -1052,7 +1151,8 @@ def publish(plan_json: str) -> str:
         description=plan.get("description", ""),
         tags=plan.get("tags") or [],
         dossier_text=(plan["dossierText"] if plan.get("stampDossier")
-                      and plan.get("dossierText") else None))
+                      and plan.get("dossierText") else None),
+        knowledge=_SHIP_KNOWLEDGE)
     return "published"
 
 
