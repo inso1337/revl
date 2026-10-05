@@ -65,6 +65,9 @@ schema, host-extern surface, and gate-invocation mechanics live in
 Pull a petit bout — a component and its manifest — into the composition.
 `add` fetches the component from the registry, records it in `truc.toml`, pins
 the resolved version in `truc.lock`, and vendors the source under `trucs/`.
+When the entry ships knowledge records, they are vendored too, under
+`trucs/<name>/knowledge/`, and the lock row pins their hash and whether a
+signature covered them ([registry.md §1.4](registry.md)).
 `rm` is the exact inverse: it removes the entry, the pin, and the vendored copy.
 
 ```console

@@ -4092,32 +4092,42 @@ def _emit_provide_config_local(component: dict, indent: int) -> list[str]:
     return [f"{'    ' * indent}let {_PROVIDE_CONFIG_LOCAL} = config.clone();"]
 
 
-def _call_bind_type(env: "_Env", bind: str) -> str | None:
-    """The Rust type of a `let`-effect bind whose acquisition is a CALL (an
-    `extern acquire` or a module fn), or None for any other bind (issue #1920).
+# Acquisition kinds that bind a shared RESOURCE, not a value: a host object's
+# verbs borrow it (`Map.new()`, `Pool.open(..)`), a spawn binds a live-instance
+# handle, a subscription binds the stream it pulls from. Each stays `Arc`-held.
+_RESOURCE_ACQUIRE_KINDS = frozenset({"host", "spawn", "subscribe"})
+
+
+def _held_bind_type(env: "_Env", bind: str) -> str | None:
+    """The Rust type of a `let`-effect bind held BY VALUE, or None for a bind
+    held as `Arc<..>` (issues #1920, #1931).
 
     A host acquisition (`Map.new()`, `Pool.open(..)`) is a shared resource
-    whose verbs borrow it, so it is held as `Arc<Host>`. A call returns a
-    VALUE, the handle its declared return names, and the extern's undo takes
-    that value. Wrapping it in `Arc` typed the capture `Arc<Value>` and handed
-    the undo an `Arc` where the handle was declared, so the crate did not
-    build. It is held by value instead, and every capture clones it."""
+    whose verbs borrow it, so it is held as `Arc<Host>`, and so are a spawn
+    handle, a subscription and the result-declared host CAS (`Arc<bool>`).
+    Every other acquisition EVALUATES to a value: an `extern acquire` handle,
+    a module fn's result, a required-service call's return. Wrapping it in
+    `Arc` typed the capture with the `Arc<Value>` fallback and handed an undo
+    an `Arc` where the value was declared, so the crate did not build. It is
+    held by value, typed by what the acquisition evaluates to (the same
+    inference a provide-method `let` takes), and every capture clones it. An
+    acquisition whose type cannot be named keeps the `Arc` form."""
     for s in env.component.get("body") or []:
         if s.get("step") == "let-effect" and s.get("bind") == bind:
             acquire = s.get("acquire") or {}
-            if acquire.get("kind") != "fn":
+            if acquire.get("kind") in _RESOURCE_ACQUIRE_KINDS or _is_map_cas(acquire):
                 return None
-            returns = env.v3_ctx().fn_returns.get(acquire.get("name"))
-            if not returns or returns == "Unit":
+            surface = _provide_let_type(env, acquire, env.v3_ctx())
+            if not isinstance(surface, str) or surface in ("", "Unit"):
                 return None
-            return _rust_type(returns, env.types)
+            return _rust_type(surface, env.types)
     return None
 
 
 def _bind_field_type(env: "_Env", bind: str, map_values: dict[str, str] | None) -> str:
-    """A provider struct's field for an activation bind: the call's declared
-    handle type by value, or `Arc<host>` for a host resource."""
-    held = _call_bind_type(env, bind)
+    """A provider struct's field for an activation bind: the value's type when
+    it is held by value, or `Arc<host>` for a shared resource."""
+    held = _held_bind_type(env, bind)
     if held is not None:
         return held
     return f"Arc<{_host_of(env.component, bind, map_values)}>"
@@ -4481,9 +4491,19 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
     return parts
 
 
+def _req_ident(local: str) -> str:
+    """A requirement key as a Rust identifier: its local, its provider-struct
+    field and its `self.` capture. A key that is a Rust keyword (`box`,
+    `type`, `match`) takes the same `_` ladder every other user identifier
+    does (`box` -> `box_`), as `_render_expr`'s `req` arm already spells it.
+    The STRING key (`ctx.require::<..>("box")`, the inject gate) stays the
+    surface spelling (issue #1927)."""
+    return _ident(local, "requirement")
+
+
 def _method_body(env: _Env, method: dict) -> str:
     rename = {b: _self_bind(env, b) for b in _binds(env.component)}
-    rename.update({local: f"self.{local}" for local in env.reqs})
+    rename.update({local: f"self.{_req_ident(local)}" for local in env.reqs})
     if _has_config(env.component):
         rename["config"] = "self.config"
     return _pure_method_statements(env, method, rename)
@@ -4599,18 +4619,19 @@ def _method_has_effectful_steps(method: dict) -> bool:
 
 
 def _self_bind(env: _Env, bind: str) -> str:
-    """A provide method's read of an activation bind. A call-acquired handle
-    is held by value (issue #1920), and a method has only `&self`, so a read
-    of it is a clone; a host resource is an `Arc` whose verbs borrow it."""
-    if _call_bind_type(env, bind) is not None:
-        return f"self.{bind}.clone()"
-    return f"self.{bind}"
+    """A provide method's read of an activation bind. A value-held bind
+    (issues #1920, #1931) is read through `&self`, so a read of it is a clone;
+    a shared resource is an `Arc` whose verbs borrow it."""
+    field = _ident(bind, "binding")
+    if _held_bind_type(env, bind) is not None:
+        return f"self.{field}.clone()"
+    return f"self.{field}"
 
 
 def _method_scope_rename(env: _Env) -> dict[str, str]:
     rename = {b: _self_bind(env, b) for b in _binds(env.component)}
     for req in env.reqs:
-        rename[req] = f"self.{req}"
+        rename[req] = f"self.{_req_ident(req)}"
     if _has_config(env.component):
         rename["config"] = "self.config"
     return rename
@@ -4695,9 +4716,9 @@ def _bare_param(node: object, method: dict) -> str | None:
 def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) -> None:
     pad = "    " * indent
     for bind in _binds(env.component):
-        out.append(f"{pad}let {bind}_undo = self.{bind}.clone();")
+        out.append(f"{pad}let {bind}_undo = self.{_ident(bind, 'binding')}.clone();")
     for req in env.reqs:
-        out.append(f"{pad}let {req}_undo = self.{req}.clone();")
+        out.append(f"{pad}let {req}_undo = self.{_req_ident(req)}.clone();")
     for param in method.get("params") or []:
         out.append(f"{pad}let {param}_undo = {param}.clone();")
 
@@ -4781,7 +4802,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             # borrows (`prev.push(..)`) or clones stay bare.
             for local in sorted(_undo_reclone_locals(
                     acquire_node, undo_node, body_locals, env.v3_ctx())):
-                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
                 undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
             out.append(f"{pad}let _ = {acquire};")
@@ -4812,7 +4833,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 _method_undo_clones(env, method, out, indent)
                 for local in sorted(_undo_reclone_locals(
                         acquire_node, compensate_node, body_locals, env.v3_ctx())):
-                    out.append(f"{pad}let {local}_undo = {local}.clone();")
+                    out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
                     undo_rename[local] = f"{local}_undo"
                 out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
                 _emit_compensation_registration(
@@ -4874,7 +4895,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             _method_undo_clones(env, method, out, indent)
             for local in sorted(_undo_reclone_locals(
                     acquire_node, undo_node, body_locals, env.v3_ctx())):
-                out.append(f"{pad}let {local}_undo = {local}.clone();")
+                out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
                 undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
             out.append(f"{pad}let {bind} = {acquire};")
@@ -4965,7 +4986,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             out.append(f"    {_ident(b, 'binding')}: {_bind_field_type(env, b, map_values)},")
         if env.reqs:
             for local, req_service in env.reqs.items():
-                out.append(f"    {local}: Arc<Box<dyn {_svc(req_service)}>>,")
+                out.append(f"    {_req_ident(local)}: Arc<Box<dyn {_svc(req_service)}>>,")
         out.extend(_config_struct_field(component, key))
         if has_effectful:
             out.append("    ctx: Arc<cordis::Context>,")
@@ -5074,8 +5095,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             service = step.get("service")
             struct = f"{env.name}{_camel(key)}"
             fields = ", ".join(
-                [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
-                + [f"{local}: {local}.clone()" for local in env.reqs]
+                [f"{_ident(b, 'binding')}: {_ident(b, 'binding')}.clone()" for b in _binds(env.component)]
+                + [f"{_req_ident(local)}: {_req_ident(local)}.clone()" for local in env.reqs]
                 + _config_ctor_field(env.component, key)
                 + (["ctx: Arc::new(ctx.clone())"] if has_effectful else [])
             )
@@ -5331,7 +5352,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         # a provide-method may call a required service, so the provider owns
         # the same bindings the effectful path captures (java does this too)
         for local, req_service in env.reqs.items():
-            out.append(f"    {local}: Arc<Box<dyn {_svc(req_service)}>>,")
+            out.append(f"    {_req_ident(local)}: Arc<Box<dyn {_svc(req_service)}>>,")
         out.extend(_config_struct_field(component, key))
         out.append("}")
         out.append(f"impl {_svc(service)} for {struct} {{")
@@ -5446,10 +5467,10 @@ def _emit_req_bindings(env: "_Env", cname: str, out: list[str], indent: int) -> 
     for local, service in env.reqs.items():
         if local in env.routes:
             struct = f"RevlRouter{cname}{_camel(local)}"
-            out.append(f"{pad}let {local}: std::sync::Arc<Box<dyn {_svc(service)}>> = "
+            out.append(f"{pad}let {_req_ident(local)}: std::sync::Arc<Box<dyn {_svc(service)}>> = "
                        f"{struct}::_revl_new(ctx.clone());")
         else:
-            out.append(f"{pad}let {local} = ctx.require::<Box<dyn {_svc(service)}>>({_string(local)})?;")
+            out.append(f"{pad}let {_req_ident(local)} = ctx.require::<Box<dyn {_svc(service)}>>({_string(local)})?;")
 
 
 def _emit_setup_value(node: dict, env: _Env) -> str:
@@ -5649,11 +5670,11 @@ def _emit_activation_compensation(env: "_Env", compensate_node: dict, out: list[
     rename: dict[str, str] = {}
     for req in env.reqs:
         req_c = f"{req}_comp"
-        out.append(f"{pad}let {req_c} = {req}.clone();")
+        out.append(f"{pad}let {req_c} = {_req_ident(req)}.clone();")
         rename[req] = req_c
     for local in sorted(referenced & set(env.activation_binds)):
         local_c = f"{local}_comp"
-        out.append(f"{pad}let {local_c} = {local}.clone();")
+        out.append(f"{pad}let {local_c} = {_ident(local, 'binding')}.clone();")
         rename[local] = local_c
     _emit_compensation_registration(
         env, compensate_node, env.name + ".compensate", out, indent, rename)
@@ -5680,7 +5701,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         if acq.get("kind") == "host" and acq.get("fn") == "Map.new":
             v = _component_map_values(env).get(step["bind"], "String")
             acquire = f"Map::<{v}>::new()"
-        if _call_bind_type(env, step["bind"]) is not None:
+        if _held_bind_type(env, step["bind"]) is not None:
             out.append(f"{pad}let {bind} = {acquire};")
         else:
             out.append(f"{pad}let {bind} = Arc::new({acquire});")
@@ -5689,7 +5710,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         undo_rename = {step["bind"]: undo_name}
         for req in env.reqs:
             req_undo = f"{req}_undo"
-            out.append(f"{pad}let {req_undo} = {req}.clone();")
+            out.append(f"{pad}let {req_undo} = {_req_ident(req)}.clone();")
             undo_rename[req] = req_undo
         is_cas = _is_map_cas(step.get("acquire"))
         if is_cas:
@@ -5705,7 +5726,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                 if local == step["bind"]:
                     continue
                 local_undo = f"{local}_undo"
-                out.append(f"{pad}let {local_undo} = {local}.clone();")
+                out.append(f"{pad}let {local_undo} = {_ident(local, 'binding')}.clone();")
                 undo_rename[local] = local_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         label = _string(env.name + "." + step["bind"] + ".undo")
@@ -5729,7 +5750,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         undo_rename: dict[str, str] = {}
         for req in env.reqs:
             req_undo = f"{req}_undo"
-            out.append(f"{pad}let {req_undo} = {req}.clone();")
+            out.append(f"{pad}let {req_undo} = {_req_ident(req)}.clone();")
             undo_rename[req] = req_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         out.append(f"{pad}let _ = {acquire};")
@@ -5766,7 +5787,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         rename: dict[str, str] = {}
         for req in env.reqs:
             cloned = f"{req}_t{n}"
-            out.append(f"{pad}let {cloned} = {req}.clone();")
+            out.append(f"{pad}let {cloned} = {_req_ident(req)}.clone();")
             rename[req] = cloned
         # a firing that emits an extern declaring its own `compensate` registers
         # it on the activation's accumulator, once per firing, after the fire
@@ -5842,8 +5863,8 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         service = step.get("service")
         struct = f"{env.name}{_camel(key)}"
         fields = ", ".join(
-            [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
-            + [f"{local}: {local}.clone()" for local in env.reqs]
+            [f"{_ident(b, 'binding')}: {_ident(b, 'binding')}.clone()" for b in _binds(env.component)]
+            + [f"{_req_ident(local)}: {_req_ident(local)}.clone()" for local in env.reqs]
             + _config_ctor_field(env.component, key)
         )
         out.append(f"{pad}let {key}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")

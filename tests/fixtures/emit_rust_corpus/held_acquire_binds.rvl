@@ -1,0 +1,47 @@
+// issue #1931, held to byte agreement by tests/test_selfhost_emit_rust.py and
+// built and run under cargo by backends/rust/test_held_acquire_binds_rust_1931.py.
+//
+// An activation `let`-effect bind is held by value, typed by what its
+// acquisition evaluates to, unless it is a shared resource:
+//   - `r` is a required-service call's `Int` return;
+//   - `n` is a module fn's record result (`Note`);
+//   - `seen` is a host `Map`, a shared resource whose verbs borrow it, so it
+//     stays `Arc`-held.
+// A provide method reads each value-held bind through `&self` as a clone.
+
+type Note = { tag: Str, size: Int }
+
+fn note_for(k: Int) -> Note {
+  return { tag: "n", size: k }
+}
+
+fn drop_note(n: Note) -> Int {
+  return n.size
+}
+
+service Store {
+  fn grab(k: Int) -> Int
+  fn release(k: Int) -> Int
+}
+
+service Front {
+  fn total() -> Int
+  fn label() -> Str
+}
+
+component Shop provides store: Store {
+  provide store {
+    fn grab(k) = k + 40
+    fn release(k) = 0
+  }
+}
+
+component Reader requires store: Store provides front: Front {
+  let r = effect store.grab(2) undo store.release(2)
+  let n = effect note_for(3) undo drop_note(n)
+  let seen = effect Map.new() undo seen.drop()
+  provide front {
+    fn total() = r + n.size
+    fn label() = n.tag
+  }
+}

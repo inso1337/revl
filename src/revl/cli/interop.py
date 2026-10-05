@@ -330,7 +330,14 @@ def _run_mcp(args) -> int:
                       file=sys.stderr)
                 return 1
         grants = getattr(args, "grant", None) or []
+        from ..realm_placeholders import parse_bindings  # noqa: PLC0415
+        try:
+            realm_bindings = parse_bindings(getattr(args, "bind_realm", None))
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
         set_authoring_trust(
+            realm_bindings=realm_bindings,
             host_code=getattr(args, "author_trust", "untrusted") == "trusted",
             granted=frozenset(grants) if grants else None,
             providers=providers or None,

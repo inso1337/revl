@@ -28,3 +28,10 @@ import RevL.Theorems.G5_ClassifiedTeardownPure
 import RevL.Theorems.G8_ClassifiedBoundary
 import RevL.Theorems.A9_ProvideKeyDeclared
 import RevL.Theorems.A2_NoAcquisitionAfterProvision
+import RevL.Theorems.G4_DeferredPosition
+import RevL.Theorems.G4_ApprovalFloor
+import RevL.Theorems.G6_BindingUnique
+import RevL.Theorems.G1_KeyAccess
+import RevL.Theorems.A1_AsyncColour
+import RevL.Theorems.Prelude_InterceptMethod
+import RevL.Theorems.ModelPlacement

@@ -158,6 +158,19 @@ class AdmissionProfile:
     # is not trusted" rather than of one call site is what closes the shape
     # instead of the instance.
     no_realm_placement: bool = False
+    # issue #1728: the OPERATOR's binding of realm placeholders,
+    # `((name, realm), ...)` sorted. `isolate <key> in realm(?<name>)` is the
+    # one realm form an untrusted author may write; it names a placeholder, and
+    # `realm_placeholders.bind` maps it to the realm bound here, before
+    # lowering, or refuses it by name. Empty (the default) binds nothing, so a
+    # compile that writes no placeholder is byte-identical. Set only from the
+    # operator's side (`--bind-realm`), never from an argument the author sends.
+    realm_bindings: tuple = ()
+
+    @property
+    def bindings(self) -> dict:
+        return dict(self.realm_bindings)
+
     # issue #1926: the grant made KEY-PRECISE. `None` (every door but one) keeps
     # the allowlist per service name. A set of `(component, requires key)` pairs
     # narrows it: a granted service then covers a requirement only when that
@@ -168,7 +181,8 @@ class AdmissionProfile:
     granted_requires: frozenset[tuple[str, str]] | None = None
 
     @staticmethod
-    def untrusted_author(granted, requires=None) -> "AdmissionProfile":
+    def untrusted_author(granted, realm_bindings=(),
+                         requires=None) -> "AdmissionProfile":
         """THE profile for source whose AUTHOR is not trusted: no new host code,
         reach bounded to an explicit granted service set, no self-minted
         declassifier (item 249 Slice C), derived taint sinks/sources so the
@@ -187,11 +201,12 @@ class AdmissionProfile:
                                 no_declassify=True,
                                 taint_strict=True,
                                 no_realm_placement=True,
+                                realm_bindings=tuple(realm_bindings or ()),
                                 granted_requires=(None if requires is None
                                                   else frozenset(requires)))
 
     @staticmethod
-    def self_extension(granted) -> "AdmissionProfile":
+    def self_extension(granted, realm_bindings=()) -> "AdmissionProfile":
         """The profile a SELF-EXTENDING proposal is admitted under (item 334,
         slice 2) — `Gate.propose`'s door, named for the reader who arrives from
         the proposal loop.
@@ -208,7 +223,7 @@ class AdmissionProfile:
         is the realm on every ticket that turn raises, and one covered crossing
         is all an exfiltration needs. Kept as a distinct name because `propose`'s
         refusal is load-bearing enough to be greppable."""
-        return AdmissionProfile.untrusted_author(granted)
+        return AdmissionProfile.untrusted_author(granted, realm_bindings)
 
     @property
     def active(self) -> bool:
@@ -322,6 +337,14 @@ def _realm_navigate(realms) -> dict:
                       blocked=False, alternatives=alts, profile=None)
 
 
+def _all_placeholders(stmt) -> bool:
+    """Whether a `realms(...)` route names no realm, only placeholders the
+    operator binds (issue #1728)."""
+    held = getattr(stmt, "placeholders", None) or []
+    realms = getattr(stmt, "realms", None) or []
+    return bool(held) and len(held) == len(realms)
+
+
 def _iter_realm_placements(node, out: list) -> None:
     """Every realm-naming statement reachable from a parsed AST fragment, by the
     same structural dataclass walk `_iter_var_refs` uses. A recursive walk rather
@@ -430,13 +453,21 @@ def check_no_realm_placement(root_programs: list[Program],
     for program in root_programs:
         found: list = []
         _iter_realm_placements(program.components, found)
+        # issue #1728: `realm(?<name>)` names a placeholder the operator binds,
+        # not a realm, so it is not the authority grab this refuses. Nor is a
+        # `realms(...)` route whose every entry is one; a route with any
+        # literal among its realms names that realm, and is refused.
+        found = [stmt for stmt in found
+                 if getattr(stmt, "placeholder", None) is None
+                 and not _all_placeholders(stmt)]
         if not found:
             continue
         stmt = found[0]
         plural = isinstance(stmt, RouteStmt)
         named = list(stmt.realms) if plural else [stmt.realm]
         spelling = (f'`isolate {stmt.key} in realms('
-                    + ", ".join(f'"{r}"' for r in named) + ')`') if plural else \
+                    + ", ".join(r if r.startswith("?") else f'"{r}"' for r in named)
+                    + ')`') if plural else \
                    f'`isolate {stmt.key} in realm("{stmt.realm}")`'
         raise RevlError(
             program.filename, stmt.line,
@@ -458,7 +489,8 @@ def check_no_realm_placement(root_programs: list[Program],
             navigate=_realm_navigate(
                 [r for s in found
                  for r in (list(s.realms) if isinstance(s, RouteStmt)
-                           else [s.realm])]),
+                           else [s.realm])
+                 if not r.startswith("?")]),
         )
 
 

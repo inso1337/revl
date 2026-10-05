@@ -1,0 +1,4 @@
+{
+ "mismatches": {},
+ "note": "Recorded by `python3 tools/gate_reference_census.py --record-lines` (issue #1965). Every entry is a refusal the gate and the reference agree on by tag and message but anchor at different lines: `[reference line, gate line]`. `--check` and tests/test_gate_reference_census.py fail on a mismatch that is not here, on an entry whose pair moved, and on an entry that no longer mismatches, so the list can only shrink. Names and line pairs only, no counts."
+}

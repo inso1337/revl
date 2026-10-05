@@ -1,0 +1,43 @@
+// A computer-use provider (issue #1369). The provide-method call is the UI
+// transaction unit, so the IR marks each method that crosses a computer-use
+// verb with `"unit": "ui"`: `act` crosses three directly, `peek` crosses one
+// through a module fn, and `count` crosses none and carries no key.
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
+extern emission[screen.observe] fn read_pane(region: Str) -> Str
+  = @py { return "" }
+extern emission[ui.find] fn locate(pane: Str, name: Str) -> UiTarget
+  = @py { return None }
+extern emission[ui.click] fn actuate(target: UiTarget) = @py { return None }
+
+fn peek_pane(region: Str) -> Str { return read_pane(region) }
+
+service Desk {
+  emission fn act(region: Str) -> Int
+  fn count(n: Int) -> Int
+  emission fn peek(region: Str) -> Str
+}
+
+component Agent provides desk: Desk {
+  provide desk {
+    fn act(region) {
+      let pane = emit read_pane(region)
+      let ok = emit locate(pane, "Approve")
+      emit actuate(ok)
+      return 1
+    }
+    fn count(n) = n + 1
+    fn peek(region) = emit peek_pane(region)
+  }
+}

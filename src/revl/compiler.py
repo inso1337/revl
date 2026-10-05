@@ -17,6 +17,7 @@ from .admit_profile import check_no_host_extern_reach as _check_no_host_extern_r
 from .admit_profile import enforce_document as _enforce_document
 from .admit_profile import enforce_document_per_root as _enforce_document_per_root
 from .admit_profile import enforce_source as _enforce_source
+from .realm_placeholders import bind as _bind_realm_placeholders
 from . import operator_text as _operator_text
 from .errors import RevlError
 from . import gen_types as _gen_types
@@ -686,6 +687,10 @@ def compile_source(source: str, filename: str = "<string>",
         # no-extern refusal first (structural, no IO), so an untrusted author's
         # refusal is unchanged and precedes any body-file concern (item 396).
         _enforce_source([program], profile)
+        # issue #1728: the operator's realm bindings, after the profile's
+        # structural checks (a placeholder is not a literal realm) and before
+        # lowering (G2 and the manifest then read an ordinary realm).
+        _bind_realm_placeholders(program, profile.bindings if profile else None)
         _check_user_py_body_imports(program, False)
         # item 396: a bare in-memory source has no module directory and no
         # sources map, so a body file cannot resolve without opening disk, which
@@ -1179,14 +1184,26 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     included_host = _included_host_externs(included)
     for module in root_modules:
         root_profile = per_root_profiles.get(os.path.abspath(module.path), profile)
+        # the author's delta is taken BEFORE the placeholders are bound: a
+        # bound `?<name>` is the operator's value, not the author's text
         authored = loader.delta_for(os.path.abspath(module.path), module.program)
         _enforce_source([authored], root_profile)
+        # issue #1728, as in `compile_source`: bound with THIS root's profile.
+        _bind_realm_placeholders(module.program,
+                                 root_profile.bindings if root_profile else None)
         if root_profile is not None and root_profile.no_extern:
             _check_no_host_extern_reach(
                 [authored], merged.fn_decls, included_host, root_profile)
     if loader.diffs_operator_text:
         _enforce_authored_imports(loader, included, root_modules, merged,
                                   included_host, profile)
+    # ...and an imported module's placeholders with the compile's own profile, so
+    # no `?<name>` realm ever reaches lowering unbound.
+    root_ids = {id(module) for module in root_modules}
+    for module in included:
+        if id(module) not in root_ids:
+            _bind_realm_placeholders(module.program,
+                                     profile.bindings if profile else None)
     # The two genuinely whole-compile analysis flags (DESIGN §9.3 Part 3) take the
     # JOIN across roots, in the safe (over-refusing) direction. `taint_strict`
     # only ADDS taint edges, so a composition containing any taint-strict root

@@ -225,7 +225,7 @@ The six host columns share their verdict wherever a register does not separate t
 | `G1` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g1_template_undeclared.rvl`](../examples/rejections/g1_template_undeclared.rvl) |
 | `G2` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g2_provision_conflict.rvl`](../examples/rejections/g2_provision_conflict.rvl) |
 | `G3` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g3_dependency_cycle.rvl`](../examples/rejections/g3_dependency_cycle.rvl) |
-| `G4` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g4_approval_compensate.rvl`](../examples/rejections/g4_approval_compensate.rvl) |
+| `G4` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/g4_approval_compensate.rvl`](../examples/rejections/g4_approval_compensate.rvl) |
 | `G5` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/g5_undo_arrow_emission.rvl`](../examples/rejections/g5_undo_arrow_emission.rvl) |
 | `G6` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g6_closure_mutates_capture.rvl`](../examples/rejections/g6_closure_mutates_capture.rvl) |
 | `G7` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/v2_verified_direct_recursion.rvl`](../examples/rejections/v2_verified_direct_recursion.rvl) |
@@ -256,14 +256,13 @@ The six host columns share their verdict wherever a register does not separate t
 | java | 20 | 0 | 5 | 0 |
 | wasm | 20 | 0 | 5 | 0 |
 | go | 20 | 0 | 5 | 0 |
-| revl | 7 | 5 | 5 | 8 |
+| revl | 8 | 4 | 5 | 8 |
 
 **Why a cell is not `proved`.** Every non-`proved` cell above, with the register or the reason that decided it:
 
 - `G1` on revl is a **recorded divergence**. The self-host gate agrees on 5 of 6 G1 reproducers; the rest it admits.
 - `G2` on revl is a **recorded divergence**. The self-host gate agrees on 2 of 3 G2 reproducers; the rest it admits.
 - `G3` on revl is a **recorded divergence**. The self-host gate agrees on 1 of 2 G3 reproducers; the rest it admits.
-- `G4` on revl is a **recorded divergence**. The self-host gate agrees on 40 of 41 G4 reproducers; the rest it admits.
 - `G5` on revl is **unimplemented**. The self-host gate answers every G5 reproducer under G4 (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `G6` on revl is a **recorded divergence**. The self-host gate agrees on 5 of 6 G6 reproducers; the rest it admits.
 - `G7` on revl is **unimplemented**. The self-host gate answers every G7 reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).

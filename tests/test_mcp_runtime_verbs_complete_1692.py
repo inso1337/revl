@@ -64,6 +64,7 @@ PLAN: dict[str, tuple[dict, dict | None]] = {
                      "commit": True}, None),
     "revl_export": ({"path": "exported.rvl"}, None),
     "revl_source": ({"symbol": "C", "source": SOURCE}, None),
+    "revl_knowledge": ({"op": "query"}, None),
     "revl_gauntlet": ({"source": SOURCE2}, None),
     "revl_quarantine": ({"source": SOURCE2}, None),
     "revl_repair": ({"component": "C"}, None),
