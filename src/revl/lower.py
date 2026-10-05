@@ -8378,6 +8378,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     emission_evidence = _EmissionEvidence(program)
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
+    # issue #1912: the same closure under the `emission` seed ALONE — the names
+    # whose reach includes a crossing that cannot be reverted, as against
+    # `emitting_fns`, which counts a `witnessed` extern's reach too (item 243).
+    # The provider bound is the consumer: a `witnessed[...]` service operation
+    # promises its providers reach only reversible code, and that promise is
+    # checked against this set. A subset of `emitting_fns` by construction, so
+    # a program with no `witnessed` extern has the two identical.
+    irreversible_fns = set(_emitting_capabilities(fns, externs,
+                                                 classes=("emission",)))
 
     # item 310: the capability-aware caching admission checks, run here once the
     # emission fixed point and the type/extern tables are known (a `cache pure`
@@ -8539,6 +8548,7 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                                 for e in externs
                                                 if e.get("class") == "acquire"
                                                 and _callee_name(e.get("undo"))},
+                                            irreversible_fns=irreversible_fns,
                                             errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -8838,6 +8848,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # is exactly that (so no pre-capability IR changes)
                         **({"capabilities": list(m.capabilities)}
                            if m.capabilities is not None else {}),
+                        # issue #1912: the OTHER bound, a `witnessed[caps]` (or
+                        # bare `witnessed`) operation. `emission` above stays
+                        # False for it — a witnessed crossing is reversible, so
+                        # every existing reader keeps its sound answer — and the
+                        # declaration rides this key so admission compares the
+                        # bound it was admitted with. ABSENT unless declared, so
+                        # every existing service's IR is byte-identical.
+                        **({"witnessed": list(m.witnessed)}
+                           if getattr(m, "witnessed", None) is not None
+                           else {}),
                         **({"async": True} if m.async_ else {}),
                         **({"commutative": True} if m.commutative else {}),
                         # delivery semantics (roadmap item 44): the checked
@@ -9882,6 +9902,7 @@ from .emission_analysis import (  # noqa: E402,F401
     _emitting_fns,
     _method_emissions,
     _witness_depth,
+    _witnessed_hint,
     cap_scope_enumerated_not_run,
 )
 
@@ -12493,6 +12514,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      extern_class: dict | None = None,
                      extern_undo: dict | None = None,
                      extern_inverse: dict | None = None,
+                     irreversible_fns: set | None = None,
                      errors: list | None = None,
                      untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
@@ -12502,6 +12524,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     env.extern_undo = extern_undo or {}
     env.extern_inverse = extern_inverse or {}
     env.emitting_caps = emitting_caps or {}
+    # issue #1912: the same fixed point seeded from the IRREVERSIBLE externs
+    # alone, so the provider bound can ask "does this reach an emission" apart
+    # from "does this reach a boundary at all". Absent (an older caller) is the
+    # full set, which filters nothing.
+    env.irreversible_fns = irreversible_fns
     env.emission_evidence = emission_evidence
     env.witnessed_externs = witnessed_externs or set()
     env.async_externs = dict(emission_evidence.async_externs) if emission_evidence else {}
@@ -13843,7 +13870,55 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # declaration hides an irreversible call from every consumer — and from
         # the G8 audit, which enumerates a caller's emissions by reading the
         # declarations of the methods it calls.
-        if not decl.emission:
+        if decl.witnessed is not None:
+            # issue #1912: `witnessed[caps] fn op` states the OTHER, narrower
+            # bound. An `emission` declaration says a provider MAY cross a
+            # boundary that cannot be reverted; a `witnessed` one says the
+            # provider may perform the reversible class only — a record write
+            # that persists on commit and reverts on abort (design 243) — so a
+            # store can offer a plain-looking `create` whose provider really
+            # writes. The bound is a ceiling in the same direction as every
+            # other declaration: a provider may be purer than declared, never
+            # less, so a body that reaches a TRUE emission is still refused
+            # (`irreversible_only`), and a scoped `witnessed[caps]` is held to
+            # its capability list exactly as `emission[caps]` is. A bare
+            # `witnessed` (no list) promises no scope, as a bare `emission`
+            # does. The two modifiers are mutually exclusive (the parser
+            # refuses both on one operation), so this arm is the only one a
+            # witnessed operation reaches.
+            spoken = "witnessed" if not decl.witnessed else (
+                f"witnessed[{', '.join(decl.witnessed)}]")
+            caused, used = _method_emissions(mbody, env)
+            true_caused, _true_used = _method_emissions(mbody, env,
+                                                        irreversible_only=True)
+            if true_caused:
+                evidence = ", ".join(f"`{item}`" for item in true_caused)
+                raise RevlError(
+                    comp.source or filename, method.line,
+                    f"`{svc.name}.{method.name}` is declared `{spoken}`, but "
+                    f"this implementation reaches {evidence}",
+                    hint=_witnessed_hint(svc.name, method.name),
+                    code="G4", category="emission-propagation",
+                )
+            if decl.witnessed:
+                extra = sorted(cap for cap in used
+                               if cap not in decl.witnessed)
+                if extra:
+                    offending = ", ".join(
+                        "an unnameable boundary" if cap == "*" else f"`{cap}`"
+                        for cap in extra)
+                    evidence = ", ".join(f"`{item}`" for item in caused)
+                    raise RevlError(
+                        comp.source or filename, method.line,
+                        f"`{svc.name}.{method.name}` is declared `{spoken}`, "
+                        f"but this implementation reaches {offending}"
+                        + (f" (reaching {evidence})" if evidence else ""),
+                        hint=_capability_hint(svc.name, method.name,
+                                              decl.witnessed, extra,
+                                              modifier="witnessed"),
+                        code="G4", category="emission-capability",
+                    )
+        elif not decl.emission:
             caused_steps: dict[str, list] = {}
             caused, caps_used = _method_emissions(mbody, env, caused_steps)
             if caused:
@@ -15233,8 +15308,8 @@ def _receiver_names_decided(recv, env: Env) -> bool:
 
 def _resolved_crossings(body, env: Env) -> dict:
     """Every emission crossing a provide-method body makes through a resolved
-    receiver, by IR node: `id(node) -> (label, capabilities)`. Issues #1682 and
-    #1508.
+    receiver, by IR node: `id(node) -> (label, capabilities, irreversible)`.
+    Issues #1682, #1508 and #1912.
 
     A resolved receiver is one the shared resolver names (`_instance_get_call`,
     `_service_receiver_decl`): a provision call off a spawn handle, the same
@@ -15243,6 +15318,11 @@ def _resolved_crossings(body, env: Env) -> dict:
     `<Service>.<op>` and the capabilities are the op's declared scope,
     `{"*"}` when bare. The declared scope is a fact the provider is held to by
     its own G4 provider bound, which is why the crossing can be read at it.
+
+    The third element is the operation's CLASS (issue #1912): a `witnessed[...]
+    fn` is reachable this way too, and its crossing is reversible, so the
+    provider bound's irreversible-only walk drops it while the default walk
+    counts it exactly as it counts an `emission fn`.
 
     Read by the provider upper bound (`_method_emissions`), which runs after
     the method's type environment is restored and so cannot resolve them
@@ -15266,9 +15346,12 @@ def _resolved_crossings(body, env: Env) -> dict:
                         ty = infer_ir(recv, env.type_env, env.types,
                                       env.services)
                         head, _ = parse_type(ty or "")
-                if decl is not None and decl.emission and head:
+                if decl is not None and head and (decl.emission or
+                                                  getattr(decl, "witnessed",
+                                                          None) is not None):
                     caps = set(getattr(decl, "capabilities", None) or ())
-                    out[id(n)] = (f"{head}.{decl.name}", caps or {"*"})
+                    out[id(n)] = (f"{head}.{decl.name}", caps or {"*"},
+                                  bool(decl.emission))
             for v in n.values():
                 walk(v)
         elif isinstance(n, list):
