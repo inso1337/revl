@@ -782,7 +782,10 @@ compile error, not a runtime surprise.
   config. Loading is *not* activation: a component whose `requires` are unmet
   stays PENDING (R2), and only becomes ACTIVE when a provider arrives.
   `load UserCache` before `load PgDatabase` is legal and does nothing until
-  the database lands.
+  the database lands. A component whose activation RAISES is a different
+  failure, and the `load` step reports it as such: the component's name and
+  the error it raised, on every tier (issue #1895). The R2 wording is only for
+  a `requires` that is unmet.
 - **`unload C`** disposes the instance, running its accumulated inverses
   newest-first (R1) and withdrawing its provisions (R5). Unloading a
   component that is not loaded is a compile error.

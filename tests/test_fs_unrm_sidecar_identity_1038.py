@@ -356,7 +356,8 @@ def test_a_drifted_sidecar_aborts_as_restore_residue(workspace, monkeypatch):
     session = _session()
     report = session.load(_ir(_component(
         "Agent", [_effect("rm", "doomed.txt")], abort=True)))
-    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     frame = _sole_frame(session)
     [residue] = [r for r in frame.compensation_residue
@@ -381,7 +382,8 @@ def test_an_untampered_abort_reports_no_residue_at_all(workspace):
     session = _session()
     report = session.load(_ir(_component(
         "Agent", [_effect("rm", "doomed.txt")], abort=True)))
-    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     frame = _sole_frame(session)
     assert frame.compensation_residue == []
