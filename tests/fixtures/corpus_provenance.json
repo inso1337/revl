@@ -1026,6 +1026,7 @@
    "tests/fixtures/emit_ts_corpus/destructuring.rvl",
    "tests/fixtures/emit_ts_corpus/extern_compensate.rvl",
    "tests/fixtures/emit_ts_corpus/instance_get.rvl",
+   "tests/fixtures/emit_ts_corpus/lifecycle_abort.rvl",
    "tests/fixtures/emit_ts_corpus/mixed.rvl",
    "tests/fixtures/emit_ts_corpus/optionals.rvl",
    "tests/fixtures/emit_ts_corpus/property_edges.rvl",

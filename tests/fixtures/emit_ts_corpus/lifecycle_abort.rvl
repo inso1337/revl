@@ -1,0 +1,37 @@
+// issue #1911 (the py reference tier's item 377): the `abort` lifecycle step.
+// The ts emitter refused it outright — `unknown lifecycle step 'abort'` — so a
+// witnessed abort path could not be driven on this tier at all. The step marks
+// every live activation's frame rejecting and then unloads the fibers LIFO, so
+// each witnessed inverse replays rather than commits (item 245); the driver's
+// `assert no_residue` proves the reversion left nothing behind, and the module
+// imports `frameForCtx` — the handle the step needs and nothing else uses.
+//
+// No document in this corpus contained a lifecycle `abort` before this one, so
+// `selfhost/emit_ts.rvl` could have refused or dropped the step while every
+// oracle stayed green — item 429's trap. Added FAILING FIRST: the port answered
+// `<<UNSUPPORTED-LIFECYCLE-STEP:abort>>` and never imported `frameForCtx`.
+service Ledger {
+  fn count() -> Int
+  fn note(msg: Str)
+}
+
+component Tally provides ledger: Ledger {
+  let store = effect Map.new() undo store.drop()
+  provide ledger {
+    fn count() = store.size()
+    fn note(msg) {
+      let key = `note-${msg}`
+      effect store.insert(key, msg)
+      undo store.remove(key)
+    }
+  }
+}
+
+lifecycle test "an aborted session replays the witnessed inverse" {
+  load Tally
+  call ledger.note("one")
+  let n = call ledger.count()
+  assert n != 0
+  abort
+  assert no_residue
+}

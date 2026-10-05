@@ -645,6 +645,25 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # emitter half agrees byte for byte on the reference IR; lower.rvl
         # does not yet lower an extern's declared `compensate` slot.
         "extern_compensate.rvl",
+        # issue #1911: the `abort` lifecycle STEP, on a document that is nothing
+        # but a lifecycle test. It sits LAST in this tuple, because the
+        # comparison above is order-sensitive — `diverged` is built by walking
+        # CORPUS, so a ts residual entry belongs at that document's place in the
+        # enumeration, and tests/test_selfhost_emit_ts.py appends it to CORPUS.
+        #
+        # The emitter half of item 146 holds here in the strongest form the split
+        # allows: selfhost/emit_ts.rvl fed the REFERENCE IR produces this
+        # document's bytes exactly, `abort` arm and `frameForCtx` import
+        # included. That is what the assertion above measures, and it is the
+        # reason this entry is NOT an emitter gap — the ts emitter is not
+        # absorbing a construct lower.rvl should own, it is emitting a step that
+        # is the emitter's job on every tier (selfhost/emit_py.rvl carries the
+        # same arm). What the fully-native chain cannot do is reach that IR: the
+        # document's entire payload is its `tests` section, and
+        # selfhost/lower.rvl carries no `tests`/`fault_tests` section at all, so
+        # the native chain emits the component's 1,057 bytes and no test. The
+        # same pre-existing lower.rvl gap as `lifecycle_cache.rvl` above.
+        "lifecycle_abort.rvl",
     ),
     "go": (
         # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the

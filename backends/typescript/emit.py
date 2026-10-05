@@ -69,6 +69,38 @@ JS_RESERVED = {
     "while", "with", "yield",
 }
 
+# The standard global object's VALUE properties (issue #1910). These are legal
+# identifiers, not keywords, so they are a separate family from `JS_RESERVED`:
+# a keyword is illegal as a name, a global is legal and merely SHADOWING. The
+# distinction matters because the two families collide at different positions.
+#
+# A user ADT case is emitted as a module-scope `export function <Case>()`, so a
+# case named `Date` put a `Date` binding in the module's scope and every `@ts`
+# extern body in that module lost the host's own `Date` — `new Date(ms)` then
+# resolves to the case constructor and the emitted module stops type-checking.
+# The escape is applied ONLY where a case name becomes a module-scope binding
+# (`_emit_ts_types`); the case name stays verbatim everywhere it is a *tag*
+# string or a `case` label, where it shadows nothing.
+JS_GLOBAL_RESERVED = frozenset({
+    "AggregateError", "Array", "ArrayBuffer", "BigInt", "BigInt64Array",
+    "BigUint64Array", "Boolean", "DataView", "Date", "Error", "EvalError",
+    "FinalizationRegistry", "Float32Array", "Float64Array", "Function",
+    "Infinity", "Int8Array", "Int16Array", "Int32Array", "Intl", "JSON", "Map",
+    "Math", "NaN", "Number", "Object", "Promise", "Proxy", "RangeError",
+    "ReferenceError", "Reflect", "RegExp", "Set", "SharedArrayBuffer", "String",
+    "Symbol", "SyntaxError", "TypeError", "URIError", "Uint8Array",
+    "Uint8ClampedArray", "Uint16Array", "Uint32Array", "WeakMap", "WeakRef",
+    "WeakSet", "decodeURI", "decodeURIComponent", "encodeURI",
+    "encodeURIComponent", "escape", "eval", "globalThis", "isFinite", "isNaN",
+    "parseFloat", "parseInt", "undefined", "unescape", "arguments",
+    # environment globals the emitted module runs beside (node/web, the two
+    # hosts `@ts` bodies are written against)
+    "AbortController", "AbortSignal", "Blob", "Buffer", "TextDecoder",
+    "TextEncoder", "URL", "URLSearchParams", "atob", "btoa", "clearInterval",
+    "clearTimeout", "console", "crypto", "fetch", "performance", "process",
+    "queueMicrotask", "setInterval", "setTimeout", "structuredClone",
+})
+
 # `Int` is 64-bit two's complement (docs/arithmetic.md) and a JS `number` is an
 # IEEE double, exact only to 2^53 — it cannot represent `9223372036854775807`
 # at all. `Int` is therefore `bigint`, which is arbitrary precision, so this
@@ -304,7 +336,7 @@ EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
 EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
 
-def _mangle(name: str) -> str:
+def _mangle(name: str, extra: frozenset = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *JS/TS*
     reserved word, so a valid revl identifier that happens to be a JS keyword
     (`class`, `function`, `new`, …) emits and RUNS instead of crashing at emit
@@ -338,10 +370,17 @@ def _mangle(name: str) -> str:
     Only a name whose root is reserved can change, so no existing program that
     does not name a JS keyword changes its emitted output. This is TARGET
     keywords only; the host roots stay routed through `host.<name>` in
-    `_v3_var` and the emitter scaffolding stays rejected below."""
+    `_v3_var` and the emitter scaffolding stays rejected below.
+
+    `extra` is a second, POSITION-LOCAL reserved family that the same ladder
+    must also respect (`JS_GLOBAL_RESERVED` at the one site where a case name
+    becomes a module-scope binding, issue #1910). It joins the same escape, so
+    the caller must pass it at ONE position of a name's life, never both: the
+    ladder re-escapes the root it strips, so an already-escaped name handed
+    back in would be escaped twice."""
     root = name
     while root:
-        if root in JS_RESERVED:
+        if root in JS_RESERVED or root in extra:
             return name + "_"
         if not root.endswith("_"):
             break
@@ -349,14 +388,14 @@ def _mangle(name: str) -> str:
     return name
 
 
-def _ident(name: object, role: str) -> str:
+def _ident(name: object, role: str, extra: frozenset = frozenset()) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
     if name in EMITTER_RESERVED:
         raise EmitError(
             f"{role} identifier collides with emitter scaffolding: {name!r}"
         )
-    return _mangle(name)
+    return _mangle(name, extra)
 
 
 def _method_ident(name: object) -> str:
@@ -4488,12 +4527,17 @@ def _emit_ts_types(types: dict) -> list[str]:
             lines.append("")
             for case in cases:
                 cname = _ident(case.get("name"), "case name")
+                # issue #1910: the case name is also the name of a MODULE-SCOPE
+                # constructor binding, so a case named after a JS global
+                # (`Date`) would shadow that global in every `@ts` body of this
+                # module. Escape the BINDING only — `cname` stays the tag.
+                fname = _ident(case.get("name"), "case name", JS_GLOBAL_RESERVED)
                 payload = case.get("payload")
                 if payload is None:
-                    lines.append(f"export function {cname}(): {name} {{")
+                    lines.append(f"export function {fname}(): {name} {{")
                     lines.append(f"  return {{ kind: {_string(cname)} }}")
                 else:
-                    lines.append(f"export function {cname}(value: {_ts_v3_type(payload)}): {name} {{")
+                    lines.append(f"export function {fname}(value: {_ts_v3_type(payload)}): {name} {{")
                     lines.append(f"  return {{ kind: {_string(cname)}, value }}")
                 lines.append("}")
                 lines.append("")
@@ -5185,12 +5229,46 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 body.append("  // R4 + R1: same introspection the py reference")
                 body.append("  // tier's `assert no_residue` performs.")
                 body.append("  assertNoResidue(root, _revl_baseline)")
-            else:  # pragma: no cover — the lowerer emits nothing else
+            elif kind == "abort":
+                # issue #1911 (the py reference tier's item 377): drive the
+                # enclosing session's 245 abort. `Frame.abort()` is this tier's
+                # session-level reject seam (backends/typescript/runtime.ts):
+                # it marks the frame ABORTING before its unload, so `drain`
+                # leaves `committed` false and every transactional entry —
+                # activation-body and method-deferred alike — replays its
+                # inverse instead of committing the mutation. Mark EVERY live
+                # frame first, THEN dispose LIFO: a teardown that reaches
+                # another still-live component must already see it rejecting
+                # (the ordering py's single `begin_abort` call implies).
+                body.append("  // mark every live activation aborting, so its teardown")
+                body.append("  // reverts rather than commits (item 245).")
+                body.append("  for (const _fiber of Array.from(_revl_fibers.values())) {")
+                body.append("    frameForCtx(_fiber.ctx)?.abort()")
+                body.append("  }")
+                body.append("  for (const _fiber of Array.from(_revl_fibers.values()).reverse()) {")
+                body.append("    try {")
+                body.append("      await _fiber.dispose()   // replay the witnessed inverses")
+                body.append("    } catch {")
+                body.append("      // a fiber whose teardown throws must not stop the")
+                body.append("      // LIFO unwind; py's `abort` step swallows the same")
+                body.append("    }")
+                body.append("  }")
+                body.append("  _revl_fibers.clear()")
+                # the aborted session is over: py resets its session owner here,
+                # so a component loaded after the abort is a clean new session
+                # and never inherits the aborted verdict. On this tier the bit
+                # lives on the frame (a fresh activation builds a fresh one),
+                # so clearing the map is the whole reset.
+                body.append("  await _revl_settle()")
+            else:  # pragma: no cover — the lowerer's lifecycle steps are all above
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
-        # One `extend` per region rather than a statement per emitted line:
-        # every statement here is unreachable by the self-host byte-agreement
-        # corpus (selfhost/emit_ts.rvl defers in-file test emission entirely),
-        # so each one is a line the mirrored-emitter ledger has to carry.
+        # One `extend` per region rather than a statement per emitted line: a
+        # lifecycle driver is a small number of regions, and the corpus reaches
+        # them through a document with in-file tests (issue #1911's
+        # `lifecycle_abort.rvl`). The pass-over `continue` above — a lifecycle
+        # test seen by the plain-test driver — is the statement the
+        # mirrored-emitter ledger still carries, because `_emit_v3` splits the
+        # two lists before either driver runs.
         lines.extend([
             f"it({_string(test.get('name'))}, async () => {{",
             "  // drives the composition on a real cordis context and",
@@ -5276,6 +5354,17 @@ def _uses_lifecycle_tests(ir: dict) -> bool:
     return any(t.get("lifecycle") for t in (ir.get("tests") or []))
 
 
+def _uses_lifecycle_abort(ir: dict) -> bool:
+    """True iff some `lifecycle test` drives a session `abort` (issue #1911), so
+    the module imports the runtime's `frameForCtx` — the handle that step uses to
+    reach a live activation's frame and mark it rejecting before its unload
+    (`Frame.abort`, the item 318 seam). An abort-free document stays
+    byte-identical to before the step existed."""
+    return any(step.get("step") == "abort"
+               for t in (ir.get("tests") or [])
+               for step in (t.get("body") or []))
+
+
 def _uses_frame(ir: dict, doc_ctx: "_Ctx") -> bool:
     """True iff some component registers a transactional (witnessed) or
     compensation entry (item 243 Slice 2b), reusing `_needs_frame` per
@@ -5327,6 +5416,11 @@ def _runtime_imports(ir: dict, runtime_import: str, doc_ctx: "_Ctx") -> str:
         names.append("spawn")
     if _uses_lifecycle_tests(ir):
         names += ["plug", "snapshotRuntime", "assertNoResidue"]
+        if _uses_lifecycle_abort(ir):
+            # issue #1911: only a test that drives an `abort` step reaches the
+            # runtime's session-level reject seam (`frameForCtx` -> `Frame.abort`),
+            # so an abort-free document imports exactly what it did before.
+            names.append("frameForCtx")
     return f"import {{ {', '.join(names)} }} from '{runtime_import}'"
 
 
