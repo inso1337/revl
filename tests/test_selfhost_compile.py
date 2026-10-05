@@ -569,8 +569,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # spawn/instance surface: it is the one py document whose components
         # both spawn a child and read a provision back off the handle, and the
         # component dialect's record literal and bare-name `fn` call closed the
-        # rest of it.)
-        "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
+        # rest of it. `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
+        # left it when the component dialect grew its `Arrow` arm, issue #1844:
+        # its provide method passes an arrow to `run_loop`.)
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
         "../../../src/revl/truc/components/cli.rvl",
     ),
@@ -597,9 +598,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # (realm placement metadata — isolate / intercept / routes — left this
         # list when lower.rvl grew the component-header prelude; the four ts
         # realm documents now compile byte-exact through the native chain.)
-        # whole-program documents combining several of the above
+        # whole-program documents combining several of the above.
+        # (`../../../examples/java_match.rvl` left this list with issue #1845:
+        # its component's `Err(_)` arm binds `__`, the reference's `_safe_name`
+        # spelling of the soft keyword `_`.)
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-        "../../../examples/java_match.rvl",
         # component edge shapes. Everything this document spells is byte-exact
         # through the native chain except its ONE async provide method: the
         # guard `if`/`fail` pair, the bare `fn` effect bracket, the `emit …

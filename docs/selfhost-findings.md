@@ -1799,14 +1799,12 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../emit_ts_refusals/validated_emission_operation.rvl`
 - `../emit_py_validated_shapes.rvl`
 - `branches.rvl`
-- `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 - `../../../src/revl/truc/components/cli.rvl`
 
 `ts`:
 
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
-- `../../../examples/java_match.rvl`
 - `component_edges.rvl`
 - `../emit_py_corpus/services_control_flow.rvl`
 - `../../../stdlib/router.rvl`
