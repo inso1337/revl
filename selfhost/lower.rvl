@@ -18402,6 +18402,39 @@ fn ir_params_json(ps: List[ParamN]) -> Str {
   return out
 }
 
+// The outermost qualifier head of a DECLARED type (`Untrusted`, `Trusted` or
+// `Secret`) when it wraps exactly one type argument, else "": the reference's
+// `taint.top_qualifier` for the three heads the services IR stamps.
+fn taint_top_qualifier(ty: Str) -> Str {
+  if (ty == "" || !taint_has_qualifier(ty)) { return "" }
+  let p = ty_parse(ty)
+  if (is_qual_head(p.head) && p.args.length() == 1) { return p.head }
+  return ""
+}
+
+// A service operation's `params` list: `ir_params_json` plus the issue #1937
+// stamps `"trusted": true` / `"untrusted": true`, read off the DECLARED types
+// `raw` (before alias substitution, as the reference's `extract_and_normalize`
+// reads them). A unit compiled against this IR as a manifest gets its sinks and
+// untrusted inputs back from these. Absent unless declared, so every existing
+// IR document is byte-identical.
+fn ir_service_params_json(ps: List[ParamN], raw: List[ParamN]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ps.length()) {
+    var e = "{\"name\": ".concat(jstr(ps[i].name))
+      .concat(", \"type\": ").concat(jstr(taint_strip(ps[i].ty)))
+    if (taint_mentions_secret(ps[i].ty)) { e = e.concat(", \"secret\": true") }
+    let q = i < raw.length() ? taint_top_qualifier(raw[i].ty) : ""
+    if (q == "Trusted") { e = e.concat(", \"trusted\": true") }
+    if (q == "Untrusted") { e = e.concat(", \"untrusted\": true") }
+    e = e.concat("}")
+    out = out == "" ? e : out.concat(", ").concat(e)
+    i += 1
+  }
+  return out
+}
+
 fn ir_caps_json(cs: List[Str]) -> Str {
   var out = ""
   var i = 0
@@ -18457,9 +18490,13 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   // corpus document (L6). The reference erases in its parser and emits the key
   // between `returns` and `emission`; this mirrors both.
   var term = ""
+  // issue #1937: the qualifier stripped off the return (`Untrusted`/`Secret`)
+  var retQual = ""
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
+    let rq = taint_top_qualifier(tr.ty)
+    if (rq == "Untrusted" || rq == "Secret") { retQual = rq }
     let rawRet = taint_strip(alias_subst(tr.ty, al))
     if (rawRet == "Criterion") {
       term = "criterion"
@@ -18473,8 +18510,11 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
     nexti = tr.i
   }
   var mj = jstr(nm).concat(": {\"params\": [")
-    .concat(ir_params_json(alias_subst_params(ps.ps, al)))
+    .concat(ir_service_params_json(alias_subst_params(ps.ps, al), ps.ps))
     .concat("], \"returns\": ").concat(retJson)
+  if (retQual != "") {
+    mj = mj.concat(", \"returns_qualifier\": ").concat(jstr(retQual))
+  }
   if (term != "") {
     mj = mj.concat(", \"termination\": ").concat(jstr(term))
   }

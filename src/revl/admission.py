@@ -38,6 +38,15 @@ def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
             capabilities=(tuple(mspec["capabilities"])
                           if mspec.get("capabilities") is not None else None),
         )
+        # issue #1937: the declared taint qualifiers the IR keeps beside the
+        # stripped types, read back so `taint.fold_ambient_composition` can
+        # hold every unit compiled against this manifest to them
+        ps = mspec.get("params") or []
+        methods[mname].trusted_params = frozenset(
+            i for i, p in enumerate(ps) if p.get("trusted"))
+        methods[mname].untrusted_params = frozenset(
+            i for i, p in enumerate(ps) if p.get("untrusted"))
+        methods[mname].returns_qualifier = mspec.get("returns_qualifier")
     return ServiceDecl(name, methods, 0, commutative=bool(spec.get("commutative")))
 
 
