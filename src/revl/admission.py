@@ -37,6 +37,12 @@ def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
             commutative=bool(mspec.get("commutative")),
             capabilities=(tuple(mspec["capabilities"])
                           if mspec.get("capabilities") is not None else None),
+            # issue #1912: the `witnessed[caps]` bound, read back from the IR
+            # key only a declared operation carries. `emission` above stays the
+            # sound upper bound for every other reader; this is what
+            # `_service_compatible` compares the bound against.
+            witnessed=(tuple(mspec["witnessed"])
+                       if mspec.get("witnessed") is not None else None),
         )
         # issue #1937: the declared taint qualifiers the IR keeps beside the
         # stripped types, read back so `taint.fold_ambient_composition` can
@@ -56,7 +62,8 @@ def _service_equal(a: ServiceDecl, b: ServiceDecl) -> bool:
             svc.commutative,
             {
                 m.name: (tuple(m.params), m.returns, m.emission, m.async_,
-                         m.commutative, m.capabilities)
+                         m.commutative, m.capabilities,
+                         tuple(m.witnessed) if m.witnessed is not None else None)
                 for m in svc.methods.values()
             },
         )
@@ -114,7 +121,7 @@ def _service_equal(a: ServiceDecl, b: ServiceDecl) -> bool:
 class _Drift:
     """One reason a replacement interface is not compatible."""
     method: str | None      # the offending method, or None for a service-wide clash
-    kind: str               # added | removed | signature | emission | commutative
+    kind: str               # added | removed | signature | emission | witnessed | commutative
     reason: str             # human-readable "what and why"
 
 
@@ -133,6 +140,15 @@ def _caps_widen(old_caps: tuple | None, new_caps: tuple | None) -> bool:
 
 def _caps_str(caps: tuple | None) -> str:
     return "any" if caps is None else "[" + ", ".join(caps) + "]"
+
+
+def _witnessed_caps(decl) -> tuple | None:
+    """A `witnessed` declaration's scope in `_caps_widen`'s alphabet: bare
+    `witnessed` (the empty tuple) is `None` — "any capability" — exactly as a
+    bare `emission` is. `None` for the declaration itself (not witnessed)."""
+    if getattr(decl, "witnessed", None) is None:
+        return None
+    return tuple(decl.witnessed) or None
 
 
 def _service_compatible(new: ServiceDecl, old: ServiceDecl,
@@ -241,11 +257,38 @@ def _service_compatible(new: ServiceDecl, old: ServiceDecl,
             return _Drift(mname, "emission",
                           f"`{mname}` is no longer an `emission`, but a running "
                           f"provider implements it as one (A6)")
+        if nm.witnessed is not None and om.witnessed is None:
+            # issue #1912, the `emission` rule one class down: a `witnessed`
+            # bound is a LOOSER provider obligation than plain purity, so
+            # introducing one lets a retained provider do what it promised it
+            # would not — the same loophole as introducing an `emission`.
+            return _Drift(mname, "witnessed",
+                          f"`{mname}` becomes a `witnessed` operation — a "
+                          f"running provider of it was admitted as a plain "
+                          f"`fn` and may not perform the witnessed class")
+        if om.witnessed is not None and nm.witnessed is None and strict:
+            # dropping it is safe for a consumer, but the retained provider was
+            # validated against the witnessed bound
+            return _Drift(mname, "witnessed",
+                          f"`{mname}` is no longer `witnessed`, but a running "
+                          f"provider implements it under that bound (A6)")
         if nm.emission and om.emission and _caps_widen(om.capabilities, nm.capabilities):
             return _Drift(mname, "emission",
                           f"`{mname}` widens its emission capabilities from "
                           f"{_caps_str(om.capabilities)} to "
                           f"{_caps_str(nm.capabilities)}")
+        if _caps_widen(_witnessed_caps(om), _witnessed_caps(nm)):
+            return _Drift(mname, "witnessed",
+                          f"`{mname}` widens its witnessed capabilities from "
+                          f"{_caps_str(_witnessed_caps(om))} to "
+                          f"{_caps_str(_witnessed_caps(nm))}")
+        if strict and _caps_widen(_witnessed_caps(nm), _witnessed_caps(om)):
+            return _Drift(mname, "witnessed",
+                          f"`{mname}` narrows its witnessed capabilities from "
+                          f"{_caps_str(_witnessed_caps(om))} to "
+                          f"{_caps_str(_witnessed_caps(nm))}, but a running "
+                          f"provider performs the witnessed class under the "
+                          f"old scope (G4)")
         if nm.emission and om.emission and strict \
                 and _caps_widen(nm.capabilities, om.capabilities):
             # narrowing the capability scope may outlaw an emission the retained

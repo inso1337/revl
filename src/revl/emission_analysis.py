@@ -156,7 +156,9 @@ def _emitting_fns(fns: list, externs: list, witness: dict | None = None) -> set:
 
 def _emitting_capabilities(fns: list, externs: list,
                            witness: dict | None = None, *,
-                           by_name: bool = False) -> dict[str, set]:
+                           by_name: bool = False,
+                           classes: tuple = ("emission", "witnessed"),
+                           ) -> dict[str, set]:
     """`_emitting_fns` refined from a boolean to a *set*: name -> the
     capabilities its call reaches (docs/capabilities.md).
 
@@ -182,7 +184,15 @@ def _emitting_capabilities(fns: list, externs: list,
     consumers that enumerate HOST CODE rather than authority.
 
     `witness` is filled in place as the same walk proceeds — the set and the
-    derivation come from one traversal, so they cannot disagree."""
+    derivation come from one traversal, so they cannot disagree.
+
+    `classes` names the extern classes that SEED the fixed point. The default
+    is both of them: a `witnessed` extern crosses the same boundary as an
+    `emission` (item 243), which is why an unregistered witnessed reach is
+    never mistaken for revertible. Issue #1912 needs the other question
+    answered too — "does this reach an IRREVERSIBLE crossing" — and for that
+    the seed is the `emission` class alone: the same monotone closure over a
+    strictly smaller seed, so the result is a subset of the default one."""
     # A witnessed extern crosses the same boundary as an emission (item 243): it
     # seeds the fixed point too, so an unregistered witnessed reach is never
     # mistaken for revertible. Its capability is the declared scope (`fs`), or
@@ -192,7 +202,7 @@ def _emitting_capabilities(fns: list, externs: list,
         ext["name"]: ({ext["name"]} if by_name
                       else set(ext.get("capabilities") or [ext["name"]]))
         for ext in externs
-        if ext.get("class") in ("emission", "witnessed")}
+        if ext.get("class") in classes}
     calls: dict[str, set] = {}
     passed: dict[str, set] = {}  # first-class callable references per fn body
     for fn in fns:
@@ -332,20 +342,45 @@ def _async_callables(fns: list, externs: list, witness: dict | None = None) -> s
     return colored
 
 
-def _capability_hint(service: str, method: str, declared, extra: list[str]) -> str:
-    """The repair for a provider that exceeds its declared capability set."""
+def _capability_hint(service: str, method: str, declared, extra: list[str],
+                     modifier: str = "emission") -> str:
+    """The repair for a provider that exceeds its declared capability set.
+
+    `modifier` names the declaration being widened: `emission` for the
+    irreversible bound, `witnessed` for the narrower reversible-only one
+    (issue #1912). The suggested repair stays in the class the author actually
+    declared — a witnessed provider is never told to widen into the wider
+    class, which is the over-widening the issue measures."""
+    widen_to = ("`emission fn" if modifier == "emission"
+                else f"`{modifier} fn")
     nameable = [cap for cap in extra if cap != "*"]
     if not nameable:  # nothing to widen *to* — the boundary has no name
         return (f"only a named boundary can be granted — give the emission a "
                 f"capability (a required key or an `emission` extern) or declare "
-                f"`emission fn {method}(...)` without a scope in service "
+                f"{widen_to} {method}(...)` without a scope in service "
                 f"`{service}` (G4)")
     widened = list(declared) + [cap for cap in nameable if cap not in declared]
-    return (f"a capability-scoped emission bounds *where* a provider may cross "
+    label = ("emission" if modifier == "emission"
+             else f"`{modifier}` declaration")
+    # what is being routed stays in the class the author declared: an
+    # `emission` crosses, a `witnessed` write is a step a commit settles.
+    routed = "emission" if modifier == "emission" else "write"
+    return (f"a capability-scoped {label} bounds *where* a provider may cross "
             f"the boundary — widen the declaration to "
-            f"`emission[{', '.join(widened)}] fn {method}(...)` in service "
-            f"`{service}`, or route this emission through a declared "
+            f"`{modifier}[{', '.join(widened)}] fn {method}(...)` in service "
+            f"`{service}`, or route this {routed} through a declared "
             f"capability (G4)")
+
+
+def _witnessed_hint(service: str, method: str) -> str:
+    """The repair for a `witnessed[...]` provider that crosses a TRUE emission
+    (issue #1912). The declaration bounds the provider to the reversible class
+    — a write a commit settles and an abort reverts (design 243) — and no
+    capability list widens that, so the only repair is the wider class."""
+    return (f"a `witnessed[...]` declaration bounds a provider to the effects a "
+            f"commit settles and an abort reverts; a step that cannot be undone "
+            f"belongs to the wider class — declare `emission fn {method}(...)` "
+            f"in service `{service}` (G4)")
 
 
 def _witness_depth(name: str, witness: dict) -> int:
@@ -440,7 +475,8 @@ class _EmissionEvidence:
 
 
 def _method_emissions(body: list, env: "Env",
-                      steps_out: dict | None = None) -> tuple[list[str], set]:
+                      steps_out: dict | None = None, *,
+                      irreversible_only: bool = False) -> tuple[list[str], set]:
     """What calling a provide-method irreversibly causes: `emit` steps and
     reachable emitting functions/externs. Teardown-position emissions count
     — calling the method schedules them.
@@ -455,10 +491,32 @@ def _method_emissions(body: list, env: "Env",
     derivation behind it: a list of `TraceStep`s running from the callee the
     method names down to the emission it reaches. Additive out-parameter for
     the same reason `_emitting_fns` takes one — the labels, and so the
-    message, are byte-identical whether or not evidence is collected."""
+    message, are byte-identical whether or not evidence is collected.
+
+    `irreversible_only` (issue #1912) narrows the walk to the crossings that
+    cannot be reverted: a `witnessed` extern, or a call to an operation a
+    service declared `witnessed[...]`, is a *reversible* crossing, so it
+    produces no evidence and no capability in this mode. It is the walk a
+    `witnessed[...]` declaration is held to — the reach it promises it will
+    not exceed — and it is the same walk otherwise, so the default (False) is
+    byte-identical to before. The one conservatism that survives the filter:
+    a host `emit` head whose reached names the analysis cannot name (an empty
+    reach, a first-class dispatch) still counts, because nothing says it is
+    reversible."""
     found: list[str] = []
     seen: set = set()
     caps: set = set()
+    # the names whose reach is irreversible: the emission fixed point under the
+    # `emission` seed alone. Falls back to the full emitting set when the caller
+    # did not compute it (an unplumbed caller), which filters nothing.
+    reaching: set = env.emitting_fns
+    if irreversible_only:
+        # `None` is "not computed" (an unplumbed caller) and falls back to the
+        # full set, which filters nothing — so an unplumbed caller refuses
+        # rather than admits. An EMPTY set is a real answer: nothing in the
+        # program reaches an irreversible crossing.
+        computed = getattr(env, "irreversible_fns", None)
+        reaching = env.emitting_fns if computed is None else computed
 
     def note(label: str, steps: list | None = None) -> None:
         if label not in seen:
@@ -469,7 +527,8 @@ def _method_emissions(body: list, env: "Env",
 
     def service_emission_step(local: str | None, method: str | None) -> list:
         """The terminal step for `local.method`, an `emission fn` on the
-        service bound to `local`."""
+        service bound to `local` — or a `witnessed[...] fn`, whose crossing is
+        reversible (issue #1912), so the detail says which class it is."""
         service = env.services.get(env.requires.get(local) or "")
         decl = service.methods.get(method) if service is not None else None
         evidence = getattr(env, "emission_evidence", None)
@@ -477,11 +536,21 @@ def _method_emissions(body: list, env: "Env",
         file, _ = evidence.locate(service) if evidence is not None else (None, None)
         line = getattr(decl, "line", None)
         label = f"{local}.{method}"
-        detail = "emission" if service is None else f"emission `{service.name}.{method}`"
+        witnessed = (decl is not None and not decl.emission
+                     and getattr(decl, "witnessed", None) is not None)
+        kind = "witnessed" if witnessed else "emission"
+        detail = kind if service is None else f"{kind} `{service.name}.{method}`"
         # same seam as `_EmissionEvidence.capabilities_of`, for the service
         # side: whatever the operation declares it may reach, the trace shows
         capabilities = tuple(getattr(decl, "capabilities", ()) or ())
         return [TraceStep(label, "emission", file, line, detail, capabilities)]
+
+    def req_decl(expr: dict):
+        """The `MethodDecl` a `req`-targeted call node names, or None."""
+        target = expr.get("target") or {}
+        service = env.services.get(env.requires.get(target.get("name")) or "")
+        return (service.methods.get(expr.get("method"))
+                if service is not None else None)
 
     def crossing_caps(local: str | None, method: str | None) -> set:
         """The capability set a `req` seam crossing through `local.method`
@@ -529,18 +598,27 @@ def _method_emissions(body: list, env: "Env",
         if isinstance(node, dict):
             crossing = resolved_crossings.get(id(node))
             if crossing is not None:
-                note(crossing[0])
-                caps.update(crossing[1])
+                # issue #1912: a crossing through a `witnessed[...]` operation
+                # is reversible, so `irreversible_only` drops it. The third
+                # element of the tuple is the operation's own class.
+                if not (irreversible_only and len(crossing) > 2
+                        and not crossing[2]):
+                    note(crossing[0])
+                    caps.update(crossing[1])
             through_resolved = id(node.get("expr")) in resolved_crossings
             if node.get("step") == "emit" and not through_resolved:
                 expr = node.get("expr") or {}
                 target = expr.get("target") or {}
                 if target.get("kind") == "req":
-                    note(f"{target.get('name')}.{expr.get('method')}",
-                         service_emission_step(target.get("name"), expr.get("method")))
-                    caps.update(crossing_caps(target.get("name"), expr.get("method")))
+                    decl = req_decl(expr)
+                    if not (irreversible_only
+                            and not (decl is not None and decl.emission)):
+                        note(f"{target.get('name')}.{expr.get('method')}",
+                             service_emission_step(target.get("name"),
+                                                   expr.get("method")))
+                        caps.update(crossing_caps(target.get("name"),
+                                                  expr.get("method")))
                 else:
-                    note("a host emission")
                     # every host emission reaches a named `emission` extern
                     # (`_is_emission_call` admits nothing else); `*` is the
                     # unreachable-in-practice fallback, and it is deliberately
@@ -548,23 +626,41 @@ def _method_emissions(body: list, env: "Env",
                     # unnameable boundary fails the bound rather than passing it
                     reached: set = set()
                     _calls_in(expr, reached)
-                    if not reached & env.emitting_fns:
-                        caps.add("*")
+                    # issue #1912: `_is_emission_call` treats a call reaching a
+                    # witnessed extern as a crossing too (`effect` is its
+                    # marker), so in the irreversible-only walk a head that
+                    # reaches ONLY reversible code is skipped. An EMPTY reach
+                    # stays: nothing names it, so nothing says it is reversible.
+                    reversible_head = (irreversible_only and reached
+                                       and not (reached & reaching))
+                    if reversible_head:
+                        pass
+                    else:
+                        note("a host emission")
+                        if not reached & reaching:
+                            caps.add("*")
             # an emission may also appear in value position (`let r = emit …`)
             target = node.get("target")
             if node.get("kind") == "call" and isinstance(target, dict) \
                     and target.get("kind") == "req":
-                service = env.services.get(env.requires.get(target.get("name")) or "")
-                decl = (service.methods.get(node.get("method"))
-                        if service is not None else None)
-                if decl is not None and decl.emission:
-                    note(f"{target.get('name')}.{node.get('method')}",
-                         service_emission_step(target.get("name"), node.get("method")))
-                    caps.update(crossing_caps(target.get("name"), node.get("method")))
+                decl = req_decl(node)
+                # issue #1912: a `witnessed[...]` operation crosses too, and
+                # reversibly — counted as evidence (it is what a plain
+                # declaration is refused for, and what a `witnessed[...]`
+                # declaration has to cover), dropped by the
+                # `irreversible_only` walk.
+                if decl is not None and (decl.emission or
+                                         getattr(decl, "witnessed", None) is not None):
+                    if not (irreversible_only and not decl.emission):
+                        note(f"{target.get('name')}.{node.get('method')}",
+                             service_emission_step(target.get("name"),
+                                                   node.get("method")))
+                        caps.update(crossing_caps(target.get("name"),
+                                                  node.get("method")))
             calls: set = set()
             values: set = set()
             _calls_in(node, calls, values=values)
-            for name in sorted(calls & env.emitting_fns):
+            for name in sorted(calls & reaching):
                 evidence = getattr(env, "emission_evidence", None)
                 note(f"{name}()",
                      evidence.chain_steps(name) if evidence is not None else None)
@@ -573,7 +669,7 @@ def _method_emissions(body: list, env: "Env",
             # be dispatched by whoever receives it (an arrow-typed parameter,
             # a stored binding), so the method reaches code no bound can
             # name — same verdict as calling it, one indirection later
-            for name in sorted(values & env.emitting_fns):
+            for name in sorted(values & reaching):
                 evidence = getattr(env, "emission_evidence", None)
                 note(f"{name} (passed as a function value)",
                      evidence.chain_steps(name) if evidence is not None else None)
