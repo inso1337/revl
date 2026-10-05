@@ -30736,8 +30736,1322 @@ fn constructor_lowers_user_variants_and_built_ins() {
 }
 
 #[test]
+fn map_lookup_types_the_opt_its_match_unwraps() {
+    assert!((lower_to_ir(format!("fn f(m: Map[Str, Int], k: Str) -> Int {{ let hit = m.lookup(k)\n  return match hit {{ Some(v) => v, None => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"m\", \"type\": \"Map[Str, Int]\"}, {\"name\": \"k\", \"type\": \"Str\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"hit\",\"value\":{\"kind\":\"builtin\",\"method\":\"lookup\",\"target\":{\"kind\":\"var\",\"name\":\"m\"},\"args\":[{\"kind\":\"var\",\"name\":\"k\"}]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"var\",\"name\":\"hit\"},\"arms\":[{\"pattern\":\"Some\",\"bind\":\"v\",\"body\":{\"kind\":\"var\",\"name\":\"v\"},\"payload_type\":\"Int\"},{\"pattern\":\"None\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":0}}]}}]}]}"));
+}
+
+#[test]
+fn ____is_not_a_candidate__and_the_refusal_gives_the_reason() {
+    assert!((admit_src(mset("* -> fast | *")) == "MODEL|`* -> *` in `route model on classify` (Classifier) places the origin on any available role"));
+}
+
+#[test]
+fn _____on_an_actual_optional_is_admitted() {
+    let v = admit_src(String::from("type Row = { name: Str }\n\nfn label(r: Opt[Row]) -> Opt[Str] {\n  return r?.name\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn _model__and__route__stay_ordinary_identifiers() {
+    assert!((admit_src(String::from("service Model { fn c(x: Str) -> Str }\nservice M { fn go(x: Str) -> Str }\ncomponent C requires model: Model provides out: M {\n  provide out { fn go(x) = x }\n}")) == ""));
+    assert!((admit_src(String::from("service M { fn go(model: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(model) = model }\n}")) == ""));
+}
+
+#[test]
+fn _veto__needs_the_adversary_it_is_the_veto_of() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, verifier -> edge, aggregate veto }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate veto` in model council `Release`, which declares no `adversary`"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate veto }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == ""));
+}
+
+#[test]
+fn a_map_subscript_carries_the_declared_key_and_value_type__issue__957_() {
+    assert!((lower_to_ir(String::from("fn keyed(m: Map[Str, Int], k: Str) -> Int { return m[k] } fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"keyed\",\"params\":[{\"name\": \"m\", \"type\": \"Map[Str, Int]\"}, {\"name\": \"k\", \"type\": \"Str\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"index\",\"target\":{\"kind\":\"var\",\"name\":\"m\"},\"index\":{\"kind\":\"var\",\"name\":\"k\"},\"key_type\":\"Str\",\"value_type\":\"Int\"}}]},{\"name\":\"positional\",\"params\":[{\"name\": \"xs\", \"type\": \"List[Int]\"}, {\"name\": \"i\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"index\",\"target\":{\"kind\":\"var\",\"name\":\"xs\"},\"index\":{\"kind\":\"var\",\"name\":\"i\"}}}]}]}"));
+}
+
+#[test]
+fn a_stream_requirement_draws_no_member_verdict() {
+    let v = admit_src(String::from("service Cache { fn put(key: Str) } component C requires ticks: Stream[Int] provides cache: Cache { provide cache { fn put(key) { let x = key } } }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_stream_requirement_is_not_a_service_lookup() {
+    assert!((admit_src(String::from("service E { fn go(k: Str) -> Str } event Tick(key: id) { id: Str, at: Int } component C requires sub: Stream[Tick] provides e: E { provide e { fn go(k) = k } }")) == ""));
+}
+
+#[test]
+fn a_block_match_arm_in_a_provide_method_is_read_as_the_arm_s_scope() {
+    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o { Some(v) => { let z = v + 1\n z }, None => 0 }\n      return x\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_built_in_constructor_carries_its_argument_type_into_the_arm() {
+    assert!((lower_to_ir(format!("fn f() -> Int {{ return match Ok(1) {{ Ok(o) => o, Err(e) => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"adt\",\"type\":\"Result[Any, Any]\",\"case\":\"Ok\",\"args\":[{\"kind\":\"lit\",\"value\":1}]},\"arms\":[{\"pattern\":\"Ok\",\"bind\":\"o\",\"body\":{\"kind\":\"var\",\"name\":\"o\"},\"payload_type\":\"Int\"},{\"pattern\":\"Err\",\"bind\":\"e\",\"body\":{\"kind\":\"lit\",\"value\":0},\"payload_type\":\"Any\"}]}}]}]}"));
+}
+
+#[test]
+fn a_builtin_type_read_as_a_value_names_the_type_rule() {
+    let v = admit_src(String::from("service S { fn go(n: Int) -> List[Str] }\ncomponent C provides s: S {\n  provide s { fn go(n) = List.reverse([\"a\"]) }\n}"));
+    assert!((v == "T1|`List` is a builtin type, not a value"));
+}
+
+#[test]
+fn a_call_through_a_record_field_in_a_provide_method_is_refused() {
+    let v = admit_src(String::from("extern pure fn twice(n: Int) -> Int = @py { return n * 2 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let r = { f: twice }\n      return r.f(n)\n    }\n  }\n}"));
+    assert!((v == (String::from("T1|no builtin method `f` on values — the stdlib surface is ").revl_concat(&tk_stdlib_surface())).revl_concat(" (docs/stdlib-2.0.md)")));
+}
+
+#[test]
+fn a_call_through_a_service_typed_method_parameter_must_be_marked() {
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      let x = p.charge(n)\n      return x\n    }\n  }\n}"));
+    assert!((v == "G4|call to emission `p.charge` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn a_call_through_an_arrow_value_with_no_arguments_names_the_arity() {
+    let v = admit_src(String::from("fn demo() -> Str {\n  let f = (x) => \"s\"\n  return f()\n}"));
+    assert!((v == "T1|`f` is a `(Any) -> Str` and takes 1 argument(s), 0 given"));
+}
+
+#[test]
+fn a_candidate_named_twice_has_two_positions_and_no_preference() {
+    assert!((admit_src(mset("* -> fast | fast")) == "MODEL|model role `fast` appears twice among the candidates for `*` in `route model on classify` (Classifier)"));
+}
+
+#[test]
+fn a_candidate_requires_resolves_against_the_running_service_block() {
+    let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
+    assert!((admit_src(cand.clone()) == "G1|unknown service `Store` in `requires` of CacheLayer"));
+    assert!((admit_ambient(cand.clone(), String::from("Kv/store/;App/app/;App<store;!services;:Store;:AppSvc")) == ""));
+}
+
+#[test]
+fn a_closure_assigning_to_a_capture_is_refused_at_parse__g6_() {
+    let v = admit_src(String::from("fn counter(step: Int) -> Int { var n = 0  let bump = (by: Int) => { n = n + by  n }  return bump(step) }"));
+    assert!((v == "G6|a closure cannot assign to `n`: captures are by value, not by reference (G6)"));
+}
+
+#[test]
+fn a_coerced_arrow_nested_in_a_sync_arrow_does_not_leak__admits_() {
+    assert!((admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n }\nfn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }\nfn plain(f: (Str) -> Str) -> Str { return f(\"a\") }\nservice S { emission async fn go(y: Str) -> Str }\ncomponent C provides s: S {\n  provide s { async fn go(y) { let r = plain(w => wrap(z => emit tick(z), w))   return r } }\n}")) == ""));
+}
+
+#[test]
+fn a_cold_hand_off_key_is_no_conflict() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;-OldStore")) == ""));
+}
+
+#[test]
+fn a_component_loop_refusal_still_outranks_a_tying_withdrawal() {
+    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Bus { emission fn publish(topic: Str) }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Zed requires bus: Bus { effect bus.publish(\"x\") undo bus.publish(\"y\") }");
+    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G4|call to emission `bus.publish` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn a_compound_assignment_on_a_let_is_the_same_refusal() {
+    let v = admit_src(String::from("fn bump() -> Int { let n = 1  n += 1  return n }"));
+    assert!((v == "G6|cannot reassign `n` — it is `let` (single-assignment)"));
+}
+
+#[test]
+fn a_confidential_origin_routed_to_a_council_names_the_off_device_member() {
+    let v = admit_src(String::from("model role edge on_device\nmodel role vast off_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn a_constructor_in_scrutinee_position_types_its_match_arms() {
+    assert!((lower_to_ir(format!("type Tree = Leaf | Node(Int)\nfn f(x: Int) -> Int {{ return match Node(x) {{ Node(v) => v, Leaf => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"Tree\": {\"params\": [], \"kind\": \"variant\", \"cases\": [{\"name\":\"Leaf\",\"payload\":null},{\"name\":\"Node\",\"payload\":\"Int\"}]}}, \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"x\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"adt\",\"type\":\"Tree\",\"case\":\"Node\",\"args\":[{\"kind\":\"var\",\"name\":\"x\"}]},\"arms\":[{\"pattern\":\"Node\",\"bind\":\"v\",\"body\":{\"kind\":\"var\",\"name\":\"v\"},\"payload_type\":\"Int\"},{\"pattern\":\"Leaf\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":0}}]}}]}]}"));
+}
+
+#[test]
+fn a_council_and_a_route_model_block_are_decided_in_the_same_compilation() {
+    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, adversary -> local, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> local, * -> cloud }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+    assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 1 member"));
+}
+
+#[test]
+fn a_council_declares_exactly_one_aggregation__written_down() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares no `aggregate` rule"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous,\n  aggregate majority\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares two `aggregate` rules (`unanimous` on line 6, `majority` here)"));
+}
+
+#[test]
+fn a_council_has_one_name__and_it_is_not_a_role_s() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nmodel council Release { proposer -> edge, adversary -> vast, aggregate majority }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` is declared twice (first on line 3)"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council edge { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `edge` has the name of the model role declared on line 1"));
+}
+
+#[test]
+fn a_council_is_several_models__each_with_its_own_placement() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, critic -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown council function `critic` in model council `Release`"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, proposer -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|council function `proposer` is declared twice in model council `Release` (first on line 3, as `vast`)"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` names model role `vast`, which is not declared"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> edge, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|members `proposer` and `adversary` of model council `Release` are both placed on model role `edge`"));
+}
+
+#[test]
+fn a_council_leaves_the_rest_of_the_document_checked__and__council__is_a_name() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent C provides api: Api {\n  provide api { fn go(k) { return kv.get(k) } }\n}")) == "G1|`kv` is not a declared requirement of C"));
+    assert!((admit_src(String::from("service M { fn go(council: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(council) = council }\n}")) == ""));
+}
+
+#[test]
+fn a_council_of_three_placed_members_with_a_written_aggregation_admits() {
+    let v = admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  verifier -> local2,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast; adversary -> edge;\n  aggregate majority quorum declared on_tie deny }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == ""));
+}
+
+#[test]
+fn a_crossing_placed_on_a_role_is_folded_with_no_route_model_block() {
+    let v = admit_src(String::from("model role tool on_device reaches [shell.exec]\nservice Tools { emission[model.tool] fn run(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Tools provides out: Answer {\n  provide out { fn classify(text) = emit llm.run(text) }\n}"));
+    assert!((v == "MODEL|`Classifier` crosses `model.tool`, placed on model role `tool`, which reaches `shell.exec`, but `Classifier` holds only `model.tool` - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn a_crossing_through_a_record_field_holding_a_provision_must_be_marked() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let r = { p: w.pay }\n      let x = r.p.charge(n)\n      return x\n    }\n  }\n}"));
+    assert!((v == "G4|call to emission `r.p.charge` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn a_crossing_through_a_service_typed_parameter_fits_the_declared_bound() {
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[audit.log] fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      emit p.charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"));
+}
+
+#[test]
+fn a_crossing_through_a_service_typed_parameter_inside_its_bound_is_admitted() {
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[production.payment] fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      emit p.charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_crossing_through_an_if_written_in_place_must_be_marked() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let x = (if (n > 0) { w.pay } else { w.pay }).charge(n)\n      return x\n    }\n  }\n}"));
+    assert!((v == "G4|call to emission `charge` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn a_cycle_closing_through_a_routed_running_consumer_is_refused__ambient_g3_() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB requires api: Api provides kv: Kv { isolate kv in realm(\"r2\") provide kv { fn get(k) { return api.go(k) } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;Router/api/;Router<*kv;Router>kv/r1,r2")) == "G3|dependency cycle: Router -> StoreB -> Router (G3)"));
+}
+
+#[test]
+fn a_declaration_after_a_named_test_block_is_still_reached() {
+    assert!((admit_src(String::from("test \"first\" { let a = 1  assert a == 1 } fn id(x: Int) -> Int { return x }")) == ""));
+}
+
+#[test]
+fn a_declared_local_receiver_is_not_a_g1_access() {
+    let v = admit_src(String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { let store = effect Map.new() undo store.drop() provide cache { fn put(key, value) { effect store.insert(key, value) undo store.remove(key) } } }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_declared_service_resolves() {
+    assert!((admit_src(String::from("service S { fn p(k: Str) -> Str } component C provides s: S { provide s { fn p(k) = k } }")) == ""));
+}
+
+#[test]
+fn a_deferred_extern_called_in_a_fn_body_is_refused() {
+    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nfn bill(a: Str, b: Str) -> Unit {\n  return deliver(a, b)\n}\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops { fn enqueue(sink, msg) { emit bill(sink, msg) } }\n}"));
+    assert!((v == "G4|`deferred` emission extern `deliver` cannot be called in the body of fn `bill`; a fn/test body has no session commit for the deferral to fire at (G4)"));
+}
+
+#[test]
+fn a_deferred_extern_passed_as_a_value_in_a_provide_method_is_refused() {
+    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nfn apply(f: (Str, Str) -> Unit, a: Str, b: Str) -> Unit { return f(a, b) }\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops {\n    fn enqueue(sink, msg) {\n      let r = apply(deliver, sink, msg)\n      return r\n    }\n  }\n}"));
+    assert!((v == "G4|`deferred` emission extern `deliver` is passed as a function value in component `Agent`; whoever calls the value fires it at once, with no session commit (G4)"));
+}
+
+#[test]
+fn a_deferred_extern_under_its_emit_marker_is_admitted() {
+    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops { fn enqueue(sink, msg) = emit deliver(sink, msg) }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_dependency_cycle_through_the_running_manifest_is_refused__ambient_g3_() {
+    let svc = String::from("service A { fn pa() -> Int } service B { fn pb() -> Int } ");
+    let a = String::from("component A requires b: B provides a: A { provide a { fn pa() { return 0 } } } ");
+    let b = String::from("component B requires a: A provides b: B { provide b { fn pb() { return 0 } } }");
+    let v = admit_ambient(svc.revl_concat(&b), String::from("A/a/;A<b"));
+    assert!((v == "G3|dependency cycle: A -> B -> A (G3)"));
+    assert!((v == admit_src((svc.revl_concat(&a)).revl_concat(&b))));
+}
+
+#[test]
+fn a_destructuring_let_is_read__not_refused() {
+    let v = admit_src(String::from("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_disjoint_manifest_key_never_conflicts_with_the_incoming_component() {
+    let v = admit_ambient(String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"), String::from("OldCache/cache/"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_dotted_capability_token_is_one_capability__not_two__g4_() {
+    let v = admit_src(String::from("service Store { emission[fs.write] fn ingest(r: Str) -> Int }\nservice Task { emission[fs.write] fn go() -> Int }\ncomponent Worker requires fs: Store provides task: Task {\n  provide task { fn go() { emit fs.ingest(\"x\")  return 0 } }\n}"));
+    assert!((v == "G4|`Task.go` is declared `emission[fs.write]`, but this implementation emits through `fs` (reaching `fs.ingest`)"));
+}
+
+#[test]
+fn a_dotted_capability_token_on_a_non_emitting_method_admits() {
+    assert!((admit_src(String::from("service Store { emission[fs.write] fn ingest(r: Str) -> Int }\nservice Task { emission[fs.write] fn go() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() { return 0 } }\n}")) == ""));
+}
+
+#[test]
+fn a_duplicate_let_in_one_straight_line_scope_is_refused__g6_() {
+    let v = admit_src(String::from("fn pick(x: Int) -> Int { let y = x  let y = 0  return y }"));
+    assert!((v == "G6|`y` is already declared in this function"));
+}
+
+#[test]
+fn a_fan_in_operand_is_resolved_even_though__merge__is_not__g1_() {
+    let v = admit_src(String::from("component C {\n  let a = effect Stream.source() undo a.close()\n  let sub = subscribe merge(a, nob) undo sub.close()\n}"));
+    assert!((v == "G1|`nob` is not a declared requirement of C"));
+}
+
+#[test]
+fn a_fn_whose_only_async_reach_is_a_coerced_arrow_stays_sync__admits_() {
+    assert!((admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n }\nfn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }\nfn h(y: Str) -> Str { return wrap(z => tick(z), y) }\nservice S { emission fn go(y: Str) -> Str }\ncomponent C provides s: S {\n  provide s { fn go(y) { let r = emit h(y)   return r } }\n}")) == ""));
+}
+
+#[test]
+fn a_for_binding_over_a_live_name_is_already_declared() {
+    let v = admit_src(String::from("fn f(xs: List[Int]) -> Int { let x = 1  for (x of xs) { }  return x }"));
+    assert!((v == "G6|`x` is already declared in this function"));
+}
+
+#[test]
+fn a_function_type_s_parameter_is_not_a_container_of_the_value() {
+    assert!((taint_mentions_secret(String::from("(Secret[Str]) -> Int")) == false));
+    assert!((taint_mentions_secret(String::from("Fn[Secret[Str], Int]")) == false));
+    assert!((taint_mentions_secret(String::from("List[(Secret[Str]) -> Int]")) == false));
+}
+
+#[test]
+fn a_function_typed_hand_off_row_is_read__and_meets_contravariantly() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: (Float) -> Str   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:(Int) -> Str;-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `(Float) -> Str`, but `OldStore` exports `(Int) -> Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
+}
+
+#[test]
+fn a_garbled_handoff_row_refuses_by_name() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("OldStore=db")) == "MANIFEST|manifest handoff row `OldStore=db` does not name a component, a key and its state type"));
+    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:")) == "MANIFEST|manifest handoff row `OldStore=db:` does not name a component, a key and its state type"));
+}
+
+#[test]
+fn a_garbled_parameter_list_refuses_the_wire_by_name() {
+    let src = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
+    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(key")) == "MANIFEST|manifest service row `:Store,get(key` does not name an operation"));
+    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(:Str)")) == "MANIFEST|manifest service row `:Store,get(:Str)` does not name an operation"));
+    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(key:)")) == "MANIFEST|manifest service row `:Store,get(key:)` does not name an operation"));
+}
+
+#[test]
+fn a_handoff_row_alone_moves_no_verdict() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:D")) == ""));
+    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:D")) == admit_src(clean.clone())));
+}
+
+#[test]
+fn a_host_acquisition_released_by_its_own_verb_is_admitted() {
+    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let pool = effect Pool.open(\"pg://x\", 4) undo pool.close()\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_host_acquisition_s_undo_that_is_not_its_release_is_refused() {
+    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let store = effect Map.new() undo store.get(\"x\")\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == "G4|the `undo` of `let store = effect Map.new(...)` must release THAT handle: write `undo store.drop()`"));
+}
+
+#[test]
+fn a_host_provenance_let_may_be_reassigned__reference_admits_() {
+    assert!((admit_src(String::from("fn f() -> Int { let m = Map.new()  m = m  return 1 }")) == ""));
+}
+
+#[test]
+fn a_key_both_pinned_and_routed_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realm(\"r1\")\n  isolate kv in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == "ROUTE|key `kv` is already isolated to a single realm in Router — it cannot also be routed across `realms(...)`"));
+}
+
+#[test]
+fn a_key_isolated_twice_is_refused__g1_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  isolate kv in realm(\"r1\")\n  isolate kv in realm(\"r2\")\n  let v = effect kv.get(\"x\") undo kv.get(\"x\")\n}"));
+    assert!((v == "G1|key `kv` is isolated twice in C"));
+}
+
+#[test]
+fn a_key_routed_twice_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\")\n  isolate kv in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == "ROUTE|key `kv` is routed twice in Router"));
+}
+
+#[test]
+fn a_later_refusal_does_not_overwrite_an_earlier_refusal_s_tag__g4_() {
+    let v = admit_src(String::from("service Kv { emission fn put(key: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires kv: Kv provides api: Api {\n  provide api { fn go() { return kv.put(\"a\") + beta } }\n}"));
+    assert!((v == "G4|call to emission `kv.put` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn a_legitimate_replacement_that_re_provides_the_key_admits() {
+    let svc = String::from("service D { fn q(s: Str) -> Int } ");
+    let x = String::from("component Old provides db: D { provide db { fn q(s) { let x = s   return 1 } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == ""));
+}
+
+#[test]
+fn a_malformed_replacement_row_refuses_rather_than_withdrawing_nothing() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("OldStore/db/;-OldStore/db/")) == "MANIFEST|manifest replacement row `-OldStore/db/` does not name a component"));
+}
+
+#[test]
+fn a_malformed_role_is_still_decided_before_a_refusable_council() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_devise\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> edge, adversary -> vast, aggregate first }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "MODEL|unknown residence `off_devise` for model role `vast`"));
+}
+
+#[test]
+fn a_malformed_route_row_refuses_rather_than_dropping_the_legs() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("Router/api/;Router>kv")) == "MANIFEST|manifest route row `Router>kv` does not name a component, a key and its realms"));
+}
+
+#[test]
+fn a_malformed_service_row_refuses_naming_the_row() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from(":")) == "MANIFEST|manifest service row `:` does not name a service"));
+    assert!((admit_ambient(clean.clone(), String::from(":9bad")) == "MANIFEST|manifest service row `:9bad` does not name a service"));
+    assert!((admit_ambient(clean.clone(), String::from(":A/b")) == "MANIFEST|manifest service row `:A/b` does not name a service"));
+    assert!((admit_ambient(clean.clone(), String::from("!service")) == "MANIFEST|unrecognized manifest header row `!service`"));
+}
+
+#[test]
+fn a_manifest_provision_in_a_different_realm_composes__per_realm_ambient_g2_() {
+    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str } component StoreB provides kv: Kv { isolate kv in realm(\"tenant_b\") provide kv { fn get(k) { return k } } }"), String::from("StoreA/kv/tenant_a"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_manifest_provision_in_the_same_realm_conflicts__realm_named__ambient_g2_() {
+    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str } component StoreB provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } }"), String::from("StoreA/kv/tenant_a"));
+    assert!((v == "G2|provision conflict: key `kv` in realm `tenant_a` is provided by both StoreA and StoreB (G2)"));
+}
+
+#[test]
+fn a_manifest_requirement_met_by_the_incoming_text_composes__ambient_g3_() {
+    let svc = String::from("service D { fn q(s: Str) -> Int } ");
+    let store = String::from("component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(svc.revl_concat(&store), String::from("OldApp<db")) == ""));
+}
+
+#[test]
+fn a_marked_crossing_through_a_list_literal_read_in_place_meets_the_floor() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      emit [w.pay][0].charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"));
+}
+
+#[test]
+fn a_member_given_a_confidential_input_is_not_placed_off_the_device() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast reads confidential, adversary -> edge,\n  aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` is declared `reads confidential` and runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device"));
+}
+
+#[test]
+fn a_member_may_be_given_an_origin_its_sibling_is_not__item_516_slice_4_() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge reads confidential,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}")) == ""));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn a_memory_floor_no_placement_can_fail_to_meet_is_refused() {
+    let v = admit_src(String::from("model role fast on_device device gpu memory 0 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|model role `fast` declares `memory 0`, which no placement can fail to meet"));
+}
+
+#[test]
+fn a_model_placement_is_a_prelude_declaration() {
+    let v = admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n  route model on classify { web -> local }\n}"));
+    assert!((v == "PRELUDE|`route model` must precede every effect, emit, await, and provide statement"));
+}
+
+#[test]
+fn a_model_placement_that_keeps_a_confidential_input_on_the_device_admits() {
+    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify {\n    confidential -> local,\n    * -> cloud\n  }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_module_fn_using_an_async_callable_as_a_value_is_refused__a1_() {
+    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } fn holder() -> Int { let f = tick   return 0 } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }"));
+    assert!((v == "A1|function `holder` uses async callable `tick` as a function value, but an async callable has no arrow type"));
+}
+
+#[test]
+fn a_module_fn_s_arrow_into_an_async_t__slot_is_coerced__admits_() {
+    assert!((admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } fn apply_cb(cb: () -> Async[Int]) -> Int { return cb() } fn holder() -> Int { return apply_cb(() => tick()) } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }")) == ""));
+}
+
+#[test]
+fn a_module_fn_s_sync_arrow_reaching_an_async_callable_leaks__a1_() {
+    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } fn holder(g: (Int) -> Int) -> Int { let h = x => tick()   return 0 } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }"));
+    assert!((v == "A1|this arrow reaches async callable `tick`, but its type carries no async color — the caller would receive an unawaited suspension (A1)"));
+}
+
+#[test]
+fn a_multi_realm_bind_whose_realms_all_have_providers_composes() {
+    assert!((admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent StoreB provides kv: Kv {\n  isolate kv in realm(\"r2\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}")) == ""));
+}
+
+#[test]
+fn a_name_bound_in_a_block_arm_may_be_bound_again_after_it() {
+    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o {\n        Some(v) => {\n          let z = v + 1\n          z\n        },\n        None => 0\n      }\n      let z = x + 1\n      return z\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_name_that_is_neither_a_role_nor_a_council_is_still_refused() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> ghost }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`confidential -> ghost` in `route model on classify` (Classifier) names no declared model role"));
+}
+
+#[test]
+fn a_name_the_block_arm_statement_binds_is_a_g6_rebind() {
+    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o {\n        Some(v) => {\n          let z = v + 1\n          z\n        },\n        None => 0\n      }\n      let x = 2\n      return x\n    }\n  }\n}"));
+    assert!((v == "G6|`x` is already bound in `go`"));
+}
+
+#[test]
+fn a_named_test_block_is_stepped_over__not_read_as_declarations() {
+    assert!((admit_src(String::from("fn id(x: Int) -> Int { return x } test \"id round trips\" { assert id(1) == 1 }")) == ""));
+}
+
+#[test]
+fn a_named_test_body_s_statements_draw_no_top_level_verdict() {
+    assert!((admit_src(String::from("test \"locals\" { let a = 1  var b = 2  b = a  assert b == 1 } fn id(x: Int) -> Int { return x }")) == ""));
+}
+
+#[test]
+fn a_narrowed_accepted_hand_off_shape_is_refused() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Str   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Opt[Str];-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Str`, but `OldStore` exports `Opt[Str]` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
+}
+
+#[test]
+fn a_nested_block_still_sees_the_enclosing_let() {
+    let v = admit_src(String::from("fn f(c: Bool) -> Int { let n = 1  if (c) { n = 2 }  return n }"));
+    assert!((v == "G6|cannot reassign `n` — it is `let` (single-assignment)"));
+}
+
+#[test]
+fn a_nullary_case_bound_bare_carries_its_adt_to_the_match() {
+    assert!((lower_to_ir(format!("type Tag = Red | Green(Int)\nfn f() -> Int {{ let c = Red\n  return match c {{ Red => 1, Green(n) => n }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"Tag\": {\"params\": [], \"kind\": \"variant\", \"cases\": [{\"name\":\"Red\",\"payload\":null},{\"name\":\"Green\",\"payload\":\"Int\"}]}}, \"functions\": [{\"name\":\"f\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"c\",\"value\":{\"kind\":\"adt\",\"type\":\"Tag\",\"case\":\"Red\",\"args\":[]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"var\",\"name\":\"c\"},\"arms\":[{\"pattern\":\"Red\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":1}},{\"pattern\":\"Green\",\"bind\":\"n\",\"body\":{\"kind\":\"var\",\"name\":\"n\"},\"payload_type\":\"Int\"}]}}]}]}"));
+}
+
+#[test]
+fn a_parameter_is_not_mutable__so_writing_one_is_a_let_reassignment() {
+    let v = admit_src(String::from("fn f(p: Int) -> Int { p = 2  return p }"));
+    assert!((v == "G6|cannot reassign `p` — it is `let` (single-assignment)"));
+}
+
+#[test]
+fn a_per_instance_capability_symbol_resolved_into_the_parent_s_cone_admits() {
+    assert!((admit_src(String::from("service JobStore { emission[fs.write(path=config.job_root)] fn ingest(r: Str) -> Int }\nservice TmpStore { emission[fs.write(path=\"/tmp\")] fn ingest(r: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Kid requires fs: JobStore provides worker: Worker {\n  provide worker { fn run() { emit fs.ingest(\"row\")  return \"k\" } }\n  config { job_root: Str }\n}\ncomponent Router requires fs: TmpStore {\n  let w = effect spawn Kid with { job_root: \"/tmp/jobs\" } undo w.dispose()\n}")) == ""));
+}
+
+#[test]
+fn a_plain_method_spawning_an_emitting_target_is_refused__g4_() {
+    let v = admit_src(String::from("service Store { emission[kv] fn write(row: Str) -> Int }\nservice Task { emission[kv] fn go() -> Int }\nservice Sup { fn run() -> Int }\ncomponent Worker requires kv: Store provides task: Task {\n  provide task { fn go() { emit kv.write(\"x\")  return 0 } }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }\n}"));
+    assert!((v == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv`"));
+}
+
+#[test]
+fn a_profiled_role_admits__and_the_profile_is_read_rather_than_stepped_over() {
+    let v = admit_src(String::from("model role fast on_device device gpu memory 6144 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> fast }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_provision_the_running_manifest_already_holds_conflicts__ambient_g2_() {
+    let v = admit_ambient(String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"), String::from("OldStore/db/"));
+    assert!((v == "G2|provision conflict: key `db` is provided by both OldStore and NewStore (G2)"));
+}
+
+#[test]
+fn a_pub_fn_and_a_type_written_after_an_extern_keep_their_declaration() {
+    assert!((lower_to_ir(format!("extern pure fn h(s: Str) -> Str = @py {{ return s }}\ntype T = {{ a: Int }}\npub fn render(l: Str) -> Str {{ return h(l) }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"T\": {\"params\": [], \"kind\": \"record\", \"fields\": {\"a\":\"Int\"}}}, \"functions\": [{\"name\":\"render\",\"params\":[{\"name\": \"l\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":true,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"h\"},\"args\":[{\"kind\":\"var\",\"name\":\"l\"}]}}]}], \"externs\": [{\"name\": \"h\", \"class\": \"pure\", \"params\": [{\"name\": \"s\", \"type\": \"Str\"}], \"returns\": \"Str\", \"bodies\": {\"py\": \" return s \"}}]}"));
+}
+
+#[test]
+fn a_qualifier_head_is_never_the_tail_of_a_longer_identifier() {
+    assert!((taint_strip(String::from("MyTrusted[Int]")) == "MyTrusted[Int]"));
+    assert!((taint_strip(String::from("SecretBox[Str]")) == "SecretBox[Str]"));
+    assert!((taint_mentions_secret(String::from("SecretBox[Str]")) == false));
+}
+
+#[test]
+fn a_qualifier_is_stripped_wherever_it_is_written() {
+    assert!((taint_strip(String::from("Secret[Str]")) == "Str"));
+    assert!((taint_strip(String::from("Trusted[Int]")) == "Int"));
+    assert!((taint_strip(String::from("Untrusted[Str]")) == "Str"));
+    assert!((taint_strip(String::from("Opt[Secret[Str]]")) == "Opt[Str]"));
+    assert!((taint_strip(String::from("Result[Secret[Str], Str]")) == "Result[Str, Str]"));
+    assert!((taint_strip(String::from("Map[Str, List[Secret[Int]]]")) == "Map[Str, List[Int]]"));
+    assert!((taint_strip(String::from("(Secret[Str]) -> Int")) == "(Str) -> Int"));
+    assert!((taint_strip(taint_strip(String::from("Secret[Str]"))) == "Str"));
+}
+
+#[test]
+fn a_qualifier_free_type_is_returned_verbatim() {
+    assert!((taint_strip(String::from("Str")) == "Str"));
+    assert!((taint_strip(String::from("Map[Str, Int]")) == "Map[Str, Int]"));
+    assert!((taint_strip(String::from("(Int, Str) -> Bool")) == "(Int, Str) -> Bool"));
+    assert!((taint_mentions_secret(String::from("Str")) == false));
+    assert!((taint_mentions_secret(String::from("Result[Str, Str]")) == false));
+}
+
+#[test]
+fn a_record_literal_after____is_not_the_closure_write_form() {
+    assert!((admit_src(String::from("fn f() -> Int { let k = (x: Int) => { value: x + 1 }  return k(1).value }")) == ""));
+}
+
+#[test]
+fn a_redirect_never_fires_on_a_valid_program__no_false_refusal_() {
+    assert!((admit_src(String::from("fn f(a: Int, b: Int) -> Int { return a - -b }")) == ""));
+    assert!((admit_src(String::from("fn f(xs: List[Int]) -> Int { var s = 0 for (x of xs) { s += x } return s }")) == ""));
+    assert!((admit_src(String::from("fn f() -> Int { let g = (a: Int, b: Int) => a + b return g(1, 2) }")) == ""));
+    assert!((admit_src(String::from("fn f(n: Int) -> Int { if (n > 0) { return 1 } else if (n < 0) { return 2 } return 0 }")) == ""));
+    assert!((admit_src(String::from("fn f(xs: List[Int], c: Bool) -> Int { return xs[c ? 0 : 1] }")) == ""));
+    assert!((admit_src(String::from("fn f(n: Int) -> Int { let len = n return len }")) == ""));
+    assert!((admit_src(String::from("service S { emission[fs.write(path=\"/tmp\")] fn go(r: Str) -> Int }")) == ""));
+}
+
+#[test]
+fn a_required_service_call_is_typed_against_the_running_signature() {
+    let bad = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
+    assert!((admit_ambient(bad.clone(), String::from("Kv/store/;!services;:Store,get(key:Str),bump(n:Int)")) == "T1|`store.bump` argument `n` expects `Int`, got `Str`"));
+    let ok = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
+    assert!((admit_ambient(ok.clone(), String::from("Kv/store/;!services;:Store,get(key:Str),bump(n:Int)")) == ""));
+}
+
+#[test]
+fn a_required_service_call_to_an_undeclared_operation_is_refused__a6_() {
+    let v = admit_src(String::from("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let n = effect db.execute(\"x\") undo db.query(\"y\") }"));
+    assert!((v == "A6|`db.execute` is not a method of service Database"));
+}
+
+#[test]
+fn a_requirement_already_unmet_before_the_admission_stays_admissible() {
+    let svc = String::from("service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Old provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/aux/;Store/cache/;Store<db")) == ""));
+}
+
+#[test]
+fn a_requirement_key_may_not_spell_a_builtin_type() {
+    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\nservice Lst { fn drop(xs: List[Str]) }\ncomponent C requires List: Lst provides s: S {\n  provide s { fn go(n) = n }\n}"));
+    assert!((v == "G1|requirement key `List` of C shadows the builtin type `List`"));
+}
+
+#[test]
+fn a_role_is_declared_once__and_the_refusal_names_both_residences() {
+    let v = admit_src(String::from("model role local on_device\nmodel role local off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|model role `local` is declared twice (first on line 1, as `on_device`; here as `off_device`)"));
+}
+
+#[test]
+fn a_role_reaching_no_further_than_its_component_is_admitted_with_no_block() {
+    let v = admit_src(String::from("model role tool on_device reaches [model.tool]\nservice Tools { emission[model.tool] fn run(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Tools provides out: Answer {\n  provide out { fn classify(text) = emit llm.run(text) }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_route_after_a_provide_block_is_refused__prelude_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  provide api { fn go(k) { return kv.get(k) } }\n  isolate kv in realms(\"r1\")\n}"));
+    assert!((v == "PRELUDE|`isolate ... in realms(...)` must precede every effect, emit, await, and provide statement"));
+}
+
+#[test]
+fn a_route_keyed_to_an_action_the_component_renamed_away_protects_nothing() {
+    let v = admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify_text { web -> local }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|`route model on classify_text` names no action of Classifier"));
+}
+
+#[test]
+fn a_route_whose_realms_are_all_provided_by_the_manifest_admits__ambient_route_() {
+    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}"), String::from("StoreA/kv/r1;StoreB/kv/r2"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_routed_realm_provided_by_neither_text_nor_manifest_still_refuses__ambient_route_() {
+    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r9\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"), String::from("StoreA/kv/r1"));
+    assert!((v == "ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no component provides `kv` in realm `r9` (item 162: every routed realm needs a provider)"));
+}
+
+#[test]
+fn a_routed_realm_re_provided_by_the_incoming_text_still_admits() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB provides kv: Kv { isolate kv in realm(\"r2\") provide kv { fn get(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == ""));
+}
+
+#[test]
+fn a_routed_realm_with_no_provider_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r9\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == "ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no component provides `kv` in realm `r9` (item 162: every routed realm needs a provider)"));
+}
+
+#[test]
+fn a_routed_running_consumer_that_loses_a_realm_s_provider_is_refused() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no component provides `kv` in realm `r2` (item 162: every routed realm needs a provider)"));
+}
+
+#[test]
+fn a_routed_running_consumer_whose_realms_all_stay_provided_is_untouched() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component Fresh provides other: Api { provide other { fn go(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == ""));
+}
+
+#[test]
+fn a_routed_running_requirement_is_not_reported_by_the_withdrawal_check() {
+    let svc = String::from("service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/r1;Store/cache/;Store<*db;-Old")) == ""));
+}
+
+#[test]
+fn a_rule_that_picks_one_member_s_answer_is_refused__and_so_is_a_typo() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate first }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimus }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown aggregation rule `unanimus` in model council `Release`"));
+}
+
+#[test]
+fn a_scoped_method_spawning_a_target_that_widens_its_caps_is_refused__g4_() {
+    let v = admit_src(String::from("service Store { emission[kv] fn write(row: Str) -> Int }\nservice Task { emission[kv] fn go() -> Int }\nservice Sup { emission[other] fn run() -> Int }\ncomponent Worker requires kv: Store provides task: Task {\n  provide task { fn go() { emit kv.write(\"x\")  return 0 } }\n}\ncomponent Supervisor requires other: Store provides sup: Sup {\n  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }\n}"));
+    assert!((v == "G4|`Sup.run` is declared `emission[other]`, but it spawns `Worker`, which emits through `kv`"));
+}
+
+#[test]
+fn a_scoped_method_whose_spawn_target_stays_in_bound_admits() {
+    assert!((admit_src(String::from("service Store { emission[kv] fn write(row: Str) -> Int }\nservice Task { emission[kv] fn go() -> Int }\nservice Sup { emission[kv] fn run() -> Int }\ncomponent Worker requires kv: Store provides task: Task {\n  provide task { fn go() { emit kv.write(\"x\")  return 0 } }\n}\ncomponent Supervisor requires kv: Store provides sup: Sup {\n  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }\n}")) == ""));
+}
+
+#[test]
+fn a_sibling_path_is_not_a_narrowing_of_the_parent_s_cone__g4_() {
+    let v = admit_src(String::from("service TmpStore { emission[fs.write(path=\"/tmp\")] fn ingest(r: Str) -> Int }\nservice OtherStore { emission[fs.write(path=\"/tmp-other\")] fn ingest(r: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Kid requires fs: OtherStore provides worker: Worker {\n  provide worker { fn run() { emit fs.ingest(\"row\")  return \"k\" } }\n}\ncomponent Router requires fs: TmpStore {\n  let w = effect spawn Kid with { } undo w.dispose()\n}"));
+    assert!((v == "G4|`Router` spawns `Kid`, granting it `fs.write(path=\"/tmp-other\")`, but `Router` holds only `fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, never widen them"));
+}
+
+#[test]
+fn a_spawn_dropping_the_parent_s_budget_ceiling_is_refused__g4_() {
+    let v = admit_src(String::from("service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }\nservice NetBare { emission[net] fn call(u: Str) -> Int }\nservice Worker { emission[net] fn go() -> Int }\ncomponent Child requires net: NetBare provides worker: Worker {\n  provide worker { fn go() { emit net.call(\"row\")  return 0 } }\n}\ncomponent Supervisor requires net: NetTight {\n  let w = effect spawn Child with { } undo w.dispose()\n}"));
+    assert!((v == "G4|`Supervisor` spawns `Child` with a wider resource budget than it holds: `net` drops the `calls` budget (a missing ceiling is unbounded, hence wider). A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)"));
+}
+
+#[test]
+fn a_spawn_laundered_through_a_same_spelled_requires_key_is_refused__g4_() {
+    let v = admit_src(String::from("service KvA { emission[kv_a] fn put(k: Str) -> Int }\nservice KvB { emission[kv_b] fn put(k: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Leaker requires kv: KvB provides worker: Worker {\n  provide worker { fn run() { emit kv.put(\"row\")  return \"k\" } }\n}\ncomponent Supervisor requires kv: KvA {\n  let w = effect spawn Leaker with { } undo w.dispose()\n}"));
+    assert!((v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"));
+}
+
+#[test]
+fn a_spawn_narrowing_a_budget_ceiling_admits() {
+    assert!((admit_src(String::from("service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }\nservice NetNarrow { emission[net(requests=50)] fn call(u: Str) -> Int }\nservice Worker { emission[net] fn go() -> Int }\ncomponent Child requires net: NetNarrow provides worker: Worker {\n  provide worker { fn go() { emit net.call(\"row\")  return 0 } }\n}\ncomponent Supervisor requires net: NetTight {\n  let w = effect spawn Child with { } undo w.dispose()\n}")) == ""));
+}
+
+#[test]
+fn a_spawn_narrowing_into_the_parent_s_path_cone_admits() {
+    assert!((admit_src(String::from("service TmpStore { emission[fs.write(path=\"/tmp\")] fn ingest(r: Str) -> Int }\nservice JobStore { emission[fs.write(path=\"/tmp/jobs\")] fn ingest(r: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Kid requires fs: JobStore provides worker: Worker {\n  provide worker { fn run() { emit fs.ingest(\"row\")  return \"k\" } }\n}\ncomponent Router requires fs: TmpStore {\n  let w = effect spawn Kid with { } undo w.dispose()\n}")) == ""));
+}
+
+#[test]
+fn a_spawn_reaching_outside_the_parent_s_path_cone_is_refused__g4_() {
+    let v = admit_src(String::from("service TmpStore { emission[fs.write(path=\"/tmp\")] fn ingest(r: Str) -> Int }\nservice EtcStore { emission[fs.write(path=\"/etc\")] fn ingest(r: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Kid requires fs: EtcStore provides worker: Worker {\n  provide worker { fn run() { emit fs.ingest(\"row\")  return \"k\" } }\n}\ncomponent Router requires fs: TmpStore {\n  let w = effect spawn Kid with { } undo w.dispose()\n}"));
+    assert!((v == "G4|`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, never widen them"));
+}
+
+#[test]
+fn a_spawn_that_widens_a_child_s_capabilities_is_refused__g4_() {
+    let v = admit_src(String::from("service StoreA { emission[kv_a] fn wa(r: Str) -> Int }\nservice StoreB { emission[kv_b] fn wb(r: Str) -> Int }\nservice Task { emission fn go() -> Int }\ncomponent Leaker requires kv_b: StoreB provides task: Task {\n  provide task { fn go() { emit kv_b.wb(\"x\")  return 0 } }\n}\ncomponent Supervisor requires kv_a: StoreA {\n  let l = effect spawn Leaker with { } undo l.dispose()\n}"));
+    assert!((v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"));
+}
+
+#[test]
+fn a_spawn_widening_a_budget_ceiling_is_refused__g4_() {
+    let v = admit_src(String::from("service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }\nservice NetWide { emission[net(requests=1000)] fn call(u: Str) -> Int }\nservice Worker { emission[net] fn go() -> Int }\ncomponent Child requires net: NetWide provides worker: Worker {\n  provide worker { fn go() { emit net.call(\"row\")  return 0 } }\n}\ncomponent Supervisor requires net: NetTight {\n  let w = effect spawn Child with { } undo w.dispose()\n}"));
+    assert!((v == "G4|`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)"));
+}
+
+#[test]
+fn a_spawn_handle_step_under_a_bound_covering_the_op_s_scope_is_admitted() {
+    let v = admit_src(String::from("service Task { emission[net] fn go() -> Int }\nservice Sup { emission[net] fn run() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() = 0 }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup {\n    fn run() {\n      let w = effect spawn Worker with { } undo w.dispose()\n      emit w.task.go()\n      return 0\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_spawn_handle_value_under_a_bound_missing_the_op_s_scope_is_refused() {
+    let v = admit_src(String::from("service Task { emission[net] fn go() -> Int }\nservice Sup { emission[db] fn run() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() = 0 }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup {\n    fn run() {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let r = emit w.task.go()\n      return r\n    }\n  }\n}"));
+    assert!((v == "G4|`Sup.run` is declared `emission[db]`, but this implementation emits through `net` (reaching `Task.go`)"));
+}
+
+#[test]
+fn a_statement_block_match_arm_is_not_an_arrow_head() {
+    let v = admit_src(String::from("type S = A(Str) | B(Str) fn f(s: S) -> Int { return match s { A(x) => { let y = 1  y }, B(x) => 2, } }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_step_through_an_if_bound_provision_local_meets_a_scoped_upper_bound() {
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[audit.log] fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"));
+}
+
+#[test]
+fn a_subscription_bracket_binds_its_name() {
+    let v = admit_src(String::from("component Parked {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  await sub.next()\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_successor_that_cannot_hold_the_running_state_is_refused__handoff_() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Str;-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Int`, but `OldStore` exports `Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
+}
+
+#[test]
+fn a_typed_hole_in_a_host_acquisition_s_undo_is_not_refused() {
+    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let store = effect Map.new() undo hole[Unit] \"release\"\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_widened_accepted_hand_off_shape_still_admits() {
+    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Opt[Str]   provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Str;-OldStore")) == ""));
+}
+
+#[test]
+fn a_wire_carrying_both_a_service_block_and_route_rows_refuses_the_lost_realm() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2;!services;:Kv;:Api")) == "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no component provides `kv` in realm `r2` (item 162: every routed realm needs a provider)"));
+}
+
+#[test]
+fn a_wire_that_claims_nothing_about_its_services_decides_nothing() {
+    let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
+    assert!((admit_ambient(cand.clone(), String::from("Kv/store/;App/app/;App<store")) == ""));
+}
+
+#[test]
+fn a_withdrawal_tying_with_a_spawn_bound_names_the_withdrawal() {
+    let src = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str }\nservice Kv2 { emission[kv2] fn write(row: Str) -> Int }\nservice Task { emission[kv2] fn go() -> Int }\nservice Sup { fn run() -> Int }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Worker requires kv2: Kv2 provides task: Task { provide task { fn go() { emit kv2.write(\"x\")  return 0 } } } component Supervisor provides sup: Sup { provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } } }");
+    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn a_withdrawal_tying_with_the_boot_count_names_the_withdrawal() {
+    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Env { fn a() -> Str }\nservice Env2 { fn b() -> Str }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } boot component B1 provides e1: Env { config { x: Str } provide e1 { fn a() = config.x } } boot component B2 provides e2: Env2 { config { y: Str } provide e2 { fn b() = config.y } }");
+    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn a_withdrawn_provision_a_retained_running_consumer_requires_is_refused() {
+    let svc = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Old provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn admission_against_a_halted_composition_is_refused__item_443_() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("!halted;A/a/")) == "HALTED|admission against a halted composition is refused (item 443)"));
+}
+
+#[test]
+fn admit_tag_exposes_the_bare_guarantee() {
+    assert!((admit_tag(String::from("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } } component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }")) == "G2"));
+}
+
+#[test]
+fn ambient_admission_equals_the_single_source_composition_of_manifest____src() {
+    let manifest_comp = String::from("component OldStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    let newc = String::from("component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    let svc = String::from("service D { fn q(s: Str) -> Int } ");
+    assert!((admit_ambient(svc.revl_concat(&newc), String::from("OldStore/db/")) == admit_src(((svc.revl_concat(&manifest_comp)).revl_concat(" ")).revl_concat(&newc))));
+}
+
+#[test]
+fn an__every___in__body_is_not_pruned_the_way_a_timer_body_is__a1_() {
+    let v = admit_src(String::from("extern emission async fn hf(p: Str) -> Str = @py { return p }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit hf(o) }\n}"));
+    assert!((v == "A1|component `C` reaches async extern `hf` in a setup/activation body, which cannot suspend a fiber (A1)"));
+}
+
+#[test]
+fn an__every___in__body_still_refuses_an_undeclared_name__g1_() {
+    let v = admit_src(String::from("service Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(nope) }\n}"));
+    assert!((v == "G1|`nope` is not a declared requirement of C"));
+}
+
+#[test]
+fn an__on___as__body_still_refuses_an_undeclared_name__g1_() {
+    let v = admit_src(String::from("event E(key: k) { k: Str }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  on E as e in sub { emit sink.write(nope) }\n}"));
+    assert!((v == "G1|`nope` is not a declared requirement of C"));
+}
+
+#[test]
+fn an_absent_operation_in_a_provide_method_is_refused__a6_() {
+    let v = admit_src(String::from("service Store { fn get(key: Str) -> Str } service Cache { fn lookup(key: Str) -> Str } component C requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nonexistent(key) } }"));
+    assert!((v == "A6|`store.nonexistent` is not a method of service Store"));
+}
+
+#[test]
+fn an_absent_operation_under__emit__is_a6__not_the_g4_marker_rule() {
+    let v = admit_src(String::from("service Bus { emission fn publish(topic: Str) } service Cache { fn put(key: Str) } component C requires bus: Bus provides cache: Cache { provide cache { fn put(key) { emit bus.broadcast(key) } } }"));
+    assert!((v == "A6|`bus.broadcast` is not a method of service Bus"));
+}
+
+#[test]
+fn an_aggregation_that_admits_on_a_tie_is_refused_by_name() {
+    let v = admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie allow\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "COUNCIL|`on_tie allow` in model council `Release` admits when the members disagree"));
+    assert!((admit_tag(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie allow\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL"));
+}
+
+#[test]
+fn an_annotated_let_pins_an_empty_list_and_marks_a_width_coercion() {
+    assert!((lower_to_ir(format!("fn empty() -> List[Int] {{ let xs: List[Int] = [] return xs }}\nfn full() -> List[Int] {{ let ys: List[Int] = [1] return ys }}\nfn widened(n: Int32) -> Int {{ let w: Int = n return w }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"empty\",\"params\":[],\"returns\":\"List[Int]\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"xs\",\"value\":{\"kind\":\"list\",\"items\":[],\"expected\":\"List[Int]\"},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"xs\"}}]},{\"name\":\"full\",\"params\":[],\"returns\":\"List[Int]\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"ys\",\"value\":{\"kind\":\"list\",\"items\":[{\"kind\":\"lit\",\"value\":1}]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"ys\"}}]},{\"name\":\"widened\",\"params\":[{\"name\": \"n\", \"type\": \"Int32\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"w\",\"value\":{\"kind\":\"var\",\"name\":\"n\",\"widen\":\"Int\"},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"w\"}}]}]}"));
+}
+
+#[test]
+fn an_arm_may_name_a_council_whose_members_all_stay_on_the_device() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Review }\n  provide out { fn classify(text) = text }\n}")) == ""));
+}
+
+#[test]
+fn an_arm_names_an_origin_from_the_lattice_and_a_declared_role() {
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidental -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|unknown origin class `confidental` in `route model on classify`"));
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> edge }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`confidential -> edge` in `route model on classify` (Classifier) names no declared model role"));
+}
+
+#[test]
+fn an_arrow_in_an_async_t__slot_is_coerced__not_leaky__admits_() {
+    assert!((admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Async[Str], x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => emit tick(msgs), \"x\")   return r } } }")) == ""));
+}
+
+#[test]
+fn an_arrow_in_an_emit_head_s_arguments_leaves_the_argument_position__g4_() {
+    let pre = String::from("service Ap { emission fn approve(t: Str, a: Str) -> Str } service Gt { emission fn decide(ok: Bool, v: Str) -> Str } service Rv { emission fn review(k: Str) -> Str } fn approve_args(k: Str, f: (Str, Str) -> Str) -> Str { return f(k, k) } component C requires ap: Ap, gt: Gt provides rv: Rv { provide rv { fn review(k) { ");
+    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))) } } }")) == ""));
+    assert!((admit_src(pre.revl_concat("let f = (t: Str, a: Str) => emit ap.approve(t, a)   return emit gt.decide(true, approve_args(k, f)) } } }")) == ""));
+    assert!((admit_src(pre.revl_concat("let v = approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))   return emit gt.decide(true, v) } } }")) == ""));
+    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => ap.approve(t, a))) } } }")) == "G4|call to emission `ap.approve` must be marked `emit` (G4)"));
+    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, emit ap.approve(k, k)) } } }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
+}
+
+#[test]
+fn an_arrow_parameter_resolves_in_its_body__no_false_g1_() {
+    assert!((admit_src(String::from("fn apply(f: (Int) -> Int, x: Int) -> Int { return f(x) } service S { fn go(n: Int) -> Int } component C provides s: S { provide s { fn go(n) { let r = apply(x => x, n)   return r } } }")) == ""));
+}
+
+#[test]
+fn an_arrow_value_called_at_its_arity_with_compatible_arguments_is_admitted() {
+    let v = admit_src(String::from("fn demo() -> Str {\n  let f = (x: Str): Str => x\n  return f(\"s\")\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_earlier_line_ambient_g2_conflict_outranks_a_later_internal_refusal() {
+    let src = String::from("service D { fn q(s: Str) -> Int }\ncomponent Early provides db: D { provide db { fn q(s) { let x = s   return 0 } } }\ncomponent Late provides ap: D { provide ap { fn q(s) { let x = nope   return 0 } } }");
+    let v = admit_ambient(src.clone(), String::from("OldStore/db/"));
+    assert!((v == "G2|provision conflict: key `db` is provided by both OldStore and Early (G2)"));
+}
+
+#[test]
+fn an_earlier_line_spawn_bound_still_outranks_a_later_line_withdrawal() {
+    let src = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str }\nservice Kv2 { emission[kv2] fn write(row: Str) -> Int }\nservice Task { emission[kv2] fn go() -> Int }\nservice Sup { fn run() -> Int }\ncomponent Worker requires kv2: Kv2 provides task: Task { provide task { fn go() { emit kv2.write(\"x\")  return 0 } } } component Supervisor provides sup: Sup { provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } } }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv2`"));
+}
+
+#[test]
+fn an_emission_extern_in_an_emit_head_s_arguments_needs_its_own_marker__g4_() {
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } component C { emit log_line(charge(1)) }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } component C { emit log_line(emit charge(1)) }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
+    assert!((admit_src(String::from("extern emission fn charge(c: Int) -> Int = @py { return 1 } service A { emission fn send(n: Int) -> Int } component C requires a: A { emit a.send(charge(1)) }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } service B { emission fn fetch() -> Int } component C requires b: B { emit log_line(b.fetch()) }")) == "G4|call to emission `b.fetch` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern pure fn twice(n: Int) -> Int = @py { return n * 2 } component C { emit log_line(twice(1)) }")) == ""));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { emit log_line(charge(n)) return 1 } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { let r = emit charge(n) return emit log_line(r) } } }")) == ""));
+}
+
+#[test]
+fn an_emission_in_an_emit_head_s_arguments_needs_its_own_marker__g4_() {
+    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(b.fetch()) }")) == "G4|call to emission `b.fetch` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(emit b.fetch()) }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
+    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service X { fn plain() -> Str } component C requires a: A, x: X { emit a.send(x.plain()) }")) == ""));
+    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } service K { emission fn f() -> Str } component C requires a: A, b: B provides k: K { provide k { fn f() { let r = emit b.fetch() return emit a.send(r) } } }")) == ""));
+}
+
+#[test]
+fn an_empty_parameter_list_is_a_claim__not_silence() {
+    let src = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.ping() } }");
+    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,ping()")) == ""));
+}
+
+#[test]
+fn an_exhaustive_service_block_that_omits_the_name_still_refuses() {
+    let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
+    assert!((admit_ambient(cand.clone(), String::from("Kv/store/;App/app/;App<store;!services;:AppSvc")) == "G1|unknown service `Store` in `requires` of CacheLayer"));
+}
+
+#[test]
+fn an_explicit_withdrawal_row_strands_the_same_consumer() {
+    let svc = String::from("service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db;-Old")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn an_extern_config_field_of_an_arrow_type_is_refused__g4_() {
+    assert!((admit_src(String::from("extern pure fn thing(x: Str) -> Str config { handler: (Str) -> Str } = @py { return x }")) == "G4|config field `handler` of extern `thing` has type `(Str) -> Str`, which reaches an arrow (function) type; a config field must be static data"));
+}
+
+#[test]
+fn an_if_bound_provision_local_crossed_with_an_approval_edge_is_admitted() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  let a = await approval[production.payment] { reason: \"pay\" }\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n) with a\n      return 0\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_if_bound_provision_local_meets_the_approval_floor() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"));
+}
+
+#[test]
+fn an_internally_refused_component_is_forwarded_unchanged__whatever_the_manifest() {
+    let src = String::from("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(\"x\") undo db.execute(\"y\") }");
+    assert!((admit_ambient(src.clone(), String::from("Other/svc/")) == admit_src(src.clone())));
+}
+
+#[test]
+fn an_operation_named_without_a_parameter_list_decides_nothing_about_arguments() {
+    let bad = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
+    assert!((admit_ambient(bad.clone(), String::from("Kv/store/;!services;:Store,get,bump")) == ""));
+    let miss = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nope(key) } }");
+    assert!((admit_ambient(miss.clone(), String::from("Kv/store/;!services;:Store,get,bump")) == "A6|`store.nope` is not a method of service Store"));
+}
+
+#[test]
+fn an_ordered_candidate_set_of_comparable_roles_admits() {
+    assert!((admit_src(mset("* -> fast | small")) == ""));
+}
+
+#[test]
+fn an_origin_is_routed_once__an_action_is_routed_once__a_block_names_a_role() {
+    assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { web -> local, web -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|origin `web` is routed twice in `route model on classify` (Classifier)"));
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { web -> local }\n  route model on classify { net -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` is routed twice in Classifier"));
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`route model on classify` in Classifier names no role"));
+}
+
+#[test]
+fn an_unbound_host_acquisition_is_refused() {
+    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  effect Map.new() undo 1\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == "G4|`effect Map.new(...)` must bind its handle so its `undo` can release it: write `let <name> = effect Map.new(...) undo <name>.drop()`"));
+}
+
+#[test]
+fn an_unbound_spawn_is_refused__bind_to_a_handle_() {
+    let v = admit_src(String::from("service Task { fn go() -> Int }\ncomponent Worker provides task: Task { provide task { fn go() { return 0 } } }\ncomponent Supervisor requires t: Task {\n  effect spawn Worker with { } undo dispose()\n}"));
+    assert!((v == "SPAWN|`spawn` must be bound to a handle: `let s = effect spawn Worker … undo s.dispose()`"));
+}
+
+#[test]
+fn an_undeclared_name_in_a_block_arm_s_tail_is_refused_on_that_name() {
+    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o {\n        Some(v) => {\n          let z = v + 1\n          nope(z)\n        },\n        None => 0\n      }\n      return x\n    }\n  }\n}"));
+    assert!((v == "G1|`nope` is not a declared requirement of C"));
+}
+
+#[test]
+fn an_undeclared_service_in_provides_is_refused_by_name() {
+    assert!((admit_src(String::from("component C provides s: S { }")) == "G1|unknown service `S` in `provides` of C"));
+}
+
+#[test]
+fn an_undeclared_service_in_requires_is_refused_by_name() {
+    assert!((admit_src(String::from("component C requires s: S { }")) == "G1|unknown service `S` in `requires` of C"));
+}
+
+#[test]
+fn an_undeclared_stream_in_a_subscribe_head_is_refused__g1_() {
+    let v = admit_src(String::from("component C {\n  let sub = subscribe nostream undo sub.close()\n}"));
+    assert!((v == "G1|`nostream` is not a declared requirement of C"));
+}
+
+#[test]
+fn an_unknown_manifest_row_kind_refuses_naming_the_row() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("?A/a/")) == "MANIFEST|unrecognized manifest row `?A/a/`"));
+}
+
+#[test]
+fn an_unknown_routing_strategy_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\") strategy(round_robbin)\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == "ROUTE|unknown routing strategy `round_robbin` for `kv` in Router"));
+}
+
+#[test]
+fn an_unmarked_crossing_through_a_block_arm_s_value_is_refused() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let o = Some(n)\n      let x = (match o {\n        Some(v) => {\n          let z = v\n          w.pay\n        },\n        None => w.pay\n      }).charge(n)\n      return x\n    }\n  }\n}"));
+    assert!((v == "G4|call to emission `charge` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn an_unmarked_emission_inside_an_iteration_body_is_still_g4() {
+    let v = admit_src(String::from("service Sink { emission fn write(v: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires sink: Sink provides api: Api {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(o) }\n  provide api { fn go() { return sink.write(\"x\") } }\n}"));
+    assert!((v == "G4|call to emission `sink.write` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn an_unmarked_emission_through_a_spawn_handle_is_refused__g4_() {
+    let v = admit_src(String::from("service Net { emission[net] fn send(m: Str) -> Int }\nservice Task { emission[net] fn run(p: Str) -> Int  fn status() -> Int }\ncomponent Worker requires net: Net provides task: Task {\n  provide task { fn run(p: Str) { emit net.send(p)  return 1 }  fn status() = 0 }\n}\nservice Sup { emission fn go(p: Str) -> Int }\ncomponent Supervisor provides sup: Sup {\n  provide sup { fn go(p: Str) { let w = effect spawn Worker with { } undo w.dispose()  let r = w.task.run(p)  return r } }\n}"));
+    assert!((v == "G4|call to emission `w.task.run` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn an_unprofiled_role_beside_a_profiled_one_is_not_refused_for_the_omission() {
+    let v = admit_src(String::from("model role fast on_device device gpu memory 6144 quant q4_k_m\nmodel role small on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> small }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_unscoped_emission_is_named_as_one__with_the_fix() {
+    let v = admit_src(String::from("model role local on_device reaches [Model]\nservice Model { emission fn complete(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Model provides out: Answer {\n  route model on classify { * -> local }\n  provide out { fn classify(text) = emit llm.complete(text) }\n}"));
+    assert!((v == "MODEL|`Classifier` routes `classify` (*) through model role `local`, which reaches `Model`, but `Classifier` holds only service `Model`'s unscoped emission (an unscoped emission has no token a `reaches [...]` list can name: give the `emission` methods of `Model` a scoped capability, such as `emission[model.complete]`, and reach that) - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn assigning_a_name_nothing_bound_is_the_fn_scope_g1() {
+    assert!((admit_src(String::from("fn f() -> Int { z = 2  return 1 }")) == "G1|`z` is not declared in this function"));
+}
+
+#[test]
+fn async_extern_used_as_a_value_is_refused__a1_() {
+    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } service S { emission async fn go() -> Int } component C provides s: S { provide s { async fn go() { let f = tick   return 0 } } }"));
+    assert!((v == "A1|`S.go` uses async extern `tick` as a function value, but an async callable has no arrow type"));
+}
+
+#[test]
+fn async_method_reaching_a_rule_2_colored_fn_admits() {
+    assert!((admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 }\nfn caller(cb: () -> Async[Int]) -> Int { return cb() }\nservice S { emission async fn go() -> Int }\ncomponent C provides s: S {\n  provide s { async fn go() { let r = caller(() => emit tick())   return 0 } }\n}")) == ""));
+}
+
+#[test]
+fn async_declared_op_admits_the_same_async_body() {
+    let v = admit_src(String::from("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = emit http_post(url, body) } }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn clean_provider_admits() {
+    assert!((admit_src(String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")) == ""));
+}
+
+#[test]
+fn config_before_isolate_composes__prelude_ok_() {
+    assert!((admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  config { tenant: Str }\n  isolate kv in realm(\"r1\")\n  let v = effect kv.get(\"boot\") undo kv.get(\"boot\")\n}")) == ""));
+}
+
+#[test]
+fn config_field_naming_a_service_is_refused__g4_() {
+    assert!((admit_src(String::from("service S { fn g() -> Str } component C provides s: S { config { dep: S } provide s { fn g() = \"x\" } }")) == "G4|config field `dep` of component `C` has type `S`, which reaches the service `S`; a config field must be static data"));
+}
+
+#[test]
+fn config_field_of_a_container_reaching_an_arrow_is_refused__g4_() {
+    assert!((admit_src(String::from("service S { fn g() -> Str } component C provides s: S { config { xs: List[(Str) -> Str] } provide s { fn g() = \"x\" } }")) == "G4|config field `xs` of component `C` has type `List[(Str) -> Str]`, which reaches an arrow (function) type; a config field must be static data"));
+}
+
+#[test]
+fn config_field_of_a_declared_record_reaching_an_arrow_is_refused__g4_() {
+    assert!((admit_src(String::from("service S { fn g() -> Str } type R = { h: (Str) -> Str } component C provides s: S { config { r: R } provide s { fn g() = \"x\" } }")) == "G4|config field `r` of component `C` has type `R`, which reaches an arrow (function) type; a config field must be static data"));
+}
+
+#[test]
+fn config_field_of_an_arrow_type_is_refused__g4_() {
+    assert!((admit_src(String::from("service S { fn g() -> Str } component C provides s: S { config { h: (Str) -> Str } provide s { fn g() = \"x\" } }")) == "G4|config field `h` of component `C` has type `(Str) -> Str`, which reaches an arrow (function) type; a config field must be static data"));
+}
+
+#[test]
+fn config_field_of_an_erased_type_is_refused__g4_() {
+    assert!((admit_src(String::from("service S { fn g() -> Str } component C provides s: S { config { v: Any } provide s { fn g() = \"x\" } }")) == "G4|config field `v` of component `C` has type `Any`, which reaches the erased type `Any`; a config field must be static data"));
+}
+
+#[test]
+fn config_field_of_an_opaque_type_is_refused__g4___exact_wording() {
+    assert!((admit_src(String::from("component y{config{l:t}}")) == "G4|config field `l` of component `y` has type `t`, which reaches the opaque type `t`; a config field must be static data"));
+}
+
+#[test]
+fn config_fields_built_out_of_data_admit() {
+    assert!((admit_src(String::from("service S { fn g() -> Str } type R = { a: Int, b: Str } component C provides s: S { config { xs: List[Str], m: Map[Str, Int], r: R, k: Secret[Str] } provide s { fn g() = \"x\" } }")) == ""));
+}
+
+#[test]
+fn dependency_cycle_is_refused__g3___exact_path() {
+    let v = admit_src(String::from("service A { fn ping(tag: Str) -> Str } service B { fn pong(tag: Str) -> Str } component Alpha requires b: B provides a: A { provide a { fn ping(tag) = b.pong(tag) } } component Beta requires a: A provides b: B { provide b { fn pong(tag) = a.ping(tag) } }"));
+    assert!((v == "G3|dependency cycle: Alpha -> Beta -> Alpha (G3)"));
+}
+
+#[test]
+fn disjoint_sibling_blocks_may_reuse_a_name() {
+    let v = admit_src(String::from("fn pick(c: Bool) -> Int { if (c) { let y = 1  return y } else { let y = 2  return y } }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn empty_manifest_admits_exactly_as_single_source__base_invariant_() {
+    let src = String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }");
+    assert!((admit_ambient(src.clone(), String::from("")) == admit_src(src.clone())));
+}
+
+#[test]
+fn every_candidate_of_a_set_declares_a_device_profile() {
+    assert!((admit_src(mset("* -> fast | bare")) == "MODEL|candidate(s) bare for `*` in `route model on classify` (Classifier) declare no device profile, so the candidate set cannot be ordered"));
+}
+
+#[test]
+fn every_host_emission_crossing_carries_its_marker__issue__1437_() {
+    let ch = String::from("extern emission fn charge(n: Int) -> Int = @py { return 1 } service S { emission fn go(n: Int) -> Int } ");
+    assert!((admit_src(ch.revl_concat("component C provides s: S { provide s { fn go(n) { let r = charge(n) return r } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
+    assert!((admit_src(ch.revl_concat("component C provides s: S { provide s { fn go(n) = charge(n) } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
+    assert!((admit_src(ch.revl_concat("component C provides s: S { provide s { fn go(n) { let r = emit charge(n) return r } } }")) == ""));
+    assert!((admit_src(ch.revl_concat("fn bill(n: Int) -> Int { return charge(n) } component C provides s: S { provide s { fn go(n) = bill(n) } }")) == "G4|call to emission `bill` must be marked `emit` (G4)"));
+    assert!((admit_src(ch.revl_concat("fn bill(n: Int) -> Int { return charge(n) } component C provides s: S { provide s { fn go(n) = emit bill(n) } }")) == ""));
+    assert!((admit_src(String::from("extern emission fn charge(n: Int) -> Int = @py { return 1 } service S { fn go(n: Int) -> Int } component C provides s: S { provide s { fn go(n) = emit charge(n) } }")) == "G4|`S.go` is declared plain, but this implementation reaches `charge()`"));
+}
+
+#[test]
+fn foreign_builtins_redirect_to_the_revl_surface() {
+    assert!((foreign_scan(String::from("fn f(xs: List[Int]) -> Int { return len(xs) }")) == "revl has no `len(...)`"));
+    assert!((foreign_scan(String::from("fn f(n: Int) -> Int { print(n) return n }")) == "revl has no `print`"));
+    assert!((foreign_scan(String::from("fn f(n: Int) -> Int { throw n }")) == "revl has no `throw`"));
+}
+
+#[test]
+fn foreign_literals_and_declaration_keywords_redirect() {
+    assert!((foreign_scan(String::from("fn f() -> Bool { return True }")) == "revl booleans are lowercase"));
+    assert!((foreign_scan(String::from("fn f() -> Bool { return False }")) == "revl booleans are lowercase"));
+    assert!((foreign_scan(String::from("fn f() -> Int { const x = 1 return x }")) == "revl has no `const`"));
+    assert!((foreign_scan(String::from("def foo() -> Int { return 1 }")) == "revl has no `def`"));
+    assert!((foreign_scan(String::from("fn f() -> Int { let g = lambda x: x return g(1) }")) == "revl has no `lambda`"));
+    assert!((foreign_scan(String::from("fn f(n: Int) -> Int { if (n > 0) { return 1 } elif (n < 0) { return 2 } return 0 }")) == "revl has no `elif`"));
+}
+
+#[test]
+fn foreign_statement_and_expression_forms_redirect() {
+    assert!((foreign_scan(String::from("fn f() -> Int { var i = 0 i++ return i }")) == "revl has no `++` increment operator — expressions are pure (syntax-2.0 §3.3)"));
+    assert!((foreign_scan(String::from("fn f() -> Int { var i = 0 i-- return i }")) == "revl has no `--` decrement operator — expressions are pure (syntax-2.0 §3.3)"));
+    assert!((foreign_scan(String::from("fn f() -> Int { var s = 0 for (let i = 0; i < 10; i += 1) { s += i } return s }")) == "revl has no C-style `for (init; cond; step)` loop"));
+    assert!((foreign_scan(String::from("fn f(xs: List[Int]) -> Int { var s = 0 for (x in xs) { s += x } return s }")) == "revl iterates elements with `for (x of xs)`, not `for (x in xs)`"));
+    assert!((foreign_scan(String::from("fn g(k: Int) -> Int { return k } fn f() -> Int { return g(k=1) }")) == "revl has no keyword arguments — `f(k=v)` is not a call"));
+    assert!((foreign_scan(String::from("fn f(c: Bool) -> Int { let x = 1 if c else 2 return x }")) == "revl has no Python-style `a if c else b` conditional expression"));
+    assert!((foreign_scan(String::from("fn f(xs: List[Int]) -> Int { let s = xs[0:2] return 0 }")) == "revl has no slice syntax `xs[a:b]`"));
+    assert!((foreign_scan(String::from("fn f() -> Int { let d = {\"k\": 1} return 0 }")) == "revl records use identifier keys, not string keys like `{\"k\": v}`"));
+    assert!((foreign_scan(String::from("fn f() -> Int { let t = (1, 2) return 0 }")) == "revl has no tuples — `(a, b)` is not a value"));
+    let thrower = String::from("fn f(n: Int) -> Int { throw n }");
+    assert!((admit_tag(thrower.clone()) == "FOREIGN"));
+    let garbage = String::from("@@@ not revl @@@");
+    assert!((admit_tag(garbage.clone()) == "BAD"));
+}
+
+#[test]
+fn foreign_word_operators_redirect_to_the_revl_spelling() {
+    assert!((foreign_scan(String::from("fn f(a: Bool, b: Bool) -> Bool { return a and b }")) == "`and` is not a revl operator"));
+    assert!((foreign_scan(String::from("fn f(a: Bool, b: Bool) -> Bool { return a or b }")) == "`or` is not a revl operator"));
+    assert!((foreign_scan(String::from("fn f(a: Bool) -> Bool { return not a }")) == "`not` is not a revl operator"));
+}
+
+#[test]
+fn handoff_on_a_non_provided_key_is_refused__handoff_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  handoff kv: Str\n  let v = effect kv.get(\"x\") undo kv.get(\"x\")\n}"));
+    assert!((v == "HANDOFF|`kv` is not a declared provision of C"));
+}
+
+#[test]
+fn handoff_on_a_provided_key_composes() {
+    assert!((admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C provides kv: Kv {\n  handoff kv: Str\n  provide kv { fn get(k) { return k } }\n}")) == ""));
+}
+
+#[test]
+fn isolate_after_an_effect_is_refused__prelude_rule_() {
+    let v = admit_src(String::from("service D { fn q(s: Str) -> Int }\nservice S { fn go() -> Int }\ncomponent C requires d: D provides s: S {\n  let store = effect Map.new() undo store.drop()\n  isolate d in realm(\"r1\")\n  provide s { fn go() { return 0 } }\n}"));
+    assert!((v == "PRELUDE|`isolate` must precede every effect, emit, await, and provide statement"));
+}
+
+#[test]
+fn isolate_on_an_undeclared_key_is_refused__g1_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  isolate nope in realm(\"r1\")\n  let v = effect kv.get(\"x\") undo kv.get(\"x\")\n}"));
+    assert!((v == "G1|`nope` is not a declared requirement or provision of C"));
+}
+
+#[test]
+fn item_512_s_rules_reach_the_tail_of_a_set__not_only_its_head() {
+    assert!((admit_src(mset("* -> fast | nope")) == "MODEL|`* -> nope` in `route model on classify` (Classifier) names no declared model role"));
+    assert!((admit_src(mset("confidential -> fast | slow")) == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `slow`, which is declared `off_device` on line 3: a confidential input may not leave the device (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn lower_to_ir_annotates_typed_arithmetic_operands() {
+    assert!((lower_to_ir(String::from("fn add(a: Int, b: Int) -> Int { return a + b }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"add\",\"params\":[{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"a\"},\"right\":{\"kind\":\"var\",\"name\":\"b\"},\"operands\":\"Int\"}}]}]}"));
+}
+
+#[test]
 fn lower_to_ir_binds_a_discarded_payload_as____in_a_provide_method() {
     assert!(str_has(&lower_to_ir(String::from("type Shape = Dot | Box(Int) service S { fn m(s: Shape) -> Int } component C provides p: S { provide p { fn m(s) = match s { Box(_) => 4, _ => 0 } } }")), "{\"pattern\": \"Box\", \"bind\": \"__\", \"body\": {\"kind\": \"lit\", \"value\": 4}"));
+}
+
+#[test]
+fn lower_to_ir_bumps_ir_version_to_3_on_a_module_fn() {
+    assert!(starts_with__m2(&lower_to_ir(String::from("fn id(x: Int) -> Int { return x }")), "{\"ir_version\": 3,"));
+}
+
+#[test]
+fn lower_to_ir_emits_a_module_fn_body__functions_section_() {
+    assert!((lower_to_ir(String::from("fn id(x: Int) -> Int { return x }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"id\",\"params\":[{\"name\": \"x\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"x\"}}]}]}"));
+}
+
+#[test]
+fn lower_to_ir_emits_a_record_type_declaration__types_section_() {
+    assert!((lower_to_ir(String::from("type P = { x: Int, y: Int }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"P\": {\"params\": [], \"kind\": \"record\", \"fields\": {\"x\":\"Int\",\"y\":\"Int\"}}}}"));
+}
+
+#[test]
+fn lower_to_ir_emits_an_extern_with_a_verbatim__py_body__externs_section_() {
+    assert!((lower_to_ir(String::from("extern pure fn dbl(n: Int) -> Int = @py { return n * 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"externs\": [{\"name\": \"dbl\", \"class\": \"pure\", \"params\": [{\"name\": \"n\", \"type\": \"Int\"}], \"returns\": \"Int\", \"bodies\": {\"py\": \" return n * 2 \"}}]}"));
+}
+
+#[test]
+fn lower_to_ir_emits_literal_config_field_defaults__config_schema_() {
+    assert!((lower_to_ir(String::from("service G { fn greet(w: Str) -> Str } component H provides greeting: G { config { prefix: Str = \"hi, \", count: Int = 1 } provide greeting { fn greet(w) = config.prefix } }")) == "{\"ir_version\": 1, \"services\": {\"G\": {\"methods\": {\"greet\": {\"params\": [{\"name\": \"w\", \"type\": \"Str\"}], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"H\", \"source\": \"<string>\", \"config\": [{\"name\": \"prefix\", \"type\": \"Str\", \"default\": \"hi, \"}, {\"name\": \"count\", \"type\": \"Int\", \"default\": 1}], \"requires\": {}, \"provides\": {\"greeting\": \"G\"}, \"body\": [{\"step\": \"provide\", \"name\": \"greeting\", \"service\": \"G\", \"methods\": [{\"name\": \"greet\", \"params\": [\"w\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"config\", \"field\": \"prefix\"}}]}]}]}]}"));
 }
 
 #[test]
@@ -30746,8 +32060,33 @@ fn lower_to_ir_emits_the_services_table_for_a_simple_provider() {
 }
 
 #[test]
+fn lower_to_ir_keeps_both_fns_around_a_one_line_named_test_block() {
+    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}]}"));
+}
+
+#[test]
+fn lower_to_ir_lowers_a_config_read_in_a_provide_method__component_spine_() {
+    assert!((lower_to_ir(String::from("service Conf { fn get() -> Str } component S provides conf: Conf { config { name: Str } provide conf { fn get() = config.name } }")) == "{\"ir_version\": 1, \"services\": {\"Conf\": {\"methods\": {\"get\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"S\", \"source\": \"<string>\", \"config\": [{\"name\": \"name\", \"type\": \"Str\", \"default\": null}], \"requires\": {}, \"provides\": {\"conf\": \"Conf\"}, \"body\": [{\"step\": \"provide\", \"name\": \"conf\", \"service\": \"Conf\", \"methods\": [{\"name\": \"get\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"config\", \"field\": \"name\"}}]}]}]}]}"));
+}
+
+#[test]
 fn lower_to_ir_lowers_a_method_call_on_a_list_literal_in_a_provide_method() {
     assert!(str_has(&lower_to_ir(String::from("service Math { fn go(n: Int) -> Int } component C provides math: Math { provide math { fn go(n: Int) = [1, 2].map((x) => x + n).length } }")), "{\"kind\": \"call\", \"callee\": {\"kind\": \"field\", \"target\": {\"kind\": \"list\", \"items\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 2}]}, \"name\": \"map\"}, \"args\": [{\"kind\": \"arrow\", \"params\": [\"x\"], \"captures\": [], \"body\": "));
+}
+
+#[test]
+fn lower_to_ir_lowers_a_simple_effect_provide_body() {
+    assert!((lower_to_ir(String::from("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")) == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"));
+}
+
+#[test]
+fn lower_to_ir_lowers_a_timer_step_with_interval_ms__component_spine_() {
+    assert!((lower_to_ir(String::from("service Log { emission fn write(msg: Str) } component P requires log: Log { every 15s { emit log.write(\"beat\") } }")) == "{\"ir_version\": 3, \"services\": {\"Log\": {\"methods\": {\"write\": {\"params\": [{\"name\": \"msg\", \"type\": \"Str\"}], \"returns\": null, \"emission\": true}}}}, \"components\": [{\"name\": \"P\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"log\": \"Log\"}, \"provides\": {}, \"body\": [{\"step\": \"timer\", \"mode\": \"every\", \"interval_ms\": 15000, \"body\": [{\"step\": \"emit\", \"expr\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"log\"}, \"method\": \"write\", \"args\": [{\"kind\": \"lit\", \"value\": \"beat\"}]}}]}]}]}"));
+}
+
+#[test]
+fn lower_to_ir_lowers_a_typed_provide_method_arithmetic_body__name_id__no_operands_() {
+    assert!((lower_to_ir(String::from("service Calc { fn add(a: Int, b: Int) -> Int } component A provides calc: Calc { provide calc { fn add(a, b) = a + b } }")) == "{\"ir_version\": 1, \"services\": {\"Calc\": {\"methods\": {\"add\": {\"params\": [{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}], \"returns\": \"Int\", \"emission\": false}}}}, \"components\": [{\"name\": \"A\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"calc\": \"Calc\"}, \"body\": [{\"step\": \"provide\", \"name\": \"calc\", \"service\": \"Calc\", \"methods\": [{\"name\": \"add\", \"params\": [\"a\", \"b\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"bin\", \"op\": \"+\", \"left\": {\"kind\": \"name\", \"id\": \"a\"}, \"right\": {\"kind\": \"name\", \"id\": \"b\"}}}]}]}]}]}"));
 }
 
 #[test]
@@ -30766,63 +32105,20 @@ fn lower_to_ir_marks_an_emission_op_and_a_scoped_capability() {
 }
 
 #[test]
-fn lower_to_ir_lowers_a_simple_effect_provide_body() {
-    assert!((lower_to_ir(String::from("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")) == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"));
-}
-
-#[test]
-fn lower_to_ir_bumps_ir_version_to_3_on_a_module_fn() {
-    assert!(starts_with__m2(&lower_to_ir(String::from("fn id(x: Int) -> Int { return x }")), "{\"ir_version\": 3,"));
-}
-
-#[test]
-fn lower_to_ir_emits_a_module_fn_body__functions_section_() {
-    assert!((lower_to_ir(String::from("fn id(x: Int) -> Int { return x }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"id\",\"params\":[{\"name\": \"x\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"x\"}}]}]}"));
-}
-
-#[test]
-fn lower_to_ir_annotates_typed_arithmetic_operands() {
-    assert!((lower_to_ir(String::from("fn add(a: Int, b: Int) -> Int { return a + b }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"add\",\"params\":[{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"a\"},\"right\":{\"kind\":\"var\",\"name\":\"b\"},\"operands\":\"Int\"}}]}]}"));
-}
-
-#[test]
-fn lower_to_ir_emits_a_record_type_declaration__types_section_() {
-    assert!((lower_to_ir(String::from("type P = { x: Int, y: Int }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"P\": {\"params\": [], \"kind\": \"record\", \"fields\": {\"x\":\"Int\",\"y\":\"Int\"}}}}"));
-}
-
-#[test]
-fn lower_to_ir_lowers_a_config_read_in_a_provide_method__component_spine_() {
-    assert!((lower_to_ir(String::from("service Conf { fn get() -> Str } component S provides conf: Conf { config { name: Str } provide conf { fn get() = config.name } }")) == "{\"ir_version\": 1, \"services\": {\"Conf\": {\"methods\": {\"get\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"S\", \"source\": \"<string>\", \"config\": [{\"name\": \"name\", \"type\": \"Str\", \"default\": null}], \"requires\": {}, \"provides\": {\"conf\": \"Conf\"}, \"body\": [{\"step\": \"provide\", \"name\": \"conf\", \"service\": \"Conf\", \"methods\": [{\"name\": \"get\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"config\", \"field\": \"name\"}}]}]}]}]}"));
-}
-
-#[test]
-fn lower_to_ir_lowers_a_typed_provide_method_arithmetic_body__name_id__no_operands_() {
-    assert!((lower_to_ir(String::from("service Calc { fn add(a: Int, b: Int) -> Int } component A provides calc: Calc { provide calc { fn add(a, b) = a + b } }")) == "{\"ir_version\": 1, \"services\": {\"Calc\": {\"methods\": {\"add\": {\"params\": [{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}], \"returns\": \"Int\", \"emission\": false}}}}, \"components\": [{\"name\": \"A\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"calc\": \"Calc\"}, \"body\": [{\"step\": \"provide\", \"name\": \"calc\", \"service\": \"Calc\", \"methods\": [{\"name\": \"add\", \"params\": [\"a\", \"b\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"bin\", \"op\": \"+\", \"left\": {\"kind\": \"name\", \"id\": \"a\"}, \"right\": {\"kind\": \"name\", \"id\": \"b\"}}}]}]}]}]}"));
-}
-
-#[test]
-fn lower_to_ir_lowers_a_timer_step_with_interval_ms__component_spine_() {
-    assert!((lower_to_ir(String::from("service Log { emission fn write(msg: Str) } component P requires log: Log { every 15s { emit log.write(\"beat\") } }")) == "{\"ir_version\": 3, \"services\": {\"Log\": {\"methods\": {\"write\": {\"params\": [{\"name\": \"msg\", \"type\": \"Str\"}], \"returns\": null, \"emission\": true}}}}, \"components\": [{\"name\": \"P\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"log\": \"Log\"}, \"provides\": {}, \"body\": [{\"step\": \"timer\", \"mode\": \"every\", \"interval_ms\": 15000, \"body\": [{\"step\": \"emit\", \"expr\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"log\"}, \"method\": \"write\", \"args\": [{\"kind\": \"lit\", \"value\": \"beat\"}]}}]}]}]}"));
-}
-
-#[test]
-fn lower_to_ir_emits_an_extern_with_a_verbatim__py_body__externs_section_() {
-    assert!((lower_to_ir(String::from("extern pure fn dbl(n: Int) -> Int = @py { return n * 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"externs\": [{\"name\": \"dbl\", \"class\": \"pure\", \"params\": [{\"name\": \"n\", \"type\": \"Int\"}], \"returns\": \"Int\", \"bodies\": {\"py\": \" return n * 2 \"}}]}"));
-}
-
-#[test]
-fn lower_to_ir_emits_literal_config_field_defaults__config_schema_() {
-    assert!((lower_to_ir(String::from("service G { fn greet(w: Str) -> Str } component H provides greeting: G { config { prefix: Str = \"hi, \", count: Int = 1 } provide greeting { fn greet(w) = config.prefix } }")) == "{\"ir_version\": 1, \"services\": {\"G\": {\"methods\": {\"greet\": {\"params\": [{\"name\": \"w\", \"type\": \"Str\"}], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"H\", \"source\": \"<string>\", \"config\": [{\"name\": \"prefix\", \"type\": \"Str\", \"default\": \"hi, \"}, {\"name\": \"count\", \"type\": \"Int\", \"default\": 1}], \"requires\": {}, \"provides\": {\"greeting\": \"G\"}, \"body\": [{\"step\": \"provide\", \"name\": \"greeting\", \"service\": \"G\", \"methods\": [{\"name\": \"greet\", \"params\": [\"w\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"config\", \"field\": \"prefix\"}}]}]}]}]}"));
-}
-
-#[test]
-fn clean_provider_admits() {
-    assert!((admit_src(String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")) == ""));
-}
-
-#[test]
 fn lower_to_ir_marks_sized_length_on_a_field_of_a_required_service_s_returned_record() {
     assert!(str_has(&lower_to_ir(String::from("type Label = { text: Str } service Geo { fn label(s: Str) -> Label } service S { fn m(s: Str) -> Int } component C requires geo: Geo provides p: S { provide p { fn m(s) = geo.label(s).text.length } }")), "\"name\": \"length\", \"sized_length\": true}"));
+}
+
+#[test]
+fn one_member_wearing_a_council_s_name_is_refused__and_so_is_no_proposer() {
+    assert!((admit_src(String::from("model role vast off_device\nmodel council Release { proposer -> vast, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 1 member"));
+    assert!((admit_src(String::from("model role vast off_device\nmodel council Release { aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 0 members"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { adversary -> vast, verifier -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares no `proposer`"));
+}
+
+#[test]
+fn per_tenant_spawn_narrowing_composes__attenuation_admits_() {
+    assert!((admit_src(String::from("service Store { emission[kv_a] fn write_a(row: Str) -> Int }\nservice StoreB { emission[kv_b] fn write_b(row: Str) -> Int }\nservice Worker { emission fn tenant() -> Str }\ncomponent TenantAWorker requires kv_a: Store provides worker: Worker {\n  provide worker { fn tenant() { emit kv_a.write_a(\"a\")  return \"a\" } }\n}\ncomponent TenantBWorker requires kv_b: StoreB provides worker: Worker {\n  provide worker { fn tenant() { emit kv_b.write_b(\"b\")  return \"b\" } }\n}\ncomponent Router requires kv_a: Store requires kv_b: StoreB {\n  let a = effect spawn TenantAWorker with { } undo a.dispose()\n  let b = effect spawn TenantBWorker with { } undo b.dispose()\n}")) == ""));
 }
 
 #[test]
@@ -30832,38 +32128,118 @@ fn plain_provider_reaching_an_emission_is_refused__g4___exact_wording() {
 }
 
 #[test]
-fn unmarked_emission_is_refused__g4_() {
-    assert!((admit_src(String::from("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(\"x\") undo db.execute(\"y\") }")) == "G4|call to emission `db.execute` must be marked `emit` (G4)"));
+fn re_providing_a_withdrawn_key_in_another_realm_does_not_satisfy_the_consumer() {
+    let svc = String::from("service D { fn q(s: Str) -> Int } ");
+    let x = String::from("component Old provides db: D { isolate db in realm(\"t1\") provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
 }
 
 #[test]
-fn an_emission_in_an_emit_head_s_arguments_needs_its_own_marker__g4_() {
-    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(b.fetch()) }")) == "G4|call to emission `b.fetch` must be marked `emit` (G4)"));
-    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } component C requires a: A, b: B { emit a.send(emit b.fetch()) }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
-    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service X { fn plain() -> Str } component C requires a: A, x: X { emit a.send(x.plain()) }")) == ""));
-    assert!((admit_src(String::from("service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } service K { emission fn f() -> Str } component C requires a: A, b: B provides k: K { provide k { fn f() { let r = emit b.fetch() return emit a.send(r) } } }")) == ""));
+fn reassigning_a_let_is_refused__g6___exact_wording() {
+    let v = admit_src(String::from("fn bump() -> Int { let n = 1  n = 2  return n }"));
+    assert!((v == "G6|cannot reassign `n` — it is `let` (single-assignment)"));
 }
 
 #[test]
-fn an_emission_extern_in_an_emit_head_s_arguments_needs_its_own_marker__g4_() {
-    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } component C { emit log_line(charge(1)) }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
-    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } component C { emit log_line(emit charge(1)) }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
-    assert!((admit_src(String::from("extern emission fn charge(c: Int) -> Int = @py { return 1 } service A { emission fn send(n: Int) -> Int } component C requires a: A { emit a.send(charge(1)) }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
-    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } service B { emission fn fetch() -> Int } component C requires b: B { emit log_line(b.fetch()) }")) == "G4|call to emission `b.fetch` must be marked `emit` (G4)"));
-    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern pure fn twice(n: Int) -> Int = @py { return n * 2 } component C { emit log_line(twice(1)) }")) == ""));
-    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { emit log_line(charge(n)) return 1 } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
-    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { let r = emit charge(n) return emit log_line(r) } } }")) == ""));
+fn reassigning_a_var_admits() {
+    assert!((admit_src(String::from("fn bump() -> Int { var n = 1  n = 2  n += 1  return n }")) == ""));
 }
 
 #[test]
-fn every_host_emission_crossing_carries_its_marker__issue__1437_() {
-    let ch = String::from("extern emission fn charge(n: Int) -> Int = @py { return 1 } service S { emission fn go(n: Int) -> Int } ");
-    assert!((admit_src(ch.revl_concat("component C provides s: S { provide s { fn go(n) { let r = charge(n) return r } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
-    assert!((admit_src(ch.revl_concat("component C provides s: S { provide s { fn go(n) = charge(n) } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
-    assert!((admit_src(ch.revl_concat("component C provides s: S { provide s { fn go(n) { let r = emit charge(n) return r } } }")) == ""));
-    assert!((admit_src(ch.revl_concat("fn bill(n: Int) -> Int { return charge(n) } component C provides s: S { provide s { fn go(n) = bill(n) } }")) == "G4|call to emission `bill` must be marked `emit` (G4)"));
-    assert!((admit_src(ch.revl_concat("fn bill(n: Int) -> Int { return charge(n) } component C provides s: S { provide s { fn go(n) = emit bill(n) } }")) == ""));
-    assert!((admit_src(String::from("extern emission fn charge(n: Int) -> Int = @py { return 1 } service S { fn go(n: Int) -> Int } component C provides s: S { provide s { fn go(n) = emit charge(n) } }")) == "G4|`S.go` is declared plain, but this implementation reaches `charge()`"));
+fn requires_is_decided_before_provides() {
+    assert!((admit_src(String::from("component C requires a: A provides b: B { }")) == "G1|unknown service `A` in `requires` of C"));
+}
+
+#[test]
+fn residence_is_uniform_across_a_candidate_set() {
+    assert!((admit_src(mset("* -> fast | slow")) == "MODEL|the candidates for `*` in `route model on classify` (Classifier) do not agree on residence: `fast` is `on_device` (line 1) and `slow` is `off_device` (line 3)"));
+}
+
+#[test]
+fn routing_a_confidential_origin_off_the_device_is_refused_by_name() {
+    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn routing_a_provision_is_refused__route_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate api in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == "ROUTE|`isolate ... in realms(...)` routes a *required* key — `api` is a provision of Router"));
+}
+
+#[test]
+fn routing_an_undeclared_key_is_refused__g1_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate nope in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
+    assert!((v == "G1|`nope` is not a declared requirement of Router"));
+}
+
+#[test]
+fn rule_2_param_colored_fn_in_a_sync_method_is_refused__a1_() {
+    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 }\nfn caller(cb: () -> Async[Int]) -> Int { return cb() }\nservice S { emission fn go() -> Int }\ncomponent C provides s: S {\n  provide s { fn go() { let r = caller(() => emit tick())   return 0 } }\n}"));
+    assert!((v == "A1|`S.go` is declared sync, but this implementation reaches async function `caller`, `tick` — a sync method has no in-flight window (A1)"));
+}
+
+#[test]
+fn same_key_in_different_realms_composes__per_realm_g2_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str } component StoreOne provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } } component StoreTwo provides kv: Kv { isolate kv in realm(\"tenant_b\") provide kv { fn get(k) { return k } } }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn same_key_in_the_same_realm_conflicts__g2___realm_named() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str } component StoreOne provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } } component StoreTwo provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } }"));
+    assert!((v == "G2|provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)"));
+}
+
+#[test]
+fn setup_reaching_an_async_extern_is_refused__a1_() {
+    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } service S { fn go() -> Int } component C provides s: S { emit tick() provide s { fn go() { return 0 } } }"));
+    assert!((v == "A1|component `C` reaches async extern `tick` in a setup/activation body, which cannot suspend a fiber (A1)"));
+}
+
+#[test]
+fn spawn_of_an_unknown_component_is_refused__spawn_() {
+    let v = admit_src(String::from("service Sup { fn run() -> Int }\ncomponent Supervisor provides sup: Sup {\n  provide sup { fn run() { let w = effect spawn Nope with { } undo w.dispose()  return 0 } }\n}"));
+    assert!((v == "SPAWN|`spawn Nope` names an unknown component"));
+}
+
+#[test]
+fn sync_method_implementing_an_async_op_is_refused__signature_parity_() {
+    let v = admit_src(String::from("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = emit http_post(url, body) } }"));
+    assert!((v == "A1|method `post` of provision `http` is not async but service Http declares it async"));
+}
+
+#[test]
+fn sync_provide_method_reaching_an_async_extern_is_refused__a1_() {
+    let v = admit_src(String::from("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = emit http_post(url, body) } }"));
+    assert!((v == "A1|`Http.post` is declared sync, but this implementation reaches async extern `http_post` — a sync method has no in-flight window (A1)"));
+}
+
+#[test]
+fn sync_typed_arrow_reaching_an_async_op_leaks__a1_() {
+    let v = admit_src(String::from("service Model { emission async fn complete(msgs: Str) -> Str } service S { emission async fn go() -> Str } component C requires model: Model provides s: S { provide s { async fn go() { let f = msgs => emit model.complete(msgs)   return \"x\" } } }"));
+    assert!((v == "A1|this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"));
+}
+
+#[test]
+fn the_map_value_constructor_carries_no_host_provenance() {
+    let v = admit_src(String::from("fn f() -> Int { let m = Map.empty()  m = m  return 1 }"));
+    assert!((v == "G6|cannot reassign `m` — it is `let` (single-assignment)"));
+}
+
+#[test]
+fn the_ambient_route_slice_equals_single_source_of_the_manifest_components____src() {
+    let stores = String::from("component StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent StoreB provides kv: Kv {\n  isolate kv in realm(\"r2\")\n  provide kv { fn get(k) { return k } }\n}\n");
+    let svc = String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\n");
+    let router = String::from("component Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}");
+    assert!((admit_ambient(svc.revl_concat(&router), String::from("StoreA/kv/r1;StoreB/kv/r2")) == admit_src((svc.revl_concat(&stores)).revl_concat(&router))));
+}
+
+#[test]
+fn the_ambient_splice_leaves_the_single_source_sink_unchanged() {
+    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Bus { emission fn publish(topic: Str) }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Zed requires bus: Bus { effect bus.publish(\"x\") undo bus.publish(\"y\") }");
+    assert!((admit_ambient(src.clone(), String::from("")) == admit_src(src.clone())));
+    assert!((admit_src(src.clone()) == "G4|call to emission `bus.publish` must be marked `emit` (G4)"));
 }
 
 #[test]
@@ -30894,934 +32270,13 @@ fn the_approval_floor_reaches_a_compensation_and_a_spawn_handle_crossing__item_2
 }
 
 #[test]
-fn an_arrow_in_an_emit_head_s_arguments_leaves_the_argument_position__g4_() {
-    let pre = String::from("service Ap { emission fn approve(t: Str, a: Str) -> Str } service Gt { emission fn decide(ok: Bool, v: Str) -> Str } service Rv { emission fn review(k: Str) -> Str } fn approve_args(k: Str, f: (Str, Str) -> Str) -> Str { return f(k, k) } component C requires ap: Ap, gt: Gt provides rv: Rv { provide rv { fn review(k) { ");
-    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))) } } }")) == ""));
-    assert!((admit_src(pre.revl_concat("let f = (t: Str, a: Str) => emit ap.approve(t, a)   return emit gt.decide(true, approve_args(k, f)) } } }")) == ""));
-    assert!((admit_src(pre.revl_concat("let v = approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))   return emit gt.decide(true, v) } } }")) == ""));
-    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => ap.approve(t, a))) } } }")) == "G4|call to emission `ap.approve` must be marked `emit` (G4)"));
-    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, emit ap.approve(k, k)) } } }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
+fn the_async_colour_reaches_the_fn_entries_transitively() {
+    assert!((lower_to_ir(format!("extern emission async fn hf(p: Str) -> Str = @py {{ return p }}\nfn one(p: Str) -> Str {{ return hf(p) }}\nfn two(p: Str) -> Str {{ return one(p) }}\nfn plain(n: Int) -> Int {{ return n + 1 }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[{\"name\": \"p\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"hf\"},\"args\":[{\"kind\":\"var\",\"name\":\"p\"}]}}],\"async\":true},{\"name\":\"two\",\"params\":[{\"name\": \"p\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"one\"},\"args\":[{\"kind\":\"var\",\"name\":\"p\"}]}}],\"async\":true},{\"name\":\"plain\",\"params\":[{\"name\": \"n\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"n\"},\"right\":{\"kind\":\"lit\",\"value\":1},\"operands\":\"Int\"}}]}], \"externs\": [{\"name\": \"hf\", \"class\": \"emission\", \"params\": [{\"name\": \"p\", \"type\": \"Str\"}], \"returns\": \"Str\", \"bodies\": {\"py\": \" return p \"}, \"async\": true}]}"));
 }
 
 #[test]
-fn config_field_of_an_opaque_type_is_refused__g4___exact_wording() {
-    assert!((admit_src(String::from("component y{config{l:t}}")) == "G4|config field `l` of component `y` has type `t`, which reaches the opaque type `t`; a config field must be static data"));
-}
-
-#[test]
-fn config_field_of_an_arrow_type_is_refused__g4_() {
-    assert!((admit_src(String::from("service S { fn g() -> Str } component C provides s: S { config { h: (Str) -> Str } provide s { fn g() = \"x\" } }")) == "G4|config field `h` of component `C` has type `(Str) -> Str`, which reaches an arrow (function) type; a config field must be static data"));
-}
-
-#[test]
-fn config_field_naming_a_service_is_refused__g4_() {
-    assert!((admit_src(String::from("service S { fn g() -> Str } component C provides s: S { config { dep: S } provide s { fn g() = \"x\" } }")) == "G4|config field `dep` of component `C` has type `S`, which reaches the service `S`; a config field must be static data"));
-}
-
-#[test]
-fn config_field_of_an_erased_type_is_refused__g4_() {
-    assert!((admit_src(String::from("service S { fn g() -> Str } component C provides s: S { config { v: Any } provide s { fn g() = \"x\" } }")) == "G4|config field `v` of component `C` has type `Any`, which reaches the erased type `Any`; a config field must be static data"));
-}
-
-#[test]
-fn config_field_of_a_container_reaching_an_arrow_is_refused__g4_() {
-    assert!((admit_src(String::from("service S { fn g() -> Str } component C provides s: S { config { xs: List[(Str) -> Str] } provide s { fn g() = \"x\" } }")) == "G4|config field `xs` of component `C` has type `List[(Str) -> Str]`, which reaches an arrow (function) type; a config field must be static data"));
-}
-
-#[test]
-fn config_field_of_a_declared_record_reaching_an_arrow_is_refused__g4_() {
-    assert!((admit_src(String::from("service S { fn g() -> Str } type R = { h: (Str) -> Str } component C provides s: S { config { r: R } provide s { fn g() = \"x\" } }")) == "G4|config field `r` of component `C` has type `R`, which reaches an arrow (function) type; a config field must be static data"));
-}
-
-#[test]
-fn an_extern_config_field_of_an_arrow_type_is_refused__g4_() {
-    assert!((admit_src(String::from("extern pure fn thing(x: Str) -> Str config { handler: (Str) -> Str } = @py { return x }")) == "G4|config field `handler` of extern `thing` has type `(Str) -> Str`, which reaches an arrow (function) type; a config field must be static data"));
-}
-
-#[test]
-fn config_fields_built_out_of_data_admit() {
-    assert!((admit_src(String::from("service S { fn g() -> Str } type R = { a: Int, b: Str } component C provides s: S { config { xs: List[Str], m: Map[Str, Int], r: R, k: Secret[Str] } provide s { fn g() = \"x\" } }")) == ""));
-}
-
-#[test]
-fn admit_tag_exposes_the_bare_guarantee() {
-    assert!((admit_tag(String::from("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } } component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }")) == "G2"));
-}
-
-#[test]
-fn two_providers_of_one_key_are_refused__g2_() {
-    let v = admit_src(String::from("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } } component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"));
-    assert!((v == "G2|provision conflict: key `db` is provided by both A and B (G2)"));
-}
-
-#[test]
-fn sync_provide_method_reaching_an_async_extern_is_refused__a1_() {
-    let v = admit_src(String::from("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = emit http_post(url, body) } }"));
-    assert!((v == "A1|`Http.post` is declared sync, but this implementation reaches async extern `http_post` — a sync method has no in-flight window (A1)"));
-}
-
-#[test]
-fn async_declared_op_admits_the_same_async_body() {
-    let v = admit_src(String::from("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = emit http_post(url, body) } }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn sync_method_implementing_an_async_op_is_refused__signature_parity_() {
-    let v = admit_src(String::from("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = emit http_post(url, body) } }"));
-    assert!((v == "A1|method `post` of provision `http` is not async but service Http declares it async"));
-}
-
-#[test]
-fn a_required_service_call_to_an_undeclared_operation_is_refused__a6_() {
-    let v = admit_src(String::from("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let n = effect db.execute(\"x\") undo db.query(\"y\") }"));
-    assert!((v == "A6|`db.execute` is not a method of service Database"));
-}
-
-#[test]
-fn the_same_call_to_a_declared_operation_is_admitted() {
-    let v = admit_src(String::from("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let n = effect db.query(\"x\") undo db.query(\"y\") }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn an_absent_operation_in_a_provide_method_is_refused__a6_() {
-    let v = admit_src(String::from("service Store { fn get(key: Str) -> Str } service Cache { fn lookup(key: Str) -> Str } component C requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nonexistent(key) } }"));
-    assert!((v == "A6|`store.nonexistent` is not a method of service Store"));
-}
-
-#[test]
-fn an_absent_operation_under__emit__is_a6__not_the_g4_marker_rule() {
-    let v = admit_src(String::from("service Bus { emission fn publish(topic: Str) } service Cache { fn put(key: Str) } component C requires bus: Bus provides cache: Cache { provide cache { fn put(key) { emit bus.broadcast(key) } } }"));
-    assert!((v == "A6|`bus.broadcast` is not a method of service Bus"));
-}
-
-#[test]
-fn a_stream_requirement_draws_no_member_verdict() {
-    let v = admit_src(String::from("service Cache { fn put(key: Str) } component C requires ticks: Stream[Int] provides cache: Cache { provide cache { fn put(key) { let x = key } } }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn undeclared_access_is_refused__g1___exact_wording() {
-    let v = admit_src(String::from("service Log { fn write(msg: Str) } component Logger provides log: Log { provide log { fn write(msg) { emit db.execute(msg) } } }"));
-    assert!((v == "G1|`db` is not a declared requirement of Logger"));
-}
-
-#[test]
-fn a_declared_local_receiver_is_not_a_g1_access() {
-    let v = admit_src(String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { let store = effect Map.new() undo store.drop() provide cache { fn put(key, value) { effect store.insert(key, value) undo store.remove(key) } } }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn dependency_cycle_is_refused__g3___exact_path() {
-    let v = admit_src(String::from("service A { fn ping(tag: Str) -> Str } service B { fn pong(tag: Str) -> Str } component Alpha requires b: B provides a: A { provide a { fn ping(tag) = b.pong(tag) } } component Beta requires a: A provides b: B { provide b { fn pong(tag) = a.ping(tag) } }"));
-    assert!((v == "G3|dependency cycle: Alpha -> Beta -> Alpha (G3)"));
-}
-
-#[test]
-fn same_key_in_the_same_realm_conflicts__g2___realm_named() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str } component StoreOne provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } } component StoreTwo provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } }"));
-    assert!((v == "G2|provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)"));
-}
-
-#[test]
-fn same_key_in_different_realms_composes__per_realm_g2_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str } component StoreOne provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } } component StoreTwo provides kv: Kv { isolate kv in realm(\"tenant_b\") provide kv { fn get(k) { return k } } }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn empty_manifest_admits_exactly_as_single_source__base_invariant_() {
-    let src = String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }");
-    assert!((admit_ambient(src.clone(), String::from("")) == admit_src(src.clone())));
-}
-
-#[test]
-fn a_provision_the_running_manifest_already_holds_conflicts__ambient_g2_() {
-    let v = admit_ambient(String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"), String::from("OldStore/db/"));
-    assert!((v == "G2|provision conflict: key `db` is provided by both OldStore and NewStore (G2)"));
-}
-
-#[test]
-fn ambient_admission_equals_the_single_source_composition_of_manifest____src() {
-    let manifest_comp = String::from("component OldStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    let newc = String::from("component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    let svc = String::from("service D { fn q(s: Str) -> Int } ");
-    assert!((admit_ambient(svc.revl_concat(&newc), String::from("OldStore/db/")) == admit_src(((svc.revl_concat(&manifest_comp)).revl_concat(" ")).revl_concat(&newc))));
-}
-
-#[test]
-fn a_manifest_provision_in_a_different_realm_composes__per_realm_ambient_g2_() {
-    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str } component StoreB provides kv: Kv { isolate kv in realm(\"tenant_b\") provide kv { fn get(k) { return k } } }"), String::from("StoreA/kv/tenant_a"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_manifest_provision_in_the_same_realm_conflicts__realm_named__ambient_g2_() {
-    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str } component StoreB provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } }"), String::from("StoreA/kv/tenant_a"));
-    assert!((v == "G2|provision conflict: key `kv` in realm `tenant_a` is provided by both StoreA and StoreB (G2)"));
-}
-
-#[test]
-fn an_internally_refused_component_is_forwarded_unchanged__whatever_the_manifest() {
-    let src = String::from("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(\"x\") undo db.execute(\"y\") }");
-    assert!((admit_ambient(src.clone(), String::from("Other/svc/")) == admit_src(src.clone())));
-}
-
-#[test]
-fn a_disjoint_manifest_key_never_conflicts_with_the_incoming_component() {
-    let v = admit_ambient(String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"), String::from("OldCache/cache/"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_route_whose_realms_are_all_provided_by_the_manifest_admits__ambient_route_() {
-    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}"), String::from("StoreA/kv/r1;StoreB/kv/r2"));
-    assert!((v == ""));
-}
-
-#[test]
-fn the_ambient_route_slice_equals_single_source_of_the_manifest_components____src() {
-    let stores = String::from("component StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent StoreB provides kv: Kv {\n  isolate kv in realm(\"r2\")\n  provide kv { fn get(k) { return k } }\n}\n");
-    let svc = String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\n");
-    let router = String::from("component Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}");
-    assert!((admit_ambient(svc.revl_concat(&router), String::from("StoreA/kv/r1;StoreB/kv/r2")) == admit_src((svc.revl_concat(&stores)).revl_concat(&router))));
-}
-
-#[test]
-fn a_routed_realm_provided_by_neither_text_nor_manifest_still_refuses__ambient_route_() {
-    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r9\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"), String::from("StoreA/kv/r1"));
-    assert!((v == "ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no component provides `kv` in realm `r9` (item 162: every routed realm needs a provider)"));
-}
-
-#[test]
-fn an_earlier_line_ambient_g2_conflict_outranks_a_later_internal_refusal() {
-    let src = String::from("service D { fn q(s: Str) -> Int }\ncomponent Early provides db: D { provide db { fn q(s) { let x = s   return 0 } } }\ncomponent Late provides ap: D { provide ap { fn q(s) { let x = nope   return 0 } } }");
-    let v = admit_ambient(src.clone(), String::from("OldStore/db/"));
-    assert!((v == "G2|provision conflict: key `db` is provided by both OldStore and Early (G2)"));
-}
-
-#[test]
-fn a_dependency_cycle_through_the_running_manifest_is_refused__ambient_g3_() {
-    let svc = String::from("service A { fn pa() -> Int } service B { fn pb() -> Int } ");
-    let a = String::from("component A requires b: B provides a: A { provide a { fn pa() { return 0 } } } ");
-    let b = String::from("component B requires a: A provides b: B { provide b { fn pb() { return 0 } } }");
-    let v = admit_ambient(svc.revl_concat(&b), String::from("A/a/;A<b"));
-    assert!((v == "G3|dependency cycle: A -> B -> A (G3)"));
-    assert!((v == admit_src((svc.revl_concat(&a)).revl_concat(&b))));
-}
-
-#[test]
-fn without_the_requirement_row_the_cross_manifest_cycle_is_invisible() {
-    let svc = String::from("service A { fn pa() -> Int } service B { fn pb() -> Int } ");
-    let b = String::from("component B requires a: A provides b: B { provide b { fn pb() { return 0 } } }");
-    assert!((admit_ambient(svc.revl_concat(&b), String::from("A/a/")) == ""));
-}
-
-#[test]
-fn admission_against_a_halted_composition_is_refused__item_443_() {
-    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("!halted;A/a/")) == "HALTED|admission against a halted composition is refused (item 443)"));
-}
-
-#[test]
-fn an_unknown_manifest_row_kind_refuses_naming_the_row() {
-    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("?A/a/")) == "MANIFEST|unrecognized manifest row `?A/a/`"));
-}
-
-#[test]
-fn a_malformed_replacement_row_refuses_rather_than_withdrawing_nothing() {
-    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("OldStore/db/;-OldStore/db/")) == "MANIFEST|manifest replacement row `-OldStore/db/` does not name a component"));
-}
-
-#[test]
-fn a_withdrawn_provision_a_retained_running_consumer_requires_is_refused() {
-    let svc = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str } ");
-    let x = String::from("component Old provides other: C { provide other { fn g(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
-}
-
-#[test]
-fn an_explicit_withdrawal_row_strands_the_same_consumer() {
-    let svc = String::from("service C { fn g(k: Str) -> Str } ");
-    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db;-Old")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
-}
-
-#[test]
-fn a_legitimate_replacement_that_re_provides_the_key_admits() {
-    let svc = String::from("service D { fn q(s: Str) -> Int } ");
-    let x = String::from("component Old provides db: D { provide db { fn q(s) { let x = s   return 1 } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == ""));
-}
-
-#[test]
-fn a_requirement_already_unmet_before_the_admission_stays_admissible() {
-    let svc = String::from("service C { fn g(k: Str) -> Str } ");
-    let x = String::from("component Old provides other: C { provide other { fn g(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/aux/;Store/cache/;Store<db")) == ""));
-}
-
-#[test]
-fn re_providing_a_withdrawn_key_in_another_realm_does_not_satisfy_the_consumer() {
-    let svc = String::from("service D { fn q(s: Str) -> Int } ");
-    let x = String::from("component Old provides db: D { isolate db in realm(\"t1\") provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
-}
-
-#[test]
-fn withdrawing_the_consumer_too_releases_the_withdrawn_key() {
-    let svc = String::from("service C { fn g(k: Str) -> Str } ");
-    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db;-Old;-Store")) == ""));
-}
-
-#[test]
-fn a_routed_running_requirement_is_not_reported_by_the_withdrawal_check() {
-    let svc = String::from("service C { fn g(k: Str) -> Str } ");
-    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/r1;Store/cache/;Store<*db;-Old")) == ""));
-}
-
-#[test]
-fn a_routed_running_consumer_that_loses_a_realm_s_provider_is_refused() {
-    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
-    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no component provides `kv` in realm `r2` (item 162: every routed realm needs a provider)"));
-}
-
-#[test]
-fn without_the_route_row_the_routed_realm_loss_is_invisible() {
-    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
-    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv")) == ""));
-}
-
-#[test]
-fn a_routed_realm_re_provided_by_the_incoming_text_still_admits() {
-    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
-    let x = String::from("component StoreB provides kv: Kv { isolate kv in realm(\"r2\") provide kv { fn get(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == ""));
-}
-
-#[test]
-fn a_routed_running_consumer_whose_realms_all_stay_provided_is_untouched() {
-    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
-    let x = String::from("component Fresh provides other: Api { provide other { fn go(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2")) == ""));
-}
-
-#[test]
-fn a_wire_carrying_both_a_service_block_and_route_rows_refuses_the_lost_realm() {
-    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
-    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv;Router>kv/r1,r2;!services;:Kv;:Api")) == "ROUTE|multi-realm bind of `kv` in Router names realm `r2`, but no component provides `kv` in realm `r2` (item 162: every routed realm needs a provider)"));
-}
-
-#[test]
-fn a_malformed_route_row_refuses_rather_than_dropping_the_legs() {
-    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("Router/api/;Router>kv")) == "MANIFEST|manifest route row `Router>kv` does not name a component, a key and its realms"));
-}
-
-#[test]
-fn a_cycle_closing_through_a_routed_running_consumer_is_refused__ambient_g3_() {
-    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
-    let x = String::from("component StoreB requires api: Api provides kv: Kv { isolate kv in realm(\"r2\") provide kv { fn get(k) { return api.go(k) } } }");
-    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;Router/api/;Router<*kv;Router>kv/r1,r2")) == "G3|dependency cycle: Router -> StoreB -> Router (G3)"));
-}
-
-#[test]
-fn an_undeclared_service_in_requires_is_refused_by_name() {
-    assert!((admit_src(String::from("component C requires s: S { }")) == "G1|unknown service `S` in `requires` of C"));
-}
-
-#[test]
-fn an_undeclared_service_in_provides_is_refused_by_name() {
-    assert!((admit_src(String::from("component C provides s: S { }")) == "G1|unknown service `S` in `provides` of C"));
-}
-
-#[test]
-fn requires_is_decided_before_provides() {
-    assert!((admit_src(String::from("component C requires a: A provides b: B { }")) == "G1|unknown service `A` in `requires` of C"));
-}
-
-#[test]
-fn a_declared_service_resolves() {
-    assert!((admit_src(String::from("service S { fn p(k: Str) -> Str } component C provides s: S { provide s { fn p(k) = k } }")) == ""));
-}
-
-#[test]
-fn a_stream_requirement_is_not_a_service_lookup() {
-    assert!((admit_src(String::from("service E { fn go(k: Str) -> Str } event Tick(key: id) { id: Str, at: Int } component C requires sub: Stream[Tick] provides e: E { provide e { fn go(k) = k } }")) == ""));
-}
-
-#[test]
-fn a_candidate_requires_resolves_against_the_running_service_block() {
-    let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
-    assert!((admit_src(cand.clone()) == "G1|unknown service `Store` in `requires` of CacheLayer"));
-    assert!((admit_ambient(cand.clone(), String::from("Kv/store/;App/app/;App<store;!services;:Store;:AppSvc")) == ""));
-}
-
-#[test]
-fn a_wire_that_claims_nothing_about_its_services_decides_nothing() {
-    let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
-    assert!((admit_ambient(cand.clone(), String::from("Kv/store/;App/app/;App<store")) == ""));
-}
-
-#[test]
-fn an_exhaustive_service_block_that_omits_the_name_still_refuses() {
-    let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
-    assert!((admit_ambient(cand.clone(), String::from("Kv/store/;App/app/;App<store;!services;:AppSvc")) == "G1|unknown service `Store` in `requires` of CacheLayer"));
-}
-
-#[test]
-fn the_empty_wire_keeps_the_standalone_verdict() {
-    let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
-    assert!((admit_ambient(cand.clone(), String::from("")) == admit_src(cand.clone())));
-}
-
-#[test]
-fn a_required_service_call_is_typed_against_the_running_signature() {
-    let bad = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
-    assert!((admit_ambient(bad.clone(), String::from("Kv/store/;!services;:Store,get(key:Str),bump(n:Int)")) == "T1|`store.bump` argument `n` expects `Int`, got `Str`"));
-    let ok = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
-    assert!((admit_ambient(ok.clone(), String::from("Kv/store/;!services;:Store,get(key:Str),bump(n:Int)")) == ""));
-}
-
-#[test]
-fn an_operation_named_without_a_parameter_list_decides_nothing_about_arguments() {
-    let bad = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
-    assert!((admit_ambient(bad.clone(), String::from("Kv/store/;!services;:Store,get,bump")) == ""));
-    let miss = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nope(key) } }");
-    assert!((admit_ambient(miss.clone(), String::from("Kv/store/;!services;:Store,get,bump")) == "A6|`store.nope` is not a method of service Store"));
-}
-
-#[test]
-fn the_text_s_service_declaration_outranks_the_running_one() {
-    let src = String::from("service Store { fn bump(n: Str) -> Str } service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
-    assert!((admit_ambient(src.clone(), String::from("Kv/other/;!services;:Store,bump(n:Int)")) == ""));
-}
-
-#[test]
-fn an_empty_parameter_list_is_a_claim__not_silence() {
-    let src = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.ping() } }");
-    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,ping()")) == ""));
-}
-
-#[test]
-fn a_garbled_parameter_list_refuses_the_wire_by_name() {
-    let src = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
-    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(key")) == "MANIFEST|manifest service row `:Store,get(key` does not name an operation"));
-    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(:Str)")) == "MANIFEST|manifest service row `:Store,get(:Str)` does not name an operation"));
-    assert!((admit_ambient(src.clone(), String::from("Kv/store/;!services;:Store,get(key:)")) == "MANIFEST|manifest service row `:Store,get(key:)` does not name an operation"));
-}
-
-#[test]
-fn a_handoff_row_alone_moves_no_verdict() {
-    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:D")) == ""));
-    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:D")) == admit_src(clean.clone())));
-}
-
-#[test]
-fn a_successor_that_cannot_hold_the_running_state_is_refused__handoff_() {
-    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Str;-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Int`, but `OldStore` exports `Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
-}
-
-#[test]
-fn a_widened_accepted_hand_off_shape_still_admits() {
-    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Opt[Str]   provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Str;-OldStore")) == ""));
-}
-
-#[test]
-fn a_narrowed_accepted_hand_off_shape_is_refused() {
-    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Str   provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:Opt[Str];-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `Str`, but `OldStore` exports `Opt[Str]` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
-}
-
-#[test]
-fn a_cold_hand_off_key_is_no_conflict() {
-    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: Int   provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;-OldStore")) == ""));
-}
-
-#[test]
-fn a_function_typed_hand_off_row_is_read__and_meets_contravariantly() {
-    let x = String::from("service D { fn q(s: Str) -> Int } component OldStore provides db: D { handoff db: (Float) -> Str   provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(x.clone(), String::from("OldStore/db/;OldStore=db:(Int) -> Str;-OldStore")) == "G2|state hand-off on `db` differs from the running manifest: `OldStore` accepts `(Float) -> Str`, but `OldStore` exports `(Int) -> Str` — the successor cannot hold the predecessor's state, and dropping it on the swap would be residue"));
-}
-
-#[test]
-fn a_garbled_handoff_row_refuses_by_name() {
-    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("OldStore=db")) == "MANIFEST|manifest handoff row `OldStore=db` does not name a component, a key and its state type"));
-    assert!((admit_ambient(clean.clone(), String::from("OldStore=db:")) == "MANIFEST|manifest handoff row `OldStore=db:` does not name a component, a key and its state type"));
-}
-
-#[test]
-fn the_service_block_leaves_every_ambient_composition_verdict_unmoved() {
-    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from("OldCache/cache/;!services;:D;:Other")) == ""));
-    assert!((admit_ambient(clean.clone(), String::from("OldStore/db/;!services;:D")) == admit_ambient(clean.clone(), String::from("OldStore/db/"))));
-    assert!((admit_ambient(clean.clone(), String::from("!services")) == admit_src(clean.clone())));
-}
-
-#[test]
-fn the_service_block_does_not_disturb_a_withdrawal_refusal() {
-    let fresh = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str } component Fresh provides other: C { provide other { fn g(k) { return k } } }");
-    let bare = String::from("Db/db/;Store/cache/;Store<db;-Db");
-    let blocked = String::from("Db/db/;Store/cache/;Store<db;!services;:D;:C;-Db");
-    assert!((admit_ambient(fresh.clone(), blocked.clone()) == admit_ambient(fresh.clone(), bare.clone())));
-    assert!((admit_ambient(fresh.clone(), blocked.clone()) == "G2|this admission withdraws the running provider of `db` (`Db`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
-}
-
-#[test]
-fn a_malformed_service_row_refuses_naming_the_row() {
-    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(clean.clone(), String::from(":")) == "MANIFEST|manifest service row `:` does not name a service"));
-    assert!((admit_ambient(clean.clone(), String::from(":9bad")) == "MANIFEST|manifest service row `:9bad` does not name a service"));
-    assert!((admit_ambient(clean.clone(), String::from(":A/b")) == "MANIFEST|manifest service row `:A/b` does not name a service"));
-    assert!((admit_ambient(clean.clone(), String::from("!service")) == "MANIFEST|unrecognized manifest header row `!service`"));
-}
-
-#[test]
-fn a_withdrawal_tying_with_a_spawn_bound_names_the_withdrawal() {
-    let src = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str }\nservice Kv2 { emission[kv2] fn write(row: Str) -> Int }\nservice Task { emission[kv2] fn go() -> Int }\nservice Sup { fn run() -> Int }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Worker requires kv2: Kv2 provides task: Task { provide task { fn go() { emit kv2.write(\"x\")  return 0 } } } component Supervisor provides sup: Sup { provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } } }");
-    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
-}
-
-#[test]
-fn a_withdrawal_tying_with_the_boot_count_names_the_withdrawal() {
-    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Env { fn a() -> Str }\nservice Env2 { fn b() -> Str }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } boot component B1 provides e1: Env { config { x: Str } provide e1 { fn a() = config.x } } boot component B2 provides e2: Env2 { config { y: Str } provide e2 { fn b() = config.y } }");
-    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
-}
-
-#[test]
-fn an_earlier_line_spawn_bound_still_outranks_a_later_line_withdrawal() {
-    let src = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str }\nservice Kv2 { emission[kv2] fn write(row: Str) -> Int }\nservice Task { emission[kv2] fn go() -> Int }\nservice Sup { fn run() -> Int }\ncomponent Worker requires kv2: Kv2 provides task: Task { provide task { fn go() { emit kv2.write(\"x\")  return 0 } } } component Supervisor provides sup: Sup { provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } } }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } }");
-    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv2`"));
-}
-
-#[test]
-fn a_component_loop_refusal_still_outranks_a_tying_withdrawal() {
-    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Bus { emission fn publish(topic: Str) }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Zed requires bus: Bus { effect bus.publish(\"x\") undo bus.publish(\"y\") }");
-    assert!((admit_ambient(src.clone(), String::from("Old/db/;Store/cache/;Store<db")) == "G4|call to emission `bus.publish` must be marked `emit` (G4)"));
-}
-
-#[test]
-fn the_ambient_splice_leaves_the_single_source_sink_unchanged() {
-    let src = String::from("service C { fn g(k: Str) -> Str }\nservice Bus { emission fn publish(topic: Str) }\ncomponent Old provides other: C { provide other { fn g(k) { return k } } } component Zed requires bus: Bus { effect bus.publish(\"x\") undo bus.publish(\"y\") }");
-    assert!((admit_ambient(src.clone(), String::from("")) == admit_src(src.clone())));
-    assert!((admit_src(src.clone()) == "G4|call to emission `bus.publish` must be marked `emit` (G4)"));
-}
-
-#[test]
-fn a_manifest_requirement_met_by_the_incoming_text_composes__ambient_g3_() {
-    let svc = String::from("service D { fn q(s: Str) -> Int } ");
-    let store = String::from("component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
-    assert!((admit_ambient(svc.revl_concat(&store), String::from("OldApp<db")) == ""));
-}
-
-#[test]
-fn undeclared_bare_value_in_a_method_is_refused__g1_() {
-    let v = admit_src(String::from("service S { fn go() -> Int } component C provides s: S { provide s { fn go() { let x = nope   return 0 } } }"));
-    assert!((v == "G1|`nope` is not a declared requirement of C"));
-}
-
-#[test]
-fn an_arrow_parameter_resolves_in_its_body__no_false_g1_() {
-    assert!((admit_src(String::from("fn apply(f: (Int) -> Int, x: Int) -> Int { return f(x) } service S { fn go(n: Int) -> Int } component C provides s: S { provide s { fn go(n) { let r = apply(x => x, n)   return r } } }")) == ""));
-}
-
-#[test]
-fn async_extern_used_as_a_value_is_refused__a1_() {
-    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } service S { emission async fn go() -> Int } component C provides s: S { provide s { async fn go() { let f = tick   return 0 } } }"));
-    assert!((v == "A1|`S.go` uses async extern `tick` as a function value, but an async callable has no arrow type"));
-}
-
-#[test]
-fn setup_reaching_an_async_extern_is_refused__a1_() {
-    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } service S { fn go() -> Int } component C provides s: S { emit tick() provide s { fn go() { return 0 } } }"));
-    assert!((v == "A1|component `C` reaches async extern `tick` in a setup/activation body, which cannot suspend a fiber (A1)"));
-}
-
-#[test]
-fn isolate_after_an_effect_is_refused__prelude_rule_() {
-    let v = admit_src(String::from("service D { fn q(s: Str) -> Int }\nservice S { fn go() -> Int }\ncomponent C requires d: D provides s: S {\n  let store = effect Map.new() undo store.drop()\n  isolate d in realm(\"r1\")\n  provide s { fn go() { return 0 } }\n}"));
-    assert!((v == "PRELUDE|`isolate` must precede every effect, emit, await, and provide statement"));
-}
-
-#[test]
-fn config_before_isolate_composes__prelude_ok_() {
-    assert!((admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  config { tenant: Str }\n  isolate kv in realm(\"r1\")\n  let v = effect kv.get(\"boot\") undo kv.get(\"boot\")\n}")) == ""));
-}
-
-#[test]
-fn sync_typed_arrow_reaching_an_async_op_leaks__a1_() {
-    let v = admit_src(String::from("service Model { emission async fn complete(msgs: Str) -> Str } service S { emission async fn go() -> Str } component C requires model: Model provides s: S { provide s { async fn go() { let f = msgs => emit model.complete(msgs)   return \"x\" } } }"));
-    assert!((v == "A1|this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"));
-}
-
-#[test]
-fn an_arrow_in_an_async_t__slot_is_coerced__not_leaky__admits_() {
-    assert!((admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Async[Str], x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => emit tick(msgs), \"x\")   return r } } }")) == ""));
-}
-
-#[test]
-fn the_same_arrow_in_a_sync_slot_leaks__a1_() {
-    let v = admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => emit tick(msgs), \"x\")   return r } } }"));
-    assert!((v == "A1|this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"));
-}
-
-#[test]
-fn a_module_fn_using_an_async_callable_as_a_value_is_refused__a1_() {
-    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } fn holder() -> Int { let f = tick   return 0 } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }"));
-    assert!((v == "A1|function `holder` uses async callable `tick` as a function value, but an async callable has no arrow type"));
-}
-
-#[test]
-fn a_module_fn_s_sync_arrow_reaching_an_async_callable_leaks__a1_() {
-    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } fn holder(g: (Int) -> Int) -> Int { let h = x => tick()   return 0 } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }"));
-    assert!((v == "A1|this arrow reaches async callable `tick`, but its type carries no async color — the caller would receive an unawaited suspension (A1)"));
-}
-
-#[test]
-fn a_module_fn_s_arrow_into_an_async_t__slot_is_coerced__admits_() {
-    assert!((admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 } fn apply_cb(cb: () -> Async[Int]) -> Int { return cb() } fn holder() -> Int { return apply_cb(() => tick()) } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }")) == ""));
-}
-
-#[test]
-fn a_spawn_that_widens_a_child_s_capabilities_is_refused__g4_() {
-    let v = admit_src(String::from("service StoreA { emission[kv_a] fn wa(r: Str) -> Int }\nservice StoreB { emission[kv_b] fn wb(r: Str) -> Int }\nservice Task { emission fn go() -> Int }\ncomponent Leaker requires kv_b: StoreB provides task: Task {\n  provide task { fn go() { emit kv_b.wb(\"x\")  return 0 } }\n}\ncomponent Supervisor requires kv_a: StoreA {\n  let l = effect spawn Leaker with { } undo l.dispose()\n}"));
-    assert!((v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"));
-}
-
-#[test]
-fn a_spawn_laundered_through_a_same_spelled_requires_key_is_refused__g4_() {
-    let v = admit_src(String::from("service KvA { emission[kv_a] fn put(k: Str) -> Int }\nservice KvB { emission[kv_b] fn put(k: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Leaker requires kv: KvB provides worker: Worker {\n  provide worker { fn run() { emit kv.put(\"row\")  return \"k\" } }\n}\ncomponent Supervisor requires kv: KvA {\n  let w = effect spawn Leaker with { } undo w.dispose()\n}"));
-    assert!((v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"));
-}
-
-#[test]
-fn a_spawn_reaching_outside_the_parent_s_path_cone_is_refused__g4_() {
-    let v = admit_src(String::from("service TmpStore { emission[fs.write(path=\"/tmp\")] fn ingest(r: Str) -> Int }\nservice EtcStore { emission[fs.write(path=\"/etc\")] fn ingest(r: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Kid requires fs: EtcStore provides worker: Worker {\n  provide worker { fn run() { emit fs.ingest(\"row\")  return \"k\" } }\n}\ncomponent Router requires fs: TmpStore {\n  let w = effect spawn Kid with { } undo w.dispose()\n}"));
-    assert!((v == "G4|`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, never widen them"));
-}
-
-#[test]
-fn a_spawn_narrowing_into_the_parent_s_path_cone_admits() {
-    assert!((admit_src(String::from("service TmpStore { emission[fs.write(path=\"/tmp\")] fn ingest(r: Str) -> Int }\nservice JobStore { emission[fs.write(path=\"/tmp/jobs\")] fn ingest(r: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Kid requires fs: JobStore provides worker: Worker {\n  provide worker { fn run() { emit fs.ingest(\"row\")  return \"k\" } }\n}\ncomponent Router requires fs: TmpStore {\n  let w = effect spawn Kid with { } undo w.dispose()\n}")) == ""));
-}
-
-#[test]
-fn a_sibling_path_is_not_a_narrowing_of_the_parent_s_cone__g4_() {
-    let v = admit_src(String::from("service TmpStore { emission[fs.write(path=\"/tmp\")] fn ingest(r: Str) -> Int }\nservice OtherStore { emission[fs.write(path=\"/tmp-other\")] fn ingest(r: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Kid requires fs: OtherStore provides worker: Worker {\n  provide worker { fn run() { emit fs.ingest(\"row\")  return \"k\" } }\n}\ncomponent Router requires fs: TmpStore {\n  let w = effect spawn Kid with { } undo w.dispose()\n}"));
-    assert!((v == "G4|`Router` spawns `Kid`, granting it `fs.write(path=\"/tmp-other\")`, but `Router` holds only `fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, never widen them"));
-}
-
-#[test]
-fn a_spawn_widening_a_budget_ceiling_is_refused__g4_() {
-    let v = admit_src(String::from("service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }\nservice NetWide { emission[net(requests=1000)] fn call(u: Str) -> Int }\nservice Worker { emission[net] fn go() -> Int }\ncomponent Child requires net: NetWide provides worker: Worker {\n  provide worker { fn go() { emit net.call(\"row\")  return 0 } }\n}\ncomponent Supervisor requires net: NetTight {\n  let w = effect spawn Child with { } undo w.dispose()\n}"));
-    assert!((v == "G4|`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)"));
-}
-
-#[test]
-fn a_spawn_dropping_the_parent_s_budget_ceiling_is_refused__g4_() {
-    let v = admit_src(String::from("service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }\nservice NetBare { emission[net] fn call(u: Str) -> Int }\nservice Worker { emission[net] fn go() -> Int }\ncomponent Child requires net: NetBare provides worker: Worker {\n  provide worker { fn go() { emit net.call(\"row\")  return 0 } }\n}\ncomponent Supervisor requires net: NetTight {\n  let w = effect spawn Child with { } undo w.dispose()\n}"));
-    assert!((v == "G4|`Supervisor` spawns `Child` with a wider resource budget than it holds: `net` drops the `calls` budget (a missing ceiling is unbounded, hence wider). A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)"));
-}
-
-#[test]
-fn a_spawn_narrowing_a_budget_ceiling_admits() {
-    assert!((admit_src(String::from("service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }\nservice NetNarrow { emission[net(requests=50)] fn call(u: Str) -> Int }\nservice Worker { emission[net] fn go() -> Int }\ncomponent Child requires net: NetNarrow provides worker: Worker {\n  provide worker { fn go() { emit net.call(\"row\")  return 0 } }\n}\ncomponent Supervisor requires net: NetTight {\n  let w = effect spawn Child with { } undo w.dispose()\n}")) == ""));
-}
-
-#[test]
-fn a_per_instance_capability_symbol_resolved_into_the_parent_s_cone_admits() {
-    assert!((admit_src(String::from("service JobStore { emission[fs.write(path=config.job_root)] fn ingest(r: Str) -> Int }\nservice TmpStore { emission[fs.write(path=\"/tmp\")] fn ingest(r: Str) -> Int }\nservice Worker { emission fn run() -> Str }\ncomponent Kid requires fs: JobStore provides worker: Worker {\n  provide worker { fn run() { emit fs.ingest(\"row\")  return \"k\" } }\n  config { job_root: Str }\n}\ncomponent Router requires fs: TmpStore {\n  let w = effect spawn Kid with { job_root: \"/tmp/jobs\" } undo w.dispose()\n}")) == ""));
-}
-
-#[test]
-fn a_dotted_capability_token_is_one_capability__not_two__g4_() {
-    let v = admit_src(String::from("service Store { emission[fs.write] fn ingest(r: Str) -> Int }\nservice Task { emission[fs.write] fn go() -> Int }\ncomponent Worker requires fs: Store provides task: Task {\n  provide task { fn go() { emit fs.ingest(\"x\")  return 0 } }\n}"));
-    assert!((v == "G4|`Task.go` is declared `emission[fs.write]`, but this implementation emits through `fs` (reaching `fs.ingest`)"));
-}
-
-#[test]
-fn a_dotted_capability_token_on_a_non_emitting_method_admits() {
-    assert!((admit_src(String::from("service Store { emission[fs.write] fn ingest(r: Str) -> Int }\nservice Task { emission[fs.write] fn go() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() { return 0 } }\n}")) == ""));
-}
-
-#[test]
-fn an_unmarked_emission_through_a_spawn_handle_is_refused__g4_() {
-    let v = admit_src(String::from("service Net { emission[net] fn send(m: Str) -> Int }\nservice Task { emission[net] fn run(p: Str) -> Int  fn status() -> Int }\ncomponent Worker requires net: Net provides task: Task {\n  provide task { fn run(p: Str) { emit net.send(p)  return 1 }  fn status() = 0 }\n}\nservice Sup { emission fn go(p: Str) -> Int }\ncomponent Supervisor provides sup: Sup {\n  provide sup { fn go(p: Str) { let w = effect spawn Worker with { } undo w.dispose()  let r = w.task.run(p)  return r } }\n}"));
-    assert!((v == "G4|call to emission `w.task.run` must be marked `emit` (G4)"));
-}
-
-#[test]
-fn a_plain_method_spawning_an_emitting_target_is_refused__g4_() {
-    let v = admit_src(String::from("service Store { emission[kv] fn write(row: Str) -> Int }\nservice Task { emission[kv] fn go() -> Int }\nservice Sup { fn run() -> Int }\ncomponent Worker requires kv: Store provides task: Task {\n  provide task { fn go() { emit kv.write(\"x\")  return 0 } }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }\n}"));
-    assert!((v == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv`"));
-}
-
-#[test]
-fn a_scoped_method_spawning_a_target_that_widens_its_caps_is_refused__g4_() {
-    let v = admit_src(String::from("service Store { emission[kv] fn write(row: Str) -> Int }\nservice Task { emission[kv] fn go() -> Int }\nservice Sup { emission[other] fn run() -> Int }\ncomponent Worker requires kv: Store provides task: Task {\n  provide task { fn go() { emit kv.write(\"x\")  return 0 } }\n}\ncomponent Supervisor requires other: Store provides sup: Sup {\n  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }\n}"));
-    assert!((v == "G4|`Sup.run` is declared `emission[other]`, but it spawns `Worker`, which emits through `kv`"));
-}
-
-#[test]
-fn a_scoped_method_whose_spawn_target_stays_in_bound_admits() {
-    assert!((admit_src(String::from("service Store { emission[kv] fn write(row: Str) -> Int }\nservice Task { emission[kv] fn go() -> Int }\nservice Sup { emission[kv] fn run() -> Int }\ncomponent Worker requires kv: Store provides task: Task {\n  provide task { fn go() { emit kv.write(\"x\")  return 0 } }\n}\ncomponent Supervisor requires kv: Store provides sup: Sup {\n  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }\n}")) == ""));
-}
-
-#[test]
-fn per_tenant_spawn_narrowing_composes__attenuation_admits_() {
-    assert!((admit_src(String::from("service Store { emission[kv_a] fn write_a(row: Str) -> Int }\nservice StoreB { emission[kv_b] fn write_b(row: Str) -> Int }\nservice Worker { emission fn tenant() -> Str }\ncomponent TenantAWorker requires kv_a: Store provides worker: Worker {\n  provide worker { fn tenant() { emit kv_a.write_a(\"a\")  return \"a\" } }\n}\ncomponent TenantBWorker requires kv_b: StoreB provides worker: Worker {\n  provide worker { fn tenant() { emit kv_b.write_b(\"b\")  return \"b\" } }\n}\ncomponent Router requires kv_a: Store requires kv_b: StoreB {\n  let a = effect spawn TenantAWorker with { } undo a.dispose()\n  let b = effect spawn TenantBWorker with { } undo b.dispose()\n}")) == ""));
-}
-
-#[test]
-fn rule_2_param_colored_fn_in_a_sync_method_is_refused__a1_() {
-    let v = admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 }\nfn caller(cb: () -> Async[Int]) -> Int { return cb() }\nservice S { emission fn go() -> Int }\ncomponent C provides s: S {\n  provide s { fn go() { let r = caller(() => emit tick())   return 0 } }\n}"));
-    assert!((v == "A1|`S.go` is declared sync, but this implementation reaches async function `caller`, `tick` — a sync method has no in-flight window (A1)"));
-}
-
-#[test]
-fn async_method_reaching_a_rule_2_colored_fn_admits() {
-    assert!((admit_src(String::from("extern emission async fn tick() -> Int = @py { return 1 }\nfn caller(cb: () -> Async[Int]) -> Int { return cb() }\nservice S { emission async fn go() -> Int }\ncomponent C provides s: S {\n  provide s { async fn go() { let r = caller(() => emit tick())   return 0 } }\n}")) == ""));
-}
-
-#[test]
-fn spawn_of_an_unknown_component_is_refused__spawn_() {
-    let v = admit_src(String::from("service Sup { fn run() -> Int }\ncomponent Supervisor provides sup: Sup {\n  provide sup { fn run() { let w = effect spawn Nope with { } undo w.dispose()  return 0 } }\n}"));
-    assert!((v == "SPAWN|`spawn Nope` names an unknown component"));
-}
-
-#[test]
-fn an_unbound_spawn_is_refused__bind_to_a_handle_() {
-    let v = admit_src(String::from("service Task { fn go() -> Int }\ncomponent Worker provides task: Task { provide task { fn go() { return 0 } } }\ncomponent Supervisor requires t: Task {\n  effect spawn Worker with { } undo dispose()\n}"));
-    assert!((v == "SPAWN|`spawn` must be bound to a handle: `let s = effect spawn Worker … undo s.dispose()`"));
-}
-
-#[test]
-fn handoff_on_a_non_provided_key_is_refused__handoff_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  handoff kv: Str\n  let v = effect kv.get(\"x\") undo kv.get(\"x\")\n}"));
-    assert!((v == "HANDOFF|`kv` is not a declared provision of C"));
-}
-
-#[test]
-fn two_handoffs_in_one_component_are_refused__handoff_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C provides kv: Kv {\n  handoff kv: Str\n  handoff kv: Int\n  provide kv { fn get(k) { return k } }\n}"));
-    assert!((v == "HANDOFF|C declares more than one `handoff` — a component has one activation frame, so it hands off one state shape"));
-}
-
-#[test]
-fn handoff_on_a_provided_key_composes() {
-    assert!((admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C provides kv: Kv {\n  handoff kv: Str\n  provide kv { fn get(k) { return k } }\n}")) == ""));
-}
-
-#[test]
-fn isolate_on_an_undeclared_key_is_refused__g1_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  isolate nope in realm(\"r1\")\n  let v = effect kv.get(\"x\") undo kv.get(\"x\")\n}"));
-    assert!((v == "G1|`nope` is not a declared requirement or provision of C"));
-}
-
-#[test]
-fn a_key_isolated_twice_is_refused__g1_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C requires kv: Kv {\n  isolate kv in realm(\"r1\")\n  isolate kv in realm(\"r2\")\n  let v = effect kv.get(\"x\") undo kv.get(\"x\")\n}"));
-    assert!((v == "G1|key `kv` is isolated twice in C"));
-}
-
-#[test]
-fn a_multi_realm_bind_whose_realms_all_have_providers_composes() {
-    assert!((admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent StoreB provides kv: Kv {\n  isolate kv in realm(\"r2\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}")) == ""));
-}
-
-#[test]
-fn a_routed_realm_with_no_provider_is_refused__route_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r9\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
-    assert!((v == "ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no component provides `kv` in realm `r9` (item 162: every routed realm needs a provider)"));
-}
-
-#[test]
-fn an_unknown_routing_strategy_is_refused__route_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\") strategy(round_robbin)\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
-    assert!((v == "ROUTE|unknown routing strategy `round_robbin` for `kv` in Router"));
-}
-
-#[test]
-fn routing_a_provision_is_refused__route_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate api in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
-    assert!((v == "ROUTE|`isolate ... in realms(...)` routes a *required* key — `api` is a provision of Router"));
-}
-
-#[test]
-fn routing_an_undeclared_key_is_refused__g1_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate nope in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
-    assert!((v == "G1|`nope` is not a declared requirement of Router"));
-}
-
-#[test]
-fn the_left_operand_s_refusal_wins_over_the_right_one__g1_() {
-    let v = admit_src(String::from("service Kv { fn put(key: Str, value: Str) }\ncomponent C provides kv: Kv {\n  provide kv { fn put(key, value) { let n = alpha | beta.drop() } }\n}"));
-    assert!((v == "G1|`alpha` is not a declared requirement of C"));
-}
-
-#[test]
-fn a_later_refusal_does_not_overwrite_an_earlier_refusal_s_tag__g4_() {
-    let v = admit_src(String::from("service Kv { emission fn put(key: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires kv: Kv provides api: Api {\n  provide api { fn go() { return kv.put(\"a\") + beta } }\n}"));
-    assert!((v == "G4|call to emission `kv.put` must be marked `emit` (G4)"));
-}
-
-#[test]
-fn the_earlier_refusal_still_wins_when_the_operands_are_swapped__g1_() {
-    let v = admit_src(String::from("service Kv { emission fn put(key: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires kv: Kv provides api: Api {\n  provide api { fn go() { return beta + kv.put(\"a\") } }\n}"));
-    assert!((v == "G1|`beta` is not a declared requirement of C"));
-}
-
-#[test]
-fn two_unmarked_emissions_in_one_expression_name_the_first__g4_() {
-    let v = admit_src(String::from("service Db { emission fn run(sql: Str) -> Int }\nservice Bus { emission fn send(m: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires db: Db, bus: Bus provides api: Api {\n  provide api { fn go() { return db.run(\"a\") + bus.send(\"b\") } }\n}"));
-    assert!((v == "G4|call to emission `db.run` must be marked `emit` (G4)"));
-}
-
-#[test]
-fn a_key_both_pinned_and_routed_is_refused__route_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realm(\"r1\")\n  isolate kv in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
-    assert!((v == "ROUTE|key `kv` is already isolated to a single realm in Router — it cannot also be routed across `realms(...)`"));
-}
-
-#[test]
-fn a_key_routed_twice_is_refused__route_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\")\n  isolate kv in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
-    assert!((v == "ROUTE|key `kv` is routed twice in Router"));
-}
-
-#[test]
-fn a_route_after_a_provide_block_is_refused__prelude_() {
-    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  provide api { fn go(k) { return kv.get(k) } }\n  isolate kv in realms(\"r1\")\n}"));
-    assert!((v == "PRELUDE|`isolate ... in realms(...)` must precede every effect, emit, await, and provide statement"));
-}
-
-#[test]
-fn a_coerced_arrow_nested_in_a_sync_arrow_does_not_leak__admits_() {
-    assert!((admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n }\nfn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }\nfn plain(f: (Str) -> Str) -> Str { return f(\"a\") }\nservice S { emission async fn go(y: Str) -> Str }\ncomponent C provides s: S {\n  provide s { async fn go(y) { let r = plain(w => wrap(z => emit tick(z), w))   return r } }\n}")) == ""));
-}
-
-#[test]
-fn a_fn_whose_only_async_reach_is_a_coerced_arrow_stays_sync__admits_() {
-    assert!((admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n }\nfn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }\nfn h(y: Str) -> Str { return wrap(z => tick(z), y) }\nservice S { emission fn go(y: Str) -> Str }\ncomponent C provides s: S {\n  provide s { fn go(y) { let r = emit h(y)   return r } }\n}")) == ""));
-}
-
-#[test]
-fn foreign_word_operators_redirect_to_the_revl_spelling() {
-    assert!((foreign_scan(String::from("fn f(a: Bool, b: Bool) -> Bool { return a and b }")) == "`and` is not a revl operator"));
-    assert!((foreign_scan(String::from("fn f(a: Bool, b: Bool) -> Bool { return a or b }")) == "`or` is not a revl operator"));
-    assert!((foreign_scan(String::from("fn f(a: Bool) -> Bool { return not a }")) == "`not` is not a revl operator"));
-}
-
-#[test]
-fn foreign_literals_and_declaration_keywords_redirect() {
-    assert!((foreign_scan(String::from("fn f() -> Bool { return True }")) == "revl booleans are lowercase"));
-    assert!((foreign_scan(String::from("fn f() -> Bool { return False }")) == "revl booleans are lowercase"));
-    assert!((foreign_scan(String::from("fn f() -> Int { const x = 1 return x }")) == "revl has no `const`"));
-    assert!((foreign_scan(String::from("def foo() -> Int { return 1 }")) == "revl has no `def`"));
-    assert!((foreign_scan(String::from("fn f() -> Int { let g = lambda x: x return g(1) }")) == "revl has no `lambda`"));
-    assert!((foreign_scan(String::from("fn f(n: Int) -> Int { if (n > 0) { return 1 } elif (n < 0) { return 2 } return 0 }")) == "revl has no `elif`"));
-}
-
-#[test]
-fn foreign_builtins_redirect_to_the_revl_surface() {
-    assert!((foreign_scan(String::from("fn f(xs: List[Int]) -> Int { return len(xs) }")) == "revl has no `len(...)`"));
-    assert!((foreign_scan(String::from("fn f(n: Int) -> Int { print(n) return n }")) == "revl has no `print`"));
-    assert!((foreign_scan(String::from("fn f(n: Int) -> Int { throw n }")) == "revl has no `throw`"));
-}
-
-#[test]
-fn foreign_statement_and_expression_forms_redirect() {
-    assert!((foreign_scan(String::from("fn f() -> Int { var i = 0 i++ return i }")) == "revl has no `++` increment operator — expressions are pure (syntax-2.0 §3.3)"));
-    assert!((foreign_scan(String::from("fn f() -> Int { var i = 0 i-- return i }")) == "revl has no `--` decrement operator — expressions are pure (syntax-2.0 §3.3)"));
-    assert!((foreign_scan(String::from("fn f() -> Int { var s = 0 for (let i = 0; i < 10; i += 1) { s += i } return s }")) == "revl has no C-style `for (init; cond; step)` loop"));
-    assert!((foreign_scan(String::from("fn f(xs: List[Int]) -> Int { var s = 0 for (x in xs) { s += x } return s }")) == "revl iterates elements with `for (x of xs)`, not `for (x in xs)`"));
-    assert!((foreign_scan(String::from("fn g(k: Int) -> Int { return k } fn f() -> Int { return g(k=1) }")) == "revl has no keyword arguments — `f(k=v)` is not a call"));
-    assert!((foreign_scan(String::from("fn f(c: Bool) -> Int { let x = 1 if c else 2 return x }")) == "revl has no Python-style `a if c else b` conditional expression"));
-    assert!((foreign_scan(String::from("fn f(xs: List[Int]) -> Int { let s = xs[0:2] return 0 }")) == "revl has no slice syntax `xs[a:b]`"));
-    assert!((foreign_scan(String::from("fn f() -> Int { let d = {\"k\": 1} return 0 }")) == "revl records use identifier keys, not string keys like `{\"k\": v}`"));
-    assert!((foreign_scan(String::from("fn f() -> Int { let t = (1, 2) return 0 }")) == "revl has no tuples — `(a, b)` is not a value"));
-    let thrower = String::from("fn f(n: Int) -> Int { throw n }");
-    assert!((admit_tag(thrower.clone()) == "FOREIGN"));
-    let garbage = String::from("@@@ not revl @@@");
-    assert!((admit_tag(garbage.clone()) == "BAD"));
-}
-
-#[test]
-fn a_redirect_never_fires_on_a_valid_program__no_false_refusal_() {
-    assert!((admit_src(String::from("fn f(a: Int, b: Int) -> Int { return a - -b }")) == ""));
-    assert!((admit_src(String::from("fn f(xs: List[Int]) -> Int { var s = 0 for (x of xs) { s += x } return s }")) == ""));
-    assert!((admit_src(String::from("fn f() -> Int { let g = (a: Int, b: Int) => a + b return g(1, 2) }")) == ""));
-    assert!((admit_src(String::from("fn f(n: Int) -> Int { if (n > 0) { return 1 } else if (n < 0) { return 2 } return 0 }")) == ""));
-    assert!((admit_src(String::from("fn f(xs: List[Int], c: Bool) -> Int { return xs[c ? 0 : 1] }")) == ""));
-    assert!((admit_src(String::from("fn f(n: Int) -> Int { let len = n return len }")) == ""));
-    assert!((admit_src(String::from("service S { emission[fs.write(path=\"/tmp\")] fn go(r: Str) -> Int }")) == ""));
-}
-
-#[test]
-fn a_qualifier_free_type_is_returned_verbatim() {
-    assert!((taint_strip(String::from("Str")) == "Str"));
-    assert!((taint_strip(String::from("Map[Str, Int]")) == "Map[Str, Int]"));
-    assert!((taint_strip(String::from("(Int, Str) -> Bool")) == "(Int, Str) -> Bool"));
-    assert!((taint_mentions_secret(String::from("Str")) == false));
-    assert!((taint_mentions_secret(String::from("Result[Str, Str]")) == false));
-}
-
-#[test]
-fn a_qualifier_is_stripped_wherever_it_is_written() {
-    assert!((taint_strip(String::from("Secret[Str]")) == "Str"));
-    assert!((taint_strip(String::from("Trusted[Int]")) == "Int"));
-    assert!((taint_strip(String::from("Untrusted[Str]")) == "Str"));
-    assert!((taint_strip(String::from("Opt[Secret[Str]]")) == "Opt[Str]"));
-    assert!((taint_strip(String::from("Result[Secret[Str], Str]")) == "Result[Str, Str]"));
-    assert!((taint_strip(String::from("Map[Str, List[Secret[Int]]]")) == "Map[Str, List[Int]]"));
-    assert!((taint_strip(String::from("(Secret[Str]) -> Int")) == "(Str) -> Int"));
-    assert!((taint_strip(taint_strip(String::from("Secret[Str]"))) == "Str"));
-}
-
-#[test]
-fn a_qualifier_head_is_never_the_tail_of_a_longer_identifier() {
-    assert!((taint_strip(String::from("MyTrusted[Int]")) == "MyTrusted[Int]"));
-    assert!((taint_strip(String::from("SecretBox[Str]")) == "SecretBox[Str]"));
-    assert!((taint_mentions_secret(String::from("SecretBox[Str]")) == false));
-}
-
-#[test]
-fn the_marking_follows_the_value_through_type_constructors() {
-    assert!(taint_mentions_secret(String::from("Secret[Str]")));
-    assert!(taint_mentions_secret(String::from("Opt[Secret[Str]]")));
-    assert!(taint_mentions_secret(String::from("Result[Secret[Str], Str]")));
-    assert!(taint_mentions_secret(String::from("Result[Str, Secret[Str]]")));
-    assert!(taint_mentions_secret(String::from("Map[Str, List[Secret[Int]]]")));
-}
-
-#[test]
-fn a_function_type_s_parameter_is_not_a_container_of_the_value() {
-    assert!((taint_mentions_secret(String::from("(Secret[Str]) -> Int")) == false));
-    assert!((taint_mentions_secret(String::from("Fn[Secret[Str], Int]")) == false));
-    assert!((taint_mentions_secret(String::from("List[(Secret[Str]) -> Int]")) == false));
-}
-
-#[test]
-fn the_witness_position_is_the_ok_arm_alone() {
-    assert!(taint_secret_witness(String::from("Result[Secret[Str], Str]")));
-    assert!((taint_secret_witness(String::from("Result[Str, Secret[Str]]")) == false));
-    assert!((taint_secret_witness(String::from("Secret[Str]")) == false));
-    assert!((taint_secret_witness(String::from("Opt[Secret[Str]]")) == false));
+fn the_council_phase_runs_ahead_of_the_route_phase() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> vast, adversary -> edge, aggregate first }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidental -> edge }\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"));
 }
 
 #[test]
@@ -31834,6 +32289,57 @@ fn the_declared_inverse_s_parameter_is_a_witness_position_too() {
 }
 
 #[test]
+fn the_device_vocabulary_is_closed__so_a_typo_is_a_refusal() {
+    let v = admit_src(String::from("model role fast on_device device gpu0 memory 6144 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|unknown device class `gpu0` on model role `fast`"));
+}
+
+#[test]
+fn the_earlier_refusal_still_wins_when_the_operands_are_swapped__g1_() {
+    let v = admit_src(String::from("service Kv { emission fn put(key: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires kv: Kv provides api: Api {\n  provide api { fn go() { return beta + kv.put(\"a\") } }\n}"));
+    assert!((v == "G1|`beta` is not a declared requirement of C"));
+}
+
+#[test]
+fn the_empty_wire_keeps_the_standalone_verdict() {
+    let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
+    assert!((admit_ambient(cand.clone(), String::from("")) == admit_src(cand.clone())));
+}
+
+#[test]
+fn the_floor_is_counted_over_the_declared_members__never_the_answering_set() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate majority quorum answered\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`quorum answered` in model council `Release` counts the rule's floor over the members that answered"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate majority quorum declaired\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown quorum basis `declaired` in model council `Release`"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie splitt\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown tie outcome `splitt` in model council `Release`"));
+}
+
+#[test]
+fn the_function_read_off_a_record_field_and_bound_is_admitted() {
+    let v = admit_src(String::from("extern pure fn twice(n: Int) -> Int = @py { return n * 2 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let r = { f: twice }\n      let g = r.f\n      return g(n)\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn the_left_operand_s_refusal_wins_over_the_right_one__g1_() {
+    let v = admit_src(String::from("service Kv { fn put(key: Str, value: Str) }\ncomponent C provides kv: Kv {\n  provide kv { fn put(key, value) { let n = alpha | beta.drop() } }\n}"));
+    assert!((v == "G1|`alpha` is not a declared requirement of C"));
+}
+
+#[test]
+fn the_marking_follows_the_value_through_type_constructors() {
+    assert!(taint_mentions_secret(String::from("Secret[Str]")));
+    assert!(taint_mentions_secret(String::from("Opt[Secret[Str]]")));
+    assert!(taint_mentions_secret(String::from("Result[Secret[Str], Str]")));
+    assert!(taint_mentions_secret(String::from("Result[Str, Secret[Str]]")));
+    assert!(taint_mentions_secret(String::from("Map[Str, List[Secret[Int]]]")));
+}
+
+#[test]
+fn the_profile_words_stay_ordinary_identifiers() {
+    assert!((admit_src(String::from("service M { fn go(device: Str, memory: Str, quant: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(device, memory, quant) = device }\n}")) == ""));
+}
+
+#[test]
 fn the_receiver_rule_marks_the_parameter_the_witness_flows_into__and_no_other() {
     let ts = lex_src(String::from("extern pure fn revoke(id: Secret[Str]) -> Unit = @py { return }\nextern pure fn tag(id: Str, tag: Secret[Str]) -> Unit = @py { return }\nextern witnessed fn lease() -> Result[Str, Str]\n    undo revoke(result)\n    = @py { return Ok(\"x\") }"));
     let ds = taint_decl_params(ts.clone());
@@ -31841,6 +32347,37 @@ fn the_receiver_rule_marks_the_parameter_the_witness_flows_into__and_no_other() 
     assert!(((taint_params_of(&ds, "revoke"))[(0i64) as usize] == "Secret[Str]"));
     assert!(((taint_params_of(&ds, "tag"))[(1i64) as usize] == "Secret[Str]"));
     assert!((taint_params_of(&ds, "nobody").revl_length() == 0i64));
+}
+
+#[test]
+fn the_residence_rule_still_runs_ahead_of_the_profile_rules() {
+    let v = admit_src(String::from("model role fast on_devise device gpu0 memory 0 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|unknown residence `on_devise` for model role `fast`"));
+}
+
+#[test]
+fn the_residence_vocabulary_is_closed__so_a_typo_is_a_refusal() {
+    let v = admit_src(String::from("model role local on_devise\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|unknown residence `on_devise` for model role `local`"));
+    assert!((admit_tag(String::from("model role local on_devise\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "MODEL"));
+}
+
+#[test]
+fn the_role_table_is_decided_before_any_council_indexes_it() {
+    let v = admit_src(String::from("model role edge on_devise\nmodel council Release { proposer -> edge, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|unknown residence `on_devise` for model role `edge`"));
+}
+
+#[test]
+fn the_same_arrow_in_a_sync_slot_leaks__a1_() {
+    let v = admit_src(String::from("extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => emit tick(msgs), \"x\")   return r } } }"));
+    assert!((v == "A1|this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"));
+}
+
+#[test]
+fn the_same_call_to_a_declared_operation_is_admitted() {
+    let v = admit_src(String::from("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let n = effect db.query(\"x\") undo db.query(\"y\") }"));
+    assert!((v == ""));
 }
 
 #[test]
@@ -31855,6 +32392,33 @@ fn the_scanner_reads_the_declared_parameter_list__qualifier_and_all() {
 }
 
 #[test]
+fn the_secret_origin_reaches_no_council_either() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { secret -> Review }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `secret` origin to model council `Review`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"));
+}
+
+#[test]
+fn the_secret_origin_reaches_no_role__at_either_residence() {
+    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { secret -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `secret` origin to model role `local`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"));
+}
+
+#[test]
+fn the_service_block_does_not_disturb_a_withdrawal_refusal() {
+    let fresh = String::from("service D { fn q(s: Str) -> Int } service C { fn g(k: Str) -> Str } component Fresh provides other: C { provide other { fn g(k) { return k } } }");
+    let bare = String::from("Db/db/;Store/cache/;Store<db;-Db");
+    let blocked = String::from("Db/db/;Store/cache/;Store<db;!services;:D;:C;-Db");
+    assert!((admit_ambient(fresh.clone(), blocked.clone()) == admit_ambient(fresh.clone(), bare.clone())));
+    assert!((admit_ambient(fresh.clone(), blocked.clone()) == "G2|this admission withdraws the running provider of `db` (`Db`) and nothing provides it again, but the running component `Store` still requires it (G2)"));
+}
+
+#[test]
+fn the_service_block_leaves_every_ambient_composition_verdict_unmoved() {
+    let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    assert!((admit_ambient(clean.clone(), String::from("OldCache/cache/;!services;:D;:Other")) == ""));
+    assert!((admit_ambient(clean.clone(), String::from("OldStore/db/;!services;:D")) == admit_ambient(clean.clone(), String::from("OldStore/db/"))));
+    assert!((admit_ambient(clean.clone(), String::from("!services")) == admit_src(clean.clone())));
+}
+
+#[test]
 fn the_stamps_land_in_the_ir_the_emitters_read() {
     let ir = lower_to_ir(String::from("extern pure fn mint(u: Str) -> Secret[Str]\n= @py { return u }\nservice V { fn take(t: Secret[Str]) -> Int  fn plain(n: Int) -> Int }"));
     assert!((ir.revl_index_of("\"returns\": \"Str\", \"bodies\"") != (0i64).checked_sub(1i64).expect("revl: Int overflow")));
@@ -31865,215 +32429,9 @@ fn the_stamps_land_in_the_ir_the_emitters_read() {
 }
 
 #[test]
-fn _3_2__an_arrow_whose_body_depends_on_a_bottom_parameter_claims_no_result() {
-    let v = admit_src(String::from("fn takes_int(n: Int) -> Int {\n  return n\n}\n\nfn demo() -> Int {\n  let f = (x) => x\n  return takes_int(f(1))\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn an_arrow_value_called_at_its_arity_with_compatible_arguments_is_admitted() {
-    let v = admit_src(String::from("fn demo() -> Str {\n  let f = (x: Str): Str => x\n  return f(\"s\")\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_call_through_an_arrow_value_with_no_arguments_names_the_arity() {
-    let v = admit_src(String::from("fn demo() -> Str {\n  let f = (x) => \"s\"\n  return f()\n}"));
-    assert!((v == "T1|`f` is a `(Any) -> Str` and takes 1 argument(s), 0 given"));
-}
-
-#[test]
-fn _____on_an_actual_optional_is_admitted() {
-    let v = admit_src(String::from("type Row = { name: Str }\n\nfn label(r: Opt[Row]) -> Opt[Str] {\n  return r?.name\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn reassigning_a_let_is_refused__g6___exact_wording() {
-    let v = admit_src(String::from("fn bump() -> Int { let n = 1  n = 2  return n }"));
-    assert!((v == "G6|cannot reassign `n` — it is `let` (single-assignment)"));
-}
-
-#[test]
-fn a_compound_assignment_on_a_let_is_the_same_refusal() {
-    let v = admit_src(String::from("fn bump() -> Int { let n = 1  n += 1  return n }"));
-    assert!((v == "G6|cannot reassign `n` — it is `let` (single-assignment)"));
-}
-
-#[test]
-fn a_parameter_is_not_mutable__so_writing_one_is_a_let_reassignment() {
-    let v = admit_src(String::from("fn f(p: Int) -> Int { p = 2  return p }"));
-    assert!((v == "G6|cannot reassign `p` — it is `let` (single-assignment)"));
-}
-
-#[test]
-fn reassigning_a_var_admits() {
-    assert!((admit_src(String::from("fn bump() -> Int { var n = 1  n = 2  n += 1  return n }")) == ""));
-}
-
-#[test]
-fn a_duplicate_let_in_one_straight_line_scope_is_refused__g6_() {
-    let v = admit_src(String::from("fn pick(x: Int) -> Int { let y = x  let y = 0  return y }"));
-    assert!((v == "G6|`y` is already declared in this function"));
-}
-
-#[test]
-fn disjoint_sibling_blocks_may_reuse_a_name() {
-    let v = admit_src(String::from("fn pick(c: Bool) -> Int { if (c) { let y = 1  return y } else { let y = 2  return y } }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_nested_block_still_sees_the_enclosing_let() {
-    let v = admit_src(String::from("fn f(c: Bool) -> Int { let n = 1  if (c) { n = 2 }  return n }"));
-    assert!((v == "G6|cannot reassign `n` — it is `let` (single-assignment)"));
-}
-
-#[test]
-fn a_for_binding_over_a_live_name_is_already_declared() {
-    let v = admit_src(String::from("fn f(xs: List[Int]) -> Int { let x = 1  for (x of xs) { }  return x }"));
-    assert!((v == "G6|`x` is already declared in this function"));
-}
-
-#[test]
-fn two_for_loops_may_bind_one_name__the_bind_is_body_scoped_() {
-    let v = admit_src(String::from("fn total(xs: List[Int]) -> Int { var t = 0  for (x of xs) { t += x }  for (x of xs) { t += x }  return t }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn assigning_a_name_nothing_bound_is_the_fn_scope_g1() {
-    assert!((admit_src(String::from("fn f() -> Int { z = 2  return 1 }")) == "G1|`z` is not declared in this function"));
-}
-
-#[test]
-fn a_host_provenance_let_may_be_reassigned__reference_admits_() {
-    assert!((admit_src(String::from("fn f() -> Int { let m = Map.new()  m = m  return 1 }")) == ""));
-}
-
-#[test]
-fn the_map_value_constructor_carries_no_host_provenance() {
-    let v = admit_src(String::from("fn f() -> Int { let m = Map.empty()  m = m  return 1 }"));
-    assert!((v == "G6|cannot reassign `m` — it is `let` (single-assignment)"));
-}
-
-#[test]
-fn a_closure_assigning_to_a_capture_is_refused_at_parse__g6_() {
-    let v = admit_src(String::from("fn counter(step: Int) -> Int { var n = 0  let bump = (by: Int) => { n = n + by  n }  return bump(step) }"));
-    assert!((v == "G6|a closure cannot assign to `n`: captures are by value, not by reference (G6)"));
-}
-
-#[test]
-fn a_record_literal_after____is_not_the_closure_write_form() {
-    assert!((admit_src(String::from("fn f() -> Int { let k = (x: Int) => { value: x + 1 }  return k(1).value }")) == ""));
-}
-
-#[test]
-fn a_statement_block_match_arm_is_not_an_arrow_head() {
-    let v = admit_src(String::from("type S = A(Str) | B(Str) fn f(s: S) -> Int { return match s { A(x) => { let y = 1  y }, B(x) => 2, } }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_named_test_block_is_stepped_over__not_read_as_declarations() {
-    assert!((admit_src(String::from("fn id(x: Int) -> Int { return x } test \"id round trips\" { assert id(1) == 1 }")) == ""));
-}
-
-#[test]
-fn a_declaration_after_a_named_test_block_is_still_reached() {
-    assert!((admit_src(String::from("test \"first\" { let a = 1  assert a == 1 } fn id(x: Int) -> Int { return x }")) == ""));
-}
-
-#[test]
-fn a_named_test_body_s_statements_draw_no_top_level_verdict() {
-    assert!((admit_src(String::from("test \"locals\" { let a = 1  var b = 2  b = a  assert b == 1 } fn id(x: Int) -> Int { return x }")) == ""));
-}
-
-#[test]
-fn lower_to_ir_keeps_both_fns_around_a_one_line_named_test_block() {
-    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}]}"));
-}
-
-#[test]
-fn a_map_subscript_carries_the_declared_key_and_value_type__issue__957_() {
-    assert!((lower_to_ir(String::from("fn keyed(m: Map[Str, Int], k: Str) -> Int { return m[k] } fn positional(xs: List[Int], i: Int) -> Int { return xs[i] }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"keyed\",\"params\":[{\"name\": \"m\", \"type\": \"Map[Str, Int]\"}, {\"name\": \"k\", \"type\": \"Str\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"index\",\"target\":{\"kind\":\"var\",\"name\":\"m\"},\"index\":{\"kind\":\"var\",\"name\":\"k\"},\"key_type\":\"Str\",\"value_type\":\"Int\"}}]},{\"name\":\"positional\",\"params\":[{\"name\": \"xs\", \"type\": \"List[Int]\"}, {\"name\": \"i\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"index\",\"target\":{\"kind\":\"var\",\"name\":\"xs\"},\"index\":{\"kind\":\"var\",\"name\":\"i\"}}}]}]}"));
-}
-
-#[test]
-fn a_pub_fn_and_a_type_written_after_an_extern_keep_their_declaration() {
-    assert!((lower_to_ir(format!("extern pure fn h(s: Str) -> Str = @py {{ return s }}\ntype T = {{ a: Int }}\npub fn render(l: Str) -> Str {{ return h(l) }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"T\": {\"params\": [], \"kind\": \"record\", \"fields\": {\"a\":\"Int\"}}}, \"functions\": [{\"name\":\"render\",\"params\":[{\"name\": \"l\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":true,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"h\"},\"args\":[{\"kind\":\"var\",\"name\":\"l\"}]}}]}], \"externs\": [{\"name\": \"h\", \"class\": \"pure\", \"params\": [{\"name\": \"s\", \"type\": \"Str\"}], \"returns\": \"Str\", \"bodies\": {\"py\": \" return s \"}}]}"));
-}
-
-#[test]
-fn an_annotated_let_pins_an_empty_list_and_marks_a_width_coercion() {
-    assert!((lower_to_ir(format!("fn empty() -> List[Int] {{ let xs: List[Int] = [] return xs }}\nfn full() -> List[Int] {{ let ys: List[Int] = [1] return ys }}\nfn widened(n: Int32) -> Int {{ let w: Int = n return w }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"empty\",\"params\":[],\"returns\":\"List[Int]\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"xs\",\"value\":{\"kind\":\"list\",\"items\":[],\"expected\":\"List[Int]\"},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"xs\"}}]},{\"name\":\"full\",\"params\":[],\"returns\":\"List[Int]\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"ys\",\"value\":{\"kind\":\"list\",\"items\":[{\"kind\":\"lit\",\"value\":1}]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"ys\"}}]},{\"name\":\"widened\",\"params\":[{\"name\": \"n\", \"type\": \"Int32\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"w\",\"value\":{\"kind\":\"var\",\"name\":\"n\",\"widen\":\"Int\"},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"w\"}}]}]}"));
-}
-
-#[test]
-fn a_constructor_in_scrutinee_position_types_its_match_arms() {
-    assert!((lower_to_ir(format!("type Tree = Leaf | Node(Int)\nfn f(x: Int) -> Int {{ return match Node(x) {{ Node(v) => v, Leaf => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"Tree\": {\"params\": [], \"kind\": \"variant\", \"cases\": [{\"name\":\"Leaf\",\"payload\":null},{\"name\":\"Node\",\"payload\":\"Int\"}]}}, \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"x\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"adt\",\"type\":\"Tree\",\"case\":\"Node\",\"args\":[{\"kind\":\"var\",\"name\":\"x\"}]},\"arms\":[{\"pattern\":\"Node\",\"bind\":\"v\",\"body\":{\"kind\":\"var\",\"name\":\"v\"},\"payload_type\":\"Int\"},{\"pattern\":\"Leaf\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":0}}]}}]}]}"));
-}
-
-#[test]
-fn a_nullary_case_bound_bare_carries_its_adt_to_the_match() {
-    assert!((lower_to_ir(format!("type Tag = Red | Green(Int)\nfn f() -> Int {{ let c = Red\n  return match c {{ Red => 1, Green(n) => n }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"Tag\": {\"params\": [], \"kind\": \"variant\", \"cases\": [{\"name\":\"Red\",\"payload\":null},{\"name\":\"Green\",\"payload\":\"Int\"}]}}, \"functions\": [{\"name\":\"f\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"c\",\"value\":{\"kind\":\"adt\",\"type\":\"Tag\",\"case\":\"Red\",\"args\":[]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"var\",\"name\":\"c\"},\"arms\":[{\"pattern\":\"Red\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":1}},{\"pattern\":\"Green\",\"bind\":\"n\",\"body\":{\"kind\":\"var\",\"name\":\"n\"},\"payload_type\":\"Int\"}]}}]}]}"));
-}
-
-#[test]
-fn a_built_in_constructor_carries_its_argument_type_into_the_arm() {
-    assert!((lower_to_ir(format!("fn f() -> Int {{ return match Ok(1) {{ Ok(o) => o, Err(e) => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"adt\",\"type\":\"Result[Any, Any]\",\"case\":\"Ok\",\"args\":[{\"kind\":\"lit\",\"value\":1}]},\"arms\":[{\"pattern\":\"Ok\",\"bind\":\"o\",\"body\":{\"kind\":\"var\",\"name\":\"o\"},\"payload_type\":\"Int\"},{\"pattern\":\"Err\",\"bind\":\"e\",\"body\":{\"kind\":\"lit\",\"value\":0},\"payload_type\":\"Any\"}]}}]}]}"));
-}
-
-#[test]
-fn map_lookup_types_the_opt_its_match_unwraps() {
-    assert!((lower_to_ir(format!("fn f(m: Map[Str, Int], k: Str) -> Int {{ let hit = m.lookup(k)\n  return match hit {{ Some(v) => v, None => 0 }} }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"m\", \"type\": \"Map[Str, Int]\"}, {\"name\": \"k\", \"type\": \"Str\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"hit\",\"value\":{\"kind\":\"builtin\",\"method\":\"lookup\",\"target\":{\"kind\":\"var\",\"name\":\"m\"},\"args\":[{\"kind\":\"var\",\"name\":\"k\"}]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"match\",\"scrutinee\":{\"kind\":\"var\",\"name\":\"hit\"},\"arms\":[{\"pattern\":\"Some\",\"bind\":\"v\",\"body\":{\"kind\":\"var\",\"name\":\"v\"},\"payload_type\":\"Int\"},{\"pattern\":\"None\",\"bind\":null,\"body\":{\"kind\":\"lit\",\"value\":0}}]}}]}]}"));
-}
-
-#[test]
-fn the_async_colour_reaches_the_fn_entries_transitively() {
-    assert!((lower_to_ir(format!("extern emission async fn hf(p: Str) -> Str = @py {{ return p }}\nfn one(p: Str) -> Str {{ return hf(p) }}\nfn two(p: Str) -> Str {{ return one(p) }}\nfn plain(n: Int) -> Int {{ return n + 1 }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[{\"name\": \"p\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"hf\"},\"args\":[{\"kind\":\"var\",\"name\":\"p\"}]}}],\"async\":true},{\"name\":\"two\",\"params\":[{\"name\": \"p\", \"type\": \"Str\"}],\"returns\":\"Str\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"one\"},\"args\":[{\"kind\":\"var\",\"name\":\"p\"}]}}],\"async\":true},{\"name\":\"plain\",\"params\":[{\"name\": \"n\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"n\"},\"right\":{\"kind\":\"lit\",\"value\":1},\"operands\":\"Int\"}}]}], \"externs\": [{\"name\": \"hf\", \"class\": \"emission\", \"params\": [{\"name\": \"p\", \"type\": \"Str\"}], \"returns\": \"Str\", \"bodies\": {\"py\": \" return p \"}, \"async\": true}]}"));
-}
-
-#[test]
-fn a_destructuring_let_is_read__not_refused() {
-    let v = admit_src(String::from("type R = { a: Int, b: Int } fn f(r: R) -> Int { let { a, b } = r  return a + b }"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_subscription_bracket_binds_its_name() {
-    let v = admit_src(String::from("component Parked {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  await sub.next()\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn an_undeclared_stream_in_a_subscribe_head_is_refused__g1_() {
-    let v = admit_src(String::from("component C {\n  let sub = subscribe nostream undo sub.close()\n}"));
-    assert!((v == "G1|`nostream` is not a declared requirement of C"));
-}
-
-#[test]
-fn a_fan_in_operand_is_resolved_even_though__merge__is_not__g1_() {
-    let v = admit_src(String::from("component C {\n  let a = effect Stream.source() undo a.close()\n  let sub = subscribe merge(a, nob) undo sub.close()\n}"));
-    assert!((v == "G1|`nob` is not a declared requirement of C"));
-}
-
-#[test]
-fn an__every___in__body_still_refuses_an_undeclared_name__g1_() {
-    let v = admit_src(String::from("service Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(nope) }\n}"));
-    assert!((v == "G1|`nope` is not a declared requirement of C"));
-}
-
-#[test]
-fn an__on___as__body_still_refuses_an_undeclared_name__g1_() {
-    let v = admit_src(String::from("event E(key: k) { k: Str }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  on E as e in sub { emit sink.write(nope) }\n}"));
-    assert!((v == "G1|`nope` is not a declared requirement of C"));
-}
-
-#[test]
-fn an__every___in__body_is_not_pruned_the_way_a_timer_body_is__a1_() {
-    let v = admit_src(String::from("extern emission async fn hf(p: Str) -> Str = @py { return p }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit hf(o) }\n}"));
-    assert!((v == "A1|component `C` reaches async extern `hf` in a setup/activation body, which cannot suspend a fiber (A1)"));
+fn the_text_s_service_declaration_outranks_the_running_one() {
+    let src = String::from("service Store { fn bump(n: Str) -> Str } service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }");
+    assert!((admit_ambient(src.clone(), String::from("Kv/other/;!services;:Store,bump(n:Int)")) == ""));
 }
 
 #[test]
@@ -32083,213 +32441,52 @@ fn the_timer_body_s_prune_survives_the_iteration_branch() {
 }
 
 #[test]
-fn an_unmarked_emission_inside_an_iteration_body_is_still_g4() {
-    let v = admit_src(String::from("service Sink { emission fn write(v: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires sink: Sink provides api: Api {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(o) }\n  provide api { fn go() { return sink.write(\"x\") } }\n}"));
-    assert!((v == "G4|call to emission `sink.write` must be marked `emit` (G4)"));
+fn the_witness_position_is_the_ok_arm_alone() {
+    assert!(taint_secret_witness(String::from("Result[Secret[Str], Str]")));
+    assert!((taint_secret_witness(String::from("Result[Str, Secret[Str]]")) == false));
+    assert!((taint_secret_witness(String::from("Secret[Str]")) == false));
+    assert!((taint_secret_witness(String::from("Opt[Secret[Str]]")) == false));
 }
 
 #[test]
-fn a_model_placement_that_keeps_a_confidential_input_on_the_device_admits() {
-    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify {\n    confidential -> local,\n    * -> cloud\n  }\n  provide out { fn classify(text) = text }\n}"));
+fn two_for_loops_may_bind_one_name__the_bind_is_body_scoped_() {
+    let v = admit_src(String::from("fn total(xs: List[Int]) -> Int { var t = 0  for (x of xs) { t += x }  for (x of xs) { t += x }  return t }"));
     assert!((v == ""));
 }
 
 #[test]
-fn routing_a_confidential_origin_off_the_device_is_refused_by_name() {
-    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
+fn two_handoffs_in_one_component_are_refused__handoff_() {
+    let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\ncomponent C provides kv: Kv {\n  handoff kv: Str\n  handoff kv: Int\n  provide kv { fn get(k) { return k } }\n}"));
+    assert!((v == "HANDOFF|C declares more than one `handoff` — a component has one activation frame, so it hands off one state shape"));
 }
 
 #[test]
-fn the_residence_vocabulary_is_closed__so_a_typo_is_a_refusal() {
-    let v = admit_src(String::from("model role local on_devise\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|unknown residence `on_devise` for model role `local`"));
-    assert!((admit_tag(String::from("model role local on_devise\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "MODEL"));
+fn two_providers_of_one_key_are_refused__g2_() {
+    let v = admit_src(String::from("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } } component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"));
+    assert!((v == "G2|provision conflict: key `db` is provided by both A and B (G2)"));
 }
 
 #[test]
-fn a_role_is_declared_once__and_the_refusal_names_both_residences() {
-    let v = admit_src(String::from("model role local on_device\nmodel role local off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|model role `local` is declared twice (first on line 1, as `on_device`; here as `off_device`)"));
+fn two_unmarked_emissions_in_one_expression_name_the_first__g4_() {
+    let v = admit_src(String::from("service Db { emission fn run(sql: Str) -> Int }\nservice Bus { emission fn send(m: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires db: Db, bus: Bus provides api: Api {\n  provide api { fn go() { return db.run(\"a\") + bus.send(\"b\") } }\n}"));
+    assert!((v == "G4|call to emission `db.run` must be marked `emit` (G4)"));
 }
 
 #[test]
-fn an_arm_names_an_origin_from_the_lattice_and_a_declared_role() {
-    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidental -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|unknown origin class `confidental` in `route model on classify`"));
-    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> edge }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`confidential -> edge` in `route model on classify` (Classifier) names no declared model role"));
+fn undeclared_access_is_refused__g1___exact_wording() {
+    let v = admit_src(String::from("service Log { fn write(msg: Str) } component Logger provides log: Log { provide log { fn write(msg) { emit db.execute(msg) } } }"));
+    assert!((v == "G1|`db` is not a declared requirement of Logger"));
 }
 
 #[test]
-fn an_origin_is_routed_once__an_action_is_routed_once__a_block_names_a_role() {
-    assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { web -> local, web -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|origin `web` is routed twice in `route model on classify` (Classifier)"));
-    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { web -> local }\n  route model on classify { net -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` is routed twice in Classifier"));
-    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`route model on classify` in Classifier names no role"));
+fn undeclared_bare_value_in_a_method_is_refused__g1_() {
+    let v = admit_src(String::from("service S { fn go() -> Int } component C provides s: S { provide s { fn go() { let x = nope   return 0 } } }"));
+    assert!((v == "G1|`nope` is not a declared requirement of C"));
 }
 
 #[test]
-fn a_route_keyed_to_an_action_the_component_renamed_away_protects_nothing() {
-    let v = admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify_text { web -> local }\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|`route model on classify_text` names no action of Classifier"));
-}
-
-#[test]
-fn the_secret_origin_reaches_no_role__at_either_residence() {
-    assert!((admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { secret -> local }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `secret` origin to model role `local`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"));
-}
-
-#[test]
-fn an_arm_may_name_a_council_whose_members_all_stay_on_the_device() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Review }\n  provide out { fn classify(text) = text }\n}")) == ""));
-}
-
-#[test]
-fn a_confidential_origin_routed_to_a_council_names_the_off_device_member() {
-    let v = admit_src(String::from("model role edge on_device\nmodel role vast off_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
-}
-
-#[test]
-fn the_secret_origin_reaches_no_council_either() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { secret -> Review }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `secret` origin to model council `Review`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"));
-}
-
-#[test]
-fn a_name_that_is_neither_a_role_nor_a_council_is_still_refused() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> ghost }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`confidential -> ghost` in `route model on classify` (Classifier) names no declared model role"));
-}
-
-#[test]
-fn the_council_phase_runs_ahead_of_the_route_phase() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> vast, adversary -> edge, aggregate first }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidental -> edge }\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"));
-}
-
-#[test]
-fn a_malformed_role_is_still_decided_before_a_refusable_council() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_devise\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> edge, adversary -> vast, aggregate first }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "MODEL|unknown residence `off_devise` for model role `vast`"));
-}
-
-#[test]
-fn a_model_placement_is_a_prelude_declaration() {
-    let v = admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n  route model on classify { web -> local }\n}"));
-    assert!((v == "PRELUDE|`route model` must precede every effect, emit, await, and provide statement"));
-}
-
-#[test]
-fn _model__and__route__stay_ordinary_identifiers() {
-    assert!((admit_src(String::from("service Model { fn c(x: Str) -> Str }\nservice M { fn go(x: Str) -> Str }\ncomponent C requires model: Model provides out: M {\n  provide out { fn go(x) = x }\n}")) == ""));
-    assert!((admit_src(String::from("service M { fn go(model: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(model) = model }\n}")) == ""));
-}
-
-#[test]
-fn a_profiled_role_admits__and_the_profile_is_read_rather_than_stepped_over() {
-    let v = admit_src(String::from("model role fast on_device device gpu memory 6144 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> fast }\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn the_device_vocabulary_is_closed__so_a_typo_is_a_refusal() {
-    let v = admit_src(String::from("model role fast on_device device gpu0 memory 6144 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|unknown device class `gpu0` on model role `fast`"));
-}
-
-#[test]
-fn a_memory_floor_no_placement_can_fail_to_meet_is_refused() {
-    let v = admit_src(String::from("model role fast on_device device gpu memory 0 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|model role `fast` declares `memory 0`, which no placement can fail to meet"));
-}
-
-#[test]
-fn the_residence_rule_still_runs_ahead_of_the_profile_rules() {
-    let v = admit_src(String::from("model role fast on_devise device gpu0 memory 0 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|unknown residence `on_devise` for model role `fast`"));
-}
-
-#[test]
-fn an_unprofiled_role_beside_a_profiled_one_is_not_refused_for_the_omission() {
-    let v = admit_src(String::from("model role fast on_device device gpu memory 6144 quant q4_k_m\nmodel role small on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> small }\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn the_profile_words_stay_ordinary_identifiers() {
-    assert!((admit_src(String::from("service M { fn go(device: Str, memory: Str, quant: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(device, memory, quant) = device }\n}")) == ""));
-}
-
-#[test]
-fn an_ordered_candidate_set_of_comparable_roles_admits() {
-    assert!((admit_src(mset("* -> fast | small")) == ""));
-}
-
-#[test]
-fn ____is_not_a_candidate__and_the_refusal_gives_the_reason() {
-    assert!((admit_src(mset("* -> fast | *")) == "MODEL|`* -> *` in `route model on classify` (Classifier) places the origin on any available role"));
-}
-
-#[test]
-fn a_candidate_named_twice_has_two_positions_and_no_preference() {
-    assert!((admit_src(mset("* -> fast | fast")) == "MODEL|model role `fast` appears twice among the candidates for `*` in `route model on classify` (Classifier)"));
-}
-
-#[test]
-fn residence_is_uniform_across_a_candidate_set() {
-    assert!((admit_src(mset("* -> fast | slow")) == "MODEL|the candidates for `*` in `route model on classify` (Classifier) do not agree on residence: `fast` is `on_device` (line 1) and `slow` is `off_device` (line 3)"));
-}
-
-#[test]
-fn every_candidate_of_a_set_declares_a_device_profile() {
-    assert!((admit_src(mset("* -> fast | bare")) == "MODEL|candidate(s) bare for `*` in `route model on classify` (Classifier) declare no device profile, so the candidate set cannot be ordered"));
-}
-
-#[test]
-fn item_512_s_rules_reach_the_tail_of_a_set__not_only_its_head() {
-    assert!((admit_src(mset("* -> fast | nope")) == "MODEL|`* -> nope` in `route model on classify` (Classifier) names no declared model role"));
-    assert!((admit_src(mset("confidential -> fast | slow")) == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `slow`, which is declared `off_device` on line 3: a confidential input may not leave the device (G-MODEL-PLACE)"));
-}
-
-#[test]
-fn a_council_of_three_placed_members_with_a_written_aggregation_admits() {
-    let v = admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  verifier -> local2,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == ""));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast; adversary -> edge;\n  aggregate majority quorum declared on_tie deny }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == ""));
-}
-
-#[test]
-fn an_aggregation_that_admits_on_a_tie_is_refused_by_name() {
-    let v = admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie allow\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "COUNCIL|`on_tie allow` in model council `Release` admits when the members disagree"));
-    assert!((admit_tag(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie allow\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL"));
-}
-
-#[test]
-fn a_rule_that_picks_one_member_s_answer_is_refused__and_so_is_a_typo() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate first }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimus }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown aggregation rule `unanimus` in model council `Release`"));
-}
-
-#[test]
-fn the_floor_is_counted_over_the_declared_members__never_the_answering_set() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate majority quorum answered\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`quorum answered` in model council `Release` counts the rule's floor over the members that answered"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate majority quorum declaired\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown quorum basis `declaired` in model council `Release`"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous on_tie splitt\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown tie outcome `splitt` in model council `Release`"));
-}
-
-#[test]
-fn a_council_is_several_models__each_with_its_own_placement() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, critic -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown council function `critic` in model council `Release`"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, proposer -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|council function `proposer` is declared twice in model council `Release` (first on line 3, as `vast`)"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` names model role `vast`, which is not declared"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> edge, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|members `proposer` and `adversary` of model council `Release` are both placed on model role `edge`"));
-}
-
-#[test]
-fn a_member_may_be_given_an_origin_its_sibling_is_not__item_516_slice_4_() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge reads confidential,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}")) == ""));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
-}
-
-#[test]
-fn a_member_given_a_confidential_input_is_not_placed_off_the_device() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast reads confidential, adversary -> edge,\n  aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` is declared `reads confidential` and runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device"));
+fn unmarked_emission_is_refused__g4_() {
+    assert!((admit_src(String::from("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(\"x\") undo db.execute(\"y\") }")) == "G4|call to emission `db.execute` must be marked `emit` (G4)"));
 }
 
 #[test]
@@ -32301,227 +32498,30 @@ fn what_a_member_may_be_declared_to_read_is_a_closed_vocabulary() {
 }
 
 #[test]
-fn one_member_wearing_a_council_s_name_is_refused__and_so_is_no_proposer() {
-    assert!((admit_src(String::from("model role vast off_device\nmodel council Release { proposer -> vast, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 1 member"));
-    assert!((admit_src(String::from("model role vast off_device\nmodel council Release { aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 0 members"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { adversary -> vast, verifier -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares no `proposer`"));
+fn withdrawing_the_consumer_too_releases_the_withdrawn_key() {
+    let svc = String::from("service C { fn g(k: Str) -> Str } ");
+    let x = String::from("component Fresh provides other: C { provide other { fn g(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("Old/db/;Store/cache/;Store<db;-Old;-Store")) == ""));
 }
 
 #[test]
-fn a_council_declares_exactly_one_aggregation__written_down() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares no `aggregate` rule"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous,\n  aggregate majority\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares two `aggregate` rules (`unanimous` on line 6, `majority` here)"));
+fn without_the_requirement_row_the_cross_manifest_cycle_is_invisible() {
+    let svc = String::from("service A { fn pa() -> Int } service B { fn pb() -> Int } ");
+    let b = String::from("component B requires a: A provides b: B { provide b { fn pb() { return 0 } } }");
+    assert!((admit_ambient(svc.revl_concat(&b), String::from("A/a/")) == ""));
 }
 
 #[test]
-fn _veto__needs_the_adversary_it_is_the_veto_of() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, verifier -> edge, aggregate veto }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate veto` in model council `Release`, which declares no `adversary`"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate veto }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == ""));
+fn without_the_route_row_the_routed_realm_loss_is_invisible() {
+    let svc = String::from("service Kv { fn get(k: Str) -> Str } service Api { fn go(k: Str) -> Str } ");
+    let x = String::from("component StoreB provides other: Api { provide other { fn go(k) { return k } } }");
+    assert!((admit_ambient(svc.revl_concat(&x), String::from("StoreA/kv/r1;StoreB/kv/r2;Router/api/;Router<*kv")) == ""));
 }
 
 #[test]
-fn a_council_has_one_name__and_it_is_not_a_role_s() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nmodel council Release { proposer -> edge, adversary -> vast, aggregate majority }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` is declared twice (first on line 3)"));
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council edge { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `edge` has the name of the model role declared on line 1"));
-}
-
-#[test]
-fn the_role_table_is_decided_before_any_council_indexes_it() {
-    let v = admit_src(String::from("model role edge on_devise\nmodel council Release { proposer -> edge, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
-    assert!((v == "MODEL|unknown residence `on_devise` for model role `edge`"));
-}
-
-#[test]
-fn a_council_leaves_the_rest_of_the_document_checked__and__council__is_a_name() {
-    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent C provides api: Api {\n  provide api { fn go(k) { return kv.get(k) } }\n}")) == "G1|`kv` is not a declared requirement of C"));
-    assert!((admit_src(String::from("service M { fn go(council: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(council) = council }\n}")) == ""));
-}
-
-#[test]
-fn a_council_and_a_route_model_block_are_decided_in_the_same_compilation() {
-    let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, adversary -> local, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> local, * -> cloud }\n  provide out { fn classify(text) = text }\n}"));
+fn _3_2__an_arrow_whose_body_depends_on_a_bottom_parameter_claims_no_result() {
+    let v = admit_src(String::from("fn takes_int(n: Int) -> Int {\n  return n\n}\n\nfn demo() -> Int {\n  let f = (x) => x\n  return takes_int(f(1))\n}"));
     assert!((v == ""));
-    assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 1 member"));
-}
-
-#[test]
-fn a_crossing_placed_on_a_role_is_folded_with_no_route_model_block() {
-    let v = admit_src(String::from("model role tool on_device reaches [shell.exec]\nservice Tools { emission[model.tool] fn run(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Tools provides out: Answer {\n  provide out { fn classify(text) = emit llm.run(text) }\n}"));
-    assert!((v == "MODEL|`Classifier` crosses `model.tool`, placed on model role `tool`, which reaches `shell.exec`, but `Classifier` holds only `model.tool` - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"));
-}
-
-#[test]
-fn a_role_reaching_no_further_than_its_component_is_admitted_with_no_block() {
-    let v = admit_src(String::from("model role tool on_device reaches [model.tool]\nservice Tools { emission[model.tool] fn run(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Tools provides out: Answer {\n  provide out { fn classify(text) = emit llm.run(text) }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn an_unscoped_emission_is_named_as_one__with_the_fix() {
-    let v = admit_src(String::from("model role local on_device reaches [Model]\nservice Model { emission fn complete(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Model provides out: Answer {\n  route model on classify { * -> local }\n  provide out { fn classify(text) = emit llm.complete(text) }\n}"));
-    assert!((v == "MODEL|`Classifier` routes `classify` (*) through model role `local`, which reaches `Model`, but `Classifier` holds only service `Model`'s unscoped emission (an unscoped emission has no token a `reaches [...]` list can name: give the `emission` methods of `Model` a scoped capability, such as `emission[model.complete]`, and reach that) - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"));
-}
-
-#[test]
-fn a_crossing_through_a_record_field_holding_a_provision_must_be_marked() {
-    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let r = { p: w.pay }\n      let x = r.p.charge(n)\n      return x\n    }\n  }\n}"));
-    assert!((v == "G4|call to emission `r.p.charge` must be marked `emit` (G4)"));
-}
-
-#[test]
-fn an_if_bound_provision_local_meets_the_approval_floor() {
-    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n)\n      return 0\n    }\n  }\n}"));
-    assert!((v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"));
-}
-
-#[test]
-fn an_if_bound_provision_local_crossed_with_an_approval_edge_is_admitted() {
-    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  let a = await approval[production.payment] { reason: \"pay\" }\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n) with a\n      return 0\n    }\n  }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_crossing_through_an_if_written_in_place_must_be_marked() {
-    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let x = (if (n > 0) { w.pay } else { w.pay }).charge(n)\n      return x\n    }\n  }\n}"));
-    assert!((v == "G4|call to emission `charge` must be marked `emit` (G4)"));
-}
-
-#[test]
-fn a_marked_crossing_through_a_list_literal_read_in_place_meets_the_floor() {
-    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      emit [w.pay][0].charge(n)\n      return 0\n    }\n  }\n}"));
-    assert!((v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"));
-}
-
-#[test]
-fn a_step_through_an_if_bound_provision_local_meets_a_scoped_upper_bound() {
-    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[audit.log] fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n)\n      return 0\n    }\n  }\n}"));
-    assert!((v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"));
-}
-
-#[test]
-fn a_call_through_a_service_typed_method_parameter_must_be_marked() {
-    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      let x = p.charge(n)\n      return x\n    }\n  }\n}"));
-    assert!((v == "G4|call to emission `p.charge` must be marked `emit` (G4)"));
-}
-
-#[test]
-fn a_crossing_through_a_service_typed_parameter_fits_the_declared_bound() {
-    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[audit.log] fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      emit p.charge(n)\n      return 0\n    }\n  }\n}"));
-    assert!((v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"));
-}
-
-#[test]
-fn a_crossing_through_a_service_typed_parameter_inside_its_bound_is_admitted() {
-    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[production.payment] fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      emit p.charge(n)\n      return 0\n    }\n  }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_spawn_handle_step_under_a_bound_covering_the_op_s_scope_is_admitted() {
-    let v = admit_src(String::from("service Task { emission[net] fn go() -> Int }\nservice Sup { emission[net] fn run() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() = 0 }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup {\n    fn run() {\n      let w = effect spawn Worker with { } undo w.dispose()\n      emit w.task.go()\n      return 0\n    }\n  }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_spawn_handle_value_under_a_bound_missing_the_op_s_scope_is_refused() {
-    let v = admit_src(String::from("service Task { emission[net] fn go() -> Int }\nservice Sup { emission[db] fn run() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() = 0 }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup {\n    fn run() {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let r = emit w.task.go()\n      return r\n    }\n  }\n}"));
-    assert!((v == "G4|`Sup.run` is declared `emission[db]`, but this implementation emits through `net` (reaching `Task.go`)"));
-}
-
-#[test]
-fn a_call_through_a_record_field_in_a_provide_method_is_refused() {
-    let v = admit_src(String::from("extern pure fn twice(n: Int) -> Int = @py { return n * 2 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let r = { f: twice }\n      return r.f(n)\n    }\n  }\n}"));
-    assert!((v == (String::from("T1|no builtin method `f` on values — the stdlib surface is ").revl_concat(&tk_stdlib_surface())).revl_concat(" (docs/stdlib-2.0.md)")));
-}
-
-#[test]
-fn the_function_read_off_a_record_field_and_bound_is_admitted() {
-    let v = admit_src(String::from("extern pure fn twice(n: Int) -> Int = @py { return n * 2 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let r = { f: twice }\n      let g = r.f\n      return g(n)\n    }\n  }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_deferred_extern_called_in_a_fn_body_is_refused() {
-    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nfn bill(a: Str, b: Str) -> Unit {\n  return deliver(a, b)\n}\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops { fn enqueue(sink, msg) { emit bill(sink, msg) } }\n}"));
-    assert!((v == "G4|`deferred` emission extern `deliver` cannot be called in the body of fn `bill`; a fn/test body has no session commit for the deferral to fire at (G4)"));
-}
-
-#[test]
-fn a_deferred_extern_passed_as_a_value_in_a_provide_method_is_refused() {
-    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nfn apply(f: (Str, Str) -> Unit, a: Str, b: Str) -> Unit { return f(a, b) }\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops {\n    fn enqueue(sink, msg) {\n      let r = apply(deliver, sink, msg)\n      return r\n    }\n  }\n}"));
-    assert!((v == "G4|`deferred` emission extern `deliver` is passed as a function value in component `Agent`; whoever calls the value fires it at once, with no session commit (G4)"));
-}
-
-#[test]
-fn a_deferred_extern_under_its_emit_marker_is_admitted() {
-    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops { fn enqueue(sink, msg) = emit deliver(sink, msg) }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_host_acquisition_s_undo_that_is_not_its_release_is_refused() {
-    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let store = effect Map.new() undo store.get(\"x\")\n  provide s { fn go(k) = 1 }\n}"));
-    assert!((v == "G4|the `undo` of `let store = effect Map.new(...)` must release THAT handle: write `undo store.drop()`"));
-}
-
-#[test]
-fn a_host_acquisition_released_by_its_own_verb_is_admitted() {
-    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let pool = effect Pool.open(\"pg://x\", 4) undo pool.close()\n  provide s { fn go(k) = 1 }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn an_unbound_host_acquisition_is_refused() {
-    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  effect Map.new() undo 1\n  provide s { fn go(k) = 1 }\n}"));
-    assert!((v == "G4|`effect Map.new(...)` must bind its handle so its `undo` can release it: write `let <name> = effect Map.new(...) undo <name>.drop()`"));
-}
-
-#[test]
-fn a_requirement_key_may_not_spell_a_builtin_type() {
-    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\nservice Lst { fn drop(xs: List[Str]) }\ncomponent C requires List: Lst provides s: S {\n  provide s { fn go(n) = n }\n}"));
-    assert!((v == "G1|requirement key `List` of C shadows the builtin type `List`"));
-}
-
-#[test]
-fn a_builtin_type_read_as_a_value_names_the_type_rule() {
-    let v = admit_src(String::from("service S { fn go(n: Int) -> List[Str] }\ncomponent C provides s: S {\n  provide s { fn go(n) = List.reverse([\"a\"]) }\n}"));
-    assert!((v == "T1|`List` is a builtin type, not a value"));
-}
-
-#[test]
-fn a_typed_hole_in_a_host_acquisition_s_undo_is_not_refused() {
-    let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let store = effect Map.new() undo hole[Unit] \"release\"\n  provide s { fn go(k) = 1 }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_block_match_arm_in_a_provide_method_is_read_as_the_arm_s_scope() {
-    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o { Some(v) => { let z = v + 1\n z }, None => 0 }\n      return x\n    }\n  }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn an_undeclared_name_in_a_block_arm_s_tail_is_refused_on_that_name() {
-    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o {\n        Some(v) => {\n          let z = v + 1\n          nope(z)\n        },\n        None => 0\n      }\n      return x\n    }\n  }\n}"));
-    assert!((v == "G1|`nope` is not a declared requirement of C"));
-}
-
-#[test]
-fn a_name_bound_in_a_block_arm_may_be_bound_again_after_it() {
-    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o {\n        Some(v) => {\n          let z = v + 1\n          z\n        },\n        None => 0\n      }\n      let z = x + 1\n      return z\n    }\n  }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_name_the_block_arm_statement_binds_is_a_g6_rebind() {
-    let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o {\n        Some(v) => {\n          let z = v + 1\n          z\n        },\n        None => 0\n      }\n      let x = 2\n      return x\n    }\n  }\n}"));
-    assert!((v == "G6|`x` is already bound in `go`"));
-}
-
-#[test]
-fn an_unmarked_crossing_through_a_block_arm_s_value_is_refused() {
-    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let o = Some(n)\n      let x = (match o {\n        Some(v) => {\n          let z = v\n          w.pay\n        },\n        None => w.pay\n      }).charge(n)\n      return x\n    }\n  }\n}"));
-    assert!((v == "G4|call to emission `charge` must be marked `emit` (G4)"));
 }
 
 #[test]

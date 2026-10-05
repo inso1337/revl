@@ -85,6 +85,23 @@ import tempfile
 # corpus, docgen reads the conformance matrix.
 REGISTRY = [
     {
+        # issue #1768: selfhost/lower.rvl is a SOURCE, but its in-file test
+        # blocks are kept sorted by name, so the one conflict that layout
+        # leaves (two branches adding different tests into the same gap) is
+        # mechanical: keep both sides' blocks, sort. sort_lower_tests.py
+        # refuses anything else (a marker outside the tests section, a test
+        # edited on both sides) and the conflict is left for you.
+        "name": "lower-tests",
+        "paths": ["selfhost/lower.rvl"],
+        "merge": "in-place",
+        "feeds": ["gate-crates", "census"],
+        "write": [{"run": ["{python}", "tools/sort_lower_tests.py", "--write"]}],
+        "check": [{"run": ["{python}", "tools/sort_lower_tests.py", "--check"]}],
+        "hint": "a conflict outside the in-file tests section, or in one test "
+                "both sides edited, is a real one: resolve it by hand, then run "
+                "`python3 tools/sort_lower_tests.py --write`.",
+    },
+    {
         "name": "gate-crates",
         "paths": ["crates/revl-gate/*", "crates/revl-gate-wasm/*"],
         "merge": "theirs",
