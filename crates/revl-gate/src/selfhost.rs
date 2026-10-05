@@ -318,6 +318,12 @@ pub struct AcqRoot {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DfTest {
+    name: String,
+    body: Vec<Stmt>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Verd {
     v: String,
     line: i64,
@@ -6045,25 +6051,26 @@ fn component_map_values(comp: Value, services: Value, functions: Vec<Value>, ctx
     return out;
 }
 
-fn call_bind_type(comp: Value, bind: &str, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> String {
+fn held_bind_type(comp: Value, bind: &str, services: Value, ctx_: Ctx__m1) -> String {
     for s in value_list(value_field(comp.clone(), String::from("body"))) {
         if ((value_str(value_field(s.clone(), String::from("step"))) == "let-effect") && (value_str(value_field(s.clone(), String::from("bind"))) == bind)) {
             let acq = value_field(s.clone(), String::from("acquire"));
-            if (node_kind(acq.clone()) != "fn") {
+            let k = node_kind(acq.clone());
+            if ((((k == "host") || (k == "spawn")) || (k == "subscribe")) || is_map_cas(acq.clone())) {
                 return String::from("");
             }
-            let r = map_get(fr.clone(), value_str(value_field(acq.clone(), String::from("name"))));
-            if ((r == "") || (r == "Unit")) {
+            let surface = provide_let_type(acq.clone(), ctx_.clone(), comp.clone(), services.clone());
+            if ((surface == "") || (surface == "Unit")) {
                 return String::from("");
             }
-            return rust_type_t(Value::new(serde_json::Value::from(r.clone())), tn.clone());
+            return rust_type_t(Value::new(serde_json::Value::from(surface.clone())), ctx_.tn.clone());
         }
     }
     return String::from("");
 }
 
-fn bind_field_type(comp: Value, bind: String, map_values: std::collections::HashMap<String, String>, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> String {
-    let held = call_bind_type(comp.clone(), &bind, fr.clone(), tn.clone());
+fn bind_field_type(comp: Value, bind: String, map_values: std::collections::HashMap<String, String>, services: Value, ctx_: Ctx__m1) -> String {
+    let held = held_bind_type(comp.clone(), &bind, services.clone(), ctx_.clone());
     if (held != "") {
         return held;
     }
@@ -6382,10 +6389,10 @@ fn is_stream_next(comp: Value, expr: Value) -> bool {
     return is_subscription_bind(comp.clone(), &name);
 }
 
-fn method_scope_rename(comp: Value, fr: std::collections::HashMap<String, String>, tn: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
+fn method_scope_rename(comp: Value, services: Value, ctx_: Ctx__m1) -> std::collections::HashMap<String, String> {
     let mut rn = std::collections::HashMap::new();
     for b in binds(comp.clone()) {
-        if (call_bind_type(comp.clone(), &b, fr.clone(), tn.clone()) != "") {
+        if (held_bind_type(comp.clone(), &b, services.clone(), ctx_.clone()) != "") {
             rn.insert(b.clone(), format!("self.{}.clone()", mangle(b.clone())));
         } else {
             rn.insert(b.clone(), format!("self.{}", mangle(b.clone())));
@@ -6541,7 +6548,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
     let pad = ind(indent);
     let name = value_str(value_field(comp.clone(), String::from("name")));
     let mnm = value_str(value_field(method.clone(), String::from("name")));
-    let scope = method_scope_rename(comp.clone(), ctx_.fr.clone(), ctx_.tn.clone());
+    let scope = method_scope_rename(comp.clone(), services.clone(), ctx_.clone());
     let mut c = set_rn(ctx_.clone(), scope.clone());
     let mut out: Vec<String> = vec![];
     let mut index = 0i64;
@@ -6690,7 +6697,7 @@ fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, ta
             out.extend((bl.lines).iter().cloned());
             out.push(String::from("    }"));
         } else {
-            let ctxr = set_rn(ctx_.clone(), method_scope_rename(comp.clone(), fr.clone(), tables.tn.clone()));
+            let ctxr = set_rn(ctx_.clone(), method_scope_rename(comp.clone(), services.clone(), ctx_.clone()));
             out.push(format!("    fn {}(&self, {}) -> {} {{ {} }}", mn, ps.revl_join(", "), ret, pure_method_statements(method.clone(), ctxr.clone())));
         }
     }
@@ -6911,7 +6918,7 @@ fn emit_let_effect_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_
         }
         acq_src = format!("Map::<{}>::new()", v);
     }
-    if (call_bind_type(comp.clone(), &raw_bind, ctx_.fr.clone(), ctx_.tn.clone()) != "") {
+    if (held_bind_type(comp.clone(), &raw_bind, value_field(ir.clone(), String::from("services")), ctx_.clone()) != "") {
         out.push(format!("{}let {} = {};", pad, bind, acq_src));
     } else {
         out.push(format!("{}let {} = Arc::new({});", pad, bind, acq_src));
@@ -7148,7 +7155,7 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
         let struct_ = format!("{}{}", cname, camel(key.clone()));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), fr.clone(), tables.tn.clone())));
+            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone()))));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(local.clone()), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
@@ -7222,7 +7229,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
         let struct_ = format!("{}{}", cname, camel(key.clone()));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), fr.clone(), tables.tn.clone())));
+            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone()))));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(local.clone()), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
@@ -11896,6 +11903,223 @@ fn svc_local_refusal(recv: Expr, op: String, marked: bool, cx: Ctx__m2) -> Strin
     let sp = svc_recv_spelling(recv.clone());
     let spelled = if (sp == "") { op.clone() } else { (sp.revl_concat(".")).revl_concat(&op) };
     return (String::from("call to emission `").revl_concat(&spelled)).revl_concat("` must be marked `emit` (G4)");
+}
+
+fn deferred_extern_names(ts: &[Token]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut depth = 0i64;
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(ts, i, "eof"))) {
+        if atk(ts, i, "{") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if atk(ts, i, "}") {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if ((depth == 0i64) && atw(ts, i, "extern")) {
+            let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
+            let mut deferred = false;
+            while (((j < ts.revl_length()) && (j < (i).checked_add(16i64).expect("revl: Int overflow"))) && (!atw(ts, j.clone(), "fn"))) {
+                if ati(ts, j.clone(), "deferred") {
+                    deferred = true;
+                }
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if ((deferred && atw(ts, j.clone(), "fn")) && atk(ts, (j).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                out.push(tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).text);
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn dfr_call_msg(name: &str, where_: &str, inArrow: bool) -> String {
+    let route = if inArrow { String::from("inside an arrow in ").revl_concat(&where_) } else { String::from("in ").revl_concat(&where_) };
+    return (((String::from("`deferred` emission extern `").revl_concat(&name)).revl_concat("` cannot be called ")).revl_concat(&route)).revl_concat("; a fn/test body has no session commit for the deferral to fire at (G4)");
+}
+
+fn dfr_value_msg(name: &str, where_: &str) -> String {
+    return (((String::from("`deferred` emission extern `").revl_concat(&name)).revl_concat("` is passed as a function value in ")).revl_concat(&where_)).revl_concat("; whoever calls the value fires it at once, with no session commit (G4)");
+}
+
+fn dfr_callee_name(e: Expr) -> String {
+    return match e {
+    Expr::Var(n) => n,
+    _ => String::from(""),
+};
+}
+
+fn dfr_expr(e: Expr, dn: &[String], where_: &str, inArrow: bool, calls: bool) -> String {
+    return match e {
+    Expr::Var(n) => if contains__m2(dn, &n) { dfr_value_msg(&n, where_) } else { String::from("") },
+    Expr::Call(c) => { let c = *c; dfr_call(c.target.clone(), &c.args, dn, where_, inArrow, calls) },
+    Expr::OptCall(c) => { let c = *c; dfr_call(c.target.clone(), &c.args, dn, where_, inArrow, calls) },
+    Expr::Field(f) => { let f = *f; dfr_expr(f.target.clone(), dn, where_, inArrow, calls) },
+    Expr::OptField(f) => { let f = *f; dfr_expr(f.target.clone(), dn, where_, inArrow, calls) },
+    Expr::Bin(b) => { let b = *b; dfr_first(dfr_expr(b.l.clone(), dn, where_, inArrow, calls), dfr_expr(b.r.clone(), dn, where_, inArrow, calls)) },
+    Expr::Un(u) => { let u = *u; dfr_expr(u.e.clone(), dn, where_, inArrow, calls) },
+    Expr::Emit(u) => { let u = *u; dfr_expr(u.e.clone(), dn, where_, inArrow, calls) },
+    Expr::Index(x) => { let x = *x; dfr_first(dfr_expr(x.target.clone(), dn, where_, inArrow, calls), dfr_expr(x.idx.clone(), dn, where_, inArrow, calls)) },
+    Expr::If(x) => { let x = *x; dfr_first(dfr_expr(x.cond.clone(), dn, where_, inArrow, calls), dfr_first(dfr_expr(x.then_.clone(), dn, where_, inArrow, calls), dfr_expr(x.els.clone(), dn, where_, inArrow, calls))) },
+    Expr::Lst(l) => dfr_list(&l.items, 0i64, dn, where_, inArrow, calls),
+    Expr::Rec(r) => dfr_inits(&r.fields, 0i64, dn, where_, inArrow, calls),
+    Expr::Arrow(ar) => { let ar = *ar; dfr_expr(ar.body, dn, where_, true, calls) },
+    Expr::Match(m) => { let m = *m; dfr_first(dfr_expr(m.scrut.clone(), dn, where_, inArrow, calls), dfr_arms(&m.arms, 0i64, dn, where_, inArrow, calls)) },
+    Expr::Templ(t) => dfr_parts(&t.parts, 0i64, dn, where_, inArrow, calls),
+    Expr::RecUpd(r) => { let r = *r; dfr_first(dfr_expr(r.base.clone(), dn, where_, inArrow, calls), dfr_inits(&r.upds, 0i64, dn, where_, inArrow, calls)) },
+    _ => String::from(""),
+};
+}
+
+fn dfr_first(a: String, b: String) -> String {
+    return if (a != "") { a.clone() } else { b };
+}
+
+fn dfr_call(target: Expr, args: &[Expr], dn: &[String], where_: &str, inArrow: bool, calls: bool) -> String {
+    let head = dfr_callee_name(target.clone());
+    if ((head != "") && contains__m2(dn, &head)) {
+        if calls {
+            return dfr_call_msg(&head, where_, inArrow);
+        }
+        return dfr_list(args, 0i64, dn, where_, inArrow, calls);
+    }
+    let t = if (head != "") { String::from("") } else { dfr_expr(target.clone(), dn, where_, inArrow, calls) };
+    if (t != "") {
+        return t;
+    }
+    return dfr_list(args, 0i64, dn, where_, inArrow, calls);
+}
+
+fn dfr_list(xs: &[Expr], i: i64, dn: &[String], where_: &str, inArrow: bool, calls: bool) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let r = dfr_expr((xs)[(i) as usize].clone(), dn, where_, inArrow, calls);
+    if (r != "") {
+        return r;
+    }
+    return dfr_list(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, where_, inArrow, calls);
+}
+
+fn dfr_inits(xs: &[InitN], i: i64, dn: &[String], where_: &str, inArrow: bool, calls: bool) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let r = dfr_expr((xs)[(i) as usize].value.clone(), dn, where_, inArrow, calls);
+    if (r != "") {
+        return r;
+    }
+    return dfr_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, where_, inArrow, calls);
+}
+
+fn dfr_arms(xs: &[ArmN], i: i64, dn: &[String], where_: &str, inArrow: bool, calls: bool) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let r = dfr_expr((xs)[(i) as usize].body.clone(), dn, where_, inArrow, calls);
+    if (r != "") {
+        return r;
+    }
+    return dfr_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, where_, inArrow, calls);
+}
+
+fn dfr_parts(xs: &[PartN], i: i64, dn: &[String], where_: &str, inArrow: bool, calls: bool) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let r = dfr_expr((xs)[(i) as usize].e.clone(), dn, where_, inArrow, calls);
+    if (r != "") {
+        return r;
+    }
+    return dfr_parts(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, where_, inArrow, calls);
+}
+
+fn dfr_stmts(ss: &[Stmt], i: i64, dn: &[String], where_: &str, calls: bool) -> Verd {
+    if (i >= ss.revl_length()) {
+        return no_verd();
+    }
+    let r = dfr_expr((ss)[(i) as usize].e.clone(), dn, where_, false, calls);
+    if (r != "") {
+        return mk_verd(tagged("G4", &r), (ss)[(i) as usize].line.clone());
+    }
+    return dfr_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), dn, where_, calls);
+}
+
+fn dfr_tests(ts: Vec<Token>) -> Vec<DfTest> {
+    let mut out: Vec<DfTest> = vec![];
+    let mut depth = 0i64;
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        if ((((depth == 0i64) && atw(&ts, i, "test")) && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "string")) && atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "{")) {
+            let e = close_brace(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+            if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return out;
+            }
+            let raw = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+            out.push(DfTest { name: raw.clone(), body: p_stmts(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"), vec![]) });
+            i = (e).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if atk(&ts, i, "{") {
+                depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if atk(&ts, i, "}") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn deferred_reach_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
+    let dn = deferred_extern_names(&ts);
+    if (dn.revl_length() == 0i64) {
+        return no_verd();
+    }
+    let mut i = 0i64;
+    while (i < pg.fns.revl_length()) {
+        let f = (pg.fns)[(i) as usize].clone();
+        if ((!f.isEmExtern) && (!f.isAsyncExtern)) {
+            let v = dfr_stmts(&f.body, 0i64, &dn, &((String::from("the body of fn `").revl_concat(&f.name)).revl_concat("`")), true);
+            if (v.v != "") {
+                return v;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let tests = dfr_tests(ts.clone());
+    i = 0i64;
+    while (i < tests.revl_length()) {
+        let v = dfr_stmts(&(tests)[(i) as usize].body, 0i64, &dn, &((String::from("the body of test `").revl_concat(&(tests)[(i) as usize].name)).revl_concat("`")), true);
+        if (v.v != "") {
+            return v;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    i = 0i64;
+    while (i < pg.comps.revl_length()) {
+        let c = (pg.comps)[(i) as usize].clone();
+        let where_ = (String::from("component `").revl_concat(&c.name)).revl_concat("`");
+        let sv = dfr_stmts(&c.setup, 0i64, &dn, &where_, false);
+        if (sv.v != "") {
+            return sv;
+        }
+        let mut pi = 0i64;
+        while (pi < c.provs.revl_length()) {
+            let mut mi = 0i64;
+            while (mi < (c.provs)[(pi) as usize].methods.revl_length()) {
+                let mv = dfr_stmts(&((c.provs)[(pi) as usize].methods.clone())[(mi) as usize].body, 0i64, &dn, &where_, false);
+                if (mv.v != "") {
+                    return mv;
+                }
+                mi = (mi).checked_add(1i64).expect("revl: Int overflow");
+            }
+            pi = (pi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
 }
 
 fn tagged(tag: &str, msg: &str) -> String {
@@ -20926,6 +21150,10 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
     if (cachev.v != "") {
         return NoLink { done: true, refs: vec![cachev.clone()] };
     }
+    let dfv = deferred_reach_refusal(ts.clone(), pg.clone());
+    if (dfv.v != "") {
+        return NoLink { done: true, refs: vec![dfv.clone()] };
+    }
     let acq = check_reachable_fn_acquire(pg.clone());
     if (acq.v != "") {
         return NoLink { done: true, refs: vec![acq.clone()] };
@@ -21969,6 +22197,39 @@ fn ir_params_json(ps: &[ParamN]) -> String {
     return out;
 }
 
+fn taint_top_qualifier(ty: String) -> String {
+    if ((ty == "") || (!taint_has_qualifier(&ty))) {
+        return String::from("");
+    }
+    let p = ty_parse(ty.clone());
+    if (is_qual_head(&p.head) && (p.args.revl_length() == 1i64)) {
+        return p.head;
+    }
+    return String::from("");
+}
+
+fn ir_service_params_json(ps: &[ParamN], raw: &[ParamN]) -> String {
+    let mut out = String::from("");
+    let mut i = 0i64;
+    while (i < ps.revl_length()) {
+        let mut e = ((String::from("{\"name\": ").revl_concat(&jstr(&(ps)[(i) as usize].name))).revl_concat(", \"type\": ")).revl_concat(&jstr(&taint_strip((ps)[(i) as usize].ty.clone())));
+        if taint_mentions_secret((ps)[(i) as usize].ty.clone()) {
+            e.push_str(", \"secret\": true");
+        }
+        let q = if (i < raw.revl_length()) { taint_top_qualifier((raw)[(i) as usize].ty.clone()) } else { String::from("") };
+        if (q == "Trusted") {
+            e.push_str(", \"trusted\": true");
+        }
+        if (q == "Untrusted") {
+            e.push_str(", \"untrusted\": true");
+        }
+        e.push_str("}");
+        out = if (out == "") { e.clone() } else { (out.revl_concat(", ")).revl_concat(&e) };
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn ir_caps_json(cs: &[String]) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
@@ -22021,9 +22282,14 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
     let mut retJson = String::from("null");
     let mut term = String::from("");
+    let mut retQual = String::from("");
     let mut nexti = ps.i;
     if atk(&ts, ps.i, "arrow") {
         let tr = type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
+        let rq = taint_top_qualifier(tr.ty.clone());
+        if ((rq == "Untrusted") || (rq == "Secret")) {
+            retQual = rq.clone();
+        }
         let rawRet = taint_strip(alias_subst(tr.ty.clone(), al.clone()));
         if (rawRet == "Criterion") {
             term = String::from("criterion");
@@ -22038,7 +22304,10 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
         }
         nexti = tr.i;
     }
-    let mut mj = (((jstr(&nm).revl_concat(": {\"params\": [")).revl_concat(&ir_params_json(&alias_subst_params(ps.ps.clone(), al.clone())))).revl_concat("], \"returns\": ")).revl_concat(&retJson);
+    let mut mj = (((jstr(&nm).revl_concat(": {\"params\": [")).revl_concat(&ir_service_params_json(&alias_subst_params(ps.ps.clone(), al.clone()), &ps.ps))).revl_concat("], \"returns\": ")).revl_concat(&retJson);
+    if (retQual != "") {
+        mj = (mj.revl_concat(", \"returns_qualifier\": ")).revl_concat(&jstr(&retQual));
+    }
     if (term != "") {
         mj = (mj.revl_concat(", \"termination\": ")).revl_concat(&jstr(&term));
     }
@@ -32118,6 +32387,24 @@ fn a_call_through_a_record_field_in_a_provide_method_is_refused() {
 #[test]
 fn the_function_read_off_a_record_field_and_bound_is_admitted() {
     let v = admit_src(String::from("extern pure fn twice(n: Int) -> Int = @py { return n * 2 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let r = { f: twice }\n      let g = r.f\n      return g(n)\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_deferred_extern_called_in_a_fn_body_is_refused() {
+    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nfn bill(a: Str, b: Str) -> Unit {\n  return deliver(a, b)\n}\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops { fn enqueue(sink, msg) { emit bill(sink, msg) } }\n}"));
+    assert!((v == "G4|`deferred` emission extern `deliver` cannot be called in the body of fn `bill`; a fn/test body has no session commit for the deferral to fire at (G4)"));
+}
+
+#[test]
+fn a_deferred_extern_passed_as_a_value_in_a_provide_method_is_refused() {
+    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nfn apply(f: (Str, Str) -> Unit, a: Str, b: Str) -> Unit { return f(a, b) }\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops {\n    fn enqueue(sink, msg) {\n      let r = apply(deliver, sink, msg)\n      return r\n    }\n  }\n}"));
+    assert!((v == "G4|`deferred` emission extern `deliver` is passed as a function value in component `Agent`; whoever calls the value fires it at once, with no session commit (G4)"));
+}
+
+#[test]
+fn a_deferred_extern_under_its_emit_marker_is_admitted() {
+    let v = admit_src(String::from("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\nservice Ops { emission fn enqueue(sink: Str, msg: Str) }\ncomponent Agent provides ops: Ops {\n  provide ops { fn enqueue(sink, msg) = emit deliver(sink, msg) }\n}"));
     assert!((v == ""));
 }
 

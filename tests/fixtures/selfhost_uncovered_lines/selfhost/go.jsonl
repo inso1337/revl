@@ -32,41 +32,19 @@
 
 ["function", "has-any-word-tests-the-neighbours-of-an", "is_word_char", 2, 2]
 
-["reason", "issue-106-go-combined-path", "Issue #106, the v3 combined path's first slice (`_emit_v3_combined` for provide-only components). Most of this is the branches that DECLINE a document past the slice: `combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `has_stub_host`, `declares_secret` and `has_lifecycle_test` answering false or true for a config field, a realm, an activation step, an effect or `emit` in a method, a builtin, a `??`, a field or record, a Secret marking, a stub host or a lifecycle test, and `emit_module` falling back to the pure path. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the config-carrying component in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected). The rest is arms the carried documents do not reach yet: in `comp_expr_bare`, a `var` reference, an Int negation and a callee-field method call; in `comp_name_ref`, a name that is not a parameter (a required key by name, or the fallback); in `ref_ident`, a node with an `id` and no `name`; in `comp_go_type`, the `Unit`, `Row`, empty and undeclared-name spellings; in `lower_first`, an empty or non-uppercase input; in `safe_local`, a name ending in `_`; in `emit_comp_provide_impl`, a bare `return` with no value. In `meta_literal`, a null in an intercept's metadata."]
+["reason", "issue-106-go-combined-path", "Issue #106, the v3 combined path (`_emit_v3_combined`), first five slices, and the issue #1834 match inference (the first typed arm, with its binding in scope, and an interface-typed temp for a scrutinee that is not a bare name). The decline checks (`combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `comp_match_ok`) are written as one boolean per arm, so a declined document costs no branch of its own. What no carried document reaches: in `comp_expr_ok` and `comp_expr_bare`, a `var` reference (a v3 provide body spells a name as `name`); in `comp_expr_bare`, a callee-field method call and the Int negation through `revlSub` (the frontend sets no `operands` on a provide body's `-`); in `emit_module`, the fall-back to the pure path for an aliased `strings` import, a `//revl:import` or the sealed Result form; in `call_head_ok`, a method call whose callee is a field; in `comp_name_ref`, a required key referenced as a bare name; in `meta_literal`, a null in an intercept's metadata. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the component beside a lifecycle test in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected)."]
 
-["function", "issue-106-go-combined-path", "combined_ok", 3, 3]
+["function", "issue-106-go-combined-path", "call_head_ok", 1, 1]
 
-["function", "issue-106-go-combined-path", "comp_expr", 1, 1]
+["function", "issue-106-go-combined-path", "comp_expr_bare", 3, 3]
 
-["function", "issue-106-go-combined-path", "comp_expr_bare", 4, 4]
+["function", "issue-106-go-combined-path", "comp_expr_ok", 1, 1]
 
-["function", "issue-106-go-combined-path", "comp_expr_ok", 14, 14]
-
-["function", "issue-106-go-combined-path", "comp_go_type", 4, 4]
-
-["function", "issue-106-go-combined-path", "comp_name_ref", 3, 3]
-
-["function", "issue-106-go-combined-path", "component_ok", 4, 4]
-
-["function", "issue-106-go-combined-path", "declares_secret", 5, 5]
-
-["function", "issue-106-go-combined-path", "emit_comp_provide_impl", 1, 1]
+["function", "issue-106-go-combined-path", "comp_name_ref", 1, 1]
 
 ["function", "issue-106-go-combined-path", "emit_module", 1, 1]
 
-["function", "issue-106-go-combined-path", "has_lifecycle_test", 1, 1]
-
-["function", "issue-106-go-combined-path", "has_stub_host", 4, 4]
-
-["function", "issue-106-go-combined-path", "lower_first", 2, 2]
-
 ["function", "issue-106-go-combined-path", "meta_literal", 1, 1]
-
-["function", "issue-106-go-combined-path", "provide_method_ok", 3, 3]
-
-["function", "issue-106-go-combined-path", "ref_ident", 1, 1]
-
-["function", "issue-106-go-combined-path", "safe_local", 1, 1]
 
 ["reason", "issue-1631-the-arity-guard-in-v3-fill", "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus."]
 
@@ -88,7 +66,7 @@
 
 ["function", "named-marker-fallbacks-and-guards-of-the-pure", "go_literal", 1, 1]
 
-["function", "named-marker-fallbacks-and-guards-of-the-pure", "host_constructor", 3, 3]
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "host_constructor", 2, 2]
 
 ["function", "named-marker-fallbacks-and-guards-of-the-pure", "is_interface", 1, 1]
 

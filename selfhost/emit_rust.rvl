@@ -4664,27 +4664,29 @@ fn component_map_values(comp: Any, services: Any, functions: List[Any], ctx: Ctx
 // binds a live-instance handle, a result-declared CAS binds the atomic `bool`
 // result, and a host root binds that object — the Map generically, with the
 // value type learned above (defaulting to the historical `String`).
-// `_call_bind_type` (issue #1920): the Rust type of an activation bind whose
-// acquisition is a CALL (an `extern acquire` or a module fn), its declared
-// return, held by value; "" for any other bind. A host resource stays an
-// `Arc<host>`, but a call returns the handle its undo takes, and wrapping it
-// in `Arc` handed the undo an `Arc` and typed the capture `Arc<Value>`.
-fn call_bind_type(comp: Any, bind: Str, fr: Map[Str, Str], tn: Map[Str, Str]) -> Str {
+// `_held_bind_type` (issues #1920, #1931): the Rust type of an activation
+// bind held BY VALUE, "" for one held as `Arc<..>`. A host object, a spawn
+// handle, a subscription and the result-declared host CAS are shared
+// resources and stay `Arc`-held. Every other acquisition evaluates to a value
+// (an `extern acquire` handle, a module fn's result, a required-service
+// call's return), typed by the same inference a provide-method `let` takes.
+fn held_bind_type(comp: Any, bind: Str, services: Any, ctx: Ctx) -> Str {
   for (s of value_list(value_field(comp, "body"))) {
     if (value_str(value_field(s, "step")) == "let-effect" && value_str(value_field(s, "bind")) == bind) {
       let acq = value_field(s, "acquire")
-      if (node_kind(acq) != "fn") { return "" }
-      let r = map_get(fr, value_str(value_field(acq, "name")))
-      if (r == "" || r == "Unit") { return "" }
-      return rust_type_t(r, tn)
+      let k = node_kind(acq)
+      if (k == "host" || k == "spawn" || k == "subscribe" || is_map_cas(acq)) { return "" }
+      let surface = provide_let_type(acq, ctx, comp, services)
+      if (surface == "" || surface == "Unit") { return "" }
+      return rust_type_t(surface, ctx.tn)
     }
   }
   return ""
 }
 
 // `_bind_field_type`: a provider struct's field for an activation bind.
-fn bind_field_type(comp: Any, bind: Str, map_values: Map[Str, Str], fr: Map[Str, Str], tn: Map[Str, Str]) -> Str {
-  let held = call_bind_type(comp, bind, fr, tn)
+fn bind_field_type(comp: Any, bind: Str, map_values: Map[Str, Str], services: Any, ctx: Ctx) -> Str {
+  let held = held_bind_type(comp, bind, services, ctx)
   if (held != "") { return held }
   return `Arc<${host_of(comp, bind, map_values)}>`
 }
@@ -4959,13 +4961,13 @@ fn is_stream_next(comp: Any, expr: Any) -> Bool {
 // The capture rename maps: a provide-method reads binds/reqs/config off `self`;
 // an undo closure re-reads pre-cloned `<name>_undo` copies.
 // `_method_scope_rename`. A provide method has only `&self`, so a read of a
-// call-acquired handle, held by value (issue #1920), is a clone.
-fn method_scope_rename(comp: Any, fr: Map[Str, Str], tn: Map[Str, Str]) -> Map[Str, Str] {
+// value-held bind (issues #1920, #1931) is a clone.
+fn method_scope_rename(comp: Any, services: Any, ctx: Ctx) -> Map[Str, Str] {
   var rn: Map[Str, Str] = Map.empty()
   // a key or bind that is a Rust keyword is captured under its mangled name,
   // the one its field and its local carry (issue #1927)
   for (b of binds(comp)) {
-    if (call_bind_type(comp, b, fr, tn) != "") { rn = rn.set(b, `self.${mangle(b)}.clone()`) }
+    if (held_bind_type(comp, b, services, ctx) != "") { rn = rn.set(b, `self.${mangle(b)}.clone()`) }
     else { rn = rn.set(b, `self.${mangle(b)}`) }
   }
   for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `self.${mangle(req)}`) }
@@ -5095,7 +5097,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
   let pad = ind(indent)
   let name = value_str(value_field(comp, "name"))
   let mnm = value_str(value_field(method, "name"))
-  let scope = method_scope_rename(comp, ctx.fr, ctx.tn)
+  let scope = method_scope_rename(comp, services, ctx)
   var c = set_rn(ctx, scope)
   var out = []
   var index = 0
@@ -5237,7 +5239,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
       out = out.concat(bl.lines)
       out = out.push("    }")
     } else {
-      let ctxr = set_rn(ctx, method_scope_rename(comp, fr, tables.tn))
+      let ctxr = set_rn(ctx, method_scope_rename(comp, services, ctx))
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} { ${pure_method_statements(method, ctxr)} }`)
     }
   }
@@ -5489,7 +5491,7 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     if (v == "") { v = "String" }
     acq_src = `Map::<${v}>::new()`
   }
-  if (call_bind_type(comp, raw_bind, ctx.fr, ctx.tn) != "") { out = out.push(`${pad}let ${bind} = ${acq_src};`) }
+  if (held_bind_type(comp, raw_bind, value_field(ir, "services"), ctx) != "") { out = out.push(`${pad}let ${bind} = ${acq_src};`) }
   else { out = out.push(`${pad}let ${bind} = Arc::new(${acq_src});`) }
   let undo_name = `${bind}_undo`
   out = out.push(`${pad}let ${undo_name} = ${bind}.clone();`)
@@ -5828,7 +5830,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, fr, tables.tn)},`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr))},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
@@ -5908,7 +5910,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, fr, tables.tn)},`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr))},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }

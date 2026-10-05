@@ -1,0 +1,22 @@
+// issue #1892: a component signature that takes `Any` or a `Result`
+// parameter. `Any` renders as Go's `any` (in a parameter, a return and a
+// list element) and a Result parameter as the package's `RevlResult[T, E]`,
+// which pulls the Result struct preamble in. The surface spelling used to
+// reach the Go signature and the package did not build.
+type Note = { title: Str, size: Int }
+
+service Shelf {
+  fn settle(r: Result[Int, Str]) -> Int
+  fn blob() -> Any
+  fn raw(v: Any) -> Any
+  fn raws() -> List[Any]
+}
+
+component Store provides shelf: Shelf {
+  provide shelf {
+    fn settle(r) = 1
+    fn blob() = "x"
+    fn raw(v) = v
+    fn raws() = []
+  }
+}
