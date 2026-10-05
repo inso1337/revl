@@ -4737,9 +4737,25 @@ async def _revl_settle():
         await _revl_asyncio.sleep(0)
 
 
+def _revl_live():
+    # the fibers this lifecycle test loaded, by component, kept where
+    # `_revl_call` can read why a provider is missing (issue #1895)
+    _REVL_LIVE.clear()
+    return _REVL_LIVE
+
+
 async def _revl_call(root, key, method, args, where):
     impl = root.get(key)
     if impl is None:
+        # a provider whose activation RAISED is its own failure, with the error
+        # it raised; the R2 wording is only for a `requires` that is unmet
+        # (issue #1895). cordis records the error on the FAILED fiber.
+        for name in _REVL_PROVIDERS.get(key, ()):
+            err = getattr(_REVL_LIVE.get(name), "_error", None)
+            if err is not None:
+                raise AssertionError(
+                    "{}: no provider for key {!r}: its provider {} failed to activate: "
+                    "{}: {}".format(where, key, name, type(err).__name__, err)) from err
         raise AssertionError(
             "{}: no provider for key {!r} \u2014 its component is loaded but not ACTIVE; "
             "a component with an unmet `requires` stays PENDING (R2)".format(where, key))
@@ -4758,10 +4774,23 @@ def _revl_collect_inverse_residue(fiber):
 '''
 
 
+def _render_providers(ir: dict) -> str:
+    """`_REVL_PROVIDERS`: each provision key, sorted, to the components that
+    provide it, in declaration order (issue #1895)."""
+    providers: dict = {}
+    for comp in ir.get("components") or []:
+        for key in comp.get("provides") or {}:
+            providers.setdefault(key, []).append(_ident(comp["name"], "component name"))
+    return "{" + ", ".join(
+        f"{key!r}: [{', '.join(map(repr, names))}]"
+        for key, names in sorted(providers.items())) + "}"
+
+
 def _emit_lifecycle_harness() -> "_Lines":
     out = _Lines()
     out.add(0, f"_REVL_ACQUIRE = {_LIFECYCLE_ACQUIRE!r}")
     out.add(0, "_REVL_INVERSE_RESIDUE = []")
+    out.add(0, "_REVL_LIVE = {}")
     out.add(0)
     for line in _LIFECYCLE_HARNESS.strip("\n").split("\n"):
         out.add(0, line)
@@ -4792,7 +4821,7 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         out.add(2, "_revl_Clock.reset()")
     out.add(2, "events = []")
     out.add(2, "_REVL_INVERSE_RESIDUE.clear()")
-    out.add(2, "_revl_fibers = {}")
+    out.add(2, "_revl_fibers = _revl_live()")
     if uses_abort:
         # item 377: register a 245 session-commit owner BEFORE any component
         # loads, so every activation frame joins its live-frame registry and an
@@ -5865,6 +5894,9 @@ def emit(ir: dict) -> str:
             for key, idem in sorted(idempotent_map.items())
         ) + "}"
         out.add(0, f"_REVL_IDEMPOTENT = {rendered_idem}")
+        # issue #1895: {key: the components that provide it}, so a call that
+        # finds no provider can say the provider's activation raised
+        out.add(0, f"_REVL_PROVIDERS = {_render_providers(ir)}")
         out.add(0)
     # issue #540: one traversal answers every `_uses_*` gate below, in place of
     # the dozen-plus full-IR walks that dominated emit. Byte-identical output.
