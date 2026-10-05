@@ -1,0 +1,10 @@
+// an arrow parameter is untyped in a component, so its method stays lenient
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math {
+    fn go(n: Int) {
+      let g = (n) => n.frob()
+      return 1
+    }
+  }
+}

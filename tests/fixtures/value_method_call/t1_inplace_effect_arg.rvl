@@ -1,0 +1,7 @@
+// issue #1942: the same refusal in an activation `effect` argument
+service Store { fn put(k: Int, v: Int) }
+service Health { fn status() -> Int }
+component B requires store: Store provides health: Health {
+  effect store.put(1, [1].frob()) undo store.put(1, 0)
+  provide health { fn status() = 1 }
+}

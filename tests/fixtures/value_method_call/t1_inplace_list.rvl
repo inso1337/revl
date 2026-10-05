@@ -1,0 +1,5 @@
+// issue #1942: a method outside the builtin table on a list literal
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math { fn go(n) = [1, 2].map((x) => x + n).length }
+}

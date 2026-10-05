@@ -1,0 +1,5 @@
+// issue #1942: a builtin call's Str result, read in place
+service Math { fn go(s: Str) -> Int }
+component C provides math: Math {
+  provide math { fn go(s) = (s.concat("x")).frob(1) }
+}
