@@ -20,7 +20,6 @@ here when `lake` is on PATH, and by `make formal` always.
 from __future__ import annotations
 
 import io
-import json
 import shutil
 import sys
 from contextlib import redirect_stdout
@@ -230,8 +229,9 @@ def test_a_blind_row_is_filed_under_missed_g6(harness, verdicts, rows, tmp_path)
 
 
 def test_the_g6_ledger_list_is_empty(harness):
-    ledger = json.loads(harness.OOF_LEDGER_PATH.read_text(encoding="utf-8"))
+    ledger = harness.load_out_of_fragment_ledger()
     assert ledger["out-of-fragment-G6"] == []
+    assert not (harness.OOF_LEDGER_PATH / "out-of-fragment-G6").exists()
     assert "out-of-fragment-G6" in harness.OOF_RATCHET_BUCKETS
 
 
