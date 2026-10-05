@@ -624,12 +624,21 @@ def _resolve_group(group: dict, paths: list, ctx: Context) -> list:
 
 
 def _changed(root: str) -> list:
-    """Every modified, added or deleted path in the worktree, conflicts aside."""
+    """Every path with an UNSTAGED change in the worktree (modified, added,
+    untracked or deleted), conflicts aside.
+
+    A change already staged and untouched since (`D ` after a transition's
+    `git rm`, `M ` after `_take_theirs`) is left out: it has nothing more to
+    stage, and `git add -A -- <path>` on a path deleted from both the index
+    and the worktree fails with "pathspec did not match" (#1917's two-file
+    layout, which main deleted inside the census generator's own directory)."""
     out = _git(root, "status", "--porcelain", "--untracked-files=all")
     paths = []
     for line in out.splitlines():
         status, path = line[:2], line[3:]
         if "U" in status or status in ("AA", "DD"):
+            continue
+        if status[1] == " ":
             continue
         paths.append(path.split(" -> ")[-1])
     return paths

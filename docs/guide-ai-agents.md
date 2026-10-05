@@ -164,7 +164,10 @@ Rules that will reject you if you forget them:
 - **No acquisition after `provide`** (A2); **no `await` in a provide-method
   body unless the operation is declared `async fn`** (A1).
 - **`fail "msg"`**, deliberate L-Raise: reverts accumulated effects and lands
-  the component FAILED.
+  the component FAILED. A FAILED component's `revl_state` row carries
+  `error: {type, message}`, what its activation raised, and a call on a key it
+  provides names that provider and that error (issue #1895), so a raising
+  host body is never mistaken for an unmet `requires`.
 
 ## The guarantees are your safety net
 
