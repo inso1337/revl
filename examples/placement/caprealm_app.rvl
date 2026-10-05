@@ -16,7 +16,7 @@
 service Kv {
   fn get(k: Str) -> Opt[Str]
   fn set(k: Str, v: Str)
-  fn unset(k: Str) -> Str
+  fn unset(k: Str)
 }
 
 service Sealer {

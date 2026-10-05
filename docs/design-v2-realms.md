@@ -17,7 +17,7 @@ Two prelude statements, following syntax-2.0's reserved shapes:
 ```revl
 service Kv {
   fn set(key: Str, value: Str) -> Int
-  fn unset(key: Str) -> Int
+  fn unset(key: Str)
 }
 
 component TenantAApp requires kv: Kv {

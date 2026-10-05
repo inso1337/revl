@@ -14,7 +14,7 @@
 service Kv {
   fn get(k: Str, v: Str) -> Opt[Str]
   fn set(k: Str, v: Str)
-  fn unset(k: Str) -> Str
+  fn unset(k: Str)
 }
 
 component TenantAStore provides kv: Kv {

@@ -144,7 +144,7 @@
 
 ["reason", "selfhost-emit-java-rvl-method-body-lines-only", "selfhost/emit_java.rvl::method_body_lines: Only flat fx.track compensation remains. A provided-method compensation makes component_needs_frame true, so admitted emission necessarily selects the frame compensation branch. Issue #1512 re-records it 1 to 5: double_tool.rvl's provider method `double` was the corpus document that reached the `void`-return statements here, because its return type was looked up under the renamed `double_`. It renders with its declared `long` return now, as the reference does."]
 
-["function", "selfhost-emit-java-rvl-method-body-lines-only", "method_body_lines", 5, 5]
+["function", "selfhost-emit-java-rvl-method-body-lines-only", "method_body_lines", 1, 1]
 
 ["reason", "selfhost-emit-java-rvl-method-body-residual-effectful", "selfhost/emit_java.rvl::method_body: Residual effectful/multistep trap and nonvoid bare-return marker are outside method_simple_ok; the void value-expression branch requires nonsimple legacy calls. Scalar/name and bare void return cases are covered."]
 
