@@ -157,6 +157,77 @@ means the check needs no whole-program fixed point over the service graph,
 and it matches what a reader of one component can verify. `revl audit`
 composes the chain back together across the whole composition (§5).
 
+### The reversible class: `witnessed[C]` (item 562)
+
+A service operation may also be declared `witnessed[C]`:
+
+```
+service Box { witnessed[store] fn set(v: Str) -> Str }
+```
+
+The bound is the same shape and the same direction as `emission[C]`, over a
+narrower kind of effect. A `witnessed` extern is the item-243 class: its writes
+**persist on commit and revert on abort**, so the runtime both records what to
+undo and can undo it. `emission[C]` says *this provider may cross the boundary
+irreversibly, through these capabilities*; `witnessed[C]` says *this provider
+may leave reversible state behind, through these capabilities, and nothing
+more.*
+
+It exists because the two classes are not interchangeable at the call site. A
+record store offering `fn create_x(row) -> Str` beside one genuine emission
+(`delete_with_history`) has no lawful `emission` spelling for `create_x`: the
+only bound the checker used to offer widened the declaration to an irreversible
+one, which then (a) reads as `set: emission` in `revl audit`, (b) lets the
+provider reach a true emission behind a consumer that assumed a revertible
+step, and (c) pends every write under a policy that pends by declaration. A
+provider that reaches a true `emission` is still refused under `witnessed`
+exactly as it is under a plain `fn` — and the repair it is offered is the wider
+*class*, never a scope the class cannot have:
+
+```
+`Box.set` is declared `witnessed[store]`, but this implementation reaches
+`a host emission`, `publish()`
+  a `witnessed[...]` declaration bounds a provider to the effects a commit
+  settles and an abort reverts; a step that cannot be undone belongs to the
+  wider class — declare `emission fn set(...)` in service `Box` (G4)
+```
+
+A capability the declaration does not name is refused the way `emission[C]`
+refuses it, with the repair kept in-class:
+
+```
+`Box.set` is declared `witnessed[store]`, but this implementation reaches
+`tmp` (reaching `write_val()`, `scratch()`)
+  a capability-scoped `witnessed` declaration bounds *where* a provider may
+  cross the boundary — widen the declaration to `witnessed[store, tmp] fn
+  set(...)` in service `Box`, or route this write through a declared
+  capability (G4)
+```
+
+Three consequences worth stating outright:
+
+- **Purer is always fine.** `witnessed[C] fn m` may be implemented by a body
+  that touches nothing at all; the reverse (a plain `fn m` implemented over a
+  `witnessed` write) is refused by the existing rule, and its diagnostic is
+  unchanged.
+- **The subset algebra is over the emission class.** The fixed point G4 runs is
+  still `caps()` above (`witnessed[C]` seeds `C`, so a caller sees the
+  capability), but the *provider* bound is checked against the reversible-only
+  reach: a body that reaches one capability witnessedly and another
+  irreversibly is refused, and the repair offered stays inside the class
+  (`witnessed[store, bus]`), never silently upgraded to `emission`.
+- **The surfaces that read the declaration read the class, not a widening.**
+  `revl audit` lists the extern under `host code: ... (witnessed, py+ts)`, not
+  among the component's `emissions`; `distributability` no longer reports the
+  operation as an emission; and `revl mcp schema` drops the read-only proof
+  (§6) while `destructiveHint` stays false. Before this spelling existed the
+  only way to admit such a body was to widen the declaration, and every one of
+  those surfaces then read an irreversible crossing.
+- **A consumer call to a `witnessed` operation is a step, not a crossing.** The
+  consumer still writes it plainly — `box.set(v)`, no `emit` — because a
+  witnessed effect is one the caller's abort will undo. Only a true emission
+  needs the marker.
+
 ## 4. IR
 
 A scoped emission carries the set; a bare one does not carry the key at all:
@@ -174,6 +245,20 @@ codegen one.
 
 `_service_from_ir` reads it back and `_service_equal` compares it, so a
 service redeclared across modules must agree on its capability set too.
+
+A `witnessed[C]` operation is the same shape with its own key, and — this is
+the point of the class — `emission` is **false**:
+
+```json
+"set": {"params": [...], "returns": "Str",
+        "emission": false, "witnessed": ["store"]}
+```
+
+The key is absent unless the operation declares it, and `emission` is not set,
+because a consumer reads `emission` to decide whether a call crosses the
+boundary irreversibly. A witnessed operation does not: the call is a recorded
+step its caller's abort will undo. That is also why no existing IR or backend
+golden moved for this — the key is additive and present only when spelled.
 
 ## 5. `revl audit`
 
@@ -258,6 +343,16 @@ an author's assertion (docs/mcp-bridge.md). The capability set joins them:
 `readOnlyHint`/`destructiveHint` are unchanged: a scoped emission is still an
 emission.
 
+A `witnessed[C]` operation is the one class where the hints move, and for the
+reason they exist: `readOnlyHint: true` is the checker's *proof* that a body
+mutates nothing (docs/mcp-bridge.md, aka.ms/mcp annotations), and a reversible
+write is still a write. Such a tool therefore carries `readOnlyHint: false`
+with `destructiveHint: false` — the checker refused anything it could not
+revert — plus `x-revl.classification: "witnessed"`, the vocabulary
+`revl mcp import` already uses for this class, the scope under
+`x-revl.witnessed` (`["*"]` for bare `witnessed`, `[]` for a plain operation),
+and an `x-revl.guarantee` that names the witnessed bound.
+
 ## 7. Where this lives
 
 | concern | file |
@@ -267,4 +362,5 @@ emission.
 | audit | `src/revl/__main__.py` — `_boundary` |
 | policy reach | `src/revl/policy.py` — `component_reach` (the `capabilities or (name,)` rule) |
 | MCP | `src/revl/mcp/schema.py` — `_tool`, `_method_effects` |
-| tests | `tests/test_capabilities.py`, `tests/test_247_capability_reach_spellings.py`, `examples/rejections/g4_capability_not_declared.rvl` |
+| tests | `tests/test_capabilities.py`, `tests/test_247_capability_reach_spellings.py`, `examples/rejections/g4_capability_not_declared.rvl`, `tests/test_witnessed_service_op_1912.py` (the reversible class) |
+| the reversible class | `src/revl/parser.py` — `MethodDecl.witnessed`; `src/revl/emission_analysis.py` — `_witnessed_hint`, `_method_emissions(irreversible_only=True)`; `src/revl/lower.py` — the `decl.witnessed` arm of the G4 check |
