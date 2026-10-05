@@ -1102,6 +1102,10 @@
 
 ["oracle-reject:an unbound realm placeholder ahead of a lowering refusal", "agree-refuse/G2"]
 
+["oracle-reject:an unbound realm placeholder in a route", "agree-refuse/G2"]
+
+["oracle-reject:an unbound route placeholder ahead of a route refusal", "agree-refuse/G2"]
+
 ["oracle-reject:an undeclared name in an argument", "agree-refuse/G1"]
 
 ["oracle-reject:an undeclared name left of an unmarked emission is still G1", "agree-refuse/G1"]

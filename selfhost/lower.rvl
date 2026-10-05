@@ -9482,6 +9482,26 @@ fn realm_placeholder_msg(name: Str, key: Str) -> Str {
     .concat("and until then the provision has no realm to check G2 against")
 }
 
+// The `realms(...)` route form takes placeholders too, one per leg, and the
+// reference refuses the first unbound one in list order with its own sentence.
+fn realm_route_placeholder_msg(name: Str, key: Str) -> Str {
+  return "realm placeholder `?".concat(name).concat("` (on `isolate ").concat(key)
+    .concat(" in realms(...)`) is not bound: the operator binds it to a realm at ")
+    .concat("admission, and until then that leg of the route has no realm to ")
+    .concat("resolve `").concat(key).concat("` in")
+}
+
+// The first `?<name>` inside the `realms(` list opened at `j`, or "" when the
+// list closes without one.
+fn route_placeholder_at(ts: List[Token], j: Int) -> Str {
+  var k = j
+  while (k < ts.length() && !atk(ts, k, ")")) {
+    if (atk(ts, k, "?") && atk(ts, k + 1, "ident")) { return tkc(ts, k + 1).text }
+    k += 1
+  }
+  return ""
+}
+
 fn realm_placeholder_scan(ts: List[Token]) -> Verd {
   var i = 0
   while (i < ts.length()) {
@@ -9490,6 +9510,14 @@ fn realm_placeholder_scan(ts: List[Token]) -> Verd {
         && atk(ts, i + 7, ")")) {
       let msg = realm_placeholder_msg(tkc(ts, i + 6).text, tkc(ts, i + 1).text)
       return mk_verd(tagged("G2", msg), tkc(ts, i).line)
+    }
+    if (atw(ts, i, "isolate") && atw(ts, i + 2, "in") && ati(ts, i + 3, "realms")
+        && atk(ts, i + 4, "(")) {
+      let name = route_placeholder_at(ts, i + 5)
+      if (name != "") {
+        let msg = realm_route_placeholder_msg(name, tkc(ts, i + 1).text)
+        return mk_verd(tagged("G2", msg), tkc(ts, i).line)
+      }
     }
     i += 1
   }

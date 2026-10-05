@@ -337,6 +337,14 @@ def _realm_navigate(realms) -> dict:
                       blocked=False, alternatives=alts, profile=None)
 
 
+def _all_placeholders(stmt) -> bool:
+    """Whether a `realms(...)` route names no realm, only placeholders the
+    operator binds (issue #1728)."""
+    held = getattr(stmt, "placeholders", None) or []
+    realms = getattr(stmt, "realms", None) or []
+    return bool(held) and len(held) == len(realms)
+
+
 def _iter_realm_placements(node, out: list) -> None:
     """Every realm-naming statement reachable from a parsed AST fragment, by the
     same structural dataclass walk `_iter_var_refs` uses. A recursive walk rather
@@ -446,16 +454,20 @@ def check_no_realm_placement(root_programs: list[Program],
         found: list = []
         _iter_realm_placements(program.components, found)
         # issue #1728: `realm(?<name>)` names a placeholder the operator binds,
-        # not a realm, so it is not the authority grab this refuses.
+        # not a realm, so it is not the authority grab this refuses. Nor is a
+        # `realms(...)` route whose every entry is one; a route with any
+        # literal among its realms names that realm, and is refused.
         found = [stmt for stmt in found
-                 if getattr(stmt, "placeholder", None) is None]
+                 if getattr(stmt, "placeholder", None) is None
+                 and not _all_placeholders(stmt)]
         if not found:
             continue
         stmt = found[0]
         plural = isinstance(stmt, RouteStmt)
         named = list(stmt.realms) if plural else [stmt.realm]
         spelling = (f'`isolate {stmt.key} in realms('
-                    + ", ".join(f'"{r}"' for r in named) + ')`') if plural else \
+                    + ", ".join(r if r.startswith("?") else f'"{r}"' for r in named)
+                    + ')`') if plural else \
                    f'`isolate {stmt.key} in realm("{stmt.realm}")`'
         raise RevlError(
             program.filename, stmt.line,
@@ -477,7 +489,8 @@ def check_no_realm_placement(root_programs: list[Program],
             navigate=_realm_navigate(
                 [r for s in found
                  for r in (list(s.realms) if isinstance(s, RouteStmt)
-                           else [s.realm])]),
+                           else [s.realm])
+                 if not r.startswith("?")]),
         )
 
 
