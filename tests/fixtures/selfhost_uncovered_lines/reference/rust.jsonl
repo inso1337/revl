@@ -1,6 +1,6 @@
-["reason", "activation-body-runtime-lowering-emit-step-s-residual", "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one."]
+["reason", "activation-body-runtime-lowering-emit-step-s-residual", "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm (emit_rust_corpus/teardown_compensate.rvl, item 391, reaches the `emit ... compensate` arm, 24 -> 23). That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one."]
 
-["function", "activation-body-runtime-lowering-emit-step-s-residual", "_emit_step", 24, 24]
+["function", "activation-body-runtime-lowering-emit-step-s-residual", "_emit_step", 23, 23]
 
 ["function", "activation-body-runtime-lowering-emit-step-s-residual", "_guard_frame_neutral_loop", 1, 1]
 
@@ -14,11 +14,9 @@
 
 ["function", "backends-rust-emit-py-borrow-list-arg-item", "_borrow_list_arg", 1, 1]
 
-["reason", "backends-rust-emit-py-rust-render-pure-stmts", "backends/rust/emit.py::_rust_render_pure_stmts: issue #548 renders a pure provide-method step list (bindings, assignment, return, and if/while/for/break/continue whose arms are themselves pure), and item 458 / issue #721 added its `emit` arm (a BARE conditional crossing inside an `if`/`else` arm, rendered exactly as the effectful renderer's own bare-emit arm: `let _ = <call>;` with the method params cloned into the call). No byte-agreement corpus document drives a provide method through control flow at all, so these statement forms are reference-measured only; the identical fn-grammar shapes are covered. Reaching them from the corpus needs the self-host `emit_rust.rvl` provide-method renderer to mirror the same arms first, or the two tiers diverge on the document that reaches them (the item-429 trap) - tracked as remaining work on item 458. `_iter_method_steps` is the shared walk those arms need: it descends the `if`/`while`/`for` bodies issue #548 admits so the effectful-method scans see a crossing nested in an arm instead of taking the pure path over it."]
+["reason", "backends-rust-emit-py-rust-render-pure-stmts", "backends/rust/emit.py::_rust_render_pure_stmts: issue #548 renders a pure provide-method step list (bindings, assignment, return, and if/while/for/break/continue whose arms are themselves pure), and item 458 / issue #721 added its `emit` arm. selfhost/emit_rust.rvl mirrors it since item 391 (`pure_stmts`, with `iter_method_steps` for `_iter_method_steps`), held to byte agreement by emit_rust_corpus/method_control_flow.rvl, which reaches `_iter_method_steps` in full and every arm but one: the final `raise` for a step kind the lowering never puts in a pure method body."]
 
-["function", "backends-rust-emit-py-rust-render-pure-stmts", "_iter_method_steps", 3, 3]
-
-["function", "backends-rust-emit-py-rust-render-pure-stmts", "_rust_render_pure_stmts", 29, 29]
+["function", "backends-rust-emit-py-rust-render-pure-stmts", "_rust_render_pure_stmts", 1, 1]
 
 ["reason", "backends-rust-emit-py-v3-strip-index-clone", "backends/rust/emit.py::_v3_strip_index_clone: item 437d read-only clone elision for a List index read. The bare index place (xs[i].clone() to xs[i]) is covered; the residual is the field-off-index shape (xs[i].f.clone() to xs[i].f) in a read-only slot, reached by no corpus document."]
 
@@ -30,13 +28,13 @@
 
 ["function", "canonical-abi-bridge-boundary-the-residuals-serialize-and", "_split_result", 1, 1]
 
-["reason", "component-construction-fallbacks-residuals-cover-absent-malf", "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls. emit_rust_corpus/prelude_names.rvl (issue #1920) reaches one more of `_emit_component`'s statements, 5 -> 4."]
+["reason", "component-construction-fallbacks-residuals-cover-absent-malf", "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls. emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 2 more statements each of `_emit_component`, `_emit_component_new` and `_emit_components`: the teardown begin and commit lines on both provider paths, and the module's teardown preamble. emit_rust_corpus/intercept_metadata.rvl (item 391, the intercept port) reaches more of this group: `_emit_component_new` 21 -> 7."]
 
-["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component", 4, 4]
+["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component", 2, 2]
 
-["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component_new", 23, 23]
+["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_component_new", 7, 7]
 
-["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_components", 6, 6]
+["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_components", 4, 4]
 
 ["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_req_bindings", 2, 2]
 
@@ -46,7 +44,7 @@
 
 ["function", "concrete-any-boxing-coercion-coerce-any-arg-a", "_coerce_any_arg", 7, 7]
 
-["reason", "demand-selected-formatting-helpers-canonical-float-interpola", "Demand-selected formatting helpers: canonical Float interpolation and record/timer/teardown preambles are emitted only when those deferred runtime features are present. Ordinary string interpolation and checked arithmetic are covered without selecting these helper bodies."]
+["reason", "demand-selected-formatting-helpers-canonical-float-interpola", "Demand-selected formatting helpers: canonical Float interpolation and record/timer preambles are emitted only when those deferred runtime features are present. The teardown preamble left this group with item 391: emit_rust_corpus/teardown_compensate.rvl selects it. Ordinary string interpolation and checked arithmetic are covered without selecting these helper bodies."]
 
 ["function", "demand-selected-formatting-helpers-canonical-float-interpola", "_format", 20, 20]
 
@@ -56,8 +54,6 @@
 
 ["function", "demand-selected-formatting-helpers-canonical-float-interpola", "_revl_record_preamble", 2, 2]
 
-["function", "demand-selected-formatting-helpers-canonical-float-interpola", "_revl_teardown_preamble", 1, 1]
-
 ["function", "demand-selected-formatting-helpers-canonical-float-interpola", "_uses_float_interp.walk", 5, 5]
 
 ["reason", "explicit-invalid-input-guards-accepted-frontend-ir-contains", "Explicit invalid-input guards: accepted frontend IR contains no unresolved holes; `_refuse_holes` and its walker make such direct or stale IR fail loudly instead of generating Rust. `_refuse_deferred_emissions` used to be recorded here and is now recorded beside `_refuse_validated_emissions`, with the reason both carry (issue #1431)."]
@@ -66,7 +62,7 @@
 
 ["function", "explicit-invalid-input-guards-accepted-frontend-ir-contains", "_refuse_holes.walk", 1, 1]
 
-["reason", "extern-declared-compensate-item-254-issue-1592-emit", "Extern-declared compensate (item 254, issue #1592): `_emit_compensations` adds the compensation an emission extern declares to the ones an `emit` registers, `_reaches_declared` and `_declared_call` register one for a call in any other position of a provide method (a `let`, a `return`, an argument, a nested operand, an `if` arm) as a block expression, and `_as_fn_call` re-spells that slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_rust.rvl ports no compensation registration (the family the witnessed/compensation group above defers). The behaviour is pinned and executed against real cordis-rs by backends/rust/test_emit_rust.py::test_extern_declared_compensation_registers_at_every_site."]
+["reason", "extern-declared-compensate-item-254-issue-1592-emit", "Extern-declared compensate (item 254, issue #1592): `_emit_compensations` adds the compensation an emission extern declares to the ones an `emit` registers, `_reaches_declared` and `_declared_call` register one for a call in any other position of a provide method (a `let`, a `return`, an argument, a nested operand, an `if` arm) as a block expression, and `_as_fn_call` re-spells that slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_rust.rvl ports the site-spelled registration (item 391) but not the declared one, and names a document that declares one with a `<<DEFER-declared-compensate>>` marker. `_emit_compensations` 4 -> 3: emit_rust_corpus/teardown_compensate.rvl reaches its site-clause statement. The behaviour is pinned and executed against real cordis-rs by backends/rust/test_emit_rust.py::test_extern_declared_compensation_registers_at_every_site."]
 
 ["function", "extern-declared-compensate-item-254-issue-1592-emit", "_as_fn_call", 5, 5]
 
@@ -74,7 +70,7 @@
 
 ["function", "extern-declared-compensate-item-254-issue-1592-emit", "_declared_call", 7, 7]
 
-["function", "extern-declared-compensate-item-254-issue-1592-emit", "_emit_compensations", 4, 4]
+["function", "extern-declared-compensate-item-254-issue-1592-emit", "_emit_compensations", 3, 3]
 
 ["function", "extern-declared-compensate-item-254-issue-1592-emit", "_reaches_declared", 7, 7]
 
@@ -84,7 +80,7 @@
 
 ["function", "extern-only-boundary-these-statements-build-extern-config", "_rust_extern_config_bind", 9, 9]
 
-["reason", "host-map-binding-inference-these-functions-scan-let", "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs. Issue #1734's emit_rust_corpus/comp_str_builtin.rvl returns a nested call (`k.concat(\"!\")`) from a provide method of a component holding a `Map`, so `_map_expr_inserts` now walks a call node's arguments and target; what is left is its non-dict guard. emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `_map_value_rust_type`'s statements, 2 -> 1."]
+["reason", "host-map-binding-inference-these-functions-scan-let", "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs. emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 1 more of `_host_of`'s statements. emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `_map_value_rust_type`'s statements, 2 -> 1. Issue #1931 holds every value acquisition by its type, so `_host_of` is now asked only about a shared resource or an acquisition whose type cannot be named: the arms that a value bind used to reach through it (the item-391 teardown document's required-service acquisition among them) are unreached, 3 -> 4."]
 
 ["function", "host-map-binding-inference-these-functions-scan-let", "_host_of", 4, 4]
 
@@ -134,15 +130,13 @@
 
 ["function", "item-421-f6-the-rust-half-the-declared", "_stream_host_rust", 6, 6]
 
-["reason", "ownership-and-string-view-alternatives-residuals-are-the", "Ownership and string-view alternatives: residuals are the computed/non-atomic argument refusal, unknown or function-typed clone safety nets, positional char-view threading, and undo recloning branches. The corpus covers ordinary borrowed strings, owned calls, escaping callbacks, computed receivers, and safe string self-append."]
+["reason", "ownership-and-string-view-alternatives-residuals-are-the", "Ownership and string-view alternatives: residuals are the computed/non-atomic argument refusal, unknown or function-typed clone safety nets, positional char-view threading, and undo recloning branches. The corpus covers ordinary borrowed strings, owned calls, escaping callbacks, computed receivers, and safe string self-append. emit_rust_corpus/by_value_reuse.rvl (item 391) reaches the reuse half: `_by_value_reuse` in full, `_by_value_arg` 4 -> 2 (the unknown-type reuse clone and the reused-field clone) and `_by_value_field_clone` 2 -> 1."]
 
 ["function", "ownership-and-string-view-alternatives-residuals-are-the", "_borrow_str_arg", 1, 1]
 
-["function", "ownership-and-string-view-alternatives-residuals-are-the", "_by_value_arg", 4, 4]
+["function", "ownership-and-string-view-alternatives-residuals-are-the", "_by_value_arg", 2, 2]
 
-["function", "ownership-and-string-view-alternatives-residuals-are-the", "_by_value_field_clone", 2, 2]
-
-["function", "ownership-and-string-view-alternatives-residuals-are-the", "_by_value_reuse", 1, 1]
+["function", "ownership-and-string-view-alternatives-residuals-are-the", "_by_value_field_clone", 1, 1]
 
 ["function", "ownership-and-string-view-alternatives-residuals-are-the", "_char_view_args", 9, 9]
 
@@ -158,7 +152,7 @@
 
 ["function", "ownership-and-string-view-alternatives-residuals-are-the", "_v3_self_append_inplace", 19, 19]
 
-["reason", "pure-v3-expression-and-statement-residuals-explicit-refusals", "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. The stdlib-method result table (`_v3_builtin_return_type`) joins this bucket: it names the surface type of a `kind == \"builtin\"` node, so a `let` bound to a method call carries a type instead of none. Driving `_v3_infer_type` over the receivers it now asks about is what pulls `_v3_infer_type` 11 -> 4, `_v3_is_float` 4 -> 1 and `_v3_is_str` 2 -> 1. Its own residual statement is the `@self` fallback for a receiver the corpus never leaves untyped; the same missing mirror keeps a corpus document from reaching it, because `selfhost/emit_rust.rvl` carries no inference layer of its own. emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `_v3_infer_type`'s statements, 4 -> 3."]
+["reason", "pure-v3-expression-and-statement-residuals-explicit-refusals", "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_rust.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. The stdlib-method result table (`_v3_builtin_return_type`) joins this bucket: it names the surface type of a `kind == \"builtin\"` node, so a `let` bound to a method call carries a type instead of none. Driving `_v3_infer_type` over the receivers it now asks about is what pulls `_v3_infer_type` 11 -> 4, `_v3_is_float` 4 -> 1 and `_v3_is_str` 2 -> 1. Its own residual statement is the `@self` fallback for a receiver the corpus never leaves untyped; the same missing mirror keeps a corpus document from reaching it, because `selfhost/emit_rust.rvl` carries no inference layer of its own. emit_rust_corpus/by_value_reuse.rvl (item 391) reaches one more `_v3_infer_type` arm (the `match` arm-body type), 4 -> 3: selfhost/emit_rust.rvl now mirrors the inference arms the by-value rules read (literal, index, field, record, `match`, stdlib-method result). emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `_v3_infer_type`'s statements, 3 -> 2."]
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_emit_v3_functions", 8, 8]
 
@@ -170,7 +164,7 @@
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_empty_vec_elem_types.collect", 1, 1]
 
-["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_infer_type", 3, 3]
+["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_infer_type", 2, 2]
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_inplace_persistent", 12, 12]
 
@@ -186,15 +180,15 @@
 
 ["function", "pure-v3-expression-and-statement-residuals-explicit-refusals", "_v3_stmt", 5, 5]
 
-["reason", "realm-routing-and-child-instances-require-intercept-json", "Realm routing and child instances require intercept JSON metadata, deterministic realm identities, router structs, spawn handles, and runtime child configuration. The self-host emitter explicitly defers isolate/intercept/routes/spawn."]
+["reason", "realm-routing-and-child-instances-require-intercept-json", "Realm routing and child instances require intercept JSON metadata, deterministic realm identities, router structs, spawn handles, and runtime child configuration. The self-host emitter explicitly defers isolate/intercept/routes/spawn. emit_rust_corpus/intercept_metadata.rvl (item 391, the intercept port) reaches more of this group: `_intercept_json_lit` 18 -> 2, `_intercept_json_type` 34 -> 3."]
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_collect_realm_labels", 2, 2]
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_emit_router_struct", 16, 16]
 
-["function", "realm-routing-and-child-instances-require-intercept-json", "_intercept_json_lit", 18, 18]
+["function", "realm-routing-and-child-instances-require-intercept-json", "_intercept_json_lit", 2, 2]
 
-["function", "realm-routing-and-child-instances-require-intercept-json", "_intercept_json_type", 34, 34]
+["function", "realm-routing-and-child-instances-require-intercept-json", "_intercept_json_type", 3, 3]
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_revl_spawn_handle", 1, 1]
 
@@ -228,11 +222,11 @@
 
 ["function", "record-variant-context-invariants-the-remaining-branches-dia", "_recursive_boxed_edges.reaches", 9, 9]
 
-["reason", "recursive-struct-field-boxing-issue-919-the-second", "Recursive struct-field boxing (issue #919): the second half of the boxing pass, which puts a recursive STRUCT-field edge behind a `Box` (E0072) and then unboxes it where it is read (E0308 — Rust does not auto-deref a `Box` field in value position). `_inline_cycle_target` decides which wrapper types can carry the edge; `_boxed_field_read` unboxes it at the read site. Both are ENTERED on every corpus document, because the pass runs unconditionally over the document's types, so their headers and early exits execute; the struct-field arms below those exits are reached only by a document carrying such an edge. The rust byte-agreement corpus cannot hold one: the port (selfhost/emit_rust.rvl) carries no boxing pass at all — no `boxed_cases`/`boxed_fields`, no `_recursive_boxed_edges` — so the reference would emit a deref the port does not and there is no byte-identical oracle to hold over it. The recursive-edge regression lives in tests/test_emit_rust_opt_recursion_919.py instead, which asserts the emitted text directly."]
+["reason", "recursive-struct-field-boxing-issue-919-the-second", "Recursive struct-field boxing (issue #919): the second half of the boxing pass, which puts a recursive STRUCT-field edge behind a `Box` (E0072) and then unboxes it where it is read (E0308 — Rust does not auto-deref a `Box` field in value position). `_inline_cycle_target` decides which wrapper types can carry the edge; `_boxed_field_read` unboxes it at the read site. Both are ENTERED on every corpus document, because the pass runs unconditionally over the document's types, so their headers and early exits execute; the struct-field arms below those exits are reached only by a document carrying such an edge. The rust byte-agreement corpus cannot hold one: the port (selfhost/emit_rust.rvl) carries no boxing pass at all — no `boxed_cases`/`boxed_fields`, no `_recursive_boxed_edges` — so the reference would emit a deref the port does not and there is no byte-identical oracle to hold over it. The recursive-edge regression lives in tests/test_emit_rust_opt_recursion_919.py instead, which asserts the emitted text directly. emit_rust_corpus/by_value_reuse.rvl (item 391) declares a record with a `List[Str]` field, which drives `_inline_cycle_target` 4 statements further before its early exit, 13 -> 9."]
 
 ["function", "recursive-struct-field-boxing-issue-919-the-second", "_boxed_field_read", 12, 12]
 
-["function", "recursive-struct-field-boxing-issue-919-the-second", "_inline_cycle_target", 13, 13]
+["function", "recursive-struct-field-boxing-issue-919-the-second", "_inline_cycle_target", 9, 9]
 
 ["reason", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/rust/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_rust_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper."]
 
@@ -290,19 +284,19 @@
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_string", 5, 5]
 
-["reason", "version-and-document-shape-guards-emit-rejects-malformed", "Version and document-shape guards: emit rejects malformed/unknown IR, _emit_v1/_emit_v2 are legacy paths outside the mirrored v3 contract, and the residual _emit_v3 statements are the empty-document refusal and the lifecycle-test delegation (the pure test section is emitted since item 391, emit_rust_corpus/in_file_tests.rvl)."]
+["reason", "version-and-document-shape-guards-emit-rejects-malformed", "Version and document-shape guards: emit rejects malformed/unknown IR, _emit_v1/_emit_v2 are legacy paths outside the mirrored v3 contract, and the residual _emit_v3 statements handle empty documents plus test/lifecycle sections delegated to their explicit boundaries. emit_rust_corpus/intercept_metadata.rvl (item 391, the intercept port) reaches more of this group: `_emit_v2` 6 -> 1, `emit` 3 -> 2."]
 
 ["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v1", 1, 1]
 
-["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v2", 6, 6]
+["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v2", 1, 1]
 
 ["function", "version-and-document-shape-guards-emit-rejects-malformed", "_emit_v3", 2, 2]
 
-["function", "version-and-document-shape-guards-emit-rejects-malformed", "emit", 3, 3]
+["function", "version-and-document-shape-guards-emit-rejects-malformed", "emit", 2, 2]
 
-["reason", "witnessed-effect-and-compensation-runtime-these-branches-det", "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers this family rather than emitting a partial transaction."]
+["reason", "witnessed-effect-and-compensation-runtime-these-branches-det", "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers the witnessed half rather than emitting a partial transaction. The compensation half is ported since item 391 and held to byte agreement by emit_rust_corpus/teardown_compensate.rvl, which reaches `_emit_teardown_begin`, `_emit_teardown_commit`, `_emit_compensation_registration` and `_emit_activation_compensation` in full, 6 more of `_method_body_lines`'s statements and 1 more each of `_body_has_compensation`'s and `_method_bodies_have_compensation`'s. What is left of those is the witnessed half, the extern-declared compensation (issue #1592) and the component-`if` walk, which no document can reach because a component `if` is a guard that holds only `fail` (G6). emit_rust_corpus/method_control_flow.rvl (item 391) reaches 5 more of `_method_body_lines`'s statements, 35 -> 30: the top-level control-flow arm (issue #548)."]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_body_has_compensation", 3, 3]
+["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_body_has_compensation", 2, 2]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_body_has_witnessed", 2, 2]
 
@@ -310,27 +304,19 @@
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_dedup_colour_erased_poly_externs._rewrite", 6, 6]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_activation_compensation", 13, 13]
-
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_compensation_registration", 14, 14]
-
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_method_witnessed_step", 19, 19]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_setup_step", 22, 22]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_setup_value", 1, 1]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_teardown_begin", 3, 3]
-
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_teardown_commit", 2, 2]
-
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_emit_witnessed_step", 26, 26]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_bodies_have_compensation", 2, 2]
+["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_bodies_have_compensation", 1, 1]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_bodies_have_witnessed", 1, 1]
 
-["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_body_lines", 38, 38]
+["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_method_body_lines", 27, 27]
 
 ["function", "witnessed-effect-and-compensation-runtime-these-branches-det", "_step_is_witnessed_effect", 2, 2]
 

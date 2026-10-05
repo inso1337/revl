@@ -340,7 +340,8 @@ def test_h1_reverts_residue_free_on_abort(workspace):
     report = session.load(_ir(_component(
         "Agent", [_effect("write", "artifact.txt", "v2"),
                   _effect("rm", "stale.txt")], abort=True)))
-    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     # abort replayed both inverses: files back to their preimage
     assert art.read_text() == "v1", "abort did not restore the write preimage"
@@ -425,7 +426,8 @@ def test_residue_surface_enumerates_aborted_crossings(workspace, tmp_path, monke
     report = session.load(_ir(_component(
         "Agent", [_effect("write", "artifact.txt", "v2"),
                   _effect("rm", "stale.txt")], abort=True)), record=True)
-    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED",
+        "error": {"type": "RuntimeError", "message": "boom"}}]
 
     # Finalize the in-process abort the way the session lifecycle does: the
     # activation failed and reverted its witnessed inverses in-process, and the

@@ -166,11 +166,26 @@ Three rules:
   third-party layer, for the same reason no layer may raise its own trust class
   ([composition layers](composition-layers.md#granted-is-never-in-a-stack-layer)).
 
-A row that writes no `granted` clause at all is unconfined: it is the project's
-own code, and confining it would be wrong. Wiring the untrusted-author profile
-per row is the confinement slice, and it waits on the trust decision recorded in
-roadmap 425 F1. Until then the clause and its subset check are enforced and the
-profile is not, which is exactly the split roadmap item 424 slice A1 states.
+Whether a row is CONFINED is decided by its trust class, not by the clause: a
+row the base composition or the site layer declares is first-party and admits
+unconfined, and a row a stack layer contributes is non-first-party and, under
+`admit_composition(confine=True)` (`truc apply`), admits under the
+untrusted-author profile with its granted set as its reach. The clause and the
+key-subset check apply wherever it is written.
+
+The keys in `granted` are `requires` KEYS. The profile's allowlist compares
+SERVICE names, so a confined row is admitted with the service each of its
+granted keys is typed as.
+
+A stack-layer row cannot carry the clause itself, so its owner or the operator
+grants it with a `grant` statement that names the row without re-declaring it,
+and the row stays non-first-party:
+
+```revl sketch
+grant records_kit::@records with { approvals, writer }
+```
+
+See [composition layers](composition-layers.md#grant-the-owner-or-the-operator-grants-a-confined-row-its-reach).
 
 ## `place`: which process a row runs on
 
