@@ -12915,6 +12915,25 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     return lowered
 
 
+def _crosses_computer_use(body: list, env: "Env") -> bool:
+    """Whether a provide-method body crosses a computer-use verb (issue #1369).
+
+    The method call is the unit of a UI transaction (docs/design/538-ui-
+    transactions.md §0: "a UI transaction is not a new effect construct"), so
+    the IR marks the method rather than adding a construct. The question is
+    asked of the same capability set the G4 provider upper bound reads
+    (`_method_emissions`): a token whose root is in `ui_family.ROOTS`
+    (`screen.observe`, `ui.click`, a deeper rung) is a computer-use crossing. A
+    call through a required key contributes the KEY, not the providing
+    method's verbs, so the mark sits on the method whose own body performs the
+    verb. Additive: a method that crosses none carries no key, so every other
+    program's IR is byte-identical."""
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+    _, caps = _method_emissions(body, env)
+    return any(cap.split(".", 1)[0] in ui_family.ROOTS for cap in caps
+               if isinstance(cap, str))
+
+
 def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: set[str], env: Env) -> dict:
     filename = env.filename
     comp = env.component
@@ -13644,6 +13663,13 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     code="G4", category="emission-capability",
                 )
 
+        # issue #1369 (item 522 slice 3): the provide-method call is the UI
+        # transaction unit, so a method whose body crosses a computer-use verb
+        # carries `"unit": "ui"`. Computed here, while the body's resolved
+        # crossings are still in scope, and stamped where the method is
+        # appended.
+        ui_unit = _crosses_computer_use(mbody, env)
+
         env.resolved_crossings = {}
 
         # sync/async arrow polymorphism (item 342): in a SYNC method, redirect
@@ -13784,7 +13810,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # the value its effect used, so name those locals for the emitters.
         _pin_inverse_captures(mbody)
 
-        methods.append({"name": method.name, "params": safe_params, "body": mbody})
+        lowered = {"name": method.name, "params": safe_params, "body": mbody}
+        if ui_unit:
+            lowered["unit"] = "ui"
+        methods.append(lowered)
 
     missing = set(svc.methods) - implemented
     if missing:
