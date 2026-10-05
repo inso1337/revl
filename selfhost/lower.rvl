@@ -9679,6 +9679,62 @@ pub fn foreign_scan(src: Str) -> Str {
   return foreign_scan_ts(lex_src(src))
 }
 
+// issue #1728: `isolate <key> in realm(?<name>)` names a realm PLACEHOLDER the
+// operator binds at admission (`--bind-realm <name>=<realm>`). The reference
+// binds it after parsing and before lowering (`revl.realm_placeholders.bind`),
+// and refuses the first unbound one by name. The gate takes no bindings, so for
+// it every placeholder is unbound: refusing it, with the reference's sentence,
+// is the fail-closed answer. A placeholder the operator HAS bound is a program
+// the reference admits and this gate refuses, the direction the gate is allowed
+// to err in, and an embedder that binds realms admits through the reference.
+fn realm_placeholder_msg(name: Str, key: Str) -> Str {
+  return "realm placeholder `?".concat(name).concat("` (on `isolate ").concat(key)
+    .concat("`) is not bound: the operator binds it to a realm at admission, ")
+    .concat("and until then the provision has no realm to check G2 against")
+}
+
+// The `realms(...)` route form takes placeholders too, one per leg, and the
+// reference refuses the first unbound one in list order with its own sentence.
+fn realm_route_placeholder_msg(name: Str, key: Str) -> Str {
+  return "realm placeholder `?".concat(name).concat("` (on `isolate ").concat(key)
+    .concat(" in realms(...)`) is not bound: the operator binds it to a realm at ")
+    .concat("admission, and until then that leg of the route has no realm to ")
+    .concat("resolve `").concat(key).concat("` in")
+}
+
+// The first `?<name>` inside the `realms(` list opened at `j`, or "" when the
+// list closes without one.
+fn route_placeholder_at(ts: List[Token], j: Int) -> Str {
+  var k = j
+  while (k < ts.length() && !atk(ts, k, ")")) {
+    if (atk(ts, k, "?") && atk(ts, k + 1, "ident")) { return tkc(ts, k + 1).text }
+    k += 1
+  }
+  return ""
+}
+
+fn realm_placeholder_scan(ts: List[Token]) -> Verd {
+  var i = 0
+  while (i < ts.length()) {
+    if (atw(ts, i, "isolate") && atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
+        && atk(ts, i + 4, "(") && atk(ts, i + 5, "?") && atk(ts, i + 6, "ident")
+        && atk(ts, i + 7, ")")) {
+      let msg = realm_placeholder_msg(tkc(ts, i + 6).text, tkc(ts, i + 1).text)
+      return mk_verd(tagged("G2", msg), tkc(ts, i).line)
+    }
+    if (atw(ts, i, "isolate") && atw(ts, i + 2, "in") && ati(ts, i + 3, "realms")
+        && atk(ts, i + 4, "(")) {
+      let name = route_placeholder_at(ts, i + 5)
+      if (name != "") {
+        let msg = realm_route_placeholder_msg(name, tkc(ts, i + 1).text)
+        return mk_verd(tagged("G2", msg), tkc(ts, i).line)
+      }
+    }
+    i += 1
+  }
+  return mk_verd("", 0)
+}
+
 // issue #1813: a module `fn` and an `extern fn` may not share a name. The
 // reference checks it once lowering has otherwise admitted the program
 // (`check_and_lower`), so every other refusal it draws keeps its place, and
@@ -16898,6 +16954,9 @@ pub fn admit_src(src: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  // issue #1728: an unbound realm placeholder is refused before lowering.
+  let rph = realm_placeholder_scan(ts)
+  if (rph.v != "") { return rph.v }
   // item 419c: collect every recoverable refusal and report the minimum by
   // `(line, seq)` — the reference's `diagnostics[0]`. A single-refusal program
   // yields exactly the wire it did before the sink existed.
@@ -16927,6 +16986,8 @@ pub fn admit_all(src: Str) -> Str {
   if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
+  let rph = realm_placeholder_scan(ts)
+  if (rph.v != "") { return fmt_all([rph]) }
   let refs = collect_refusals(ts, pg)
   let fxe = fn_extern_scan(ts)
   if (refs.length() == 0 && fxe.v != "") { return fmt_all([fxe]) }
@@ -17817,6 +17878,9 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  // issue #1728, as in `admit_src`: no binding reaches the gate.
+  let rph = realm_placeholder_scan(ts)
+  if (rph.v != "") { return rph.v }
   // REPLACEMENT (the item-186 wave, part 1). `drop` is what this admission
   // withdraws from the running composition: the explicit `-C` rows plus every
   // running component the incoming text redeclares by name, exactly

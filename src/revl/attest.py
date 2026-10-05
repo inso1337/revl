@@ -453,7 +453,7 @@ RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "typecheck", "lexer", "composition", "hostref", "hostfile",
                    "cap_order", "ui_family", "resources", "kernel_boundary",
                    "cardinality", "decode_grammar", "model_profile",
-                   "operator_text", "type_schema")
+                   "operator_text", "type_schema", "realm_placeholders")
 
 #: The sibling modules a rule module imports that are NOT rules, each with the
 #: reason it is not one. This is the argued half of the membership question and
