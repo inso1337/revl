@@ -1835,10 +1835,10 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 
 `rust`:
 
-- `component_edges.rvl`
 - `comp_stream.rvl`
-- `bridge_types.rvl`
 - `in_file_tests.rvl`
+- `by_value_reuse.rvl`
+- `method_control_flow.rvl`
 
 `wasm`:
 
