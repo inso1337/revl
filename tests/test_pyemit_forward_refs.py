@@ -22,6 +22,7 @@ ADT cases ARE constructed, because those classes are real.
 
 import importlib.util
 import sys
+import typing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,3 +119,29 @@ def test_typing_import_is_only_what_the_annotations_mention():
     not a name `_py_type` can render (item 436 F9)."""
     code, _ = _compile_and_exec("type Node = { val: Int, next: Opt[Node] }\n")
     assert "from typing import Optional\n" in code
+
+
+def test_builtin_erased_type_renders_as_any_not_a_bare_name():
+    """issue #1923: `Value` is a reserved BUILTIN, never a declared type.
+
+    Quoting cannot rescue it — the quoting above applies exactly to a forward
+    reference to a name some declaration emits, and nothing declares `Value` —
+    so the unerased annotation was a bare `value: Value` against nothing that
+    defines it: a NameError at class-body evaluation on 3.13, and on 3.14 the
+    same exception moved by PEP 649 to the first `__annotations__` read, which
+    is the introspection a consumer does. It erases to `Any`, the same erasure
+    `Result[…]` takes, and the import follows the rendered annotation rather
+    than being asserted anywhere.
+    """
+    code, ns = _compile_and_exec(
+        'type Holder = { name: Str, value: Value }\n'
+        'fn mk() -> Holder { return { name: "x", value: 1 } }\n'
+    )
+    assert "from typing import Any\n" in code
+    assert "    value: Any\n" in code
+    assert "Value" not in code
+    # the consumer that used to raise: reading the annotations back
+    assert ns["Holder"].__annotations__["value"] is typing.Any
+    assert typing.get_type_hints(ns["Holder"])["value"] is typing.Any
+    # erasure is an annotation change only — the record value is still a dict
+    assert ns["mk"]() == {"name": "x", "value": 1}

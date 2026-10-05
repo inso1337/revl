@@ -507,6 +507,11 @@ fn go_type(tv: Any) -> Str {
   // of an unpinned Opt/Result type parameter. Both are Go's `any`, and the
   // second must not reach `v3_ident`, which escapes a USER `any` to `any_`.
   if (t == "Any" || t == "any") { return "any" }
+  // issue #1923: `Value` — the stdlib erased-dynamic type (stdlib/value.rvl) — is
+  // a reserved builtin that is never declared, so it fell through to `v3_ident`
+  // and printed the surface spelling into a record field (`Value Value`), which
+  // `go build` rejected with `undefined: Value`. Erase it to `any`, as for `Any`.
+  if (t == "Value") { return "any" }
   let ft = split_fn_type(t)
   if (ft.length() > 0) {
     let np = ft.length()
@@ -3569,6 +3574,11 @@ fn comp_go_type(tv: Any, types: Any) -> Str {
   // issue #1892: `Any` erases to Go's `any`, and a Result parameter is the
   // package's `RevlResult[T, E]` (return position spreads in `comp_go_return`)
   if (t == "Any") { return "any" }
+  // issue #1923: `Value` is the stdlib erased-dynamic type, a reserved builtin
+  // that is never DECLARED, so it used to fall through to `camel` and print the
+  // surface spelling (`Value Value`) into a record that `go build` then rejected
+  // with `undefined: Value`. `any` is this tier's spelling of it, as for `Any`.
+  if (t == "Value") { return "any" }
   if (t.startsWith("Result[") && t.endsWith("]")) {
     let oe = split_top(t.slice(7, t.length() - 1), ",")
     return `RevlResult[${comp_go_type(oe[0], types)}, ${comp_go_type(oe[1], types)}]`

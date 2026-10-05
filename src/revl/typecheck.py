@@ -170,6 +170,40 @@ def _scrutinee_spec(types: dict, scrutinee_t: str | None) -> dict | None:
     return _model_answer.applied_spec(scrutinee_t)
 
 
+def match_arm_payload(cases_by_name: dict | None, scrutinee_t: str | None,
+                      pattern: str) -> str | None:
+    """The type an arm's payload binder takes, or None when it is unknown.
+
+    The mirror of `lower._arm_payload_type`, which lowering already uses to
+    bind the payload — the two must agree, or a match arm binds a value whose
+    type the checker does not know. A user variant (and the provided
+    `Aggregate[T]`/`Answer[T]`, resolved by `_scrutinee_spec`) answers from
+    its case table, passed in already indexed by name so a match stays
+    O(arms + cases) rather than O(arms x cases). The built-in `Opt`/`Result`
+    have no case table at all — they are not declared anywhere — so their
+    payloads come from the scrutinee's type arguments: `Opt[T]`'s `Some` binds
+    `T`, `Result[T, E]`'s `Ok` binds `T` and `Err` binds `E`.
+
+    Without the built-in half, every arm over an `Opt`/`Result` bound ⊥, the
+    arm's body inferred ⊥, and `join` then erased the *other* arm's type too
+    (`Ok(v) => "x", Err(e) => e` inferred ⊥ rather than `Str`), which is how
+    issue #1909's `Some(e) => e.key` lost the `List[Str]` that the empty `[]`
+    arm's `List[Never]` was supposed to widen to."""
+    if cases_by_name is not None:
+        payload = cases_by_name.get(pattern)
+        if payload is not None:
+            return payload
+    head, args = parse_type(scrutinee_t)
+    if head == "Opt" and pattern == "Some" and args:
+        return args[0]
+    if head == "Result" and len(args) == 2:
+        if pattern == "Ok":
+            return args[0]
+        if pattern == "Err":
+            return args[1]
+    return None
+
+
 def parse_type(name: str | None) -> tuple[str | None, list[str]]:
     """"List[Row]" -> ("List", ["Row"]); "Str" -> ("Str", []).
 
@@ -1042,14 +1076,52 @@ def compatible(expected: str | None, actual: str | None,
     return False
 
 
+def _fill_unknown_args(keep: str | None, other: str | None) -> str | None:
+    """`keep` with every type argument that is only the UNRESOLVED placeholder
+    `Any` replaced by `other`'s argument in the same position.
+
+    A lone builtin constructor cannot name the parameter its sibling fixes:
+    `Ok(7)` types as `Result[Int, Any]` and `Err(1)` as `Result[Any, Int]` (see
+    the constructor typing in `infer`), because neither call mentions the other
+    parameter. `join` returns one side WHOLESALE when the two are `compatible`,
+    so `ok ? Ok(7) : Err(1)` used to join to `Result[Int, Any]` -- the first
+    side's unresolved slot, kept -- and an `Err(e)` arm then bound `e: Any`,
+    where `0 - e` is refused ("operand of `-` expects `Int`, got `Any`").
+    Filling the placeholder from the side that DID resolve it is the join of
+    the two, position by position: `Result[Int, Int]`. `Opt` never showed this
+    because it has a single parameter, so `Some(5)` and `None` resolve it.
+
+    Only the literal `Any` placeholder is filled, and only where the sibling
+    resolved that position. `Never` is the bottom and `widen_bottom` owns
+    filling it; POISON is absorbing and must stay; a `$`-prefixed implicit fn
+    type parameter belongs to the function; and `Value` (item 180) is a REAL
+    dynamic type rather than a placeholder, so narrowing it to a concrete type
+    would refuse programs this checker admits today."""
+    keep_head, keep_args = parse_type(keep)
+    other_head, other_args = parse_type(other)
+    if keep_head != other_head or len(keep_args) != len(other_args):
+        return keep
+    filled = []
+    changed = False
+    for arg, other_arg in zip(keep_args, other_args):
+        if arg == "Any" and other_arg != "Any":
+            filled.append(other_arg)
+            changed = True
+            continue
+        inner = _fill_unknown_args(arg, other_arg)
+        filled.append(inner)
+        changed = changed or inner != arg
+    return format_type(keep_head, filled) if changed else keep
+
+
 def join(a: str | None, b: str | None, types: dict | None = None) -> str | None:
     """Common type of two branches, or None when unknown."""
     if a is None or b is None:
         return None
     if compatible(a, b, types):
-        return a
+        return _fill_unknown_args(a, b)
     if compatible(b, a, types):
-        return b
+        return _fill_unknown_args(b, a)
     return None
 
 
@@ -1073,6 +1145,30 @@ def widen_bottom(declared: str | None, actual: str | None,
         return None
     if declared == "Never":
         return actual
+    # A structural record declaration has no parsed head/args to recurse into:
+    # `var svc = { name: n, methods: [] }` declares
+    # `{name: Str, methods: List[Never]}`, and the accumulator that names the
+    # element type at its first reassignment (`svc = <a SvcD>`) was refused
+    # where `var m = Map.empty()` is admitted — the same rule, one level in.
+    # Field-wise, with the same "only bottoms may be filled" test.
+    d_fields = structural_fields(declared) or nominal_record_fields(declared, types)
+    a_fields = structural_fields(actual) or nominal_record_fields(actual, types)
+    if d_fields is not None and a_fields is not None:
+        if set(d_fields) != set(a_fields):
+            return None
+        filled: dict[str, str | None] = {}
+        grew_field = False
+        for k, d in d_fields.items():
+            a = a_fields[k]
+            inner = widen_bottom(d, a, types)
+            if inner is not None and inner != d:
+                filled[k] = inner
+                grew_field = True
+            elif compatible(d, a, types):
+                filled[k] = d
+            else:
+                return None
+        return format_structural(filled) if grew_field else None
     dhead, dargs = parse_type(declared)
     ahead, aargs = parse_type(actual)
     if not dargs or dhead != ahead or len(dargs) != len(aargs):
@@ -1882,6 +1978,23 @@ def _reject_float_literal_range(filename: str | None, line: int, v: float) -> No
     )
 
 
+def bind_local(tenv: dict, name: str, t: str | None) -> None:
+    """Record a local binder in a type environment, ⊥ included (issues #1903,
+    #1924).
+
+    A type environment answers *what type a name has*, never *whether the name
+    is local*: an absent name falls through to the module tables in
+    `ExprVar`'s inference — a nullary user-ADT case, then item 380's top-level
+    `fn` as a first-class value. So a binder whose type is still unknown must
+    be recorded as ⊥ rather than left out. Leaving it out is what let a
+    `let`-bound local whose initialiser inferred to nothing (#1903) and a bare
+    lambda parameter (#1924) resolve to a same-named top-level `fn` — in
+    #1924's case a *private* one in another file, which is not even a name the
+    calling file may mention. ⊥ shadows exactly as a known type does, and
+    unifies with whatever the body asks of it."""
+    tenv[name] = t
+
+
 def _extend_arm_tenv(stmt, tenv: dict, types: dict, filename: str | None) -> None:
     """Extend a block-arm's tail scope with one of its statements.
 
@@ -1892,8 +2005,9 @@ def _extend_arm_tenv(stmt, tenv: dict, types: dict, filename: str | None) -> Non
     from .parser import LetStmt
     if isinstance(stmt, LetStmt):
         declared = getattr(stmt, "type", None)
-        tenv[stmt.name] = (declared if declared is not None
-                           else infer_ast(stmt.value, tenv, types, filename))
+        bind_local(tenv, stmt.name,
+                   declared if declared is not None
+                   else infer_ast(stmt.value, tenv, types, filename))
 
 
 def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
@@ -2372,12 +2486,8 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         for pattern, bind, body in expr.arms:
             inner = dict(tenv)
             if bind is not None:
-                payload = (cases_by_name.get(pattern)
-                           if cases_by_name is not None else None)
-                if payload is not None:
-                    inner[bind] = payload
-                else:
-                    inner.pop(bind, None)
+                bind_local(inner, bind,
+                           match_arm_payload(cases_by_name, scrutinee_t, pattern))
             t = infer_ast(body, inner, types, filename)
             result = t if result is None else join(result, t, types)
         return result
@@ -2414,10 +2524,10 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         annotations = arrow_annotations(expr)
         inner = dict(tenv)
         for param, ptype in zip(expr.params, annotations):
-            if ptype:
-                inner[param] = ptype
-            else:
-                inner.pop(param, None)
+            # item 75(a) §3.1 / issue #1924: the bare parameter is ⊥, not
+            # absent — it is still this body's local, and it must shadow an
+            # outer name of the same spelling rather than fall through to it.
+            bind_local(inner, param, ptype)
         independent = not arrow_depends_on_unknown_param(expr, annotations)
         written_return = getattr(expr, "written_returns", None)
         if written_return and independent and filename:
@@ -2700,10 +2810,7 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
                            f"parameter `{name}` of this arrow (from {where})",
                            want, written)
         resolved.append(written or want)
-        if resolved[-1]:
-            inner[name] = resolved[-1]
-        else:
-            inner.pop(name, None)
+        bind_local(inner, name, resolved[-1])
     # The body is checked against the *unwrapped* return: the async color is a
     # tier property, not part of the value's shape (item 92 §2). `_resolve_arrow`
     # still writes the async-headed `want_return` back onto the node, so the
@@ -2798,12 +2905,8 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
         for pattern, bind, body in expr.arms:
             inner = dict(tenv)
             if bind is not None:
-                payload = (cases_by_name.get(pattern)
-                           if cases_by_name is not None else None)
-                if payload is not None:
-                    inner[bind] = payload
-                else:
-                    inner.pop(bind, None)
+                bind_local(inner, bind,
+                           match_arm_payload(cases_by_name, scrutinee_t, pattern))
             check_ast(body, expected, inner, types, filename, where)
         return
     if isinstance(expr, ExprRecordUpdate):

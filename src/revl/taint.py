@@ -1442,7 +1442,8 @@ class _FlowChecker:
                  secret_config: frozenset = frozenset(),
                  config_env: dict | None = None,
                  comp_config: dict | None = None,
-                 component: str = "", action: str = "") -> None:
+                 component: str = "", action: str = "",
+                 scope_env: dict | None = None) -> None:
         self.model = model
         self.filename = filename
         self.line = line
@@ -1519,6 +1520,17 @@ class _FlowChecker:
         self.state_env: dict = state_env if state_env is not None else {}
         self.state_names = state_names
         self.state_writes: dict[str, Taint] = {}
+        # issue #1983: the persistence RESOURCE world. `scope_env` is the
+        # accumulated taint of each declared persistence resource (`(scope,
+        # extern name)` -> what crossed into it), computed to a fixed point
+        # before the refusal pass by `_infer_scope_env`; a read of a resource
+        # mints what was written into it (`_mint_reload`). `scope_writes` records
+        # what THIS walk sent across, folded back by the fixpoint driver — the
+        # resource analogue of `state_env`/`state_writes`, and flow-insensitive
+        # in the same way (a resource is shared state, so what enters it from any
+        # crossing is reachable by any later read of it).
+        self.scope_env: dict = scope_env if scope_env is not None else {}
+        self.scope_writes: dict = {}
         # Slice C: the origins the enclosing declaration is allowed to `endorse`,
         # and a human label for the declassify record (the fn / `Component.method`
         # name). An `endorse[o]` with `o` not in `endorse_allowed` is refused.
@@ -1648,6 +1660,59 @@ class _FlowChecker:
                                               node, via, first_index=index)
                     self._check_model_reach(cross, cap, node)
 
+    def _record_scope_write(self, scope: str, name: str, arg_taints: list,
+                            via: tuple) -> None:
+        """Record (issue #1983) that this crossing may have written tainted data
+        into the persistence resource `scope`, keyed by the extern that crossed.
+
+        This is the WRITE half of the resource fixpoint. A resource is
+        flow-insensitive shared state: whatever entered it at ANY crossing is
+        reachable by ANY later read of it, in this body, in another body, or
+        across the call graph — so recording at the write, and joining all
+        records into `scope_env` to a fixed point before the refusal pass, is
+        what makes the analysis order-insensitive. Reordering the write and the
+        read inside a body cannot defeat it; a read that precedes its writer
+        textually is refused identically.
+
+        Only CONCRETE origins are recorded. A symbolic parameter marker says
+        nothing about a resource at rest — it is a value the caller has not been
+        seen to supply yet — and recording one would make the table a function of
+        inference-mode bookkeeping rather than of the program."""
+        for at in arg_taints:
+            origins = frozenset(o for o in at.origins if _param_index(o) is None)
+            if not origins:
+                continue
+            key = (scope, name)
+            self.scope_writes[key] = _join(
+                self.scope_writes.get(key, CLEAN), Taint(origins, at.via + via))
+
+    def _mint_reload(self, callee: str, result: Taint) -> Taint:
+        """A value crossing OUT of a persistence resource (issue #1983).
+
+        `emission[fs] fn read(p: Str) -> Str` declares no origin, so the host
+        round trip `fetch -> write -> read -> announce` used to launder: the
+        reader's declared return type says nothing about what was in the
+        resource, and the resource's contents are not the reader's to declare.
+        The result of a read therefore carries what OTHER crossings wrote into
+        the same resource, with the read named as one more step of the chain.
+
+        The same extern's own writes are excluded: a `write`'s result is not
+        read-back data, so `emit write(p, v)` does not re-mint its own argument
+        (a `read -> write` round trip stays admitted). An empty table — a program
+        that never crossed a persistence scope with a tainted value — leaves
+        every result byte-identical."""
+        scope = self.model.persistence_sinks.get(callee)
+        if scope is None or not self.scope_env:
+            return result
+        carried: Taint | None = None
+        for (sscope, name), taint in self.scope_env.items():
+            if sscope != scope or name == callee or not taint.origins:
+                continue
+            carried = taint if carried is None else _join(carried, taint)
+        if carried is None:
+            return result
+        return _join(result, Taint(carried.origins, carried.via + (callee,)))
+
     def _on_sink(self, sink_name: str, kind: str, index: int, arg_taint: Taint,
                  node, internal_via: tuple) -> None:
         """A tainted argument has reached a sink. In inference mode record which
@@ -1698,6 +1763,13 @@ class _FlowChecker:
         shape a caller across a unit boundary ever sees) and the PROVIDER's body
         is what writes. Recording the reach on the operation's signature is what
         lets the refusal happen at the caller's crossing instead of nowhere."""
+        # issue #1983: the resource record is taken in EVERY mode — it is the
+        # write half of the resource fixpoint, not a refusal — and here it
+        # catches the write the caller makes through a helper fn / service op
+        # (`save(p, page)` where `save` owns the `write`), which the direct
+        # record in `_taint_of_call` cannot see.
+        self._record_scope_write(scope, sink_name, arg_taints,
+                                 tuple(internal_via))
         if not self.infer:
             return
         for at in arg_taints:
@@ -2152,8 +2224,10 @@ class _FlowChecker:
             indirect = (node.get("kind") == "call"
                         and isinstance(callee_node, dict)
                         and callee_node.get("kind") in ("var", "name"))
-            return self._taint_of_call(callee, node.get("args") or [], env, node,
-                                       indirect=indirect)
+            return self._mint_reload(
+                callee,
+                self._taint_of_call(callee, node.get("args") or [], env, node,
+                                    indirect=indirect))
 
         # record construction is field-granular (Slice B): each field carries its
         # own taint, so a later read of a clean field stays clean even when a
@@ -2386,6 +2460,13 @@ class _FlowChecker:
         # one. Only an EXPIRED policy refuses; a declared legal hold overrides
         # the deadline inside `RetentionPolicy.expired`.
         _scope = self.model.persistence_sinks.get(callee)
+        if _scope is not None:
+            # issue #1983: the write half of the resource fixpoint. A value
+            # crossing INTO a declared persistence resource is recorded against
+            # that resource, so a later read of it — through a DIFFERENT extern of
+            # the same scope, whose declared return says nothing — mints the
+            # origin back (`_mint_reload`) instead of laundering it.
+            self._record_scope_write(_scope, callee, arg_taints, (callee,))
         if _scope is not None and self.model.retention_as_of is not None:
             if self.infer:
                 # record the reach on the ENCLOSING callable's signature, so a
@@ -2842,18 +2923,23 @@ def _state_bindings(body) -> frozenset:
 def _infer_state_env(body, model: TaintModel, source: str, line: int,
                      signatures: dict, state_names: frozenset,
                      known: frozenset, any_sink: bool,
-                     secret_config: frozenset = frozenset()) -> dict:
+                     secret_config: frozenset = frozenset(),
+                     scope_env: dict | None = None) -> dict:
     """The per-component state environment (Slice B3), to a fixed point: seed each
     world from its activation binding, then join in every tainted write from every
     method (methods run in unknown order, so the join over all writers is the only
-    sound seed). Non-enforcing — the refusal pass runs afterwards with this env."""
+    sound seed). Non-enforcing — the refusal pass runs afterwards with this env.
+
+    `scope_env` (issue #1983) is the persistence-resource table a state read may
+    mint from, so a value read out of a store and parked in a state world keeps
+    the origin the store was carrying."""
     state_env: dict = {}
     act_steps = [s for s in body
                  if isinstance(s, dict) and s.get("step") != "provide"]
     act = _FlowChecker(model, source, line, signatures=signatures, enforce=False,
                        known_callables=known, any_sink=any_sink,
                        state_env=state_env, state_names=state_names,
-                       secret_config=secret_config)
+                       secret_config=secret_config, scope_env=scope_env)
     act_env: dict = {}
     act.run(act_steps, act_env)
     for name in state_names:
@@ -2898,7 +2984,7 @@ def _infer_state_env(body, model: TaintModel, source: str, line: int,
                 model, source, method.get("line") or line, signatures=signatures,
                 enforce=False, known_callables=known, any_sink=any_sink,
                 state_env=state_env, state_names=state_names,
-                secret_config=secret_config)
+                secret_config=secret_config, scope_env=scope_env)
             env: dict = {}
             _seed_param_env(model, mname, method.get("params"), env)
             checker.run(method.get("body") or [], env)
@@ -2911,9 +2997,80 @@ def _infer_state_env(body, model: TaintModel, source: str, line: int,
     return state_env
 
 
+def _infer_scope_env(fns, components, model: TaintModel, filename: str,
+                     signatures: dict, known: frozenset = frozenset(),
+                     any_sink: bool = False, comp_config: dict | None = None,
+                     scope_env: dict | None = None) -> dict:
+    """The persistence-resource environment (issue #1983), to a fixed point.
+
+    A declared persistence resource (`retention.PERSISTENCE_SINK_SCOPES`: `fs`,
+    `db`, `store`, …) is shared state that outlives the body that touched it and
+    whose readers declare a plain `Str`. `emission[fs] fn write(p, v)` followed by
+    `emission[fs] fn read(p) -> Str` therefore round-tripped an untrusted value
+    into a `Trusted[T]` sink with no refusal anywhere: the reader's declared
+    return type is not evidence about the resource's contents.
+
+    The fixpoint is the same shape as `_infer_state_env`'s and for the same
+    reason: a resource has no known order of access, so the only sound seed for a
+    read is the JOIN of every write to it — which makes the analysis
+    order-insensitive by construction. Every body is walked NON-ENFORCINGLY (the
+    refusal pass runs afterwards with the converged table) and what each crossing
+    sent into each resource is joined back in, sweeping until nothing grows. The
+    transfer is monotone over a finite lattice (origins are the finite
+    origin-class set, the resource/name keys a finite set) and the bound is a
+    safety net for a malformed graph, never the normal stop.
+
+    Empty — and the whole feature inert, with every program byte-identical — when
+    the program declares no persistence scope at all (`persistence_sinks` is
+    empty)."""
+    scope_env = {} if scope_env is None else scope_env
+    if not model.persistence_sinks:
+        return scope_env
+    bodies = list(_callables(fns, components, filename))
+    # a component's ACTIVATION body is a body too — the same steps
+    # `_walk_component_methods` enforces over — and `_callables` only covers it
+    # through a config-declaring component's synthetic `<C>#config` callable. A
+    # component with no config that mints a value into a store while activating
+    # is exactly as much of a writer, so it is walked here in its own right.
+    for comp in components:
+        if secret_config_fields(comp):
+            continue  # `_callables` already yields this body as `<C>#config`
+        act_steps = [s for s in (comp.get("body") or [])
+                     if isinstance(s, dict) and s.get("step") != "provide"]
+        if act_steps:
+            cname = comp.get("name") or "?"
+            bodies.append((f"{cname} activation", f"{cname}#activation", [],
+                           act_steps, comp.get("source") or filename,
+                           comp.get("line") or 0, frozenset(), None))
+    bound = 2 * len(bodies) + 10
+    changed = True
+    while changed and bound > 0:
+        changed = False
+        bound -= 1
+        for (qual, key, params, body, source, line, secret_config,
+             _config_fields) in bodies:
+            checker = _FlowChecker(model, source, line, signatures=signatures,
+                                   enforce=False, qualname=qual,
+                                   known_callables=known, any_sink=any_sink,
+                                   secret_config=secret_config,
+                                   comp_config=comp_config,
+                                   scope_env=scope_env)
+            env: dict = {}
+            _seed_param_env(model, key, params, env)
+            checker.run(body, env)
+            for rkey, wrote in checker.scope_writes.items():
+                old = scope_env.get(rkey, CLEAN)
+                joined = _join(old, wrote)
+                if joined.origins != old.origins:
+                    scope_env[rkey] = joined
+                    changed = True
+    return scope_env
+
+
 def _infer_signatures(fns, components, model: TaintModel, filename: str,
                       known: frozenset = frozenset(),
-                      any_sink: bool = False) -> dict:
+                      any_sink: bool = False,
+                      scope_env: dict | None = None) -> dict:
     """Infer a `_Signature` for every callable, as a least fixed point over the
     same call graph the emission analysis walks (`_emitting_capabilities`).
 
@@ -2923,7 +3080,15 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
     transfer is monotone and the lattice is finite (parameter indices bounded by
     arity, origins by the finite origin-class set), so the iteration terminates
     at a least fixed point — mutual recursion converges exactly as G4's emission
-    fixed point does. The bound guards a malformed graph from looping forever."""
+    fixed point does. The bound guards a malformed graph from looping forever.
+
+    `scope_env` (issue #1983) is the persistence-resource table, so a body that
+    only RELOADS a resource (`fn load(p) { return emit read(p) }`) records the
+    resource's origins in its own signature's `mints` — that is how the refusal
+    travels across a service seam to a caller that never names the sink. The two
+    lattices are mutually recursive (a signature decides which writes a caller
+    records, the table decides what a read mints), so `check_taint` alternates
+    the two to a joint fixed point."""
     signatures: dict[str, _Signature] = {}
     callables = list(_callables(fns, components, filename))
     comp_config = component_config_order(components)
@@ -2948,6 +3113,7 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
                                    known_callables=known, any_sink=any_sink,
                                    secret_config=secret_config,
                                    comp_config=comp_config,
+                                   scope_env=scope_env,
                                    config_env=(seed_target if config_fields
                                                else None))
             env: dict = {}
@@ -2967,6 +3133,23 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
                                      checker.model_hits):
                 changed = True
     return signatures
+
+
+def _lattice_size(signatures: dict, scope_env: dict) -> int:
+    """The combined monotone measure of the two mutually-recursive lattices
+    (issue #1983): the signature table and the persistence-resource table. Every
+    real growth of either strictly increases it (`_Signature.merge` and
+    `_infer_scope_env` both only ever add), so an alternating sweep that leaves
+    it unchanged has reached their JOINT fixed point."""
+    total = 0
+    for sig in signatures.values():
+        total += (len(sig.flows_to_return) + len(sig.mints)
+                  + len(sig.reaches_sink) + len(sig.persists_at)
+                  + len(sig.models_at))
+        total += sum(len(v) for v in sig.clears.values())
+    for taint in scope_env.values():
+        total += len(taint.origins)
+    return total
 
 
 def check_taint(program, fns, components, model: TaintModel,
@@ -2992,6 +3175,33 @@ def check_taint(program, fns, components, model: TaintModel,
     any_sink = bool(model.sinks)
     signatures = _infer_signatures(fns, components, model, filename, known, any_sink)
     comp_config = component_config_order(components)
+    # issue #1983: the persistence-resource table, before the refusal pass, so a
+    # read of a resource mints what was written into it. Computed from the
+    # program's declared persistence scopes, and empty (the whole feature inert)
+    # when it declares none.
+    scope_env = _infer_scope_env(fns, components, model, filename, signatures,
+                                 known, any_sink, comp_config)
+    if scope_env:
+        # The two lattices are mutually recursive: a signature decides which
+        # writes a caller records and where the refusal travels, while the
+        # resource table decides what a read mints. Alternate to their JOINT
+        # fixed point — a wrapper that only reloads a resource
+        # (`fn load(p) { return emit read(p) }`) only carries the origin into its
+        # own signature once the table says the resource is dirty, and its
+        # caller is judged on that signature.
+        bound = 2 * (len(scope_env) + len(signatures)) + 10
+        measure = _lattice_size(signatures, scope_env)
+        while bound > 0:
+            bound -= 1
+            signatures = _infer_signatures(fns, components, model, filename,
+                                           known, any_sink, scope_env)
+            scope_env = _infer_scope_env(fns, components, model, filename,
+                                         signatures, known, any_sink,
+                                         comp_config, scope_env)
+            grown = _lattice_size(signatures, scope_env)
+            if grown == measure:
+                break
+            measure = grown
 
     # top-level pure fns (lowered IR): seed params declared `Untrusted[T]`, run
     # the refusal pass, AND collect each fn's declassification/reach provenance
@@ -3008,7 +3218,7 @@ def check_taint(program, fns, components, model: TaintModel,
                                    fn["name"], frozenset()),
                                endorse_label=fn["name"],
                                known_callables=known, any_sink=any_sink,
-                               untrusted=untrusted)
+                               untrusted=untrusted, scope_env=scope_env)
         env: dict = {}
         _seed_param_env(model, fn["name"], fn.get("params"), env)
         checker.run(fn.get("body") or [], env)
@@ -3061,13 +3271,13 @@ def check_taint(program, fns, components, model: TaintModel,
         secret_config = secret_config_fields(comp)
         state_env = (_infer_state_env(comp_body, model, source, line, signatures,
                                       state_names, known, any_sink,
-                                      secret_config)
+                                      secret_config, scope_env=scope_env)
                      if state_names else {})
         reaches, declassified, records, approvals = _walk_component_methods(
             comp_body, model, source, line, signatures,
             comp.get("name") or "", known, any_sink, state_env, state_names,
             untrusted=untrusted, secret_config=secret_config,
-            comp_config=comp_config)
+            comp_config=comp_config, scope_env=scope_env)
         # item 249, Finding 2: fold the provenance of every top-level fn washer
         # this component reaches onto its own surface, so a declassification done
         # inside a helper fn is not invisible to the audit token / policy.
@@ -3268,7 +3478,8 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                             state_names: frozenset = frozenset(),
                             untrusted: bool = False,
                             secret_config: frozenset = frozenset(),
-                            comp_config: dict | None = None
+                            comp_config: dict | None = None,
+                            scope_env: dict | None = None
                             ) -> tuple[set, set, list, set]:
     reaches: set = set()
     declassified: set = set()
@@ -3303,7 +3514,7 @@ def _walk_component_methods(body, model: TaintModel, source: str,
             # an activation-body `return` is not a crossing of the service / MCP
             # bridge, so the provide-method return rules do not apply here.
             provide_return=False, secret_config=secret_config,
-            comp_config=comp_config)
+            comp_config=comp_config, scope_env=scope_env)
         act.run(act_steps, {})
         reaches |= act.reaches
         declassified |= act.declassified
@@ -3325,7 +3536,7 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     state_env=state_env if state_env is not None else {},
                     state_names=state_names, untrusted=untrusted,
                     provide_return=True, secret_config=secret_config,
-                    comp_config=comp_config,
+                    comp_config=comp_config, scope_env=scope_env,
                     # item 514: the action this body IS, so a model crossing it
                     # reaches is judged against the `route model` block keyed to
                     # this name.
