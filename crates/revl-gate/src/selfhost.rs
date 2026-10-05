@@ -10138,6 +10138,20 @@ fn handoff_twice_msg(cname: &str) -> String {
     return (cname.revl_concat(" declares more than one `handoff` — a component has one ")).revl_concat("activation frame, so it hands off one state shape");
 }
 
+fn qkey_len(ts: &[Token], i: i64) -> i64 {
+    if (atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), ":") && atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), ":")) {
+        return 4i64;
+    }
+    return 1i64;
+}
+
+fn qkey_text(ts: &[Token], i: i64) -> String {
+    if (qkey_len(ts, i) == 4i64) {
+        return (tkc(ts, i).text.revl_concat("::")).revl_concat(&tkc(ts, (i).checked_add(3i64).expect("revl: Int overflow")).text);
+    }
+    return tkc(ts, i).text;
+}
+
 fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, icept: Vec<String>, hoff: Bind, action: bool) -> ProvR {
     if (i >= end) {
         return mk_provr_h(provs.clone(), setup.clone(), iso.clone(), rts.clone(), hoff.clone(), i);
@@ -10146,15 +10160,16 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         return p_comp_body(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
     }
     if atw(&ts, i, "provide") {
-        let key = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
-        if (!atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "{")) {
-            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), (i).checked_add(2i64).expect("revl: Int overflow"), false);
+        let key = qkey_text(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+        let kl = qkey_len(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+        if (!atk(&ts, ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "{")) {
+            return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), false);
         }
-        let pend = close_brace(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+        let pend = close_brace(&ts, ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"));
         if (pend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), ts.revl_length(), false);
         }
-        let ms = p_prov_methods(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), (pend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
+        let ms = p_prov_methods(ts.clone(), ((i).checked_add(2i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), (pend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
         if (!ms.ok) {
             return mk_provr(provs.clone(), setup.clone(), iso.clone(), rts.clone(), String::from(""), pend, false);
         }
@@ -10294,22 +10309,23 @@ fn p_component(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
         let isReq = atw(&ts, j.clone(), "requires");
         let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
         while (((((k < ts.revl_length()) && (!atk(&ts, k.clone(), "{"))) && (!atk(&ts, k.clone(), "eof"))) && (!atw(&ts, k.clone(), "requires"))) && (!atw(&ts, k.clone(), "provides"))) {
-            if ((atk(&ts, k.clone(), "ident") && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), ":")) && atk(&ts, (k).checked_add(2i64).expect("revl: Int overflow"), "ident")) {
-                let pair = Bind { name: tkc(&ts, k.clone()).text, ty: tkc(&ts, (k).checked_add(2i64).expect("revl: Int overflow")).text };
+            let kl = qkey_len(&ts, k.clone());
+            if ((atk(&ts, k.clone(), "ident") && atk(&ts, (k).checked_add(kl).expect("revl: Int overflow"), ":")) && atk(&ts, ((k).checked_add(kl).expect("revl: Int overflow")).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                let pair = Bind { name: qkey_text(&ts, k.clone()), ty: tkc(&ts, ((k).checked_add(kl).expect("revl: Int overflow")).checked_add(1i64).expect("revl: Int overflow")).text };
                 if isReq {
                     reqs.push(pair.clone());
                 } else {
                     provh.push(pair.clone());
                 }
-                if (!atk(&ts, (k).checked_add(3i64).expect("revl: Int overflow"), "[")) {
-                    let ref__ = SvcRef { key: tkc(&ts, k.clone()).text, svc: tkc(&ts, (k).checked_add(2i64).expect("revl: Int overflow")).text, line: tkc(&ts, k.clone()).line, clause: if isReq { String::from("requires") } else { String::from("provides") } };
+                if (!atk(&ts, ((k).checked_add(kl).expect("revl: Int overflow")).checked_add(2i64).expect("revl: Int overflow"), "[")) {
+                    let ref__ = SvcRef { key: qkey_text(&ts, k.clone()), svc: tkc(&ts, ((k).checked_add(kl).expect("revl: Int overflow")).checked_add(1i64).expect("revl: Int overflow")).text, line: tkc(&ts, k.clone()).line, clause: if isReq { String::from("requires") } else { String::from("provides") } };
                     if isReq {
                         reqRefs.push(ref__.clone());
                     } else {
                         provRefs.push(ref__.clone());
                     }
                 }
-                k = (k).checked_add(3i64).expect("revl: Int overflow");
+                k = (k).checked_add((kl).checked_add(2i64).expect("revl: Int overflow")).expect("revl: Int overflow");
             } else {
                 k = (k).checked_add(1i64).expect("revl: Int overflow");
             }

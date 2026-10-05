@@ -160,10 +160,24 @@ not build; there is no tier left that silently writes an unusable identifier.
 ### Self-host ports
 
 `selfhost/emit_*.rvl` mirror the reference emitters byte for byte, and the ports
-carry a provision key unqualified. No corpus document uses a namespaced key, so
-the ports stay byte-identical to their references on the corpus — the contract
-`tests/test_selfhost_compile.py` asserts. Porting the mangling (and the
-collision refusal) into the six ports is owed as its own item.
+do not mangle a provision key: a qualified key reaches an emit port as the
+joined `ns::local` spelling and is written out as one. Porting the mangling (and
+the collision refusal) into the six ports is owed as its own item.
+
+The **parse** half is ported. `selfhost/lower.rvl` and `selfhost/checker.rvl`
+read a provision key through the same reconstruction the reference's
+`_provision_key` performs: the separator is two *adjacent* `:` tokens rather than
+a lexed `::`, so a qualified key is four tokens where a bare one is one, and the
+two halves join them back into the key's wiring identity. The lexer is untouched,
+and a bare key is read as one token exactly as before, so an unqualified program
+lowers byte-for-byte as it did and the ports stay byte-identical to their
+references on the corpus — the contract `tests/test_selfhost_compile.py` asserts.
+Reading the key as a single bare token instead failed the whole component with
+`bad provide block in component <C>`, which is a false rejection of legal
+first-party code of exactly the kind `tools/gate_reference_census.py` refuses to
+tolerate — and it hid the collision rule above behind a parse stage that never
+reached it, since a backend's `_check_host_keys` arm is reachable only once the
+key parses.
 
 ## What this unblocks (item 49)
 
