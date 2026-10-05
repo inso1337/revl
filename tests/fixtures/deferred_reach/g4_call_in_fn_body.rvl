@@ -1,0 +1,15 @@
+// REFUSED G4 (item 400): `bill` calls the deferred extern by name. A fn body
+// has no session commit for the deferral to fire at. The file name's prefix is
+// the expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_gate_deferred_reach_1688.py holds it.
+
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+fn bill(a: Str, b: Str) -> Unit {
+  return deliver(a, b)
+}
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops {
+    fn enqueue(sink, msg) { emit bill(sink, msg) }
+  }
+}

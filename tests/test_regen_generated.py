@@ -466,8 +466,8 @@ def test_the_real_registry_lists_every_generator_in_dependency_order():
                             capture_output=True, text=True, check=True)
     names = [line.split(" ", 1)[0] for line in result.stdout.splitlines()
              if line and not line.startswith((" ", "hand-maintained", "left alone", "layout move"))]
-    assert names == ["gate-crates", "grammar", "provenance", "census", "formal",
-                     "conformance", "ledger", "docgen"]
+    assert names == ["lower-tests", "gate-crates", "grammar", "provenance",
+                     "census", "formal", "conformance", "ledger", "docgen"]
     assert "layout move: tests/fixtures/selfhost_uncovered_lines.json -> ledger" in result.stdout
     assert "layout move: docs/census-artifact.json, docs/census-artifact.md -> census" in result.stdout
     assert ("layout move: tests/fixtures/census_crate_reproduction.json, "

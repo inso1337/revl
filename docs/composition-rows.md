@@ -175,7 +175,11 @@ key-subset check apply wherever it is written.
 
 The keys in `granted` are `requires` KEYS. The profile's allowlist compares
 SERVICE names, so a confined row is admitted with the service each of its
-granted keys is typed as.
+granted keys is typed as, and only for the row's own component under that key
+(`AdmissionProfile.granted_requires`, issue #1926). The profile is per source
+file, and a file can hold more than one component, so a service-name grant
+alone would also cover every other component in the file that requires the
+same service.
 
 A stack-layer row cannot carry the clause itself, so its owner or the operator
 grants it with a `grant` statement that names the row without re-declaring it,

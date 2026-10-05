@@ -107,6 +107,10 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_framework_bench.py",
     "tests/test_inprocess_gate.py",
     "tests/test_inprocess_gate_rust.py",
+    # Indexes every tracked `.rvl` outside `bench/results/` for its
+    # `// expected error:` blocks (issue #1745), bench's own sources included,
+    # so a bench change can change its verdict.
+    "tests/test_knowledge_index_1745.py",
     # Issue #1829: the bare-name guard walks every importable `.py` in the
     # repository, `bench/` included (five `bench/**/run.py` files are why it
     # exists), so a new or renamed bench module can change its verdict.
@@ -142,6 +146,12 @@ BENCH_DEPENDENT_TESTS = (
     # documents as members of the emit_java corpus (roadmap item 146 gap 2's
     # located-gap ratchet), so a bench change must re-run it.
     "tests/test_selfhost_compile.py",
+    # Issue #106: the go oracle's combined-path CORPUS names
+    # `bench/codegen/java/cases/interp_format/case.rvl` and three
+    # `bench/results/...` attempts (the audit-logger, replicator and
+    # billing-ledger tasks) as byte-agreement documents, and builds each one
+    # against stc-go, so a bench change must re-run it.
+    "tests/test_selfhost_emit_go.py",
     # Drives the codegen-perf harness (bench/codegen/python/run.py) to gate the
     # roadmap-436 / issue-71 python-emitter findings, so a bench change re-runs it.
     "tests/test_71_codegen_perf_findings.py",

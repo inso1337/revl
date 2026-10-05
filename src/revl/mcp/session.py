@@ -27,7 +27,7 @@ from fnmatch import fnmatchcase
 
 from .. import cap_order
 from .. import intent as _intent
-from .._paths import backends_root, python_backend_emitter
+from .._paths import backends_root, python_backend_emitter, venv_python
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
@@ -557,7 +557,7 @@ def _backend():
             f"set it up with `sh {backend_dir / 'setup.sh'}` and run the server "
             f"as `revl mcp …` (the `setup.sh`-installed console script, the "
             f"documented happy path) or, with the venv's interpreter "
-            f"explicitly, `{backend_dir / '.venv' / 'bin' / 'python'} -m revl mcp …` "
+            f"explicitly, `{venv_python(backend_dir / '.venv')} -m revl mcp …` "
             f"(issue #317 closes most of `-m`'s CWD-shadowing window; `revl` "
             f"closes the rest)"
         ) from exc

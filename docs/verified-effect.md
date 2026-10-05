@@ -39,8 +39,9 @@ only so far.
 
 ## 2. Writing one
 
-`verified` is a modifier on an **activation-body** effect, exactly as
-`verified fn` is a modifier on a function (syntax-2.0 §7). One token in one
+`verified` is a modifier on an **activation-body** effect, or on a witnessed
+effect in a provide method (below), exactly as `verified fn` is a modifier on a
+function (syntax-2.0 §7). One token in one
 position; nothing is added to the lexer (`verified` is already a keyword).
 
 ```revl fragment
@@ -64,10 +65,46 @@ the component with fresh, type-directed values (positive `Int`s, printable
 rather than at one hand-picked point. A component with no `config` is still
 round-tripped N times; there is simply no surface to vary.
 
-`verified effect` is refused in a **provide-method** body. The round trip is
-defined by a closed *activate → tear down* window, and the fiber runs an
-activation effect's inverse on teardown; a method effect runs per request and
-has no such window. The refusal is a compile error, not a silent no-op.
+In a **provide-method** body, `verified` is allowed on a **witnessed** effect
+only (issue #1897). A method effect runs per request, so it has no
+*activate → tear down* window of its own. Its round trip is the method's own
+window instead, call-then-abort, on the py reference tier:
+
+1. Bring up the providers, take the fingerprint, activate the component.
+2. Call the method with type-directed random arguments.
+3. Abort the component's activation frame and dispose it, so the witnessed
+   effect's declared inverse replays (the session abort's seam, item 245).
+4. Assert the fingerprint is back at the snapshot and the abort left no
+   `restore-residue` (the inverse ran without raising).
+
+A round where the call registered no inverse (the effect returned `Err`, or
+the call raised) is inconclusive and fails, as an activation that never reached
+ACTIVE does.
+
+```revl fragment
+component Store provides data: Data {
+  provide data {
+    fn import_rows(rows) {
+      verified effect write_batch(rows)   // write_batch is `witnessed[store]`
+    }
+    fn size() = store_size()
+  }
+}
+```
+
+The witness carries the before-images, so one abort returns the store to its
+state before the batch.
+
+The fingerprint is the in-process ledger, as for every round trip. A witnessed
+effect's host state (rows in a database, files) is outside it: there the round
+trip establishes that the declared inverse registered and ran cleanly. Whether
+it restored the data is what a `lifecycle test` asserts in-language, by
+reading the state back after `abort` (`tests/test_verified_method_effect_1897.py`).
+
+`verified` on any other method statement is still a compile error: a plain
+method effect (its inverse is the site `undo`), a `let`-bound effect, an
+`emit`. Move a plain effect to the activation body to verify it, or drop
+`verified`.
 
 ### Which positions carry an inverse guarantee
 

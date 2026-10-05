@@ -332,3 +332,88 @@ import RevL
 #print axioms RevL.A2.fixture_release_before_withdrawal
 #print axioms RevL.A2.fixture_opens_the_window
 #print axioms RevL.A2.a2_not_vacuous
+
+-- Issue #1742: the G4 deferred-position rule. A `deferred` emission extern is
+-- reached only by a call in a component; never called in a `fn` or `test`
+-- body, inside an arrow there, or as a function value. The per-reach rule and
+-- its decider, the file rule and its decider (the oracle's `DF` row), and the
+-- corpus shapes the rule both admits and refuses.
+#print axioms RevL.G4Deferred.legalB_iff
+#print axioms RevL.G4Deferred.deferredB_iff
+#print axioms RevL.G4Deferred.value_never_legal
+#print axioms RevL.G4Deferred.body_reach_refused
+#print axioms RevL.G4Deferred.refused_of_mem
+#print axioms RevL.G4Deferred.fixtures_decided
+#print axioms RevL.G4Deferred.deferred_not_vacuous
+-- Issue #1455: the approval floor (item 246, Decision 3). The capability
+-- token, the approval edge and the refusal, decided per marked crossing by
+-- the differential oracle's `AP` row.
+#print axioms RevL.G4Approval.coversB_iff
+#print axioms RevL.G4Approval.edgeCoversB_iff
+#print axioms RevL.G4Approval.crossingB_iff
+#print axioms RevL.G4Approval.no_edge_iff_nothing_required
+#print axioms RevL.G4Approval.uncovered_required_refused
+#print axioms RevL.G4Approval.unrequired_needs_no_edge
+#print axioms RevL.G4Approval.covering_edge_admits
+#print axioms RevL.G4Approval.globMatch_star_any
+#print axioms RevL.G4Approval.approval_not_vacuous
+#print axioms RevL.G4Approval.approval_row_not_vacuous
+-- Issue #1812: G6 binding uniqueness. A binding may not reuse a name in view,
+-- and visibility is block-scoped. The frame-membership decider, the scope
+-- decider (the oracle's `BU` row), the three refusal shapes and the corpus
+-- shapes the rule both admits and refuses.
+#print axioms RevL.G6Binding.okB_iff
+#print axioms RevL.G6Binding.bindingB_iff
+#print axioms RevL.G6Binding.visibleB_iff
+#print axioms RevL.G6Binding.seed_rebind_refused
+#print axioms RevL.G6Binding.rebind_refused
+#print axioms RevL.G6Binding.inner_shadow_refused
+#print axioms RevL.G6Binding.fixtures_decided
+#print axioms RevL.G6Binding.binding_not_vacuous
+-- Issue #1807: G1 declared access over a component's real heads. Every
+-- access root (a call head's root that is no binding, callable, import, host
+-- family or constructor) is a declared requirement; decided per component by
+-- the oracle's `G1` row.
+#print axioms RevL.G1Access.accessB_iff
+#print axioms RevL.G1Access.undeclared_refused
+#print axioms RevL.G1Access.access_mono
+#print axioms RevL.G1Access.declaring_admits
+#print axioms RevL.G1Access.fixtures_decided
+#print axioms RevL.G1Access.g1_access_not_vacuous
+-- Issue #1808: A1 async colour. Reach of an async name through the `fn`
+-- graph within a fuel bound, the per-site rule (a sync method, an unawaited
+-- step and a teardown slot reach nothing async; an awaited step must), the
+-- signature rule, and the corpus shapes; decided by the oracle's `A1`/`A1S`
+-- rows.
+#print axioms RevL.A1Async.reachB_iff
+#print axioms RevL.A1Async.reach_mono
+#print axioms RevL.A1Async.reaches_iff
+#print axioms RevL.A1Async.siteB_iff
+#print axioms RevL.A1Async.teardown_suspension_refused
+#print axioms RevL.A1Async.await_without_async_refused
+#print axioms RevL.A1Async.await_pairing_exact
+#print axioms RevL.A1Async.sigB_iff
+#print axioms RevL.A1Async.fixtures_decided
+#print axioms RevL.A1Async.a1_not_vacuous
+-- Issue #1809: three declaration rules. Prelude ordering (preludes precede
+-- every action), intercept target (a requirement, not a provision) and
+-- method in service (A6 call-site half); decided by the oracle's `PL`, `IC`
+-- and `MS` rows.
+#print axioms RevL.Prelude.preludeB_iff
+#print axioms RevL.Prelude.prelude_after_action_refused
+#print axioms RevL.Prelude.preludes_first_admitted
+#print axioms RevL.Prelude.interceptB_iff
+#print axioms RevL.Prelude.intercept_provision_refused
+#print axioms RevL.Prelude.methodB_iff
+#print axioms RevL.Prelude.undeclared_method_refused
+#print axioms RevL.Prelude.fixtures_decided
+#print axioms RevL.Prelude.prelude_rules_not_vacuous
+-- Issue #1811: G-MODEL-PLACE placement. A confidentiality origin is placed on
+-- the device only, decided by the oracle's `MPV` row; the model-reach half is
+-- decided by the oracle's `MAV` row through the proved `attenuatesB`.
+#print axioms RevL.ModelPlace.placeB_iff
+#print axioms RevL.ModelPlace.off_device_refused
+#print axioms RevL.ModelPlace.open_origin_anywhere
+#print axioms RevL.ModelPlace.on_device_admitted
+#print axioms RevL.ModelPlace.fixtures_decided
+#print axioms RevL.ModelPlace.placement_not_vacuous

@@ -42,8 +42,6 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these", "config_default_lit", 1, 1]
 
-["function", "component-construction-and-provide-method-alternatives-these", "emit_component", 1, 1]
-
 ["function", "component-construction-and-provide-method-alternatives-these", "has_extra_linebreak", 1, 1]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "is_extra_linebreak", 3, 3]
@@ -82,29 +80,31 @@
 
 ["function", "extern-deferral-boundary-the-residual-branches-detect-absent", "extern_body_defer", 2, 2]
 
-["reason", "host-bind-and-realm-residuals-beyond-the-two", "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153). emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 1 more of `emit_comp_step`'s statements and 2 more of `host_of`'s. `by_value_reuse` left this group with item 391: emit_rust_corpus/by_value_reuse.rvl reaches it in full."]
-
-["function", "host-bind-and-realm-residuals-beyond-the-two", "component_map_values", 1, 1]
+["reason", "host-bind-and-realm-residuals-beyond-the-two", "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153). emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 1 more of `emit_comp_step`'s statements and 2 more of `host_of`'s. `by_value_reuse` left this group with item 391: emit_rust_corpus/by_value_reuse.rvl reaches it in full. Issue #1931 holds every value acquisition by its type, so `host_of` is now asked only about a shared resource or an acquisition whose type cannot be named: the arms that a value bind used to reach through it (the item-391 teardown document's required-service acquisition among them) are unreached, 4 -> 6."]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "emit_comp_step", 7, 7]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "emit_let_effect_step", 6, 6]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "host_of", 4, 4]
+["function", "host-bind-and-realm-residuals-beyond-the-two", "host_of", 6, 6]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "map_insert_candidates", 7, 7]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_expr_type", 75, 75]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_surface_type", 1, 1]
-
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "steps_use_timer", 2, 2]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "witnessed_acquire", 5, 5]
+["function", "host-bind-and-realm-residuals-beyond-the-two", "witnessed_acquire", 1, 1]
 
 ["reason", "host-object-blocks-no-corpus-document-acquires-the", "Host-object blocks no corpus document acquires: the corpus declares a host `Map`, so the Pool and Job literal line lists (and the CAS verb test that selects `insert_if_absent`) are emitted by a branch the corpus never takes. Each is a verbatim transcription of the reference's own literal list, so there is nothing for a second implementation to get wrong beyond the gate on which block rides along, which the Map case does exercise (issue 1153)."]
 
 ["function", "host-object-blocks-no-corpus-document-acquires-the", "is_map_cas_verb", 1, 1]
+
+["reason", "issue-1920-call-acquired-binds-and-service-trait-names", "Issue #1920, the port of the same two changes. `held_bind_type` mirrors `_held_bind_type` (issue #1931 generalised it from calls to every value acquisition) and records the same unreachable arms: an acquisition whose type cannot be named or is `Unit`, and the loop-exhausted return. `svc_ident`'s loop-exhausted `return mangle(name)` is reached only by a name of nothing but underscores, which is not a valid service name; emit_rust_corpus/prelude_names.rvl reaches the reserved rung and the `Box_` -> `Box__` ladder step."]
+
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "held_bind_type", 2, 2]
+
+["function", "issue-1920-call-acquired-binds-and-service-trait-names", "svc_ident", 1, 1]
 
 ["reason", "item-391-by-value-reuse-residuals-emit-rust", "Item 391 by-value reuse residuals (emit_rust_corpus/by_value_reuse.rvl holds the rest of the port to byte agreement): `builtin_return_type` mirrors the reference's `_BUILTIN_RESULT` table, and its `to_int32`, `field` and `list` rows name methods this port renders `<<UNSUPPORTED-BUILTIN:...>>`, so no corpus document can bind one; its final `return \"\"` is reached only by a method the table does not name, and every method the port renders is named. `by_value_tail`'s borrowed-`&str` arm is the reference's own safety net (`_by_value_tail`, recorded there too): the borrow analysis keeps a borrowed param out of an owned position. `decl_site_names`' `let_pattern` arm declares destructured names, and the port renders destructuring as `<<UNSUPPORTED-STEP:let_pattern>>`."]
 
@@ -192,7 +192,7 @@
 
 ["function", "the-port-s-stream-typed-event-host-dialect", "stream_stage_arrow", 1, 1]
 
-["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements. `v3_infer_type` 3 -> 4 with item 391: its new index arm's Map-subscript return (`value_type`, issue #957) is unreachable from the corpus because the port has no map-subscript rendering."]
+["reason", "type-table-and-validated-ir-fallbacks-residuals-mark", "Type-table and validated-IR fallbacks: residuals mark duplicate or ambiguous record shapes/constructors, unknown record layouts, malformed function signatures, absent reference names, unknown scalar types/literals, and unsupported type declarations. Accepted unique records, ADTs, Bytes, nested lists, function signatures and scalar defaults are covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `rust_type_t`'s statements. `v3_infer_type` 3 -> 4 with item 391: its new index arm's Map-subscript return (`value_type`, issue #957) is unreachable from the corpus because the port has no map-subscript rendering. emit_rust_corpus/held_acquire_binds.rvl (issue #1931) reaches one more of `v3_infer_type`'s statements, 4 -> 3."]
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "build_type_tables", 2, 2]
 
@@ -216,4 +216,4 @@
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "split_fn_ret", 2, 2]
 
-["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "v3_infer_type", 4, 4]
+["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "v3_infer_type", 3, 3]

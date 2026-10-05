@@ -248,6 +248,9 @@ class EvidenceBundle:
     inverse_roundtrip: dict | None = None
     capabilities: dict | None = None
     provenance: dict | None = None
+    # knowledge slice 4 (issue #1762): the component's knowledge records, as
+    # `{"kind": "revl.knowledge", "records": [...]}`, bound like a dossier
+    knowledge: dict | None = None
 
     def present(self) -> tuple[str, ...]:
         """The facet names this bundle actually carries, for diagnostics."""
@@ -484,6 +487,8 @@ _BOUND_FACETS = {
     "inverse-roundtrip": "inverse_roundtrip",
     "gauntlet": "gauntlet",
     "capabilities": "capabilities",
+    # knowledge slice 4 (issue #1762): a signed entry vouches for its records
+    "knowledge": "knowledge",
 }
 
 
@@ -736,7 +741,63 @@ def load_evidence_bundle(entry_dir: str | os.PathLike) -> EvidenceBundle:
         inverse_roundtrip=_read_json(ev / EVIDENCE_INVERSE_ROUNDTRIP),
         capabilities=_read_json(ev / EVIDENCE_CAPABILITIES),
         provenance=_read_json(ev / EVIDENCE_PROVENANCE),
+        knowledge=load_knowledge(entry_dir),
     )
+
+
+# knowledge slice 4 (issue #1762): one JSON file per record, as in a project's
+# `.revl/knowledge/`, under `<entry>/knowledge/`.
+KNOWLEDGE_DIRNAME = "knowledge"
+
+
+def load_knowledge(entry_dir: str | os.PathLike, *,
+                   regular_only: bool = False) -> dict | None:
+    """An entry's knowledge records as one document, sorted by id so its hash
+    is a function of the records alone, or None when it ships none.
+    `regular_only` reads no symlinked directory or record, for a copy whose
+    bytes have to be the ones on disk (a vendored truc, issue #1769)."""
+    directory = Path(entry_dir) / KNOWLEDGE_DIRNAME
+    if not directory.is_dir() or (regular_only and directory.is_symlink()):
+        return None
+    paths = [p for p in sorted(directory.glob("*.json"))
+             if not regular_only or (p.is_file() and not p.is_symlink())]
+    records = [doc for doc in (_read_json(p) for p in paths)
+               if isinstance(doc, dict) and isinstance(doc.get("id"), str)]
+    if not records:
+        return None
+    return {"kind": "revl.knowledge",
+            "records": sorted(records, key=lambda r: r["id"])}
+
+
+def check_knowledge(source: str, records: list) -> None:
+    """Refuse a record whose anchor does not resolve in the component source:
+    a note about a declaration the component does not have would mislead every
+    agent that resolves it (the study's §6.6)."""
+    from . import symbols  # noqa: PLC0415 - the symbol model
+
+    vs = {"source": source, "modules": {}}
+    for record in records:
+        if record.get("op", "note") != "note":
+            continue
+        symbol = (record.get("anchor") or {}).get("symbol")
+        try:
+            symbols.locate(vs, symbol or "")
+        except symbols.SymbolError as error:
+            raise RevlError("<registry>", 0,
+                            f"registry: refusing to publish knowledge record "
+                            f"{record.get('id')}: its anchor `{symbol}` does not "
+                            f"resolve in the component ({error})") from None
+
+
+def _write_knowledge(entry_dir: Path, records: list) -> None:
+    directory = entry_dir / KNOWLEDGE_DIRNAME
+    if directory.is_dir():
+        for old in directory.glob("*.json"):
+            old.unlink()
+    directory.mkdir(parents=True, exist_ok=True)
+    for record in records:
+        (directory / f"{record['id']}.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
@@ -1237,7 +1298,8 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
                     publisher: str | None = None,
                     description: str | None = None,
                     tags: list | None = None,
-                    dossier_text: str | None = None) -> dict:
+                    dossier_text: str | None = None,
+                    knowledge: list | None = None) -> dict:
     """Publish `source` as `name` (a first release or an update), and return the
     release record. Raises `RevlError` on any refusal, having written nothing.
 
@@ -1253,6 +1315,8 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
     """
     facts = release_facts(registry_dir, name, source, version,
                           scheme=scheme, publisher=publisher)
+    if knowledge:
+        check_knowledge(source, knowledge)   # before anything is written
     if facts["refusals"]:
         raise RevlError(
             str(Path(registry_dir) / "components" / name), 0,
@@ -1302,6 +1366,8 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
                                 "tags": [str(t) for t in (tags or [])]})
     if dossier_text:
         (entry_dir / "dossier.json").write_text(dossier_text, encoding="utf-8")
+    if knowledge is not None:
+        _write_knowledge(entry_dir, knowledge)
 
     # manifest.json is produced by the current compiler, never copied from the
     # publisher — the reproducibility invariant does the honesty work (§1).
@@ -1982,6 +2048,32 @@ def _normalize_ir_for_attest(ir: dict) -> dict:
     return attest.path_normalized_ir(copy.deepcopy(ir))
 
 
+def _candidate_knowledge(entry: RegistryEntry, assessment: EvidenceAssessment) -> list:
+    """The knowledge records a candidate ships, as `revl_resolve` serves them
+    (issue #1762). They are the publisher's only when a valid attestation binds
+    them; otherwise they are untrusted text, and an untrusted record rides with
+    its body only when it carries evidence, as a note does (#1754)."""
+    bundle = entry.evidence_bundle or EvidenceBundle()
+    if bundle.knowledge is None:
+        return []
+    from . import knowledge as _knowledge  # noqa: PLC0415
+
+    signed = assessment.verified.get("knowledge") is True
+    out = []
+    for record in bundle.knowledge["records"]:
+        if record.get("op", "note") != "note":
+            continue
+        trust = "publisher" if signed else "untrusted"
+        shown = _knowledge.served({**record, "status": "live",
+                               "author": {**(record.get("author") or {}),
+                                          "trust": trust}})
+        if signed:
+            shown["body"] = record.get("body")
+            shown.pop("bodyWithheld", None)
+        out.append(shown)
+    return out
+
+
 def _assess_match(match: "_Match", *, key: bytes | None,
                   trusted_publishers: frozenset,
                   ir_cache: dict) -> EvidenceAssessment:
@@ -2238,6 +2330,9 @@ def resolve(registry, need, manifest: dict | None = None,
                     f"({', '.join(match.bridge.merges)}), inverting any "
                     "fault-sweep conclusion that errors surface as `Err`; the "
                     "facet status above is unchanged, its RANK is discounted")
+        knowledge = _candidate_knowledge(entry, assessment)
+        if knowledge:
+            candidate["knowledge"] = knowledge
         if entry.dossier is not None:
             candidate["dossier"] = entry.dossier
         if policy is not None:

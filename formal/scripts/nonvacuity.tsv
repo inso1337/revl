@@ -226,3 +226,59 @@ RevL.A2.fixture_refused	concrete	-	the fold refuses [acquire, provide, acquire],
 RevL.A2.fixture_release_before_withdrawal	concrete	-	the fixture's proof pass under commit and abort runs a release before the withdrawal: the window docs/rejections.md#a2 describes
 RevL.A2.fixture_opens_the_window	necessity	RevL.A2.fixture_release_before_withdrawal,RevL.A2.a2_not_vacuous	the refused pass is computed, and the refusal is not universal: okBody's pass satisfies the ordering claim
 RevL.A2.a2_not_vacuous	concrete	-	okBody = [acquire, provide]: admitted by the fold and the rule, stack [release, withdrawal], commit and abort passes [withdrawal, release], halted pass empty
+RevL.G4Deferred.legalB_iff	instance	RevL.G4Deferred.deferred_not_vacuous,RevL.G4Deferred.fixtures_decided	legalB decides true on a component call (Legal) and false on a fn-body call and a component value, so the per-reach verdict is mutation-sensitive
+RevL.G4Deferred.deferredB_iff	instance	RevL.G4Deferred.deferred_not_vacuous,RevL.G4Deferred.fixtures_decided	deferredB is true on okEmitStep (which satisfies DeferredOK) and false on callInFn, arrowInFn and valueInComponent, so the printed DF verdict is mutation-sensitive
+RevL.G4Deferred.value_never_legal	necessity	RevL.G4Deferred.deferred_not_vacuous	a value reach is refused in every scope; the refusal is not universal, since a component call is admitted
+RevL.G4Deferred.body_reach_refused	necessity	RevL.G4Deferred.deferred_not_vacuous	a fn or test reach is refused at every position; the component call in okEmitStep is admitted, so the refusal is scoped
+RevL.G4Deferred.refused_of_mem	instance	RevL.G4Deferred.deferred_not_vacuous	callInFn holds the illegal fn call beside a legal component call, and is refused
+RevL.G4Deferred.fixtures_decided	concrete	-	the four tests/fixtures/deferred_reach shapes: ok_emit_step admitted; a call in a fn body, a call in an arrow there, and a component value refused
+RevL.G4Deferred.deferred_not_vacuous	concrete	-	okEmitStep is admitted by the rule, callInFn and valueInComponent refused
+RevL.G4Approval.coversB_iff	instance	RevL.G4Approval.approval_not_vacuous	the coverage decider: true on the exact and the glob scope over production.payment, false on staging.*
+RevL.G4Approval.edgeCoversB_iff	instance	RevL.G4Approval.approval_not_vacuous	the edge decider: false on no edge (scopedNoEdge), true on a covering edge (scopedExactEdge)
+RevL.G4Approval.crossingB_iff	instance	RevL.G4Approval.approval_not_vacuous,RevL.G4Approval.approval_row_not_vacuous	the per-crossing decision the oracle prints: false on the scoped-extern and other-edge fixtures, true on their covered twins
+RevL.G4Approval.no_edge_iff_nothing_required	instance	RevL.G4Approval.approval_not_vacuous	both sides inhabited with no edge: scopedNoEdge reaches a required token and is refused, unrequiredHead reaches none and is admitted
+RevL.G4Approval.uncovered_required_refused	necessity	RevL.G4Approval.approval_not_vacuous	the three hypotheses hold together on otherEdgeCompensation (pay required, edge mail); with a covering edge instead (scopedExactEdge) the crossing is admitted
+RevL.G4Approval.unrequired_needs_no_edge	instance	RevL.G4Approval.approval_not_vacuous	unrequiredHead: notify reaches no required token and is admitted with no edge
+RevL.G4Approval.covering_edge_admits	instance	RevL.G4Approval.approval_not_vacuous	scopedGlobEdge: production.* covers production.payment, the one required token reached
+RevL.G4Approval.globMatch_star_any	instance	RevL.G4Approval.approval_not_vacuous	the trailing star the glob fixture's scope ends in; scopedWrongGlob shows a star does not cover a different prefix
+RevL.G4Approval.approval_not_vacuous	concrete	-	the scoped-extern fixture refused and admitted under the exact and the glob edge, refused under another glob; the other-edge fixture's head admitted and compensation refused; an unrequired head admitted with no edge
+RevL.G4Approval.approval_row_not_vacuous	concrete	-	the verdict moves with the edge alone, the required set alone and the token alone: the AE, AR and AX rows are each load-bearing
+RevL.G6Binding.okB_iff	instance	RevL.G6Binding.binding_not_vacuous,RevL.G6Binding.fixtures_decided	okB decides false on the shadowing method (shadowSeed) and on letThenFor, true on siblingArms and on the unseeded binding, so the frame walk is mutation-sensitive
+RevL.G6Binding.bindingB_iff	instance	RevL.G6Binding.binding_not_vacuous,RevL.G6Binding.fixtures_decided	bindingB is false on the corpus shape and true on its twin without the colliding seed name, so the printed BU verdict is mutation-sensitive
+RevL.G6Binding.visibleB_iff	instance	RevL.G6Binding.binding_not_vacuous	visibleB is true for store against shadowSeed and false for store against the seed [key], both reached in binding_not_vacuous
+RevL.G6Binding.seed_rebind_refused	necessity	RevL.G6Binding.binding_not_vacuous	a seeded name is refused; the same bind is admitted under a seed without it, so the refusal is not universal
+RevL.G6Binding.rebind_refused	necessity	RevL.G6Binding.binding_not_vacuous	two binds of one name in a row are refused; a single bind is admitted (the unseeded twin), so the refusal is not universal
+RevL.G6Binding.inner_shadow_refused	necessity	RevL.G6Binding.binding_not_vacuous,RevL.G6Binding.fixtures_decided	an outer name rebound inside a block is refused; sibling blocks reusing a name are admitted (siblingArms), so the refusal is scoped
+RevL.G6Binding.fixtures_decided	concrete	-	the corpus shape refused and its unseeded twin admitted; sibling arms admitted; a let then a for binder of the same name refused
+RevL.G6Binding.binding_not_vacuous	concrete	-	shadowSeed refused, the unseeded twin and siblingArms admitted by the rule
+RevL.G1Access.accessB_iff	instance	RevL.G1Access.g1_access_not_vacuous,RevL.G1Access.fixtures_decided	accessB is false on Logger's undeclared db and true once db is declared, so the printed G1 verdict is mutation-sensitive
+RevL.G1Access.undeclared_refused	necessity	RevL.G1Access.g1_access_not_vacuous	one undeclared root refuses; the same root declared is admitted, so the refusal is not universal
+RevL.G1Access.access_mono	instance	RevL.G1Access.g1_access_not_vacuous	AccessOK [db] [db] holds and widening the requirements keeps it
+RevL.G1Access.declaring_admits	instance	RevL.G1Access.g1_access_not_vacuous	Logger is refused with no requirements and admitted once db is declared
+RevL.G1Access.fixtures_decided	concrete	-	g1_undeclared_access's Logger refused, admitted with db declared; a declared store admitted, refused against a db-only declaration
+RevL.G1Access.g1_access_not_vacuous	concrete	-	the undeclared access refused and the declared one admitted by the rule
+RevL.A1Async.reachB_iff	instance	RevL.A1Async.a1_not_vacuous,RevL.A1Async.fixtures_decided	reachB is true on open_conn (through the fn graph to ho) and false on W.cool, so the reach decider is mutation-sensitive
+RevL.A1Async.reach_mono	instance	RevL.A1Async.a1_not_vacuous	open_conn reaches async within 2 steps, and so within 3
+RevL.A1Async.reaches_iff	instance	RevL.A1Async.a1_not_vacuous	a site's heads reach async exactly when one head does: open_conn does, W.cool does not
+RevL.A1Async.siteB_iff	instance	RevL.A1Async.a1_not_vacuous,RevL.A1Async.fixtures_decided	siteB is true on the awaited acquisition and the synchronous undo, false on the unawaited acquisition and the suspending undo, so the printed A1 verdict is mutation-sensitive
+RevL.A1Async.teardown_suspension_refused	necessity	RevL.A1Async.a1_not_vacuous	an undo reaching W.heat is refused; an undo reaching W.cool is admitted, so the refusal is not universal
+RevL.A1Async.await_without_async_refused	necessity	RevL.A1Async.fixtures_decided	an await emit of the sync Log.note is refused; the awaited open_conn acquisition is admitted
+RevL.A1Async.await_pairing_exact	instance	RevL.A1Async.a1_not_vacuous	open_conn is admitted awaited and refused unawaited, the pairing the theorem states
+RevL.A1Async.sigB_iff	instance	RevL.A1Async.fixtures_decided	sigB is false on a sync implementation of an async declaration and true when the colours agree
+RevL.A1Async.fixtures_decided	concrete	-	the undo, effect, sync-method, emit and signature shapes of the A1 fixtures decided both ways
+RevL.A1Async.a1_not_vacuous	concrete	-	the reach through a fn, the awaited acquisition admitted, its unawaited twin and the suspending undo refused, the synchronous undo admitted
+RevL.Prelude.preludeB_iff	instance	RevL.Prelude.prelude_rules_not_vacuous,RevL.Prelude.fixtures_decided	preludeB is false on an action then a prelude and true on a prelude then an action, so the printed PL verdict is mutation-sensitive
+RevL.Prelude.prelude_after_action_refused	necessity	RevL.Prelude.prelude_rules_not_vacuous	a prelude after an action is refused; the prelude-first order is admitted, so the refusal is not universal
+RevL.Prelude.preludes_first_admitted	instance	RevL.Prelude.prelude_rules_not_vacuous	[prelude, action] is admitted, the n = 1 instance
+RevL.Prelude.interceptB_iff	instance	RevL.Prelude.prelude_rules_not_vacuous,RevL.Prelude.fixtures_decided	interceptB is false on an intercept of the provision kv and true when kv is required instead
+RevL.Prelude.intercept_provision_refused	necessity	RevL.Prelude.prelude_rules_not_vacuous	intercepting a pure provision is refused; intercepting a requirement is admitted
+RevL.Prelude.methodB_iff	instance	RevL.Prelude.prelude_rules_not_vacuous,RevL.Prelude.fixtures_decided	methodB is false on Database.execute and true on Database.query against a query-only table
+RevL.Prelude.undeclared_method_refused	necessity	RevL.Prelude.prelude_rules_not_vacuous	an undeclared operation is refused; a declared one is admitted
+RevL.Prelude.fixtures_decided	concrete	-	the three corpus shapes refused and their twins admitted
+RevL.Prelude.prelude_rules_not_vacuous	concrete	-	each rule refuses its corpus shape and admits the twin
+RevL.ModelPlace.placeB_iff	instance	RevL.ModelPlace.placement_not_vacuous,RevL.ModelPlace.fixtures_decided	placeB is false on confidential -> an off-device role and true on confidential -> an on-device role, so the printed MPV verdict is mutation-sensitive
+RevL.ModelPlace.off_device_refused	necessity	RevL.ModelPlace.placement_not_vacuous	a confidential origin off the device is refused; on the device it is admitted, so the refusal is not universal
+RevL.ModelPlace.open_origin_anywhere	instance	RevL.ModelPlace.placement_not_vacuous	the open origin * placed off the device is admitted
+RevL.ModelPlace.on_device_admitted	instance	RevL.ModelPlace.placement_not_vacuous	confidential placed on the device is admitted
+RevL.ModelPlace.fixtures_decided	concrete	-	the role and council placements of the two fixtures refused; on-device and open-origin twins admitted
+RevL.ModelPlace.placement_not_vacuous	concrete	-	the off-device placement refused, the on-device one and an open origin off the device admitted

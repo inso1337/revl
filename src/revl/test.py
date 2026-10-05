@@ -478,13 +478,31 @@ def _ts_runtime_contract(path: Path) -> tuple[str, str]:
     return ("pass", "; also executed under plain node (ts runtime contract)")
 
 
+# vitest's own entry script (its package.json `bin`), run through node. The
+# `node_modules/.bin/vitest` file npm writes beside it is a POSIX shell shim,
+# which Windows cannot execute (WinError 193; the runnable ones there are
+# `vitest.cmd`/`vitest.ps1`), so executing the entry through node is the one
+# spelling that is the same on every platform (issue #1940).
+VITEST_ENTRY = BACKENDS / "typescript" / "node_modules" / "vitest" / "vitest.mjs"
+
+
+def vitest_command() -> list[str] | None:
+    """The argv prefix that runs vitest, or None when it is not installed or
+    there is no node to run it with."""
+    node = shutil.which("node")
+    if node is None or not VITEST_ENTRY.is_file():
+        return None
+    return [node, str(VITEST_ENTRY)]
+
+
 def run_ts(ir: dict) -> tuple[str, str]:
     """Emit the v3 test blocks and run them under the backend's vitest, then
     re-run the same module under plain node (issue #295, above)."""
-    vitest = BACKENDS / "typescript" / "node_modules" / ".bin" / "vitest"
-    if not vitest.exists():
+    vitest = vitest_command()
+    if vitest is None:
         return ("skip", Absent(
-            "vitest not installed (`cd backends/typescript && npm ci`)"))
+            "vitest not installed (`cd backends/typescript && npm ci`), or no "
+            "node on PATH"))
     note = _fault_note(ir, "ts")
     try:
         source = _emitter("typescript").emit(_without_fault_tests(ir),
@@ -524,7 +542,7 @@ def run_ts(ir: dict) -> tuple[str, str]:
         )
         path.write_text(stdlib_ref_root_stmt + source, encoding="utf-8")
         result = subprocess.run(
-            [str(vitest), "run", str(path)],
+            [*vitest, "run", str(path)],
             cwd=BACKENDS / "typescript",
             capture_output=True, text=True, timeout=180,
             env={**os.environ, "CI": "1"},
