@@ -4092,32 +4092,42 @@ def _emit_provide_config_local(component: dict, indent: int) -> list[str]:
     return [f"{'    ' * indent}let {_PROVIDE_CONFIG_LOCAL} = config.clone();"]
 
 
-def _call_bind_type(env: "_Env", bind: str) -> str | None:
-    """The Rust type of a `let`-effect bind whose acquisition is a CALL (an
-    `extern acquire` or a module fn), or None for any other bind (issue #1920).
+# Acquisition kinds that bind a shared RESOURCE, not a value: a host object's
+# verbs borrow it (`Map.new()`, `Pool.open(..)`), a spawn binds a live-instance
+# handle, a subscription binds the stream it pulls from. Each stays `Arc`-held.
+_RESOURCE_ACQUIRE_KINDS = frozenset({"host", "spawn", "subscribe"})
+
+
+def _held_bind_type(env: "_Env", bind: str) -> str | None:
+    """The Rust type of a `let`-effect bind held BY VALUE, or None for a bind
+    held as `Arc<..>` (issues #1920, #1931).
 
     A host acquisition (`Map.new()`, `Pool.open(..)`) is a shared resource
-    whose verbs borrow it, so it is held as `Arc<Host>`. A call returns a
-    VALUE, the handle its declared return names, and the extern's undo takes
-    that value. Wrapping it in `Arc` typed the capture `Arc<Value>` and handed
-    the undo an `Arc` where the handle was declared, so the crate did not
-    build. It is held by value instead, and every capture clones it."""
+    whose verbs borrow it, so it is held as `Arc<Host>`, and so are a spawn
+    handle, a subscription and the result-declared host CAS (`Arc<bool>`).
+    Every other acquisition EVALUATES to a value: an `extern acquire` handle,
+    a module fn's result, a required-service call's return. Wrapping it in
+    `Arc` typed the capture with the `Arc<Value>` fallback and handed an undo
+    an `Arc` where the value was declared, so the crate did not build. It is
+    held by value, typed by what the acquisition evaluates to (the same
+    inference a provide-method `let` takes), and every capture clones it. An
+    acquisition whose type cannot be named keeps the `Arc` form."""
     for s in env.component.get("body") or []:
         if s.get("step") == "let-effect" and s.get("bind") == bind:
             acquire = s.get("acquire") or {}
-            if acquire.get("kind") != "fn":
+            if acquire.get("kind") in _RESOURCE_ACQUIRE_KINDS or _is_map_cas(acquire):
                 return None
-            returns = env.v3_ctx().fn_returns.get(acquire.get("name"))
-            if not returns or returns == "Unit":
+            surface = _provide_let_type(env, acquire, env.v3_ctx())
+            if not isinstance(surface, str) or surface in ("", "Unit"):
                 return None
-            return _rust_type(returns, env.types)
+            return _rust_type(surface, env.types)
     return None
 
 
 def _bind_field_type(env: "_Env", bind: str, map_values: dict[str, str] | None) -> str:
-    """A provider struct's field for an activation bind: the call's declared
-    handle type by value, or `Arc<host>` for a host resource."""
-    held = _call_bind_type(env, bind)
+    """A provider struct's field for an activation bind: the value's type when
+    it is held by value, or `Arc<host>` for a shared resource."""
+    held = _held_bind_type(env, bind)
     if held is not None:
         return held
     return f"Arc<{_host_of(env.component, bind, map_values)}>"
@@ -4599,10 +4609,10 @@ def _method_has_effectful_steps(method: dict) -> bool:
 
 
 def _self_bind(env: _Env, bind: str) -> str:
-    """A provide method's read of an activation bind. A call-acquired handle
-    is held by value (issue #1920), and a method has only `&self`, so a read
-    of it is a clone; a host resource is an `Arc` whose verbs borrow it."""
-    if _call_bind_type(env, bind) is not None:
+    """A provide method's read of an activation bind. A value-held bind
+    (issues #1920, #1931) is read through `&self`, so a read of it is a clone;
+    a shared resource is an `Arc` whose verbs borrow it."""
+    if _held_bind_type(env, bind) is not None:
         return f"self.{bind}.clone()"
     return f"self.{bind}"
 
@@ -5680,7 +5690,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         if acq.get("kind") == "host" and acq.get("fn") == "Map.new":
             v = _component_map_values(env).get(step["bind"], "String")
             acquire = f"Map::<{v}>::new()"
-        if _call_bind_type(env, step["bind"]) is not None:
+        if _held_bind_type(env, step["bind"]) is not None:
             out.append(f"{pad}let {bind} = {acquire};")
         else:
             out.append(f"{pad}let {bind} = Arc::new({acquire});")

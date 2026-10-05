@@ -1842,6 +1842,8 @@
 
 ["tests/fixtures/emit_rust_corpus/float_pub.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/held_acquire_binds.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/in_file_tests.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/intercept_metadata.rvl", "agree-admit"]

@@ -930,6 +930,7 @@
    "tests/fixtures/emit_rust_corpus/effect_undo.rvl",
    "tests/fixtures/emit_rust_corpus/externs.rvl",
    "tests/fixtures/emit_rust_corpus/float_pub.rvl",
+   "tests/fixtures/emit_rust_corpus/held_acquire_binds.rvl",
    "tests/fixtures/emit_rust_corpus/in_file_tests.rvl",
    "tests/fixtures/emit_rust_corpus/intercept_metadata.rvl",
    "tests/fixtures/emit_rust_corpus/lengths.rvl",
