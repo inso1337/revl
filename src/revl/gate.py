@@ -646,13 +646,6 @@ _DECIDER_SERVICES = frozenset({"Admission", "AdmitGate"})
 _DECIDER_EXTERNS = frozenset({"host_admit", "host_admit_all"})
 
 
-#: The lowered-IR node kinds that name a callable by their `name` field: a
-#: `fn` call target and a `var` reference. One definition: the frontend's
-#: release rule (`lower._extern_acquire_of`) reads an acquisition's callee
-#: through the same two spellings.
-IR_NAMING_KINDS = ("fn", "var")
-
-
 def _ir_referenced_names(node, out: set) -> None:
     """Every identifier a lowered-IR fragment could reach: a `{"kind": "fn",
     "name": ...}` call target, a `{"kind": "var", "name": ...}` reference (which
@@ -661,7 +654,7 @@ def _ir_referenced_names(node, out: set) -> None:
     "any reference on a reachable path is a reach" stance — conservative and
     sound for a fail-closed refusal."""
     if isinstance(node, dict):
-        if node.get("kind") in IR_NAMING_KINDS and isinstance(node.get("name"), str):
+        if node.get("kind") in ("fn", "var") and isinstance(node.get("name"), str):
             out.add(node["name"])
         for value in node.values():
             _ir_referenced_names(value, out)
