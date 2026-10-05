@@ -186,10 +186,9 @@ def test_every_document_files_under_agree_g5_by_the_u5_row(
 
 
 def test_the_g5_ledger_list_is_empty(harness):
-    import json
-
-    ledger = json.loads(harness.OOF_LEDGER_PATH.read_text(encoding="utf-8"))
+    ledger = harness.load_out_of_fragment_ledger()
     assert ledger["out-of-fragment-G5"] == []
+    assert not (harness.OOF_LEDGER_PATH / "out-of-fragment-G5").exists()
     assert "out-of-fragment-G5" in harness.OOF_RATCHET_BUCKETS
 
 

@@ -1,0 +1,1 @@
+{"case": "oracle-reject:acquire extern with compensate but no undo", "buckets": ["agree-refuse/G4"]}

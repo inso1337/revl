@@ -1,0 +1,1 @@
+{"case": "oracle-reject:a cache external clause with a ttl bound does not swallow the next operation", "buckets": ["agree-refuse/G4"]}

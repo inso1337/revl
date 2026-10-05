@@ -1,0 +1,1 @@
+{"case": "oracle-accept:a fn whose only async reach is a coerced arrow stays sync", "buckets": ["agree-admit"]}

@@ -1,0 +1,857 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Ops": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "region",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        }
+      }
+    },
+    "TailOps": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "region",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    },
+    "AsyncOps": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "region",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true,
+          "async": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "ui_transaction.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "region"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "pane1",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "amount",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane1"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Amount"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_amount",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "amount"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "10"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "pane2",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "memo",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane2"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Memo"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_memo",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "memo"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "m"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "pane3",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "approve",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane3"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Approve"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "actuate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "approve"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "pane4",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "checked",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane4"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Approve"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "pane5",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "note",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane5"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Note"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_note",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "note"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "n"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "pane6",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "receipt",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane6"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Attach"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "saved",
+                  "value": {
+                    "kind": "fn",
+                    "name": "fetch_receipt",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "receipt"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "TailAgent",
+      "source": "ui_transaction.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "tail": "TailOps"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "tail",
+          "service": "TailOps",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "region"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "pane",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "amount",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Amount"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "typed",
+                  "value": {
+                    "kind": "fn",
+                    "name": "type_amount",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "amount"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "10"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "approve",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Approve"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "actuate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "approve"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "AsyncAgent",
+      "source": "ui_transaction.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "async_ops": "AsyncOps"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "async_ops",
+          "service": "AsyncOps",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "region"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "amount",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate_async",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Amount"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_amount",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "amount"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "10"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "approve",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate_async",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Approve"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "actuate_async",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "approve"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "ui_transaction.rvl",
+        "inject": [],
+        "provides": [
+          "ops"
+        ]
+      },
+      {
+        "name": "TailAgent",
+        "file": "ui_transaction.rvl",
+        "inject": [],
+        "provides": [
+          "tail"
+        ]
+      },
+      {
+        "name": "AsyncAgent",
+        "file": "ui_transaction.rvl",
+        "inject": [],
+        "provides": [
+          "async_ops"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent",
+      "TailAgent",
+      "AsyncAgent"
+    ]
+  },
+  "types": {
+    "UiTarget": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "application": "Str",
+        "window": "Str",
+        "role": "Str",
+        "name": "Str",
+        "evidence": "Str",
+        "action": "Str",
+        "session": "Str",
+        "bounds": "Str",
+        "expiry": "Int",
+        "confirm": "Bool"
+      }
+    }
+  },
+  "externs": [
+    {
+      "name": "read_pane",
+      "class": "emission",
+      "params": [
+        {
+          "name": "region",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'observe'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n  return 'pane'\n"
+      },
+      "capabilities": [
+        "screen.observe"
+      ]
+    },
+    {
+      "name": "locate",
+      "class": "emission",
+      "params": [
+        {
+          "name": "pane",
+          "type": "Str"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        }
+      ],
+      "returns": "UiTarget",
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'locate:' + name\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n  return { application: 'Billing', window: 'w', role: 'r', name, evidence: 'e', action: 'a', session: 's', bounds: 'b', expiry: 0n, confirm: false }\n"
+      },
+      "capabilities": [
+        "ui.find"
+      ]
+    },
+    {
+      "name": "clear_amount",
+      "class": "pure",
+      "params": [],
+      "returns": null,
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'compensate:clear_amount'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n"
+      }
+    },
+    {
+      "name": "clear_memo",
+      "class": "pure",
+      "params": [],
+      "returns": null,
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'compensate:clear_memo'\n  record(line)\n  if (g.__revlUiCompFail) throw new Error('the memo field is gone')\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n"
+      }
+    },
+    {
+      "name": "clear_note",
+      "class": "pure",
+      "params": [],
+      "returns": null,
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'compensate:clear_note'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n"
+      }
+    },
+    {
+      "name": "type_amount",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        },
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'type_amount'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n"
+      },
+      "capabilities": [
+        "ui.text"
+      ],
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "clear_amount"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "type_memo",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        },
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'type_memo'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n"
+      },
+      "capabilities": [
+        "ui.text"
+      ],
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "clear_memo"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "actuate",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'actuate'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n"
+      },
+      "capabilities": [
+        "ui.click"
+      ]
+    },
+    {
+      "name": "type_note",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        },
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'type_note'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n"
+      },
+      "capabilities": [
+        "ui.text"
+      ],
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "clear_note"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "fetch_receipt",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'fetch_receipt'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n  return 'receipt'\n"
+      },
+      "capabilities": [
+        "ui.download"
+      ]
+    },
+    {
+      "name": "locate_async",
+      "class": "emission",
+      "params": [
+        {
+          "name": "pane",
+          "type": "Str"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        }
+      ],
+      "returns": "UiTarget",
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'locate:' + name\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n  return { application: 'Billing', window: 'w', role: 'r', name, evidence: 'e', action: 'a', session: 's', bounds: 'b', expiry: 0n, confirm: false }\n"
+      },
+      "async": true,
+      "capabilities": [
+        "ui.find"
+      ]
+    },
+    {
+      "name": "actuate_async",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "ts": "\n  const g = globalThis as any\n  const line = 'actuate'\n  record(line)\n  g.__revlUiSeen = g.__revlUiSeen ?? {}\n  g.__revlUiSeen[line] = (g.__revlUiSeen[line] ?? 0) + 1\n  const [want, nth] = String(g.__revlUiFail ?? '').split('#')\n  if (line === want && g.__revlUiSeen[line] === Number(nth || '1')) {\n    throw new Error('the substrate could not confirm ' + line)\n  }\n"
+      },
+      "async": true,
+      "capabilities": [
+        "ui.click"
+      ]
+    }
+  ]
+}

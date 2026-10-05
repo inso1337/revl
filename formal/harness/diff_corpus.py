@@ -65,9 +65,9 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    different language than the one that ships (issue #1169). The
    `out-of-fragment-G5` and `out-of-fragment-G6` buckets record an ABSENCE,
    which cannot disagree with anything, so they are gated on MEMBERSHIP
-   instead: `formal/out_of_fragment_ledger.json` names the files in each,
-   shrinks only, and a file joining one without a line in it fails the
-   gate. Only `agree-*` and the generic `out-of-fragment` are purely
+   instead: `formal/out_of_fragment_ledger/` holds one record per file in
+   each, shrinks only, and a file joining one without a record fails the
+   gate (`--show-ledger` prints it). Only `agree-*` and the generic `out-of-fragment` are purely
    informational.
 5. render those buckets into `formal/STATUS.md` between the
    `GENERATED alignment` markers, and fail the gate when the checked-in
@@ -5431,8 +5431,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # parameter into the corpus reds the gate with `joined out-of-fragment-G5`;
 # teaching the exporter to follow a handle's method reference, a dispatched
 # arrow and a passed fn (issue #1792) red it with `left out-of-fragment-G5`
-# on each of the ten files it newly resolved, until their lines went. Deleting the ledger reds it as well — a missing ratchet
-# reads as a failure, never as nothing to check.
+# on each of the ten files it newly resolved, until their lines went.
+# Deleting the ledger reds it as well while any bucket has a member: a
+# missing ratchet reads as a failure, never as nothing to check.
 #
 # It records NAMES ONLY — no counts, no totals, no line numbers — so the
 # file is byte-identical whether it is written under CI's python 3.11 or a
@@ -5452,42 +5453,22 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # model carries a row aimed at each of them — the `U5` registration fold and
 # the `C` confinement surface — so "no fact about this file" is a claim
 # about a specific row that exists, and that is the claim worth pinning.
-OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
+# One file per record (issue #1768): `formal/out_of_fragment_ledger/<bucket>/
+# <file>.json`, holding `["bucket", "file"]`. It was one JSON object of lists,
+# then one record per line; in both, two pull requests that each added a name
+# in the same gap, or next to names the other deleted, conflicted. Separate
+# files merge. What the ledger is, the path rule, and how to read and
+# regenerate it are in `formal/out_of_fragment_ledger.md`, next to it.
+#: What the documents call it; the path a test repoints is OOF_LEDGER_PATH.
+OOF_LEDGER_NAME = "formal/out_of_fragment_ledger"
+OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger"
 OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
                        "out-of-fragment-inverse", "out-of-fragment-witnessed")
-OOF_LEDGER_ABOUT = [
-    "The corpus files the checker refuses G5, G6 or with a G4 inverse",
-    "rule (the host release, a provide-method write's inverse), and the",
-    "model has NO fact about: `out-of-fragment-G5`, `out-of-fragment-G6`",
-    "and `out-of-fragment-inverse` in",
-    "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
-    "(The G4 deferred-position rule left this ledger in issue #1742: the",
-    "model states it as `RevL.G4Deferred`, decided as the `DF` row. The",
-    "G4 approval floor left it in issue #1455: `RevL.G4Approval`, decided",
-    "as the `AP` row. The G5 list emptied in issue #1792, when the exporter",
-    "began resolving an inverse's indirections, and the G6 list in issue",
-    "#1812, when binding uniqueness became `RevL.G6Binding` (the `BU`",
-    "row). Both buckets stay, so a new unresolvable `undo` or a new G6",
-    "purity refusal still reds the gate.)",
-    "`out-of-fragment-witnessed` (issue #1963) holds the files the checker",
-    "refuses for a witnessed extern called with a site `undo`: the model",
-    "has no witnessed-extern fact yet.",
-    "",
-    "Each bucket records an absence, so none can disagree with anything",
-    "and none could fail the gate on its own (issue #1169). This ledger",
-    "is what makes them fire: MEMBERSHIP is checkable even when the",
-    "contents are not. A file that joins a bucket without a line here is a",
-    "gate failure, and a line that is no longer in its bucket is a gate",
-    "failure that must be DELETED -- so the lists shrink only, and every",
-    "name left is a hole someone still owes the model a row for.",
-    "",
-    "Regenerate with `python3 formal/harness/diff_corpus.py --write-ledger`",
-    "and read the diff: a new name is a new hole, not a formality.",
-    "`--write-status` deliberately does not touch this file.",
-    "",
-    "It records NAMES only -- never counts, totals or line numbers -- so it",
-    "is identical under CI's python 3.11 and a 3.14 developer venv.",
-]
+#: Bytes a record path keeps as is; every other byte is `%XX`.
+_LEDGER_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                         "0123456789_.-")
+_LEDGER_CLEAN = _LEDGER_SAFE | {"+"}
+_LEDGER_ESCAPED = "_escaped"
 
 
 def _oof_ledger_path() -> Path:
@@ -5505,11 +5486,108 @@ def _shown(path: Path) -> str:
 
 
 def out_of_fragment_ledger(samples: dict[str, list[str]]) -> dict:
-    """The ledger this run's buckets would produce, ready to serialize."""
-    doc: dict = {"_about": list(OOF_LEDGER_ABOUT)}
-    for bucket in OOF_RATCHET_BUCKETS:
-        doc[bucket] = sorted(set(samples.get(bucket, [])))
-    return doc
+    """The ledger this run's buckets would produce: `{bucket: [file, ...]}`
+    for every ratcheted bucket, each list sorted."""
+    return {bucket: sorted(set(samples.get(bucket, [])))
+            for bucket in OOF_RATCHET_BUCKETS}
+
+
+def ledger_record_path(bucket: str, rel: str) -> str:
+    """Where one record lives, relative to the ledger directory.
+
+    `examples/rejections/x.rvl` under `out-of-fragment-G5` ->
+    `out-of-fragment-G5/examples/rejections/x.rvl.json`. A name with a
+    character outside `[A-Za-z0-9_.+-]` in a segment, an empty, `.` or `..`
+    segment, or a first segment of `_escaped` goes to
+    `<bucket>/_escaped/<name>.json` with every byte outside `[A-Za-z0-9_.-]`
+    (including `/`) as uppercase `%XX`. Deterministic and injective, the
+    same rule as the census cases (`docs/census-artifact/cases/README.md`)."""
+    parts = rel.split("/")
+    if (all(p and p not in (".", "..") and set(p) <= _LEDGER_CLEAN for p in parts)
+            and parts[0] != _LEDGER_ESCAPED):
+        return f"{bucket}/{rel}.json"
+    escaped = "".join(chr(b) if chr(b) in _LEDGER_SAFE else f"%{b:02X}"
+                      for b in rel.encode("utf-8"))
+    return f"{bucket}/{_LEDGER_ESCAPED}/{escaped}.json"
+
+
+def ledger_record_text(bucket: str, rel: str) -> str:
+    return json.dumps([bucket, rel]) + "\n"
+
+
+def ledger_files(doc: dict) -> dict[str, str]:
+    """`doc` as the committed directory: `{record path: bytes}`."""
+    return {ledger_record_path(bucket, rel): ledger_record_text(bucket, rel)
+            for bucket in OOF_RATCHET_BUCKETS for rel in doc.get(bucket, [])}
+
+
+def _ledger_record_files(root: Path) -> list[str]:
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
+                  if p.is_file())
+
+
+def load_out_of_fragment_ledger(path: Path | None = None) -> dict:
+    """The committed ledger as `{bucket: [file, ...]}`, every ratcheted bucket
+    present and each list sorted. No directory is the empty ledger. Raises
+    `ValueError` on a file that is not exactly one record's canonical bytes
+    at that record's own path: a malformed record, a bucket the ratchet does
+    not hold, a record filed at the wrong path, or any other file."""
+    root = _oof_ledger_path() if path is None else Path(path)
+    doc: dict = {bucket: [] for bucket in OOF_RATCHET_BUCKETS}
+    if not root.exists():
+        return doc
+    if not root.is_dir():
+        raise ValueError(f"{_shown(root)} is not a directory")
+    for name in _ledger_record_files(root):
+        try:
+            text = (root / name).read_text(encoding="utf-8")
+            record = json.loads(text)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError(f"{name}: not a [bucket, file] record ({e})") from e
+        if (not isinstance(record, list) or len(record) != 2
+                or not all(isinstance(x, str) for x in record)):
+            raise ValueError(f"{name}: not a [bucket, file] record")
+        bucket, rel = record
+        if bucket not in doc:
+            raise ValueError(f"{name}: {bucket!r} is not a ratcheted bucket")
+        if ledger_record_path(bucket, rel) != name:
+            raise ValueError(f"{name} records {rel} under {bucket}, whose file "
+                             f"is {ledger_record_path(bucket, rel)}")
+        if text != ledger_record_text(bucket, rel):
+            raise ValueError(f"{name}: not the canonical bytes of its record "
+                             "(`--write-ledger` writes them)")
+        doc[bucket].append(rel)
+    return {bucket: sorted(names) for bucket, names in doc.items()}
+
+
+def write_out_of_fragment_ledger(doc: dict, root: Path) -> None:
+    """Make `root` hold exactly `doc`: write each record, delete every other
+    file, and remove directories left empty (the directory itself too)."""
+    want = ledger_files(doc)
+    for name, text in want.items():
+        target = root / name
+        if not target.is_file() or target.read_text(encoding="utf-8") != text:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+    if not root.is_dir():
+        return
+    for name in _ledger_record_files(root):
+        if name not in want:
+            (root / name).unlink()
+    for d in sorted((p for p in root.rglob("*") if p.is_dir()),
+                    key=lambda p: len(p.parts), reverse=True):
+        if not any(d.iterdir()):
+            d.rmdir()
+    if not any(root.iterdir()):
+        root.rmdir()
+
+
+def show_ledger(path: Path | None = None) -> str:
+    """`--show-ledger`: the committed ledger, one `bucket file` per line,
+    sorted. Read-only, and it runs nothing: it reads the directory."""
+    doc = load_out_of_fragment_ledger(path)
+    rows = [f"{bucket} {rel}" for bucket in sorted(doc) for rel in doc[bucket]]
+    return "\n".join(rows) if rows else "the out-of-fragment ledger is empty"
 
 
 def out_of_fragment_ratchet(samples: dict[str, list[str]],
@@ -5524,22 +5602,23 @@ def out_of_fragment_ratchet(samples: dict[str, list[str]],
     ledger as stale."""
     path = _oof_ledger_path()
     doc = out_of_fragment_ledger(samples)
-    text = json.dumps(doc, indent=2, ensure_ascii=True) + "\n"
     if write:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        write_out_of_fragment_ledger(doc, path)
         print(f"{_shown(path)}: out-of-fragment ledger rewritten "
               + " ".join(f"{b}={len(doc[b])}" for b in OOF_RATCHET_BUCKETS))
         return []
-    try:
-        committed = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    if not path.exists() and any(doc.values()):
+        # No directory is the empty ledger, so deleting it claims every
+        # bucket is empty; with members in the corpus that is one failure,
+        # said as what happened rather than as a joined line for each.
         return [f"{_shown(path)} is missing — the out-of-fragment "
                 "buckets have no ratchet, so a file can join them silently; "
                 "regenerate with `python3 formal/harness/diff_corpus.py "
                 "--write-ledger`"]
-    except json.JSONDecodeError as e:
-        return [f"{_shown(path)} is not readable JSON ({e})"]
+    try:
+        committed = load_out_of_fragment_ledger(path)
+    except ValueError as e:
+        return [f"{_shown(path)} is not a readable ledger ({e})"]
     findings: list[str] = []
     for bucket in OOF_RATCHET_BUCKETS:
         have = set(doc[bucket])
@@ -5602,12 +5681,15 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
     gate that computes it; storing it here only added a line every pull
     request rewrote. What stays is what a reader cannot get from the run's
     summary at a glance and what only moves when the model's relation to a
-    named file moves: the bucket names, their gate class, and the named
-    members. The FATAL rows keep their count because it is zero on every run
-    that passes the gate, so it never churns, and a non-zero one is a red gate
-    with its files named below. The ratcheted rows keep theirs because it is
-    the size of a membership ledger that only shrinks: it moves only in a
-    diff that edits `formal/out_of_fragment_ledger.json` too.
+    named file moves: the bucket names and their gate class. The FATAL rows
+    keep their count because it is zero on every run that passes the gate, so
+    it never churns, and a non-zero one is a red gate with its files named
+    below. The ratcheted rows carry neither a count nor their members (issue
+    #1768): the count moved whenever a pull request added or closed a hole,
+    and a sorted member list put two pull requests that each added a name in
+    the same gap in conflict. The members are the files of the shrink-only
+    `formal/out_of_fragment_ledger/`, one per name, which
+    `--show-ledger` prints.
 
     `census`, `file_facts`, `componentless`, `refusals`, `ref` and
     `mismatches` are still accepted, because the gate's own printout renders
@@ -5647,8 +5729,8 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             "An absence cannot disagree, so the two buckets aimed at a row "
             "the model does carry are `ratcheted` instead: "
             f"`{'` and `'.join(OOF_RATCHET_BUCKETS)}` are held to the names "
-            f"in `{OOF_LEDGER_PATH.relative_to(REPO)}`, which shrinks only. "
-            "A file that JOINS one fails the gate, and a line no longer in "
+            f"in `{OOF_LEDGER_NAME}/`, which shrinks only. "
+            "A file that JOINS one fails the gate, and a record no longer in "
             "its bucket fails it until it is deleted. So a new `undo` shape "
             "the `Prog` cannot resolve, or a new G6 purity fixture, cannot arrive "
             "while the model stays silent about it. `agree-*` and the "
@@ -5667,32 +5749,32 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         if k in FATAL_BUCKETS:
             lines.append(f"| `{k}` | {align.get(k, 0)} | **FATAL** |")
         elif k in OOF_RATCHET_BUCKETS:
-            lines.append(f"| `{k}` | {align.get(k, 0)} | ratcheted |")
+            lines.append(f"| `{k}` | in the ledger | ratcheted |")
         else:
             lines.append(f"| `{k}` | printed by the gate | informational |")
     lines.append("")
-    # Every ratcheted bucket gets its own list, written even when it is empty
-    # (`- none`), so a file joining one bucket edits only that bucket's lines:
-    # two pull requests filling two different buckets touch lines that a
-    # stable heading separates, and git merges them (issue #1768's property,
-    # which an empty ledger list would otherwise lose: both sides would add
-    # the same opening lines). A FATAL bucket is listed only when it is
+    # The ratcheted buckets' members are the ledger's files, not a list here
+    # (issue #1768): a sorted list put two pull requests that each added a
+    # name in the same gap, or next to a name the other closed, in conflict.
+    # The gate holds the ledger equal to each bucket in both directions, so
+    # pointing at it loses nothing. A FATAL bucket is listed only when it is
     # non-empty, which is a red gate in any case.
-    lines.append(para("Nothing is counted without being named; the files "
-                      "in the non-`agree` buckets are:"))
+    lines.append(para(
+        "The members of the ratcheted buckets are not listed here. Each is "
+        f"one file under `{OOF_LEDGER_NAME}/<bucket>/`, "
+        "which the gate holds equal to its bucket in both directions; "
+        "`python3 formal/harness/diff_corpus.py --show-ledger` prints them, "
+        "sorted, without running the corpus. A list here put two pull "
+        "requests that each added a name next to the other's in conflict "
+        "(issue #1768)."))
     lines.append("")
-    for k in OOF_RATCHET_BUCKETS:
-        lines.append(f"`{k}`:")
+    fatal = [(k, rel) for k in FATAL_BUCKETS
+             for rel in sorted(_ALIGN_SAMPLES.get(k, []))]
+    if fatal:
+        lines.append(para("The files in a FATAL bucket, which is empty on "
+                          "every run that passes the gate:"))
         lines.append("")
-        members = sorted(_ALIGN_SAMPLES.get(k, []))
-        lines.extend(f"- `{rel}`" for rel in members)
-        if not members:
-            lines.append("- none")
-        lines.append("")
-    for k in FATAL_BUCKETS:
-        for rel in sorted(_ALIGN_SAMPLES.get(k, [])):
-            lines.append(f"- `{k}`: `{rel}`")
-    if any(_ALIGN_SAMPLES.get(k) for k in FATAL_BUCKETS):
+        lines.extend(f"- `{k}`: `{rel}`" for k, rel in fatal)
         lines.append("")
     if _G5_WITNESS:
         lines.append(para(
@@ -5918,6 +6000,14 @@ if __name__ == "__main__":
     _argv = sys.argv[1:]
     if "--census-json" in _argv:
         sys.exit(census_json())
+    if "--show-ledger" in _argv:
+        try:
+            print(show_ledger())
+        except ValueError as e:
+            print(f"{_shown(OOF_LEDGER_PATH)} is not a readable ledger ({e})",
+                  file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
     if "--write-ledger" in _argv:
         sys.exit(write_status(ledger=True))
     sys.exit(write_status() if "--write-status" in _argv else main())

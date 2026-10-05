@@ -38,7 +38,7 @@
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_effect_step", 11, 11]
 
-["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_method_witnessed_step", 45, 45]
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_method_witnessed_step", 47, 47]
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_pins", 3, 3]
 
@@ -70,7 +70,7 @@
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_emit_return", 21, 21]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_expr", 62, 62]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_expr", 63, 63]
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_format", 2, 2]
 
@@ -102,7 +102,7 @@
 
 ["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_as_fn_call", 5, 5]
 
-["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_declared_call", 9, 9]
+["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_declared_call", 11, 11]
 
 ["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_emit_compensations", 3, 3]
 
@@ -216,7 +216,7 @@
 
 ["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_bridge_helpers", 52, 52]
 
-["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_combined", 32, 32]
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_combined", 33, 33]
 
 ["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_placement", 1, 1]
 
@@ -264,7 +264,7 @@
 
 ["reason", "remaining-entry-paths-accept-the-package-name-compatibility", "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead. Issue #1347 adds three statements: `Int.to_int32` in a component METHOD body flags the checked narrow `revlToI32`, so this path resets `_COMP_NEEDS_OVERFLOW32` and writes the helper that the pure typed-core path emits off `ctx.needs_overflow32`. It sits in the same live-component assembly after the pure-module early return, which the module oracle never enters. Issue #1669 adds two statements: an ir_version 3 document that carries a `lifecycle test`, components and a module `fn` takes the combined renderer, because the live stc-go path never renders module fns. A component document cannot be a go corpus case (selfhost/emit_go.rvl names its components instead); backends/go/test_module_fn_lifecycle_1669.py runs it under `go test` against the pinned stc-go."]
 
-["function", "remaining-entry-paths-accept-the-package-name-compatibility", "_emit", 84, 84]
+["function", "remaining-entry-paths-accept-the-package-name-compatibility", "_emit", 86, 86]
 
 ["reason", "remaining-fallbacks-reject-a-signature-without-a-parenthesiz", "Remaining fallbacks reject a signature without a parenthesized argument list or without its closing parenthesis; canonical frontend function types are well formed."]
 
@@ -324,7 +324,7 @@
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_host_stubs", 22, 22]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_method_body", 65, 65]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_method_body", 67, 67]
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_provide_impl", 2, 2]
 
@@ -349,6 +349,24 @@
 ["reason", "the-three-guards-that-answer-none-for-a", "The three guards that answer None for a field-call callee that is not a host family root: a receiver that is not a plain name, a name outside Map/Pool/Job/Stream, and a root the document bound or declared. Records carry no methods, so a field call is only ever spelled on a host root; `Map.new()` and `Pool.open()` in a plain fn are in the corpus (emit_py_corpus/hostroots.rvl, issue #106). Issue #106, fifth slice: the combined path's method-emit documents (comp_provide_emit.rvl and four tree documents) run more of this; the counts are lowered in place."]
 
 ["function", "the-three-guards-that-answer-none-for-a", "_v3_host_constructor", 2, 2]
+
+["reason", "ui-transaction-unit-item-522-issue-1369", "The UI transaction unit (item 522 slice 3, issue #1369): `_ui_transaction_facts` and `_calls_any` derive the per-method units from revl.ui_transaction, `_set_ui_facts` keys them by method, `_open_ui_scope` opens a unit method's scope, and `_ui_cross_call`, `_ui_comp_literal`, `_declared_comp` and `_emit_ui_crossing_step` render each computer-use crossing through `revlUiCross`. The same branches raise `_declared_call`, `_emit`, `_emit_method_body`, `_emit_method_witnessed_step`, `_emit_v3_combined` and `_expr`. It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/ui_transaction/exec_test.go."]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_calls_any", 7, 7]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_declared_comp", 2, 2]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_emit_ui_crossing_step", 11, 11]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_open_ui_scope", 7, 7]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_set_ui_facts", 2, 2]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_comp_literal", 4, 4]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_cross_call", 8, 8]
+
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_transaction_facts", 28, 28]
 
 ["reason", "v3-own-continue-skips-a-statement-that-is", "`_v3_own_continue` skips a statement that is not a dict and `_v3_str_concat_pieces` refuses a `.concat` with other than one argument; the IR carries neither. The code-point scan with every near miss it must refuse, and the `.concat` string builder, are in the corpus (emit_go_corpus/loop_shapes.rvl, issue #106)."]
 
