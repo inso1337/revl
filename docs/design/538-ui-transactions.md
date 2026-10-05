@@ -480,6 +480,34 @@ named in the discharge record a later commit writes, so a crash between the
 unit's run and the session's verdict leaves their descriptors open, and what
 `revl recover` then does with them was not measured.
 
+**The go tier runs the unit too** (issue #1369, item 3 of the decision on the
+issue, one tier per pull request). `backends/go/emit.py` derives the same
+units from `revl.ui_transaction`. Go has no context-local storage, so the
+scope is lexical: a unit method opens `_revlUi := revlSelf.revlFrame.uiScope(
+"<key>.<method>", true)` and defers `_revlUi.exit()`, and a method that only
+reaches a computer-use extern opens one with `settles` false. Every
+registration in the method body goes through the scope, and every
+computer-use crossing renders as `revlUiCross` (`revlUiCrossVoid` for no
+value), the analog of py's `declared_crossing`: it notes the crossing,
+registers the crossing's compensation (the site-spelled one, else the
+declared one) after the call returns, and still registers it when the call
+panics. The scope buffers what the call registers. A call that returns
+flushes the buffer onto the activation frame in registration order. A unit
+whose call panics settles the buffer instead, witnessed inverses newest
+first, then compensations newest first under the same per-call bound and
+budget as an abort's Phase 2, records the run on
+`RevlFrame.UiTransactionRuns()`, and re-panics with the same value. The
+entries never reach the frame, so the clean unload after the failed call
+discharges nothing of them and a later `Abort()` does not run them twice.
+Two concurrent calls on one activation each hold their own scope. go erases
+the async color, so an async unit is the same unit. A document with no
+computer-use extern is emitted byte-identically.
+`backends/go/scenarios/emitted/ui_transaction/exec_test.go` is the py suite's
+oracle, its control and its rules on this tier, plus a unit holding a
+witnessed inverse, a non-computer-use declared compensation and a
+site-spelled one. The go runtime has no E-Stop, so there is no halted run
+here.
+
 **Slice 4: `uncompensated` on the residue report. LANDED** (PR #1287 and
 #1296 for the states and the DOES NOT PROVE clauses, PR #1386 for the run the
 report prints). The oracle as written here was measured on `68c9c354`, by
