@@ -210,8 +210,9 @@ def test_example_compiles():
 
 
 def test_leaky_example_compiles_cleanly():
-    """The point of the negative case: the leak is invisible to every static
-    check — the document is accepted, and only the lifecycle test catches it."""
+    """The point of the negative case: the leak (a composition the test never
+    unloads) is invisible to every static check. The document is accepted, and
+    only the lifecycle test catches it."""
     ir = compile_files([str(EXAMPLES / "lifecycle_leak.rvl")])
     assert ir["tests"][0]["lifecycle"] is True
 

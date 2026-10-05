@@ -452,8 +452,17 @@ def _classify(e: RevlError) -> str:
     if ("unknown service `" in m
             and ("in `requires` of" in m or "in `provides` of" in m)):
         return "G1"
+    # issue #1847: a requirement key spelling a builtin type or a host root
+    # (`Env.__init__`, `_refuse_builtin_requirement_key`). The gate spells it
+    # byte for byte in the same header verdict as the unknown service above.
+    if m.startswith("requirement key `") and (
+            " shadows the builtin type `" in m or " shadows the host root `" in m):
+        return "G1"
     if ("cannot reassign" in m
             or "is already declared in this function" in m
+            # issue #1813: a module fn and an extern fn of one name
+            or ("is already declared as an extern on line " in m)
+            or ("is already declared as a function on line " in m)
             or "is bound here and called in this body" in m
             or "is already bound in" in m
             or "(G6)" in m):
@@ -1790,6 +1799,24 @@ component Supervisor requires net: Kv provides sup: Sup {
 # reference's own text is the ground truth. Several are the documented
 # `expected error` of a checked-in rejection fixture.
 REJECTED_PROGRAMS = [
+    # ---- issue #1813: a module fn and an extern fn of one name --------------
+    # The reference checks it once the program is otherwise admitted, so the
+    # second case's G1 is what both sides report; the third puts the extern
+    # second, and the refusal moves to the extern's line.
+    ("a fn that reuses an extern's name", """extern pure fn f(x: Int) -> Int = @py { return x }
+fn f(x: Int) -> Int { return x + 1 }
+fn g() -> Int { return f(1) }
+""", "G6"),
+    ("any other refusal outranks a fn reusing an extern's name", """service S { fn g() -> Int }
+component C provides s: S {
+  provide s { fn g() = db.get() }
+}
+extern pure fn f(x: Int) -> Int = @py { return x }
+fn f(x: Int) -> Int { return x + 1 }
+""", "G1"),
+    ("an extern that reuses a fn's name", """fn f(x: Int) -> Int { return x + 1 }
+pub extern pure fn f(x: Int) -> Int = @py { return x }
+""", "G6"),
     # ---- the qualified test heads, negative controls (item 391) ------------
     # Stepping over a test block must land on the NEXT declaration, not past
     # it: each of these puts a real refusal in the tail, so a step that
@@ -2018,13 +2045,15 @@ component Logger provides log: Log {
     # requirement" G1 refusal a bare `nope()` does. The gate's `type_ctors` used
     # to collect every Upper-cased name a `type` declaration mentioned, admitting
     # this whole family; it now follows the same alias/variant split.
+    # issue #1847: a builtin type head names the type rule (T1, "is a builtin
+    # type, not a value"), not the "add `requires`" G1 it drew before
     ("g1 bare call of a builtin type aliased single-case",
      """type Alias = Int
 service S { fn go() -> Int }
 component C provides s: S {
   provide s { fn go() { let x = Int("1")   return 0 } }
 }
-""", "G1"),
+""", "T1"),
     # G1 bare CALL head: a single-case type application (`type Rows = List[Row]`)
     # is an alias RHS too, so its head `List` is not a constructor.
     ("g1 bare call of a type-application alias head",
@@ -2033,7 +2062,7 @@ service S { fn go() -> Int }
 component C provides s: S {
   provide s { fn go() { let x = List(1)   return 0 } }
 }
-""", "G1"),
+""", "T1"),
     # The accepting twin: in a MULTI-case variant the same builtin name IS a
     # registered case, so `Str("a")` resolves and both admit. (Held in the
     # ACCEPTED corpus below so a future over-eager fix cannot silently start
@@ -2414,6 +2443,9 @@ component C requires kv: Kv {
      _fixture("g4_method_host_acquire"), "G4"),
     ("g4 host acquire in a teardown slot",
      _fixture("g4_undo_host_acquire"), "G4"),
+    # issue #1859: the undo of a host acquisition is not its release
+    ("g4 host undo that is not the release",
+     _fixture("g4_undo_not_release"), "G4"),
     ("g4 host acquire in a component-reachable fn body",
      _fixture("g4_fn_body_host_acquire"), "G4"),
     # the same rule at the two positions no checked-in fixture occupies

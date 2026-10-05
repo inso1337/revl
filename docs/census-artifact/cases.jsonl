@@ -426,6 +426,8 @@
 
 ["examples/rejections/g4_undo_host_acquire.rvl", "agree-refuse/G4"]
 
+["examples/rejections/g4_undo_not_release.rvl", "agree-refuse/G4"]
+
 ["examples/rejections/g4_unmarked_alias_emission.rvl", "agree-refuse/G4"]
 
 ["examples/rejections/g4_unmarked_emission.rvl", "agree-refuse/G4"]
@@ -446,7 +448,7 @@
 
 ["examples/rejections/g5_undo_handle_emission.rvl", "refuse-out-of-slice/G4"]
 
-["examples/rejections/g5_undo_handle_ref_arg.rvl", "no-objection-out-of-slice"]
+["examples/rejections/g5_undo_handle_ref_arg.rvl", "refuse-out-of-slice/G4"]
 
 ["examples/rejections/g5_undo_handle_ref_let.rvl", "no-objection-out-of-slice"]
 
@@ -926,6 +928,8 @@
 
 ["oracle-reject:a deeper required-key crossing follows the sorted names", "agree-refuse/G4"]
 
+["oracle-reject:a fn that reuses an extern's name", "agree-refuse/G6"]
+
 ["oracle-reject:a for binding over a live name", "agree-refuse/G6"]
 
 ["oracle-reject:a for loop as the only returning path", "agree-refuse/T1"]
@@ -1070,6 +1074,8 @@
 
 ["oracle-reject:an extern slot refusal inside a match arm", "agree-refuse/G4"]
 
+["oracle-reject:an extern that reuses a fn's name", "agree-refuse/G6"]
+
 ["oracle-reject:an if with no else", "agree-refuse/T1"]
 
 ["oracle-reject:an if/else with only one returning arm", "agree-refuse/T1"]
@@ -1106,6 +1112,8 @@
 
 ["oracle-reject:an unmarked emission left of an undeclared name is still G4", "agree-refuse/G4"]
 
+["oracle-reject:any other refusal outranks a fn reusing an extern's name", "agree-refuse/G1"]
+
 ["oracle-reject:assignment to a name nothing bound", "agree-refuse/G1"]
 
 ["oracle-reject:assignment to a parameter", "agree-refuse/G6"]
@@ -1132,9 +1140,9 @@
 
 ["oracle-reject:extern with no classification is G8", "agree-refuse/G8"]
 
-["oracle-reject:g1 bare call of a builtin type aliased single-case", "agree-refuse/G1"]
+["oracle-reject:g1 bare call of a builtin type aliased single-case", "agree-refuse/T1"]
 
-["oracle-reject:g1 bare call of a type-application alias head", "agree-refuse/G1"]
+["oracle-reject:g1 bare call of a type-application alias head", "agree-refuse/T1"]
 
 ["oracle-reject:g1 required key used as a bare value", "agree-refuse/G1"]
 
@@ -1189,6 +1197,8 @@
 ["oracle-reject:g4 host acquire in an emit expression", "agree-refuse/G4"]
 
 ["oracle-reject:g4 host acquire wrapped inside an effect bracket's acquisition", "agree-refuse/G4"]
+
+["oracle-reject:g4 host undo that is not the release", "agree-refuse/G4"]
 
 ["oracle-reject:g4 multi-hop named-call chain", "agree-refuse/G4"]
 

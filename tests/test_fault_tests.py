@@ -819,10 +819,52 @@ def _run_src(src: str, capsys):
     return code, capsys.readouterr().out
 
 
+_NON_INVERSE_UNDO = {"kind": "call", "target": {"kind": "name", "id": "scratch"},
+                     "method": "insert",
+                     "args": [{"kind": "lit", "value": "leak"},
+                              {"kind": "lit", "value": "1"}]}
+
+
+def _run_leaky(src: str, capsys):
+    """Run `src`'s fault test with the scratch map's inverse replaced by the
+    non-inverse `scratch.insert("leak", "1")`, in the IR.
+
+    Since issue #1859 that `undo` does not compile: a host acquisition's
+    inverse must be its release on the bound handle. The runtime R1
+    accounting these tests pin is still the backstop for what the checker
+    cannot see, and it still has to charge the leak on both fault paths, so
+    the source compiles with the real inverse and the IR is given the leaky
+    one: exactly the program the checker now refuses, reached past it."""
+    from revl.test import test_command
+
+    honest = src.replace('undo scratch.insert("leak", "1")', 'undo scratch.drop()')
+    ir = compile_source(honest, "fault.rvl")
+    [bracket] = [step for step in ir["components"][0]["body"]
+                 if step.get("step") == "let-effect" and step.get("bind") == "scratch"]
+    bracket["undo"] = _NON_INVERSE_UNDO
+    code = test_command(ir, "py")
+    return code, capsys.readouterr().out
+
+
+_NON_INVERSE_REFUSAL = (
+    "the `undo` of `let scratch = effect Map.new(...)` must release THAT "
+    "handle: write `undo scratch.drop()`")
+
+
+def test_a_non_inverse_undo_is_refused_before_the_fault_test():
+    """Since issue #1859 the leaky document does not compile: a host
+    acquisition's `undo` must be its release on the bound handle."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_FAULT_ON_LEAKY, "fault.rvl")
+    assert excinfo.value.code == "G4"
+    assert excinfo.value.message == _NON_INVERSE_REFUSAL
+
+
 @needs_cordis
 def test_a_non_inverse_undo_fails_the_fault_test(capsys):
-    """Before the R1 accounting this exact document passed."""
-    code, out = _run_src(_FAULT_ON_LEAKY, capsys)
+    """Before the R1 accounting this exact program passed. It is reached
+    past the checker now (`_run_leaky`), and R1 must still charge it."""
+    code, out = _run_leaky(_FAULT_ON_LEAKY, capsys)
     assert code == 1, out
     assert "FAIL mid-activation failure reverts its acquisition" in out
     assert "residue in the host" in out
@@ -872,11 +914,20 @@ fault test "mid-activation failure with a non-inverse undo" for Fragile {
 '''
 
 
+def test_a_non_inverse_undo_is_refused_before_an_injected_fault():
+    """The injected-fault twin of the test above, refused the same way."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_LEAKY_UNDER_INJECTION, "fault.rvl")
+    assert excinfo.value.code == "G4"
+    assert excinfo.value.message == _NON_INVERSE_REFUSAL
+
+
 @needs_cordis
 def test_a_non_inverse_undo_fails_under_an_injected_fault(capsys):
     """The R1 accounting must hold when the *probe* faults the activation,
-    not only when a `fail` statement in the body does."""
-    code, out = _run_src(_LEAKY_UNDER_INJECTION, capsys)
+    not only when a `fail` statement in the body does. The program is reached
+    past the checker (`_run_leaky`), which refuses it since issue #1859."""
+    code, out = _run_leaky(_LEAKY_UNDER_INJECTION, capsys)
     assert code == 1, out
     assert "FAIL mid-activation failure with a non-inverse undo" in out
     assert "residue in the host" in out

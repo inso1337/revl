@@ -125,7 +125,7 @@ was corrected by hand and had drifted back within a day.
 | fault-tests.md | needs-work | 71 |  |
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
-| fmt.md | needs-work | 14 |  |
+| fmt.md | needs-work | 12 |  |
 | frontend-assets.md | needs-work | 13 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
@@ -173,7 +173,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 46 | yes |
-| rejections.md | needs-work | 70 |  |
+| rejections.md | needs-work | 71 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |

@@ -9198,6 +9198,16 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None) -> 
             f"`Result[Witness, Error]` "
             f"(docs/design/243-witnessed-externs.md, G4)")
         return message, hint
+    from .typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415
+    release = _HOST_ACQUIRE_VERBS.get(spelling)
+    if release is not None:
+        # issue #1859: a host acquisition has exactly one inverse, so the hint
+        # names it instead of offering an `<expr>` the checker now refuses
+        return (
+            f"effect has no `undo` and {head} is not pure",
+            f"write `let <name> = effect {spelling}(...) undo "
+            f"<name>.{release}()`: a host acquisition's inverse is its "
+            f"family's release on the handle it bound (G4)")
     return (
         f"effect has no `undo` and {head} is not pure",
         f"write `effect {spelling}(...) undo <expr>`, or mark the call `emit` "
