@@ -151,6 +151,15 @@ python3 "$here/emit.py" "$here/scenarios/emitted/method_compensate/method_compen
 python3 "$here/emit.py" "$here/scenarios/emitted/extern_compensate/extern_compensate.ir.json" externcompensate \
   > "$here/scenarios/emitted/extern_compensate/gen_extern_compensate_test.go"
 
+# --- the UI transaction unit (item 522 slice 3, issue #1369) ------------------
+# ui_transaction.ir.json is written by the one-off generator beside it
+# (_gen_ui_transaction.py), which keeps the source out of the scoring corpora.
+# A provide method that crosses a computer-use verb settles its own entries
+# when its call panics. exec_test.go (hand-written) mirrors
+# tests/test_ui_transaction_runtime_1369.py.
+python3 "$here/emit.py" "$here/scenarios/emitted/ui_transaction/ui_transaction.ir.json" uitransaction \
+  > "$here/scenarios/emitted/ui_transaction/gen_ui_transaction_test.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -180,6 +189,7 @@ if command -v gofmt >/dev/null 2>&1; then
            "$here/scenarios/emitted/provide_method_witnessed/gen_provide_method_witnessed_test.go" \
            "$here/scenarios/emitted/method_compensate/gen_method_compensate_test.go" \
            "$here/scenarios/emitted/extern_compensate/gen_extern_compensate_test.go" \
+           "$here/scenarios/emitted/ui_transaction/gen_ui_transaction_test.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

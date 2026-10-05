@@ -36,6 +36,7 @@ pub const KNOWN_IR_FIELDS: &[&str] = &[
     "externs",
     "fault_tests",
     "functions",
+    "generated_from",
     "holes",
     "ir_version",
     "manifest",

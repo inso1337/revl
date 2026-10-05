@@ -65,7 +65,7 @@ def test_the_reference_admits_the_document(stem):
 # The rebind walk steps over an arm, but not over the statement that holds it:
 # binding `x` again after `let x = match ...` is the reference's G6. Kept out of
 # the corpus because the formal model has no fact about the G6 rebind rule, so
-# the document would widen formal/out_of_fragment_ledger.json; the gate's twin
+# the document would widen formal/out_of_fragment_ledger/; the gate's twin
 # is the in-file program "a name the block-arm statement binds is a G6 rebind"
 # in selfhost/lower.rvl.
 REBIND_AFTER_BLOCK_STATEMENT = """service S { fn go(n: Int) -> Int }

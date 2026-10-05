@@ -61,6 +61,14 @@ CRATE = "cordis4j"
 # shifts). Mirrors backends/go/emit.py's `_RECORD_MODE`.
 _RECORD_MODE = False
 
+# issue #1369 (item 522 slice 3): the document's computer-use externs, by name,
+# and its provide methods that run in a UI scope, keyed by
+# `(component, key, method)`. Set per `emit()` from `_ui_transaction_facts`
+# and restored after; both empty for a document with no computer-use extern,
+# which then emits byte-identically.
+_UI_EXTERNS: dict = {}
+_UI_SCOPES: dict = {}
+
 # item 178(b): lifecycle mode. Set by `emit()` for an ir_version 3 document that
 # carries `lifecycle test` blocks (docs/syntax-2.0.md §7.1). Those tests prove
 # R1 (every acquired host resource was released) as well as R4 (no provision
@@ -1159,6 +1167,10 @@ class _V3Ctx:
         # renders bare. Its site-spelled compensation REPLACES the extern's
         # declared one, so the call must not also register the declared one.
         self.declared_skip: object = None
+        # issue #1369: inside a provide method that runs in a UI scope, the
+        # local holding that scope (`_revlUi`); its registrations and its
+        # computer-use crossings go through it instead of `fx`/`frame`.
+        self.ui_scope: str | None = None
         # Every component in the document, keyed by name, so a `spawn`
         # acquisition can resolve its target template's config layout (the
         # plugin-constructor argument order) and provided keys (the services to
@@ -2163,6 +2175,10 @@ def _expr(
             _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
         declared = ctx.declared.get(node.get("name"))
+        if _is_ui_crossing(node, ctx) and node is not ctx.declared_skip:
+            # issue #1369: a computer-use crossing in a value position
+            comp = _declared_compensate(declared, ctx, env) if declared else None
+            return _ui_cross(node, f"{fn_name}({args})", comp, ctx)
         if (declared is not None and ctx.crossing_frame is not None
                 and node is not ctx.declared_skip):
             return _declared_crossing(f"{fn_name}({args})", declared, ctx, env)
@@ -6245,15 +6261,9 @@ def _site_compensated_call(step: dict, ctx: "_V3Ctx", rename, env: "_Env | None"
         ctx.declared_skip = previous
 
 
-def _declared_crossing(call: str, ext: dict, ctx: "_V3Ctx", env: "_Env | None") -> str:
-    """One crossing of `ext`, an extern that declares its own `compensate`,
-    in a component body (issue #1511). Every position a call can be written in
-    renders through `_expr`'s `fn` arm and so through here: the forward call is
-    an argument, which Java evaluates first, and `RevlDeclared` then tracks the
-    declared compensation into the activation's `fx` through
-    `RevlFrame.compensation`, the entry a site-spelled `emit .. compensate ..`
-    makes. So it is discharged on commit, runs in Phase 2 on abort, newest
-    first, and a crossing that throws registers nothing."""
+def _declared_compensate(ext: dict, ctx: "_V3Ctx", env: "_Env | None") -> tuple[str, str]:
+    """The call an extern's declared `compensate` makes, rendered, and the
+    callee's name."""
     comp = ext["compensate"]
     callee = comp.get("callee") or {}
     name = callee.get("name") or callee.get("id")
@@ -6264,10 +6274,49 @@ def _declared_crossing(call: str, ext: dict, ctx: "_V3Ctx", env: "_Env | None") 
             "registers (issue #1511)")
     # the slot binds nothing (lower.py `_check_extern_undo`), so no rename
     args = ", ".join(_expr(a, ctx, None, env) for a in comp.get("args") or [])
-    compensate = f"{_fn_name(name)}({args})"
+    return f"{_fn_name(name)}({args})", str(name)
+
+
+def _is_ui_crossing(node, ctx) -> bool:
+    return (bool(getattr(ctx, "ui_scope", None)) and isinstance(node, dict)
+            and node.get("kind") == "fn" and node.get("name") in _UI_EXTERNS)
+
+
+def _ui_cross(node: dict, call: str, comp: "tuple[str, str] | None", ctx) -> str:
+    """A computer-use crossing inside a UI scope (issue #1369): `comp` is the
+    crossing's compensation, `(rendered call, its name)`, or None."""
+    step = _string(str(node.get("name")))
+    if comp is None:
+        attempted, compensate = "null", "null"
+    else:
+        attempted, compensate = _string(comp[1]), f"() -> {comp[0]}"
+    ext = _UI_EXTERNS[node.get("name")]
+    if _java_v3_type(ext.get("returns")) == "void":
+        return f"{ctx.ui_scope}.crossUnit({step}, {attempted}, {compensate}, () -> {call})"
+    return f"{ctx.ui_scope}.cross({step}, {attempted}, {compensate}, () -> {call})"
+
+
+def _declared_crossing(call: str, ext: dict, ctx: "_V3Ctx", env: "_Env | None") -> str:
+    """One crossing of `ext`, an extern that declares its own `compensate`,
+    in a component body (issue #1511). Every position a call can be written in
+    renders through `_expr`'s `fn` arm and so through here: the forward call is
+    an argument, which Java evaluates first, and `RevlDeclared` then tracks the
+    declared compensation into the activation's `fx` through
+    `RevlFrame.compensation`, the entry a site-spelled `emit .. compensate ..`
+    makes. So it is discharged on commit, runs in Phase 2 on abort, newest
+    first, and a crossing that throws registers nothing."""
+    compensate, name = _declared_compensate(ext, ctx, env)
     frame = ctx.crossing_frame
     crossing = _string(str(ext.get("name")))
     attempted = _string(str(name))
+    if ctx.ui_scope:
+        # issue #1369: inside a UI scope the entry is the scope's until the
+        # call returns
+        if _java_v3_type(ext.get("returns")) == "void":
+            return (f"{ctx.ui_scope}.declaredUnit({crossing}, {attempted}, "
+                    f"() -> {call}, () -> {compensate})")
+        return (f"{ctx.ui_scope}.declared({crossing}, {attempted}, {call}, "
+                f"() -> {compensate})")
     if _java_v3_type(ext.get("returns")) == "void":
         return (f"RevlDeclared.crossedUnit(fx, {frame}, {crossing}, {attempted}, "
                 f"() -> {call}, () -> {compensate})")
@@ -6322,6 +6371,9 @@ def _component_needs_frame(component: dict, witnessed: dict[str, dict],
     # issue #1511: a crossing of an extern that declares its own `compensate`
     # registers a compensation entry wherever it is written.
     if _reaches_declared(component.get("body"), declared or {}):
+        return True
+    # issue #1369: a UI scope settles or flushes onto the frame
+    if any(key[0] == component.get("name") for key in _UI_SCOPES):
         return True
     return any(step_needs(step) for step in component.get("body") or [])
 
@@ -6604,7 +6656,279 @@ def _emit_revl_frame_runtime(declared: bool = False) -> list[str]:
     ]
     if declared:
         lines.extend(_DECLARED_CROSSING_RUNTIME)
+    if _UI_SCOPES:
+        lines.extend(_UI_TRANSACTION_RUNTIME.splitlines() + [""])
     return lines
+
+
+#: Issue #1369 (item 522 slice 3): the UI transaction unit, emitted beside
+#: `RevlFrame` only when a provide method runs in a UI scope.
+_UI_TRANSACTION_RUNTIME = r'''// ---- the UI transaction unit (item 522 slice 3, issue #1369) ----
+// The java mirror of backends/python/runtime.py's `Frame.ui_transaction` and
+// `declared_crossing`. A provide method that crosses a computer-use verb is
+// one unit. The method holds its scope explicitly (`_revlUi`): every
+// registration and every computer-use crossing in the method body goes
+// through it, so two concurrent calls on one activation never see each
+// other's entries.
+//
+// The scope buffers what the call registers. A call that returns flushes the
+// buffer into the activation's `fx` in registration order, as the same
+// entries a method body tracks outside a unit. A unit whose call throws
+// settles its own entries instead: Phase 1 replays its witnessed inverses
+// newest first, Phase 2 runs its compensations newest first through
+// `RevlFrame.runPhase2`'s bound, each continue-and-record, the run is
+// recorded, and the failure propagates unchanged. The entries never reach
+// `fx`, so neither the clean unload after the failed call nor a later
+// `abort()` runs them. A call scope (`settles` false) flushes on a throw too.
+
+/** One compensation a settled unit ran: the crossing it offsets ("" for an
+ * entry with no crossing), the compensation, and whether it failed. */
+public record RevlUiRan(String step, String compensation, boolean failed) {}
+
+/** One residue record a settled unit left, in the merged residue schema. */
+public record RevlUiResidue(String kind, String crossing, String attempted,
+        String outcome, String error) {}
+
+/** The record a settled unit leaves, the java form of the py tier's
+ * `Frame.ui_transaction_runs` entry. */
+public record RevlUiRun(String unit, String failedStep, java.util.List<String> crossed,
+        String error, java.util.List<RevlUiRan> ran, java.util.List<String> replayed,
+        java.util.List<RevlUiResidue> residue) {}
+
+public static final class RevlUi {
+    private static final java.util.Map<RevlFrame, java.util.List<RevlUiRun>> RUNS =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    /** The runs the settled units of `activation` recorded, oldest first. */
+    public static java.util.List<RevlUiRun> runs(Disposable activation) {
+        if (!(activation instanceof RevlActivation live)) {
+            return java.util.List.of();
+        }
+        synchronized (RUNS) {
+            return java.util.List.copyOf(RUNS.getOrDefault(live.frame, java.util.List.of()));
+        }
+    }
+
+    private record Entry(String step, String crossing, String attempted, Runnable action,
+            boolean witnessed) {}
+
+    private final Context.EffectScope fx;
+    private final RevlFrame frame;
+    private final String name;
+    private final boolean settles;
+    private final java.util.List<String> crossed = new java.util.ArrayList<>();
+    private String failedStep = "";
+    private java.util.List<Entry> entries = new java.util.ArrayList<>();
+
+    RevlUi(Context.EffectScope fx, RevlFrame frame, String name, boolean settles) {
+        this.fx = fx;
+        this.frame = frame;
+        this.name = name;
+        this.settles = settles;
+    }
+
+    /** A witnessed inverse the call registered. */
+    void transactional(String crossing, String attempted, Runnable undo) {
+        entries.add(new Entry("", crossing, attempted, undo, true));
+    }
+
+    /** A compensation that offsets no computer-use crossing. */
+    void compensation(String crossing, String attempted, Runnable compensate) {
+        entries.add(new Entry("", crossing, attempted, compensate, false));
+    }
+
+    /** `RevlDeclared.crossed` inside a scope. */
+    <T> T declared(String crossing, String attempted, T value, Runnable compensate) {
+        compensation(crossing, attempted, compensate);
+        return value;
+    }
+
+    /** `RevlDeclared.crossedUnit` inside a scope. */
+    void declaredUnit(String crossing, String attempted, Runnable call, Runnable compensate) {
+        call.run();
+        compensation(crossing, attempted, compensate);
+    }
+
+    /** One computer-use crossing. It notes the crossing, and registers its
+     * compensation after the call returns. A crossing that throws is the step
+     * the call failed at, and still registers its own compensation: the throw
+     * says the substrate could not confirm the effect, which is not knowing it
+     * did not land. */
+    <T> T cross(String step, String attempted, Runnable compensate,
+            java.util.function.Supplier<T> call) {
+        crossed.add(step);
+        T value;
+        try {
+            value = call.get();
+        } catch (RuntimeException | Error failure) {
+            if (failedStep.isEmpty()) {
+                failedStep = step;
+            }
+            register(step, attempted, compensate);
+            throw failure;
+        }
+        register(step, attempted, compensate);
+        return value;
+    }
+
+    /** `cross` for a crossing that returns nothing. */
+    void crossUnit(String step, String attempted, Runnable compensate, Runnable call) {
+        cross(step, attempted, compensate, () -> {
+            call.run();
+            return null;
+        });
+    }
+
+    private void register(String step, String attempted, Runnable compensate) {
+        if (compensate != null) {
+            entries.add(new Entry(step, step, attempted, compensate, false));
+        }
+    }
+
+    /** The method's success path, and a call scope's every path: track the
+     * buffered entries into `fx`, in registration order. */
+    void flush() {
+        for (Entry entry : entries) {
+            fx.track(entry.witnessed()
+                    ? frame.transactionalMethod(entry.crossing(), entry.attempted(), entry.action())
+                    : frame.compensation(entry.crossing(), entry.attempted(), entry.action()));
+        }
+        entries = new java.util.ArrayList<>();
+    }
+
+    /** A failed unit: settle its entries, record the run. The caller rethrows. */
+    void fail(Throwable failure) {
+        if (!settles) {
+            return;
+        }
+        java.util.List<Entry> mine = entries;
+        entries = new java.util.ArrayList<>();
+        int before = frame.residue.size();
+        java.util.List<String> replayed = replay(mine);
+        java.util.List<RevlUiRan> ran = compensate(mine);
+        java.util.List<RevlUiResidue> residue = new java.util.ArrayList<>();
+        for (RevlFrame.Residue r : frame.residue.subList(before, frame.residue.size())) {
+            residue.add(new RevlUiResidue(r.kind(), r.crossing(), r.attempted(), r.outcome(), r.error()));
+        }
+        RevlUiRun run = new RevlUiRun(name, failedStep, java.util.List.copyOf(crossed),
+                String.valueOf(failure), ran, replayed, residue);
+        synchronized (RUNS) {
+            RUNS.computeIfAbsent(frame, k -> new java.util.ArrayList<>()).add(run);
+        }
+    }
+
+    /** Phase 1: the witnessed inverses, newest first, each guarded. */
+    private java.util.List<String> replay(java.util.List<Entry> mine) {
+        java.util.List<String> replayed = new java.util.ArrayList<>();
+        for (int i = mine.size() - 1; i >= 0; i--) {
+            Entry entry = mine.get(i);
+            if (!entry.witnessed()) {
+                continue;
+            }
+            try {
+                entry.action().run();
+            } catch (RuntimeException | Error err) {
+                frame.residue.add(new RevlFrame.Residue("restore-residue", entry.crossing(),
+                        entry.attempted(), true, String.valueOf(err), "failed"));
+            }
+            replayed.add(entry.attempted());
+        }
+        return replayed;
+    }
+
+    /** Phase 2: the compensations, newest first, each through
+     * `RevlFrame.runPhase2`'s per-call bound, under one budget. */
+    private java.util.List<RevlUiRan> compensate(java.util.List<Entry> mine) {
+        java.util.List<RevlUiRan> ran = new java.util.ArrayList<>();
+        long budgetMs = RevlFrame.envMs("REVL_COMPENSATION_BUDGET_MS", 5000L);
+        long deadline = System.nanoTime() + budgetMs * 1_000_000L;
+        for (int i = mine.size() - 1; i >= 0; i--) {
+            Entry entry = mine.get(i);
+            if (entry.witnessed()) {
+                continue;
+            }
+            if (budgetMs > 0 && System.nanoTime() >= deadline) {
+                frame.residue.add(new RevlFrame.Residue("compensation-residue", entry.crossing(),
+                        entry.attempted(), false, "deadline-expired", "not-attempted"));
+                continue;
+            }
+            int before = frame.residue.size();
+            frame.phase2.addLast(new RevlFrame.Phase2Task(entry.crossing(), entry.attempted(),
+                    entry.action()));
+            frame.runPhase2();
+            ran.add(new RevlUiRan(entry.step(), entry.attempted(), frame.residue.size() > before));
+        }
+        return ran;
+    }
+}
+'''
+
+
+def _ui_transaction_facts(ir: dict) -> tuple[dict, dict]:
+    """Issue #1369 (item 522 slice 3): the computer-use externs of the
+    document, by name, and the provide methods that run in a scope, as
+    `{(component, key, method): "ui_transaction" | "call_scope"}`.
+
+    The same derivation as the py, ts, go and rust emitters, from
+    `revl.ui_transaction`, the module `revl erase-report` prints the static
+    run from, so the unit this tier settles is the unit the report describes.
+    A method that crosses a computer-use verb is its UI transaction unit; one
+    that only reaches such an extern gets a scope that never settles.
+    FAIL-CLOSED: without the frontend, a document that declares a
+    computer-use capability is refused rather than emitted with no unit. A
+    document with none gets `({}, {})` and is emitted byte-identically."""
+    roots = {str(cap).split(".", 1)[0]
+             for ext in ir.get("externs") or []
+             for cap in ext.get("capabilities") or []}
+    if not roots & {"ui", "screen"}:
+        return {}, {}
+    try:
+        try:
+            from revl import ui_family, ui_transaction  # noqa: PLC0415
+        except ModuleNotFoundError:  # standalone `python3 emit.py`: src/ on the path
+            import pathlib  # noqa: PLC0415
+            src = pathlib.Path(__file__).resolve().parents[2] / "src"
+            if src.is_dir() and str(src) not in sys.path:
+                sys.path.insert(0, str(src))
+            from revl import ui_family, ui_transaction  # noqa: PLC0415
+    except Exception as error:  # noqa: BLE001 - frontend absent
+        raise EmitError(
+            "a computer-use extern needs the revl frontend to find its "
+            "transaction unit (item 522), and it is not importable here: "
+            f"{error}") from error
+    index = ui_transaction._extern_index(ir)
+    names = {name for name, entry in index.items()
+             if ui_family.reversibility(entry["token"]) is not None}
+    if not names:
+        return {}, {}
+    units = {(plan["component"], plan["key"], plan["method"])
+             for plan in ui_transaction.plans(ir)
+             if plan["key"] != "<activation>"}
+    scopes: dict = {}
+    for comp in ir.get("components") or []:
+        for entry in comp.get("body") or []:
+            if not isinstance(entry, dict) or entry.get("step") != "provide":
+                continue
+            for method in entry.get("methods") or []:
+                key = (comp.get("name"), entry.get("name"), method.get("name"))
+                if key in units:
+                    scopes[key] = "ui_transaction"
+                elif _calls_any(method.get("body"), names):
+                    scopes[key] = "call_scope"
+    externs = {ext.get("name"): ext for ext in ir.get("externs") or []
+               if ext.get("name") in names}
+    return externs, scopes
+
+
+def _calls_any(node, names: set) -> bool:
+    """Whether *node* (any IR subtree) calls one of *names*."""
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in names:
+            return True
+        return any(_calls_any(value, names) for value in node.values())
+    if isinstance(node, list):
+        return any(_calls_any(item, names) for item in node)
+    return False
 
 
 # Issue #1511: the registration of an extern-DECLARED compensation at a
@@ -7035,6 +7359,12 @@ def _method_body_lines(
                     "a non-witnessed let-effect is not supported inside a method "
                     "body on the java tier")
         elif step == "emit":
+            if _is_ui_crossing(stmt.get("expr"), v3_ctx):
+                # issue #1369: a computer-use crossing registers its own
+                # compensation, the site-spelled one or else the declared one,
+                # even when it throws
+                lines.append(f"{_ui_crossing_statement(stmt, v3_ctx, rename, env, lines)};")
+                continue
             lines.append(f"{_site_compensated_call(stmt, v3_ctx, rename, env)};")
             if stmt.get("compensate") is not None:
                 _emit_compensation_track(
@@ -7196,6 +7526,28 @@ def _emit_bracket_track(
     )
 
 
+def _ui_crossing_statement(stmt: dict, v3_ctx: "_V3Ctx", rename, env, lines: list[str]) -> str:
+    """An `emit` statement whose call is a computer-use crossing inside a UI
+    scope (issue #1369). One compensation per crossing (issue #1902): the
+    site-spelled clause, with its by-value pins, else the extern's declared
+    one. The call itself renders bare."""
+    expr = stmt["expr"]
+    previous, v3_ctx.declared_skip = v3_ctx.declared_skip, expr
+    try:
+        call = _expr(expr, v3_ctx, rename, env)
+    finally:
+        v3_ctx.declared_skip = previous
+    comp = None
+    if stmt.get("compensate") is not None:
+        pins = _emit_inverse_pins(lines, "", stmt, "compensate", v3_ctx, env, rename)
+        comp = (_expr(stmt["compensate"], v3_ctx, pins, env), _call_label(stmt["compensate"]))
+    else:
+        declared = v3_ctx.declared.get(expr.get("name"))
+        if declared is not None:
+            comp = _declared_compensate(declared, v3_ctx, env)
+    return _ui_cross(expr, call, comp, v3_ctx)
+
+
 def _emit_compensation_track(
     out: list[str], pad: str, forward: dict, compensate: dict,
     v3_ctx: _V3Ctx, env: _Env, frame_expr: str | None,
@@ -7214,6 +7566,12 @@ def _emit_compensation_track(
         return
     crossing = _string(_call_label(forward))
     attempted = _string(_call_label(compensate))
+    if v3_ctx.ui_scope:
+        # issue #1369: inside a UI scope the entry is the scope's until the
+        # call returns
+        out.append(f"{pad}{v3_ctx.ui_scope}.compensation({crossing}, {attempted}, "
+                   f"() -> {compensate_expr});")
+        return
     out.append(
         f"{pad}fx.track({frame_expr}.compensation({crossing}, {attempted}, "
         f"() -> {compensate_expr}));"
@@ -7281,10 +7639,16 @@ def _emit_witnessed_step(
             f"{pad}    revlRecordTransactional({receiver}, {method}, "
             f"new String[]{{{referent}}});"
         )
-    out.append(
-        f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
-        f"() -> {undo_expr}));"
-    )
+    if frame_method and v3_ctx.ui_scope:
+        # issue #1369: inside a UI scope the inverse is the scope's until the
+        # call returns
+        out.append(f"{pad}    {v3_ctx.ui_scope}.transactional({crossing}, {attempted}, "
+                   f"() -> {undo_expr});")
+    else:
+        out.append(
+            f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
+            f"() -> {undo_expr}));"
+        )
     out.append(f"{pad}}}")
     if bind is not None:
         out.append(f"{pad}var {bind} = {result_var};")
@@ -7810,10 +8174,29 @@ def _emit_component_modern(
             secret_params = _secret_method_params(env, key, contract, method.get("params") or [])
             if secret_params:
                 out.append(f"        revlMarkSecret({', '.join(secret_params)});")
-            for line in _method_body_lines(
-                env, method, v3_ctx, returns_void=ret == "void", frame_expr=frame_expr,
-            ):
-                out.append(("        " + line) if line else line)
+            scope = _UI_SCOPES.get((name, key, contract))
+            if scope is not None:
+                # issue #1369: the method runs in a UI scope
+                v3_ctx.ui_scope = "_revlUi"
+                out.append(f"        RevlUi _revlUi = new RevlUi(fx, frame, "
+                           f"{_string(key + '.' + contract)}, "
+                           f"{'true' if scope == 'ui_transaction' else 'false'});")
+                out.append("        try {")
+            body_pad = "            " if scope is not None else "        "
+            try:
+                body = _method_body_lines(
+                    env, method, v3_ctx, returns_void=ret == "void", frame_expr=frame_expr)
+            finally:
+                v3_ctx.ui_scope = None
+            for line in body:
+                out.append((body_pad + line) if line else line)
+            if scope is not None:
+                out.append("        } catch (RuntimeException | Error _revlFailure) {")
+                out.append("            _revlUi.fail(_revlFailure);")
+                out.append("            throw _revlFailure;")
+                out.append("        } finally {")
+                out.append("            _revlUi.flush();")
+                out.append("        }")
             out.append("    }")
         out.append("}")
         out.append("")
@@ -8681,6 +9064,9 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
     _SECRET_MODE = _declares_secret(ir)
     _LIFECYCLE_MODE = any(t.get("lifecycle") for t in (ir.get("tests") or []))
     _V3_DECLARED_TYPES = frozenset(ir.get("types") or {})
+    global _UI_EXTERNS, _UI_SCOPES
+    saved_ui = (_UI_EXTERNS, _UI_SCOPES)
+    _UI_EXTERNS, _UI_SCOPES = _ui_transaction_facts(ir)
     try:
         version = ir.get("ir_version")
         if version == 1:
@@ -8700,6 +9086,7 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
         _LIFECYCLE_MODE = saved_lifecycle
         _V3_DECLARED_TYPES = saved_types
         _SECRET_MODE = saved_secret
+        _UI_EXTERNS, _UI_SCOPES = saved_ui
 
 
 def _main(argv: list[str]) -> int:

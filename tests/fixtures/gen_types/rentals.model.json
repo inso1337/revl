@@ -1,0 +1,45 @@
+{
+  "revl_model": 1,
+  "name": "Rentals",
+  "locale": "fr-FR",
+  "service": "RentalsData",
+  "entities": [
+    {
+      "name": "Customer",
+      "label": "Client",
+      "key": ["id"],
+      "fields": [
+        {"name": "id", "type": "Str", "label": "Numéro client"},
+        {"name": "name", "type": "Str", "label": "Nom"},
+        {"name": "email", "type": "Str", "optional": true, "label": "Courriel"},
+        {"name": "tags", "type": "Str", "list": true}
+      ],
+      "relations": [
+        {"name": "orders", "to": "Order", "many": true, "label": "Commandes"}
+      ]
+    },
+    {
+      "name": "Order",
+      "label": "Commande",
+      "key": ["number"],
+      "fields": [
+        {"name": "number", "type": "Int", "label": "Numéro"},
+        {"name": "total", "type": "Float"},
+        {"name": "paid", "type": "Bool"}
+      ],
+      "relations": [
+        {"name": "customer", "to": "Customer", "label": "Client"}
+      ]
+    },
+    {
+      "name": "OrderLine",
+      "key": ["order", "position"],
+      "fields": [
+        {"name": "order", "type": "Int"},
+        {"name": "position", "type": "Int"},
+        {"name": "item", "type": "Str"},
+        {"name": "quantity", "type": "Int"}
+      ]
+    }
+  ]
+}

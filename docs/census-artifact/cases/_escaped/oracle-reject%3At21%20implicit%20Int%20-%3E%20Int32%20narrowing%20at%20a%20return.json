@@ -1,0 +1,1 @@
+{"case": "oracle-reject:t21 implicit Int -> Int32 narrowing at a return", "buckets": ["agree-refuse/T1"]}

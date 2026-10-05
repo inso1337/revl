@@ -131,6 +131,7 @@ was corrected by hand and had drifted back within a day.
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | stale-fixed | 1 |  |
 | gauntlet.md | needs-work | 18 |  |
+| gen-types.md | needs-work | 0 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
 | guarantees.md | needs-work | 2 |  |

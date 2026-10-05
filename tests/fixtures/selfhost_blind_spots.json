@@ -22,6 +22,9 @@
   "go": {
     "blind": {},
     "unported": {
+      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method opens a lexical scope (`uiScope`, `revlUiCross`). It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/ui_transaction/exec_test.go.": [
+        "key=<activation>"
+      ],
       "Issues #1511 and #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit` (a `ctx.Effect` compensation entry), a provide-method `emit` and every value position of a provide method (`registerMethodCompensation`, through `revlDeclared` for a `let`, a `return`, an argument or a nested operand), and a timer firing. It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/extern_compensate/exec_test.go.": [
         "class=emission"
       ],
@@ -165,6 +168,9 @@
       ],
       "Issue #1511: an extern of `class=emission` that declares `compensate` is registered at every crossing in a component through `RevlDeclared`. selfhost/emit_java.rvl does not port the registration, so a corpus document declaring one would make the byte-agreement oracle diverge; the runtime proof is backends/java/test_declared_compensate_java.py.": [
         "class=emission"
+      ],
+      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method runs its body in a `RevlUi` scope, each computer-use crossing through `RevlUi.cross`. emit_java.rvl carries no UI transaction unit (the self-host gap of issue #1972). The corpus has no computer-use document with @java bodies. The runtime proof is backends/java/test_ui_transaction_java_1369.py.": [
+        "key=<activation>"
       ]
     }
   },
@@ -223,6 +229,9 @@
       ]
     },
     "unported": {
+      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method runs its body under `catch_unwind` in a `RevlUiScope`, each computer-use crossing through `revl_ui_cross`. emit_rust.rvl carries no UI transaction unit (the self-host gap of issue #1972). The corpus has no computer-use document with @rs bodies. The runtime proof is backends/rust/test_ui_transaction_rust_1369.py.": [
+        "key=<activation>"
+      ],
       "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
         "secret=<true>",
         "secret_return=<true>"
@@ -268,6 +277,9 @@
       ]
     },
     "unported": {
+      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and wraps each unit method in `Frame.uiTransaction` and each computer-use extern in `uiCrossing`. emit_ts.rvl carries no UI transaction unit (issue #1972). The corpus has no computer-use document with @ts bodies; #1972's done criterion adds one. The runtime proof is backends/typescript/tests/ui_transaction.test.ts.": [
+        "key=<activation>"
+      ],
       "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
         "kind=hole"
       ]

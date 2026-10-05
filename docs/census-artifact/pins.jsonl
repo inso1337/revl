@@ -34,13 +34,15 @@
 
 ["reference", "src/revl/fmt.py"]
 
-["reference", "src/revl/gate.py"]
+["reference", "src/revl/gen_types.py"]
 
 ["reference", "src/revl/holes.py"]
 
 ["reference", "src/revl/hostfile.py"]
 
 ["reference", "src/revl/hostref.py"]
+
+["reference", "src/revl/import_openapi.py"]
 
 ["reference", "src/revl/kernel_boundary.py"]
 
@@ -71,8 +73,6 @@
 ["reference", "src/revl/policy.py"]
 
 ["reference", "src/revl/realm_placeholders.py"]
-
-["reference", "src/revl/recovery.py"]
 
 ["reference", "src/revl/resources.py"]
 

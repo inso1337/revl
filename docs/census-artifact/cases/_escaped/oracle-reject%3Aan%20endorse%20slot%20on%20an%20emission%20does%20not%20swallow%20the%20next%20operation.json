@@ -1,0 +1,1 @@
+{"case": "oracle-reject:an endorse slot on an emission does not swallow the next operation", "buckets": ["agree-refuse/G4"]}

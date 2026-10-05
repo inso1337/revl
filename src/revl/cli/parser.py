@@ -1168,6 +1168,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_mcp_http_arguments(mcp_proxy)
     _add_profile_settle_argument(mcp_proxy)
 
+    gen = sub.add_parser(
+        "gen-types",
+        help="turn a typed model document into revl types and a service "
+             "signature, with its digest in the header (docs/gen-types.md)")
+    gen.add_argument("model", help="the model document (.json, `revl_model: 1`)")
+    gen.add_argument("-o", "--output", default=None,
+                     help="output path (default: stdout). The header names the "
+                          "model relative to this file's directory")
+    gen.add_argument("--json-diagnostics", action="store_true",
+                     help="on rejection, print a structured diagnostic instead "
+                          "of the human rendering")
+
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")
     imp_sub = imp.add_subparsers(dest="import_command", required=True)
