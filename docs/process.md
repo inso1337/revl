@@ -282,11 +282,17 @@ root suite.
 the same `tools/affected_tests.py` selection. When it is the full root suite
 (about 70 minutes as one job), or 40 or more files, the shards split it by test
 file with `REVL_TEST_SHARD=k/4`, balanced by the per-file seconds in
-`tests/shard_weights.json`. A smaller selection runs whole in shard 1. The
+`tests/shard_weights.json`. A file heavier than half an even shard is split
+further, by test family (a test function with all its parametrizations, or a
+test class). It was built for `tests/test_selfhost_lower.py`, whose nesting
+test took about 19 minutes until issue #1861 made it about 26 seconds; no file
+is heavy enough to split on the current weights. A smaller selection
+runs whole in shard 1. The
 shards run every selected test exactly once, which
 `tests/test_root_suite_shards_1774.py` pins. A stale weight only makes the
 shards uneven. A sharded run ends by printing `REVL_SHARD_SECONDS <seconds> <file>`
-for each file it ran; `python tools/refresh_shard_weights.py --run <run id> --write`
+for each file it ran, and `<file>::<family>` lines for a split file;
+`python tools/refresh_shard_weights.py --run <run id> --write`
 reads those lines from a FULL run's four job logs into the weights file. To run one
 shard locally: `REVL_TEST_SHARD=2/4 pytest tests/ -q`.
 

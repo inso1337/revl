@@ -214,6 +214,21 @@ def _go_type(t) -> str:
         return _PRIM[t]
     if t.startswith("List[") and t.endswith("]"):
         return "[]" + _go_type(t[5:-1])
+    if t == "Any":
+        # issue #1892: revl's `Any` wildcard erases to Go's `any`, as it does
+        # in `_go_v3_type`. It used to fall through to `_camel`, which printed
+        # the surface spelling into a service signature (`Raw(v Any) Any`) and
+        # the package did not build (`undefined: Any`).
+        return "any"
+    if t.startswith("Result[") and t.endswith("]"):
+        # issue #1892: a Result in value (parameter) position is the package's
+        # `RevlResult[T, E]`, as `_go_v3_type` spells it. Return position
+        # spreads to `(T, E, bool)` in `_go_return` and never reaches here.
+        # Printing the surface spelling (`Settle(r Result[Int, Str])`) did not
+        # build (`undefined: Result`). The rendered `RevlResult[` is what pulls
+        # a Result preamble into the package.
+        ok, err = _v3_split_generic(t[7:-1])
+        return "RevlResult[%s, %s]" % (_go_type(ok), _go_type(err))
     if t.startswith("Opt[") and t.endswith("]"):
         # Value/parameter position: Opt lowers to a pointer `*T` (nil == None),
         # which carries the presence bit a bare `T` cannot. The (T, bool) tuple
@@ -800,6 +815,44 @@ def _v3_comp_construct(node, env: _Env) -> str:
     return "%s{Value: %s}" % (struct, args[0])
 
 
+def _comp_arm_binding(st, pattern) -> str | None:
+    """The surface type a match arm's `bind` takes: the case payload for a
+    user-variant or Opt/Result case, the scrutinee itself for `_`."""
+    if pattern == "_":
+        return st
+    if isinstance(st, str) and st.startswith("Opt[") and st.endswith("]"):
+        return st[4:-1] if pattern == "Some" else None
+    if isinstance(st, str) and st.startswith("Result[") and st.endswith("]"):
+        parts = _v3_split_generic(st[7:-1])
+        if len(parts) == 2:
+            return parts[0] if pattern == "Ok" else parts[1] if pattern == "Err" \
+                else None
+        return None
+    adt = st if (isinstance(st, str) and st in _V3_TYPES) \
+        else _v3_case_layout().get(pattern, (None, None))[0]
+    return _v3_case_payload(adt, pattern) if adt in _V3_TYPES else None
+
+
+def _comp_infer_match(node, env: _Env):
+    """The value type of a component-body `match`: its first arm whose body
+    infers one (issue #1834)."""
+    st = _comp_infer(node.get("scrutinee"), env)
+    for arm in node.get("arms") or []:
+        bind = arm.get("bind")
+        saved = dict(env.var_types)
+        try:
+            if bind and bind != "_":
+                bound = _comp_arm_binding(st, arm.get("pattern"))
+                if bound:
+                    env.var_types[bind] = bound
+            found = _comp_infer(arm.get("body"), env)
+        finally:
+            env.var_types = saved
+        if found:
+            return found
+    return None
+
+
 def _go_comp_match(node, env: _Env, expected) -> str:
     """A `match` in a component/method body (v3 typed-core placement).
 
@@ -828,7 +881,20 @@ def _go_comp_match(node, env: _Env, expected) -> str:
     scrutinee = _expr(scrut_node, env, st)
     layout = _v3_case_layout()
     lines = ["func() %s {" % exp_t]
-    lines.append("\tswitch _m := %s.(type) {" % scrutinee)
+    # issue #1834: a scrutinee that is not a bare identifier, such as a case
+    # constructed in place (`match Circle(n) { .. }`), renders to a concrete
+    # composite literal. `.(type)` needs an interface operand, and the literal's
+    # `{` would be read as the switch body, so bind it to an interface-typed
+    # temp first, as the pure tier does (item 313).
+    if isinstance(scrut_node, dict) and scrut_node.get("kind") in ("var", "name"):
+        operand = scrutinee
+    else:
+        iface = st if (isinstance(st, str) and st in _V3_TYPES) else next(
+            (layout[a.get("pattern")][0] for a in arms
+             if a.get("pattern") in layout), None)
+        lines.append("\tvar _s %s = %s" % (_go_type(iface) or "any", scrutinee))
+        operand = "_s"
+    lines.append("\tswitch _m := %s.(type) {" % operand)
     has_wild = False
     saved_types = dict(env.var_types)
     try:
@@ -1131,8 +1197,10 @@ def _comp_infer(node, env: _Env):
         # lowered to `revlListLen` on a string (issue #1356).
         return _CONFIG_TYPES.get(node.get("field"))
     if k == "match":
-        # a match's value type is its scrutinee's
-        return _comp_infer(node.get("scrutinee"), env)
+        # a match's value is one of its arms', never its scrutinee's (issue
+        # #1834): the first arm whose body infers a type, with the arm's binding
+        # in scope, the way `_go_comp_match` picks its result type
+        return _comp_infer_match(node, env)
     if k == "field":
         tt = _comp_infer(node.get("target"), env)
         if isinstance(tt, str) and tt in _V3_TYPES \
@@ -1833,8 +1901,9 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             env.declared_skip = step.get("expr")
             out.append("%s%s" % (pad, _expr(step["expr"], env)))
             env.declared_skip = None
-            # the site-spelled clause, then the extern's own declared one
-            # (item 254, issue #1592), each registered after the fire.
+            # one compensation per crossing, registered after the fire: the
+            # site-spelled clause, else the extern's own declared one (item
+            # 254, issues #1592 and #1902).
             for comp_node in _emit_compensations(step):
                 compensate_call = _expr(comp_node, env)
                 key, method = _call_descriptor(comp_node)
@@ -2671,20 +2740,20 @@ def _as_fn_call(node):
 
 
 def _emit_compensations(step) -> list:
-    """The compensations an `emit` step registers, in order: the site-spelled
-    `compensate` clause, then the emitted extern's own declared one (item 254,
-    issue #1592). The order the py reference registers them in. An extern is
-    matched as a `fn`-kind call naming it (backends/python/emit.py
+    """The compensation an `emit` step registers: one per crossing (issue
+    #1902). A site-spelled `compensate` clause REPLACES the emitted extern's
+    own declared one (item 254, issue #1592); the declared one is the default
+    only when the site spells none. The rule the py reference keeps. An extern
+    is matched as a `fn`-kind call naming it (backends/python/emit.py
     `_compensated_extern`)."""
-    out = []
     if step.get("compensate") is not None:
-        out.append(step["compensate"])
+        return [step["compensate"]]
     expr = step.get("expr")
     if _COMPENSATED_EXTERNS and isinstance(expr, dict) and expr.get("kind") == "fn":
         ext = _COMPENSATED_EXTERNS.get(expr.get("name"))
         if ext is not None:
-            out.append(_as_fn_call(ext["compensate"]))
-    return out
+            return [_as_fn_call(ext["compensate"])]
+    return []
 
 
 def _timer_has_compensate(step) -> bool:
@@ -3324,9 +3393,10 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # `runCompensationPhase` drains the queue, best-effort and bounded,
         # via the goroutine-abandon pattern (go's per-tier obligation).
         emit_call = _expr(step["expr"], env)
-        # the site-spelled clause, then the emitted extern's own declared one
-        # (item 254, issue #1592): one entry each, in that order, as the py
-        # reference registers them. The emission fires inside the first.
+        # one compensation per crossing: the site-spelled clause, else the
+        # emitted extern's own declared one (item 254, issues #1592 and
+        # #1902), as the py reference registers it. The emission fires inside
+        # it.
         compensations = _emit_compensations(step)
         for index, comp_node in enumerate(compensations):
             compensate_call = _expr(comp_node, env)
@@ -11261,7 +11331,12 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         # `@go` body hand-constructs RevlOk/RevlErr, and `_emit_witnessed_step`
         # asserts on them.
         out.append(_COMP_RESULT_PREAMBLE)
-    elif used_result:
+    elif used_result or "RevlResult[" in body_blob:
+        # issue #1892: a component signature that takes a Result renders the
+        # type (`_go_type`) without the IR's `types`/`functions` spelling one,
+        # so the rendered body decides here too. Nothing in that body
+        # constructs a sealed `RevlOk`/`RevlErr`, so the struct form is the
+        # one that agrees with the pure tier beside it.
         out.append(_V3_RESULT_PREAMBLE)
     if used_map or _COMP_NEEDS_MAP:
         out.append(_V3_MAP_PREAMBLE)

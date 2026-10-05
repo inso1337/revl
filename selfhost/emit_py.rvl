@@ -1968,6 +1968,48 @@ fn runtime_ref(name: Str) -> Str {
 }
 
 // -------------------------------------------- component-body expressions (cexpr)
+// The named call an inverse or a compensation makes, as the `call=` keyword the
+// frame writes verbatim into the WAL discharge descriptor. Mirrors the
+// reference `_named_call_kwarg`: a call through a required service names the
+// key as its receiver and an extern or module fn call has receiver `None`. A
+// witnessed inverse's arguments are evaluated against `result` (`witness` is
+// the `Ok` value's expression); a compensation's are captured only when every
+// one is a name, a literal, a config read or a field of one, and are `None`
+// otherwise. Any other shape adds nothing.
+fn inert_arg(node: Any) -> Bool {
+  let k = node_kind(node)
+  if (k == "field") { return inert_arg(value_field(node, "target")) }
+  return k == "name" || k == "var" || k == "lit" || k == "config"
+}
+
+fn call_kwarg(node: Any, witness: Str) -> Str {
+  let kind = node_kind(node)
+  var receiver = "None"
+  var method = ""
+  if (kind == "call" && !value_is_null(value_field(node, "target"))) {
+    let target = value_field(node, "target")
+    if (node_kind(target) != "req") { return "" }
+    receiver = py_repr(value_str(value_field(target, "name")))
+    method = value_str(value_field(node, "method"))
+  } else if (kind == "call" && node_kind(value_field(node, "callee")) == "var") {
+    method = value_str(value_field(value_field(node, "callee"), "name"))
+  } else if (kind == "fn") {
+    method = value_str(value_field(node, "name"))
+  } else {
+    return ""
+  }
+  let args = value_list(value_field(node, "args"))
+  var captured = `[${ccommajoin(args)}]`
+  if (witness != "") {
+    captured = `(lambda result: [${ccommajoin(args)}])(${witness})`
+  } else {
+    for (a of args) {
+      if (!inert_arg(a)) { captured = "None" }
+    }
+  }
+  return `, call={'receiver': ${receiver}, 'method': ${py_repr(method)}, 'args': ${captured}}`
+}
+
 fn ccommajoin(nodes: List[Any]) -> Str {
   var parts = []
   for (e of nodes) { parts = parts.push(cexpr(e)) }
@@ -2422,7 +2464,7 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
       // commit, drained in Phase 2 after every proof inverse, guarded and
       // residue-collected. Mirrors the reference emit.py's `_method_step`.
       var out = [line(indent, emission_fire(value_field(step, "expr")))]
-      out = out.push(line(indent, `_revl_frame.compensation_method(${inverse_lambda(step, "compensate", "")}: ${cexpr(value_field(step, "compensate"))})`))
+      out = out.push(line(indent, `_revl_frame.compensation_method(${inverse_lambda(step, "compensate", "")}: ${cexpr(value_field(step, "compensate"))}${call_kwarg(value_field(step, "compensate"), "")})`))
       return { lines: out, counter: counter }
     }
     var out = [line(indent, emission_fire(value_field(step, "expr")))]
@@ -3055,6 +3097,7 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
     if (!value_is_null(value_field(ext, "idempotency_key"))) { kwargs = kwargs.concat(", idempotency=").concat(py_repr(value_str(value_field(ext, "idempotency_key")))) }
   }
   kwargs = kwargs.concat(transactional_scope_kwargs(ext))
+  kwargs = kwargs.concat(call_kwarg(value_field(ext, "undo"), tmp.concat(".value")))
   // A witnessed extern whose confidentiality is declared on the INVERSE's
   // parameter (`undo revoke(result)` against `revoke(id: Secret[Str])`) rather
   // than on its own return. This tier redacts by VALUE at the recorder, so the
@@ -3173,13 +3216,14 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       // completed. This is the two-phase model, not the old
       // single-interleaved-LIFO ordering (docs/contract-errata.md TCK A5
       // respec, a5a/a5b); it is compensation, not inversion (§6.1).
-      out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))})`))
+      out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))}${call_kwarg(value_field(step, "compensate"), "")})`))
     }
     // item 254: the reversal an emission extern declares on itself, registered
-    // as the same Phase-2 compensation a site-spelled one is.
+    // as the same Phase-2 compensation a site-spelled one is. One per crossing
+    // (issue #1902): a site-spelled `compensate` replaces it.
     let ext_comp = compensated_extern(value_field(step, "expr"), externs)
-    if (!value_is_null(ext_comp)) {
-      out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(ext_comp, "compensate"))})`))
+    if (!value_is_null(ext_comp) && value_is_null(value_field(step, "compensate"))) {
+      out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(ext_comp, "compensate"))}${call_kwarg(value_field(ext_comp, "compensate"), "")})`))
     }
     out = out.push("")
     return { lines: out, counter: counter }
@@ -4148,8 +4192,11 @@ fn lifecycle_harness() -> List[Str] {
     "    \"\"\"Host resources acquired during the test and never released (R1).\"\"\"",
     "    live = {}",
     "    for event in events:",
-    "        tag, _, verb = event.split(\" \", 1)[0].rpartition(\".\")",
-    "        if not tag:",
+    "        head, _, rest = event.partition(\" \")",
+    "        tag, _, verb = head.rpartition(\".\")",
+    "        if not tag or rest.startswith(\"refused\"):",
+    "            # `pool.open refused <url>`: the acquisition raised and acquired",
+    "            # nothing, so there is nothing to release (issue #1859)",
     "            continue",
     "        if verb in _REVL_ACQUIRE:",
     "            live[tag] = verb",

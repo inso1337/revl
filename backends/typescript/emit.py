@@ -1485,8 +1485,9 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             # is unguarded. `frame.compensationMethod` makes it abort-only:
             # discharged on a commit, drained in Phase 2 after every proof
             # inverse, guarded and residue-collected. Fire the emission first,
-            # then register: the site-spelled clause, then the extern's own
-            # declared one (item 254, issue #1592).
+            # then register one compensation per crossing: the site-spelled
+            # clause, else the extern's own declared one (item 254, issues
+            # #1592 and #1902).
             lines.append(f"{indent}{_expr(step['expr'], _emit_ctx(step, ctx))}")
             for comp_node in _emit_compensations(step, ctx):
                 _register_compensation(
@@ -1801,16 +1802,16 @@ def _compensated_extern(expr: Any, ctx: "_Ctx") -> Optional[dict]:
 
 
 def _emit_compensations(step: dict, ctx: "_Ctx") -> list:
-    """The compensation expressions an `emit` step registers, in order: the
-    site-spelled `compensate` clause, then the extern's own declared one. The
-    same order the py reference registers them in."""
-    out = []
+    """The compensation an `emit` step registers: one per crossing (issue
+    #1902). A site-spelled `compensate` clause REPLACES the extern's own
+    declared one; the declared one is the default only when the site spells
+    none. The rule the py reference and `fault._owed_compensations` keep."""
     if step.get("compensate") is not None:
-        out.append(step["compensate"])
+        return [step["compensate"]]
     ext = _compensated_extern(step.get("expr"), ctx)
     if ext is not None:
-        out.append(_as_fn_call(ext["compensate"]))
-    return out
+        return [_as_fn_call(ext["compensate"])]
+    return []
 
 
 def _as_fn_call(node: Any) -> Any:

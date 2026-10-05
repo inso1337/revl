@@ -8,9 +8,9 @@ each is pinned here:
 1. The `initialize` instructions name the loop in order with the exact verbs:
    revl_resolve -> revl_scaffold -> fill -> revl_query_withdraw -> revl_check
    -> revl_admit. Each tool on the loop says which step it is.
-2. A `revl_edit` response carries `blastRadius`: the revl_query_withdraw
-   cascade for every component the edit touches, read off the running
-   composition.
+2. A `revl_edit`, `revl_swap` or `revl_change` response carries
+   `blastRadius`: the revl_query_withdraw cascade for every component the
+   change touches, read off the running composition.
 3. `revl_check` carries `selfCheck`: every guarantee G1-G9 as pass, fail (with
    the code and the fix) or unchecked, in one call.
 """
@@ -231,3 +231,61 @@ def test_a_draft_edit_with_a_hole_carries_the_cascade_too():
     assert radius["touched"] == ["Web"]
     assert [c["component"] for c in radius["components"]["Web"]["cascade"]] == [
         "Client"]
+
+
+#: Mem as CHAIN declares it, with a second effect: a change to Mem alone.
+MEM_TWICE = (
+    "component Mem provides store: Store {\n"
+    "  let m = effect Map.new() undo m.drop()\n"
+    "  let n = effect Map.new() undo n.drop()\n"
+    "  provide store { fn get(k) = m.get(k) }\n"
+    "}"
+)
+
+
+def _mem_cascade(radius: dict) -> list[str]:
+    assert radius["touched"] == ["Mem"], radius
+    assert radius["breaks"] == 2, radius
+    return [c["component"] for c in radius["components"]["Mem"]["cascade"]]
+
+
+@needs_runtime
+def test_an_inline_swap_carries_the_cascade_of_what_it_replaces():
+    assert _call("revl_load", {"source": CHAIN})["ok"] is True
+    swapped = _call("revl_swap", {"source": CHAIN.replace(
+        "  let m = effect Map.new() undo m.drop()\n",
+        "  let m = effect Map.new() undo m.drop()\n"
+        "  let n = effect Map.new() undo n.drop()\n")})
+    assert swapped["swapped"] is True, swapped
+    assert _mem_cascade(swapped["blastRadius"]) == ["Web", "Client"]
+
+
+@needs_runtime
+def test_a_swap_by_name_carries_the_radius_too():
+    assert _call("revl_load", {"source": CHAIN})["ok"] is True
+    swapped = _call("revl_swap", {})
+    assert swapped["swapped"] is True and swapped["fromServerSide"] is True, swapped
+    # the held source re-admitted unchanged touches no component
+    assert swapped["blastRadius"]["touched"] == []
+    assert swapped["blastRadius"]["breaks"] == 0
+
+
+@needs_runtime
+def test_a_change_proposal_and_its_commit_both_carry_the_cascade():
+    assert _call("revl_load", {"source": CHAIN})["ok"] is True
+    proposed = _call("revl_change", {"replace": {"component": "Mem",
+                                                 "source": MEM_TWICE}})
+    assert proposed["ok"] is True and proposed["committed"] is False, proposed
+    assert _mem_cascade(proposed["blastRadius"]) == ["Web", "Client"]
+    committed = _call("revl_change", {"commit": True})
+    assert committed["committed"] is True, committed
+    assert _mem_cascade(committed["blastRadius"]) == ["Web", "Client"]
+
+
+@needs_runtime
+def test_a_change_committed_in_one_call_carries_the_cascade():
+    assert _call("revl_load", {"source": CHAIN})["ok"] is True
+    committed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mem", "source": MEM_TWICE}})
+    assert committed["committed"] is True, committed
+    assert _mem_cascade(committed["blastRadius"]) == ["Web", "Client"]

@@ -47,7 +47,10 @@ IRREVERSIBLE = {
     "revl_call": "a call reaches the running composition and may cross the "
                  "boundary; an emission cannot be un-emitted (compensation is "
                  "not inversion, docs/erase-report.md)",
-    "revl_commit": "the commit manifest step records the session's pending "
+    "revl_act": "one gated action is a call (issue #1708): it reaches the "
+                "running composition and may cross the boundary, and an "
+                "emission cannot be un-emitted",
+    "revl_commit":"the commit manifest step records the session's pending "
                    "crossings for confirmation; it has no inverse call",
     "revl_commit_confirm": "a confirmed commit fires the deferred crossings; "
                            "they cannot be un-emitted",

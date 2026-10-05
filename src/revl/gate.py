@@ -73,17 +73,10 @@ GATE_API_VERSION = "1.0.0"
 
 def _language_version() -> str:
     """The revl language/package version the gate admits (`gate_version()`
-    .language). Read from the installed distribution metadata, falling back to
-    the in-repo package version when running from a checkout with no install."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
-        try:
-            return version("revl")
-        except PackageNotFoundError:
-            pass
-    except Exception:  # noqa: BLE001 — metadata is a convenience, never fatal
-        pass
-    return "2.0.0"
+    .language): `revl.attest.compiler_version`, the one definition."""
+    from .attest import compiler_version  # noqa: PLC0415
+
+    return compiler_version()
 
 
 # ---------------------------------------------------------------------------

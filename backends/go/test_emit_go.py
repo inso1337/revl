@@ -1747,3 +1747,115 @@ def test_a_lifecycle_test_without_unload_builds_and_passes():
     from revl.test import RUNNERS  # noqa: PLC0415
     status, message = RUNNERS["go"](compile_source(_NO_UNLOAD, "no_unload.rvl"))
     assert status == "pass", message
+
+
+# --- issue #1834: a component-body match's type is its arms', not its scrutinee's
+#
+# `_comp_infer` answered a `match` with its scrutinee's type, so a match in an
+# inferred position (a call argument, a `.length` receiver) was typed as the
+# scrutinee's ADT and the emitted Go did not build. A match over a case built in
+# place (`match Circle(n) { .. }`) also put the concrete composite literal
+# straight into the type switch, which Go rejects twice over.
+
+_MATCH_TYPE_SRC = """
+type Shape = Dot | Circle(Int)
+fn keep(n: Int) -> Int { return n }
+service S {
+  fn k(s: Shape) -> Int
+  fn j(s: Shape) -> Int
+  fn a(n: Int) -> Int
+  fn r(s: Shape) -> Int
+}
+component C provides s: S {
+  provide s {
+    fn k(s) = keep(match s { Dot => (match s { _ => 2 }), _ => 3 })
+    fn j(s) = (match s { Dot => "dot", _ => "other" }).length
+    fn a(n) = match Circle(n) { Circle(r) => keep(r), _ => 0 }
+    fn r(s) = keep(match s { Circle(r) => r, _ => 0 })
+  }
+}
+"""
+
+
+def _go_build(src: str, name: str) -> None:
+    import sys  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "tools"))
+    from validate import GoValidator  # noqa: PLC0415
+
+    validator = GoValidator()
+    reason = validator.unavailable()
+    if reason:
+        pytest.skip(reason)
+    status, detail = validator.check([(name, src)])[name]
+    assert status == "ok", detail
+
+
+def test_a_match_in_an_inferred_position_takes_its_arms_type():
+    from revl import compile_source  # noqa: PLC0415
+
+    src = emit.emit(compile_source(_MATCH_TYPE_SRC, "m.rvl"))
+    assert "func() Shape {" not in src, "a match typed as its scrutinee"
+    # `.length` on the Str a match yields is a string length, not a list one
+    assert "revlListLen(func() string" not in src
+    # the case built in place is bound to an interface-typed temp first
+    assert "var _s Shape = ShapeCircle{Value: n}" in src
+    assert "switch _m := ShapeCircle{" not in src
+
+
+def test_go_build_accepts_a_match_in_an_inferred_position():
+    from revl import compile_source  # noqa: PLC0415
+
+    _go_build(emit.emit(compile_source(_MATCH_TYPE_SRC, "m.rvl")),
+              "match-type-from-arms")
+
+
+# --- issue #1892: `Any` and a Result parameter in a component signature
+#
+# `_go_type`, which renders the service-trait and provide-method signatures,
+# had no arm for `Any` and none for a `Result[T, E]` in value position. Both
+# fell through to `_camel`, so the interface said `Settle(r Result[Int, Str])`
+# and `Raw(v Any) Any`, and the package did not build (`undefined: Result`,
+# `undefined: Any`). The same document shape, once with a top-level `type` (the
+# combined renderer) and once components-only (the stc-go component path).
+
+_SIGNATURE_SERVICE = """
+service Shelf {
+  fn settle(r: Result[Int, Str]) -> Int
+  fn blob() -> Any
+  fn raw(v: Any) -> Any
+  fn raws() -> List[Any]
+}
+
+component Store provides shelf: Shelf {
+  provide shelf {
+    fn settle(r) = 1
+    fn blob() = "x"
+    fn raw(v) = v
+    fn raws() = []
+  }
+}
+"""
+
+_SIGNATURE_DOCS = {
+    "combined": "type Note = { title: Str, size: Int }\n" + _SIGNATURE_SERVICE,
+    "components-only": _SIGNATURE_SERVICE,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SIGNATURE_DOCS))
+def test_a_component_signature_spells_any_and_a_result_parameter_in_go(shape):
+    from revl import compile_source  # noqa: PLC0415
+
+    src = emit.emit(compile_source(_SIGNATURE_DOCS[shape], f"sig_{shape}.rvl"))
+    assert "Result[Int, Str]" not in src and " Any" not in src
+    assert "Settle(r RevlResult[" in src
+    assert "Raw(v any) any" in src and "Raws() []any" in src
+
+
+@pytest.mark.parametrize("shape", sorted(_SIGNATURE_DOCS))
+def test_go_build_accepts_any_and_a_result_parameter_in_a_component_signature(shape):
+    from revl import compile_source  # noqa: PLC0415
+
+    _go_build(emit.emit(compile_source(_SIGNATURE_DOCS[shape], f"sig_{shape}.rvl")),
+              f"signature-any-result-{shape}")

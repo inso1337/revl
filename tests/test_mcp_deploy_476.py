@@ -66,7 +66,7 @@ PINNED_SSH = {"processes": {"db": {"deploy": {
 
 # ---------------------------------------------------------------- the verb
 
-def test_deploy_is_listed_and_not_read_only():
+def test_deploy_is_listed_and_not_read_only(all_mcp_tools):
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     assert "revl_deploy" in tools

@@ -246,8 +246,8 @@ def test_called_fn_is_emitted_into_the_component_module(tmp_path):
         "fn unused(n: Int) -> Int { return n }\n"
         + _component("= outer(x)")
     ))["C"]
-    assert "(func $outer" in wat and "(func $inner" in wat
-    assert "(func $unused" not in wat        # only the closure, not the corpus
+    assert "(func $fn.outer" in wat and "(func $fn.inner" in wat
+    assert "(func $fn.unused" not in wat        # only the closure, not the corpus
     assert int(_invoke(tmp_path, "closure", wat, "provide:s.f", 20)[-1]) == 42
 
 

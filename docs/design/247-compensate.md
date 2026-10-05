@@ -44,6 +44,10 @@ Present today:
 
 - Parse. `emit <call> compensate <expr>` at a call site (src/revl/parser.py:1398-1402)
   and an extern-level `emission ... compensate <expr>` slot (parser.py:1022-1028).
+  When an emit of such an extern also spells one at the site, the site-spelled
+  one replaces the extern's for that crossing: one compensation per crossing
+  (issue #1902, `docs/design/teardown-contract.md` "One compensation per
+  crossing").
 - Check. `compensate` is legal only on an `emission` extern, not on
   `pure`/`acquire`/`witnessed` (lower.py:1577-1602), not on an `async` extern
   (lower.py:1674-1678), and its expression is checked by the shared extern-slot

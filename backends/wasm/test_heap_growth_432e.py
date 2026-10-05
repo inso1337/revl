@@ -118,7 +118,7 @@ def _core_module(canonical, core_wat: str, out: pathlib.Path,
     """Compile the emitted core WAT, with the heap driver spliced in, to a
     core wasm file. `memory` replaces the emitted memory declaration, which is
     how the capped-host case is set up without touching the emitter."""
-    wat = core_wat.replace("\n  (func $echo ", "\n" + _DRIVER + "  (func $echo ", 1)
+    wat = core_wat.replace("\n  (func $fn.echo ", "\n" + _DRIVER + "  (func $fn.echo ", 1)
     assert "(export \"drive\")" in wat, "driver splice point moved"
     if memory is not None:
         wat = wat.replace('  (memory (export "memory") 1)\n', memory + "\n", 1)

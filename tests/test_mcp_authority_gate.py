@@ -438,6 +438,7 @@ UNGATED = {
     "revl_explain": "renders a diagnostic",
     "revl_grammar": "returns the grammar",
     "revl_idiom": "returns a fixed example document",
+    "revl_verbs": "returns the server's own verb schemas (issue #1697)",
     "revl_tools": "returns the tool surface",
     "revl_source": "reads one declaration of the held source; changes nothing "
                    "(issue #1714)",
@@ -455,6 +456,7 @@ UNGATED = {
     "revl_history_emitted_between": "reads the recording",
     "revl_history_lifetime": "reads the recording",
     "revl_timeline": "reads the recording",
+    "revl_counterfactual": "decides a variant of the act log; runs nothing",
     "revl_inspect_step": "reads one recorded step",
     "revl_replay_bisect": "binary-searches the recording for a predicate flip",
 }
