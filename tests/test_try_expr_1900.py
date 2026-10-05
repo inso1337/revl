@@ -7,7 +7,9 @@ try e` binds the `Ok` payload of `e` and, when `e` is an `Err`, returns that
 
 The decision on #1900 fixes the shape:
 
-* a prefix keyword, allowed only as a whole `let` initializer or `return`
+* a CONTEXTUAL prefix operator (an identifier everywhere it does not start an
+  operand, so `fn try`, `s.try(x)` and a local named `try` still compile),
+  allowed only as a whole `let` initializer or `return`
   operand of a `fn` or `verified fn` body, and not in a provide method;
 * `try e` has type `T` for `e: Result[T, E]`, and the enclosing fn must return
   `Result[_, E]` with the same `E`, else it is refused naming `E`;
@@ -65,8 +67,8 @@ REFUSED = {
         "`try` is not allowed in a provide method or component body yet: a "
         "returned `Err` does not settle the unit there (issue #1900)",
 }
-ADMITTED = ("ok_annotated", "ok_branches", "ok_fresh_names", "ok_list_parser",
-            "ok_return_operand", "ok_sequence")
+ADMITTED = ("ok_annotated", "ok_branches", "ok_contextual_name", "ok_fresh_names",
+            "ok_list_parser", "ok_return_operand", "ok_sequence")
 
 _PARSE = 'fn parse(n: Int) -> Result[Int, Str] { return n > 0 ? Ok(n) : Err("neg") }\n'
 
@@ -182,9 +184,22 @@ def test_a_test_body_has_no_result_to_return():
     assert excinfo.value.message == REFUSED["t1_no_return_type"]
 
 
-def test_try_is_a_keyword():
-    with pytest.raises(RevlError):
-        compile_source("fn f(try: Int) -> Int { return try }\n")
+def test_try_is_contextual_not_a_keyword():
+    """`try` is the prefix operator only before a token that starts its
+    operand and could not follow a plain name. A fn, a provide method and a
+    local may still be named `try`, and a call `try(x)`, `try - 1` or a method
+    `s.try(x)` keep the meaning they had before the operator existed."""
+    from revl.lexer import KEYWORDS
+    assert "try" not in KEYWORDS
+    src = ("service S { fn try(x: Int) -> Int }\n"
+           "component P provides s: S { provide s { fn try(x) { return x + 1 } } }\n"
+           "fn try(n: Int) -> Int { return n + 1 }\n"
+           "fn f(n: Int) -> Int {\n  let a = try(n)\n  return a\n}\n"
+           "fn g(n: Int) -> Int {\n  let try = n\n  return try - 1\n}\n")
+    ir = compile_source(src)
+    f = [x for x in ir["functions"] if x["name"] == "f"][0]
+    assert f["body"][0]["value"]["kind"] == "call"
+    assert "try_0" not in json.dumps(ir)
 
 
 # ---- the tiers run it ---------------------------------------------------------

@@ -302,6 +302,11 @@ fn parse_fields(ns: List[Int], path: Str) -> Result[List[Field], Str] {
 
 The rules:
 
+- `try` is contextual, not a keyword. It is the prefix operator when the token
+  after it is a name, a literal, a template, a keyword, `!` or `~`, and the
+  identifier it always was everywhere else: a fn, a service operation or a
+  local may still be named `try`, and `try(x)`, `try - 1` and `s.try(x)` keep
+  their meaning.
 - `try` stands only as a whole `let` (or `var`) initializer, `let x = try e`,
   or a whole `return` operand, `return try e`, in a `fn` or `verified fn`
   body. Anywhere else, inside a call, an operator, a condition or a match

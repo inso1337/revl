@@ -492,7 +492,7 @@ def test_every_try_expr_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(TRY_EXPR.glob("*.rvl"))
-    assert len(docs) == 17, f"the try-expr corpus has {len(docs)} documents"
+    assert len(docs) == 18, f"the try-expr corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))

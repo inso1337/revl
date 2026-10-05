@@ -1727,6 +1727,11 @@ class FnParam:
     default: object | None = None
 
 
+# The tokens after which the identifier `try` is the prefix operator
+# (`Parser._try_operand_ahead`, issue #1900).
+_TRY_OPERAND_START = frozenset(
+    {"ident", "int", "float", "string", "template", "kw", "!", "~"})
+
 # an identifier-shaped word, for `FnDecl.idents` over template interpolations
 _IDENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -8522,7 +8527,7 @@ class Parser:
         if tok.kind == "kw" and tok.value == "emit":
             self.next()
             return EmitExpr(self._unary(), tok.line)
-        if tok.kind == "kw" and tok.value == "try":
+        if tok.kind == "ident" and tok.value == "try" and self._try_operand_ahead():
             # Result propagation (issue #1900): a prefix unary, so it binds as
             # tightly as `!`/`-` and its operand is a postfix expression
             # (`try parse(s)`). Where it may stand is decided in lower: only as
@@ -8530,6 +8535,17 @@ class Parser:
             self.next()
             return ExprUn("try", self._unary(), tok.line)
         return self._postfix()
+
+    def _try_operand_ahead(self) -> bool:
+        """Is the identifier `try` here the prefix operator? `try` is
+        CONTEXTUAL, not a keyword (issue #1900): it is the operator only when
+        the next token can start its operand and could not follow a plain name
+        in a program that compiles without it (a name, a literal, a template,
+        a keyword, `!` or `~`). Everywhere else it is the identifier it always
+        was: `fn try(...)`, `s.try(...)`, a call `try(x)`, `try - 1`,
+        `try[0]` or a bare `try`."""
+        nxt = self.peek_ahead(1)
+        return nxt.kind in _TRY_OPERAND_START
 
     def _await_approval_expr(self) -> ApprovalExpr:
         """`await approval[C] { field: expr, ... }` — parsed only as the RHS of a

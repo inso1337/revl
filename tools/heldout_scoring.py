@@ -374,8 +374,7 @@ _RESERVED = frozenset((
     "for", "handoff", "hole", "idempotent", "if", "in", "intercept",
     "isolate", "let", "match", "null", "of", "provide", "provides", "pub",
     "pure", "realm", "requires", "return", "service", "spawn", "subscribe",
-    "test", "true", "try", "type", "undo", "use", "var", "verified", "while",
-    "with",
+    "test", "true", "type", "undo", "use", "var", "verified", "while", "with",
 ))
 
 # The near-miss families. Each is one token outside the admission surface, and

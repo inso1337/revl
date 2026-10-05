@@ -1,0 +1,34 @@
+// `try` is contextual, not a keyword: before a name it is the prefix
+// operator, and everywhere else it is the identifier it always was
+fn try(n: Int) -> Int { return n + 1 }
+
+fn parse(n: Int) -> Result[Int, Str] {
+  return n > 0 ? Ok(n) : Err("neg")
+}
+
+fn names(n: Int) -> Int {
+  let a = try(n)
+  let b = try (n)
+  return a + b
+}
+
+fn local(n: Int) -> Int {
+  let try = n * 2
+  return try - 1
+}
+
+fn prop(n: Int) -> Result[Int, Str] {
+  let x = try parse(n)
+  return Ok(x + names(n) + local(n))
+}
+
+fn code(r: Result[Int, Str]) -> Int {
+  return match r { Ok(v) => v, Err(e) => 0 - e.length }
+}
+
+test "contextual" {
+  assert names(1) == 4
+  assert local(3) == 5
+  assert code(prop(2)) == 11
+  assert code(prop(0)) == 0 - 3
+}

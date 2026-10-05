@@ -72,7 +72,6 @@ fn keywords() -> List[Str] {
     "match", "test", "assert", "async", "as", "fail",
     "hole",
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
-    "try",
     "idempotent"]
 }
 

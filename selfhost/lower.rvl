@@ -234,7 +234,7 @@
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
                     is_bad, expr_at, params_at, type_at, nesting_limit,
-                    is_record_key, unesc }
+                    is_record_key, unesc, at_try_op }
 // The shared type-SPELLING algebra (docs/design/457-selfhost-type-layer.md
 // §3.1, slice T1). It is a leaf module with no AST dependency and its own
 // differential oracle against `src/revl/typecheck.py`, so the refusing walk
@@ -23528,7 +23528,7 @@ fn try_k_at(ts: List[Token], at: Int, marks: Map[Str, Int]) -> Int {
   var n = 0
   var j = lo
   while (j < at) {
-    if (atw(ts, j, "try")) { n += 1 }
+    if (at_try_op(ts, j)) { n += 1 }
     j += 1
   }
   let taken = try_fn_idents(ts, lo, hi)
@@ -23675,7 +23675,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
       j = tr.i
     }
     if (!atk(ts, j, "=")) { return mk_one("", env, muts, hi) }
-    if (atw(ts, j + 1, "try")) {
+    if (at_try_op(ts, j + 1)) {
       return lir_try_let(ts, i, j + 1, name, declared, mutable, env, muts, ret,
                          marks, births, al, hi)
     }
@@ -23708,7 +23708,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     // an rvalue, not only an expression: `return { r | class = r.class_ }` is a
     // record-update in return position, and the shared parser's grammar has no
     // node for it.
-    if (atw(ts, i + 1, "try")) {
+    if (at_try_op(ts, i + 1)) {
       return lir_try_return(ts, i + 1, env, muts, ret, marks, al, hi)
     }
     let r = lir_rhs_exp(ts, i + 1, env, ret, al)

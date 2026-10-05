@@ -36,6 +36,10 @@ OUT_OF_SCOPE = (
     *(f"tests/fixtures/record_field_call/t1_{n}.rvl" for n in (
         "arrow_field", "declared_type", "in_place", "let", "nested_field",
         "return")),
+    # issue #1900: `try` in a provide method, a T1 refusal of the type checker
+    # (the other `t1_` documents of that corpus are module fns only, so they
+    # have no composition to model and file as such)
+    "tests/fixtures/try_expr/t1_provide_method.rvl",
 )
 
 #: Out of fragment, NOT out of scope: a guarantee-coded refusal the model

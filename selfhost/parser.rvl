@@ -586,12 +586,26 @@ fn p_unary(ts: List[Token], i: Int, d: Int) -> PR {
   }
   // Result propagation (issue #1900): a prefix unary like `!`/`-`, so its
   // operand is a postfix expression. Where it may stand is decided in lower.
-  if (at_kw(ts, i, "try")) {
+  // `try` is CONTEXTUAL, an identifier the reference lexes as one: it is the
+  // operator only before a token that starts its operand and could not follow
+  // a plain name (`at_try_op`).
+  if (at_try_op(ts, i)) {
     let r = p_unary(ts, i + 1, d + 1)
     if (is_bad(r.e)) { return r }
     return { i: r.i, e: Un({ op: "try", e: r.e }) }
   }
   return p_postfix(ts, i, d)
+}
+
+// `Parser._try_operand_ahead`: the identifier `try` before a name, a literal,
+// a template, a keyword, `!` or `~` is the prefix operator; anywhere else it
+// is the identifier (`fn try(...)`, `s.try(...)`, `try(x)`, `try - 1`).
+pub fn at_try_op(ts: List[Token], i: Int) -> Bool {
+  let t = tk(ts, i)
+  if (t.kind != "ident" || t.text != "try") { return false }
+  let k = tk(ts, i + 1).kind
+  return k == "ident" || k == "int" || k == "float" || k == "string"
+    || k == "template" || k == "kw" || k == "!" || k == "~"
 }
 
 // A comma-separated expression list up to `close`.
