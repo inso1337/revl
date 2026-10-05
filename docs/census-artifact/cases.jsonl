@@ -1,5 +1,11 @@
 ["admission:comment_only", "agree-admit"]
 
+["admission:component_identity_body", "agree-admit"]
+
+["admission:component_no_provision", "agree-admit"]
+
+["admission:component_requires_and_calls", "agree-admit"]
+
 ["admission:empty_composition", "agree-admit"]
 
 ["admission:interface_empty_service", "agree-admit"]
@@ -10,7 +16,13 @@
 
 ["admission:interface_two_services", "agree-admit"]
 
-["admission:near_miss_component", "agree-admit"]
+["admission:near_miss_component_effect", "agree-admit"]
+
+["admission:near_miss_component_literal_body", "agree-admit"]
+
+["admission:near_miss_component_missing_method", "no-objection-out-of-slice"]
+
+["admission:near_miss_component_unknown_service", "agree-refuse/G1"]
 
 ["admission:near_miss_duplicate_method", "no-objection-out-of-slice"]
 
