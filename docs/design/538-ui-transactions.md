@@ -466,6 +466,26 @@ The compensating host bodies are still the substrate's (item 539), exactly as
 the actuations are. What revl owns and now runs is the order and the
 membership, which is section 3's `compensate` row.
 
+**The typescript tier runs it too** (issue #1369, item 3 of the decision on
+the issue, one tier per pull request). `backends/typescript/emit.py` derives
+the same units from `revl.ui_transaction` and wraps each one in
+`Frame.uiTransaction` (`uiTransactionAsync` for an async method); a method
+that only reaches a computer-use extern runs in `Frame.callScope`, which never
+settles. Each computer-use extern's exported name is a `uiCrossing` wrapper,
+the analog of py's `declared_crossing`: inside a scope it notes the crossing
+and registers the extern's declared compensation wherever the call is written,
+and a crossing that throws still registers its own. A failed unit settles what
+the call registered, witnessed inverses newest first, then compensations
+newest first, each continue-and-record, records the run on
+`Frame.uiTransactionRuns`, and rethrows; the entries leave the frame's
+deferred lists first, so the clean unload after the failed call discharges
+nothing of them and a later abort does not run them twice. The scope is a
+node `AsyncLocalStorage` when the host has one, created on the first call
+that opens a scope, so a program with no computer-use verb runs exactly as
+before. `backends/typescript/tests/ui_transaction.test.ts` is the py suite's
+oracle, its control and its rules, on this tier. The ts runtime has no E-Stop,
+so there is no halted run here.
+
 What is still not here. The unit is INFERRED from a method body that crosses a
 computer-use verb; there is no `transaction` construct an author writes. A
 declaration needs a new IR key, and the IR is built in `src/revl/lower.py`, so
