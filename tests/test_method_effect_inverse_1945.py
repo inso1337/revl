@@ -173,12 +173,43 @@ def _extern_store(undo: str) -> str:
             "}\n")
 
 
+def _extern_no_inverse(effect: str, undo: str) -> str:
+    return (_EXTERNS + _SERVICE
+            + "component Store provides kv: Kv {\n"
+            "  provide kv {\n"
+            "    fn get(k) = k\n"
+            "    fn set(k, v) {\n"
+            f"      effect {effect}\n"
+            f"      undo   {undo}\n"
+            "      return v\n"
+            "    }\n"
+            "  }\n"
+            "}\n")
+
+
 def test_an_extern_undone_by_its_declared_inverse_is_declared():
     assert _set_step(_extern_store("unlock_rows()"))["inverse"] == "declared"
 
 
-def test_an_extern_undone_by_anything_else_is_asserted():
-    assert _set_step(_extern_store("forget(k)"))["inverse"] == "asserted"
+def test_an_extern_undone_by_anything_else_is_refused_by_its_declaration():
+    """`lock_row` declares its inverse, so its site `undo` has one legal
+    spelling and `asserted` is not reachable for it: the declaration asserts
+    `unlock_rows` reverts, not that any call may stand in for it (issue #1859
+    slice 3, which landed after D1 to D3 — see the table in
+    docs/verified-effect.md)."""
+    error = _refusal(_extern_store("forget(k)"))
+    assert error.code == "G4"
+    assert error.message == (
+        "the `undo` of `effect lock_row(...)` must be the inverse `lock_row` "
+        "declares: write `undo unlock_rows(...)` as the declaration calls it")
+
+
+def test_an_extern_that_declares_no_inverse_is_asserted():
+    """An extern that is not an `extern acquire` declares no inverse, so there
+    is nothing to hold its site `undo` to and the reversal stays the author's
+    word."""
+    assert _set_step(_extern_no_inverse("forget(k)", "unlock_rows()"))["inverse"] \
+        == "asserted"
 
 
 def test_a_typed_hole_in_the_undo_is_an_obligation_with_no_provenance():
