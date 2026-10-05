@@ -38,7 +38,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .._paths import backends_root
+from .._paths import backends_root, venv_python as _venv_python
 from . import remedy
 
 #: Verbs that need a live composition, which only the runtime can boot.
@@ -89,8 +89,9 @@ def setup_command() -> str:
 
 
 def venv_python() -> Path:
-    """Where `backends/python/setup.sh` puts the runtime venv's interpreter."""
-    return backends_root() / "python" / ".venv" / "bin" / "python"
+    """Where `backends/python/setup.sh` puts the runtime venv's interpreter
+    (`Scripts/python.exe` on Windows, issue #1939)."""
+    return _venv_python(backends_root() / "python" / ".venv")
 
 
 def venv_has_cordis(python: Path) -> bool:

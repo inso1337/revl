@@ -1,0 +1,77 @@
+// item 391 (#106), held to byte agreement by tests/test_selfhost_emit_rust.py:
+// the per-activation teardown accumulator (item 243 / item 324 and the
+// two-phase abort of docs/design/teardown-contract.md). selfhost/emit_rust.rvl
+// used to name an activation `emit ... compensate` with a
+// `DEFER-emit-compensate` marker and to register a provide method's compensate
+// as a plain always-replaying bracket.
+//
+//   - `Billing` holds every site: an activation `emit ... compensate` reading
+//     an earlier `let`-effect bind (cloned into the closure, like each
+//     required service), a second one after a guard, and one in a provide
+//     method, beside a timer (whose firing cannot compensate). It opens `RevlTeardown` first, commits last, and the
+//     module carries the teardown runtime once.
+//   - `Refunds` compensates only inside a provide method, which still needs
+//     the accumulator built at activation.
+//   - `Opener` has no effectful method, so it takes the simple provider path,
+//     and compensates at activation there.
+//   - `Audit` has no compensation at all and stays byte-identical to before.
+
+service Ledger {
+  fn open(name: Str) -> Int
+  fn close(name: Str) -> Int
+  emission fn post(n: Int) -> Int
+  emission fn void(n: Int) -> Int
+}
+
+service Api {
+  emission fn charge(n: Int) -> Int
+}
+
+service Desk {
+  emission fn refund(n: Int) -> Int
+}
+
+service Probe {
+  fn ping() -> Int
+}
+
+component Billing requires ledger: Ledger provides api: Api {
+  config { strict: Bool = true }
+  let h = effect ledger.open("books") undo ledger.close("books")
+  emit ledger.post(1) compensate ledger.void(h)
+  if (!config.strict) {
+    fail "billing needs strict mode"
+  }
+  emit ledger.post(2) compensate ledger.void(2)
+  every 1s {
+    emit ledger.post(3)
+  }
+  provide api {
+    fn charge(n) {
+      emit ledger.post(n) compensate ledger.void(n)
+      return n
+    }
+  }
+}
+
+component Refunds requires ledger: Ledger provides desk: Desk {
+  provide desk {
+    fn refund(n) {
+      emit ledger.post(n) compensate ledger.void(n)
+      return n
+    }
+  }
+}
+
+component Opener requires ledger: Ledger provides gauge: Probe {
+  emit ledger.post(9) compensate ledger.void(9)
+  provide gauge {
+    fn ping() = ledger.open("opener")
+  }
+}
+
+component Audit requires ledger: Ledger provides probe: Probe {
+  provide probe {
+    fn ping() = ledger.open("audit")
+  }
+}

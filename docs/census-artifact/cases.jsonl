@@ -1,5 +1,11 @@
 ["admission:comment_only", "agree-admit"]
 
+["admission:component_identity_body", "agree-admit"]
+
+["admission:component_no_provision", "agree-admit"]
+
+["admission:component_requires_and_calls", "agree-admit"]
+
 ["admission:empty_composition", "agree-admit"]
 
 ["admission:interface_empty_service", "agree-admit"]
@@ -10,7 +16,13 @@
 
 ["admission:interface_two_services", "agree-admit"]
 
-["admission:near_miss_component", "agree-admit"]
+["admission:near_miss_component_effect", "agree-admit"]
+
+["admission:near_miss_component_literal_body", "agree-admit"]
+
+["admission:near_miss_component_missing_method", "no-objection-out-of-slice"]
+
+["admission:near_miss_component_unknown_service", "agree-refuse/G1"]
 
 ["admission:near_miss_duplicate_method", "no-objection-out-of-slice"]
 
@@ -426,6 +438,8 @@
 
 ["examples/rejections/g4_undo_host_acquire.rvl", "agree-refuse/G4"]
 
+["examples/rejections/g4_undo_not_release.rvl", "agree-refuse/G4"]
+
 ["examples/rejections/g4_unmarked_alias_emission.rvl", "agree-refuse/G4"]
 
 ["examples/rejections/g4_unmarked_emission.rvl", "agree-refuse/G4"]
@@ -446,7 +460,7 @@
 
 ["examples/rejections/g5_undo_handle_emission.rvl", "refuse-out-of-slice/G4"]
 
-["examples/rejections/g5_undo_handle_ref_arg.rvl", "no-objection-out-of-slice"]
+["examples/rejections/g5_undo_handle_ref_arg.rvl", "refuse-out-of-slice/G4"]
 
 ["examples/rejections/g5_undo_handle_ref_let.rvl", "no-objection-out-of-slice"]
 
@@ -926,6 +940,8 @@
 
 ["oracle-reject:a deeper required-key crossing follows the sorted names", "agree-refuse/G4"]
 
+["oracle-reject:a fn that reuses an extern's name", "agree-refuse/G6"]
+
 ["oracle-reject:a for binding over a live name", "agree-refuse/G6"]
 
 ["oracle-reject:a for loop as the only returning path", "agree-refuse/T1"]
@@ -1070,6 +1086,8 @@
 
 ["oracle-reject:an extern slot refusal inside a match arm", "agree-refuse/G4"]
 
+["oracle-reject:an extern that reuses a fn's name", "agree-refuse/G6"]
+
 ["oracle-reject:an if with no else", "agree-refuse/T1"]
 
 ["oracle-reject:an if/else with only one returning arm", "agree-refuse/T1"]
@@ -1106,6 +1124,8 @@
 
 ["oracle-reject:an unmarked emission left of an undeclared name is still G4", "agree-refuse/G4"]
 
+["oracle-reject:any other refusal outranks a fn reusing an extern's name", "agree-refuse/G1"]
+
 ["oracle-reject:assignment to a name nothing bound", "agree-refuse/G1"]
 
 ["oracle-reject:assignment to a parameter", "agree-refuse/G6"]
@@ -1132,9 +1152,9 @@
 
 ["oracle-reject:extern with no classification is G8", "agree-refuse/G8"]
 
-["oracle-reject:g1 bare call of a builtin type aliased single-case", "agree-refuse/G1"]
+["oracle-reject:g1 bare call of a builtin type aliased single-case", "agree-refuse/T1"]
 
-["oracle-reject:g1 bare call of a type-application alias head", "agree-refuse/G1"]
+["oracle-reject:g1 bare call of a type-application alias head", "agree-refuse/T1"]
 
 ["oracle-reject:g1 required key used as a bare value", "agree-refuse/G1"]
 
@@ -1189,6 +1209,8 @@
 ["oracle-reject:g4 host acquire in an emit expression", "agree-refuse/G4"]
 
 ["oracle-reject:g4 host acquire wrapped inside an effect bracket's acquisition", "agree-refuse/G4"]
+
+["oracle-reject:g4 host undo that is not the release", "agree-refuse/G4"]
 
 ["oracle-reject:g4 multi-hop named-call chain", "agree-refuse/G4"]
 
@@ -1428,6 +1450,10 @@
 
 ["tests/fixtures/approval_service_locals/g4_list_element_unmarked.rvl", "agree-refuse/G4"]
 
+["tests/fixtures/approval_service_locals/g4_match_block_local_step.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_match_block_local_unmarked.rvl", "agree-refuse/G4"]
+
 ["tests/fixtures/approval_service_locals/g4_record_alias_step.rvl", "agree-refuse/G4"]
 
 ["tests/fixtures/approval_service_locals/g4_record_field_step.rvl", "agree-refuse/G4"]
@@ -1443,6 +1469,8 @@
 ["tests/fixtures/approval_service_locals/ok_if_local_step.rvl", "agree-admit"]
 
 ["tests/fixtures/approval_service_locals/ok_list_element_step.rvl", "agree-admit"]
+
+["tests/fixtures/approval_service_locals/ok_match_block_local_step.rvl", "agree-admit"]
 
 ["tests/fixtures/approval_service_locals/ok_record_alias_step.rvl", "agree-admit"]
 
@@ -1774,6 +1802,8 @@
 
 ["tests/fixtures/emit_rust_corpus/bridge_types.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/by_value_reuse.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/calls.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/checked_div.rvl", "agree-admit"]
@@ -1814,6 +1844,8 @@
 
 ["tests/fixtures/emit_rust_corpus/in_file_tests.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/intercept_metadata.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/lengths.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/lists.rvl", "agree-admit"]
@@ -1821,6 +1853,8 @@
 ["tests/fixtures/emit_rust_corpus/loop_moves.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/maps.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/method_control_flow.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/perf_arg_index.rvl", "agree-admit"]
 
@@ -1831,6 +1865,8 @@
 ["tests/fixtures/emit_rust_corpus/perf_iter.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/perf_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/prelude_names.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/records.rvl", "agree-admit"]
 
@@ -1847,6 +1883,8 @@
 ["tests/fixtures/emit_rust_corpus/str_borrows.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/strings.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/teardown_compensate.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/transforms.rvl", "agree-admit"]
 
@@ -2174,6 +2212,38 @@
 
 ["tests/fixtures/handle_provider_bound/ok_value_covered.rvl", "agree-admit"]
 
+["tests/fixtures/match_block_arms/g1_after_arm.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/match_block_arms/g1_undeclared_in_arm.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/match_block_arms/g1_undeclared_in_tail.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/match_block_arms/g4_unmarked_in_arm.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/match_block_arms/g4_unmarked_in_tail.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/match_block_arms/ok_in_if_body.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_let_bound.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_multiline.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_nested.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_rebind_after_arm.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_rebind_inside_arm.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_rebind_outer_name.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_record_arm.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_returned.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_semicolon.rvl", "agree-admit"]
+
+["tests/fixtures/match_block_arms/ok_two_lets.rvl", "agree-admit"]
+
 ["tests/fixtures/model_reach_crossing/model_extern_block_value.rvl", "agree-refuse/MODEL"]
 
 ["tests/fixtures/model_reach_crossing/model_extern_no_block.rvl", "agree-refuse/MODEL"]
@@ -2238,6 +2308,12 @@
 
 ["tests/fixtures/service_receiver_expressions/g4_list_unmarked.rvl", "agree-refuse/G4"]
 
+["tests/fixtures/service_receiver_expressions/g4_match_block_marked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_match_block_tail_local_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_match_block_unmarked.rvl", "agree-refuse/G4"]
+
 ["tests/fixtures/service_receiver_expressions/g4_match_marked.rvl", "agree-refuse/G4"]
 
 ["tests/fixtures/service_receiver_expressions/g4_match_unmarked.rvl", "agree-refuse/G4"]
@@ -2259,6 +2335,8 @@
 ["tests/fixtures/service_receiver_expressions/ok_list_approved.rvl", "agree-admit"]
 
 ["tests/fixtures/service_receiver_expressions/ok_match_approved.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_match_block_approved.rvl", "agree-admit"]
 
 ["tests/fixtures/service_receiver_expressions/ok_record_approved.rvl", "agree-admit"]
 

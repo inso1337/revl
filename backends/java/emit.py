@@ -1155,6 +1155,10 @@ class _V3Ctx:
         # component (a top-level fn) there is no activation to owe it to.
         self.declared = _declared_externs(externs)
         self.crossing_frame: str | None = None
+        # issue #1902: the one call node an `emit .. compensate ..` statement
+        # renders bare. Its site-spelled compensation REPLACES the extern's
+        # declared one, so the call must not also register the declared one.
+        self.declared_skip: object = None
         # Every component in the document, keyed by name, so a `spawn`
         # acquisition can resolve its target template's config layout (the
         # plugin-constructor argument order) and provided keys (the services to
@@ -2159,7 +2163,8 @@ def _expr(
             _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
         declared = ctx.declared.get(node.get("name"))
-        if declared is not None and ctx.crossing_frame is not None:
+        if (declared is not None and ctx.crossing_frame is not None
+                and node is not ctx.declared_skip):
             return _declared_crossing(f"{fn_name}({args})", declared, ctx, env)
         return f"{fn_name}({args})"
 
@@ -6226,6 +6231,20 @@ def _declared_crossings_used(ir: dict) -> bool:
                for component in ir.get("components") or [])
 
 
+def _site_compensated_call(step: dict, ctx: "_V3Ctx", rename, env: "_Env | None") -> str:
+    """An `emit` statement's own call. One compensation per crossing (issue
+    #1902): when the statement spells `compensate`, that one REPLACES the
+    extern's declared one, so the call renders bare and only the site entry is
+    tracked. A declared crossing nested in its arguments still registers."""
+    if step.get("compensate") is None:
+        return _expr(step["expr"], ctx, rename, env)
+    previous, ctx.declared_skip = ctx.declared_skip, step["expr"]
+    try:
+        return _expr(step["expr"], ctx, rename, env)
+    finally:
+        ctx.declared_skip = previous
+
+
 def _declared_crossing(call: str, ext: dict, ctx: "_V3Ctx", env: "_Env | None") -> str:
     """One crossing of `ext`, an extern that declares its own `compensate`,
     in a component body (issue #1511). Every position a call can be written in
@@ -7016,7 +7035,7 @@ def _method_body_lines(
                     "a non-witnessed let-effect is not supported inside a method "
                     "body on the java tier")
         elif step == "emit":
-            lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
+            lines.append(f"{_site_compensated_call(stmt, v3_ctx, rename, env)};")
             if stmt.get("compensate") is not None:
                 _emit_compensation_track(
                     lines, "", stmt["expr"], stmt["compensate"], v3_ctx, env, frame_expr,
@@ -7327,7 +7346,7 @@ def _emit_component_stmts(
             _emit_bracket_track(out, pad, step["acquire"], step["undo"], v3_ctx, env,
                                 frame_expr, None, step)
         elif kind == "emit":
-            out.append(f"{pad}{_expr(step['expr'], v3_ctx, None, env)};")
+            out.append(f"{pad}{_site_compensated_call(step, v3_ctx, None, env)};")
             if step.get("compensate") is not None:
                 _emit_compensation_track(
                     out, pad, step["expr"], step["compensate"], v3_ctx, env, frame_expr)

@@ -259,15 +259,19 @@ def test_a_correct_verified_effect_survives_the_round_trip(capsys):
     assert "PASS Seeder" in out
 
 
-@needs_cordis
-def test_a_no_op_inverse_is_caught(capsys):
-    ir = compile_source(_WRONG_NOOP, "t.rvl")
-    failures, dossier = fault_mod.run_roundtrip_units(ir, fault_mod.roundtrip_units(ir))
-    out = capsys.readouterr().out
-    assert failures == 1
-    assert dossier["status"] == "failed"
-    assert "never released" in out
-    assert dossier["components"][0]["counterexample"]["reason"]
+def test_a_no_op_inverse_is_refused_before_it_can_run():
+    """The canonical replay.md section 4.1 case ("a no-op undo") on a HOST
+    acquisition. The round trip used to catch it at runtime ("never
+    released"); since issue #1859 a host acquisition's `undo` must be its
+    release on the bound handle, so the program does not compile. The
+    service-effect case below (`_WRONG_PARTIAL`) has no table to check
+    against and is still the round trip's to catch."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_WRONG_NOOP, "t.rvl")
+    assert excinfo.value.code == "G4"
+    assert excinfo.value.message == (
+        "the `undo` of `let store = effect Map.new(...)` must release THAT "
+        "handle: write `undo store.drop()`")
 
 
 @needs_cordis

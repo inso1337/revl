@@ -189,6 +189,74 @@ def test_apply_threads_trust_host_code_through(tmp_path):
     assert "--trust-host-code" in report["message"]
 
 
+_GATE_SERVICES = (
+    "service ApprovalGate { fn ok(x: Str) -> Bool }\n"
+    "service SourceWriter { fn write(x: Str) -> Str }\n"
+    "service Records { fn put(x: Str) -> Str }\n")
+
+
+def _records_project(tmp_path: Path, site: str | None) -> Path:
+    """Issue #1921's report: a base with an ApprovalGate provider and a
+    SourceWriter provider, plus a vendored stack layer adding a host-code-free
+    component that requires both. `site` is the operator's site layer body."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "services.rvl").write_text(_GATE_SERVICES)
+    (tmp_path / "approvals.rvl").write_text(
+        'use "services.rvl" { }\n'
+        "component Approvals provides approvals: ApprovalGate {\n"
+        "  provide approvals { fn ok(x) = true }\n}\n")
+    (tmp_path / "writer.rvl").write_text(
+        'use "services.rvl" { }\n'
+        "component Writer provides writer: SourceWriter {\n"
+        "  provide writer { fn write(x) = x }\n}\n")
+    kit = tmp_path / "trucs" / "records_kit"
+    kit.mkdir(parents=True, exist_ok=True)
+    (kit / "services.rvl").write_text(_GATE_SERVICES)
+    (kit / "component.rvl").write_text(
+        'use "services.rvl" { }\n'
+        "component RecordsKit requires approvals: ApprovalGate, "
+        "writer: SourceWriter provides records: Records {\n"
+        "  provide records { fn put(x) = writer.write(x) }\n}\n")
+    (kit / "layer.rvl").write_text(
+        "layer RecordsKitLayer for Demo {\n"
+        '  add row @records from "component.rvl" provides records\n}\n')
+    site_clause = ""
+    if site is not None:
+        (tmp_path / "ops.rvl").write_text(
+            "site layer Ops for Demo {\n" + site + "}\n")
+        site_clause = '  site "ops.rvl"\n'
+    (tmp_path / "base.rvl").write_text(
+        'composition Demo {\n  use "services.rvl"\n'
+        '  row @approvals from "approvals.rvl" provides approvals\n'
+        '  row @writer from "writer.rvl" provides writer\n'
+        '  stack "trucs/records_kit/layer.rvl"\n' + site_clause + "}\n")
+    (tmp_path / "truc.toml").write_text(
+        '[assembly]\nname = "demo"\nentry = ["base.rvl"]\n')
+    (tmp_path / "truc.lock").write_text(json.dumps(
+        {"lockVersion": 1,
+         "trucs": [{"name": "records_kit", "sourceHash": "a" * 64}]}))
+    return tmp_path
+
+
+def test_apply_admits_a_confined_stack_row_the_operator_granted(tmp_path):
+    """Issue #1921. Ungranted, the confined stack row is refused at admission
+    (its reach is empty by default). Once the operator's site layer grants it
+    both keys, `truc apply` admits it, still MEASURED (confined)."""
+    proj = _records_project(tmp_path / "ungranted", site=None)
+    report = json.loads(_host.apply(str(proj), False))
+    assert report["code"] == 1
+    assert "not in the granted set" in report["message"]
+
+    proj = _records_project(
+        tmp_path / "granted",
+        site="  grant records_kit::@records with { approvals, writer }\n")
+    assert json.loads(_host.stack_check(str(proj)))["code"] == 0
+    report = json.loads(_host.apply(str(proj), False))
+    assert report["code"] == 0, report["message"]
+    assert "MEASURED" in report["message"]
+    assert "RecordsKit" in report["sources"]
+
+
 def test_a_project_with_no_entry_document_is_refused(tmp_path):
     """truc owns which document is applied; a truc.toml naming no entry is a
     refusal, not a crash (the boundary stays total)."""

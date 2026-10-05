@@ -172,12 +172,17 @@ component C {
 
 def test_a_pure_fn_inverse_still_admits():
     """No over-refusal: a `fn` that reaches no boundary is in neither the
-    extern-class table nor the emission-reach fixed point."""
+    extern-class table nor the emission-reach fixed point. (The bracket is an
+    `extern acquire`: a host `Pool.open` must be released by its own
+    `close()` since issue #1859.)"""
     ir = compile_source("""
 extern pure fn note(x: Str) -> Unit = @py { return None }
 fn local_restore(x: Str) -> Unit { return note(x) }
+type H = { id: Int }
+extern pure fn rel(h: H) -> Unit = @py { return None }
+extern acquire fn acq() -> H undo rel(result) = @py { return {"id": 1} }
 component C {
-  let p = effect Pool.open("u", 1) undo local_restore("x")
+  let p = effect acq() undo local_restore("x")
 }
 """, "t.rvl")
     assert ir["components"][0]["body"][0]["undo"]["name"] == "local_restore"
