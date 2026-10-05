@@ -456,6 +456,29 @@ def test_every_deferred_reach_document_is_decided_alike_by_both(measured):
     assert not wrong, "\n  ".join(["deferred-reach documents moved:"] + wrong)
 
 
+# --- `verified` in a provide method (issue #1897) ----------------------------
+#
+# Only a witnessed effect may be verified in a provide method. The reference
+# refused the other shapes (a site `undo`, a let-bound effect, `verified emit`)
+# and the gate skipped the `verified` line whole, a false admission no corpus
+# document showed. `t1_` both refuse, `ok_` both admit.
+VERIFIED_METHOD_EFFECT = ROOT / "tests" / "fixtures" / "verified_method_effect"
+
+
+def test_every_verified_method_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(VERIFIED_METHOD_EFFECT.glob("*.rvl"))
+    assert len(docs) == 4, f"the verified-method corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["verified-method documents moved:"] + wrong)
+
+
 # --- `try e`, Result propagation in a `fn` body (issue #1900) ---------------
 #
 # `ok_` both admit; `t1_` both refuse T1 with the same message: an operand that

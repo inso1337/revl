@@ -1,0 +1,11 @@
+// A `verified effect` with a site `undo` in a provide method: the round trip
+// there is call-then-abort, which does not run a site `undo` (issue #1897).
+service W { fn put(k: Str) }
+component Widget provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w {
+    fn put(k) {
+      verified effect store.insert(k, "1") undo store.remove(k)
+    }
+  }
+}

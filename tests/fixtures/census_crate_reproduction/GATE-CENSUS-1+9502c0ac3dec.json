@@ -1,5 +1,5 @@
 {
- "checker_version": "GATE-CENSUS-1+626f35ab60a2",
+ "checker_version": "GATE-CENSUS-1+9502c0ac3dec",
  "engine": "crate",
  "false_admissions": [],
  "note": "A recorded `tools/gate_reference_census.py --engine crate` run, read by tools/census_artifact.py. It is recorded rather than re-run because it needs cargo and takes minutes. The checker version it was taken at is recorded with it, and a reproduction taken at a different version is reported as stale and lifts no claim.",
@@ -382,6 +382,7 @@
   "oracle-accept:a transparent alias through a service, a config field and a body",
   "oracle-accept:a validated emission is read",
   "oracle-accept:a validated emission with a retry budget is read",
+  "oracle-accept:a verified witnessed effect in a provide method",
   "oracle-accept:a while(true) whose only break targets a nested loop",
   "oracle-accept:a while(true) with no targeting break",
   "oracle-accept:a witnessed extern's declared scope meets a provide-method bound",
@@ -480,6 +481,8 @@
   "oracle-reject:a for loop as the only returning path",
   "oracle-reject:a key isolated twice is refused (G1)",
   "oracle-reject:a key routed twice is refused (ROUTE)",
+  "oracle-reject:a let-bound verified call that is not an effect",
+  "oracle-reject:a let-bound verified method effect on a witnessed extern",
   "oracle-reject:a list transform whose free function nothing declares",
   "oracle-reject:a literal zero divisor",
   "oracle-reject:a marked reach through a helper carries no host label",
@@ -512,6 +515,7 @@
   "oracle-reject:a valid extern before a malformed one",
   "oracle-reject:a validated emission does not swallow the next operation",
   "oracle-reject:a validated emission with a retry budget does not swallow the next operation",
+  "oracle-reject:a verified method effect whose undo is on the next line",
   "oracle-reject:a while(true) with a break targeting it",
   "oracle-reject:a1 async compensate suspends",
   "oracle-reject:a1 async effect not awaited",
@@ -693,6 +697,7 @@
   "oracle-reject:undo slot sees only the implicit result binding",
   "oracle-reject:v2 a Map value's `set` against the map's V",
   "oracle-reject:v2 a method a Map value's stdlib surface does not name",
+  "oracle-reject:verified emit in an activation body",
   "selfhost/checker.rvl",
   "selfhost/compile.rvl",
   "selfhost/emit_go.rvl",
@@ -1241,7 +1246,11 @@
   "tests/fixtures/try_expr/t1_return_not_result.rvl",
   "tests/fixtures/try_expr/t1_return_payload_mismatch.rvl",
   "tests/fixtures/v2_math_lib.rvl",
-  "tests/fixtures/v2_math_main.rvl"
+  "tests/fixtures/v2_math_main.rvl",
+  "tests/fixtures/verified_method_effect/ok_witnessed.rvl",
+  "tests/fixtures/verified_method_effect/t1_emit.rvl",
+  "tests/fixtures/verified_method_effect/t1_let_bound.rvl",
+  "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
  ],
  "tracked_buckets": {}
 }
