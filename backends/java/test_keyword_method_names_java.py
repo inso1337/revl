@@ -82,7 +82,7 @@ JAVA_WORDS = sorted({
 #: Pinned, so the admitted set is exactly the rest.
 FRONTEND_REFUSED = {
     "assert", "break", "continue", "else", "false", "for", "if", "null",
-    "provides", "requires", "return", "true", "var", "while", "with",
+    "provides", "requires", "return", "true", "try", "var", "while", "with",
 }
 
 ADMITTED = [name for name in JAVA_WORDS if name not in FRONTEND_REFUSED]

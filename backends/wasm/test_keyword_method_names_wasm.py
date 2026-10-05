@@ -122,7 +122,7 @@ def _lifecycle(names: list[str]) -> str:
 def test_the_frontend_hands_the_emitter_these_names():
     """Pinned so a frontend change that admits or refuses another name is seen
     here: the emitter must carry every name it is handed."""
-    assert len(CANDIDATES) == 148 and len(ADMITTED) == 124
+    assert len(CANDIDATES) == 148 and len(ADMITTED) == 123
     refused = set(CANDIDATES) - set(ADMITTED)
     assert {"if", "return", "match", "type", "provide", "config", "spawn"} <= refused
     assert {"func", "module", "memory", "call", "end", "class", "def",
