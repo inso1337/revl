@@ -47,6 +47,7 @@ import json
 import os
 import re
 
+from ._paths import relpath_or_abs
 from .errors import RevlError
 from .import_openapi import _comment_safe, _line_of, _pointer
 from .lexer import KEYWORDS
@@ -363,8 +364,11 @@ def gen_types_file(path: str, output: str | None = None) -> str:
         data = handle.read()
     model = load_model(data, filename=path)
     base = os.path.dirname(os.path.abspath(output)) if output else os.getcwd()
-    model_path = os.path.relpath(os.path.abspath(path), base).replace(os.sep, "/")
-    if model_path == ".." or model_path.startswith("../"):
+    # on another drive there is no relative path and the helper returns the
+    # absolute one (issue #1944), which is outside `base` as well
+    rel = relpath_or_abs(os.path.abspath(path), base)
+    model_path = rel.replace(os.sep, "/")
+    if os.path.isabs(rel) or model_path == ".." or model_path.startswith("../"):
         raise RevlError(
             path, 0,
             f"the model document is outside the directory the generated file is "

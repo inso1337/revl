@@ -124,6 +124,19 @@ def test_a_model_outside_the_output_directory_is_refused(project):
     assert "outside the directory the generated file is written to" in error.message
 
 
+def test_a_model_on_another_drive_is_refused(project, monkeypatch):
+    # Windows: no relative path between drives, so the guarded relpath returns
+    # the absolute one (issue #1944); that is outside the output directory too.
+    import os
+
+    import revl.gen_types as gen_types_mod
+    monkeypatch.setattr(gen_types_mod, "relpath_or_abs",
+                        lambda path, start=None: os.path.abspath(path))
+    error = _refusal(gen_types_file, str(project / "rentals.model.json"),
+                     str(project / "types.rvl"))
+    assert "outside the directory the generated file is written to" in error.message
+
+
 # ------------------------------------------------ the compiler's check
 
 
