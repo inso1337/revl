@@ -15357,6 +15357,209 @@ fn fn_extern_scan(ts: &[Token]) -> Verd {
     return no_verd();
 }
 
+fn verified_after_msg(found: &str) -> String {
+    return (String::from("expected `effect` after `verified`, found '").revl_concat(&found)).revl_concat("'");
+}
+
+fn verified_method_msg() -> String {
+    return String::from("`verified effect` in a provide-method body is only allowed on a witnessed effect (issue #1897)");
+}
+
+fn verified_let_at(ts: &[Token], i: i64) -> bool {
+    return ((atk(ts, (i).checked_sub(1i64).expect("revl: Int overflow"), "=") && atk(ts, (i).checked_sub(2i64).expect("revl: Int overflow"), "ident")) && atw(ts, (i).checked_sub(3i64).expect("revl: Int overflow"), "let"));
+}
+
+fn verified_head_at(ts: &[Token], i: i64) -> bool {
+    if (!atw(ts, i, "verified")) {
+        return false;
+    }
+    let p = tkc(ts, (i).checked_sub(1i64).expect("revl: Int overflow"));
+    if (((p.kind == "{") || (p.kind == "}")) || (p.kind == ";")) {
+        return true;
+    }
+    if (p.line < tkc(ts, i).line) {
+        return true;
+    }
+    return verified_let_at(ts, i);
+}
+
+fn verified_parse_scan(ts: &[Token]) -> Verd {
+    let spans = model_comp_spans(ts);
+    let mut s = 0i64;
+    while (s < spans.revl_length()) {
+        let mut i = (spans)[(s) as usize].slo.clone();
+        while (i < (spans)[(s) as usize].shi.clone()) {
+            if (verified_head_at(ts, i) && (!atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "effect"))) {
+                let nx = tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+                if ((nx.kind == "ident") || (nx.kind == "kw")) {
+                    return mk_verd(tagged("T1", &verified_after_msg(&nx.text)), nx.line);
+                }
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        s = (s).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn verified_has_undo(ts: &[Token], i: i64, hi: i64) -> bool {
+    let ln = tkc(ts, i).line;
+    let mut depth = 0i64;
+    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+    while (j < hi) {
+        let k = tkc(ts, j.clone()).kind;
+        if (depth == 0i64) {
+            if atw(ts, j.clone(), "undo") {
+                return true;
+            }
+            if (k == "}") {
+                return false;
+            }
+            if (tkc(ts, j.clone()).line > ln) {
+                return false;
+            }
+        }
+        if (((k == "(") || (k == "[")) || (k == "{")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (((k == ")") || (k == "]")) || (k == "}")) {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn verified_stmt_msg(ts: &[Token], i: i64, hi: i64, wit: &[String]) -> String {
+    if (!atw(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "effect")) {
+        return String::from("");
+    }
+    if verified_let_at(ts, i) {
+        return verified_method_msg();
+    }
+    let callee = tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+    let witnessed = (((callee.kind == "ident") && atk(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "(")) && contains__m2(wit, &callee.text));
+    if witnessed {
+        return String::from("");
+    }
+    if (!verified_has_undo(ts, i, hi)) {
+        return String::from("");
+    }
+    return verified_method_msg();
+}
+
+fn verified_in_body(ts: &[Token], lo: i64, hi: i64, wit: &[String]) -> Verd {
+    let mut depth = 0i64;
+    let mut i = (lo).checked_add(1i64).expect("revl: Int overflow");
+    while (i < (hi).checked_sub(1i64).expect("revl: Int overflow")) {
+        let k = tkc(ts, i.clone()).kind;
+        if ((depth == 0i64) && verified_head_at(ts, i.clone())) {
+            let m = verified_stmt_msg(ts, i.clone(), (hi).checked_sub(1i64).expect("revl: Int overflow"), wit);
+            if (m != "") {
+                let at = if verified_let_at(ts, i.clone()) { (i).checked_sub(3i64).expect("revl: Int overflow") } else { i.clone() };
+                return mk_verd(tagged("T1", &m), tkc(ts, at).line);
+            }
+        }
+        if (((k == "(") || (k == "[")) || (k == "{")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (((k == ")") || (k == "]")) || (k == "}")) {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn verified_in_provide(ts: &[Token], lo: i64, hi: i64, wit: &[String]) -> Verd {
+    let mut depth = 0i64;
+    let mut i = (lo).checked_add(1i64).expect("revl: Int overflow");
+    while (i < (hi).checked_sub(1i64).expect("revl: Int overflow")) {
+        if ((((depth == 0i64) && atw(ts, i.clone(), "fn")) && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) && atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "(")) {
+            let mut j = close_paren(ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+            if (j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return no_verd();
+            }
+            while (((j < (hi).checked_sub(1i64).expect("revl: Int overflow")) && (!atk(ts, j, "{"))) && (!atk(ts, j, "="))) {
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if atk(ts, j, "{") {
+                let e = close_brace(ts, j);
+                if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                    return no_verd();
+                }
+                let v = verified_in_body(ts, j, e, wit);
+                if (v.v != "") {
+                    return v;
+                }
+                i = e;
+            } else {
+                i = j;
+            }
+        } else {
+            let k = tkc(ts, i).kind;
+            if (k == "{") {
+                depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if (k == "}") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return no_verd();
+}
+
+fn verified_method_verd(ts: &[Token], cname: &str, wit: &[String]) -> Verd {
+    let spans = model_comp_spans(ts);
+    let mut s = 0i64;
+    while (s < spans.revl_length()) {
+        if ((spans)[(s) as usize].sname == cname) {
+            let mut depth = 0i64;
+            let mut i = (spans)[(s) as usize].slo.clone();
+            while (i < (spans)[(s) as usize].shi.clone()) {
+                if (((depth == 0i64) && atw(ts, i, "provide")) && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+                    while ((j < (spans)[(s) as usize].shi.clone()) && (!atk(ts, j.clone(), "{"))) {
+                        j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    }
+                    let e = close_brace(ts, j.clone());
+                    if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                        return no_verd();
+                    }
+                    let v = verified_in_provide(ts, j.clone(), e, wit);
+                    if (v.v != "") {
+                        return v;
+                    }
+                    i = e;
+                } else {
+                    let k = tkc(ts, i).kind;
+                    if (k == "{") {
+                        depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+                    }
+                    if (k == "}") {
+                        depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+                    }
+                    i = (i).checked_add(1i64).expect("revl: Int overflow");
+                }
+            }
+            return no_verd();
+        }
+        s = (s).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn verified_or(vm: Verd, v: Verd, compLine: i64) -> Verd {
+    if (vm.v == "") {
+        return v;
+    }
+    if (((v.v == "") || (v.line == compLine)) || (vm.line <= v.line)) {
+        return vm;
+    }
+    return v;
+}
+
 fn ends_expr_kw(w: &str) -> bool {
     if (((((w == "let") || (w == "var")) || (w == "return")) || (w == "if")) || (w == "else")) {
         return true;
@@ -21205,6 +21408,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
     let cnames = comp_names(pg.comps.clone(), 0i64, vec![]);
     let sNames = svc_names(pg.svcs.clone(), 0i64, vec![]);
     let svcsDecidable = (ambSvcsKnown && (!has_use_decl(&ts)));
+    let wit = witnessed_extern_names(&ts);
     let mut ci = 0i64;
     while (ci < pg.comps.revl_length()) {
         let comp = (pg.comps)[(ci) as usize].clone();
@@ -21223,7 +21427,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
                     poisoned.push(comp.name.clone());
                 } else {
                     let cx = ctx_for(base.clone(), comp.clone());
-                    let v = check_component(comp.clone(), cx.clone(), &gtys);
+                    let v = verified_or(verified_method_verd(&ts, &comp.name, &wit), check_component(comp.clone(), cx.clone(), &gtys), comp.line);
                     if (v.v != "") {
                         refs.push(v.clone());
                         poisoned.push(comp.name.clone());
@@ -21275,6 +21479,10 @@ pub fn admit_src(src: String) -> String {
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
     }
+    let vps = verified_parse_scan(&ts);
+    if (vps.v != "") {
+        return vps.v;
+    }
     let rph = realm_placeholder_scan(&ts);
     if (rph.v != "") {
         return rph.v;
@@ -21302,6 +21510,10 @@ pub fn admit_all(src: String) -> String {
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
         return fmt_all(&(vec![mk_verd(tagged("BAD", &pg.bad), 0i64)]));
+    }
+    let vps = verified_parse_scan(&ts);
+    if (vps.v != "") {
+        return fmt_all(&(vec![mk_verd(vps.v.clone(), 0i64)]));
     }
     let rph = realm_placeholder_scan(&ts);
     if (rph.v != "") {
@@ -21762,6 +21974,10 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
+    }
+    let vps = verified_parse_scan(&ts);
+    if (vps.v != "") {
+        return vps.v;
     }
     let rph = realm_placeholder_scan(&ts);
     if (rph.v != "") {
@@ -31117,6 +31333,12 @@ fn a_legitimate_replacement_that_re_provides_the_key_admits() {
 }
 
 #[test]
+fn a_let_bound_verified_method_effect_is_refused__t1_() {
+    let v = admit_src(String::from("service W { fn put(k: Str) }\ncomponent Widget provides w: W {\n  let store = effect Map.new() undo store.drop()\n  provide w { fn put(k) {\n      let ok = verified effect store.insert_if_absent(k, \"1\") undo store.remove(k)\n  } }\n}"));
+    assert!((v == "T1|`verified effect` in a provide-method body is only allowed on a witnessed effect (issue #1897)"));
+}
+
+#[test]
 fn a_malformed_replacement_row_refuses_rather_than_withdrawing_nothing() {
     let clean = String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
     assert!((admit_ambient(clean.clone(), String::from("OldStore/db/;-OldStore/db/")) == "MANIFEST|manifest replacement row `-OldStore/db/` does not name a component"));
@@ -31539,6 +31761,18 @@ fn a_successor_that_cannot_hold_the_running_state_is_refused__handoff_() {
 #[test]
 fn a_typed_hole_in_a_host_acquisition_s_undo_is_not_refused() {
     let v = admit_src(String::from("service S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let store = effect Map.new() undo hole[Unit] \"release\"\n  provide s { fn go(k) = 1 }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_verified_method_effect_with_a_site_undo_is_refused__t1_() {
+    let v = admit_src(String::from("service W { fn put(k: Str) }\ncomponent Widget provides w: W {\n  let store = effect Map.new() undo store.drop()\n  provide w { fn put(k) {\n      verified effect store.insert(k, \"1\") undo store.remove(k)\n  } }\n}"));
+    assert!((v == "T1|`verified effect` in a provide-method body is only allowed on a witnessed effect (issue #1897)"));
+}
+
+#[test]
+fn a_verified_witnessed_method_effect_is_admitted() {
+    let v = admit_src(String::from("type E = { code: Str }\nextern pure fn unput(k: Str) -> Unit = @py {\n    return\n}\nextern witnessed[store] fn put_w(k: Str) -> Result[Str, E]\n  undo unput(result) = @py {\n    return Ok(k)\n}\nservice W { emission fn put(k: Str) }\ncomponent C provides w: W {\n  provide w { fn put(k) {\n      verified effect put_w(k)\n  } }\n}"));
     assert!((v == ""));
 }
 
@@ -32487,6 +32721,12 @@ fn undeclared_bare_value_in_a_method_is_refused__g1_() {
 #[test]
 fn unmarked_emission_is_refused__g4_() {
     assert!((admit_src(String::from("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(\"x\") undo db.execute(\"y\") }")) == "G4|call to emission `db.execute` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn verified_before_emit_is_a_parse_refusal__t1_() {
+    let v = admit_src(String::from("service Bus { emission fn send(k: Str) }\nservice W { emission fn put(k: Str) }\ncomponent Widget requires bus: Bus provides w: W {\n  provide w { fn put(k) {\n      verified emit bus.send(k)\n  } }\n}"));
+    assert!((v == "T1|expected `effect` after `verified`, found 'emit'"));
 }
 
 #[test]
