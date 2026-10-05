@@ -412,6 +412,12 @@ def _classify(e: RevlError) -> str:
     # as an agreement.
     if "unclassified extern" in m:
         return "G8"
+    # issue #1963: the parser's undo-less effect over a dotted acquisition
+    # (`missing_undo_refusal`). Code-less there; `revl.diagnostics.classify`
+    # files it under G4, and the gate spells it byte for byte. The lowering's
+    # bare-name twin carries the G4 code and is named by the code arm above.
+    if m.startswith("effect has no `undo` and ") and m.endswith(" is not pure"):
+        return "G4"
     if ("slot of extern" in m
             or "declares no return type, so there is no acquired value to bind" in m
             or "cannot call the extern itself" in m
@@ -488,7 +494,12 @@ def _classify(e: RevlError) -> str:
             # for byte (selfhost/lower.rvl's `verified` section).
             or ("`verified effect` in a provide-method body is only allowed "
                 "on a witnessed effect") in m
-            or "expected `effect` after `verified`, found " in m):
+            or "expected `effect` after `verified`, found " in m
+            # issue #1963: a teardown-registering step inside a provide-method
+            # `if`/`while`/`for` body. Code-less; the gate spells it byte for
+            # byte (selfhost/lower.rvl's effect-statement section).
+            or ("a teardown-registering step (`effect`/`let-effect`/`await`) "
+                "is not allowed inside a provide-method ") in m):
         return "T1"
     if ("is not a case of" in m
             or "record update names" in m

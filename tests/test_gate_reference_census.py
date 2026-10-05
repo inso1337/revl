@@ -299,6 +299,32 @@ def test_every_value_crossing_bounds_a_spawned_child_in_both(measured):
     assert not wrong, "\n  ".join(["value-crossing documents moved:"] + wrong)
 
 
+# --- effect statement rules (issue #1963) ------------------------------------
+#
+# Three statement rules the gate did not decide: a witnessed extern called with
+# a site `undo`, an undo-less effect over a dotted call, and a
+# teardown-registering step inside a provide-method `if`/`while`/`for`. All were
+# false admissions. The arrow-method G1 document is here for the line the gate
+# now anchors it at, which this census does not compare (the in-file
+# `admit_all` test in selfhost/lower.rvl does). `g4_`/`t1_`/`g1_` both refuse
+# under that tag, `ok_` both admit.
+EFFECT_STATEMENT_RULES = ROOT / "tests" / "fixtures" / "effect_statement_rules"
+
+
+def test_every_effect_statement_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(EFFECT_STATEMENT_RULES.glob("*.rvl"))
+    assert len(docs) == 14, f"the effect-statement corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["effect-statement documents moved:"] + wrong)
+
+
 # --- the model reach fold (item 519, issue #1193 slice 2, issue #1451) --------
 #
 # A role a component's crossing is placed on was outside the product unless a
@@ -870,6 +896,16 @@ def test_the_frontier_mirror_matches_the_rust(census):
         "1" for _ in range(generator.MAX_LEVEL_ITEMS + 1))
     assert len(flat) < generator.MAX_SOURCE_BYTES // 10
     assert scan(flat) is not None
+    # a reserved capability namespace is a gap
+    # (`a_reserved_capability_namespace_is_a_gap`). The mirror lacked this arm
+    # until the corpus gained a computer-use document (issue #1369), when the
+    # cheap engine said no-objection where the crate declined.
+    if tables["capability_roots"]:
+        root = tables["capability_roots"][0]
+        assert scan(f"extern emission[{root}.click] fn c(t: Str) = @py {{ pass }}") \
+            is not None
+        # a root not followed by `.` is an ordinary word
+        assert scan(f"fn {root}(x: Int) -> Int {{ return x }}") is None
 
 
 def test_every_sibling_tool_is_loaded_relative_to_this_tool():
