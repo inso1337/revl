@@ -726,6 +726,28 @@ def test_native_ir_matches_provide_records_shapes(lower_to_ir, sig, method):
     assert native["body"] == reference["body"]
 
 
+@pytest.mark.parametrize("returns,body", [
+    ("Opt[Int]", "None"),
+    ("Opt[Int]", "Some(1)"),
+    ("Opt[Opt[Int]]", "Some(None)"),
+    ("Result[Int, Str]", "Ok(1)"),
+])
+def test_native_ir_lowers_an_option_constructor_in_a_component(
+        lower_to_ir, returns, body):
+    """Issue #1818: a component-position `None` or `Some(x)` made `cir_expr`
+    fail, and a failed method drops the WHOLE component `body`, so the native
+    chain emitted the component with no provision. The reference writes a
+    `var` node for a bare `None` and a `call` on the constructor's `var` for
+    `Some(x)`. `Ok(1)` is the tagged case that already lowered, kept as the
+    control."""
+    source = (f"service S {{ fn w() -> {returns} }} "
+              f"component C provides s: S {{ provide s {{ fn w() = {body} }} }}")
+    native = json.loads(lower_to_ir(source))["components"][0]
+    reference = compile_source(source)["components"][0]
+    assert "body" in native
+    assert native["body"] == reference["body"]
+
+
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_services(lower_to_ir, rel):
     """The SERVICES table is byte-identical to the reference IR on every corpus

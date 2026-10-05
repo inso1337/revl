@@ -19271,7 +19271,8 @@ fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: C
 // (`_lower_component_pure_expr`) read a nullary USER case first, ahead of the
 // scope: `Dot` of `type Shape = Dot | Circle(Int)` is an `adt` with no args,
 // the node the fn path writes (`lir_expr`). The built-in `Opt`/`Result` cases
-// are not this shape. A scoped name is a `name` node. Anything else refuses.
+// are not this shape. A scoped name is a `name` node, and an unscoped `None`
+// a `var` node. Anything else refuses.
 // Before issue #1840 a nullary case refused here, and a refused provide method
 // fails `cir_body`, so `ir_component` dropped the whole component `body`.
 fn cir_var(n: Str, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
@@ -19281,6 +19282,10 @@ fn cir_var(n: Str, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   if (scope_has(sc, n)) {
     return mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
   }
+  // Out of scope, the reference answers a name in `callables`, which holds
+  // `_BUILTIN_CONSTRUCTORS`, with a `var` node: `None` is the one constructor
+  // that is a value on its own (issue #1818).
+  if (n == "None") { return mk_irres(true, "{\"kind\": \"var\", \"name\": \"None\"}") }
   return mk_irres(false, "")
 }
 
@@ -19327,12 +19332,19 @@ fn cir_adt(adt: Str, case_: Str, args: List[Expr], sc: List[Bind],
 // an `Async[T]` parameter slot: the reference fills omitted trailing defaults
 // and coerces an arrow into an async slot, and both are no-ops exactly when
 // every parameter is supplied and none is async. An `Opt`/`Result` constructor
-// head is NOT a module call and is refused here rather than lowered to a `fn`
-// node naming something no tier defines; a TAGGED case is routed to `cir_adt`
-// by `cir_call` before it reaches this function, and the guard below stays as
-// the fail-closed answer for any other caller.
+// head is NOT a module call and never becomes a `fn` node naming something no
+// tier defines. `Some(x)` is the reference's `_BUILTIN_CONSTRUCTORS` arm, a
+// `call` node whose callee is the constructor's `var` (issue #1818); a TAGGED
+// case (`Ok`/`Err`) is routed to `cir_adt` by `cir_call` before it reaches this
+// function, and the guard below stays as the fail-closed answer for any other
+// caller.
 fn cir_fncall(nm: Str, args: List[Expr], sc: List[Bind], hostSc: List[Str],
               cx: CCtx) -> IrRes {
+  if (nm == "Some" && args.length() == 1) {
+    let sa = cir_args(args, 0, sc, hostSc, cx, "")
+    if (!sa.ok) { return mk_irres(false, "") }
+    return mk_irres(true, "{\"kind\": \"call\", \"callee\": {\"kind\": \"var\", \"name\": \"Some\"}, \"args\": [".concat(sa.js).concat("]}"))
+  }
   if (nm == "Some" || nm == "None" || nm == "Ok" || nm == "Err") {
     return mk_irres(false, "")
   }
@@ -27130,4 +27142,30 @@ component C provides s: S {
   }
 }""")
   assert v == "G6|`x` is already bound in `go`"
+}
+
+test "an unmarked crossing through a block arm's value is refused" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let o = Some(n)
+      let x = (match o {
+        Some(v) => {
+          let z = v
+          w.pay
+        },
+        None => w.pay
+      }).charge(n)
+      return x
+    }
+  }
+}""")
+  assert v == "G4|call to emission `charge` must be marked `emit` (G4)"
 }

@@ -1,0 +1,33 @@
+// REFUSED G4 (approval floor, issue #1729): `t` is a local bound by a `match` whose
+// `Some` arm is a statement block ending in `w.pay`, and `emit t.charge(n)`
+// crosses `production.payment` with no `with` edge. The block arm's value had no
+// type, so `t` was not a service and the marked call was refused as "not
+// declared `emission`". The twin is `ok_match_block_local_step.rvl`.
+// The file name's prefix is the expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_approval_service_locals.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let o = Some(n)
+      let t = match o {
+        Some(v) => {
+          let z = v
+          w.pay
+        },
+        None => w.pay
+      }
+      emit t.charge(n)
+      return 0
+    }
+  }
+}

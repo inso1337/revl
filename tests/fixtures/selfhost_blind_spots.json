@@ -197,6 +197,12 @@
         "class=witnessed",
         "kind=spawn"
       ],
+      "Named only in order to MARK a document loudly (issue #1592). An extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit`, every other position of a provide method, and a timer firing. selfhost/emit_rust.rvl ports the site-spelled compensation (item 391) but not the declared one: `declared_compensate_marker` reads `class=emission` only to emit `<<DEFER-declared-compensate>>` for a document that declares one, so no emit_rust_corpus document can carry it. The runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
+        "class=emission"
+      ],
+      "Read only to TYPE a result, never rendered (item 391): `builtin_return_type` mirrors the reference's `_BUILTIN_SELF_RESULT` row, where a `set` result has its receiver's type. The port's builtin renderer still answers `set` with `<<UNSUPPORTED-BUILTIN:set>>`, so a corpus document that spelled it would diverge, and the method stays out of the corpus.": [
+        "method=set"
+      ],
       "The FR-4 host-Map value inference (issue 1153) names these builtin methods and the `format` node to LEARN a map's value type from its write sites, never to render them: `render_builtin` still returns the explicit UNSUPPORTED-BUILTIN marker for each, so no emitted byte depends on the arm. The corpus pins the parameter case (`cache.insert(key, value)` with an Int param); a document that inserted a `push`/`slice`/interpolation result would reach one of these and is the corpus case to add if the inference is ever changed.": [
         "kind=format",
         "method=charAt",
@@ -221,9 +227,6 @@
       ]
     },
     "unported": {
-      "Issue #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit` and every other position of a provide method (a block expression registering on `revl_teardown_of(&self.ctx)` for a `let`, a `return`, an argument, a nested operand or an `if` arm), and a timer firing. selfhost/emit_rust.rvl ports no compensation registration, so no emit_rust_corpus document can carry it; the runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
-        "class=emission"
-      ],
       "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
         "secret=<true>",
         "secret_return=<true>"
@@ -234,9 +237,6 @@
       "Reference host Map construction and access use runtime descriptors and borrowed-key conventions. The self-host pure-v3 port has no host Map value representation, so its Map names and get/next operations are not renderable.": [
         "name=Map",
         "name=remove"
-      ],
-      "The reference Rust builtin renderer implements these positional-string, mutable-collection, conversion, and repetition families. The self-host renderer's supported subset ends at covered length/to_str/read-only string operations and returns an explicit unsupported marker for these methods.": [
-        "method=set"
       ],
       "These expression and destructuring forms are rejected before or inside the self-host pure-v3 renderer: unresolved holes, legacy format nodes, optional call/field chaining, record update, and list/record binding patterns all require lowering absent from the port.": [
         "bind=_",

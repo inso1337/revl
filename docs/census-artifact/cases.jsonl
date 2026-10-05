@@ -1450,6 +1450,10 @@
 
 ["tests/fixtures/approval_service_locals/g4_list_element_unmarked.rvl", "agree-refuse/G4"]
 
+["tests/fixtures/approval_service_locals/g4_match_block_local_step.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/approval_service_locals/g4_match_block_local_unmarked.rvl", "agree-refuse/G4"]
+
 ["tests/fixtures/approval_service_locals/g4_record_alias_step.rvl", "agree-refuse/G4"]
 
 ["tests/fixtures/approval_service_locals/g4_record_field_step.rvl", "agree-refuse/G4"]
@@ -1465,6 +1469,8 @@
 ["tests/fixtures/approval_service_locals/ok_if_local_step.rvl", "agree-admit"]
 
 ["tests/fixtures/approval_service_locals/ok_list_element_step.rvl", "agree-admit"]
+
+["tests/fixtures/approval_service_locals/ok_match_block_local_step.rvl", "agree-admit"]
 
 ["tests/fixtures/approval_service_locals/ok_record_alias_step.rvl", "agree-admit"]
 
@@ -1796,6 +1802,8 @@
 
 ["tests/fixtures/emit_rust_corpus/bridge_types.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/by_value_reuse.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/calls.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/checked_div.rvl", "agree-admit"]
@@ -1836,6 +1844,8 @@
 
 ["tests/fixtures/emit_rust_corpus/in_file_tests.rvl", "agree-admit"]
 
+["tests/fixtures/emit_rust_corpus/intercept_metadata.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_rust_corpus/lengths.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/lists.rvl", "agree-admit"]
@@ -1843,6 +1853,8 @@
 ["tests/fixtures/emit_rust_corpus/loop_moves.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/maps.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/method_control_flow.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/perf_arg_index.rvl", "agree-admit"]
 
@@ -1869,6 +1881,8 @@
 ["tests/fixtures/emit_rust_corpus/str_borrows.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/strings.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/teardown_compensate.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/transforms.rvl", "agree-admit"]
 
@@ -2292,6 +2306,12 @@
 
 ["tests/fixtures/service_receiver_expressions/g4_list_unmarked.rvl", "agree-refuse/G4"]
 
+["tests/fixtures/service_receiver_expressions/g4_match_block_marked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_match_block_tail_local_unmarked.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/service_receiver_expressions/g4_match_block_unmarked.rvl", "agree-refuse/G4"]
+
 ["tests/fixtures/service_receiver_expressions/g4_match_marked.rvl", "agree-refuse/G4"]
 
 ["tests/fixtures/service_receiver_expressions/g4_match_unmarked.rvl", "agree-refuse/G4"]
@@ -2313,6 +2333,8 @@
 ["tests/fixtures/service_receiver_expressions/ok_list_approved.rvl", "agree-admit"]
 
 ["tests/fixtures/service_receiver_expressions/ok_match_approved.rvl", "agree-admit"]
+
+["tests/fixtures/service_receiver_expressions/ok_match_block_approved.rvl", "agree-admit"]
 
 ["tests/fixtures/service_receiver_expressions/ok_record_approved.rvl", "agree-admit"]
 
