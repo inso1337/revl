@@ -93,9 +93,77 @@ needed by the registry.
   `requires` (and hence `inject` in the manifest). For an unqualified key the
   qualified string equals the binding, so the IR — and every backend's emitted
   output — is unchanged. Backends therefore need **no** change for the
-  unqualified path; emitting a *qualified* key to a target runtime is future
-  work and is out of scope here (the deliverable is the compile-time key
-  identity: parsing, linking/G2, injection, and admission).
+  unqualified path; the *qualified* path reaches a target runtime as of issue
+  #1914 — see **Host identifiers** below.
+
+## Host identifiers (issue #1914)
+
+The qualified string is the *wiring* identity — the IR, G2's one-provider rule,
+`revl audit` and the dependency queries all compare it — but `::` is not legal
+in any target language's identifier grammar, so each emitter mangles the key
+into a host identifier, at **one helper per backend** (`_host_key`) through
+which every site passes: the `provide` site, every `call` site, every injected
+reference, the runtime registry lookup and anything the seam or the sourcemap
+prints.
+
+```
+_host_key(k) = k                                              if "::" not in k
+             = "__".join(p.replace("_", "_u") for p in k.split("::"))
+```
+
+| key | host identifier |
+| --- | --- |
+| `db` | `db` — unchanged, byte for byte |
+| `acme::greeter` | `acme__greeter` |
+| `a::b__c` | `a__b_u_uc` |
+| `a__b::c` | `a_u_ub__c` |
+
+An unqualified key is returned verbatim, so a v1 program's emitted output does
+not move — the whole emitted corpus is byte-identical across this change.
+
+### Why the rule is injective
+
+`p → p.replace("_", "_u")` is injective, because every `_` it writes is
+followed by a `u`, so the escape can be read off left to right. Its image
+therefore contains **no** `_` that is not followed by `u`; in particular no
+segment image ends in `_` and no segment image contains `__`. So in a mangled
+qualified key `__` occurs *exactly* at the segment joins: splitting on `__`
+recovers the segment images and unescaping each recovers the segments, which
+reconstructs the key. Two distinct **qualified** keys therefore cannot share a
+mangled spelling.
+
+One residual pair is left, and it is deliberate: a *flat* key that already
+spells a mangled qualified one — `a__b` beside `a::b`, both `a__b`. A flat key
+must keep its spelling (that is what byte-identity above buys), so this is the
+one collision the rule admits; it is **refused by name** before anything is
+emitted, never mangled into a silent alias:
+
+```
+provision keys 'acme__greeter' and 'acme::greeter' both mangle to the Python identifier 'acme__greeter': rename one of them
+```
+
+`_check_host_keys` sweeps `provides`, `requires`, `routes`, `isolate` and
+`intercept` in one place per backend, so no key reaches an identifier site
+without passing `_host_key` and no ambiguous pair reaches a runtime.
+
+### Per tier
+
+| tier | a qualified key becomes | note |
+| --- | --- | --- |
+| `py`, `ts`, `java`, `rust` | mangled, each `::`-part validated as an identifier | `::` is illegal in all four identifier grammars |
+| `go` | mangled | as above, and `_camel` collapses `_`, so go's guard compares `_camel(_host_key(k))`: `a::b` and `a__b` both name `AcmeGreeter` |
+| `wasm` | carried **verbatim** | a WAT identifier may contain `:` and the emitter's addresses are `.`-joined, so `$req.acme::greeter.hello` already names exactly one key; no mangling and no refusal, but each part is still held to the identifier grammar so a key cannot smuggle a `.` or `/` into an address |
+
+A tier that cannot name a key must say so rather than emit something that will
+not build; there is no tier left that silently writes an unusable identifier.
+
+### Self-host ports
+
+`selfhost/emit_*.rvl` mirror the reference emitters byte for byte, and the ports
+carry a provision key unqualified. No corpus document uses a namespaced key, so
+the ports stay byte-identical to their references on the corpus — the contract
+`tests/test_selfhost_compile.py` asserts. Porting the mangling (and the
+collision refusal) into the six ports is owed as its own item.
 
 ## What this unblocks (item 49)
 

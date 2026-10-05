@@ -559,3 +559,23 @@ def test_the_stream_surface_is_named_not_dropped(emitted, reference):
     got = emitted["emit_java_src"](ir)
     assert_boundary_witness(want, got, "Stream.subscribe(",
                             "<<DEFER-component-nonsimple:")
+
+
+# item 560 / issue #1914: the one key pair the injective mangling cannot split
+# ---------------------------------------------------------------------------
+# `tests/fixtures/emit_java_refusals/host_identifier_collision.rvl` is the only
+# input that reaches the namespaced branch of the mangling and the refusal arm of
+# `_check_host_keys`, so `tools/selfhost_line_coverage.py` drives both halves
+# over it. Its refusal text is asserted here.
+COLLISION_DOC = (ROOT / "tests" / "fixtures" / "emit_java_refusals"
+                 / "host_identifier_collision.rvl")
+
+
+def test_a_host_identifier_collision_is_refused_by_name(reference):
+    """A namespaced key and the unqualified key that already spells its mangled
+    identifier are two DISTINCT wiring keys that must not land on one host
+    identifier. The reference refuses to guess which one was meant, by name."""
+    ir = compile_files([str(COLLISION_DOC)])
+    with pytest.raises(reference.EmitError,
+                       match="both lower to the Java identifier"):
+        reference.emit(ir)
