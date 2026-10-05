@@ -1184,6 +1184,33 @@ class PlaceDecl:
     backend: str | None = None    # None == the composition's default backend
 
 
+@dataclass
+class GrantDecl:
+    """A `grant` statement: `grant <address> with { key, ... }` (issue #1921,
+    completing item 424 R2 and 426 §9.3 Part 2).
+
+    `granted { ... }` on a row can only be written by the document that DECLARES
+    the row, and the declaring document is what fixes the row's trust class
+    (426 §4.1). So the clause could never reach a row a stack layer adds: the
+    stack layer may not write it (no layer raises its own authority) and the
+    base composition or site layer that writes it on a row of their own makes
+    that row first-party, hence unconfined. `grant` is the missing half: it
+    NAMES an existing row, like `place`, and sets that row's granted keys
+    without re-declaring it, so the row keeps its trust class.
+
+    - `grant` is writable ONLY in the base composition and the operator's site
+      layer. A stack layer writing `grant` is refused (`_layer_op`).
+    - the keys are `requires` KEYS, the same spelling as `granted { ... }`.
+    - the address resolves to a row or it is a REFUSAL (426 §2.4).
+
+    `grant` is a CONTEXTUAL keyword read only in this position, exactly as
+    `place` is, so the lexer's KEYWORDS set is untouched.
+    """
+    address: "Address"
+    keys: list[tuple[str, int]]
+    line: int
+
+
 # --- item 473 (issue #825): the composition SLO contract ---------------------
 #
 # A composition may declare ONE `slo { ... }` block naming the service-level
@@ -1340,6 +1367,11 @@ class CompositionDecl:
     # in their own list because a `place` names an existing row rather than
     # declaring one, so it carries no `from` path and no label of its own.
     places: list["PlaceDecl"] = field(default_factory=list)
+    # issue #1921: `grant` statements — the reach a confined (stack-layer) row
+    # may compose against, written by the composition's owner without
+    # re-declaring the row. Base composition only here; a site layer's grant
+    # rides its `LayerOp`s, exactly as `place` does.
+    grants: list["GrantDecl"] = field(default_factory=list)
     # item 426 S2 (§3.1): the ordered layer stack. `stack` entries are LEVEL 1
     # peers — conflicts between them refuse — and `site` is the single LEVEL 2
     # layer, the one level at which "I decide" is expressible. Both are ordered
@@ -1413,7 +1445,7 @@ class LayerOp:
     over the wiring graph, not declared, so a position operation would invent a
     concept the gate does not have.
     """
-    op: str                   # "add" | "remove" | "replace" | "configure" | "resolve" | "place"
+    op: str                   # "add" | "remove" | "replace" | "configure" | "resolve" | "place" | "grant"
     line: int
     address: Address | None = None
     row: RowDecl | None = None                    # add / replace
@@ -1421,6 +1453,7 @@ class LayerOp:
     winner: Address | None = None                 # resolve
     loser: Address | None = None                  # resolve
     place: "PlaceDecl | None" = None              # place (site layer only)
+    grant: "GrantDecl | None" = None              # grant (site layer only)
 
 
 @dataclass
@@ -4592,6 +4625,7 @@ class Parser:
         hosts: list[HostRowDecl] = []
         seams: list[SeamRowDecl] = []
         places: list[PlaceDecl] = []
+        grants: list[GrantDecl] = []
         uses: list[tuple[str, int]] = []
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
@@ -4658,6 +4692,14 @@ class Parser:
                 pline = self.next().line
                 places.append(self._place_spec(self._address(), pline))
                 continue
+            if self.at("ident", "grant"):
+                # issue #1921: a grant names an existing row (typically one a
+                # stack layer adds) and sets its granted keys. Like `place`, it
+                # declares no label. A stack layer writing `grant` is refused in
+                # `_layer_op`.
+                gline = self.next().line
+                grants.append(self._grant_spec(self._address(), gline))
+                continue
             if self.at("ident", "slo"):
                 # item 473 (issue #825): the composition-level SLO contract.
                 # Contextual, like `stack`/`site`/`place` above: recognised only
@@ -4678,14 +4720,16 @@ class Parser:
                 raise self.err(
                     tok.line,
                     "expected `slo`, `row`, `remote`, `host`, `seam`, `place`, "
-                    f"`use`, `stack`, `site`, or `}}` in composition {name}, "
+                    f"`grant`, `use`, `stack`, `site`, or `}}` in composition "
+                    f"{name}, "
                     f"found {tok.value!r}",
                     hint="a composition document declares rows: "
                          '`row @label from "path.rvl" provides key`, '
                          '`remote @label provides key: Service at host("h:port")`, '
                          '`host @label provides key: Service`, '
                          '`seam @label on key("k") observe with @observer`, or '
-                         'places one: `place @label on process "p" backend rust`. '
+                         'places one: `place @label on process "p" backend rust`, '
+                         'or grants one its reach: `grant @label with { key }`. '
                          'It may also declare the service-level objectives the '
                          'rollout must hold, and what a live breach of each '
                          'one does: `slo { p95_latency: 250ms on breach divert '
@@ -4695,7 +4739,8 @@ class Parser:
         self.expect("}")
         return CompositionDecl(name, rows, line, uses, stack=stack,
                                site=site, remotes=remotes, hosts=hosts,
-                               seams=seams, places=places, slo=slo,
+                               seams=seams, places=places, grants=grants,
+                               slo=slo,
                                slo_responses=slo_responses,
                                slo_windows=slo_windows)
 
@@ -4988,6 +5033,35 @@ class Parser:
             self.next()
             backend = self._name(what="a backend name after `backend`")
         return PlaceDecl(address, process, line, backend)
+
+    def _grant_spec(self, address: Address, line: int) -> GrantDecl:
+        """`<address> with { key, ... }`, with the leading `grant` keyword and
+        the address already consumed (issue #1921).
+
+        The keys go in a `with` block for the reason `configure` writes one:
+        `@records {` lexes as a HOST BODY (426 S2). The two callers, the base
+        composition and the site layer, differ only in WHERE a grant is
+        allowed, so the tail is parsed once here."""
+        if not self.at("kw", "with"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `with` after `grant {address.spelling()}`, found "
+                f"{tok.value!r}",
+                hint=f"the granted keys go in a `with` block: `grant "
+                     f"{address.spelling()} with {{ approvals, writer }}`. The "
+                     "brace cannot follow the label directly: `@row {` is a "
+                     "HOST BODY to the lexer (426 S2)")
+        self.next()
+        self.expect("{")
+        keys: list[tuple[str, int]] = []
+        while not self.at("}"):
+            kline = self.peek().line
+            keys.append((self._provision_key(what="a granted key"), kline))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return GrantDecl(address, keys, line)
 
     def _composition_label(self, composition: str, label: str, line: int,
                            seen: dict[str, int]) -> None:
@@ -5300,13 +5374,34 @@ class Parser:
                          "the base composition and the site layer may `place`")
             spec = self._place_spec(address, oline)
             return LayerOp("place", oline, address=spec.address, place=spec)
+        if self.at("ident", "grant"):
+            oline = self.next().line
+            address = self._address()
+            if not site:
+                # issue #1921, item 424 R2's third rule: no layer may raise its
+                # own authority. A stack layer that could `grant` would widen
+                # the reach of its own row (or a peer's), which is exactly what
+                # refusing `granted` in a stack layer exists to prevent.
+                raise self.err(
+                    oline,
+                    f"`grant` raises a row's reach, and `{layer}` is a stack "
+                    "layer, which may not grant any row reach",
+                    hint="the reach a confined row may compose against is "
+                         "granted by the composition's owner or the operator, "
+                         "never by a layer: no layer may raise its own authority "
+                         "(424 R2, 426 §4.1). Write the `grant` in the base "
+                         "composition or the site layer")
+            spec = self._grant_spec(address, oline)
+            return LayerOp("grant", oline, address=spec.address, grant=spec)
         raise self.err(
             tok.line,
             f"expected `add`, `remove`, `replace`, `configure`"
-            f"{', `resolve`, `place`' if site else ''}, `touches`, or `}}` in "
+            f"{', `resolve`, `place`, `grant`' if site else ''}, `touches`, "
+            f"or `}}` in "
             f"layer `{layer}`, found {tok.value!r}",
             hint="there are four operations and no more (426 §3.2)"
-                 + (", plus the site layer's `resolve` and `place`" if site else "")
+                 + (", plus the site layer's `resolve`, `place` and `grant`"
+                    if site else "")
                  + ". There is no positional operation: load order is derived "
                    "from the wiring, not declared, so no layer gets to reorder "
                    "anything")

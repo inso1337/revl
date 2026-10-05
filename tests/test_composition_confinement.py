@@ -630,3 +630,217 @@ layer Otel for Demo {
     assert not res["clean"]
     text = authority_panel.render(res)
     assert "UNCHECKED HOST CODE" in text and nfp[0] in text
+
+
+# =========================================================================== #
+# Issue #1921 — a confined stack-layer row reaches only what the owner or the
+# operator GRANTS it, and `grant` is how a grant reaches such a row.
+#
+# Before: `granted` could only be written by the document that DECLARES a row,
+# and the declaring document fixes the row's trust class (§4.1). A stack layer
+# may not write it (no layer raises its own authority), and the base or the site
+# layer writing it on a row of their own made that row first-party, hence
+# unconfined. So every confined stack row requiring another row's service was
+# refused under `confine=True`. `grant <address> with { keys }` names the row
+# without re-declaring it, so it keeps its trust class and gets its reach.
+# =========================================================================== #
+
+_GRANT_SERVICES = """
+service ApprovalGate  { fn ok(x: Str) -> Bool }
+service SourceWriter  { fn write(x: Str) -> Str }
+service Records       { fn put(x: Str) -> Str }
+"""
+
+_APPROVALS = """
+use "services.rvl" { }
+component Approvals provides approvals: ApprovalGate {
+  provide approvals { fn ok(x) = true }
+}
+"""
+
+_WRITER = """
+use "services.rvl" { }
+component Writer provides writer: SourceWriter {
+  provide writer { fn write(x) = x }
+}
+"""
+
+# a host-code-free stack component that requires BOTH base services.
+_RECORDS_KIT = """
+use "services.rvl" { }
+component RecordsKit requires approvals: ApprovalGate, writer: SourceWriter
+    provides records: Records {
+  provide records { fn put(x) = writer.write(x) }
+}
+"""
+
+# the same shape, but its source declares host code: a grant is REACH, not
+# host-code trust, so the untrusted-author profile still refuses it.
+_RECORDS_KIT_HOST = """
+use "services.rvl" { }
+extern pure fn leak(t: Str) -> Str = @py { import os; return os.environ.get("HOME", "") }
+component RecordsKit requires approvals: ApprovalGate, writer: SourceWriter
+    provides records: Records {
+  provide records { fn put(x) = leak(writer.write(x)) }
+}
+"""
+
+_RECORDS_LAYER = """
+layer RecordsKitLayer for Demo {
+  add row @records from "../records_kit.rvl" provides records
+}
+"""
+
+
+def _grant_project(tmp_path: Path, *, base_grant: str = "", site: str | None = None,
+                   layer: str = _RECORDS_LAYER, kit: str = _RECORDS_KIT) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "services.rvl").write_text(_GRANT_SERVICES)
+    (tmp_path / "approvals.rvl").write_text(_APPROVALS)
+    (tmp_path / "writer.rvl").write_text(_WRITER)
+    (tmp_path / "records_kit.rvl").write_text(kit)
+    (tmp_path / "layers").mkdir(exist_ok=True)
+    (tmp_path / "layers" / "records.rvl").write_text(layer)
+    site_clause = ""
+    if site is not None:
+        (tmp_path / "layers" / "ops.rvl").write_text(
+            "site layer Ops for Demo {\n" + site + "}\n")
+        site_clause = '  site "layers/ops.rvl"\n'
+    doc = tmp_path / "base.rvl"
+    doc.write_text(
+        "composition Demo {\n"
+        '  use "services.rvl"\n'
+        '  row @approvals from "approvals.rvl" provides approvals\n'
+        '  row @writer from "writer.rvl" provides writer\n'
+        + base_grant +
+        '  stack "layers/records.rvl"\n'
+        + site_clause + "}\n")
+    return doc
+
+
+def _records_row(doc: Path, tmp_path: Path):
+    table = resolve_file(str(doc), str(tmp_path))
+    return next(r for r in table.rows if r.label == "records")
+
+
+def test_a_site_grant_admits_a_confined_stack_row_and_keeps_it_non_first_party(tmp_path):
+    """#1921 (1). The operator grants the stack row both keys it requires; the
+    composition admits under `confine=True`, and the row stays non-first-party:
+    the grant is reach, never a change of trust class."""
+    from revl.composition import _row_profiles, row_trust
+    doc = _grant_project(tmp_path,
+                         site="  grant @records with { approvals, writer }\n")
+    row = _records_row(doc, tmp_path)
+    assert row_trust(row) == "non-first-party"
+    assert row.granted == ["approvals", "writer"]
+    assert row.to_ir()["granted"] == ["approvals", "writer"]
+    assert (2, "Ops", "grant") in row.provenance
+    # the profile the row is confined under: the services its granted KEYS bind.
+    profile = _row_profiles(resolve_file(str(doc), str(tmp_path)),
+                            str(tmp_path))[str(tmp_path / "records_kit.rvl")]
+    assert profile.no_extern
+    assert profile.granted == frozenset({"ApprovalGate", "SourceWriter"})
+
+    document = admit_composition(str(doc), str(tmp_path), confine=True)
+    assert "RecordsKit" in {c["name"] for c in document["components"]}
+    full = admit_composition(str(doc), str(tmp_path), confine=True, full=True)
+    assert "RecordsKit" in {c["name"] for c in full["components"]}
+
+
+def test_a_base_composition_grant_admits_the_same_row(tmp_path):
+    """#1921 (1), the owner's spelling: the base composition may grant a stack
+    row it does not declare, and the row is still non-first-party."""
+    from revl.composition import row_trust
+    doc = _grant_project(
+        tmp_path, base_grant="  grant @records with { approvals, writer }\n")
+    row = _records_row(doc, tmp_path)
+    assert row_trust(row) == "non-first-party"
+    assert row.granted == ["approvals", "writer"]
+    document = admit_composition(str(doc), str(tmp_path), confine=True)
+    assert "RecordsKit" in {c["name"] for c in document["components"]}
+
+
+def test_a_partial_grant_is_refused_naming_the_ungranted_key(tmp_path):
+    """#1921 (2). Only `approvals` granted: the row is refused at resolution,
+    naming `writer`, before anything compiles."""
+    doc = _grant_project(tmp_path, site="  grant @records with { approvals }\n")
+    with pytest.raises(RevlError) as exc:
+        admit_composition(str(doc), str(tmp_path), confine=True)
+    msg = str(exc.value)
+    assert "requires `writer`" in msg and "its grant does not list" in msg
+    assert "`approvals`" in msg
+
+
+def test_a_site_grant_replaces_a_partial_base_grant(tmp_path):
+    """The operator has the final say, as with `place`: a site grant replaces
+    the base grant of the same row, and the subset rule judges the final one."""
+    doc = _grant_project(
+        tmp_path, base_grant="  grant @records with { approvals }\n",
+        site="  grant @records with { approvals, writer }\n")
+    assert _records_row(doc, tmp_path).granted == ["approvals", "writer"]
+    admit_composition(str(doc), str(tmp_path), confine=True)
+
+
+def test_a_stack_layer_writing_a_grant_is_refused(tmp_path):
+    """#1921 (3). No layer may raise its own authority: a stack layer that
+    writes `grant` is refused at parse, and so is one that writes `granted`."""
+    layer = _RECORDS_LAYER[:-2] + "  grant @records with { approvals, writer }\n}\n"
+    doc = _grant_project(tmp_path, layer=layer)
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    msg = str(exc.value)
+    assert "`grant`" in msg and "may not grant any row reach" in msg
+
+    clause = _RECORDS_LAYER.replace(
+        "provides records", "provides records granted { approvals, writer }")
+    doc = _grant_project(tmp_path, layer=clause)
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "writes a `granted` clause" in str(exc.value)
+
+
+def test_a_granted_row_declaring_host_code_is_still_refused(tmp_path):
+    """#1921 (4). A grant is REACH, not host-code trust: a granted stack row
+    whose source declares an extern is refused by the untrusted-author profile
+    exactly as an ungranted one is."""
+    doc = _grant_project(tmp_path, kit=_RECORDS_KIT_HOST,
+                         site="  grant @records with { approvals, writer }\n")
+    with pytest.raises(RevlError) as exc:
+        admit_composition(str(doc), str(tmp_path), confine=True)
+    assert getattr(exc.value, "code", None) == "G8"
+
+
+def test_a_grant_of_a_first_party_row_is_refused(tmp_path):
+    """A grant confines nothing on a first-party row, and a no-op is a refusal
+    (426 §2.4): granting a base row, with or without a stack, refuses."""
+    doc = _grant_project(tmp_path,
+                         site="  grant @approvals with { approvals }\n")
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "first-party and admits unconfined" in str(exc.value)
+
+    (tmp_path / "flat.rvl").write_text(
+        "composition Flat {\n"
+        '  use "services.rvl"\n'
+        '  row @approvals from "approvals.rvl" provides approvals\n'
+        "  grant @approvals with { approvals }\n"
+        "}\n")
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(tmp_path / "flat.rvl"), str(tmp_path))
+    assert "first-party and admits unconfined" in str(exc.value)
+
+
+def test_a_grant_naming_no_row_or_granting_twice_is_refused(tmp_path):
+    """The address resolves or it is a refusal (426 §2.4), and one document
+    grants a row once."""
+    doc = _grant_project(tmp_path, site="  grant @nope with { approvals }\n")
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "`grant @nope` names row `@nope`" in str(exc.value)
+
+    doc = _grant_project(tmp_path, site=(
+        "  grant @records with { approvals }\n"
+        "  grant @records with { writer }\n"))
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "a second time" in str(exc.value)
