@@ -282,6 +282,28 @@
         ]
       },
       "note": "merged into feat/1463-mcp-http (PR #1529's branch, still open) as a fast-forward, so its merge commit 43ffd3fe was never on main. CARRIED by PR #1557 (squash commit 1fb2c721, 2026-10-02 23:58), which brought that branch's work to main. The merge added no files and MODIFIED two: tests/test_mcp_http_transport.py is BYTE-IDENTICAL to this merge's copy at 1fb2c721, and src/revl/mcp/http_guard.py was carried already modified (the same squash adds DispatchLock to it), so it is pinned by the two drain tests this merge added, which still pass."
+    },
+    "1805": {
+      "merge": "38e90ee543b9229ee46abf2b3c135dda24bf0ef6",
+      "verdict": "CARRIED",
+      "carried_at": "56f048a428ec9a70d2c58d38aa63b2ff2cd6c4f4",
+      "added": [
+        "tests/test_realm_placeholder_routes_1728.py"
+      ],
+      "identical": [
+        "docs/design-v2-realms.md",
+        "docs/design/1728-realm-placeholder.md",
+        "docs/mcp-bridge.md",
+        "grammar/revl.ebnf",
+        "grammar/revl.gbnf",
+        "grammar/revl.lark",
+        "src/revl/admit_profile.py",
+        "src/revl/parser.py",
+        "src/revl/realm_placeholders.py",
+        "tests/test_realm_placeholder_routes_1728.py",
+        "tests/test_selfhost_lower.py"
+      ],
+      "note": "merged into lane/1728-realm-placeholder, the branch of PR #1773, which was later squashed to main. CARRIED: #1773 was pushed carrying this PR's head, so GitHub marked it merged; tests/test_realm_placeholder_routes_1728.py, the one file this merge added, is on main via PR #1773's squash commit 56f048a4, byte-identical to this merge's copy."
     }
   }
 }
