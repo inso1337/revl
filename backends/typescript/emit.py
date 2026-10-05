@@ -4622,6 +4622,52 @@ def _ts_extern_config_scaffold() -> list[str]:
     ]
 
 
+def _ts_secret_scaffold(externs: list) -> list[str]:
+    """Module-level bound-secret seam (item 256, issue #1936), the ts mirror of
+    the py tier's `_REVL_SECRETS` map and fail-loud `_revl_secret` helper
+    (backends/python/emit.py `_emit_externs`). The runner
+    (placement_runner.ts) resolves each name in `_REVL_SECRET_NAMES` once at
+    plug, from `REVL_SECRET_<NAME>`, and installs the value into the map before
+    any component loads. A bound extern body reads the key as its first local.
+    The helper names the secret but never its value, and there is no default.
+    Emitted only when some extern carries a bound secret, so a secret-free
+    program is byte-identical."""
+    names: list[str] = []
+    for ext in externs:
+        for sname in ext.get("secrets") or []:
+            if sname not in names:
+                names.append(sname)
+    return [
+        "export const _REVL_SECRET_NAMES: string[] = "
+        f"{json.dumps(names)};",
+        "",
+        "export const _REVL_SECRETS: Record<string, string> = {};",
+        "",
+        "function _revlSecret(name: string): string {",
+        "  const value = _REVL_SECRETS[name];",
+        "  if (value === undefined) {",
+        "    throw new Error(",
+        '      "capability-bound secret `" + name + "` was not " +',
+        '      "installed before its extern body ran; the run driver " +',
+        '      "must resolve it at plug (item 256). No default exists " +',
+        '      "for a secret.",',
+        "    );",
+        "  }",
+        "  return value;",
+        "}",
+        "",
+    ]
+
+
+def _ts_secret_binds(ext: dict) -> list[str]:
+    """The `const <name> = _revlSecret("<name>");` first body locals of a bound
+    extern, one per secret it receives (item 256, the py tier's injection). A
+    component or service method body never gets one, so the name resolves only
+    inside the bound body. Empty for an extern with no bound secret."""
+    return [f"const {_ident(sname, 'secret name')} = _revlSecret({json.dumps(sname)});"
+            for sname in ext.get("secrets") or []]
+
+
 def _ts_extern_config_bind(ext: dict) -> str:
     """The `const _revl_config = ...` first-body line for a config extern, or
     None. Passes the required (non-defaulted) field names and the resolved
@@ -4751,6 +4797,9 @@ def _emit_ts_externs(externs: list) -> list[str]:
     # extern carries a config schema (byte-identical when none do).
     if any(ext.get("config") for ext in externs):
         lines.extend(_ts_extern_config_scaffold())
+    # item 256 / issue #1936: the bound-secret seam, likewise only when used.
+    if any(ext.get("secrets") for ext in externs):
+        lines.extend(_ts_secret_scaffold(externs))
     for ext in externs:
         name = _ident(ext.get("name"), "extern name")
         params = ", ".join(
@@ -4810,6 +4859,8 @@ def _emit_ts_externs(externs: list) -> list[str]:
                 lines.append("")
             lines.append(
                 f"{export_kw}async function {impl}({params}): Promise<{returns}> {{")
+            for bind in _ts_secret_binds(ext):
+                lines.append("  " + bind)
             if config_bind:
                 lines.append("  " + config_bind)
             body = textwrap.dedent(bodies["ts"].strip("\n"))
@@ -4827,6 +4878,8 @@ def _emit_ts_externs(externs: list) -> list[str]:
             lines.append("}")
             lines.append("")
         lines.append(f"{export_kw}function {impl}({params}): {returns} {{")
+        for bind in _ts_secret_binds(ext):
+            lines.append("  " + bind)
         if config_bind:
             lines.append("  " + config_bind)
         body = textwrap.dedent(bodies["ts"].strip("\n"))

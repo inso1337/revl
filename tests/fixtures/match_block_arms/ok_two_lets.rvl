@@ -1,0 +1,17 @@
+// ADMITTED (issue #1699): a block arm with two `let`s before its tail. The gate
+// refused G1 on the second `let`.
+// The file name's prefix is the expected verdict (`ok_` admitted, `g1_`/`g4_` refused
+// under that tag); tests/test_gate_match_block_arms_1699.py holds it.
+
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let o = Some(n)
+      let x = match o { Some(v) => { let a = v + 1
+ let b = a * 2
+ b }, None => 0 }
+      return x
+    }
+  }
+}

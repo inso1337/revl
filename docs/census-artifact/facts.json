@@ -2,6 +2,9 @@
  "engine": "selfhost",
  "issued_admissions": [
   "admission:comment_only",
+  "admission:component_identity_body",
+  "admission:component_no_provision",
+  "admission:component_requires_and_calls",
   "admission:empty_composition",
   "admission:interface_empty_service",
   "admission:interface_one_service",
