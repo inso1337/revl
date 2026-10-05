@@ -2614,6 +2614,43 @@ def _scope_for(frame: "Frame") -> "Optional[_CallScope]":
     return scope if scope is not None and scope.frame is frame else None
 
 
+#: issue #1902: one compensation per crossing. A site-spelled `compensate g()`
+#: REPLACES the extern's declared one for that crossing; the declared one is
+#: the default only when the site spells none. A decorated crossing (below)
+#: registers its own compensation, so a site that spells one hands it to the
+#: decorator through this variable (`site_compensation`) rather than
+#: registering a second entry beside the declared one.
+_SITE_COMPENSATION: contextvars.ContextVar = contextvars.ContextVar(
+    "_revl_site_compensation", default=None)
+
+
+class site_compensation:  # noqa: N801 - a runtime name the emitter imports
+    """Around one fire of a decorated crossing: the site-spelled compensation
+    that crossing registers in place of the one its extern declares
+    (issue #1902)."""
+
+    def __init__(self, compensate: Callable[[], Any], *, call: Optional[dict] = None):
+        self._site = (compensate, call)
+        self._token = None
+
+    def __enter__(self):
+        self._token = _SITE_COMPENSATION.set(self._site)
+        return self
+
+    def __exit__(self, *exc):
+        _SITE_COMPENSATION.reset(self._token)
+        return False
+
+
+def _take_site_compensation():
+    """The site-spelled compensation the current fire carries, cleared for the
+    host body so a crossing nested inside it keeps its own declared one."""
+    site = _SITE_COMPENSATION.get()
+    if site is None:
+        return None, None
+    return site, _SITE_COMPENSATION.set(None)
+
+
 def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None,
                       *, ui: bool = False, call: Optional[dict] = None):
     """Decorator on an extern that declares `compensate`, a computer-use
@@ -2629,7 +2666,11 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
     substrate could not confirm the effect, which is not knowing it did not
     land, and a declared inverse that clears a field is correct either way.
     Any other raising crossing registers nothing, item 247's rule: the
-    compensation is owed for an emission that crossed."""
+    compensation is owed for an emission that crossed.
+
+    When the site spells its own `compensate` (`site_compensation`), that one
+    is registered instead of the declared one, by the same rules (issue
+    #1902)."""
     def _wrap(fn):
         def _enter():
             scope = _CALL_SCOPE.get()
@@ -2638,41 +2679,54 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
             scope.crossed.append(label)
             return scope
 
-        def _failed(scope):
+        def _owed(site):
+            return site if site is not None else (compensate, call)
+
+        def _failed(scope, site):
             if scope.failed_step is None:
                 scope.failed_step = label
             if not ui:
                 return
             try:
-                scope._register(label, compensate, call)
+                scope._register(label, *_owed(site))
             except EstopRefused:
                 pass   # a halt runs no compensation; the crossing's own raise propagates
 
         if inspect.iscoroutinefunction(fn):
             async def _declared_crossing_async(*args, **kwargs):
-                scope = _enter()
-                if scope is None:
-                    return await fn(*args, **kwargs)
+                site, token = _take_site_compensation()
                 try:
-                    value = await fn(*args, **kwargs)
-                except BaseException:
-                    _failed(scope)
-                    raise
-                scope._register(label, compensate, call)
-                return value
+                    scope = _enter()
+                    if scope is None:
+                        return await fn(*args, **kwargs)
+                    try:
+                        value = await fn(*args, **kwargs)
+                    except BaseException:
+                        _failed(scope, site)
+                        raise
+                    scope._register(label, *_owed(site))
+                    return value
+                finally:
+                    if token is not None:
+                        _SITE_COMPENSATION.reset(token)
             wrapped = _declared_crossing_async
         else:
             def _declared_crossing_sync(*args, **kwargs):
-                scope = _enter()
-                if scope is None:
-                    return fn(*args, **kwargs)
+                site, token = _take_site_compensation()
                 try:
-                    value = fn(*args, **kwargs)
-                except BaseException:
-                    _failed(scope)
-                    raise
-                scope._register(label, compensate, call)
-                return value
+                    scope = _enter()
+                    if scope is None:
+                        return fn(*args, **kwargs)
+                    try:
+                        value = fn(*args, **kwargs)
+                    except BaseException:
+                        _failed(scope, site)
+                        raise
+                    scope._register(label, *_owed(site))
+                    return value
+                finally:
+                    if token is not None:
+                        _SITE_COMPENSATION.reset(token)
             wrapped = _declared_crossing_sync
         wrapped.__name__ = fn.__name__
         wrapped.__qualname__ = fn.__qualname__

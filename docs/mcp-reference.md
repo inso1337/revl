@@ -616,6 +616,76 @@ finest level that holds. When only a component's methods (or a service's
 operations, or a type's members) changed, the members are reported, each with
 `parent` and `parentKind`; otherwise the whole declaration is.
 
+**Write the decision, not the frame (issue #1700).** Output tokens are the
+expensive ones, so the edit path asks for as little text as it can:
+
+- `{symbol, body}` replaces only the body of a method (`Comp.key.method`) or a
+  top-level `fn`. The server keeps the declared header (name, parameters,
+  return type). An expression becomes `= expr`; a body with a line that starts
+  with `let`, `var` or `return` becomes a block. A symbol that is not a method
+  or fn is refused; send `replacement` for it.
+- Terse text is accepted everywhere an edit takes source (`replacement`,
+  `body`, `append`, and `revl_change`'s `replace` and `add`). It is stored as
+  `revl fmt` writes it, so `fn now()=4+5` is held as `fn now() = 4 + 5`. When
+  the stored text differs from what was sent, the edit's echo in `applied`
+  carries it as `canonical`, so there is nothing to re-send.
+- The minimal forms, smallest first, for changing one method:
+  `{symbol: "C.k.m", body: "<expr>"}`, then `{symbol: "C.k.m", replacement:
+  "fn m(..) = <expr>"}`, then `revl_change {replace: {component, source}}`, then
+  a whole-file `revl_swap`. For the reference change in
+  `tests/test_mcp_terse_edits_1700.py` (one body in `examples/user_cache.rvl`)
+  these are 77, 98, 420 and 1,290 bytes of arguments.
+- `{symbol: "Comp.key.op", body}` for an `op` the provide block does not
+  define yet writes the method's frame from the service declaration
+  (`fn op(<its parameter names>)`) and puts the body in it. A provider must
+  implement every operation, so this is how a service gains an operation and
+  its implementation in one call: edit the service, then the body, in the same
+  `edits` list.
+- `revl_check` and `revl_swap` accept terse inline source too. They compile
+  it AS SENT, so every diagnostic names a line you wrote. `revl_swap` stores
+  the canonical form, which the formatter's IR-equivalence gate proved compiles
+  identically, and `revl_check` says what it would be. Both answer
+  `canonicalSource: {changed, digest}`, and the text itself with
+  `returnCanonical: true`. Text the formatter cannot read, or a rewrite its
+  gate refuses, is kept as written (`kept` says why). A files-loaded
+  composition is the operator's files and is not rewritten.
+- **Punctuation you may leave out.** Match arms separated by newlines alone
+  (`A => 1` on one line, `B => 2` on the next) and an `if` condition without
+  parentheses (`if x > 1 { ... }`) are completed on the server: the `,` and the
+  parentheses are inserted, inside their lines, so every diagnostic keeps its
+  line number. A line is a new arm only if it holds `=>` at the arm's depth,
+  and an `if` is wrapped only up to the first `{` at its depth on the same
+  line. Completion runs only on text that does not parse and is used only if
+  the result parses; anything ambiguous (a condition whose first `{` is a
+  record literal) is left as written, and the parse error is yours. The
+  answer reports it as `completed: [{line, inserted}]`, in `canonicalSource`
+  for `revl_check`/`revl_swap`/`revl_load` and as a `completed` entry in
+  `applied` for an edit. This is the MCP surface only: `revl compile` still
+  refuses both forms, so files stay in the one canonical grammar.
+- `revl_load` holds a DRAFT (a holed candidate) canonical, and answers with
+  `canonicalSource` too; a load that boots keeps the bytes it was sent (a
+  snapshot reproduces them). A draft's hole lines never move: the IR records
+  them, so the gate refuses any layout that would shift one, and a fillSpec's
+  `line` stays the held line.
+- An `anchor` that does not occur verbatim in the held text is matched by its
+  tokens, whitespace aside (echo `matched: "tokens"`), so an anchor copied
+  from what you sent still applies after the server stored a canonical
+  rewrite. Tokens and comments must match exactly and in order. `count`
+  bounds the sites as before. A `range` is a character offset into the HELD
+  text, which may be the canonical rewrite (`changed: true`): read it with
+  `revl_source` or `returnCanonical` before computing one. `{symbol, ...}`
+  and `{hole, expr}` edits are not affected.
+- Since the formatter puts each `provide` member on its own line, a terse
+  one-line provide block swapped in (or loaded as a draft) has every method
+  addressable by symbol. A member that still shares a line (a booting first
+  load, or a program where the gate kept the old layout) cannot be addressed
+  alone.
+
+An `{append}` edit adds new top-level declarations at the end of the buffer
+(the only one, or `target`), with no offset to compute. A name that is already
+declared in any buffer is refused; replace it with `{symbol, replacement}`
+instead. `revl_change {add}` is this edit.
+
 `commit: false` proposes instead of swapping: the edit lands in your proposal,
 shared with `revl_change`, and `revl_change {commit: true}` commits it (issue
 #1696). The default stays `commit: true` for now; see the design note.
@@ -633,8 +703,8 @@ components, where the top-level `touched` above names symbols:
 - `breaks`: the total across the touched components.
 
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
-  replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}`,
-  each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
+  replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}` /
+  `{symbol, body}` / `{append}`, each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
   inline source or the one loaded file, a loaded file's path, or an in-memory
   module. A loaded file can also be named by its basename or a trailing part
   of its path when that matches exactly one loaded file; one matching several
@@ -681,9 +751,13 @@ rule for edited files, the gates and drafts behave exactly as for `revl_edit`:
 | `{replace: {component, source}}` | replaces one declaration by name with its whole new text |
 | `{withdraw: "Name"}` | removes the component (and the comment above it) and withdraws it. Refused from the plan when the cascade is not empty |
 | `{withdraw: {component, cascade: true}}` | withdraws the component and its whole cascade together |
+| `{add: {component, provide, methods, config?, target?}}` | the server writes the component. `provide` is a key, or `{key, service}`; the service is the given one, or the one the composition already knows the key as. `methods` holds only bodies (`{"now": "store.get_count() + 1"}`); each frame comes from the service declaration. `requires` is inferred: every receiver a body calls (`store.get()`) that is a key of the composition. Refused, naming it: an unknown receiver, a missing or unknown operation, a key whose service cannot be inferred, a `config.` read with no `config` given (config is never inferred) |
+| `{add: {source, target?}}` | appends new declarations to the only buffer, or to `target` (a loaded file's path, a module key, or `source`). Refused before anything applies when a name is already declared (use `replace`), when `source` declares nothing, or when there are several buffers and no `target` |
 
-The answer carries `committed`, `verified` (`admission`, and `gauntlet` when
-asked), `plan` for a withdrawal (`cascade`, `withdrawalOrder`,
+The answer carries `committed`, `verified` (`admission`; `guarantees`, the
+G1-G9 self-check `revl_check` returns, whenever a compile judged the
+candidate: every guarantee `pass` once admitted, the failing one with its code,
+message and fix when refused; and `gauntlet` when asked), `plan` for a withdrawal (`cascade`, `withdrawalOrder`,
 `orphanedKeys`), the `touched` symbols, and `components`: every component the
 change touched, each with `added` / `changed` / `removed`, plus `would lose a
 provider` for a refused cascade. A proposal and a commit (with an intent, or
@@ -691,7 +765,7 @@ of the held proposal) also carry `blastRadius`, as `revl_edit` does; a commit
 reads it off the composition running at commit time. A change that fails
 verification commits nothing, and the running composition is unchanged.
 
-- Inputs: one of `edit` / `replace` / `withdraw`; `gauntlet`; `commit`
+- Inputs: one of `edit` / `replace` / `withdraw` / `add`; `gauntlet`; `commit`
   (default false: propose only); `discard`; with nothing loaded, `files` /
   `source` / `modules` / `config`.
 
