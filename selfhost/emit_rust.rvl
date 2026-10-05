@@ -534,12 +534,16 @@ fn is_builtin_ctor(name: Str) -> Bool {
 // parameter names in the current function (empty in component methods).
 // `flb` holds the module-wide borrowed LIST parameter indices (the list analog
 // of `fb`); `lp` holds the borrowed list-parameter names in the current function
-// (the list analog of `bp`).
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str], flb: Map[Str, List[Int]], lp: Map[Str, Str] }
+// (the list analog of `bp`). `ft` is the declared field types of every record,
+// keyed `<Type>.<field>` (`_V3Ctx.record_field_types`). `mu` is the current
+// function's reused names (`ctx.multi_use`), `mf` the pre-order ordinals of the
+// `for` nodes whose iterable may move (`ctx.movable_for_iterables`), and `fo` the
+// ordinal the next rendered `for` takes; all three are empty outside a module fn.
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str], flb: Map[Str, List[Int]], lp: Map[Str, Str], ft: Map[Str, Str], mu: Map[Str, Str], mf: List[Int], fo: Int }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
 // the same type tables); paired with the type-NAME set for `rust_type`.
-type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str] }
+type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], ft: Map[Str, Str] }
 // A statement-emission result: the lines produced AND the threaded ctx, since
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
 // is visible to every later statement (the reference mutates one `ctx` in place).
@@ -549,15 +553,19 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
-  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
 }
 // Swap in a fresh rename map (the component-capture scope for one render).
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
-  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
 }
 // Swap in a fresh var_types map (a provide-method seeds params/map-bindings).
 fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
-  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
+  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
+}
+// Advance the `for` ordinal (the next rendered `for` takes `fo`).
+fn set_fo(ctx: Ctx, fo: Int) -> Ctx {
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: fo }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -577,12 +585,15 @@ fn build_type_tables(types: Any) -> TypeTables {
   var cp: Map[Str, Str] = Map.empty()
   var rbf: Map[Str, Str] = Map.empty()
   var tn: Map[Str, Str] = Map.empty()
+  var ft: Map[Str, Str] = Map.empty()
   for (name of value_keys(types)) {
     tn = tn.set(name, "1")
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
     if (kind == "record") {
-      let key = sorted_key(value_keys(value_field(spec, "fields")))
+      let fields = value_field(spec, "fields")
+      for (f of value_keys(fields)) { ft = ft.set(`${name}.${f}`, value_str(value_field(fields, f))) }
+      let key = sorted_key(value_keys(fields))
       if (rbf.has(key)) { rbf = rbf.set(key, "<<AMBIG>>") } else { rbf = rbf.set(key, name) }
     }
     if (kind == "variant") {
@@ -595,7 +606,7 @@ fn build_type_tables(types: Any) -> TypeTables {
       }
     }
   }
-  return { ca: ca, cp: cp, rbf: rbf, tn: tn }
+  return { ca: ca, cp: cp, rbf: rbf, tn: tn, ft: ft }
 }
 
 // `_V3Ctx.record_type_for_fields`: a record literal's nominal struct type, from
@@ -824,6 +835,13 @@ fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
 fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
   let k = node_kind(node)
   if (k == "name" || k == "var" || k == "req") { return map_get(ctx.vt, ref_name(node)) }
+  if (k == "lit") {
+    // a bare `Int`/`Bool` literal is a Copy scalar, so a reused counter
+    // (`var i = 0`) is never cloned
+    let lv = value_field(node, "value")
+    if (value_kind(lv) == "bool") { return "Bool" }
+    if (value_kind(lv) == "int") { return "Int" }
+  }
   if (k == "adt") { return map_get(ctx.ca, value_str(value_field(node, "case"))) }
   if (k == "fn") { return map_get(ctx.fr, value_str(value_field(node, "name"))) }
   if (k == "call" && !value_is_null(value_field(node, "callee"))) {
@@ -835,8 +853,61 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
     }
   }
   if (k == "list") { return "List" }
+  if (k == "index") {
+    // a Map subscript answers the map's declared VALUE type (#957)
+    let vty = value_str(value_field(node, "value_type"))
+    if (vty != "") { return vty }
+    let inner = list_element_type(v3_infer_type(value_field(node, "target"), ctx))
+    if (inner != "") { return inner }
+  }
+  if (k == "field") {
+    let bty = v3_infer_type(value_field(node, "target"), ctx)
+    if (bty != "") {
+      let fty = map_get(ctx.ft, `${bty}.${value_str(value_field(node, "name"))}`)
+      if (fty != "") { return fty }
+    }
+  }
+  if (k == "record") {
+    // only a field set that names exactly one record
+    var names = []
+    for (f of value_list(value_field(node, "fields"))) { names = names.push(value_str(value_at(f, 0))) }
+    let rn = map_get(ctx.rbf, sorted_key(names))
+    if (resolved(rn)) { return rn }
+  }
+  if (k == "match") {
+    for (arm of value_list(value_field(node, "arms"))) {
+      let aty = v3_infer_type(value_field(arm, "body"), ctx)
+      if (aty != "") { return aty }
+    }
+  }
+  if (k == "builtin") {
+    let bt = builtin_return_type(node, ctx)
+    if (bt != "") { return bt }
+  }
   if (v3_is_str(node, ctx)) { return "Str" }
   if (v3_is_float(node)) { return "Float" }
+  return ""
+}
+
+// `_v3_builtin_return_type`: a stdlib method call's surface type, from the
+// method table (`_BUILTIN_RESULT`) or, for an `@self` row, the receiver's.
+fn builtin_return_type(node: Any, ctx: Ctx) -> Str {
+  let m = value_str(value_field(node, "method"))
+  if (m == "length" || m == "charCodeAt" || m == "codepoint_at" || m == "indexOf"
+      || m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
+      || m == "size") { return "Int" }
+  if (m == "charAt" || m == "join" || m == "repeat" || m == "str" || m == "to_str") { return "Str" }
+  if (m == "startsWith" || m == "endsWith" || m == "has" || m == "is_alnum"
+      || m == "is_digit" || m == "is_alpha" || m == "is_space") { return "Bool" }
+  if (m == "split" || m == "keys") { return "List[Str]" }
+  if (m == "to_int32") { return "Int32" }
+  if (m == "field") { return "Any" }
+  if (m == "list") { return "List[Any]" }
+  if (m == "checked_div_trunc" || m == "checked_div_floor" || m == "checked_div_euclid"
+      || m == "checked_mod") { return "Result[Int, Str]" }
+  if (m == "slice" || m == "concat" || m == "push" || m == "set" || m == "remove") {
+    return v3_infer_type(value_field(node, "target"), ctx)
+  }
   return ""
 }
 
@@ -948,34 +1019,224 @@ fn self_append_plus(target: Str, recv: Str, valnode: Any, ctx: Ctx) -> Str {
   return `${recv}.push_str(${borrow_str_arg(rn, render_expr(rn, ctx), ctx)});`
 }
 
+fn is_copy_type(ty: Str) -> Bool {
+  let head = strip_spaces(ty.split("[")[0])
+  return head == "Int" || head == "Bool" || head == "Float"
+}
+
+// `_by_value_field_clone`: `<rendered>.clone()` when a by-value use is a field
+// read `root.f1.f2..` whose ROOT binding the body reuses (`ctx.multi_use`), so
+// moving the field out would strand the later use (E0382). The field type is
+// followed down the declared record fields; only a field known to be Copy is
+// left bare. "" is the reference's `None` (let the caller decide).
+fn by_value_field_clone(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  if (node_kind(arg_node) != "field") { return "" }
+  var chain: List[Str] = []
+  var cur = arg_node
+  while (node_kind(cur) == "field") {
+    chain = chain.push(value_str(value_field(cur, "name")))
+    cur = value_field(cur, "target")
+  }
+  let root = ref_node_ident(cur)
+  if (root == "" || !ctx.mu.has(root)) { return "" }
+  var ty = map_get(ctx.vt, root)
+  var i = chain.length() - 1
+  while (i >= 0) {
+    if (ty != "") { ty = map_get(ctx.ft, `${ty}.${chain[i]}`) }
+    i = i - 1
+  }
+  if (ty != "" && is_copy_type(ty)) { return "" }
+  return `${rendered}.clone()`
+}
+
 // `_by_value_arg`: wrap a by-value free-function/constructor argument so the call
 // cannot consume a value the caller still needs (E0382). A bare non-Copy variable
 // is `.clone()`d; a function-typed one is passed `&`; Copy scalars and fresh
-// temporaries pass through.
+// temporaries pass through. A name whose type is unknown clones only when the
+// body reuses it.
 fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let fc = by_value_field_clone(arg_node, rendered, ctx)
+  if (fc != "") { return fc }
   let name = ref_name(arg_node)
   if (name == "") { return rendered }
   if (ctx.bp.has(name)) { return `${rendered}.to_string()` }
   let ty = map_get(ctx.vt, name)
-  if (ty == "") { return rendered }
-  if (is_fn_type(ty)) { return "&".concat(rendered) }
-  let head = strip_spaces(ty.split("[")[0])
-  if (head == "Int" || head == "Bool" || head == "Float") { return rendered }
-  return rendered.concat(".clone()")
+  if (ty != "") {
+    if (is_fn_type(ty)) { return "&".concat(rendered) }
+    if (is_copy_type(ty)) { return rendered }
+    return rendered.concat(".clone()")
+  }
+  if (ctx.mu.has(name)) { return rendered.concat(".clone()") }
+  return rendered
 }
 
-// `_by_value_reuse`: the clone for a position that moves ONLY on reuse — a
-// host/builtin method argument. The reference clones a binding the body READS
-// AGAIN (`ctx.multi_use`), and `multi_use` is populated in exactly one place:
-// the free-function pass. A component's `_V3Ctx` is a fresh object, so at the
-// component surface — the only surface this port calls it from — `multi_use` is
-// empty, the Copy test is unreachable, and the only live arm is the borrowed
-// `&str` param safety net.
-fn by_value_reuse(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
-  let name = ref_name(arg_node)
+// `_by_value_tail`: a bare name in a position that moves only on reuse (an
+// `if`-expression branch, a `let` value, a `for` iterable) clones when the body
+// reads it again and it is not known to be Copy.
+fn by_value_tail(node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let name = ref_name(node)
   if (name == "") { return rendered }
-  if (ctx.bp.has(name)) { return rendered.concat(".to_string()") }
+  if (ctx.bp.has(name)) { return `${rendered}.to_string()` }
+  let ty = map_get(ctx.vt, name)
+  if (ty != "" && is_copy_type(ty)) { return rendered }
+  if (ctx.mu.has(name)) { return rendered.concat(".clone()") }
   return rendered
+}
+
+// `_by_value_reuse`: a `match` scrutinee, a list element, a builtin or host
+// method argument. The field rule first, then the tail rule. Outside a module
+// fn `mu` is empty, so only the borrowed-`&str` safety net can fire there.
+fn by_value_reuse(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let fc = by_value_field_clone(arg_node, rendered, ctx)
+  if (fc != "") { return fc }
+  return by_value_tail(arg_node, rendered, ctx)
+}
+
+// --------------------------------------------------- the reuse analysis
+//
+// `_body_multi_use`, `_loop_repeated_reads` and `_movable_for_iterables`: run
+// once per module fn over its body, before it renders.
+
+// The identifier a reference node (`var`/`name`/`req`) names, else "" for any
+// other node (`ref_ident` below answers for a node its caller already checked).
+fn ref_node_ident(node: Any) -> Str {
+  let k = node_kind(node)
+  if (k != "var" && k != "name" && k != "req") { return "" }
+  let idv = value_str(value_field(node, "id"))
+  if (idv != "") { return idv }
+  return value_str(value_field(node, "name"))
+}
+
+// Every reference in a subtree, one entry per textual use.
+fn subtree_refs(node: Any) -> List[Str] {
+  var out: List[Str] = []
+  if (value_kind(node) == "record") {
+    let id = ref_node_ident(node)
+    if (id != "") { out = out.push(id) }
+    for (k of value_keys(node)) { out = out.concat(subtree_refs(value_field(node, k))) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { out = out.concat(subtree_refs(item)) }
+  }
+  return out
+}
+
+fn ref_counts(node: Any) -> Map[Str, Int] {
+  var m: Map[Str, Int] = Map.empty()
+  for (r of subtree_refs(node)) { m = m.set(r, (m.lookup(r) ?? 0) + 1) }
+  return m
+}
+
+// `_decl_site_names`: the names one node DECLARES. A statement spells them in
+// a fixed field (`assign` declares nothing); an arrow declares its params and a
+// match arm its `bind`.
+fn decl_site_names(node: Any) -> List[Str] {
+  let step = value_str(value_field(node, "step"))
+  var keys: List[Str] = []
+  if (step != "") {
+    if (step == "let") { keys = ["name"] }
+    if (step == "for" || step == "let-effect") { keys = ["bind"] }
+    if (step == "let_pattern") { keys = ["names", "rest"] }
+  } else {
+    if (node_kind(node) == "arrow") { keys = ["params"] }
+    else { if (str_in(value_keys(node), "pattern")) { keys = ["bind"] } }
+  }
+  var out: List[Str] = []
+  for (key of keys) {
+    let v = value_field(node, key)
+    if (value_kind(v) == "str") { out = out.push(value_str(v)) }
+    if (value_kind(v) == "list") {
+      for (n of value_list(v)) { if (value_kind(n) == "str") { out = out.push(value_str(n)) } }
+    }
+  }
+  return out
+}
+
+fn subtree_decls(node: Any) -> List[Str] {
+  var out: List[Str] = []
+  if (value_kind(node) == "record") {
+    out = out.concat(decl_site_names(node))
+    for (k of value_keys(node)) { out = out.concat(subtree_decls(value_field(node, k))) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { out = out.concat(subtree_decls(item)) }
+  }
+  return out
+}
+
+// `_loop_repeated_reads`: a name read inside a `while`/`for` frame runs more
+// than once, so it is a reuse even when spelled once (issue #1157), unless the
+// frame itself binds it. A `for` iterable runs once, outside its own frame.
+fn loop_repeated_reads(node: Any) -> List[Str] {
+  var out: List[Str] = []
+  if (value_kind(node) == "record") {
+    let step = value_str(value_field(node, "step"))
+    if (step == "while" || step == "for") {
+      var reads: List[Str] = []
+      var bound: List[Str] = []
+      if (step == "for" && value_kind(value_field(node, "bind")) == "str") {
+        bound = bound.push(value_str(value_field(node, "bind")))
+      }
+      for (k of value_keys(node)) {
+        if (k != "iterable") {
+          reads = reads.concat(subtree_refs(value_field(node, k)))
+          bound = bound.concat(subtree_decls(value_field(node, k)))
+        }
+      }
+      for (r of reads) { if (!str_in(bound, r) && !str_in(out, r)) { out = out.push(r) } }
+    }
+    for (k of value_keys(node)) { out = out.concat(loop_repeated_reads(value_field(node, k))) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { out = out.concat(loop_repeated_reads(item)) }
+  }
+  return out
+}
+
+// `ctx.multi_use`: referenced more than once, or read inside a loop frame.
+fn reused_names(body: List[Any]) -> Map[Str, Str] {
+  var mu: Map[Str, Str] = Map.empty()
+  let counts = ref_counts(body)
+  for (k of counts.keys()) { if ((counts.lookup(k) ?? 0) > 1) { mu = mu.set(k, "1") } }
+  for (r of loop_repeated_reads(body)) { mu = mu.set(r, "1") }
+  return mu
+}
+
+// `_movable_for_iterables` (item 437f): a reused bare-name `for` iterable MOVES
+// instead of cloning when the loop is not nested in a loop or an arrow and
+// every other reference to the name precedes it in pre-order. The reference
+// keys the answer by node identity; this port numbers the `for` nodes in the
+// same pre-order and `v3_stmt` counts them off as it renders.
+type MovSt = { seen: Map[Str, Int], ord: Int, mov: List[Int] }
+
+fn movable_walk(node: Any, depth: Int, total: Map[Str, Int], mu: Map[Str, Str], st: MovSt) -> MovSt {
+  var s = st
+  if (value_kind(node) == "record") {
+    let id = ref_node_ident(node)
+    if (id != "") { s = { seen: s.seen.set(id, (s.seen.lookup(id) ?? 0) + 1), ord: s.ord, mov: s.mov } }
+    let step = value_str(value_field(node, "step"))
+    if (step == "for") {
+      let name = ref_node_ident(value_field(node, "iterable"))
+      var mov = s.mov
+      if (name != "" && mu.has(name) && depth == 0
+          && (s.seen.lookup(name) ?? 0) + 1 == (total.lookup(name) ?? 0)) {
+        mov = mov.push(s.ord)
+      }
+      s = { seen: s.seen, ord: s.ord + 1, mov: mov }
+    }
+    var inner = depth
+    if (step == "while" || step == "for" || node_kind(node) == "arrow") { inner = depth + 1 }
+    for (k of value_keys(node)) { s = movable_walk(value_field(node, k), inner, total, mu, s) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { s = movable_walk(item, depth, total, mu, s) }
+  }
+  return s
+}
+
+fn movable_for_iterables(body: List[Any], mu: Map[Str, Str]) -> List[Int] {
+  let st = movable_walk(body, 0, ref_counts(body), mu, { seen: Map.empty(), ord: 0, mov: [] })
+  return st.mov
 }
 
 fn str_readonly_arg_builtin(method: Str) -> Bool {
@@ -1257,12 +1518,6 @@ fn call_arg(callee: Str, index: Int, node: Any, rendered: Str, ctx: Ctx) -> Str 
   return by_value_arg(node, rendered, ctx)
 }
 
-fn owned_borrowed_tail(node: Any, ctx: Ctx) -> Str {
-  let rendered = render_expr(node, ctx)
-  if (ctx.bp.has(ref_name(node))) { return `${rendered}.to_string()` }
-  return rendered
-}
-
 // -------------------------------------------------------------- expressions
 // `_V3Ctx.constructor`: a user variant case -> `Enum::Case` / `Enum::Case(arg)`
 // (the case name is used RAW, as the reference does — not mangled), else the
@@ -1454,7 +1709,13 @@ fn render_call(node: Any, ctx: Ctx) -> Str {
   var callee_name = ""
   if (ckind == "var") { callee_name = value_str(value_field(callee_node, "name")) }
   if (callee_name != "" && (is_builtin_ctor(callee_name) || ctx.ca.has(callee_name))) {
-    return constructor(ctx, callee_name, arg_exprs)
+    var cargs = []
+    var ci = 0
+    while (ci < arg_nodes.length()) {
+      cargs = cargs.push(by_value_arg(arg_nodes[ci], arg_exprs[ci], ctx))
+      ci = ci + 1
+    }
+    return constructor(ctx, callee_name, cargs)
   }
   var callee = render_expr(callee_node, ctx)
   if (!is_atomic(ckind)) { callee = `(${callee})` }
@@ -1476,7 +1737,7 @@ fn render_index(node: Any, ctx: Ctx) -> Str {
 
 fn render_list(node: Any, ctx: Ctx) -> Str {
   var parts = []
-  for (it of value_list(value_field(node, "items"))) { parts = parts.push(owned_borrowed_tail(it, ctx)) }
+  for (it of value_list(value_field(node, "items"))) { parts = parts.push(by_value_reuse(it, render_expr(it, ctx), ctx)) }
   return "vec![".concat(parts.join(", ")).concat("]")
 }
 
@@ -1503,7 +1764,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     ps = ps.push(param)
     i = i + 1
   }
-  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp }
+  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
   return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), inner)} }`
 }
 
@@ -1552,7 +1813,8 @@ fn render_record(node: Any, ctx: Ctx) -> Str {
 // a fixed `    ` prefix and the enclosing `_v3_stmt` only pads the first line);
 // an unmatched `_` gets `unreachable!()` unless an arm already wilds.
 fn render_match(node: Any, ctx: Ctx) -> Str {
-  let scrut = render_expr(value_field(node, "scrutinee"), ctx)
+  let snode = value_field(node, "scrutinee")
+  let scrut = by_value_reuse(snode, render_expr(snode, ctx), ctx)
   let arms = value_list(value_field(node, "arms"))
   var lines = [`match ${scrut} {`]
   var hasWild = false
@@ -1652,7 +1914,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   }
   if (kind == "adt") {
     var aa = []
-    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx)) }
+    for (a of value_list(value_field(node, "args"))) { aa = aa.push(by_value_arg(a, render_expr(a, ctx), ctx)) }
     return constructor(ctx, value_str(value_field(node, "case")), aa)
   }
   if (kind == "bin") { return render_bin(node, ctx) }
@@ -1663,7 +1925,9 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   if (kind == "match") { return render_match(node, ctx) }
   if (kind == "index") { return render_index(node, ctx) }
   if (kind == "if") {
-    return `if ${render_expr(value_field(node, "cond"), ctx)} { ${owned_borrowed_tail(value_field(node, "then"), ctx)} } else { ${owned_borrowed_tail(value_field(node, "else"), ctx)} }`
+    let tn = value_field(node, "then")
+    let en = value_field(node, "else")
+    return `if ${render_expr(value_field(node, "cond"), ctx)} { ${by_value_tail(tn, render_expr(tn, ctx), ctx)} } else { ${by_value_tail(en, render_expr(en, ctx), ctx)} }`
   }
   if (kind == "list") { return render_list(node, ctx) }
   if (kind == "maplit") { return "std::collections::HashMap::new()" }
@@ -1736,9 +2000,7 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
   var rendered = []
   for (a of args) {
     var r = render_expr(a, ctx)
-    if (method != "lookup" && method != "has" && method != "remove" && ctx.bp.has(ref_name(a))) {
-      r = `${r}.to_string()`
-    }
+    if (method != "lookup" && method != "has" && method != "remove") { r = by_value_reuse(a, r, ctx) }
     rendered = rendered.push(r)
   }
   if (method == "checked_div_trunc" || method == "checked_div_floor" || method == "checked_div_euclid" || method == "checked_mod") {
@@ -1999,7 +2261,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     let nm = mangle(raw)
     let valnode = value_field(node, "value")
     let inferred = v3_infer_type(valnode, ctx)
-    let value = render_expr(valnode, ctx)
+    let value = by_value_tail(valnode, render_expr(valnode, ctx), ctx)
     var nctx = ctx
     if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
     var out = []
@@ -2051,9 +2313,11 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     let iterable_node = value_field(node, "iterable")
     let iterable_type = v3_infer_type(iterable_node, ctx)
     let element_type = list_element_type(iterable_type)
-    var loop_ctx = ctx
-    if (element_type != "") { loop_ctx = set_vt(ctx, value_str(value_field(node, "bind")), element_type) }
-    var out = [line(indent, `for ${bind} in ${render_expr(iterable_node, ctx)} {`)]
+    var iterable = render_expr(iterable_node, ctx)
+    if (ctx.mf.indexOf(ctx.fo) < 0) { iterable = by_value_tail(iterable_node, iterable, ctx) }
+    var loop_ctx = set_fo(ctx, ctx.fo + 1)
+    if (element_type != "") { loop_ctx = set_vt(loop_ctx, value_str(value_field(node, "bind")), element_type) }
+    var out = [line(indent, `for ${bind} in ${iterable} {`)]
     let bodyR = emit_stmts(value_list(value_field(node, "body")), loop_ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
@@ -2105,7 +2369,7 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
       ps = ps.push(`${mangle(pname)}: ${ptype}`)
       i = i + 1
     }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp, ft: tables.ft, mu: reused_names(body), mf: movable_for_iterables(body, reused_names(body)), fo: 0 }
     var returns = "()"
     if (!value_is_null(value_field(fnode, "returns"))) {
       returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
@@ -2691,6 +2955,158 @@ fn tests_use_advance(ir: Any) -> Bool {
     }
   }
   return false
+}
+
+// `_revl_teardown_preamble`: the three-entry-kind teardown loop's runtime
+// substrate (item 243 + the two-phase abort of docs/design/teardown-contract.md),
+// a literal block built on cordis-rs's public API. Emitted once per module that
+// `uses_teardown`.
+fn revl_teardown_preamble() -> List[Str] {
+  var o = []
+  o = o.push("/// item 243 / docs/design/teardown-contract.md: the per-activation")
+  o = o.push("/// three-entry-kind teardown accumulator (transactional + compensation).")
+  o = o.push("/// See `_revl_teardown_preamble` in the emitter for the design.")
+  o = o.push("struct RevlTeardown {")
+  o = o.push("    committed: std::sync::atomic::AtomicBool,")
+  o = o.push("    phase2: std::sync::Mutex<Vec<RevlPendingCompensation>>,")
+  o = o.push("    budget_ms: u64,")
+  o = o.push("    #[allow(dead_code)] // read for config-surface parity; see the")
+  o = o.push("    // preamble docstring — rust has no in-call preemption to bound with it.")
+  o = o.push("    per_call_ms: u64,")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("struct RevlPendingCompensation {")
+  o = o.push("    label: String,")
+  o = o.push("    call: Box<dyn FnOnce() + Send>,")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("fn revl_compensation_budget_ms() -> u64 {")
+  o = o.push("    std::env::var(\"REVL_COMPENSATION_BUDGET_MS\").ok()")
+  o = o.push("        .and_then(|v| v.parse::<u64>().ok())")
+  o = o.push("        .unwrap_or(5000)")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("fn revl_compensation_per_call_ms() -> u64 {")
+  o = o.push("    std::env::var(\"REVL_COMPENSATION_PER_CALL_MS\").ok()")
+  o = o.push("        .and_then(|v| v.parse::<u64>().ok())")
+  o = o.push("        .unwrap_or(1000)")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// item 324: the out-of-band abort registry — the faithful mirror of the")
+  o = o.push("/// py runtime's `_FRAME_BY_CTX` + `_sole_frame`. A session-level reject")
+  o = o.push("/// (item 245's explicit commit/abort UX) runs OUTSIDE the fiber and must")
+  o = o.push("/// reach an already-activated component's `RevlTeardown` to clear")
+  o = o.push("/// `committed`, so its next unload REPLAYS the per-tool-call (and")
+  o = o.push("/// activation-body) transactional inverses instead of discharging them.")
+  o = o.push("/// The state itself lives on the fiber's (private) extended context, which")
+  o = o.push("/// no out-of-fiber caller can reach — cordis-rs's `Context::extend` derives")
+  o = o.push("/// a child whose metadata the parent/fiber context cannot see — so this")
+  o = o.push("/// weak, label-keyed registry is the reach-in seam. Weak so a disposed")
+  o = o.push("/// activation's teardown is collected normally; the registry never keeps")
+  o = o.push("/// one alive.")
+  o = o.push("#[allow(clippy::type_complexity)]")
+  o = o.push("static REVL_TEARDOWN_REGISTRY: std::sync::OnceLock<")
+  o = o.push("    std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>>>")
+  o = o.push("    = std::sync::OnceLock::new();")
+  o = o.push("")
+  o = o.push("fn revl_teardown_registry()")
+  o = o.push("    -> &'static std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>> {")
+  o = o.push("    REVL_TEARDOWN_REGISTRY.get_or_init(|| std::sync::Mutex::new(Vec::new()))")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("fn revl_teardown_remember(label: &str, state: &std::sync::Arc<RevlTeardown>) {")
+  o = o.push("    revl_teardown_registry().lock().unwrap()")
+  o = o.push("        .push((label.to_string(), std::sync::Arc::downgrade(state)));")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Abort every live activation registered under `label`: clear `committed`")
+  o = o.push("/// so the next teardown REPLAYS its transactional inverses (py's")
+  o = o.push("/// `Frame.abort`). Idempotent; skips dead weak entries. The driver/harness")
+  o = o.push("/// calls this before unloading the fiber to reject the session's work.")
+  o = o.push("#[allow(dead_code)]")
+  o = o.push("fn revl_abort(label: &str) {")
+  o = o.push("    let registry = revl_teardown_registry().lock().unwrap();")
+  o = o.push("    for (entry_label, weak) in registry.iter() {")
+  o = o.push("        if entry_label == label {")
+  o = o.push("            if let Some(state) = weak.upgrade() {")
+  o = o.push("                state.committed.store(false, std::sync::atomic::Ordering::Release);")
+  o = o.push("            }")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Register the phase-2 drain hook FIRST — so cordis-rs's LIFO dispose")
+  o = o.push("/// runs it LAST, after every bracket/transactional inverse — and return")
+  o = o.push("/// the shared accumulator plus a `Context` extended to carry it, so a")
+  o = o.push("/// provide-method on this same fiber can recover it later via")
+  o = o.push("/// `revl_teardown_of`.")
+  o = o.push("fn revl_teardown_begin(ctx: &cordis::Context, label: &str)")
+  o = o.push("    -> cordis::Result<(cordis::Context, std::sync::Arc<RevlTeardown>)> {")
+  o = o.push("    let state = std::sync::Arc::new(RevlTeardown {")
+  o = o.push("        committed: std::sync::atomic::AtomicBool::new(false),")
+  o = o.push("        phase2: std::sync::Mutex::new(Vec::new()),")
+  o = o.push("        budget_ms: revl_compensation_budget_ms(),")
+  o = o.push("        per_call_ms: revl_compensation_per_call_ms(),")
+  o = o.push("    });")
+  o = o.push("    let ctx = ctx.extend(\"_revl_teardown\", state.clone());")
+  o = o.push("    revl_teardown_remember(label, &state);  // item 324: out-of-band abort reach-in")
+  o = o.push("    let sentinel = state.clone();")
+  o = o.push("    ctx.effect(label.to_string(), move || {")
+  o = o.push("        if !sentinel.committed.load(std::sync::atomic::Ordering::Acquire) {")
+  o = o.push("            revl_drain_phase2(&sentinel);")
+  o = o.push("        }")
+  o = o.push("        Ok(())")
+  o = o.push("    })?;")
+  o = o.push("    Ok((ctx, state))")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// A provide-method's own recovery of its activation's teardown state")
+  o = o.push("/// (`self.ctx` is the same fiber `revl_teardown_begin` extended).")
+  o = o.push("fn revl_teardown_of(ctx: &cordis::Context) -> std::sync::Arc<RevlTeardown> {")
+  o = o.push("    (*ctx.metadata::<std::sync::Arc<RevlTeardown>>(\"_revl_teardown\")")
+  o = o.push("        .ok()")
+  o = o.push("        .flatten()")
+  o = o.push("        .expect(\"revl: teardown state missing — a compensated effect ran \\")
+  o = o.push("                outside an activation that registered one\"))")
+  o = o.push("        .clone()")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Phase 2: best-effort compensation replay, LIFO within itself (the")
+  o = o.push("/// queue already holds that order — see the preamble docstring), bounded")
+  o = o.push("/// by `REVL_COMPENSATION_BUDGET_MS` checked BETWEEN calls (rust has no")
+  o = o.push("/// in-call preemption of a synchronous compensation — see the rust row")
+  o = o.push("/// of docs/design/teardown-contract.md). A panicking compensation is")
+  o = o.push("/// caught (best-effort, never fails the abort) and logged; the loop")
+  o = o.push("/// continues to the next queued compensation either way.")
+  o = o.push("fn revl_drain_phase2(state: &RevlTeardown) {")
+  o = o.push("    let queued: Vec<RevlPendingCompensation> = {")
+  o = o.push("        let mut guard = state.phase2.lock().unwrap();")
+  o = o.push("        std::mem::take(&mut *guard)")
+  o = o.push("    };")
+  o = o.push("    if queued.is_empty() {")
+  o = o.push("        return;")
+  o = o.push("    }")
+  o = o.push("    let unbounded = state.budget_ms == 0;")
+  o = o.push("    let deadline = std::time::Instant::now()")
+  o = o.push("        + std::time::Duration::from_millis(state.budget_ms);")
+  o = o.push("    for pending in queued {")
+  o = o.push("        if !unbounded && std::time::Instant::now() >= deadline {")
+  o = o.push("            eprintln!(")
+  o = o.push("                \"revl: compensation {:?} skipped (deadline-expired, budget={}ms)\",")
+  o = o.push("                pending.label, state.budget_ms,")
+  o = o.push("            );")
+  o = o.push("            continue;")
+  o = o.push("        }")
+  o = o.push("        let label = pending.label;")
+  o = o.push("        let outcome = std::panic::catch_unwind(")
+  o = o.push("            std::panic::AssertUnwindSafe(pending.call));")
+  o = o.push("        if outcome.is_err() {")
+  o = o.push("            eprintln!(\"revl: compensation {:?} failed\", label);")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
 }
 
 // `_revl_timer_preamble`: the clock coeffect + timer scheduler (item 57), the
@@ -3916,6 +4332,22 @@ fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
       return render_expr(value_field(s0, "expr"), ctx)
     }
   }
+  return pure_stmts(steps, ctx, method_param_names(method)).join(" ")
+}
+
+fn method_param_names(method: Any) -> List[Str] {
+  var out: List[Str] = []
+  for (p of value_list(value_field(method, "params"))) { out = out.push(value_str(p)) }
+  return out
+}
+
+// `_rust_render_pure_stmts` (issue #548): a PURE provide-method step list as
+// Rust statement strings: bindings, assignments, `return`, and the control-flow
+// forms whose bodies are themselves pure. Shared by the pure-method path and
+// the effectful one, where a top-level `if`/`while`/`for` sits beside the
+// `emit`/`effect` steps. A `let` shadows an outer capture for the rest of its
+// list; an arm renders in a copy of the scope, so its bindings stay inside it.
+fn pure_stmts(steps: List[Any], ctx: Ctx, params: List[Str]) -> List[Str] {
   var parts = []
   var c = ctx
   for (step of steps) {
@@ -3928,20 +4360,60 @@ fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
       parts = parts.push(`let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
       c = cshadow
     } else {
-      if (kind == "assign") {
-        parts = parts.push(`${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), c)};`)
-      } else {
-        if (kind == "return") {
-          let e = value_field(step, "expr")
-          if (value_is_null(e)) { parts = parts.push("return;") }
-          else { parts = parts.push(`return ${render_expr(e, c)};`) }
-        } else {
-          parts = parts.push(`<<DEFER-method-step:${kind}>>`)
-        }
-      }
+      parts = parts.push(pure_stmt(step, kind, c, params))
     }
   }
-  return parts.join(" ")
+  return parts
+}
+
+// The scope an emission inside an arm renders its call in: each method param
+// cloned, so the call does not move a value the rest of the body reads.
+fn params_cloned(rn: Map[Str, Str], params: List[Str]) -> Map[Str, Str] {
+  var out = rn
+  for (p of params) { out = out.set(p, `${p}.clone()`) }
+  return out
+}
+
+fn pure_stmt(step: Any, kind: Str, c: Ctx, params: List[Str]) -> Str {
+  if (kind == "assign") {
+    return `${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), c)};`
+  }
+  if (kind == "return") {
+    let e = value_field(step, "expr")
+    if (value_is_null(e)) { return "return;" }
+    return `return ${render_expr(e, c)};`
+  }
+  if (kind == "if") {
+    let cond = render_expr(value_field(step, "cond"), c)
+    let then = pure_stmts(value_list(value_field(step, "then")), c, params).join(" ")
+    var out = `if ${cond} { ${then} }`
+    let els = value_list(value_field(step, "else"))
+    if (els.length() > 0) { out = out.concat(` else { ${pure_stmts(els, c, params).join(" ")} }`) }
+    return out
+  }
+  if (kind == "while") {
+    let cond = render_expr(value_field(step, "cond"), c)
+    return `while ${cond} { ${pure_stmts(value_list(value_field(step, "body")), c, params).join(" ")} }`
+  }
+  if (kind == "for") {
+    // `.iter().cloned()` yields owned elements without moving the iterable (a
+    // param or `self` field may be read again).
+    let bind = value_str(value_field(step, "bind"))
+    let inner = set_rn(c, c.rn.set(bind, mangle(bind)))
+    let iterable = render_expr(value_field(step, "iterable"), c)
+    let body = pure_stmts(value_list(value_field(step, "body")), inner, params).join(" ")
+    return `for ${mangle(bind)} in ${iterable}.iter().cloned() { ${body} }`
+  }
+  if (kind == "emit") {
+    // item 458 / issue #721: a bare `emit` inside an arm registers nothing, so
+    // it renders as the effectful renderer's bare emit, the method params
+    // cloned into the call. A conditional `emit ... compensate` is refused at
+    // lowering and never reaches here.
+    return `let _ = ${render_expr(value_field(step, "expr"), set_rn(c, params_cloned(c.rn, params)))};`
+  }
+  if (kind == "break") { return "break;" }
+  if (kind == "continue") { return "continue;" }
+  return `<<DEFER-method-step:${kind}>>`
 }
 
 // ------------------------------------------------------------ config (item 218)
@@ -3977,7 +4449,7 @@ fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, St
 }
 
 fn plain_ctx(tables: TypeTables, fr: Map[Str, Str]) -> Ctx {
-  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
+  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0 }
 }
 
 // `_map_value_expr_type`: best-effort SURFACE type of an expression. "" is the
@@ -4362,23 +4834,39 @@ fn emit_req_bindings(reqs: Any, indent: Int) -> List[Str] {
 }
 
 // -------------------------------------------- effectful method body (item 218)
+// `_iter_method_steps`: every step of a provide-method body, descending the
+// `if`/`while`/`for` arms issue #548 admits, so a bare `emit` inside an arm
+// (item 458) makes the method effectful.
+fn iter_method_steps(steps: List[Any]) -> List[Any] {
+  var out: List[Any] = []
+  for (step of steps) {
+    out = out.push(step)
+    let k = value_str(value_field(step, "step"))
+    if (k == "if") {
+      out = out.concat(iter_method_steps(value_list(value_field(step, "then"))))
+      out = out.concat(iter_method_steps(value_list(value_field(step, "else"))))
+    }
+    if (k == "while" || k == "for") { out = out.concat(iter_method_steps(value_list(value_field(step, "body")))) }
+  }
+  return out
+}
+
 fn component_has_effectful_methods(comp: Any) -> Bool {
   for (step of value_list(value_field(comp, "body"))) {
     if (value_str(value_field(step, "step")) == "provide") {
       for (method of value_list(value_field(step, "methods"))) {
-        for (bs of value_list(value_field(method, "body"))) {
-          let k = value_str(value_field(bs, "step"))
-          if (k == "effect" || k == "emit") { return true }
-        }
+        if (method_has_effectful_steps(method)) { return true }
       }
     }
   }
   return false
 }
+// `_RUST_EFFECTFUL_STEPS`: `effect`, `emit` and the method-body host CAS
+// `let-effect` (item 397).
 fn method_has_effectful_steps(method: Any) -> Bool {
-  for (bs of value_list(value_field(method, "body"))) {
+  for (bs of iter_method_steps(value_list(value_field(method, "body")))) {
     let k = value_str(value_field(bs, "step"))
-    if (k == "effect" || k == "emit") { return true }
+    if (k == "effect" || k == "emit" || k == "let-effect") { return true }
   }
   return false
 }
@@ -4561,25 +5049,34 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
         var undoR = method_undo_rename(comp, method)
         var acqR = scope
         for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
-        let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
-        var registers_undo = kind == "effect"
-        var undonode: Any = value_field(step, "undo")
         if (kind == "emit") {
-          undonode = value_field(step, "compensate")
-          if (!value_is_null(undonode)) { registers_undo = true }
-        }
-        var acqnode = value_field(step, "acquire")
-        if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
-        if (registers_undo) {
+          // the emission fires, then its `compensate` (item 247, the
+          // teardown-contract two-phase abort) is registered on the
+          // activation's accumulator, recovered through the same fiber's ctx:
+          // it discharges on commit and queues onto phase 2 on abort.
+          out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), set_rn(c, acqR))};`)
+          let cnode = value_field(step, "compensate")
+          if (!value_is_null(cnode)) {
+            out = out.concat(method_undo_clones(comp, method, indent))
+            for (local of undo_reclone_locals(value_field(step, "expr"), cnode, body_locals, c.vt)) {
+              out = out.push(`${pad}let ${local}_undo = ${local}.clone();`)
+              undoR = undoR.set(local, `${local}_undo`)
+            }
+            out = out.push(`${pad}let _revl_teardown = revl_teardown_of(&self.ctx);`)
+            out = out.concat(compensation_registration(cnode, c, undoR, `${name}.${mnm}.compensate.${num_str(index)}`, "self.ctx", false, indent))
+          }
+        } else {
+          let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
+          var acqnode = value_field(step, "acquire")
+          if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
           out = out.concat(method_undo_clones(comp, method, indent))
+          let undonode = value_field(step, "undo")
           for (local of undo_reclone_locals(acqnode, undonode, body_locals, c.vt)) {
             out = out.push(`${pad}let ${local}_undo = ${local}.clone();`)
             undoR = undoR.set(local, `${local}_undo`)
           }
-        }
-        let acq = render_expr(acqnode, set_rn(c, acqR))
-        out = out.push(`${pad}let _ = ${acq};`)
-        if (registers_undo) {
+          let acq = render_expr(acqnode, set_rn(c, acqR))
+          out = out.push(`${pad}let _ = ${acq};`)
           let undox = render_expr(undonode, set_rn(c, undoR))
           out = out.push(`${pad}let _ = self.ctx.effect(${label}, move || { ${undox}; Ok(()) });`)
         }
@@ -4607,7 +5104,13 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           if (inferred != "") { c = set_vt(c, nm, inferred) }
           if (kind == "let" && nm != "") { body_locals = body_locals.set(nm, "1") }
         } else {
-          out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
+          if (kind == "if" || kind == "while" || kind == "for" || kind == "break" || kind == "continue") {
+            // issue #548: a top-level control-flow step beside the effect/emit
+            // steps; its arms are pure, so the shared pure renderer writes it.
+            for (ln of pure_stmts([step], c, method_param_names(method))) { out = out.push(`${pad}${ln}`) }
+          } else {
+            out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
+          }
         }
       }
     }
@@ -4657,7 +5160,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     var ret = "()"
     let r = value_field(svc_method, "returns")
     if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty() }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0 }
     if (effectful && method_has_effectful_steps(method)) {
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
       let bl = method_body_lines(comp, method, services, ctx, 2)
@@ -4771,6 +5274,127 @@ fn witnessed_acquire(ir: Any, acq: Any) -> Bool {
   return false
 }
 
+// item 243 Slice 2b: the per-activation `RevlTeardown` accumulator. The
+// reference's `_component_needs_teardown` asks whether a component holds an
+// `emit ... compensate` in the activation body or in a provide method, or a
+// `witnessed` acquisition. A program with none emits byte-identically, with no
+// teardown runtime at all.
+//
+// Two of the reference's arms are not mirrored. A witnessed acquisition is not
+// ported, so neither is the accumulator it would open: in the activation body
+// the step is a `DEFER-*-witnessed` marker, and a provide method still lowers
+// one as a plain bracket (the reference's `_emit_method_witnessed_step`), a
+// divergence no corpus document reaches because none declares a witnessed
+// extern. And the reference walks a component `if` for a
+// compensation, but a component `if` is a guard that holds only `fail` (G6), so
+// no compensation can sit in one.
+fn body_has_compensation(steps: List[Any]) -> Bool {
+  for (s of steps) {
+    if (value_str(value_field(s, "step")) == "emit"
+        && !value_is_null(value_field(s, "compensate"))) { return true }
+  }
+  return false
+}
+
+fn component_needs_teardown(comp: Any) -> Bool {
+  let body = value_list(value_field(comp, "body"))
+  if (body_has_compensation(body)) { return true }
+  for (step of body) {
+    if (value_str(value_field(step, "step")) == "provide") {
+      for (m of value_list(value_field(step, "methods"))) {
+        if (body_has_compensation(value_list(value_field(m, "body")))) { return true }
+      }
+    }
+  }
+  return false
+}
+
+// `_uses_teardown`: gates `revl_teardown_preamble` for the whole module.
+fn uses_teardown(ir: Any) -> Bool {
+  for (comp of value_list(value_field(ir, "components"))) {
+    if (component_needs_teardown(comp)) { return true }
+  }
+  return false
+}
+
+// An emission extern that declares its own `compensate` (item 254, issue
+// #1592, the reference's non-empty `_compensated_table`) registers it at every
+// site its emission reaches. This port does not lower that, so a document
+// declaring one gets a marker in the module instead of a silent omission.
+fn declared_compensate_marker(ir: Any) -> List[Str] {
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "emission"
+        && !value_is_null(value_field(ext, "compensate"))) { return ["<<DEFER-declared-compensate>>"] }
+  }
+  return []
+}
+
+// The activation `let-effect` binds a run of steps adds, in emission order
+// (an `if` arm's included): the reference appends each to
+// `env.activation_binds` as it emits it, and a pure walk threads the same list.
+fn step_let_binds(steps: List[Any]) -> List[Str] {
+  var out: List[Str] = []
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "let-effect") { out = out.push(value_str(value_field(s, "bind"))) }
+    if (k == "if") {
+      out = out.concat(step_let_binds(value_list(value_field(s, "then"))))
+      out = out.concat(step_let_binds(value_list(value_field(s, "else"))))
+    }
+  }
+  return out
+}
+
+fn str_in(xs: List[Str], x: Str) -> Bool {
+  for (y of xs) { if (y == x) { return true } }
+  return false
+}
+
+// `sorted(referenced & set(activation_binds))`, deduplicated.
+fn sorted_common(xs: List[Str], ys: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  for (x of xs) { if (str_in(ys, x) && !str_in(out, x)) { out = out.push(x) } }
+  return list_sort(out)
+}
+
+// `_emit_compensation_registration`: wrap the compensate call in a boxed
+// `FnOnce` and register a disposer that discharges on commit or queues onto
+// the activation's phase-2 queue on abort. `propagate` is the activation
+// spelling (`ctx`, `?`); a provide method and a timer firing register
+// fire-and-forget through their own handle on the activation ctx.
+fn compensation_registration(node: Any, ctx: Ctx, rn: Map[Str, Str], label_text: Str,
+                             ctx_expr: Str, propagate: Bool, indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  let call = render_expr(node, set_rn(ctx, rn))
+  let label = string_lit(label_text)
+  var tail = ";"
+  var lead = "let _ = "
+  if (propagate) {
+    tail = "?;"
+    lead = ""
+  }
+  var o = []
+  o = o.push(`${pad}let _revl_state = _revl_teardown.clone();`)
+  o = o.push(`${pad}let _revl_call: Box<dyn FnOnce() + Send> = Box::new(move || { let _ = ${call}; });`)
+  o = o.push(`${pad}${lead}${ctx_expr}.effect(${label}, move || {`)
+  o = o.push(`${pad}    if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {`)
+  o = o.push(`${pad}        _revl_state.phase2.lock().unwrap().push(`)
+  o = o.push(`${pad}            RevlPendingCompensation { label: ${label}.to_string(), call: _revl_call });`)
+  o = o.push(`${pad}    }`)
+  o = o.push(`${pad}    Ok(())`)
+  o = o.push(`${pad}})${tail}`)
+  return o
+}
+
+// `_emit_teardown_begin`: open the accumulator before any user step registers
+// an effect. `_emit_teardown_commit`'s line, which flips `committed` right
+// before the activation reports success, is written at its two sites.
+fn teardown_begin(comp: Any) -> Str {
+  let label = string_lit(`${value_str(value_field(comp, "name"))}.teardown.phase2`)
+  return `            let (ctx, _revl_teardown) = revl_teardown_begin(&ctx, ${label})?;`
+}
+
+
 fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
                         map_values: Map[Str, Str], indent: Int) -> List[Str] {
   let pad = ind(indent)
@@ -4864,7 +5488,7 @@ fn count_timers(steps: List[Any]) -> Int {
 
 fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
                   map_values: Map[Str, Str], indent: Int, tbase: Int,
-                  sbase: Int) -> List[Str] {
+                  sbase: Int, abinds: List[Str]) -> List[Str] {
   let pad = ind(indent)
   let kind = value_str(value_field(step, "step"))
   let name = value_str(value_field(comp, "name"))
@@ -5050,7 +5674,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     // this discards the TYPED binding, which is the one the body reads.
     out = out.push(`${pad}            let _ = &${bind};`)
     for (nested of body) {
-      out = out.concat(emit_comp_step(comp, nested, ir, bodyctx, map_values, indent + 3, tbase, sbase))
+      out = out.concat(emit_comp_step(comp, nested, ir, bodyctx, map_values, indent + 3, tbase, sbase, abinds))
     }
     out = out.push(`${pad}        }`)
     out = out.push(`${pad}    }`)
@@ -5059,8 +5683,21 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   }
   if (kind == "emit") {
     out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), ctx)};`)
-    if (!value_is_null(value_field(step, "compensate"))) {
-      out = out.push(`${pad}<<DEFER-emit-compensate:${name}>>`)
+    let cnode = value_field(step, "compensate")
+    if (!value_is_null(cnode)) {
+      // `_emit_activation_compensation`: pre-clone every required service and
+      // every prior activation bind the compensate reads, so the `move`
+      // closure owns copies the forward emit cannot have moved.
+      var cR: Map[Str, Str] = Map.empty()
+      for (req of value_keys(value_field(comp, "requires"))) {
+        out = out.push(`${pad}let ${req}_comp = ${req}.clone();`)
+        cR = cR.set(req, `${req}_comp`)
+      }
+      for (local of sorted_common(expr_var_names(cnode, Map.empty()).keys(), abinds)) {
+        out = out.push(`${pad}let ${local}_comp = ${local}.clone();`)
+        cR = cR.set(local, `${local}_comp`)
+      }
+      out = out.concat(compensation_registration(cnode, ctx, cR, `${name}.compensate`, "ctx", true, indent))
     }
     return out
   }
@@ -5073,18 +5710,21 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     out = out.push(`${pad}if ${render_expr(value_field(step, "cond"), ctx)} {`)
     var tb = tbase
     var sb = sbase
+    var ab = abinds
     for (nested of value_list(value_field(step, "then"))) {
-      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb))
+      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb, ab))
       tb = tb + count_timers([nested])
       sb = sb + count_stream_events([nested])
+      ab = ab.concat(step_let_binds([nested]))
     }
     let alt = value_list(value_field(step, "else"))
     if (alt.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (nested of alt) {
-        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb))
+        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb, ab))
         tb = tb + count_timers([nested])
         sb = sb + count_stream_events([nested])
+        ab = ab.concat(step_let_binds([nested]))
       }
     }
     out = out.push(`${pad}}`)
@@ -5141,21 +5781,26 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.push(`        ${string_lit(name)},`)
   out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
   out = out.push(closure_open)
+  let teardown = component_needs_teardown(comp)
+  if (teardown) { out = out.push(teardown_begin(comp)) }
   out = out.concat(emit_config_application(comp, cty, 3))
   out = out.concat(emit_provide_config_local(comp, 3))
   out = out.concat(emit_req_bindings(reqs, 3))
   var tb = 0
   var sb = 0
+  var ab: List[Str] = []
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
-      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb, ab))
       tb = tb + count_timers([step])
       sb = sb + count_stream_events([step])
+      ab = ab.concat(step_let_binds([step]))
     }
   }
+  if (teardown) { out = out.push("            _revl_teardown.committed.store(true, std::sync::atomic::Ordering::Release);") }
   out = out.push("            Ok(cordis::PluginOutput::none())")
   out = out.push("        },")
   out = out.push("    )")
@@ -5188,7 +5833,6 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   let functions = value_list(value_field(ir, "functions"))
   let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
-  if (value_keys(value_field(comp, "intercept")).length() > 0) { out = out.push(`<<DEFER-intercept:${name}>>`) }
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(key)}`
@@ -5203,6 +5847,8 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     out = out.push("}")
     out = out.push("")
   }
+  let gate = intercept_inject(comp, cname)
+  out = out.concat(gate.defs)
   // An `await` step colours the whole activation: cordis-rs drives the closure
   // as a real future through `plugin_async`, so the factory and the closure
   // header both change. The gate is per-COMPONENT — a component with no await
@@ -5216,23 +5862,28 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.push(`pub fn ${snk}() -> cordis::PluginHandle {`)
   out = out.push(plugin_open)
   out = out.push(`        ${string_lit(name)},`)
-  out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
+  out = out.push(`        cordis::${gate.inject},`)
   out = out.push(closure_open)
+  let teardown = component_needs_teardown(comp)
+  if (teardown) { out = out.push(teardown_begin(comp)) }
   out = out.concat(emit_config_application(comp, cty, 3))
   out = out.concat(emit_provide_config_local(comp, 3))
   out = out.concat(emit_req_bindings(reqs, 3))
   var tb = 0
   var sb = 0
+  var ab: List[Str] = []
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
-      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb, ab))
       tb = tb + count_timers([step])
       sb = sb + count_stream_events([step])
+      ab = ab.concat(step_let_binds([step]))
     }
   }
+  if (teardown) { out = out.push("            _revl_teardown.committed.store(true, std::sync::atomic::Ordering::Release);") }
   out = out.push("            Ok(cordis::PluginOutput::none())")
   out = out.push("        },")
   out = out.push("    )")
@@ -5244,6 +5895,117 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
 // `_emit_component_auto`: a component with NO isolate/intercept and NO effectful
 // method routes to the simple `_emit_component`; anything else routes to
 // `_emit_component_new`.
+// `_intercept_json_type` / `_intercept_json_lit`: an `intercept` key's
+// metadata as a concrete Rust value. cordis-rs has no serde_json dependency, so
+// a record becomes a generated `#[derive(Clone)] struct` (named
+// `<base>Intercept<n>`, a nested record's base being its parent struct) and a
+// list a `Vec<T>`. The reference caches a record's struct by object identity;
+// both passes walk the same tree, so this port keys the cache by the record's
+// path in it instead. Struct definitions land in `defs` children first.
+type IcSt = { defs: List[Str], names: Map[Str, Str], counter: Int }
+type IcRes = { text: Str, st: IcSt }
+
+fn ic_type(v: Any, base: Str, path: Str, st: IcSt) -> IcRes {
+  let k = value_kind(v)
+  if (k == "record") {
+    let cached = map_get(st.names, path)
+    if (cached != "") { return { text: cached, st: st } }
+    let n = st.counter + 1
+    let name = `${base}Intercept${n.to_str()}`
+    var s = { defs: st.defs, names: st.names.set(path, name), counter: n }
+    var lines = ["#[derive(Clone)]", `struct ${name} {`]
+    for (key of value_keys(v)) {
+      let r = ic_type(value_field(v, key), name, `${path}/${key}`, s)
+      s = r.st
+      lines = lines.push(`    ${key}: ${r.text},`)
+    }
+    lines = lines.push("}")
+    return { text: name, st: { defs: s.defs.concat(lines).push(""), names: s.names, counter: s.counter } }
+  }
+  if (k == "list") {
+    let items = value_list(v)
+    if (items.length() == 0) { return { text: "Vec<()>", st: st } }
+    let first = ic_type(items[0], base, `${path}/0`, st)
+    var s = first.st
+    var i = 1
+    while (i < items.length()) {
+      let r = ic_type(items[i], base, `${path}/${i.to_str()}`, s)
+      s = r.st
+      // the reference refuses a heterogeneous array; this port names it
+      if (r.text != first.text) { return { text: "<<UNSUPPORTED-intercept-array>>", st: s } }
+      i = i + 1
+    }
+    return { text: `Vec<${first.text}>`, st: s }
+  }
+  if (k == "bool") { return { text: "bool", st: st } }
+  if (k == "int") { return { text: "i64", st: st } }
+  if (k == "float") { return { text: "f64", st: st } }
+  if (k == "null") { return { text: "()", st: st } }
+  return { text: "String", st: st }
+}
+
+fn ic_lit(v: Any, base: Str, path: Str, st: IcSt) -> IcRes {
+  let k = value_kind(v)
+  if (k == "record") {
+    let t = ic_type(v, base, path, st)
+    var s = t.st
+    var fields = []
+    for (key of value_keys(v)) {
+      let r = ic_lit(value_field(v, key), base, `${path}/${key}`, s)
+      s = r.st
+      fields = fields.push(`${key}: ${r.text}`)
+    }
+    return { text: `${t.text} { ${fields.join(", ")} }`, st: s }
+  }
+  if (k == "list") {
+    var s = st
+    var parts = []
+    var i = 0
+    for (item of value_list(v)) {
+      let r = ic_lit(item, base, `${path}/${i.to_str()}`, s)
+      s = r.st
+      parts = parts.push(r.text)
+      i = i + 1
+    }
+    return { text: `vec![${parts.join(", ")}]`, st: s }
+  }
+  if (k == "bool") {
+    if (value_bool(v)) { return { text: "true", st: st } }
+    return { text: "false", st: st }
+  }
+  if (k == "int") { return { text: `${num_str(v)}i64`, st: st } }
+  if (k == "float") { return { text: `${num_str(v)}f64`, st: st } }
+  if (k == "null") { return { text: "()", st: st } }
+  return { text: `String::from(${string_lit(v)})`, st: st }
+}
+
+// The plugin's `Inject` gate. A component that intercepts a requirement builds
+// it field by field, `.require_with(<key>, <metadata>)` for an intercepted key
+// and `.require(<key>)` for the rest, and the metadata's struct definitions
+// are emitted ahead of the plugin.
+type InjectR = { inject: Str, defs: List[Str] }
+
+fn intercept_inject(comp: Any, cname: Str) -> InjectR {
+  let reqs = value_field(comp, "requires")
+  let itc = value_field(comp, "intercept")
+  if (value_keys(itc).length() == 0) { return { inject: rust_inject(value_keys(reqs)), defs: [] } }
+  var inject = "Inject::none()"
+  var defs = []
+  for (local of value_keys(reqs)) {
+    if (str_in(value_keys(itc), local)) {
+      let base = `${cname}${camel(local)}`
+      let empty: IcSt = { defs: [], names: Map.empty(), counter: 0 }
+      let t = ic_type(value_field(itc, local), base, "", empty)
+      let l = ic_lit(value_field(itc, local), base, "", t.st)
+      defs = defs.concat(l.st.defs)
+      inject = inject.concat(`.require_with(${string_lit(local)}, ${l.text})`)
+    } else {
+      inject = inject.concat(`.require(${string_lit(local)})`)
+    }
+  }
+  return { inject: inject, defs: defs }
+}
+
 fn emit_component_auto(comp: Any, services: Any, ir: Any) -> List[Str] {
   let iso = value_keys(value_field(comp, "isolate")).length() > 0
   let itc = value_keys(value_field(comp, "intercept")).length() > 0
@@ -5251,6 +6013,17 @@ fn emit_component_auto(comp: Any, services: Any, ir: Any) -> List[Str] {
     return emit_component(comp, services, ir)
   }
   return emit_component_new(comp, services, ir)
+}
+
+// `xs` with the entry at `at` replaced by `v`.
+fn replaced_at(xs: List[Str], at: Int, v: Str) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  for (x of xs) {
+    if (i == at) { out = out.push(v) } else { out = out.push(x) }
+    i = i + 1
+  }
+  return out
 }
 
 // ---------------------------------------------------------------- the bridge
@@ -5401,15 +6174,22 @@ fn emit_bridge(ir: Any) -> List[Str] {
   let components = value_list(value_field(ir, "components"))
   let tables = build_type_tables(value_field(ir, "types"))
   let tnames = tables.tn
-  // provided: key -> service, over every comp's provisions (subset: no
-  // duplicate keys across components — that dedup is deferred).
-  var pkeys = []
-  var psvcs = []
+  // provided: key -> service, over every comp's provisions. A key two
+  // components provide (one per realm) is one entry, at its first position,
+  // naming the service its last provider declares (the reference's dict).
+  var pkeys: List[Str] = []
+  var psvcs: List[Str] = []
   for (comp of components) {
     let provs = value_field(comp, "provides")
     for (key of value_keys(provs)) {
-      pkeys = pkeys.push(key)
-      psvcs = psvcs.push(value_str(value_field(provs, key)))
+      let svc = value_str(value_field(provs, key))
+      let at = pkeys.indexOf(key)
+      if (at < 0) {
+        pkeys = pkeys.push(key)
+        psvcs = psvcs.push(svc)
+      } else {
+        psvcs = replaced_at(psvcs, at, svc)
+      }
     }
   }
   var out = bridge_rpc_preamble()
@@ -5785,6 +6565,8 @@ pub fn emit_rust_src(ir: Any) -> Str {
   }
   let components = value_list(value_field(ir, "components"))
   if (needs_realm_helper(components)) { out = out.concat(revl_realm_helper(components)) }
+  if (uses_teardown(ir)) { out = out.concat(revl_teardown_preamble()) }
+  out = out.concat(declared_compensate_marker(ir))
   for (comp of components) {
     out = out.concat(emit_component_auto(comp, services, ir))
   }
@@ -5822,7 +6604,10 @@ fn emit_v3_tests(tests: List[Any], functions: List[Any], externs: List[Any], fr:
       if (body.length() == 0) {
         out = out.push("    // (empty test body)")
       } else {
-        let ctx = { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty() }
+        // a test body is a function body: the same per-body reuse analysis the
+        // reference runs over it (issue #1157), with its own bindings
+        let mu = reused_names(body)
+        let ctx = { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: mu, mf: movable_for_iterables(body, mu), fo: 0 }
         out = out.concat(emit_stmts(body, ctx, 1).lines)
       }
       out = out.push("}")
@@ -5923,7 +6708,7 @@ test "constructor lowers user variants and built-ins" {
   cp = cp.set("Node", "y")
   ca = ca.set("Leaf", "Tree")
   cp = cp.set("Leaf", "n")
-  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: Map.empty(), mu: Map.empty(), mf: [], fo: 0 }
   assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
   assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
   assert constructor(ctx, "Some", ["v"]) == "Some(v)"

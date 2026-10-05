@@ -1,0 +1,45 @@
+// item 391 (#106), held to byte agreement by tests/test_selfhost_emit_rust.py:
+// `intercept` metadata on a requirement, and the bridge tables over a key two
+// realms provide. selfhost/emit_rust.rvl named an intercepting component with
+// a `DEFER-intercept` marker and listed a twice-provided key twice.
+//
+//   - `Front` intercepts one of its two requirements: its `Inject` gate is
+//     built key by key, `.require_with` for `db` and `.require` for `log`;
+//   - the metadata holds every literal shape the surface admits (a string, an
+//     int, a float, both bools, an empty list and a list of scalars) in one
+//     generated struct;
+//   - `StoreA` and `StoreB` both provide `db`, one per realm, after `Logger`
+//     provides `log`, so the bridge's provided-key tables carry `db` once, in
+//     its first position.
+
+service Db { fn q() -> Int }
+service Log { fn line(s: Str) -> Int }
+service Api { fn run() -> Int }
+
+component Logger provides log: Log {
+  provide log { fn line(s) = 0 }
+}
+
+component StoreA provides db: Db {
+  isolate db in realm("a")
+  provide db { fn q() = 1 }
+}
+
+component StoreB provides db: Db {
+  isolate db in realm("b")
+  provide db { fn q() = 2 }
+}
+
+component Front requires db: Db, log: Log provides api: Api {
+  isolate db in realm("a")
+  intercept db with {
+    tag: "primary",
+    tier: 2,
+    weight: 0.5,
+    strict: true,
+    quiet: false,
+    extra: [],
+    zones: ["eu", "us"]
+  }
+  provide api { fn run() = 0 }
+}
