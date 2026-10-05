@@ -223,6 +223,9 @@
       ]
     },
     "unported": {
+      "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method runs its body under `catch_unwind` in a `RevlUiScope`, each computer-use crossing through `revl_ui_cross`. emit_rust.rvl carries no UI transaction unit (the self-host gap of issue #1972). The corpus has no computer-use document with @rs bodies. The runtime proof is backends/rust/test_ui_transaction_rust_1369.py.": [
+        "key=<activation>"
+      ],
       "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
         "secret=<true>",
         "secret_return=<true>"
