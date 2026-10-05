@@ -63,6 +63,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from ._paths import relpath_or_abs
 from .attest import _canonical_bytes
 
 BUNDLE_KIND = "revl.pool-bundle"
@@ -303,7 +304,9 @@ def bundle_name(given: str, cwd: Optional[Path] = None) -> str:
     :func:`path_problem` afterwards, so ``../x.rvl`` stays ``../x.rvl`` and is
     refused rather than quietly rewritten."""
     base = str(cwd) if cwd is not None else os.getcwd()
-    name = os.path.relpath(os.path.abspath(os.path.join(base, given)), base)
+    # on another Windows drive there is no relative name: keep the absolute
+    # one, which path_problem refuses (issue #1944)
+    name = relpath_or_abs(os.path.abspath(os.path.join(base, given)), base)
     return PurePosixPath(*Path(name).parts).as_posix()
 
 

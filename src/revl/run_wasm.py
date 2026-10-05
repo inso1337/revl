@@ -55,7 +55,7 @@ import tempfile
 from pathlib import Path
 
 from ._once_proof import SPEC_FLAG, OnceProof
-from ._paths import backends_root
+from ._paths import backends_root, venv_python
 from .errors import RevlError
 from .refusal import refusals
 from .wal import WAL_GUARANTEE
@@ -161,7 +161,7 @@ def _cordis_wasm_python() -> str | None:
     override = os.environ.get("REVL_CORDIS_WASM_PYTHON")
     if override and Path(override).exists():
         return override
-    venv = _cordis_wasm_dir() / ".venv" / "bin" / "python"
+    venv = venv_python(_cordis_wasm_dir() / ".venv")
     return str(venv) if venv.exists() else None
 
 
