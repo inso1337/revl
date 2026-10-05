@@ -13,10 +13,10 @@ The verb set, in the order the parser declares it:
 compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
-quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
-dev  recover  act  estop  slo  branch  compare  replay  why  metrics
-trace  profile  pool  attest  dash  repair  bundle  emit  verify  deploy
-deploy-admit  truc
+quarantine  analyze  test  mcp  gen-types  import  export  sourcemap
+serve  run  dev  recover  act  estop  slo  branch  compare  replay  why
+metrics  trace  profile  pool  attest  dash  repair  bundle  emit
+verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -1957,6 +1957,20 @@ write-ahead log and declared undos apply at call time.
   `--allow-host`, `--allow-origin` - serve the gated tools over HTTP, one
   operator per request, as for `revl mcp serve`.
 - `--profile-settle-ms MS` - as for `revl mcp serve`.
+
+### `revl gen-types`
+
+Turn a typed model document (entities, fields, relations, identity keys,
+labels, locale) into revl source: a key type and a record type per entity and
+one service signature, with the model's sha256 in the header. The compiler
+refuses the generated file once the model no longer has that digest
+([gen-types.md](gen-types.md), issue #1896).
+
+- `model` - the model document, JSON with `revl_model: 1` (required).
+- `-o`, `--output PATH` - output path (default: stdout). The header names the
+  model relative to this file's directory, so the model must be there or below.
+- `--json-diagnostics` - on rejection, print a structured diagnostic instead of
+  the human rendering.
 
 ### `revl import`
 

@@ -458,6 +458,7 @@ IR_TOPLEVEL_FIELDS = frozenset({
     "fault_tests",    # lowered fault-injection tests
     "holes",          # the obligation ledger (present only for a draft)
     "stdlib_shadow",  # item 422: a shadowed stdlib module, when one was used
+    "generated_from",  # issue #1896: each gen-types file's model digest
     "rows",           # item 426 S1: the composition row table, emitted onto the
                       # document and copied onto the manifest, so it re-enters
                       # the frontend at the S3 admit round-trip
