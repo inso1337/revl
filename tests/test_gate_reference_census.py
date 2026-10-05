@@ -336,7 +336,7 @@ def test_every_service_local_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(APPROVAL_SERVICE_LOCALS.glob("*.rvl"))
-    assert len(docs) == 18, f"the service-local corpus has {len(docs)} documents"
+    assert len(docs) == 21, f"the service-local corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))
@@ -358,7 +358,7 @@ def test_every_receiver_expression_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(SERVICE_RECEIVER_EXPRESSIONS.glob("*.rvl"))
-    assert len(docs) == 18, f"the receiver-expression corpus has {len(docs)} documents"
+    assert len(docs) == 22, f"the receiver-expression corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))
