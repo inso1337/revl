@@ -873,6 +873,16 @@ def test_the_frontier_mirror_matches_the_rust(census):
         "1" for _ in range(generator.MAX_LEVEL_ITEMS + 1))
     assert len(flat) < generator.MAX_SOURCE_BYTES // 10
     assert scan(flat) is not None
+    # a reserved capability namespace is a gap
+    # (`a_reserved_capability_namespace_is_a_gap`). The mirror lacked this arm
+    # until the corpus gained a computer-use document (issue #1369), when the
+    # cheap engine said no-objection where the crate declined.
+    if tables["capability_roots"]:
+        root = tables["capability_roots"][0]
+        assert scan(f"extern emission[{root}.click] fn c(t: Str) = @py {{ pass }}") \
+            is not None
+        # a root not followed by `.` is an ordinary word
+        assert scan(f"fn {root}(x: Int) -> Int {{ return x }}") is None
 
 
 def test_every_sibling_tool_is_loaded_relative_to_this_tool():

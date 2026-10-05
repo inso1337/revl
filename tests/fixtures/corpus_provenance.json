@@ -927,6 +927,7 @@
    "tests/fixtures/emit_py_corpus/type_aliases.rvl",
    "tests/fixtures/emit_py_corpus/type_aliases_control.rvl",
    "tests/fixtures/emit_py_corpus/types.rvl",
+   "tests/fixtures/emit_py_corpus/ui_unit.rvl",
    "tests/fixtures/emit_py_corpus/value_accessors.rvl",
    "tests/fixtures/emit_py_corpus/variant_multiline.rvl",
    "tests/fixtures/emit_py_corpus/witnessed.rvl",

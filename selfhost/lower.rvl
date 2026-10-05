@@ -20611,12 +20611,138 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
   return mk_irres(false, "")
 }
 
+// ---- the UI transaction unit (issue #1369) --------------------------------
+//
+// lower.py `_crosses_computer_use`: a provide method whose body crosses a
+// computer-use verb carries `"unit": "ui"` after its `body`, the key absent
+// otherwise. The verb table is `ui_family.ROOTS`, the two reserved roots of
+// the closed computer-use capability namespace; a token is a computer-use
+// crossing when its first dotted segment is one of them (`screen.observe`,
+// `ui.click`, a deeper rung such as `ui.click.pixel`).
+//
+// The reference reads the method's capability set, the one the G4 provider
+// upper bound reads: what its `emit` steps and the functions it calls reach.
+// Read here at the token level: the `extern emission[…]` declarations whose
+// scope names a computer-use token, closed over the module `fn`s that call one
+// of them, and then whether the method's body calls any name in that set. A
+// call through a required key contributes the key, not the providing method's
+// verbs, so neither side marks it.
+fn cu_roots() -> List[Str] { return ["screen", "ui"] }
+
+fn cu_token(cap: Str) -> Bool {
+  return contains(cu_roots(), cap.split(".")[0])
+}
+
+fn cu_any(caps: List[Str]) -> Bool {
+  for (c of caps) { if (cu_token(c)) { return true } }
+  return false
+}
+
+// The externs whose declared emission scope names a computer-use token.
+fn cu_externs(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var i = 0
+  while (i < ts.length()) {
+    if (atk(ts, i, "{")) {
+      depth += 1
+    } else if (atk(ts, i, "}")) {
+      depth -= 1
+    } else if (depth == 0 && atw(ts, i, "extern")) {
+      var j = i + 1
+      var cu = false
+      while (j < ts.length() && !atw(ts, j, "fn") && !atk(ts, j, "eof")) {
+        if (atk(ts, j, "[")) {
+          let cl = cap_list_at(ts, j, ts.length())
+          if (cu_any(cl.xs)) { cu = true }
+          j = cl.i
+        } else {
+          j += 1
+        }
+      }
+      if (cu && atk(ts, j + 1, "ident")) { out = out.push(tkc(ts, j + 1).text) }
+    }
+    i += 1
+  }
+  return out
+}
+
+// Whether the tokens in [lo, hi) call a name in `names` (a bare call, not a
+// method call through a receiver).
+fn cu_calls(ts: List[Token], lo: Int, hi: Int, names: List[Str]) -> Bool {
+  var i = lo
+  while (i < hi) {
+    if (atk(ts, i, "ident") && atk(ts, i + 1, "(") && !atk(ts, i - 1, ".")
+        && contains(names, tkc(ts, i).text)) {
+      return true
+    }
+    i += 1
+  }
+  return false
+}
+
+// One pass over the top-level `fn`s: the set grown by every fn whose body
+// calls a member.
+fn cu_grow(ts: List[Token], names: List[Str]) -> List[Str] {
+  var out = names
+  var depth = 0
+  var i = 0
+  while (i < ts.length()) {
+    if (atk(ts, i, "{")) {
+      depth += 1
+      i += 1
+    } else if (atk(ts, i, "}")) {
+      depth -= 1
+      i += 1
+    } else if (depth == 0 && atw(ts, i, "extern")) {
+      // an extern's `fn` has no revl body to read: step past its name
+      var j = i + 1
+      while (j < ts.length() && !atw(ts, j, "fn") && !atk(ts, j, "eof")) { j += 1 }
+      i = j + 2
+    } else if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")) {
+      let nm = tkc(ts, i + 1).text
+      var k = i + 2
+      while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "=")
+             && !atk(ts, k, "eof")) { k += 1 }
+      if (!atk(ts, k, "{")) {
+        i = k
+      } else {
+        let e = close_brace(ts, k)
+        if (e == 0 - 1) { return out }
+        if (!contains(out, nm) && cu_calls(ts, k + 1, e, out)) { out = out.push(nm) }
+        i = e
+      }
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
+fn cu_close(ts: List[Token], names: List[Str]) -> List[Str] {
+  let grown = cu_grow(ts, names)
+  return grown.length() == names.length() ? names : cu_close(ts, grown)
+}
+
+// Every name whose call crosses a computer-use verb: [] for a program that
+// declares none, which is every program but a computer-use one.
+fn cu_names(ts: List[Token]) -> List[Str] {
+  let seed = cu_externs(ts)
+  return seed.length() == 0 ? seed : cu_close(ts, seed)
+}
+
+// The `, "unit": "ui"` suffix of a method entry whose body [lo, hi) calls one.
+fn cu_unit(ts: List[Token], lo: Int, hi: Int, names: List[Str]) -> Str {
+  if (names.length() == 0 || !cu_calls(ts, lo, hi, names)) { return "" }
+  return ", \"unit\": \"ui\""
+}
+
 // A `provide <key> { … }` method table -> `[{name, params, body}]`. The method's
 // parameters are the surface names; their TYPES come from the provided
 // service's declaration (`svc`, A6), which is what a `match` in the body needs
 // to stamp its arms' `payload_type`. The shorthand `= expr` becomes a single
 // `return`.
-fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], svc: Str, acc: Str) -> IrRes {
+fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], svc: Str, cu: List[Str], acc: Str) -> IrRes {
   if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
   // item 219 async coloring. `async fn <m>(…)` is the SAME method entry as the
   // sync spelling: the reference lowers a provide method to `{name, params,
@@ -20650,9 +20776,10 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
     if (!be.ok) { return mk_irres(false, "") }
     let bj = cir_widen(be.js, mret, infer(r.e, cenv_ir(cx, bsc)))
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
-      .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(bj).concat("}]}")
+      .concat("], \"body\": [{\"step\": \"return\", \"expr\": ").concat(bj).concat("}]")
+      .concat(cu_unit(ts, h + 1, r.i, cu)).concat("}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-    return cir_prov_methods(ts, r.i, end, cx, sc, hostSc, svc, nacc)
+    return cir_prov_methods(ts, r.i, end, cx, sc, hostSc, svc, cu, nacc)
   }
   if (atk(ts, h, "{")) {
     let bend = close_brace(ts, h)
@@ -20662,9 +20789,10 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
                               hostSc, "")
     if (!br.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
-      .concat("], \"body\": [").concat(br.js).concat("]}")
+      .concat("], \"body\": [").concat(br.js).concat("]")
+      .concat(cu_unit(ts, h + 1, bend, cu)).concat("}")
     let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-    return cir_prov_methods(ts, bend, end, cx, sc, hostSc, svc, nacc)
+    return cir_prov_methods(ts, bend, end, cx, sc, hostSc, svc, cu, nacc)
   }
   return mk_irres(false, "")
 }
@@ -20844,7 +20972,8 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let pend = close_brace(ts, i + 2)
     if (pend == 0 - 1) { return mk_irres(false, "") }
     let svc = bind_lookup(provs, key, 0)
-    let ms = cir_prov_methods(ts, i + 3, pend - 1, cx, sc, hostSc, svc, "")
+    let ms = cir_prov_methods(ts, i + 3, pend - 1, cx, sc, hostSc, svc,
+                              cu_names(ts), "")
     if (!ms.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"provide\", \"name\": ".concat(jstr(key))
       .concat(", \"service\": ").concat(jstr(svc))
@@ -25899,6 +26028,23 @@ component Classifier provides out: Answer {
   provide out { fn classify(text) = text }
 }""")
   assert v == ""
+}
+
+test "a provide method is the ui unit only when it crosses a computer-use verb" {
+  let ui = lower_to_ir("""extern emission[ui.click] fn actuate(t: Str) = @py { return None }
+service D { emission fn act(t: Str) -> Int }
+component A provides d: D { provide d { fn act(t) {
+  emit actuate(t)
+  return 1
+} } }""")
+  assert ui.indexOf("\"unit\": \"ui\"") >= 0
+  let db = lower_to_ir("""extern emission[db.write] fn put(t: Str) = @py { return None }
+service D { emission fn act(t: Str) -> Int }
+component A provides d: D { provide d { fn act(t) {
+  emit put(t)
+  return 1
+} } }""")
+  assert db.indexOf("\"unit\"") == 0 - 1
 }
 
 test "a provision the running manifest already holds conflicts (ambient G2)" {
