@@ -1,0 +1,1103 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Ops": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "region",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        }
+      }
+    },
+    "TailOps": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "region",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    },
+    "AsyncOps": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "region",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true,
+          "async": true
+        }
+      }
+    },
+    "MixedOps": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "region",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "ui_transaction.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "region"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "pane1",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "amount",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane1"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Amount"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_amount",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "amount"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "10"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "pane2",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "memo",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane2"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Memo"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_memo",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "memo"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "m"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "pane3",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "approve",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane3"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Approve"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "actuate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "approve"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "pane4",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "checked",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane4"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Approve"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "pane5",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "note",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane5"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Note"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_note",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "note"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "n"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "pane6",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "receipt",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane6"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Attach"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "saved",
+                  "value": {
+                    "kind": "fn",
+                    "name": "fetch_receipt",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "receipt"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                }
+              ],
+              "unit": "ui"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "TailAgent",
+      "source": "ui_transaction.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "tail": "TailOps"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "tail",
+          "service": "TailOps",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "region"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "pane",
+                  "value": {
+                    "kind": "fn",
+                    "name": "read_pane",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "amount",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Amount"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_amount",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "amount"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "10"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "approve",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "pane"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Approve"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "actuate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "approve"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "unit": "ui"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "AsyncAgent",
+      "source": "ui_transaction.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "async_ops": "AsyncOps"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "async_ops",
+          "service": "AsyncOps",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "region"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "amount",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate_async",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Amount"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_amount",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "amount"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "10"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "approve",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate_async",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Approve"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "actuate_async",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "approve"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                }
+              ],
+              "unit": "ui"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Mixed",
+      "source": "ui_transaction.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "mixed": "MixedOps"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "mixed",
+          "service": "MixedOps",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "region"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "fn",
+                    "name": "mark",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "a"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "n",
+                  "value": {
+                    "kind": "fn",
+                    "name": "put_row",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "p"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "target",
+                  "value": {
+                    "kind": "fn",
+                    "name": "locate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "region"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "Amount"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "type_amount",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "target"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "10"
+                      }
+                    ]
+                  },
+                  "compensate": {
+                    "kind": "fn",
+                    "name": "clear_note",
+                    "args": []
+                  }
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "actuate",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "target"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "unit": "ui"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "ui_transaction.rvl",
+        "inject": [],
+        "provides": [
+          "ops"
+        ]
+      },
+      {
+        "name": "TailAgent",
+        "file": "ui_transaction.rvl",
+        "inject": [],
+        "provides": [
+          "tail"
+        ]
+      },
+      {
+        "name": "AsyncAgent",
+        "file": "ui_transaction.rvl",
+        "inject": [],
+        "provides": [
+          "async_ops"
+        ]
+      },
+      {
+        "name": "Mixed",
+        "file": "ui_transaction.rvl",
+        "inject": [],
+        "provides": [
+          "mixed"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent",
+      "TailAgent",
+      "AsyncAgent",
+      "Mixed"
+    ]
+  },
+  "types": {
+    "UiTarget": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "application": "Str",
+        "window": "Str",
+        "role": "Str",
+        "name": "Str",
+        "evidence": "Str",
+        "action": "Str",
+        "session": "Str",
+        "bounds": "Str",
+        "expiry": "Int",
+        "confirm": "Bool"
+      }
+    },
+    "Mark": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "line": "Str"
+      }
+    },
+    "MarkError": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "code": "Str"
+      }
+    }
+  },
+  "externs": [
+    {
+      "name": "read_pane",
+      "class": "emission",
+      "params": [
+        {
+          "name": "region",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "go": "\n\tuiStep(\"observe\")\n\treturn \"pane\"\n"
+      },
+      "capabilities": [
+        "screen.observe"
+      ]
+    },
+    {
+      "name": "locate",
+      "class": "emission",
+      "params": [
+        {
+          "name": "pane",
+          "type": "Str"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        }
+      ],
+      "returns": "UiTarget",
+      "bodies": {
+        "go": "\n\tuiStep(\"locate:\" + name)\n\treturn UiTarget{Application: \"Billing\", Name: name}\n"
+      },
+      "capabilities": [
+        "ui.find"
+      ]
+    },
+    {
+      "name": "clear_amount",
+      "class": "pure",
+      "params": [],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiStep(\"compensate:clear_amount\")\n"
+      }
+    },
+    {
+      "name": "clear_memo",
+      "class": "pure",
+      "params": [],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiCompensate(\"compensate:clear_memo\")\n"
+      }
+    },
+    {
+      "name": "clear_note",
+      "class": "pure",
+      "params": [],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiStep(\"compensate:clear_note\")\n"
+      }
+    },
+    {
+      "name": "type_amount",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        },
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiStep(\"type_amount\")\n"
+      },
+      "capabilities": [
+        "ui.text"
+      ],
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "clear_amount"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "type_memo",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        },
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiStep(\"type_memo\")\n"
+      },
+      "capabilities": [
+        "ui.text"
+      ],
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "clear_memo"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "actuate",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiStep(\"actuate\")\n"
+      },
+      "capabilities": [
+        "ui.click"
+      ]
+    },
+    {
+      "name": "type_note",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        },
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiStep(\"type_note\")\n"
+      },
+      "capabilities": [
+        "ui.text"
+      ],
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "clear_note"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "fetch_receipt",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "go": "\n\tuiStep(\"fetch_receipt\")\n\treturn \"receipt\"\n"
+      },
+      "capabilities": [
+        "ui.download"
+      ]
+    },
+    {
+      "name": "locate_async",
+      "class": "emission",
+      "params": [
+        {
+          "name": "pane",
+          "type": "Str"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        }
+      ],
+      "returns": "UiTarget",
+      "bodies": {
+        "go": "\n\tuiStep(\"locate:\" + name)\n\treturn UiTarget{Application: \"Billing\", Name: name}\n"
+      },
+      "async": true,
+      "capabilities": [
+        "ui.find"
+      ]
+    },
+    {
+      "name": "actuate_async",
+      "class": "emission",
+      "params": [
+        {
+          "name": "target",
+          "type": "UiTarget"
+        }
+      ],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiStep(\"actuate\")\n"
+      },
+      "async": true,
+      "capabilities": [
+        "ui.click"
+      ]
+    },
+    {
+      "name": "unmark",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Mark"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\tuiStep(\"undo:\" + w.Line)\n\treturn\n"
+      }
+    },
+    {
+      "name": "mark",
+      "class": "witnessed",
+      "params": [
+        {
+          "name": "line",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Mark, MarkError]",
+      "bodies": {
+        "go": "\n\tuiStep(\"mark:\" + line)\n\treturn RevlOk[Mark, MarkError]{Value: Mark{Line: line}}\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Mark",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unmark"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "restore_row",
+      "class": "pure",
+      "params": [],
+      "returns": null,
+      "bodies": {
+        "go": "\n\tuiStep(\"compensate:restore_row\")\n"
+      }
+    },
+    {
+      "name": "put_row",
+      "class": "emission",
+      "params": [
+        {
+          "name": "body",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\tuiStep(\"put:\" + body)\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "restore_row"
+        },
+        "args": []
+      }
+    }
+  ],
+  "tests": [
+    {
+      "name": "clean unload of an un-called agent leaves no residue",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "Agent",
+          "config": {}
+        },
+        {
+          "step": "unload",
+          "component": "Agent"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    }
+  ]
+}
