@@ -5234,6 +5234,15 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # lands.
             record("out-of-fragment-inverse" if formal_clean
                    else "formal-found-other", rel)
+        elif code == "G4" and category == "witnessed":
+            # A witnessed extern called with a site `undo` (issue #1963,
+            # `lower._lower_effect_step`) carries the G4 code, but it is not
+            # the marker rule either: it asks whether the call site spells an
+            # inverse the witnessed extern already declares, and the model has
+            # no witnessed-extern fact. Absence of fact, ratcheted by name as
+            # the host release rule is, until the model grows the fact.
+            record("out-of-fragment-witnessed" if formal_clean
+                   else "formal-found-other", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -5445,7 +5454,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # about a specific row that exists, and that is the claim worth pinning.
 OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
 OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
-                       "out-of-fragment-inverse")
+                       "out-of-fragment-inverse", "out-of-fragment-witnessed")
 OOF_LEDGER_ABOUT = [
     "The corpus files the checker refuses G5, G6 or with a G4 inverse",
     "rule (the host release, a provide-method write's inverse), and the",
@@ -5460,6 +5469,9 @@ OOF_LEDGER_ABOUT = [
     "#1812, when binding uniqueness became `RevL.G6Binding` (the `BU`",
     "row). Both buckets stay, so a new unresolvable `undo` or a new G6",
     "purity refusal still reds the gate.)",
+    "`out-of-fragment-witnessed` (issue #1963) holds the files the checker",
+    "refuses for a witnessed extern called with a site `undo`: the model",
+    "has no witnessed-extern fact yet.",
     "",
     "Each bucket records an absence, so none can disagree with anything",
     "and none could fail the gate on its own (issue #1169). This ledger",

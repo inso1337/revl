@@ -4887,7 +4887,7 @@ fn emit_req_bindings(reqs: Any, indent: Int) -> List[Str] {
   var out = []
   for (local of value_keys(reqs)) {
     let svc = require_ty(value_str(value_field(reqs, local)))
-    out = out.push(`${pad}let ${local} = ctx.require::<Box<dyn ${svc}>>(${string_lit(local)})?;`)
+    out = out.push(`${pad}let ${mangle(local)} = ctx.require::<Box<dyn ${svc}>>(${string_lit(local)})?;`)
   }
   return out
 }
@@ -4964,11 +4964,13 @@ fn is_stream_next(comp: Any, expr: Any) -> Bool {
 // value-held bind (issues #1920, #1931) is a clone.
 fn method_scope_rename(comp: Any, services: Any, ctx: Ctx) -> Map[Str, Str] {
   var rn: Map[Str, Str] = Map.empty()
+  // a key or bind that is a Rust keyword is captured under its mangled name,
+  // the one its field and its local carry (issue #1927)
   for (b of binds(comp)) {
-    if (held_bind_type(comp, b, services, ctx) != "") { rn = rn.set(b, `self.${b}.clone()`) }
-    else { rn = rn.set(b, `self.${b}`) }
+    if (held_bind_type(comp, b, services, ctx) != "") { rn = rn.set(b, `self.${mangle(b)}.clone()`) }
+    else { rn = rn.set(b, `self.${mangle(b)}`) }
   }
-  for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `self.${req}`) }
+  for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `self.${mangle(req)}`) }
   if (has_config(comp)) { rn = rn.set("config", "self.config") }
   return rn
 }
@@ -4982,8 +4984,8 @@ fn method_undo_rename(comp: Any, method: Any) -> Map[Str, Str] {
 fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
   let pad = ind(indent)
   var out = []
-  for (b of binds(comp)) { out = out.push(`${pad}let ${b}_undo = self.${b}.clone();`) }
-  for (req of value_keys(value_field(comp, "requires"))) { out = out.push(`${pad}let ${req}_undo = self.${req}.clone();`) }
+  for (b of binds(comp)) { out = out.push(`${pad}let ${b}_undo = self.${mangle(b)}.clone();`) }
+  for (req of value_keys(value_field(comp, "requires"))) { out = out.push(`${pad}let ${req}_undo = self.${mangle(req)}.clone();`) }
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
   return out
 }
@@ -5253,8 +5255,8 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
   let svc = value_str(value_field(step, "service"))
   let struct = `${name}${camel(key)}`
   var fields = []
-  for (b of binds(comp)) { fields = fields.push(`${mangle(b)}: ${b}.clone()`) }
-  for (local of value_keys(value_field(comp, "requires"))) { fields = fields.push(`${local}: ${local}.clone()`) }
+  for (b of binds(comp)) { fields = fields.push(`${mangle(b)}: ${mangle(b)}.clone()`) }
+  for (local of value_keys(value_field(comp, "requires"))) { fields = fields.push(`${mangle(local)}: ${mangle(local)}.clone()`) }
   fields = fields.concat(config_ctor_field(comp, key))
   if (effectful) { fields = fields.push("ctx: Arc::new(ctx.clone())") }
   var out = []
@@ -5496,7 +5498,7 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   var undoR: Map[Str, Str] = Map.empty()
   undoR = undoR.set(raw_bind, undo_name)
   for (req of value_keys(value_field(comp, "requires"))) {
-    out = out.push(`${pad}let ${req}_undo = ${req}.clone();`)
+    out = out.push(`${pad}let ${req}_undo = ${mangle(req)}.clone();`)
     undoR = undoR.set(req, `${req}_undo`)
   }
   let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
@@ -5576,7 +5578,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     let acq_src = render_expr(value_field(step, "acquire"), ctx)
     var undoR: Map[Str, Str] = Map.empty()
     for (req of value_keys(value_field(comp, "requires"))) {
-      out = out.push(`${pad}let ${req}_undo = ${req}.clone();`)
+      out = out.push(`${pad}let ${req}_undo = ${mangle(req)}.clone();`)
       undoR = undoR.set(req, `${req}_undo`)
     }
     let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
@@ -5628,7 +5630,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     // how `effect`/`let-effect` clone reqs into their undo closures.
     var tR: Map[Str, Str] = Map.empty()
     for (req of value_keys(value_field(comp, "requires"))) {
-      out = out.push(`${pad}let ${req}_t${n} = ${req}.clone();`)
+      out = out.push(`${pad}let ${req}_t${n} = ${mangle(req)}.clone();`)
       tR = tR.set(req, `${req}_t${n}`)
     }
     out = out.push(`${pad}let _revl_timer_${n} = ${schedule}(${interval}, move || {`)
@@ -5829,7 +5831,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
     for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr))},`) }
-    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${svc_ident(srv)} for ${struct} {`)
@@ -5909,7 +5911,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
     for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr))},`) }
-    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${mangle(local)}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")

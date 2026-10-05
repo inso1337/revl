@@ -1,0 +1,11 @@
+// T1 (issue #1963): the issue's own reproducer, a `verified` effect inside a
+// provide-method `if`. The control-flow rule decides it, not `verified`.
+service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      if (k == "a") {
+        verified effect store.insert(k, "1") undo store.remove(k)
+      }
+  } }
+}

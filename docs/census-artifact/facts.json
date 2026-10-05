@@ -9,7 +9,8 @@
   "admission:interface_empty_service",
   "admission:interface_one_service",
   "admission:interface_scalar_alias",
-  "admission:interface_two_services"
+  "admission:interface_two_services",
+  "tests/fixtures/effect_statement_rules/ok_arrow_method_declared.rvl"
  ],
  "mechanism": {
   "bucket": "false-admission",

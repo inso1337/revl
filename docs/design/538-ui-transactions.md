@@ -467,10 +467,15 @@ the actuations are. What revl owns and now runs is the order and the
 membership, which is section 3's `compensate` row.
 
 What is still not here. The unit is INFERRED from a method body that crosses a
-computer-use verb; there is no `transaction` construct an author writes. A
-declaration needs a new IR key, and the IR is built in `src/revl/lower.py`, so
-it is filed as the next step rather than folded into this one. The other five
-tiers have no unit. The unit writes no WAL record of its own: its entries are
+computer-use verb; there is no `transaction` construct an author writes, and
+issue #1369 decided there will not be one: a block could only split a method,
+which should then be its own method. The inference is now in the IR: the
+frontend marks such a method `"unit": "ui"` (docs/backend-ir.md), absent on
+every other method so other IR is byte-identical, and `selfhost/lower.rvl`
+computes the same mark, held to the reference on
+`tests/fixtures/emit_py_corpus/ui_unit.rvl`. The other five tiers have no unit
+yet; settling a failed call the way the python tier does is the next slice,
+typescript first. The unit writes no WAL record of its own: its entries are
 named in the discharge record a later commit writes, so a crash between the
 unit's run and the session's verdict leaves their descriptors open, and what
 `revl recover` then does with them was not measured.

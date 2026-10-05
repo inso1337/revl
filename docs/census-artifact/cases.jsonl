@@ -152,7 +152,7 @@
 
 ["demo/variants/pg_database.hotswap.rvl", "agree-refuse/G1"]
 
-["demo/variants/pg_database.rejected.rvl", "refuse-out-of-slice/G1"]
+["demo/variants/pg_database.rejected.rvl", "agree-refuse/G4"]
 
 ["dogfood/scratch-plain-test.rvl", "no-objection-out-of-slice"]
 
@@ -408,7 +408,7 @@
 
 ["examples/rejections/g4_method_write_not_inverse.rvl", "agree-refuse/G4"]
 
-["examples/rejections/g4_missing_undo.rvl", "no-objection-out-of-slice"]
+["examples/rejections/g4_missing_undo.rvl", "agree-refuse/G4"]
 
 ["examples/rejections/g4_nested_approval_emission.rvl", "agree-refuse/G4"]
 
@@ -756,6 +756,8 @@
 
 ["oracle-accept:a validated emission with a retry budget is read", "agree-admit"]
 
+["oracle-accept:a verified witnessed effect in a provide method", "agree-admit"]
+
 ["oracle-accept:a while(true) whose only break targets a nested loop", "agree-admit"]
 
 ["oracle-accept:a while(true) with no targeting break", "agree-admit"]
@@ -952,6 +954,10 @@
 
 ["oracle-reject:a key routed twice is refused (ROUTE)", "agree-refuse/ROUTE"]
 
+["oracle-reject:a let-bound verified call that is not an effect", "agree-refuse/T1"]
+
+["oracle-reject:a let-bound verified method effect on a witnessed extern", "agree-refuse/T1"]
+
 ["oracle-reject:a list transform whose free function nothing declares", "agree-refuse/G1"]
 
 ["oracle-reject:a literal zero divisor", "agree-refuse/TYPE"]
@@ -1015,6 +1021,8 @@
 ["oracle-reject:a validated emission does not swallow the next operation", "agree-refuse/G4"]
 
 ["oracle-reject:a validated emission with a retry budget does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:a verified method effect whose undo is on the next line", "agree-refuse/T1"]
 
 ["oracle-reject:a while(true) with a break targeting it", "agree-refuse/T1"]
 
@@ -1380,6 +1388,8 @@
 
 ["oracle-reject:v2 a method a Map value's stdlib surface does not name", "agree-refuse/T1"]
 
+["oracle-reject:verified emit in an activation body", "agree-refuse/T1"]
+
 ["selfhost/checker.rvl", "frontier-declined"]
 
 ["selfhost/compile.rvl", "no-objection-out-of-slice"]
@@ -1525,6 +1535,34 @@
 ["tests/fixtures/deferred_reach/ok_emit_tail.rvl", "agree-admit"]
 
 ["tests/fixtures/deferred_reach/ok_plain_value_in_fn_body.rvl", "agree-admit"]
+
+["tests/fixtures/effect_statement_rules/g1_arrow_method_next_line.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/effect_statement_rules/g4_effect_no_undo_activation.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/effect_statement_rules/g4_effect_no_undo_method.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/effect_statement_rules/g4_witnessed_site_undo_activation.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/effect_statement_rules/g4_witnessed_site_undo_method.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/effect_statement_rules/ok_arrow_method_declared.rvl", "agree-admit"]
+
+["tests/fixtures/effect_statement_rules/ok_emit_in_method_if.rvl", "agree-admit"]
+
+["tests/fixtures/effect_statement_rules/ok_method_effect_with_undo.rvl", "agree-admit"]
+
+["tests/fixtures/effect_statement_rules/ok_witnessed_effect_in_method.rvl", "agree-admit"]
+
+["tests/fixtures/effect_statement_rules/t1_effect_in_method_else.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/effect_statement_rules/t1_effect_in_method_if.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/effect_statement_rules/t1_effect_in_method_while.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/effect_statement_rules/t1_let_effect_in_method_for.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/effect_statement_rules/t1_verified_effect_in_method_if.rvl", "agree-refuse/T1"]
 
 ["tests/fixtures/embedded_frontend_document_1120.rvl", "agree-admit"]
 
@@ -1804,6 +1842,8 @@
 
 ["tests/fixtures/emit_py_corpus/types.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_corpus/ui_unit.rvl", "frontier-declined"]
+
 ["tests/fixtures/emit_py_corpus/value_accessors.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_py_corpus/variant_multiline.rvl", "agree-admit"]
@@ -1889,6 +1929,8 @@
 ["tests/fixtures/emit_rust_corpus/in_file_tests.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/intercept_metadata.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/keyword_keys.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/lengths.rvl", "agree-admit"]
 
@@ -2445,3 +2487,11 @@
 ["tests/fixtures/v2_math_lib.rvl", "agree-admit"]
 
 ["tests/fixtures/v2_math_main.rvl", "no-objection-out-of-slice"]
+
+["tests/fixtures/verified_method_effect/ok_witnessed.rvl", "agree-admit"]
+
+["tests/fixtures/verified_method_effect/t1_emit.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/verified_method_effect/t1_let_bound.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl", "agree-refuse/T1"]

@@ -180,3 +180,35 @@ def test_a_lifecycle_test_applies_the_batch_aborts_and_has_no_residue(tmp_path):
     assert run.returncode == 0, run.stdout + run.stderr
     assert "PASS a verified batch write reverts on abort" in run.stdout
     assert "PASS Store data.import_rows" in run.stdout
+
+
+# ------------------------------------------------ the gate corpus
+#
+# tests/fixtures/verified_method_effect/ is the corpus the gate census holds
+# by name (`t1_` refused, `ok_` admitted). This pins the reference's verdict
+# per document; tests/test_gate_reference_census.py holds the gate to it.
+
+CORPUS = ROOT / "tests" / "fixtures" / "verified_method_effect"
+_METHOD = ("`verified effect` in a provide-method body is only allowed on a "
+           "witnessed effect (issue #1897)")
+REFUSED = {
+    "t1_plain_site_undo": (8, _METHOD),
+    "t1_let_bound": (8, _METHOD),
+    "t1_emit": (7, "expected `effect` after `verified`, found 'emit'"),
+}
+
+
+def test_the_corpus_is_the_refusals_and_the_witnessed_admission():
+    assert sorted(p.stem for p in CORPUS.glob("*.rvl")) == sorted(
+        list(REFUSED) + ["ok_witnessed"])
+
+
+@pytest.mark.parametrize("stem", sorted(REFUSED))
+def test_the_reference_refuses_the_corpus_document(stem):
+    with pytest.raises(RevlError) as excinfo:
+        compile_source((CORPUS / f"{stem}.rvl").read_text(), f"{stem}.rvl")
+    assert (excinfo.value.line, excinfo.value.message) == REFUSED[stem]
+
+
+def test_the_reference_admits_the_witnessed_corpus_document():
+    assert compile_source((CORPUS / "ok_witnessed.rvl").read_text(), "ok.rvl")
