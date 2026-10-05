@@ -3,10 +3,15 @@
 // is per-(key, realm) (G2, paper Def. 43's "disjointness within a realm").
 // Each app also declares intercept metadata for its access (Def. 30),
 // consumed by the harness without touching provider or consumer.
+//
+// Each app's seed is undone by `kv.unset("who")`, which removes the key it
+// set. `kv.set("who", "")` would leave the key present and empty where it was
+// absent: not the inverse, and the teardown names it (issue #1945).
 
 service Kv {
   fn get(k: Str) -> Opt[Str]
   fn set(k: Str, v: Str)
+  fn unset(k: Str) -> Str
 }
 
 component TenantAStore provides kv: Kv {
@@ -18,6 +23,7 @@ component TenantAStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
@@ -30,17 +36,18 @@ component TenantBStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
   intercept kv with { quota: 5, tags: ["tenant_a"] }
-  effect kv.set("who", "alice") undo kv.set("who", "")
+  effect kv.set("who", "alice") undo kv.unset("who")
 }
 
 component TenantBApp requires kv: Kv {
   isolate kv in realm("tenant_b")
   intercept kv with { quota: 9, tags: ["tenant_b"] }
-  effect kv.set("who", "bob") undo kv.set("who", "")
+  effect kv.set("who", "bob") undo kv.unset("who")
 }

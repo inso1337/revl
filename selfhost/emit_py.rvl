@@ -2421,6 +2421,10 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     if (!value_is_null(wit)) { return witnessed_step(step, indent, wit, counter, true) }
     let fname = `_effect_${counter}`
     var out = [line(indent, `def ${fname}():`)]
+    // issue #1945: journal the host Map keys the forward write touches, so the
+    // `undo` is checked to reverse them when it runs (`Frame._guard` closes the
+    // journal at the yield), as the reference emit.py's `_method_step` does
+    out = out.push(line(indent + 1, "_revl_frame._journal_begin()"))
     out = out.push(line(indent + 1, cexpr(value_field(step, "acquire"))))
     // issue #321: a method-body effect's generator is adopted directly (it never
     // passes through `Frame._tracked`, the activation body's guard chokepoint), so
@@ -3163,6 +3167,8 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       return { lines: out.concat(e.lines).push(""), counter: e.counter }
     }
     let bind = mangle(value_str(value_field(step, "bind")))
+    // issue #1945: journal the host Map keys the bracket writes
+    out = out.push(line(indent, "_revl_frame._journal_begin()"))
     out = out.push(line(indent, `${bind} = ${await_prefix(step)}${cexpr(value_field(step, "acquire"))}`))
     let inv = cexpr(value_field(step, "undo"))
     if (is_map_cas(value_field(step, "acquire"))) {
@@ -3181,6 +3187,8 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       let e = witnessed_step(step, indent, wit, counter, false)
       return { lines: out.concat(e.lines).push(""), counter: e.counter }
     } else {
+      // issue #1945: journal the host Map keys the bracket writes
+      out = out.push(line(indent, "_revl_frame._journal_begin()"))
       out = out.push(line(indent, `${await_prefix(step)}${cexpr(value_field(step, "acquire"))}`))
       out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
     }

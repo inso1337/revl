@@ -9,6 +9,7 @@
 service Kv {
   fn get(k: Str, v: Str) -> Opt[Str]
   fn set(k: Str, v: Str)
+  fn unset(k: Str) -> Str
 }
 
 component TenantAStore provides kv: Kv {
@@ -21,6 +22,7 @@ component TenantAStore provides kv: Kv {
       return store.get(k)
     }
     fn set(k, v) = store.get(k)
+    fn unset(k) = store.remove(k)
   }
 }
 
@@ -33,12 +35,13 @@ component TenantBStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantBApp requires kv: Kv {
   isolate kv in realm("tenant_b")
-  effect kv.set("who", "B") undo kv.set("who", "")
+  effect kv.set("who", "B") undo kv.unset("who")
 }
 
 component TenantCStore provides kv: Kv {
@@ -50,15 +53,16 @@ component TenantCStore provides kv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantCApp requires kv: Kv {
   isolate kv in realm("tenant_c")
-  effect kv.set("who", "C") undo kv.set("who", "")
+  effect kv.set("who", "C") undo kv.unset("who")
 }
 
 component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
-  effect kv.set("who", "A") undo kv.set("who", "")
+  effect kv.set("who", "A") undo kv.unset("who")
 }

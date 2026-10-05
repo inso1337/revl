@@ -16,6 +16,7 @@
 service Kv {
   fn get(k: Str) -> Opt[Str]
   fn set(k: Str, v: Str)
+  fn unset(k: Str) -> Str
 }
 
 service Sealer {
@@ -44,12 +45,13 @@ component TenantAStore provides akv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantAApp requires akv: Kv {
   isolate akv in realm("tenant_a")
-  effect akv.set("who", "alice") undo akv.set("who", "")
+  effect akv.set("who", "alice") undo akv.unset("who")
 }
 
 component TenantBStore provides bkv: Kv {
@@ -61,10 +63,11 @@ component TenantBStore provides bkv: Kv {
       effect store.insert(k, v)
       undo   store.remove(k)
     }
+    fn unset(k) = store.remove(k)
   }
 }
 
 component TenantBApp requires bkv: Kv {
   isolate bkv in realm("tenant_b")
-  effect bkv.set("who", "bob") undo bkv.set("who", "")
+  effect bkv.set("who", "bob") undo bkv.unset("who")
 }

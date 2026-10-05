@@ -1978,6 +1978,8 @@ class _ComponentEmitter:
                 # next action in the same generator step, so registration is
                 # boundary-atomic with the acquisition (design §4 clause 1).
                 aw = "await " if step.get("async") else ""
+                # issue #1945: journal the host Map keys the bracket writes
+                out.add(indent, "_revl_frame._journal_begin()")
                 out.add(indent, f"{bind} = {aw}{self._expr(step.get('acquire'), where)}")
                 undo = self._expr(step.get('undo'), where)
                 if _is_map_cas(step.get("acquire")):
@@ -2006,6 +2008,8 @@ class _ComponentEmitter:
                 # item 131: an unbound async acquisition awaits before the
                 # inverse yield, same boundary-atomic shape as the bound form.
                 aw = "await " if step.get("async") else ""
+                # issue #1945: journal the host Map keys the bracket writes
+                out.add(indent, "_revl_frame._journal_begin()")
                 out.add(indent, f"{aw}{self._expr(step.get('acquire'), where)}")
                 out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
         elif kind == "fail":
@@ -3003,6 +3007,10 @@ class _ComponentEmitter:
                         f"outside the effect context.")
                 fn = f"_effect_{self._counter}"
                 out.add(indent, f"def {fn}():")
+                # issue #1945: journal the host Map keys the forward write
+                # touches, so the `undo` is checked to reverse them when it
+                # runs (`Frame._guard` closes the journal at the yield)
+                out.add(indent + 1, "_revl_frame._journal_begin()")
                 out.add(indent + 1, self._expr(acquire, where))
                 # issue #321: a method-body effect's generator is adopted
                 # directly (it never passes through `Frame._tracked`, the
