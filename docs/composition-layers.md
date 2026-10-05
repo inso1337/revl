@@ -246,6 +246,11 @@ composition Demo {
   granted key is typed as, because that is what the allowlist compares.
 - A row that requires a key its grant does not list is refused at resolution,
   naming the key.
+- The grant is key-precise: it covers the granted row's own component under
+  the keys it names, and nothing else (issue #1926). Another component in the
+  same source file that requires a granted service is refused, naming its key,
+  unless the turn provides that key itself. Two rows that read one file each
+  keep their own grant.
 - The grant is reach only. A granted row whose source declares host code is
   still refused by the profile; `--trust-host-code` is the separate, louder door
   for that.
