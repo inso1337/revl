@@ -1,0 +1,5 @@
+// issue #1942: a parenthesised Int written in place
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math { fn go(n) = (n + 1).frob(2) }
+}

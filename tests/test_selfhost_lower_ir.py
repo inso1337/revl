@@ -130,6 +130,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files, compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_py_corpus"
 
@@ -730,22 +731,22 @@ def test_native_ir_matches_provide_records_shapes(lower_to_ir, sig, method):
     "fn go(n) = [1, 2].map((x) => x + n).length",
     "fn go(n) { let ys = [n, 2].map((x) => x * 2) return n }",
     "fn go(n) = (n + 1).frob(2)",
-    # the receiver types off the required service's declared return
     "fn go(n) = geo.pts(n).map((x) => x + 1).length",
 ])
-def test_native_ir_lowers_a_method_call_on_an_in_place_receiver(lower_to_ir, method):
-    """Issue #1935: `cir_call` read a field callee only off a bare name, so a
-    method on a receiver written in place (a list literal, a parenthesised
-    expression, a service call) refused and the whole component `body` was
-    dropped. A non-builtin method there takes the reference's generic tail, a
-    `call` on the `field` read."""
+def test_native_ir_withholds_a_value_method_call_the_reference_refuses(
+        lower_to_ir, method):
+    """Issue #1942 (after #1935): a non-builtin method on a stdlib value
+    written in place is refused by the reference ("no builtin method `map` on
+    `List[Int]`"), so the native producer, which no longer lowers the generic
+    call on an in-place receiver, withholds the component `body` rather than
+    writing IR for a program the reference refuses."""
     source = ("service Geo { fn pts(n: Int) -> List[Int] } "
               "service Math { fn go(n: Int) -> Int } "
               f"component C requires geo: Geo provides math: Math {{ provide math {{ {method} }} }}")
-    native = json.loads(lower_to_ir(source))["components"][0]
-    reference = compile_source(source)["components"][0]
-    assert "body" in native
-    assert native["body"] == reference["body"]
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(source)
+    assert excinfo.value.message.startswith("no builtin method `")
+    assert "body" not in json.loads(lower_to_ir(source))["components"][0]
 
 
 @pytest.mark.parametrize("returns,body", [

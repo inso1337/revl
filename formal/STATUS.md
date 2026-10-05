@@ -1083,7 +1083,7 @@ with corpus work that never touched this layer.
 | `missed-G5` | 0 | **FATAL** |
 | `out-of-fragment` | printed by the gate | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
-| `out-of-fragment-G6` | 1 | ratcheted |
+| `out-of-fragment-G6` | 9 | ratcheted |
 | `out-of-fragment-approval` | 36 | ratcheted |
 | `out-of-fragment-inverse` | 1 | ratcheted |
 
@@ -1101,6 +1101,14 @@ buckets are:
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_match_arm.rvl`
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_record.rvl`
 - `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
+- `out-of-fragment-G6`: `tests/fixtures/value_method_call/t1_inplace_effect_arg.rvl`
+- `out-of-fragment-G6`: `tests/fixtures/value_method_call/t1_inplace_list.rvl`
+- `out-of-fragment-G6`: `tests/fixtures/value_method_call/t1_inplace_paren_int.rvl`
+- `out-of-fragment-G6`: `tests/fixtures/value_method_call/t1_inplace_req_result.rvl`
+- `out-of-fragment-G6`: `tests/fixtures/value_method_call/t1_inplace_str_call.rvl`
+- `out-of-fragment-G6`: `tests/fixtures/value_method_call/t1_named_int.rvl`
+- `out-of-fragment-G6`: `tests/fixtures/value_method_call/t1_named_list.rvl`
+- `out-of-fragment-G6`: `tests/fixtures/value_method_call/t1_named_map.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_method.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_other_edge.rvl`

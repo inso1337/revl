@@ -1,0 +1,10 @@
+// issue #1942: a named Map receiver, at its declared type
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math {
+    fn go(n) {
+      let m: Map[Str, Int] = Map.empty()
+      return m.frob()
+    }
+  }
+}

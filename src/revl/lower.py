@@ -33,7 +33,6 @@ from .typecheck import (
     FNS_KEY,
     PRINCIPAL,
     PRINCIPAL_PRODUCER_HINT,
-    _SIZED_HEADS,
     check_ast,
     refuse_self_declared_async,
     _mentions_async,
@@ -9417,20 +9416,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                         node["recv"] = recv_ty
                 return node
             if root in scope:
-                # A method on a local that is a *known* stdlib-bearing value
-                # (Str/List/Bytes) must be a builtin — builtins were already
-                # handled above, so a non-builtin here is a typo/misuse, not a
-                # host method. Receivers of unknown/host type infer to None and
-                # stay lenient (host provenance is exempt — docs/stdlib-2.0.md).
+                # A method on a local that is a *known* stdlib value must be a
+                # builtin — builtins were already handled above, so a
+                # non-builtin here is a typo/misuse, not a host method.
+                # Receivers of unknown/host type infer to None and stay lenient
+                # (host provenance is exempt — docs/stdlib-2.0.md).
                 recv_t = infer_ir({"kind": "name", "id": scope[root]},
                                   env.type_env, env.types, env.services)
-                if parse_type(recv_t)[0] in _SIZED_HEADS:
-                    raise RevlError(
-                        filename, line,
-                        f"no builtin method `{method}` on `{recv_t}` — the stdlib surface is "
-                        f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
-                        hint="records carry data, not methods; call functions as `f(x)` (G6)",
-                    )
+                _refuse_value_method(method, recv_t, filename, line)
                 _refuse_record_method(method, recv_t, env, filename, line)
                 node = {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
@@ -9516,12 +9509,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 )
         node = {"kind": "call", "callee": callee_node, "args": args}
         if inst is None and isinstance(callee_node.get("target"), dict):
+            recv_t = infer_ir(callee_node["target"], env.type_env, env.types,
+                              env.services)
+            # a stdlib value written in place (`[1, 2].map(f)`, issue #1942):
+            # judged as the same value bound to a name is
+            _refuse_value_method(callee_node.get("name"), recv_t, filename, line)
             # a record receiver read in place (`r.g.f(n)`, issue #1547)
-            _refuse_record_method(
-                callee_node.get("name"),
-                infer_ir(callee_node["target"], env.type_env, env.types,
-                         env.services),
-                env, filename, line)
+            _refuse_record_method(callee_node.get("name"), recv_t, env,
+                                  filename, line)
         if inst is None:
             # a field or element read off a service-typed local (issue #1509)
             _refuse_unmarked_local_crossing(
@@ -14987,6 +14982,31 @@ def _is_record_type(ty, types: dict) -> bool:
     head, _ = parse_type(ty)
     entry = (types or {}).get(head)
     return isinstance(entry, dict) and entry.get("kind") == "record"
+
+
+# The stdlib value heads whose whole method surface is `_BUILTIN_METHODS`
+# (issue #1942). A component-position call of any other method on one is a
+# typo or a misuse: no tier defines it, and py would raise AttributeError at
+# run time. The `fn` body refuses it on every receiver already.
+_VALUE_METHOD_HEADS = frozenset(
+    {"List", "Map", "Str", "Bytes", "Int", "Int32", "Float", "Bool"})
+
+
+def _refuse_value_method(method, recv_t, filename: str, line: int) -> None:
+    """A non-builtin method on a receiver whose static type is a stdlib value,
+    in a component body: refused with the message a named receiver has always
+    had. Named and written-in-place receivers take the same rule (issue
+    #1942); before it, only a named Str/List/Bytes receiver was checked."""
+    if not method or method in _BUILTIN_METHODS or not recv_t:
+        return
+    if parse_type(recv_t)[0] not in _VALUE_METHOD_HEADS:
+        return
+    raise RevlError(
+        filename, line,
+        f"no builtin method `{method}` on `{recv_t}` — the stdlib surface is "
+        f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
+        hint="records carry data, not methods; call functions as `f(x)` (G6)",
+    )
 
 
 def _refuse_record_method(method, recv_t, env: Env, filename: str,

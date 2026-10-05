@@ -34,7 +34,15 @@
     "examples/rejections/g5_undo_method_ref_record.rvl"
   ],
   "out-of-fragment-G6": [
-    "examples/rejections/g6_method_local_shadows_component.rvl"
+    "examples/rejections/g6_method_local_shadows_component.rvl",
+    "tests/fixtures/value_method_call/t1_inplace_effect_arg.rvl",
+    "tests/fixtures/value_method_call/t1_inplace_list.rvl",
+    "tests/fixtures/value_method_call/t1_inplace_paren_int.rvl",
+    "tests/fixtures/value_method_call/t1_inplace_req_result.rvl",
+    "tests/fixtures/value_method_call/t1_inplace_str_call.rvl",
+    "tests/fixtures/value_method_call/t1_named_int.rvl",
+    "tests/fixtures/value_method_call/t1_named_list.rvl",
+    "tests/fixtures/value_method_call/t1_named_map.rvl"
   ],
   "out-of-fragment-approval": [
     "examples/rejections/g4_approval_compensate.rvl",

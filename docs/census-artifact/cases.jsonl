@@ -2401,3 +2401,25 @@
 ["tests/fixtures/v2_math_lib.rvl", "agree-admit"]
 
 ["tests/fixtures/v2_math_main.rvl", "no-objection-out-of-slice"]
+
+["tests/fixtures/value_method_call/ok_arrow_param.rvl", "agree-admit"]
+
+["tests/fixtures/value_method_call/ok_host_map.rvl", "agree-admit"]
+
+["tests/fixtures/value_method_call/ok_inplace_builtin.rvl", "agree-admit"]
+
+["tests/fixtures/value_method_call/t1_inplace_effect_arg.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/value_method_call/t1_inplace_list.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/value_method_call/t1_inplace_paren_int.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/value_method_call/t1_inplace_req_result.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/value_method_call/t1_inplace_str_call.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/value_method_call/t1_named_int.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/value_method_call/t1_named_list.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/value_method_call/t1_named_map.rvl", "agree-refuse/T1"]

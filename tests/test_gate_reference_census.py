@@ -434,6 +434,29 @@ def test_every_record_field_call_document_is_decided_alike_by_both(measured):
     assert not wrong, "\n  ".join(["record-field-call documents moved:"] + wrong)
 
 
+# --- a non-builtin method on a stdlib value in a component (issue #1942) -----
+#
+# Refused with the named receiver's message ("no builtin method `map` on
+# `List[Int]`"), named or written in place; the census tags it T1. `t1_` both
+# refuse, `ok_` both admit. Before the fix the reference admitted every in-place
+# document and the gate admitted every one of them, the named ones included.
+VALUE_METHOD_CALL = ROOT / "tests" / "fixtures" / "value_method_call"
+
+
+def test_every_value_method_call_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(VALUE_METHOD_CALL.glob("*.rvl"))
+    assert len(docs) == 11, f"the value-method-call corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["value-method-call documents moved:"] + wrong)
+
+
 # --- a block `match` arm in a component body (issue #1699) ------------------
 #
 # The gate's statement reader did not read a block arm: the reference admitted
