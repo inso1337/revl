@@ -31570,15 +31570,45 @@ fn has_field(fields: &[RecField], name: &str) -> bool {
     return false;
 }
 
+fn fill_unknown_args(keep: String, other: String) -> String {
+    let kp = parse_type(keep.clone());
+    let op = parse_type(other.clone());
+    if ((kp.head != op.head) || (kp.args.revl_length() != op.args.revl_length())) {
+        return keep;
+    }
+    let mut filled: Vec<String> = vec![];
+    let mut changed = false;
+    let mut i = 0i64;
+    while (i < kp.args.revl_length()) {
+        let arg = (kp.args)[(i) as usize].clone();
+        let other_arg = (op.args)[(i) as usize].clone();
+        if ((arg == "Any") && (other_arg != "Any")) {
+            filled.push(other_arg.clone());
+            changed = true;
+        } else {
+            let inner = fill_unknown_args(arg.clone(), other_arg.clone());
+            filled.push(inner.clone());
+            if (inner != arg) {
+                changed = true;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if changed {
+        return format_type(kp.head.clone(), filled.clone());
+    }
+    return keep;
+}
+
 pub fn join(a: String, b: String) -> String {
     if ((a == "") || (b == "")) {
         return String::from("");
     }
     if compatible(a.clone(), b.clone()) {
-        return a;
+        return fill_unknown_args(a.clone(), b.clone());
     }
     if compatible(b.clone(), a.clone()) {
-        return b;
+        return fill_unknown_args(b.clone(), a.clone());
     }
     return String::from("");
 }

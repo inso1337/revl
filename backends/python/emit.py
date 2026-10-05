@@ -3175,7 +3175,18 @@ class _ComponentEmitter:
             self.uses.add("ConfigSchema")
             out.add(0, f"_{self.snake.upper()}_CONFIG = {_runtime_ref('ConfigSchema')}([")
             for spec in self.config_fields:
-                field = _ident(spec.get("name"), f"{where}: config field")
+                # The tuple's first element is the field's RUNTIME KEY, not a
+                # python binding: it is the same raw string a `load … with {…}`
+                # step plugs in and the body reads back out of `_revl_config`,
+                # and the runtime resolves it (and matches the `secret` list
+                # below) as a dict key. Running it through `_ident` renamed a
+                # field spelled after a python keyword — `config { from: Str }`
+                # was recorded as `'from'` at the plug site and as `'from_'` in
+                # the schema alone — so the schema refused the very key the
+                # author wrote ("missing required config field \"from_\"") and
+                # the fiber landed FAILED, misreported as an unmet `requires`,
+                # on a program every other tier activates (issue #1915).
+                field = spec.get("name")
                 out.add(1, f"({field!r}, {spec.get('type')!r}, {spec.get('default')!r}),")
             # item 256 Slice 3: the fields declared `Secret[T]`. The runtime keeps
             # their values out of the `<name>.config` trace line (stdout under
@@ -3283,7 +3294,22 @@ class _ComponentEmitter:
 # v2.0 (ir_version 3): types & pure functions (docs/syntax-2.0.md §2–§3)
 # ---------------------------------------------------------------------------
 
-_PY_TYPE = {"Int": "int", "Float": "float", "Bool": "bool", "Str": "str", "Bytes": "bytes", "Unit": "None"}
+# `Value` (stdlib/value.rvl, docs/stdlib-value.md) is the NAMED erased-dynamic
+# type: the checker reserves it as a builtin compatible with every type in both
+# directions, and the py tier erases it to the native object graph, which no
+# single python annotation names. It therefore renders as `Any`, the same
+# erasure `Result[…]` takes below. It has to be a KEY of this map rather than a
+# fall-through to the named-type return, because it is never a DECLARED type:
+# a record field of type `Value` emitted a bare `value: Value` against nothing
+# that defines `Value`, and `_emit_types` cannot quote it away — `_ann` quotes
+# only a forward reference to a type some declaration emits. On 3.13 and
+# earlier the class body itself raised `NameError: name 'Value' is not
+# defined` at import; on 3.14 PEP 649's deferral moves the same exception to
+# the first `__annotations__` read (`__annotate__`), so any consumer that
+# introspects the record — `get_type_hints`, a dataclass pass, a schema
+# builder — still hits it (issue #1923).
+_PY_TYPE = {"Int": "int", "Float": "float", "Bool": "bool", "Str": "str",
+            "Bytes": "bytes", "Unit": "None", "Value": "Any"}
 
 _PY_BIN_OPS = {
     "==": "==", "===": "==", "!=": "!=", "!==": "!=",
