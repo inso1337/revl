@@ -1,0 +1,12 @@
+// T1 (issue #1963): the step inside a provide-method `while`.
+service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      var n = 0
+      while (n < 2) {
+        effect store.insert(k, "1") undo store.remove(k)
+        n += 1
+      }
+  } }
+}

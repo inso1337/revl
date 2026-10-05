@@ -1,0 +1,18 @@
+// G4 (issue #1963): a witnessed extern called with a site `undo` in a
+// provide method. Its declared inverse is the one the teardown accumulator
+// registers, so the call site may not spell one.
+type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  provide w { fn put(k) {
+      effect put_w(k) undo unput(k)
+  } }
+}
