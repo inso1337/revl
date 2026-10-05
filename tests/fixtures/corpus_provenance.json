@@ -392,6 +392,7 @@
    "oracle-accept:a transparent alias through a service, a config field and a body",
    "oracle-accept:a validated emission is read",
    "oracle-accept:a validated emission with a retry budget is read",
+   "oracle-accept:a verified witnessed effect in a provide method",
    "oracle-accept:a while(true) whose only break targets a nested loop",
    "oracle-accept:a while(true) with no targeting break",
    "oracle-accept:a witnessed extern's declared scope meets a provide-method bound",
@@ -490,6 +491,8 @@
    "oracle-reject:a for loop as the only returning path",
    "oracle-reject:a key isolated twice is refused (G1)",
    "oracle-reject:a key routed twice is refused (ROUTE)",
+   "oracle-reject:a let-bound verified call that is not an effect",
+   "oracle-reject:a let-bound verified method effect on a witnessed extern",
    "oracle-reject:a list transform whose free function nothing declares",
    "oracle-reject:a literal zero divisor",
    "oracle-reject:a marked reach through a helper carries no host label",
@@ -521,6 +524,7 @@
    "oracle-reject:a valid extern before a malformed one",
    "oracle-reject:a validated emission does not swallow the next operation",
    "oracle-reject:a validated emission with a retry budget does not swallow the next operation",
+   "oracle-reject:a verified method effect whose undo is on the next line",
    "oracle-reject:a while(true) with a break targeting it",
    "oracle-reject:a1 async compensate suspends",
    "oracle-reject:a1 async effect not awaited",
@@ -697,6 +701,7 @@
    "oracle-reject:undo slot sees only the implicit result binding",
    "oracle-reject:v2 a Map value's `set` against the map's V",
    "oracle-reject:v2 a method a Map value's stdlib surface does not name",
+   "oracle-reject:verified emit in an activation body",
    "selfhost/checker.rvl",
    "selfhost/compile.rvl",
    "selfhost/emit_go.rvl",
@@ -1240,7 +1245,11 @@
    "tests/fixtures/value_method_call/t1_inplace_req_result.rvl",
    "tests/fixtures/value_method_call/t1_inplace_str_call.rvl",
    "tests/fixtures/value_method_call/t1_named_int.rvl",
-   "tests/fixtures/value_method_call/t1_named_list.rvl"
+   "tests/fixtures/value_method_call/t1_named_list.rvl",
+   "tests/fixtures/verified_method_effect/ok_witnessed.rvl",
+   "tests/fixtures/verified_method_effect/t1_emit.rvl",
+   "tests/fixtures/verified_method_effect/t1_let_bound.rvl",
+   "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
   ]
  }
 }

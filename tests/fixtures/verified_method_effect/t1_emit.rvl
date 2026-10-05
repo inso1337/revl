@@ -1,0 +1,10 @@
+// `verified` marks an effect only: the parser refuses it before `emit`.
+service Bus { emission fn send(k: Str) }
+service W { emission fn put(k: Str) }
+component Widget requires bus: Bus provides w: W {
+  provide w {
+    fn put(k) {
+      verified emit bus.send(k)
+    }
+  }
+}

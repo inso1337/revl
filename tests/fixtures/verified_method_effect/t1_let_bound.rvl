@@ -1,0 +1,11 @@
+// `let x = verified effect …` in a provide method: refused, witnessed or not,
+// since a method round trip only covers the unbound witnessed form (issue #1897).
+service W { fn put(k: Str) }
+component Widget provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w {
+    fn put(k) {
+      let ok = verified effect store.insert_if_absent(k, "1") undo store.remove(k)
+    }
+  }
+}

@@ -754,6 +754,8 @@
 
 ["oracle-accept:a validated emission with a retry budget is read", "agree-admit"]
 
+["oracle-accept:a verified witnessed effect in a provide method", "agree-admit"]
+
 ["oracle-accept:a while(true) whose only break targets a nested loop", "agree-admit"]
 
 ["oracle-accept:a while(true) with no targeting break", "agree-admit"]
@@ -950,6 +952,10 @@
 
 ["oracle-reject:a key routed twice is refused (ROUTE)", "agree-refuse/ROUTE"]
 
+["oracle-reject:a let-bound verified call that is not an effect", "agree-refuse/T1"]
+
+["oracle-reject:a let-bound verified method effect on a witnessed extern", "agree-refuse/T1"]
+
 ["oracle-reject:a list transform whose free function nothing declares", "agree-refuse/G1"]
 
 ["oracle-reject:a literal zero divisor", "agree-refuse/TYPE"]
@@ -1013,6 +1019,8 @@
 ["oracle-reject:a validated emission does not swallow the next operation", "agree-refuse/G4"]
 
 ["oracle-reject:a validated emission with a retry budget does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:a verified method effect whose undo is on the next line", "agree-refuse/T1"]
 
 ["oracle-reject:a while(true) with a break targeting it", "agree-refuse/T1"]
 
@@ -1375,6 +1383,8 @@
 ["oracle-reject:v2 a Map value's `set` against the map's V", "agree-refuse/T1"]
 
 ["oracle-reject:v2 a method a Map value's stdlib surface does not name", "agree-refuse/T1"]
+
+["oracle-reject:verified emit in an activation body", "agree-refuse/T1"]
 
 ["selfhost/checker.rvl", "frontier-declined"]
 
@@ -2463,3 +2473,11 @@
 ["tests/fixtures/value_method_call/t1_named_int.rvl", "agree-refuse/T1"]
 
 ["tests/fixtures/value_method_call/t1_named_list.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/verified_method_effect/ok_witnessed.rvl", "agree-admit"]
+
+["tests/fixtures/verified_method_effect/t1_emit.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/verified_method_effect/t1_let_bound.rvl", "agree-refuse/T1"]
+
+["tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl", "agree-refuse/T1"]
