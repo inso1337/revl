@@ -437,3 +437,17 @@ import RevL
 #print axioms RevL.G9Flow.corpus_rows_decided
 #print axioms RevL.G9Flow.escape_moves_the_label
 #print axioms RevL.G9Flow.g9_not_vacuous
+-- Issue #1811 group 3: G-RETAIN. The retention rule is decided by the oracle's
+-- `RETAIN` row on the sink, scope and TWO INSTANTS the CHECKER reports — the
+-- harness pins the instant (`REVL_RETENTION_AS_OF`) so the verdict is
+-- reproducible — not on the coverage of the checker's own walk; see
+-- RevL/Theorems/GRetain.lean.
+#print axioms RevL.GRetain.holdsB_iff
+#print axioms RevL.GRetain.rowB_iff
+#print axioms RevL.GRetain.hold_clears_the_deadline
+#print axioms RevL.GRetain.reaches_iff
+#print axioms RevL.GRetain.corpus_sink_scope_is_modelled
+#print axioms RevL.GRetain.unmodelled_sink_scope_has_no_sink
+#print axioms RevL.GRetain.corpus_walk_does_not_reach_another_sink
+#print axioms RevL.GRetain.corpus_row_decided
+#print axioms RevL.GRetain.retain_not_vacuous

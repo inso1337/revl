@@ -57,6 +57,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | **partial** (the same TAINT row; 1 agree-G9) | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly. The disclosure rule is now decided on the corpus through the same TAINT row, and **that is the rule on the corpus, not coverage of the checker's walk** — the same caveat G9 carries. The `G-SECRET-FLOW` refusal carries no `navigate`, so the exporter reads its sink out of the refusal message and its origin out of a table spelled in the harness, not out of the hint's prose |
 | **G-MODEL-PLACE** model placement and model reach | partial: the placement and reach rules | 6 | **yes** (one MPV row per routed component, one MAV row per consulted role; 9 agree-G-MODEL-PLACE) | since issue #1811 `RevL.ModelPlace.PlaceOK` decides that a confidentiality origin is placed on the device only, through a council member that receives it too (`placeB_iff`), and the model-reach rule of item 519 (a consulted role's `reaches [...]` within what the component holds) is decided with the spawn rule's proved `attenuatesB`. Which roles a component consults, and whether it consults a model at all, are the exporter's, read as `lower._model_reach_edges` / `_consults_a_model` read them. Not modelled: the route-block shape rules and the value-level origin ceiling (item 514) |
 | **G-COUNCIL-SPLIT** tie policy | partial: the tie-outcome rule | 7 | **yes** (one CTV row per declared council; 1 agree-G-COUNCIL-SPLIT) | since issue #1811 `RevL.ModelCouncil.SplitOK` decides that no declared council admits when its members disagree, over the tie outcome the checker reads for each council — the declared `on_tie`, or the `split` default an omitted clause resolves to (`splitB_iff`). This is a finite check over declarations with no reach, so it needs no component body; the exporter reads `prog.model_councils` and nothing else. The other `model-council` refusals are different rules with the same code and this row is deliberately silent on them: the unknown tie outcome, the aggregation vocabulary and its totality on the declared member set, the member functions and their uniqueness, `quorum` bases other than `declared`, and "exactly one aggregate rule". A council declaring no aggregation emits no `CV` row at all, so its refusal lands in `out-of-fragment` rather than being read as an agreement this row cannot make |
+| **G-RETAIN** retained data at a persistence sink | partial: the deadline rule | 9 | **yes** (one RETAIN row per checker-reported retention refusal; 1 agree-G-RETAIN) | since issue #1811 group 3 `RevL.GRetain.retainRowB` decides that a `Retained[T, P]` value does not reach a persistence sink after `P`'s deadline, over the scope, the sink and the walk the checker itself REPORTS and at the instant the checker itself COMPARED — the harness pins that instant with `REVL_RETENTION_AS_OF`, so the verdict is reproducible rather than wall-clock. The rule is the checker's own strict `as_of > until` with its three escapes (erase and keep the receipt, extend `until`, declare a `hold`); the `hold` override is proved as `hold_clears_the_deadline`. **This row is the rule on the corpus, not the coverage of the checker's walk** — the same caveat G9 carries. The `G-RETAIN` refusal carries no `navigate`, so the exporter reads its sink, scope, policy, `until`, `now` and chain out of the refusal message and hint, not out of structured fields. The declaration-level `G-RETAIN` refusal (`taint._refuse_retention_declaration`) needs no flow at all and is a different judgment; it emits no row and falls through to `out-of-fragment` |
 | **A1** iteration boundaries only during activation | partial: the async-colour rules | 10 | **yes** (one A1 row per site, one A1S row per provide method; 9 agree-A1) | the iteration boundary itself is not modelled (L0 has no `await`). Since issue #1808 the async-colour rules are: `RevL.A1Async` decides, per site, that a sync provide method, an unawaited `effect`/`emit` step and an `undo`/`compensate` slot reach nothing async and that an awaited step does, over the file's async names (async externs, async service operations) and its `fn` call graph within a fuel bound (`reachB_iff`, `siteB_iff`), and that a provide method's colour is its service's (`sigB_iff`). Not modelled: an arrow's type has no colour (`a1_async_arrow_sync_type.rvl` stays out of fragment), colour polymorphism through a callback parameter, and a stream `next` as a suspension |
 | **A2** no acquisition after a provision | full over the ordered activation body | 14 | **yes** (317 A2 rows, 1 agree-A2) | the body is a step list (`acquire` / `provide` / `other` — the checker's four refused forms, the `provide` block, and everything else) and `RevL.A2.a2B` is `lower._dispatch_action`'s fold verbatim, bridged to the declarative rule by `a2B_iff`. The content is over G7's stack: with a `bracket` per release and per withdrawal, `proof_pass_is_withdrawals_then_releases` proves that under A2 `RevL.Semantics.phase1` runs every withdrawal before every release under every settling verdict, and `fixture_opens_the_window` proves the fixture's shape runs a release first. The oracle folds the same rule over the exported `AQ` body steps on both sides; `a2_coverage` fails the gate unless the corpus carries an admitted body with both a provision and an acquisition and the refused shape. **Not modelled**: entries a provide-method body registers at call time (the G7 corpus's `method` seam), and whether the runtime withdraws a provision as a bracket at all — the theorem takes the LIFO premise the rule rests on and shows A2 is exactly the ordering condition under it |
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
@@ -377,6 +378,15 @@ Three summary readings of that map:
 | `RevL.G9Flow.corpus_rows_decided` | G9 / G-SECRET-FLOW on the corpus — the corpus shapes | **proved** | `propext` | the `fs`-at-authority and `confidential`-at-disclosure shapes refused, the same two sinks on a clean label admitted |
 | `RevL.G9Flow.escape_moves_the_label` | G9 / G-SECRET-FLOW on the corpus — the escape is not decorative | **proved** | `propext` | `endorse[fs]` on an `fs` label leaves the empty label, which the authority sink admits where it refused the original |
 | `RevL.G9Flow.g9_not_vacuous` | G9 / G-SECRET-FLOW on the corpus — non-vacuity | **proved** | `propext` | both corpus sink kinds refused and both clean twins admitted, so the `TAINT` row is mutation-sensitive in both directions |
+| `RevL.GRetain.holdsB_iff` | G-RETAIN on the corpus — the rule (issue #1811 group 3) | **proved** | `propext` | `holdsB` is `now ≤ deadline`, or anything at all under a declared hold: the checker's strict `as_of > until` with the `hold` override, and the boundary is the deadline itself |
+| `RevL.GRetain.rowB_iff` | G-RETAIN on the corpus — the row's verdict | **proved** | `propext, Classical.choice, Quot.sound` | the row prints `ok` precisely where the rule holds and `fail` precisely where it is violated, so a `fail` is the rule VIOLATED at a persistence sink the checker itself reported, at the instant the checker itself compared |
+| `RevL.GRetain.hold_clears_the_deadline` | G-RETAIN on the corpus — the escape | **proved** | `propext` | a declared hold holds at every instant, which is the third escape the checker's own hint names; the same row without it is refused, so the escape is not the default |
+| `RevL.GRetain.reaches_iff` | G-RETAIN on the corpus — the walk premise | **proved** | `propext, Classical.choice, Quot.sound` | `reaches` decides the row's `chain` column: the reported chain ends at the reported sink and not at another, so the column moves the verdict rather than decorating it |
+| `RevL.GRetain.corpus_sink_scope_is_modelled` | G-RETAIN on the corpus — the corpus scope | **proved** | none | the corpus scope `db` is in the row's table, so the exporter emits a row for the corpus refusal |
+| `RevL.GRetain.unmodelled_sink_scope_has_no_sink` | G-RETAIN on the corpus — the other direction | **proved** | none | a scope outside the checker's ten yields none, so no row is emitted and the refusal lands in the fatal `missed-G-RETAIN` rather than in an agreement |
+| `RevL.GRetain.corpus_walk_does_not_reach_another_sink` | G-RETAIN on the corpus — the corpus chain | **proved** | `propext, Classical.choice, Quot.sound` | the corpus chain `load() -> db_put` does not reach `fs_put`, so the walk premise is mutation-sensitive |
+| `RevL.GRetain.corpus_row_decided` | G-RETAIN on the corpus — the corpus shapes | **proved** | `propext, Classical.choice, Quot.sound` | the corpus row refused at the checker's instant and admitted AT the deadline and a year before it, with the `until` column the same in all three |
+| `RevL.GRetain.retain_not_vacuous` | G-RETAIN on the corpus — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | the corpus row's own columns decided at four instants — refused past the deadline, admitted at it, admitted before it, admitted under a hold — so the `RETAIN` row is mutation-sensitive in every direction and a row that ignored `now` fails here |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -671,6 +681,70 @@ the sink". The open obligation above is untouched, and `reported_walk_reaches_th
 states exactly the positive half — the reported label is reachable from the
 reported step count, at every count — and no more. Route A (item 418,
 step 9) is what would close it, and nothing here substitutes for it.
+
+## G-RETAIN — retained data at a persistence sink (`RevL.Theorems.GRetain`)
+
+`src/revl/taint.py` `_refuse_retention`: "data past its retention deadline
+may not be written to durable storage". The model is deliberately small,
+because the rule is: `PersistenceSink` is the checker's own
+`retention.PERSISTENCE_SINK_SCOPES` — the ten scopes a write can be durable
+through (`db`, `fs`, `object_store`, …) — mapped from the scope **name** the
+refusal prints (`sinkOfScope`), and `holdsB` is the checker's own predicate
+`not policy.expired(instant)`, i.e. `now ≤ deadline`, with a declared `hold`
+overriding the deadline entirely (the third escape the checker's hint names,
+alongside erasing with a receipt and extending `until`).
+
+`Instant` is `Nat` — epoch seconds, which is what the refusal prints and what
+the harness can compare exactly. The checker's comparison is **strict**
+(`as_of > until`), so the deadline instant itself still holds; `holdsB` is
+written with `≤` and `holdsB_iff` proves the correspondence rather than
+leaving it to the reader.
+
+The walk premise is `reaches`: the `chain` column the checker reported must
+actually end at the `sink` column it reported. `reaches_iff` proves that,
+`corpus_walk_reaches_the_corpus_sink` exhibits it on the corpus chain
+`load() -> db_put`, and `corpus_walk_does_not_reach_another_sink` shows the
+premise is not vacuous by failing it for a sink the chain never reaches.
+
+Non-vacuity is carried by `retain_not_vacuous`, which decides the corpus
+row's own columns at four instants — refused past the deadline, admitted AT
+it, admitted a year before it, admitted under a `hold` — so the row is
+mutation-sensitive in every direction and a `rowB` that dropped its `now`
+argument would not elaborate. `corpus_row_decided` records the three of those
+that share one `until`, which is what makes the flip attributable to the
+clock and not to a different policy.
+
+### What the differential-oracle `RETAIN` row does and does not add
+
+Issue #1811 group 3 bound this development to the differential oracle the
+same way group 2 bound G9: the `RETAIN` row decides the rule at the scope,
+the sink and the walk the checker **reported**, and at the instant the
+checker **compared**. `RevL.GRetain` adds no rule the checker does not
+already state — `sinkOfScope` is its scope table, `holdsB` is its
+`expired` negated, `reaches` is its own `The retaining path is …` line —
+and `retainRowB_iff` pins the oracle's decider to it, so a `fail` is the
+rule VIOLATED at a sink the checker itself reported, with the refusal
+explained rather than contradicted.
+
+It is still **the rule on the corpus, not the coverage of the walk**, and
+the `now` fact is where the two would be confused. Pinning
+`REVL_RETENTION_AS_OF` makes the row *reproducible*; it does not make the
+checker's walk complete, and it says nothing about whether the checker
+visits every path that could carry a retained value to a durable sink. The
+open obligation G9 carries is inherited unchanged: the row cannot
+distinguish "the rule holds at the sink the checker reached" from "the
+checker never reached the sink". Route A (item 418, step 9) is what would
+close it, and nothing here substitutes for it.
+
+One further limit, stated rather than hidden: the exporter reads the row's
+columns out of the refusal's **prose**, because the `G-RETAIN` refusal
+passes no `navigate` (unlike the three `G9` / `taint-flow` documents, whose
+sink and origins arrive as structured fields). The sink, the scope, the
+policy name, `until`, `now` and the chain are all read from the message and
+the hint. The hint is advice and is not scraped for anything the row
+decides; the `now` column is cross-checked against the harness's own pin by
+`retain_coverage`, so a message the exporter mis-parses fails the gate
+rather than producing a plausible-looking row.
 
 
 ## The effect-classification lattice — G4/G5/G8 re-proved (item 418, step 4)
@@ -1167,6 +1241,57 @@ Verdicts:
   twin of one of them. Blinding the printed verdict was seen to produce
   `missed-G9 4 FATAL`.
 
+- **RETAIN row (G-RETAIN, issue #1811 group 3)**: `Oracle.retainRowB` —
+  `RevL.GRetain.retainRowB` — over the persistence scope, the sink and the
+  walk the checker itself REPORTS, at the instant the checker itself
+  COMPARED. **This row is the rule on the corpus, NOT the coverage of the
+  checker's walk**, exactly as the `TAINT` row is: its premises ARE the
+  checker's own refusal, so it cannot tell "the rule holds at this sink" from
+  "the checker never reached the sink". Roadmap item 418 step 9 — proving
+  the checker's coverage — is untouched and out of this row's reach.
+
+  **The `now` fact, and how the harness pins it.** The rule's verdict depends
+  on the wall clock, and the refusal carries the instant it used. The
+  harness therefore sets `REVL_RETENTION_AS_OF` (the checker's own
+  `retention.AS_OF_ENV`) to a fixed instant **once, at module import**, before
+  any `compile_files` call, so every refusal the run assembles — and every
+  re-decision the exporter makes — is taken at the same instant. The pin was
+  measured verdict-neutral for the whole corpus: a full oracle run with the
+  pin and one without differ in **zero bytes** of output, so the only verdict
+  it moves is the retention file's own. `retain_coverage` asserts the row's
+  `now` column equals that pinned instant, so a run whose checker evaluated
+  at some other instant fails the gate instead of silently recording a row
+  about a different clock.
+
+  What the exporter reads out of the refusal, and from where — the
+  `G-RETAIN` refusal passes **no `navigate`** at all, so every column but the
+  code and the category comes from text:
+
+  * the **sink** and the **scope** — the refusal message's
+    ``flows into the persistence sink `<sink>` (a `<scope>` crossing)``;
+  * the **policy** — the message's ``a `Retained[T, <policy>]` value``;
+  * the **`now`** — the message's ``the deadline passed at <ISO>``, converted
+    to epoch seconds; this is the checker's own `evaluation_instant()`;
+  * the **`until`** — the **hint**'s ``may be kept until <ISO>``, the
+    policy's own deadline, converted the same way;
+  * the **chain** — the message's ``The retaining path is <chain>``, split
+    on `" -> "`; the row's `hops` column is its length minus one, so the
+    reported length is visible in the row's own output.
+
+  A scope the harness table does not carry yields no row at all, so the
+  refusal lands in the **fatal** `missed-G-RETAIN` rather than being read as
+  an agreement the row cannot make: widening the checker's
+  `PERSISTENCE_SINK_SCOPES` turns the row red, not green.
+  `persistence_sink_scopes_are_modelled` fixes that table's two directions.
+  A `G-RETAIN` refusal in category `retention` carrying the flow sentence
+  files under `agree-G-RETAIN` or `missed-G-RETAIN`; the declaration-level
+  `G-RETAIN` refusal, which carries no sink, no policy and no chain, is a
+  different judgment and falls through to `out-of-fragment`.
+  `retain_coverage` fails the gate unless the corpus row's own deadline is
+  bracketed — the same row `fail`s one second past the deadline, holds AT it
+  and holds a year before it — and `retain_not_vacuous` proves exactly that,
+  so a row that ignored `now` would not elaborate.
+
 ### The G7 row, and what it is evidence of
 
 The G7 row exists because the audit's central reading was that a
@@ -1380,6 +1505,7 @@ layer.
 | `agree-A9` | printed by the gate | informational |
 | `agree-G-COUNCIL-SPLIT` | printed by the gate | informational |
 | `agree-G-MODEL-PLACE` | printed by the gate | informational |
+| `agree-G-RETAIN` | printed by the gate | informational |
 | `agree-G1` | printed by the gate | informational |
 | `agree-G2` | printed by the gate | informational |
 | `agree-G3` | printed by the gate | informational |
@@ -1398,6 +1524,7 @@ layer.
 | `missed-A9` | 0 | **FATAL** |
 | `missed-G-COUNCIL-SPLIT` | 0 | **FATAL** |
 | `missed-G-MODEL-PLACE` | 0 | **FATAL** |
+| `missed-G-RETAIN` | 0 | **FATAL** |
 | `missed-G1` | 0 | **FATAL** |
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
