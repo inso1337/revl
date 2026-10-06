@@ -4,8 +4,22 @@ The full verb set's schemas cost about 14,000 tokens on every cold start, and
 an agent shown all of them at once reaches for a narrow verb where one broad
 call would do. So `tools/list` shows a core tier by default: the verbs an agent
 needs to author, run and change a composition, plus `revl_verbs`, which returns
-any other verb's schema when it is wanted. Every verb stays callable by name,
-listed or not; the tier decides only what is advertised up front.
+any other verb's schema when it is wanted. The tier decides only what is
+advertised up front.
+
+"Every verb stays callable by name, listed or not" is true of the transport —
+the server serves any name it is handed — and was FALSE of the model's
+interface, which is the one that matters: a function-calling model emits a call
+for a tool it was shown and for no other, and a schema returned as text is not a
+tool (issues #2042, #2073). A measured run did the work, got `admitted: true`
+and left no artifact, because `revl_export` — the one verb that writes the held
+source out — was reachable by name and not by tool.
+
+The escape hatch is what makes the claim true. `revl_verbs` is listed, so the
+model can call it; given `name` (a verb) and `args` (that verb's arguments) it
+stops being a lookup and IS that call — the same handler, the same gates, the
+same payload. Every verb is therefore one listed tool away, and the tier budget
+is untouched: the hatch is `DISCOVERY`'s role, not a fifteenth `CORE` member.
 
 A client that wants the whole list says so when the server starts:
 `revl mcp serve --all-tools`, or `REVL_MCP_ALL_TOOLS=1` in its environment.
@@ -75,6 +89,34 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
 
 _ALL_TOOLS = os.environ.get("REVL_MCP_ALL_TOOLS", "") not in ("", "0")
 
+#: The escape hatch (issues #2042, #2073): the two arguments that turn a
+#: `revl_verbs` call from a lookup into the call it names. `name` is the
+#: discriminator — no lookup form uses it — so a model that wants a verb it
+#: cannot see has a listed tool to say so with, without the tier growing.
+HATCH_NAME = "name"
+HATCH_ARGS = "args"
+
+#: The hatch's properties, as advertised, beside the names `hatch` parses, so
+#: the schema a model reads and the arguments the server accepts cannot drift.
+#: Nothing is `required`: `revl_verbs` has two mutually exclusive forms (look
+#: up, or call) and JSON Schema cannot say "`name` with `args`, or `topic` /
+#: `names` instead", so the handler enforces it and names the fix.
+HATCH_SCHEMA = {
+    HATCH_NAME: {
+        "type": "string",
+        "description": ("a verb to CALL. With `args`, this call IS that call "
+                        "instead of a lookup — the same result, the same "
+                        "errors — e.g. name \"revl_export\" with args {} is "
+                        "`revl_export {}`"),
+    },
+    HATCH_ARGS: {
+        "type": "object",
+        "description": ("the named verb's arguments, exactly as a direct call "
+                        "would take them (`{}` for a verb that takes none). "
+                        "Required with `name`"),
+    },
+}
+
 
 def set_all_tools(enabled: bool) -> None:
     """Advertise every verb (`True`) or the core tier (`False`)."""
@@ -93,8 +135,45 @@ def core(advertised: list) -> list:
 
 
 def listed(advertised: list) -> list:
-    """What `tools/list` returns: every verb, or the core tier."""
+    """What `tools/list` returns: every verb, or the core tier.
+
+    The tiered list is exactly `CORE`, and stays exactly `CORE`: the hatch
+    (#2073) is a second form of `revl_verbs`, which is already in the tier, so
+    every other verb is reachable without a fifteenth listed verb and the tier
+    budget is untouched."""
     return list(advertised) if _ALL_TOOLS else core(advertised)
+
+
+def is_hatch(arguments: dict) -> bool:
+    """Whether a `revl_verbs` call is the escape hatch rather than a lookup."""
+    return HATCH_NAME in (arguments or {})
+
+
+def hatch(arguments: dict) -> tuple[str, dict, str]:
+    """Parse an escape-hatch call: `(verb, args, reason)`.
+
+    `reason` is "" when the call is well formed, otherwise what is wrong with
+    it. A hatch that cannot name the verb it means refuses by name: answering
+    the lookup instead would be a different answer to a different question —
+    the silent no-op the hatch exists to prevent."""
+    arguments = arguments or {}
+    verb = arguments.get(HATCH_NAME)
+    if not isinstance(verb, str) or not verb.strip():
+        return "", {}, (f"`{HATCH_NAME}` must be the name of the verb to call "
+                        f"(a non-empty string); got {_kind(verb)}")
+    verb = verb.strip()
+    if arguments.get(HATCH_ARGS) is None:
+        return verb, {}, (f"`{HATCH_ARGS}` is required with `{HATCH_NAME}`: the "
+                          f"verb's arguments, `{{}}` for a verb that takes none")
+    args = arguments[HATCH_ARGS]
+    if not isinstance(args, dict):
+        return verb, {}, (f"`{HATCH_ARGS}` must be an object of the verb's "
+                          f"arguments; got {_kind(args)}")
+    return verb, args, ""
+
+
+def _kind(value) -> str:
+    return "null" if value is None else type(value).__name__
 
 
 def index(advertised: list) -> dict:

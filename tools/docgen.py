@@ -273,7 +273,8 @@ def block_mcp_count(current: str) -> str:
     return ("The server has exactly the verbs below, one section each "
             "(`python3 tools/docgen.py --show mcp-verb-count` counts them). By "
             "default `tools/list` advertises the core tier and `revl_verbs` "
-            "returns the rest; see \"Find a verb\".")
+            "returns the rest — or calls one, given `name` and `args`; see "
+            "\"Find a verb\".")
 
 
 def block_agents_mcp_count(current: str) -> str:
@@ -282,9 +283,10 @@ def block_agents_mcp_count(current: str) -> str:
         "The complete verb set comes from\n"
         "`src/revl/mcp/server.py` and `query_tools.py`. `tools/list` shows the\n"
         "core tier by default; call `revl_verbs` for any other verb's\n"
-        "schema, or call it by name. It is grouped below by what you reach for;\n"
-        "each verb's exact inputs and outputs are in\n"
-        "[mcp-reference.md](mcp-reference.md)."
+        "schema, and pass it `name` and `args` to CALL one — that call is the\n"
+        "call, so every verb is reachable from the list you were given. It is\n"
+        "grouped below by what you reach for; each verb's exact inputs and\n"
+        "outputs are in [mcp-reference.md](mcp-reference.md)."
     )
 
 
@@ -296,7 +298,8 @@ def block_authoring_mcp_count(current: str) -> str:
     mcp_tools()
     return (
         "`revl mcp serve` lists its core tier by default and `revl_verbs`\n"
-        "finds the rest; every verb is listed in full in\n"
+        "finds the rest — and calls one, given `name` and `args`, so no verb\n"
+        "is out of reach; every verb is listed in full in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
 

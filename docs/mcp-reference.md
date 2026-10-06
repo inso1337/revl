@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The server has exactly the verbs below, one section each (`python3 tools/docgen.py --show mcp-verb-count` counts them). By default `tools/list` advertises the core tier and `revl_verbs` returns the rest; see "Find a verb".
+The server has exactly the verbs below, one section each (`python3 tools/docgen.py --show mcp-verb-count` counts them). By default `tools/list` advertises the core tier and `revl_verbs` returns the rest — or calls one, given `name` and `args`; see "Find a verb".
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -261,7 +261,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_live_query` | yes | no | `verb` |
 | `revl_history_emitted_between` | yes | no | `from`, `to` |
 | `revl_history_lifetime` | yes | no | `component` |
-| `revl_verbs` | yes | no | - |
+| `revl_verbs` | no | yes | - |
 <!-- docgen:mcp-verbs end -->
 
 ---
@@ -305,22 +305,40 @@ loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
 and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
 `revl_verbs`. That is about a quarter of the full list's schema size, which
 matters on every cold start. Every verb `initialize` names is in the core tier,
-and a test holds the two together. Every other verb is still served and callable by
-name. A client that wants the whole list up front starts the server with
-`revl mcp serve --all-tools`, or sets `REVL_MCP_ALL_TOOLS=1`. The core tier is
-`CORE` in `src/revl/mcp/disclosure.py`.
+and a test holds the two together. Every other verb is still served, and every
+one of them is **callable** without being listed: `revl_verbs` is itself a
+listed tool and takes `name` and `args`, so a call through it *is* the call it
+names (see below). A client that wants the whole list up front starts the
+server with `revl mcp serve --all-tools`, or sets `REVL_MCP_ALL_TOOLS=1` — that
+costs about 22,800 extra cold-start tokens, where the hatch costs about a
+hundred. The core tier is `CORE` in `src/revl/mcp/disclosure.py`.
 
 ### `revl_verbs`
 
-The discovery verb. With no arguments it returns every verb grouped by topic
-(`author`, `session`, `approve`, `grade`, `replay`, `query`, the sections of
-this page), one sentence each and no schemas, plus the names `tools/list`
-currently shows. With `topic` it returns the exact schemas of that topic's
-verbs; with `names` it returns those verbs' exact schemas. The schemas are
-the same objects the full list carries under `--all-tools`. An unknown topic or
-name is refused with `next` set to the no-argument call.
+The discovery verb, and the escape hatch. With no arguments it returns every
+verb grouped by topic (`author`, `session`, `approve`, `grade`, `replay`,
+`query`, the sections of this page), one sentence each and no schemas, plus the
+names `tools/list` currently shows. With `topic` it returns the exact schemas of
+that topic's verbs; with `names` it returns those verbs' exact schemas. The
+schemas are the same objects the full list carries under `--all-tools`. An
+unknown topic or name is refused with `next` set to the no-argument call.
 
-- Inputs: `topic` (one of the six); `names` (verb names). Both optional.
+With `name` and `args` it **calls** the verb `name` with the arguments `args` —
+the same handler, the same jail, authoring, operator and runtime gates, the
+same payload, the same `disk` block and `sessionState` footer as calling that
+verb directly. A verb that is not in the core tier is therefore one listed tool
+away, which is what issue #2073 is about: a function-calling model emits a call
+for a tool it was *shown*, so a schema returned as text is a document, not a
+tool. `revl_export` — the verb that writes the held source out, and so the one
+that prevents a silent no-op in an agent loop — is reachable this way.
+
+A hatch that cannot name the verb it means refuses by name rather than
+answering the lookup: an unknown `name`, a missing `args`, or an `args` that is
+not an object is a diagnostic, not a silent index.
+
+- Inputs: `topic` (one of the six); `names` (verb names); `name` (a verb to
+  call) with `args` (that verb's arguments). All optional, and the two forms are
+  mutually exclusive.
 
 ## Author and admit
 

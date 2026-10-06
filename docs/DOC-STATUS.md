@@ -86,7 +86,7 @@ was corrected by hand and had drifted back within a day.
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 1 |  |
 | audit-diff.md | needs-work | 14 |  |
-| authoring-for-agents.md | needs-work | 0 |  |
+| authoring-for-agents.md | needs-work | 1 |  |
 | auto-mocks.md | needs-work | 16 |  |
 | backend-go-v3.md | needs-work | 14 | yes |
 | backend-ir-v1.md | needs-work | 16 |  |
@@ -102,7 +102,7 @@ was corrected by hand and had drifted back within a day.
 | census-artifact.md | current | 0 |  |
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 12 |  |
+| commands-reference.md | current | 14 |  |
 | component-leases.md | needs-work | 33 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 20 |  |
@@ -135,7 +135,7 @@ was corrected by hand and had drifted back within a day.
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
 | guarantees.md | needs-work | 2 |  |
-| guide-ai-agents.md | stale-fixed | 3 |  |
+| guide-ai-agents.md | stale-fixed | 4 |  |
 | guide-humans.md | stale-fixed | 1 | yes |
 | harness-gate-guide.md | needs-work | 5 |  |
 | holes.md | needs-work | 29 |  |
@@ -151,7 +151,7 @@ was corrected by hand and had drifted back within a day.
 | mcp-bridge.md | needs-work | 77 |  |
 | mcp-http-transport.md | current | 0 |  |
 | mcp-proxy.md | current | 0 |  |
-| mcp-reference.md | current | 8 |  |
+| mcp-reference.md | current | 13 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
 | model-scheduling.md | needs-work | 0 |  |
 | namespacing.md | needs-work | 16 |  |
