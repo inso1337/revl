@@ -393,3 +393,164 @@ def test_g_secret_is_a_registered_diagnostic():
         "      let s = emit complete(u)\n      let x = emit host_sink(s)",
         extra="extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"))
     assert classify(err)["code"] == "G-SECRET"
+
+
+# ===========================================================================
+# 12. Issue #1936 part 2: the binding resolves AT CALL TIME.
+#
+# §3's plug-time resolution is the default and stays strict: a declared secret
+# with no resolvable value refuses the boot, naming the secret and never a
+# value. #1936's second defect is the other half of that — the operator who
+# configures a mailbox AFTER start, or rotates a password, must be able to use
+# the binding. So a composition can opt in to booting with the name unset
+# (`secrets_may_be_absent`) and install it afterwards through
+# `_Driver.set_secret`. That seam writes the SAME name-keyed map plug-time
+# resolution writes, so the audit token still names the real binding — never a
+# locator and never a value (§5a). What it does NOT do is invent a second
+# mechanism: the emitted body already reads the map on every call, which is what
+# makes an install-after-start and a later rotation visible without a re-plug.
+# ===========================================================================
+
+
+def test_absent_at_plug_is_an_explicit_opt_in_and_the_default_still_refuses():
+    """`allow_absent` is an explicit opt-in, and the default is unchanged: with
+    it an unresolvable name is left for the call to report, without it the plug
+    still refuses, naming the secret and never a value."""
+    ir = compile_source(_HONEST_G8, "honest.rvl")
+    os.environ.pop("REVL_SECRET_API_KEY", None)
+    # the opt-in leaves the name unset instead of raising
+    assert _resolve_secrets(ir, None, allow_absent=True) == {}
+    # a value that IS resolvable is still resolved, in both modes
+    assert _resolve_secrets(ir, {"api_key": "v1"}, allow_absent=True) == {
+        "api_key": "v1"}
+    # the default is byte-identically strict, and still never names the value
+    with pytest.raises(RuntimeError) as excinfo:
+        _resolve_secrets(ir, None)
+    assert "api_key" in str(excinfo.value)
+    assert "REVL_SECRET_API_KEY" in str(excinfo.value)  # the operator's fix
+
+
+def test_the_opt_in_cannot_excuse_a_name_the_document_does_not_declare():
+    """It is a flag for the whole document, never a pattern over names, so it
+    cannot install a binding no `secret ... for ...` declared: a composition
+    with no bound secret resolves to nothing either way, and a name the document
+    does not declare is not a name the opt-in can excuse."""
+    free = compile_source(_SECRET_FREE, "free.rvl")
+    assert _resolve_secrets(free, None, allow_absent=True) == {}
+    assert _resolve_secrets(free, {"anything": "v"}, allow_absent=True) == {}
+
+
+# The same availability gate test_424_b1_interposition.py / test_run.py use.
+try:  # noqa: SIM105
+    import cordis  # noqa: F401
+    _HAVE_CORDIS = True
+except ModuleNotFoundError:  # pragma: no cover -- depends on the interpreter
+    _HAVE_CORDIS = False
+
+needs_cordis = pytest.mark.skipif(
+    not _HAVE_CORDIS,
+    reason="needs the cordis-py runtime (run under "
+           "backends/python/.venv/bin/python)")
+
+
+def _driver(ir: dict, **kwargs):
+    """A `_Driver` on the real cordis-py backend, wired exactly as
+    `run_command` wires it (the same helper test_router_runtime.py uses)."""
+    from revl._paths import backends_root, python_backend_emitter  # noqa: PLC0415
+    from revl.run import _Driver  # noqa: PLC0415
+
+    backend_dir = backends_root() / "python"
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+    import runtime as runtime_mod  # noqa: PLC0415
+    from cordis import Context  # noqa: PLC0415
+    from cordis.fiber import FiberState  # noqa: PLC0415
+
+    return _Driver(ir, {}, python_backend_emitter(), runtime_mod, Context,
+                   FiberState, **kwargs)
+
+
+@needs_cordis
+def test_a_composition_opted_into_post_plug_resolution_boots_and_refuses_at_the_call():
+    """The defect, restated as a test: with no value configured the composition
+    still BOOTS, the driver installs nothing, and the CALL is the fail-loud gate
+    — naming the secret and never a value. Before #1936 part 2 this refused at
+    plug, so a key the operator had not configured yet made the composition
+    unstartable."""
+    ir = compile_source(_HONEST_G8, "honest.rvl")
+    os.environ.pop("REVL_SECRET_API_KEY", None)
+    driver = _driver(ir, secrets_may_be_absent=True)
+    module = driver._emit_module(ir)          # the plug that used to refuse
+    assert module._REVL_SECRETS == {}
+    with pytest.raises(RuntimeError) as excinfo:
+        module.send("hi")
+    assert "api_key" in str(excinfo.value)
+    assert "sk-" not in str(excinfo.value)
+
+
+@needs_cordis
+def test_the_driver_seam_installs_and_rotates_the_key_the_next_call_reads():
+    """`set_secret` writes the map the emitted body reads on EVERY call, so an
+    install after start and a later rotation are both visible to the NEXT call —
+    no re-plug, and the binding's name never changes."""
+    ir = compile_source(_HONEST_G8, "honest.rvl")
+    os.environ.pop("REVL_SECRET_API_KEY", None)
+    driver = _driver(ir, secrets_may_be_absent=True)
+    module = driver._emit_module(ir)
+    first = driver.set_secret("api_key", "sk-first")
+    assert first["action"] == "install"
+    assert module.send("hi") == 2 + len("sk-first")
+    second = driver.set_secret("api_key", "sk-second-longer")
+    assert second["action"] == "rotate"
+    assert module.send("hi") == 2 + len("sk-second-longer")
+
+
+@needs_cordis
+def test_a_plug_resolved_key_rotates_through_the_same_seam():
+    """The strict plug path and the seam write the same map, so a key resolved at
+    plug rotates through `set_secret` too — and that first write is a ROTATION,
+    not an install, because a value was already in force."""
+    ir = compile_source(_HONEST_G8, "honest.rvl")
+    driver = _driver(ir, secrets={"api_key": "sk-plug"})
+    module = driver._emit_module(ir)
+    assert module.send("hi") == 2 + len("sk-plug")
+    record = driver.set_secret("api_key", "sk-rotated")
+    assert record["action"] == "rotate"
+    assert module.send("hi") == 2 + len("sk-rotated")
+
+
+@needs_cordis
+def test_the_seam_is_name_only_and_refuses_an_undeclared_or_blank_value():
+    """§5a: the audit surface names the secret and never the value. The seam is
+    strict on the NAME — an undeclared name has no binding, so it is refused
+    rather than silently installed — and refuses a blank value without echoing
+    it. Neither refusal installs anything."""
+    ir = compile_source(_HONEST_G8, "honest.rvl")
+    driver = _driver(ir, secrets_may_be_absent=True)
+    module = driver._emit_module(ir)
+    with pytest.raises(ValueError) as undeclared:
+        driver.set_secret("not_declared", "sk-leak")
+    assert "not_declared" in str(undeclared.value)
+    assert "sk-leak" not in str(undeclared.value)
+    with pytest.raises(ValueError) as blank:
+        driver.set_secret("api_key", "")
+    assert "api_key" in str(blank.value)
+    assert module._REVL_SECRETS == {} and driver.secret_events == []
+    record = driver.set_secret("api_key", "sk-live")
+    # the record names the binding; the value appears nowhere in it
+    assert set(record) == {"name", "capability", "action", "generation"}
+    assert record["capability"] == "net.send"
+    assert "sk-live" not in repr(driver.secret_events)
+    assert "sk-live" not in repr(ir)
+
+
+@needs_cordis
+def test_the_opt_in_is_off_by_default_so_a_missing_key_still_refuses_the_boot():
+    """No opt-in: a declared secret with no value still refuses at plug, exactly
+    as it did before #1936 — the seam is never reached by accident."""
+    ir = compile_source(_HONEST_G8, "honest.rvl")
+    os.environ.pop("REVL_SECRET_API_KEY", None)
+    driver = _driver(ir)
+    with pytest.raises(RuntimeError) as excinfo:
+        driver._emit_module(ir)
+    assert "api_key" in str(excinfo.value)
