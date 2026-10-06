@@ -449,6 +449,13 @@ CORPUS = [
     "../../../src/revl/truc/components/cli.rvl",
     "../emit_rust_corpus/reserved_names.rvl",
     "../emit_rust_corpus/calls.rvl",
+    # issue #1972: the computer-use UI transaction unit (item 522 slice 3,
+    # issue #1369) — the one document that declares a computer-use capability,
+    # so the one that holds the `ui_transaction` scope, the crossing marker on
+    # each computer-use extern, the `compensate` thunk, the async unit, and a
+    # method that reaches a crossing through a module `fn` and must get NO
+    # scope (the IR marks it `"unit": "ui"`; the reference derivation does not).
+    "ui_transaction_unit.rvl",
 ]
 
 

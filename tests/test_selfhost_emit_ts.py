@@ -296,6 +296,14 @@ CORPUS = [
     # (item 429's trap). Added FAILING FIRST: the port answered
     # `<<UNSUPPORTED-LIFECYCLE-STEP:abort>>`.
     "lifecycle_abort.rvl",
+    # issue #1972: the computer-use UI transaction unit (item 522 slice 3,
+    # issue #1369), in the py corpus because it is the tier that carried the
+    # only computer-use document before this one. It holds the `uiTransaction`
+    # /`uiTransactionAsync` scope, the `uiCrossing` wrapper on each
+    # computer-use extern, the `compensate` thunk, and a method that reaches a
+    # crossing through a module `fn` and must get NO scope (the IR marks it
+    # `"unit": "ui"`; the reference derivation does not).
+    "../emit_py_corpus/ui_transaction_unit.rvl",
 ]
 
 def _load_reference_emit():

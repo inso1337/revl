@@ -1,0 +1,65 @@
+// Computer-use transactions (item 522 slice 3, issue #1369). A provide method
+// that crosses a computer-use verb is the UI transaction unit, so the reference
+// emitters run its body inside a transaction scope and mark the crossing itself
+// with `declared_crossing`/`uiCrossing`/`revl_ui_cross`. Covered here:
+//
+//   * `act` — a unit method: three crossings, one of them (`type_amount`,
+//     `ui.text`) COMPENSATABLE with a declared inverse through `compensate`;
+//   * `watch` — an ASYNC unit method: the same unit on an `async` provide
+//     method, whose body is a single crossing in tail position;
+//   * `count` — a method that crosses nothing and carries no scope at all;
+//   * `peek` — a method that REACHES a computer-use extern through a module
+//     `fn`. `lower` marks it `"unit": "ui"` (it follows callees), but the
+//     reference derivation reads ONE body and does not follow callees, so the
+//     reference gives it NO scope. A port that reads the IR's `unit` key
+//     instead of recomputing the derivation wraps this method and diverges.
+//
+// `type_amount` is the `compensate` case: `clear_amount` is the pure inverse
+// the crossing declares, and the reference passes it to the crossing marker as
+// a thunk (`lambda: clear_amount()` in python, a `call=` table on the wire).
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
+extern emission[screen.observe] fn read_pane(region: Str) -> Str
+  = @py { return "" } = @ts { return ""; } = @rs { String::new() } = @java { return ""; }
+extern emission[ui.find] fn locate(pane: Str, name: Str) -> UiTarget
+  = @py { return None } = @ts { return null; } = @rs { todo!() } = @java { return null; }
+extern emission[ui.click] fn actuate(target: UiTarget)
+  = @py { return None } = @ts { } = @rs { } = @java { }
+extern pure fn clear_amount()
+  = @py { return None } = @ts { } = @rs { } = @java { }
+extern emission[ui.text] fn type_amount(target: UiTarget, s: Str) compensate clear_amount()
+  = @py { return None } = @ts { } = @rs { } = @java { }
+
+fn peek_pane(region: Str) -> Str { return read_pane(region) }
+
+service Desk {
+  emission fn act(region: Str) -> Int
+  emission async fn watch(region: Str) -> Str
+  fn count(n: Int) -> Int
+  emission fn peek(region: Str) -> Str
+}
+
+component Agent provides desk: Desk {
+  provide desk {
+    fn act(region) {
+      let pane = emit read_pane(region)
+      let ok = emit locate(pane, "Approve")
+      emit type_amount(ok, "42")
+      return 1
+    }
+    async fn watch(region) = emit read_pane(region)
+    fn count(n) = n + 1
+    fn peek(region) = emit peek_pane(region)
+  }
+}

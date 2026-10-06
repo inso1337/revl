@@ -271,6 +271,12 @@ CORPUS = [
     "../emit_py_corpus/annotated_lets.rvl",
     "../emit_rust_corpus/perf_index.rvl",
     "../emit_wasm_corpus/forloop.rvl",
+    # issue #1972: the computer-use UI transaction unit (item 522 slice 3,
+    # issue #1369) — the `RevlUi` scope with its `try`/`catch`/`finally`, the
+    # `_revlUi.cross`/`crossUnit` per crossing, the `compensate` registration,
+    # and a method that reaches a crossing through a module `fn` and must get NO
+    # scope (the IR marks it `"unit": "ui"`; the reference does not).
+    "../emit_py_corpus/ui_transaction_unit.rvl",
 ]
 
 

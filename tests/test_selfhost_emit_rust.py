@@ -328,6 +328,14 @@ CORPUS = [
     "keyword_keys.rvl",      # issue #1927: a requirement key that is a Rust
                              #   keyword (`box`) takes the mangled spelling as
                              #   an identifier, the surface key as a string
+    "../emit_py_corpus/ui_transaction_unit.rvl",  # issue #1972: the
+                             #   computer-use UI transaction unit (item 522
+                             #   slice 3, issue #1369) — the `RevlUiScope`/
+                             #   `catch_unwind` body, `revl_ui_cross` per
+                             #   crossing, the `compensate` registration, and a
+                             #   method that reaches a crossing through a module
+                             #   `fn` and must get NO scope (the IR marks it
+                             #   `"unit": "ui"`; the reference does not)
 ]
 
 
