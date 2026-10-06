@@ -507,8 +507,11 @@ def _cache_zoo(kinds: frozenset[str]) -> str:
             'undo restore(result) = @py { pass }',
             'extern emission fn child_read(x: Str) -> Str = @py { return x }',
             'service Worker { emission fn run(x: Str) -> Str }',
+            # emission position on purpose: a witnessed call in value position
+            # registers no inverse and is refused (issue #2044, G4). This kind
+            # needs the reach edge from the spawned child, not a registration.
             'component Child provides worker: Worker { provide worker { '
-            'fn run(x) { let w = w_spawn(x) return emit child_read(x) } } }',
+            'fn run(x) { let w = emit w_spawn(x) return emit child_read(x) } } }',
         ]
         act.append("let c = effect spawn Child with { } undo c.dispose()")
         meth.append("let d = emit c.worker.run(x)")
