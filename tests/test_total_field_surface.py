@@ -49,6 +49,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
+from _builtin_cases import serve_builtin_cases  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 
 _STDLIB = ("json.rvl", "str.rvl", "value.rvl")
@@ -81,6 +82,10 @@ def _exec_py(ir: dict) -> dict:
     code = _emit("python", ir)
     stub = types.ModuleType("runtime")
     stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    # issue #1932: the emitted module imports the builtin sum cases from the
+    # shared runtime instead of defining them itself, so the stub must serve
+    # the real Ok/Err (a None placeholder breaks the lowered match).
+    serve_builtin_cases(stub)
     had, previous = "runtime" in sys.modules, sys.modules.get("runtime")
     sys.modules["runtime"] = stub
     try:

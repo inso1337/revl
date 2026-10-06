@@ -404,6 +404,7 @@ def _is_scoring_corpus_document(f: str, root: Path) -> bool:
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
     "tests/_backend_import.py",
+    "tests/_builtin_cases.py",
     "tests/_load_by_path.py",
     "tests/_net_gate_client.ts",
     "tests/_net_gate_provider.py",

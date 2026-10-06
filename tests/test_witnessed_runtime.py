@@ -260,8 +260,14 @@ def test_witnessed_call_site_emits_ok_conditional_transactional():
     # it is NOT a bracket: no `yield lambda:` disposer for the witnessed step
     # (the only yields are the transactional one and the frame drain).
     assert "yield lambda:" not in body
-    # Ok/Err are present because the witnessed extern returns Result
-    assert "class Ok:" in body
+    # Ok/Err are in scope because the witnessed extern returns Result — since
+    # issue #1932 the module IMPORTS the cases from the shared runtime (one
+    # class object for every module) instead of emitting its own.
+    assert "class Ok:" not in body
+    runtime_import = [ln for ln in body.splitlines()
+                      if ln.startswith("from runtime import ")][0]
+    assert {"Ok", "Err"} <= {
+        n.strip() for n in runtime_import[len("from runtime import "):].split(",")}
 
 
 def test_bracket_still_emits_a_plain_disposer():
