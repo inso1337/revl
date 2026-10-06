@@ -2118,7 +2118,7 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                            % (pad, jref, bind, _expr(undo, env)))
             elif undo is not None:
                 out.append("%s\treturn func() error { if %s { %s }; return nil }"
-                           % (bind, _expr(undo, env)))
+                           % (pad, bind, _expr(undo, env)))
             else:
                 out.append("%s\treturn nil" % pad)
             out.append("%s})" % pad)
