@@ -159,11 +159,16 @@ def test_acquire_bracket_keeps_its_site_spelled_undo():
     # site undo — only a witnessed call's grammar changed.
     body = _ir("Acq")["components"][0]["body"]
     assert body == [
-        # issue #1859: the bracket now also records its inverse provenance.
+        # issue #1859: `stash_acq` DECLARES `undo unstash(result)` and the site
+        # spells that inverse, so the bracket records `declared` — the
+        # declared-extern branch, not the `_method_effect_inverse` fallthrough.
         {"step": "let-effect", "bind": "h", "inverse": "declared",
          "acquire": {"kind": "fn", "name": "stash_acq", "args": []},
          "undo": {"kind": "fn", "name": "unstash", "args": [{"kind": "name", "id": "h"}]}},
     ]
+    # issue #1859: the value is drawn from the documented small domain, and a
+    # bracket whose inverse the checker PROVED stamps no key at all.
+    assert body[0]["inverse"] in {"asserted", "declared"}
 
 
 def test_site_spelled_undo_on_a_witnessed_call_is_refused():
