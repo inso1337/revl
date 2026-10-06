@@ -28,7 +28,6 @@ import importlib.util
 import json
 import os
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -234,17 +233,25 @@ def test_no_swap_candidate_carries_a_use_reached_file(project):
     assert GREETER not in json.dumps(arguments)
 
 
-def test_no_export_plan_names_a_use_reached_file(project, monkeypatch):
+@needs_runtime
+def test_no_export_plan_names_a_use_reached_file(project):
     proj, _reg = project
     _add(proj)
-    vs = _held(proj)
-    # `_export_plan` reads the session's notes; an empty store is what an
-    # export of a freshly loaded composition has
-    monkeypatch.setattr(server_mod, "SESSION", types.SimpleNamespace(
-        note_records={}, note_stale=set(), note_refuted=set()))
+    _load_use_reached(proj)
+    session = server_mod.SESSION
+    vs = edit_mod._files_source(session.origin)
+    # a PROJECT note makes the plan non-empty, so the truc's absence below is
+    # a fact about the plan and not a fact about its size
+    notes_mod.add(session, vs,
+                  {"kind": "invariant", "body": "hi stays a pure concat"},
+                  "AppProvider.app")
     plan = server_mod._export_plan(vs, {"with_knowledge": True})
-    assert [p for p, _ in plan] == []
+    assert plan, "the plan must be non-vacuous"
+    assert _truc_path(proj) not in [p for p, _ in plan]
     assert GREETER not in json.dumps(plan)
+    # the vendored record is in the store and is still not rendered anywhere
+    assert TRAP_ID in notes_mod.notes(session)
+    assert TRAP_BODY not in json.dumps(plan)
 
 
 # ------------------------------------------------ served, and riding
