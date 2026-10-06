@@ -45,6 +45,13 @@ DIGEST_RECIPE = "revl-mcp-source-1"
 #: is fixed at import, so a cache cannot go stale within a run.
 _CACHE: dict[Path, dict] = {}
 
+#: Where a *modern* result carries its `serverInfo`: `server/discover` puts it
+#: nowhere else, and every HTTP result carries it there too. Spelled out here
+#: rather than imported from `http_transport`, so that a stdio server does not
+#: pull the HTTP transport (`http.server`, `ssl`, `select`) in to read one
+#: string; the test suite pins the two spellings equal instead.
+META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+
 
 class IdentityMismatch(RevlError):
     """The server is not the compiler the caller pinned (issue #2007)."""
@@ -106,22 +113,42 @@ def identity(root: Path | None = None) -> dict:
 def reported_identity(reported) -> dict:
     """The identity block out of whatever payload a client has in hand.
 
-    All three carry it: an `initialize` result (its `serverInfo`), a
-    `serverInfo` block itself, and a `revl_state` payload.
+    Every shape that carries it: an `initialize` result (its `serverInfo`), a
+    `serverInfo` block itself, a `revl_state` payload (the fields at the top
+    level), and a `server/discover` result — which carries `serverInfo` under
+    `_meta` and nowhere else, so a client that pinched `serverInfo` off the top
+    level alone read nothing and reported the pinned server as a stranger. A
+    whole JSON-RPC response is unwrapped to its `result` first, since that is
+    what a client off the HTTP transport holds.
     """
-    if isinstance(reported, dict) and isinstance(reported.get("serverInfo"), dict):
-        return reported["serverInfo"]
+    found = _server_info_in(reported)
+    if found is None and isinstance(reported, dict) and "jsonrpc" in reported:
+        found = _server_info_in(reported.get("result"))
+    if found is not None:
+        return found
     return reported if isinstance(reported, dict) else {}
+
+
+def _server_info_in(payload) -> dict | None:
+    """The `serverInfo` block of one result: at the top level, or in `_meta`."""
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("serverInfo"), dict):
+        return payload["serverInfo"]
+    meta = payload.get("_meta")
+    if isinstance(meta, dict) and isinstance(meta.get(META_SERVER_INFO), dict):
+        return meta[META_SERVER_INFO]
+    return None
 
 
 def assert_identity(reported, *, revision: str,
                     source_digest: str | None = None) -> dict:
     """The server's identity, or `IdentityMismatch` naming both values.
 
-    `reported` is any payload carrying the identity (`initialize` result,
-    `serverInfo`, `revl_state`). A field the caller did not pin — a
-    `source_digest` left as None — is not compared, so pinning the revision
-    alone is enough to catch a server from another tree.
+    `reported` is any payload carrying the identity (`initialize` result, a
+    `server/discover` result, `serverInfo`, `revl_state`). A field the caller
+    did not pin — a `source_digest` left as None — is not compared, so pinning
+    the revision alone is enough to catch a server from another tree.
     """
     got = reported_identity(reported)
     got_revision = got.get("revision")

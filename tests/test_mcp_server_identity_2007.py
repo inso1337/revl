@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -169,6 +170,64 @@ def test_a_pin_mismatch_is_a_hard_error_naming_both_values():
                                  source_digest=info["serverInfo"]["source_digest"])
     with pytest.raises(ident.IdentityMismatch):
         ident.assert_identity(info, revision=got, source_digest="0" * 64)
+
+
+def test_the_discover_result_can_be_pinned_too():
+    """`server/discover` carries `serverInfo` under `_meta` and nowhere else.
+
+    A client that pins off the modern introspection result must recognise the
+    server, not read `None` off a top level that never carried it. The result
+    here is the transport's own, not a hand-written shape.
+    """
+    from revl.mcp import server as server_module
+    from revl.mcp.http_transport import (META_SERVER_INFO, HttpTransport,
+                                         ServerDispatcher)
+
+    transport = types.SimpleNamespace(dispatcher=ServerDispatcher(server_module))
+    discover = HttpTransport._discover(transport, 1)
+    assert "serverInfo" not in discover["result"]       # nowhere at the top
+    carried = discover["result"]["_meta"][META_SERVER_INFO]
+    assert carried["revision"] and carried["source_digest"]
+
+    pinned = ident.identity()
+    got = ident.assert_identity(discover, revision=pinned["revision"],
+                                source_digest=pinned["source_digest"])
+    assert got["revision"] == pinned["revision"]
+
+    # and a discover result from a tree this is not is still refused loudly
+    with pytest.raises(ident.IdentityMismatch) as raised:
+        ident.assert_identity(discover, revision="0" * 40)
+    assert "0" * 40 in str(raised.value)
+    assert pinned["revision"] in str(raised.value)
+
+    # the key is spelled twice by design (a stdio server must not import the
+    # HTTP transport to read one string); the two spellings must not drift
+    assert ident.META_SERVER_INFO == META_SERVER_INFO
+
+
+def test_the_composed_wire_names_the_compiler_too():
+    """`revl mcp serve --mcp <composition>` serves a composition's own tools and
+    advertises no `revl_state`, so its `initialize` is the only surface a client
+    can pin: the name says which composition, the identity which compiler.
+    """
+    from revl import compile_source
+    from revl.mcp.composed import ComposedServer
+
+    class _Session:                      # the projection needs the IR, not a runtime
+        ir = compile_source(CACHE)
+
+        def call(self, key, method, args):
+            raise AssertionError("initialize must not reach the composition")
+
+    info = ComposedServer(_Session(), composition="app").handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})["result"]
+    assert info["serverInfo"]["name"] == "revl:app"     # still names the composition
+
+    pinned = ident.identity()
+    got = ident.assert_identity(info, revision=pinned["revision"],
+                                source_digest=pinned["source_digest"])
+    assert got["revision"] == pinned["revision"]
+    assert got["source_digest"] == pinned["source_digest"]
 
 
 def test_a_server_started_from_two_revisions_reports_two_identities(tmp_path):

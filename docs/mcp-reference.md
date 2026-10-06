@@ -178,9 +178,19 @@ does not name. `revl.mcp.identity` reads them (`identity()`) and compares them
 (`assert_identity(payload, revision=..., source_digest=...)`), the latter
 raising `IdentityMismatch`, naming both values, rather than warning, because a
 tool answering from the wrong tree is otherwise indistinguishable from one
-answering correctly. Under `revl mcp proxy` the `initialize` `serverInfo` names
-the proxy; read the compiler's identity off `revl_state`, whose handler is the
-compiler server's own.
+answering correctly.
+
+The same block rides on the other MCP wires this package serves. A
+`server/discover` result carries `serverInfo` under the reserved
+`_meta["io.modelcontextprotocol/serverInfo"]` key rather than at the top level,
+as does every result of the HTTP transport; `assert_identity` accepts that
+shape, a whole JSON-RPC response, or the block on its own. `revl mcp serve --mcp
+<composition>` serves a composition's own tools and advertises no `revl_state`,
+so its `initialize` `serverInfo` names the composition in `name` and carries the
+answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
+`serverInfo` names the proxy instead; read the compiler's identity off
+`revl_state`, whose handler is the compiler server's own, or off
+`revl_proxy_verdicts`, whose `upstream` block is the upstream's `serverInfo`.
 
 ## The verb set at a glance
 
