@@ -53,8 +53,8 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G6** purity outside effect forms, binding uniqueness | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 + 8 | **yes** (one C row per reconstructed statement, one BU row per binding scope; the gate prints the count) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on every one of them. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe. Binding uniqueness (issue #1812) is `RevL.G6Binding.BindingOK` over each scope's `BE` steps, decided by the `BU` row (`bindingB_iff`), and the corpus's one G6 binding refusal is `agree-G6` |
 | **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | **yes** (267 D rows) | the row RUNS `backends/python/runtime.py` over an enumerated scenario corpus and diffs the reference's observed disposition against the model's predicted one, with a coverage ratchet (`teardown_coverage`) that fails the gate if the corpus stops distinguishing LIFO from FIFO, Phase 2 from Phase 1, or the three dispositions from one another. Still deliberately not modelled, and so not under the row: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. The cordis LIFO unwind of the activation-body stack is supplied by the harness, not observed — only `drain`'s own `reversed` loop (item 369) is revl's own ordering code. **Modelling limit, scoped on purpose** |
 | **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 9 | **yes** (one S8 row per reconstructed statement; the gate prints the count) | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. The oracle now decides `RevL.G8Classified.stmtSurface` over each reconstructed statement's heads against the file's `Prog` (`Oracle.stmtSurfaceB`, `stmtSurfaceB_iff`); the reference recomputes the same reach caps independently from the `EX`/`FN` rows, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries both a non-empty and an empty surface, and `g8_row_not_vacuous` proves the surface goes empty when the wrapping fn stops reaching the crossing. First-class dispatch (`star`) is `n/a` on both sides |
-| **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
-| **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
+| **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable**; the rule is now decided on the corpus, on the sink the checker REPORTS | 18 | **partial** (one TAINT row per checker-reported taint refusal; the gate prints the count; 4 agree-G9) | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Still the one **UNPROVED** row in the table for *coverage*. Since issue #1811 group 2 the oracle's `TAINT` row decides the rule at the sink and on the label the checker itself reports, via `RevL.G9Flow.g9RowB` — route B of the issue, and explicitly **the rule on the corpus, not the coverage of the walk** |
+| **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | **partial** (the same TAINT row; 1 agree-G9) | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly. The disclosure rule is now decided on the corpus through the same TAINT row, and **that is the rule on the corpus, not coverage of the checker's walk** — the same caveat G9 carries. The `G-SECRET-FLOW` refusal carries no `navigate`, so the exporter reads its sink out of the refusal message and its origin out of a table spelled in the harness, not out of the hint's prose |
 | **G-MODEL-PLACE** model placement and model reach | partial: the placement and reach rules | 6 | **yes** (one MPV row per routed component, one MAV row per consulted role; 9 agree-G-MODEL-PLACE) | since issue #1811 `RevL.ModelPlace.PlaceOK` decides that a confidentiality origin is placed on the device only, through a council member that receives it too (`placeB_iff`), and the model-reach rule of item 519 (a consulted role's `reaches [...]` within what the component holds) is decided with the spawn rule's proved `attenuatesB`. Which roles a component consults, and whether it consults a model at all, are the exporter's, read as `lower._model_reach_edges` / `_consults_a_model` read them. Not modelled: the route-block shape rules and the value-level origin ceiling (item 514) |
 | **G-COUNCIL-SPLIT** tie policy | partial: the tie-outcome rule | 7 | **yes** (one CTV row per declared council; 1 agree-G-COUNCIL-SPLIT) | since issue #1811 `RevL.ModelCouncil.SplitOK` decides that no declared council admits when its members disagree, over the tie outcome the checker reads for each council — the declared `on_tie`, or the `split` default an omitted clause resolves to (`splitB_iff`). This is a finite check over declarations with no reach, so it needs no component body; the exporter reads `prog.model_councils` and nothing else. The other `model-council` refusals are different rules with the same code and this row is deliberately silent on them: the unknown tie outcome, the aggregation vocabulary and its totality on the declared member set, the member functions and their uniqueness, `quorum` bases other than `declared`, and "exactly one aggregate rule". A council declaring no aggregation emits no `CV` row at all, so its refusal lands in `out-of-fragment` rather than being read as an agreement this row cannot make |
 | **A1** iteration boundaries only during activation | partial: the async-colour rules | 10 | **yes** (one A1 row per site, one A1S row per provide method; 9 agree-A1) | the iteration boundary itself is not modelled (L0 has no `await`). Since issue #1808 the async-colour rules are: `RevL.A1Async` decides, per site, that a sync provide method, an unawaited `effect`/`emit` step and an `undo`/`compensate` slot reach nothing async and that an awaited step does, over the file's async names (async externs, async service operations) and its `fn` call graph within a fuel bound (`reachB_iff`, `siteB_iff`), and that a provide method's colour is its service's (`sigB_iff`). Not modelled: an arrow's type has no colour (`a1_async_arrow_sync_type.rvl` stays out of fragment), colour polymorphism through a callback parameter, and a stream `next` as a suspension |
@@ -369,6 +369,14 @@ Three summary readings of that map:
 | `RevL.ModelCouncil.unknown_tie_not_this_row` | G-COUNCIL-SPLIT tie policy — what it does not decide | **proved** | `propext, Quot.sound` | a spelling outside both vocabularies is admitted here; the unknown-tie rule refuses it, and conflating the two would make this row claim a judgment it does not make |
 | `RevL.ModelCouncil.fixtures_decided` | G-COUNCIL-SPLIT tie policy — the corpus shapes | **proved** | none | `gcouncilsplit_on_tie_allow` refused, the `on_tie split` and `on_tie deny` shapes admitted |
 | `RevL.ModelCouncil.council_not_vacuous` | G-COUNCIL-SPLIT tie policy — non-vacuity | **proved** | `propext, Quot.sound` | the rule refuses the admitting tie and admits `split` and `deny`, so the printed verdict is mutation-sensitive in both directions |
+| `RevL.G9Flow.admitsB_iff` | G9 / G-SECRET-FLOW on the corpus — the bridge (issue #1811 group 2) | **proved** | `propext, Classical.choice, Quot.sound` | `admitsB` decides `RevL.Lemmas.Admits` at all four sink classes, so the printed `TAINT` verdict is exactly the rule |
+| `RevL.G9Flow.g9RowB_iff` | G9 / G-SECRET-FLOW on the corpus — the row's verdict | **proved** | `propext, Classical.choice, Quot.sound` | the row prints `ok` precisely where `Admits` holds and `fail` precisely where it is violated, so a `fail` is the rule VIOLATED at a sink the checker itself reported — the refusal explained, not contradicted |
+| `RevL.G9Flow.reported_walk_reaches_the_reported_label` | G9 / G-SECRET-FLOW on the corpus — what route B is | **proved** | `propext` | every reported walk reaches the label it reported, at ANY reported length: the hop column cannot move the verdict. **This is not a claim that the reported length is the real one** |
+| `RevL.G9Flow.escapeFlow` | G9 / G-SECRET-FLOW on the corpus — the escape | **proved** | `propext` | the declassifier the checker names can be appended to the reported walk and lands on `applyD` of the entry label, which is what the row's "route it through a declared point" advice claims |
+| `RevL.G9Flow.labelOfString_is_the_label` | G9 / G-SECRET-FLOW on the corpus — the origins column | **proved** | `propext` | the empty string is the empty label, the corpus labels are the origins their names denote, and an unknown origin name is `none` — which emits no row and lands the refusal in the fatal `missed-G9` |
+| `RevL.G9Flow.corpus_rows_decided` | G9 / G-SECRET-FLOW on the corpus — the corpus shapes | **proved** | `propext` | the `fs`-at-authority and `confidential`-at-disclosure shapes refused, the same two sinks on a clean label admitted |
+| `RevL.G9Flow.escape_moves_the_label` | G9 / G-SECRET-FLOW on the corpus — the escape is not decorative | **proved** | `propext` | `endorse[fs]` on an `fs` label leaves the empty label, which the authority sink admits where it refused the original |
+| `RevL.G9Flow.g9_not_vacuous` | G9 / G-SECRET-FLOW on the corpus — non-vacuity | **proved** | `propext` | both corpus sink kinds refused and both clean twins admitted, so the `TAINT` row is mutation-sensitive in both directions |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -639,9 +647,30 @@ is exhibited; and that the checker labels the right positions as sinks,
 which is extraction, not theorem. The origin half of that labelling **is**
 proved: `taint_surface_within_declared_context` composes with G6 to show
 every origin a statement can mint is one its declared context already
-declares. No differential-oracle row references any of these definitions
-— the oracle carries no taint verdicts, so item 418's C4 applies here
-too: G9 is not covered by that gate.
+declares.
+
+### What the differential-oracle `TAINT` row does and does not add
+
+Issue #1811 group 2 bound this development to the differential oracle — as
+**route B**, the sanctioned fallback, and the distinction is the point.
+`RevL.G9Flow` adds no rule: `Flow`, `Admits`, `Sink` and the label algebra
+are reused, and `g9RowB_iff` pins the oracle's decider to `Admits`. What
+changed is that the four rejection documents the rule exists for
+(`g9_closure_capture_launders_taint.rvl`,
+`g9_service_return_launders_taint.rvl`,
+`g9_spawn_config_launders_taint.rvl`,
+`gsecret_service_return_discloses.rvl`) now land in `agree-G9` instead of
+the deliberately unratcheted `out-of-fragment`, and a checker that stops
+reporting its discovered sink turns the row **red** (`missed-G9`, fatal)
+rather than green.
+
+It is still **the rule on the corpus, not the coverage of the walk**: the
+row's premises are the checker's own refusal, so it cannot distinguish "the
+rule holds at the sink the checker reached" from "the checker never reached
+the sink". The open obligation above is untouched, and `reported_walk_reaches_the_reported_label`
+states exactly the positive half — the reported label is reachable from the
+reported step count, at every count — and no more. Route A (item 418,
+step 9) is what would close it, and nothing here substitutes for it.
 
 
 ## The effect-classification lattice — G4/G5/G8 re-proved (item 418, step 4)
@@ -1094,6 +1123,50 @@ Verdicts:
   aggregate rule"; a council declaring no aggregation emits no `CV` row at
   all, so its refusal lands in `out-of-fragment`.
 
+- **TAINT row (G9 / G-SECRET-FLOW, issue #1811 group 2)**: `Oracle.g9RowB`
+  — `RevL.G9Flow.g9RowB` — over the sink the checker itself REPORTS and the
+  label that arrived there. **This row is the rule on the corpus, NOT the
+  coverage of the checker's walk**, and that distinction is the whole of its
+  scope: the row's premises ARE the checker's own refusal, so it cannot tell
+  "the rule holds here" from "the checker looked here and found nothing".
+  Route A of the issue — growing the L0 bodies so the checker's *coverage* is
+  itself proved — is untouched, and `RevL.G9`'s coverage row stays UNPROVED.
+
+  What the exporter reads out of the refusal, and from where:
+
+  * the **sink** — `navigate.refused.sink` for the three `G9` /
+    `taint-flow` documents (`run`, at argument 1); the `G-SECRET-FLOW`
+    refusal (`taint-secret-flow`) passes no `navigate` at all, so its sink
+    (`write_file`, at argument 2) is read out of the refusal **message**;
+  * the **origins** — `navigate.refused.origins` (`fs`) for the `G9`
+    documents; for `G-SECRET-FLOW` the rule's own `confidential` origin,
+    from a table spelled in the harness and **not** scraped from the hint,
+    whose `endorse[confidential]` occurrences are prose advice. The two
+    confidentiality origins are disjoint (`SECRET_ORIGIN` /
+    `CONFIDENTIAL_ORIGIN`), so the label is not a guess;
+  * the **sink kind**, hence the sink class — the `kind` the refusal names
+    (`a shell command` / `an extern host call (a disclosure sink)`), read
+    through `RevL.G9Flow.sinkOfKind`;
+  * the **naming chain** — the `The tainting path is …` / `The disclosing
+    path is …` line of the `hint`, split into steps; the row's `hops`
+    column is its length minus one, so the reported length is visible in
+    the row's own output;
+  * the **escape** — `navigate.alternatives`' `endorse[<origin>]` ref, or
+    the `endorse[confidential]` the `G-SECRET-FLOW` hint names.
+
+  A kind or an origin name the harness table does not carry yields no row at
+  all, so the refusal lands in the **fatal** `missed-G9` rather than being
+  read as an agreement the row cannot make: widening the checker turns the
+  row red, not green. A `G9` refusal in category `taint-flow`, or a
+  `G-SECRET-FLOW` refusal in category `taint-secret-flow`, files under
+  `agree-G9` or `missed-G9`; the `G9` refusal in category
+  `taint-declassify` is a DIFFERENT rule and falls through to
+  `out-of-fragment`, as does the `G-SECRET` (`taint-secret`) refusal.
+  `g9_coverage` fails the gate unless the corpus carries both an
+  authority-sink refusal and a disclosure-sink refusal, and an admitted
+  twin of one of them. Blinding the printed verdict was seen to produce
+  `missed-G9 4 FATAL`.
+
 ### The G7 row, and what it is evidence of
 
 The G7 row exists because the audit's central reading was that a
@@ -1313,6 +1386,7 @@ layer.
 | `agree-G4` | printed by the gate | informational |
 | `agree-G5` | printed by the gate | informational |
 | `agree-G6` | printed by the gate | informational |
+| `agree-G9` | printed by the gate | informational |
 | `agree-accept` | printed by the gate | informational |
 | `agree-intercept` | printed by the gate | informational |
 | `agree-prelude` | printed by the gate | informational |
@@ -1329,6 +1403,7 @@ layer.
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
 | `missed-G6` | 0 | **FATAL** |
+| `missed-G9` | 0 | **FATAL** |
 | `missed-intercept` | 0 | **FATAL** |
 | `missed-prelude` | 0 | **FATAL** |
 | `out-of-fragment` | printed by the gate | informational |

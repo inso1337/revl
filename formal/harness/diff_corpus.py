@@ -1585,6 +1585,148 @@ def council_rows(rel: str, prog) -> list[str]:
     return rows
 
 
+# ---------------------------------------- G9 / G-SECRET-FLOW (issue #1811)
+#
+# THE RULE ON THE CORPUS, NOT COVERAGE OF THE WALK.
+#
+# `formal/RevL/Theorems/G9_NoAuthorityFromUntrusted.lean` states G9 over a
+# `Flow`: a `Label` carried through a `List Step` to a `Sink`, admitted or not
+# by `RevL.Lemmas.Admits`. Deciding that rule on the corpus needs the walk the
+# CHECKER found, and the checker hands that back only at runtime —
+# `taint._on_sink` names the hop chain in its hint and the sink, kind and
+# origins in `navigate.refused`; `taint._refuse_confidential` names the chain
+# in prose and carries no `navigate` at all. So the exporter asks the checker
+# (`checker_refusal`) and carries what it says as one `TAINT` row per refusal:
+#
+#   TAINT  <file>  <code>  <category>  <class>  <kind>  <origins>  <steps>  <hops>
+#
+# The oracle reads the class and the origins and prints the rule's verdict at
+# them (`Oracle.g9Verdicts` -> `RevL.G9Flow.g9RowB`, which decides `Admits`
+# directly, the same polarity as every other row), so a `fail` is the rule
+# VIOLATED at a sink the checker itself reported — the refusal the checker
+# raised, explained rather than contradicted — and an `ok` where the checker
+# refused is the fatal `missed-G9`.
+#
+# WHAT THIS ROW IS NOT. It decides the rule on the walk the checker
+# DISCOVERED. It is NOT a proof, and not a test, that the checker's walk
+# COVERS every tainting path in the file: a path `taint.py`'s propagation
+# never reaches is a path this row never sees, and no row assembled from the
+# checker's own output can report that. Proving the search itself — growing
+# the L0 bodies so the checker's coverage of the walk is proved — is roadmap
+# item 418 step 9 and is out of this row's reach. `g9_coverage` prints the
+# distinction, `formal/STATUS.md` states it, and the PR that added the row
+# repeats it.
+
+#: The two checker refusals the `TAINT` row decides, as `code -> category`.
+#: The two OTHER taint refusals are different rules and are deliberately left
+#: outside: `G-SECRET` / `taint-secret` (a `Secret[T]` reaching a position it
+#: may not) and `G9` / `taint-declassify` (a declassification that does not
+#: clear). Matching the CATEGORY, not just the code, is what keeps them out.
+TAINT_CODES = {"G9": "taint-flow", "G-SECRET-FLOW": "taint-secret-flow"}
+
+#: The sink kind the checker spells (`taint._sink_kind_for`,
+#: `_refuse_confidential`, `_refuse_secret`), as the `RevL.Lemmas.Sink` class
+#: the rule is stated at. Spelled HERE rather than imported from the model, so
+#: that renaming a class on either side is a diff and not a silent agreement.
+TAINT_SINK_CLASSES = {
+    "a shell command": "authority",
+    "a policy update": "authority",
+    "a UI actuation": "authority",
+    "a capability name": "authority",
+    "an extern host call (a disclosure sink)": "disclosure",
+    "an emission crossing": "disclosure",
+}
+
+#: The origin names the rule reads, spelled here for the same reason.
+TAINT_ORIGIN_NAMES = ("web", "net", "fs", "model", "input", "secret",
+                      "confidential")
+
+#: The label a taint refusal carries when the checker reports no structured
+#: `navigate` block. `_refuse_confidential` says it in prose only: the value is
+#: a `Secret[T]`, and `SECRET_ORIGIN`/`CONFIDENTIAL_ORIGIN` keep those two
+#: disjoint, so a `Secret[T]` value's label is `confidential` alone. NOT
+#: scraped out of the hint — the hint's escape text (`endorse[confidential]`)
+#: names a declassifier, not the label, and the checker owns its spelling.
+TAINT_ORIGINS_BY_CODE = {"G-SECRET-FLOW": "confidential"}
+
+#: The checker's own sentence, split into the facts the row carries.
+G9_KIND_RE = re.compile(r"flows into (.+?)(?: at argument \d+ of `| of `| - )")
+G9_PATH_RE = re.compile(r"path is (.+?)(?:\.$| \(docs/)")
+G9_STEP_SEP = " -> "
+
+#: `rel -> why` for every taint refusal the row could NOT read. A gate finding,
+#: not a silent `fail`: a row that decided an unreadable refusal would be
+#: agreeing vacuously, and a checker that began reporting a new sink kind
+#: should be made to say so here rather than pass.
+_G9_UNREADABLE: dict[str, str] = {}
+
+
+def _g9_admits(cls: str, label: list[str]) -> bool:
+    """`RevL.Lemmas.Admits`, respelled over the sink classes the checker's
+    taint refusals reach, so the reference's verdict is an INDEPENDENT
+    recomputation: widening the Lean rule moves the model alone and the
+    disagreement surfaces as a mismatch. `authority` is `Clean` — literal
+    emptiness, not "no untrusted origin", because `authority_refuses_dirty`
+    refuses a label carrying ANY origin, `secret` included."""
+    if cls == "authority":
+        return not label
+    if cls == "disclosure":
+        return "secret" not in label and "confidential" not in label
+    return False
+
+
+def _g9_label(origins: list[str]) -> list[str] | None:
+    """An origins list as a label. `None` for a name the rule does not carry,
+    so a partially-understood label is never truncated into a smaller — and
+    more admissible — one."""
+    return None if any(o not in TAINT_ORIGIN_NAMES for o in origins) \
+        else list(origins)
+
+
+def g9_rows(rel: str) -> list[str]:
+    """The `TAINT` rows of one modeled file (issue #1811, group 2).
+
+    See the section note above for what the row decides and, at length, what
+    it does not. A file the checker accepts, a refusal outside the two codes,
+    or a refusal the row cannot read emits no row — the last of those records
+    a finding in `_G9_UNREADABLE` instead of deciding the unreadable."""
+    err = checker_refusal(rel)
+    if err is None or err.code not in TAINT_CODES:
+        return []
+    if TAINT_CODES[err.code] != err.category:
+        return []
+    refused = (err.navigate or {}).get("refused") or {}
+    kind = refused.get("kind")
+    if kind is None:
+        m = G9_KIND_RE.search(err.message or "")
+        kind = m.group(1) if m else None
+    origins = refused.get("origins")
+    if origins is None:
+        spelled = TAINT_ORIGINS_BY_CODE.get(err.code)
+        origins = [spelled] if spelled else None
+    path = G9_PATH_RE.search(err.hint or "")
+    if kind is None or origins is None or path is None:
+        missing = ("sink kind" if kind is None else
+                   "origins" if origins is None else "path")
+        _G9_UNREADABLE[rel] = f"the {err.code} refusal names no {missing}"
+        return []
+    cls = TAINT_SINK_CLASSES.get(kind)
+    if cls is None:
+        _G9_UNREADABLE[rel] = (f"the {err.code} refusal reaches sink kind "
+                               f"{kind!r}, which the row does not carry")
+        return []
+    label = _g9_label(origins)
+    if label is None:
+        _G9_UNREADABLE[rel] = (f"the {err.code} refusal carries origins "
+                               f"{','.join(origins)!r}, which the row does "
+                               "not carry")
+        return []
+    steps = path.group(1)
+    return ["\t".join(["TAINT", rel, err.code, err.category, cls, kind,
+                       ",".join(origins), steps,
+                       str(steps.count(G9_STEP_SEP))])]
+
+
 # ------------------------------- out of scope by kind (issue #1810)
 #
 # `out-of-fragment` collects refusals under a rule the model states no row
@@ -1813,6 +1955,23 @@ def async_site_ok(kind: str, reaches: bool) -> bool:
     if kind == "asyncMethod":
         return True
     return not reaches
+
+
+def checker_refusal(rel: str) -> RevlError | None:
+    """The shipped checker's `RevlError` on one corpus file, or `None` when it
+    accepts.
+
+    The same door `checker_message` and `checker_code` take — `compile_files`,
+    so a `use`, an extern body file, a `ref` and an `asset` all resolve
+    against the file's own directory and the search path — asked separately
+    because the error OBJECT carries what neither of those two returns: the
+    walk a taint refusal discovered, on `navigate.refused` and in the hint
+    (`g9_rows`, issue #1811 group 2)."""
+    try:
+        compile_files([str(REPO / rel)])
+        return None
+    except RevlError as e:
+        return e
 
 
 def checker_message(rel: str) -> str:
@@ -2708,6 +2867,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         file_has_mp = False
         tsv.extend(model_role_reach_rows(rel, model_roles, caps_seen))
         tsv.extend(council_rows(rel, prog))
+        tsv.extend(g9_rows(rel))
         # async names (AN, issue #1808), file-wide
         for name in async_names(prog):
             tsv.append("\t".join(["AN", rel, name]))
@@ -4047,6 +4207,59 @@ def council_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided for each `TAINT` row (issue #1811 group 2):
+#: `file -> (sink class, label, admitted, walk, hops)`. Read by `g9_coverage`.
+_G9_ROWS: dict = {}
+
+
+def g9_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `TAINT` row (issue #1811 group 2).
+
+    THE RULE ON THE CORPUS, NOT COVERAGE OF THE WALK — and this ratchet can
+    only enforce the first half. Every taint refusal in the corpus IS a
+    refusal, so a ratchet shaped like `council_coverage`'s (one row admitted
+    and one refused) could never be satisfied: an admitted corpus row is a
+    `missed-G9`, which is fatal. What is enforced instead is that the rule
+    BITES on every row: the label the checker reported must be non-empty, and
+    the verdict must FLIP when it is emptied — the shape
+    `RevL.G9Flow.escapeFlow` reaches once the declassification the checker's
+    own refusal names has been applied. A rule that returned a constant, or a
+    row whose walk is clean to begin with, fails that.
+
+    The other half, that the checker's walk COVERS every tainting path, is
+    roadmap item 418 step 9 and is deliberately not claimed here or anywhere
+    in this row. Returns findings, treated as gate failures."""
+    findings = [f"g9 coverage: {rel}: {why}"
+                for rel, why in sorted(_G9_UNREADABLE.items())]
+    if not _G9_ROWS:
+        findings.append("g9 coverage: no TAINT rows at all — the row would "
+                        "decide nothing and agree vacuously")
+        return findings
+    for rel, (cls, label, admits, walk, hops) in sorted(_G9_ROWS.items()):
+        if _g9_admits(cls, []) == admits:
+            findings.append(
+                f"g9 coverage: {rel}: the row decides "
+                f"{'admitted' if admits else 'refused'} both at the reported "
+                f"label {','.join(label) or '(empty)'} and with that label "
+                "emptied — the verdict does not read the label")
+        if not label:
+            findings.append(f"g9 coverage: {rel}: the reported label is "
+                            "empty, so the row is deciding a clean walk")
+        if not walk:
+            findings.append(f"g9 coverage: {rel}: the row reports no walk")
+        elif str(walk.count(G9_STEP_SEP)) != hops:
+            findings.append(
+                f"g9 coverage: {rel}: the row reports {hops} hops over the "
+                f"{walk.count(G9_STEP_SEP)}-hop walk {walk!r}")
+    if not findings:
+        print(f"g9 coverage: {len(_G9_ROWS)} TAINT rows over "
+              f"classes={','.join(sorted({c for c, *_ in _G9_ROWS.values()}))}, "
+              "each flipping when its label is emptied — the rule ON THE "
+              "CORPUS (the walk the checker DISCOVERED), NOT coverage of the "
+              "checker's walk")
+    return findings
+
+
 #: What the REFERENCE read for each component's declaration rules: (steps,
 #: intercept targets, provides, operations). Read by `prelude_coverage`.
 _PRELUDE_ROWS: dict = {}
@@ -4232,7 +4445,9 @@ class Verdicts(NamedTuple):
     target and method in service, issue #1809), `places` MPV and
     `model_reach` MAV rows (G-MODEL-PLACE, issue #1811), `councils` CTV rows
     (G-COUNCIL-SPLIT: no declared council admits when its members disagree,
-    issue #1811)."""
+    issue #1811), and `g9` TAINT rows (G9 / G-SECRET-FLOW: the rule at the
+    sink class and label of the walk the checker DISCOVERED — the rule on the
+    corpus, NOT coverage of the checker's walk, issue #1811 group 2)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -4259,6 +4474,7 @@ class Verdicts(NamedTuple):
     places: dict[tuple[str, str], str]
     model_reach: dict[tuple[str, str, str], str]
     councils: dict[tuple[str, str], str]
+    g9: dict[str, str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -4273,7 +4489,7 @@ class Verdicts(NamedTuple):
                 + len(self.async_sigs) + len(self.preludes)
                 + len(self.intercepts) + len(self.methods)
                 + len(self.places) + len(self.model_reach)
-                + len(self.councils))
+                + len(self.councils) + len(self.g9))
 
 
 
@@ -4311,6 +4527,7 @@ def parse_verdicts(text: str) -> Verdicts:
     places: dict[tuple[str, str], str] = {}
     model_reach: dict[tuple[str, str, str], str] = {}
     councils: dict[tuple[str, str], str] = {}
+    g9: dict[str, str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -4402,6 +4619,13 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "CTV" and len(parts) == 4:
             # G-COUNCIL-SPLIT tie policy: (file, council) -> ok|fail.
             councils[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
+        elif parts[0] == "TAINT" and len(parts) == 6:
+            # G9 / G-SECRET-FLOW: file -> ok|fail. The class, label and hop
+            # count ride in the middle columns so the row's own output shows
+            # the walk the checker discovered; the KEY is the file, because a
+            # compile stops at its first refusal and so exports at most one
+            # taint row per file.
+            g9[parts[1]] = parts[5]
         elif parts[0] in ("PL", "IC", "MS") and len(parts) == 4:
             # the three declaration rules: (file, comp) -> ok|fail.
             {"PL": preludes, "IC": intercepts, "MS": methods}[parts[0]][
@@ -4419,7 +4643,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach, councils)
+                    places, model_reach, councils, g9)
 
 
 
@@ -4652,6 +4876,29 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             ok = r[3] not in COUNCIL_ADMITTING_TIES
             councils[(r[1], r[2])] = "ok" if ok else "fail"
             _COUNCIL_ROWS[(r[1], r[2])] = ok
+
+    # TAINT verdicts (G9 / G-SECRET-FLOW, issue #1811 group 2): the rule at the
+    # sink class and the label the checker's OWN refusal discovered,
+    # recomputed here from the exported columns. `_g9_admits` and
+    # `TAINT_ORIGIN_NAMES` are harness-spelled, not imported from
+    # `RevL.Lemmas.Admits` or `G9Flow.sinkOfClass`, so widening the model's
+    # rule moves the model alone and the reference's `fail` becomes the
+    # harness's `missed-G9`. THE RULE ON THE CORPUS: the walk is the one the
+    # checker reported, so this recomputes the RULE and says nothing about the
+    # checker's coverage of the walk (roadmap item 418 step 9).
+    #
+    # Polarity as for every other row: `ok` is the rule HOLDING (the sink
+    # admits the label the checker discovered) and `fail` is the rule VIOLATED
+    # (the sink does not). So a `fail` is what explains a checker refusal, and
+    # `ok` is the fatal `missed-G9`.
+    g9: dict[str, str] = {}
+    _G9_ROWS.clear()
+    for r in rows:
+        if r and r[0] == "TAINT" and len(r) == 9:
+            label = _g9_label([x for x in r[6].split(",") if x])
+            admits = _g9_admits(r[4], [] if label is None else label)
+            g9[r[1]] = "ok" if admits else "fail"
+            _G9_ROWS[r[1]] = (r[4], label or [], admits, r[7], r[8])
 
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
@@ -4987,7 +5234,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach, councils)
+                    places, model_reach, councils, g9)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -5109,7 +5356,7 @@ def a9_coverage() -> list[str]:
 FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
                  "missed-G6", "missed-A1", "missed-A6", "missed-A9",
                  "missed-A2", "missed-prelude", "missed-intercept",
-                 "missed-G-MODEL-PLACE", "missed-G-COUNCIL-SPLIT",
+                 "missed-G-MODEL-PLACE", "missed-G-COUNCIL-SPLIT", "missed-G9",
                  "formal-strict", "formal-found-other")
 
 
@@ -5271,6 +5518,10 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         cv_fail = any(x == "fail" for k, x in v.councils.items() if k[0] == rel)
         ic_fail = any(x == "fail" for k, x in v.intercepts.items() if k[0] == rel)
         ms_fail = any(x == "fail" for k, x in v.methods.items() if k[0] == rel)
+        # The TAINT row (G9 / G-SECRET-FLOW, issue #1811 group 2), keyed by the
+        # file alone: a compile stops at its first refusal, so at most one
+        # taint row per file is ever exported.
+        g9_fail = v.g9.get(rel) == "fail"
         a1_fail = any(x == "fail" for k, x in v.async_sites.items()
                       if k[0] == rel) or any(
             x == "fail" for k, x in v.async_sigs.items() if k[0] == rel)
@@ -5289,7 +5540,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
             and not df_fail and not bu_fail and not g1_fail and not a1_fail \
             and not pl_fail and not ic_fail and not ms_fail \
-            and not mp_fail and not ma_fail and not cv_fail
+            and not mp_fail and not ma_fail and not cv_fail and not g9_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -5398,6 +5649,18 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # members disagree, decided by the `CTV` row.
             record("agree-G-COUNCIL-SPLIT" if cv_fail
                    else "missed-G-COUNCIL-SPLIT", rel)
+        elif code in TAINT_CODES and category == TAINT_CODES[code]:
+            # G9 / G-SECRET-FLOW (issue #1811 group 2), decided by the `TAINT`
+            # row: the rule at the sink class and label of the walk the checker
+            # DISCOVERED. The row is the rule on the corpus, NOT a statement
+            # about the checker's coverage of the walk — a tainting path
+            # `taint.py` never propagates to is a path no row assembled from
+            # the checker's output can see. Matched on the CATEGORY as well as
+            # the code, because `G9` also carries the `taint-declassify`
+            # refusal and `G-SECRET` the `taint-secret` one: two other rules
+            # this row does not state, both of which fall through to
+            # `out-of-fragment`.
+            record("agree-G9" if g9_fail else "missed-G9", rel)
         elif code == "A6" and METHOD_MESSAGE in checker_message(rel):
             # Method in service (issue #1809), the call-site half of A6.
             record("agree-A6" if ms_fail else "missed-A6", rel)
@@ -5992,7 +6255,8 @@ def main() -> int:
             ("method", ref.methods, formal.methods),
             ("model_place", ref.places, formal.places),
             ("model_reach", ref.model_reach, formal.model_reach),
-            ("council", ref.councils, formal.councils)):
+            ("council", ref.councils, formal.councils),
+            ("g9", ref.g9, formal.g9)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -6023,7 +6287,8 @@ def main() -> int:
         f"{len(ref.preludes)} x 3 declaration-rule components + "
         f"{len(ref.places)} model placements + "
         f"{len(ref.model_reach)} model reach edges + "
-        f"{len(ref.councils)} council tie policies) — "
+        f"{len(ref.councils)} council tie policies + "
+        f"{len(ref.g9)} taint walks) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -6044,6 +6309,7 @@ def main() -> int:
     mismatches.extend(prelude_coverage(ref))
     mismatches.extend(model_coverage())
     mismatches.extend(council_coverage())
+    mismatches.extend(g9_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

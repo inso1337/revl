@@ -16,6 +16,7 @@ import RevL.Theorems.A1_AsyncColour
 import RevL.Theorems.Prelude_InterceptMethod
 import RevL.Theorems.ModelPlacement
 import RevL.Theorems.ModelCouncil
+import RevL.Theorems.G9Flow
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -2174,6 +2175,92 @@ def councilVerdicts (p : String) (rows : CouncilRows) : String := Id.run do
 
 end ModelCouncil
 
+/-! ### The `TAINT` row — G9 / G-SECRET-FLOW on the corpus (issue #1811 group 2)
+
+`TAINT` carries the sink the shipped checker itself DISCOVERED and the label
+that arrived there, plus the naming chain and hop count it reported. The row
+decides `RevL.Lemmas.Admits` at that sink on that label, through
+`RevL.G9Flow`. It is **the rule on the corpus, not the coverage of the
+checker's walk** (see `RevL/Theorems/G9Flow.lean`): the row's premises ARE
+the checker's own refusal, so a checker that stops reporting its discovered
+sink produces no row at all, and `diff_corpus.py` files that refusal under
+the fatal `missed-G9` rather than reading it as an agreement. A class or an
+origin name `RevL.G9Flow` does not carry yields `none` here, which is
+exactly that same failure. -/
+
+section G9Flow
+
+/-- One `TAINT` row. `cls` and `origins` are the two columns the rule reads;
+`code`, `category`, `kind`, `steps` and `hops` are carried so the row's own
+output shows what the checker discovered and how far it walked. -/
+structure G9Row where
+  path : String
+  code : String
+  category : String
+  cls : String
+  kind : String
+  origins : String
+  steps : String
+  hops : String
+
+def parseG9 (f : List String) : Option G9Row :=
+  match f with
+  | ["TAINT", path, code, category, cls, kind, origins, steps, hops] =>
+      some ⟨path, code, category, cls, kind, origins, steps, hops⟩
+  | _ => none
+
+/-- The row's verdict: the rule at the sink class the checker reported, on
+the label the checker reported. `false` for a class or an origin name the
+model does not carry, so an unreadable row can never print `ok`. -/
+def rowB (r : G9Row) : Bool :=
+  match RevL.G9Flow.sinkOfClass r.cls with
+  | none => false
+  | some k =>
+      match RevL.G9Flow.labelOfString r.origins with
+      | none => false
+      | some ℓ => RevL.G9Flow.g9RowB k ℓ
+
+/-- `rowB` is exactly the rule at a carried sink class and a carried label,
+and `false` — never vacuously `true` — when either is not carried. -/
+theorem rowB_iff (r : G9Row) :
+    rowB r = true ↔ ∃ k ℓ, RevL.G9Flow.sinkOfClass r.cls = some k ∧
+      RevL.G9Flow.labelOfString r.origins = some ℓ ∧ RevL.Lemmas.Admits k ℓ := by
+  unfold rowB
+  cases hk : RevL.G9Flow.sinkOfClass r.cls with
+  | none => simp
+  | some k =>
+      cases hl : RevL.G9Flow.labelOfString r.origins with
+      | none => simp
+      | some ℓ => simp [RevL.G9Flow.g9RowB_iff k ℓ]
+
+def g9RowB (rows : List G9Row) : Bool := rows.all rowB
+
+theorem g9RowB_iff (rows : List G9Row) :
+    g9RowB rows = true ↔ ∀ r ∈ rows, ∃ k ℓ,
+      RevL.G9Flow.sinkOfClass r.cls = some k ∧
+        RevL.G9Flow.labelOfString r.origins = some ℓ ∧
+        RevL.Lemmas.Admits k ℓ := by
+  unfold g9RowB
+  rw [List.all_eq_true]
+  exact forall_congr' fun r => imp_congr_right fun _ => rowB_iff r
+
+/-- The `TAINT` rows of one file. Kept out of `main` so its elaboration stays
+within the default heartbeat budget. -/
+structure G9Rows where
+  rows : List G9Row
+
+def parseG9Rows (fields : List (List String)) : G9Rows :=
+  { rows := fields.filterMap parseG9 }
+
+def g9Verdicts (p : String) (rs : G9Rows) : String := Id.run do
+  let mut out := ""
+  for r in rs.rows.filter (fun r => r.path == p) do
+    let v := if rowB r then "ok" else "fail"
+    out := out ++ s!"TAINT\t{p}\t{r.cls}\tlabel={r.origins}\thops={r.hops}\t{v}\n"
+  return out
+
+end G9Flow
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -2302,6 +2389,7 @@ def main (args : List String) : IO UInt32 := do
     let psrows := fields.filterMap parsePS
     let mrows' := parseModelRows fields
     let crows := parseCouncilRows fields
+    let g9rows := parseG9Rows fields
     let itrows := fields.filterMap parseIT
     let mcrows := fields.filterMap parseMC
     let aerows := fields.filterMap parseAE
@@ -2466,6 +2554,8 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ modelVerdicts p mrows' held capTable
       -- CTV verdicts (G-COUNCIL-SPLIT, issue #1811)
       out := out ++ councilVerdicts p crows
+      -- TAINT verdicts (G9 / G-SECRET-FLOW on the corpus, issue #1811 group 2)
+      out := out ++ g9Verdicts p g9rows
       -- W verdicts (spawn attenuation) per edge
       for e in edges do
         let childCaps := (lookupCaps closed e.2).filterMap (capOf capTable)
@@ -2626,3 +2716,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.placeRowB_iff
 #print axioms RevLOracle.modelReachB_iff
 #print axioms RevLOracle.councilRowB_iff
+#print axioms RevLOracle.g9RowB_iff

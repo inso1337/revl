@@ -4,8 +4,10 @@ lattice and its declassifiers (roadmap items 249 / 256, `src/revl/taint.py`
 and `src/revl/admit_profile.py`).
 
 Core only: this farm imports nothing, so it cannot drift into L0 and no
-other farm depends on it. `RevL.Theorems.G9_NoAuthorityFromUntrusted` is
-the L2 guarantee built on it.
+other farm depends on it. Two L2 files are built on it:
+`RevL.Theorems.G9_NoAuthorityFromUntrusted`, the G9 guarantee, and
+`RevL.Theorems.G9Flow`, the differential-oracle row issue #1811 group 2
+added — which is why the `Step`/`Flow` walk they share is defined here.
 
 ## What is modelled
 
@@ -269,6 +271,48 @@ def Admits : Sink → Label → Prop
   | .disclosure, ℓ => Origin.secret ∉ ℓ ∧ Origin.confidential ∉ ℓ
   | .secretReceiver, ℓ => Origin.secret ∉ ℓ
   | .unnameable, ℓ => Clean ℓ
+
+/-! ## The flow walk
+
+`Step` and `Flow` are the walk the taint rules are stated over. They live
+HERE, in L1, rather than beside the G9 guarantee that first needed them:
+two L2 files now state theorems over the same walk — `RevL.G9`, the
+guarantee, and `RevL.G9Flow`, the differential-oracle row issue #1811
+group 2 added — and the import layering (`formal/scripts/layering_gate.py`)
+forbids one guarantee file importing another, so the shared model has to
+sit below both. This is the same arrangement `RevL.Lemmas.ClassLemmas`
+has with `RevL.Theorems.G{4,5,8}_Classified*`.
+
+Nothing about the walk changed in the move: `Step`, `Flow` and their
+constructors are the definitions `RevL.G9` was proved against. -/
+
+/-- One step of a data-flow path. -/
+inductive Step where
+  /-- a crossing whose return mints origin `o` (`model.sources`). -/
+  | source : Origin → Step
+  /-- a join with another value's label (`_join` / `_union_children`). -/
+  | join : Label → Step
+  /-- an opaque or pure hop that carries the label through. -/
+  | propagate : Step
+  /-- the one weakening step: an admitted declassifier. -/
+  | declassify : Declassifier → Step
+  deriving Repr
+
+/-- `Flow P G ℓin steps ℓout`: under profile `P` and the enclosing
+declaration's grants `G`, a value entering the path labelled `ℓin` leaves
+it labelled `ℓout`. A `declassify` step carries its admission side
+condition, so an inadmissible declassification is not a flow at all. -/
+inductive Flow (P : Profile) (G : Grants) : Label → List Step → Label → Prop where
+  | nil : ∀ ℓ, Flow P G ℓ [] ℓ
+  | source : ∀ (o : Origin) (ℓ : Label) (st : List Step) (out : Label),
+      Flow P G (o :: ℓ) st out → Flow P G ℓ (.source o :: st) out
+  | join : ∀ (m ℓ : Label) (st : List Step) (out : Label),
+      Flow P G (join m ℓ) st out → Flow P G ℓ (.join m :: st) out
+  | propagate : ∀ (ℓ : Label) (st : List Step) (out : Label),
+      Flow P G ℓ st out → Flow P G ℓ (.propagate :: st) out
+  | declassify : ∀ (d : Declassifier) (ℓ : Label) (st : List Step) (out : Label),
+      DeclassOK P G d ℓ → Flow P G (applyD d ℓ) st out →
+      Flow P G ℓ (.declassify d :: st) out
 
 /-! ## Lattice facts -/
 
