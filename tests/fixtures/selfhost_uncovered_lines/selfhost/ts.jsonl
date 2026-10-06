@@ -26,9 +26,9 @@
 
 ["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "sync_acx", 1, 1]
 
-["reason", "crossing-label-fallbacks-call-method-name-returns-undo", "Crossing-label fallbacks: `call_method_name` returns `undo` for absent/empty method, fn, host or variable-callee names and unknown call shapes; `crossing_key_name` returns `?` for absent/empty requirement/name/variable identifiers or unknown targets. Lowered acquisition/undo calls carry the names used by the covered Frame bracket and compensation fixtures"]
+["reason", "crossing-label-fallbacks-call-method-name-returns-undo", "Crossing-label fallbacks: `call_method_name` returns `undo` for absent/empty method, fn, host or variable-callee names and unknown call shapes; `crossing_key_name` returns `?` for absent/empty requirement/name/variable identifiers or unknown targets. Lowered acquisition/undo calls carry the names used by the covered Frame bracket and compensation fixtures Issue #1972 ported the UI transaction unit into selfhost/emit_ts.rvl and added tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl (joined to the ts oracle), whose unit methods walk a body through `calls_any` and so through `call_method_name`, which is why this budget fell 9 to 4."]
 
-["function", "crossing-label-fallbacks-call-method-name-returns-undo", "call_method_name", 9, 9]
+["function", "crossing-label-fallbacks-call-method-name-returns-undo", "call_method_name", 4, 4]
 
 ["function", "crossing-label-fallbacks-call-method-name-returns-undo", "crossing_key_name", 12, 12]
 
@@ -41,6 +41,18 @@
 ["reason", "extern-body-and-context-empty-cases-emit-externs", "Extern-body and context empty cases: `emit_externs` writes `<<EXTERN-NO-TS-BODY>>` for a declared extern without an @ts target, while `context_augmentation` returns no declaration for a document with no provided/required keys. Admitted extern fixtures carry @ts bodies; function-only documents bypass component context output at the module gate"]
 
 ["function", "extern-body-and-context-empty-cases-emit-externs", "emit_externs", 1, 1]
+
+["reason", "item-522-slice-3-issue-1369-the-ui", "Item 522 slice 3 (issue #1369), the UI transaction unit, ported into selfhost/emit_ts.rvl by issue #1972, together with tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl (a shared corpus document, joined to the ts oracle). This tier runs 79 corpus documents against the python tier's 105, so more of the new code stays unexecuted here, and part of it is a future document rather than a structural floor: `ui_crossing_wrapper`'s `export async function ... uiCrossingAsync` arm and `runtime_imports`'s `names.append('uiCrossingAsync')` need a computer-use extern that is ASYNC, and the corpus's only `compensate`-declaring computer-use extern (`type_amount`) is sync. `reaches_computer_use`'s four unexecuted statements are its `{kind: 'call', callee: {kind: 'var'}}` arm - whose only corpus node lives inside the module `fn peek_pane` and is read at emit time - and the `compensate`/`undo` inverse-key skip beside it. `ui_verb_known` is one `return (... or ...)` statement and `is_computer_use_token`'s `len(segs) < 2` arm needs an undotted capability token; every capability in the corpus and in revl.ui_family.REVERSIBILITY is dotted. The input family is tests/test_selfhost_emit_ts.py and backends/typescript/tests/ui_transaction.test.ts."]
+
+["function", "item-522-slice-3-issue-1369-the-ui", "is_computer_use_token", 1, 1]
+
+["function", "item-522-slice-3-issue-1369-the-ui", "reaches_computer_use", 4, 4]
+
+["function", "item-522-slice-3-issue-1369-the-ui", "runtime_imports", 1, 1]
+
+["function", "item-522-slice-3-issue-1369-the-ui", "ui_crossing_wrapper", 1, 1]
+
+["function", "item-522-slice-3-issue-1369-the-ui", "ui_verb_known", 1, 1]
 
 ["reason", "legacy-expression-type-inference-is-float-expr-handles", "Legacy expression-type inference: `is_float_expr` handles unstamped literal Float and returns false for non-minus unary expressions; `surface_type` retains widen-Int, legacy name-id, Float/Str/Int/Bool literals, and unknown literal/list element (the `index` arm, the #957 `Map` value type included, is covered). Current typed IR carries operand/expected stamps on the covered forms"]
 

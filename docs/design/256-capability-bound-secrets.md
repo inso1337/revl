@@ -64,6 +64,15 @@ corrects all three and restates the guarantee boundary honestly. The changes:
   reach-completeness invariant as item 414: the secret-raise surface must be a
   registered row in `tests/test_reach_completeness.py`.
 
+- **The expressiveness cost of the mint is documented (issue #2046, added
+  later).** The whole-return mint at 4a.1 is kept exactly as written. Section 10
+  records what it costs an author (a bound extern's return cannot be handed back
+  across any crossing, not even the return of the service method that wraps the
+  emission), the two-capability working pattern that avoids the cost with no
+  checker change, and why an un-taint-the-whole-return flag stays rejected. This
+  is a documentation addition: no rule above changes, and no reachability
+  argument in this note is weakened.
+
 ### The corrected guarantee boundary, up front
 
 **What CANNOT happen, by construction (provable over the revl value graph and
@@ -397,6 +406,10 @@ sources). Rationale: a bound key is a security-critical origin whose whole purpo
 is to be contained, so its containment is not opt-in. This engages the taint
 surface (`TaintModel.active`) for any program that binds a secret, and only such
 programs, so a secret-free program stays byte-identical.
+
+The mint covers the WHOLE return, which has an expressiveness cost an author
+feels directly. Section 10 states that cost, the working pattern that avoids it
+with no checker change, and the declaration surface that would narrow it.
 
 #### 4a.2. The `secret` raise at every crossing kind (the HIGH fix)
 
@@ -884,6 +897,12 @@ bound key revl never held a typed binding to constrain. The guarantee is scoped 
 "no revl construct and no declared crossing", and the doc states it no more
 strongly.
 
+A1's mitigation is paid for in the other direction. Because the mint covers the
+whole return rather than the derived part of it, a bound extern's return is
+refused at every crossing, so a status or a fetch result cannot be handed back at
+all. That cost is real, it is the cost of closing A1 without trusting the body,
+and it is documented in section 10 rather than left to be rediscovered.
+
 ## 9. Sliced implementation plan
 
 Re-sliced so Slice 1 is the taint-side bound-key story, which is the REAL
@@ -960,3 +979,100 @@ every crossing kind (4a.2). It does NOT include a bound-key type (there is none)
 Slice 1 is the spine and stands alone: it is the by-construction bound-key
 guarantee. Slices 2 and 3 are each additive, each byte-identical when unused, and
 each independently testable.
+
+## 10. The expressiveness cost of the blanket return mint (issue #2046)
+
+4a.1 mints `secret` on the WHOLE return of a bound emission. That has a cost, and
+the cost belongs in this note rather than only in the issue that reported it: the
+return is refused at every crossing kind (4a.2), INCLUDING the return of the very
+service method that wraps the emission. A `send` that returns a status (a message
+id, a list of refused recipients), or a fetch that returns mail, cannot be handed
+back to the caller. The only admitted sink for the value remains a
+same-capability re-emission (4b).
+
+This is not a slip in the checker, and it is not something a checker patch can
+trade away for free. It is the price of the mint, and the mint is what closes
+adversarial finding A1 (section 8): a host body can reflect the injected key into
+its own return, and revl cannot read the body (G8 opacity, 6a), so the only way
+to make "a reflected key cannot travel" true WITHOUT trusting the body is to mark
+the whole return. Narrowing the marking to "only the part derived from the key"
+requires the checker to know which part that is, and `-> Str` does not say. A
+narrower marking is therefore either an author ASSERTION the checker cannot
+verify, or a new declaration surface the author is trusted to write correctly.
+The first re-opens A1; the second is a language change, which is a design
+decision and not a bug fix.
+
+### 10a. The working pattern (no checker change)
+
+The non-derived part is produced by a call whose body never receives the key. The
+injection set is capability-keyed and is a pure function of `(program.secrets,
+all externs' capabilities)` (A6, section 3), so an extern serving a DIFFERENT
+capability than the secret's bound capability is not a bound body, and it has no
+injected key for its return to be derived from:
+
+```revl
+secret api_key for net.send
+
+extern emission[net.send] fn send(body: Str) -> Int
+  = @py { return len(body) + len(api_key) }
+
+extern emission[mail.status] fn status(request_id: Str) -> Str
+  = @py { return request_id }
+
+service Mail { emission fn deliver(request_id: Str) -> Str }
+
+component Kit provides mail: Mail {
+  provide mail {
+    fn deliver(request_id: Str) {
+      let body = "hi"
+      let n = emit send(body)
+      return emit status(request_id)
+    }
+  }
+}
+```
+
+The split is the compiler's, not a convention: in the IR `send` carries
+`"secrets": ["api_key"]` and `status` carries no `secrets` entry at all (section
+5). What the pattern does NOT do is CHECK the derivation. The second body is
+trusted to compute its return from the request, exactly as every other host body
+is trusted (G8), and a body that reaches the key by some other route (a host-side
+slot, a global) is the A3 residual 6a already names. That residual is precisely
+what the blanket mint keeps out of the revl value graph, which is why the
+two-capability split is the sanctioned form and the host-side slot is not: the
+split leaves the key's confinement intact and only the second body's trust
+unchanged, while a slot that the second body reads hands the key to a body revl
+believes is unbound.
+
+Cost, stated plainly: a status that is genuinely not a function of the key still
+needs a second extern, and the split is an authoring convention rather than a
+checked property. `inso1337/revl-harness#48` reached this shape the hard way,
+through a host-side slot an unbound extern reads back once; the two-capability
+form above is the version that does not hide the data flow from the checker.
+
+### 10b. Why an un-taint-the-whole-return flag is rejected
+
+A `keyless` flag on the extern (or any switch that un-marks the whole return)
+would silently un-taint a value that may genuinely derive from the key, on nothing
+but an author assertion. That re-opens A1 and it is the one option this design
+does not offer, however convenient it is for a caller. A flag that un-marks only
+SOME of the return is a different feature with a different cost (10c).
+
+### 10c. The declaration-surface alternative, and why it is not landed here
+
+Issue #2046's option (b) is the positive form: the author DECLARES which part of
+the return is derived (a `Bound[Status]` marking, or a `derive` clause naming the
+derived positions), taint marks only those, and every undeclared path stays
+exactly as confined as it is today. It is a real option and it is fail-closed by
+construction, because silence has to keep meaning "all of it" for the declaration
+to narrow anything.
+
+It is not landed by this note, and the reason is the surface rather than the
+taint. `Bound[T]` is new grammar, and it reaches `parser.py`, `lower.py`,
+`taint.py`, the python emitter and `selfhost/emit_py.rvl` (whose byte-parity
+oracle is `tests/test_selfhost_emit_py.py`), plus a 4a.1 revision and a fresh
+adversarial pass over A1, because the new hole is exactly "the author asserts
+non-derivation and the checker cannot tell". That is a language-surface change
+and it needs its own design review. Until such a surface exists and is argued on
+the same footing as A1, the blanket mint stands and this section is its
+documented cost.
