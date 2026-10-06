@@ -552,12 +552,16 @@ def test_every_try_expr_document_is_decided_alike_by_both(measured):
     assert not wrong, "\n  ".join(["try-expr documents moved:"] + wrong)
 
 
-# --- a non-builtin method on a stdlib value in a component (issue #1942) -----
+# --- a non-builtin method on a stdlib value in a component (issues #1942,
+# #1968) ---------------------------------------------------------------------
 #
 # Refused with the named receiver's message ("no builtin method `map` on
 # `List[Int]`"), named or written in place; the census tags it T1. `t1_` both
-# refuse, `ok_` both admit. Before the fix the reference admitted every in-place
-# document and the gate admitted every one of them, the named ones included.
+# refuse, `ok_` both admit. Before the #1942 fix the reference admitted every
+# in-place document and the gate admitted every one of them, the named ones
+# included. #1968 added `Map` to the refused heads — the one value head a host
+# handle shares its name with, told from the value by the binding — and the
+# three `Map` fixtures and the handle guard beside them.
 VALUE_METHOD_CALL = ROOT / "tests" / "fixtures" / "value_method_call"
 
 
@@ -565,7 +569,7 @@ def test_every_value_method_call_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(VALUE_METHOD_CALL.glob("*.rvl"))
-    assert len(docs) == 12, f"the value-method-call corpus has {len(docs)} documents"
+    assert len(docs) == 15, f"the value-method-call corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))

@@ -30,6 +30,7 @@ from .hostref import program_has_ref as _program_has_ref
 from .hostref import resolve_assets as _resolve_assets
 from .hostref import resolve_refs as _resolve_refs
 from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
+from .lower import _same_file_two_copies
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 from .typecheck import format_type, parse_type
 
@@ -154,6 +155,10 @@ class _LoadedModule:
     named_types: set[str] = field(default_factory=set)
     named_externs: set[str] = field(default_factory=set)
     named_services: set[str] = field(default_factory=set)
+    # issue #1908: which module each name in `named_*` was imported FROM, so
+    # the privacy pass can keep *that* module's `pub` declaration bare for the
+    # callers that named it, rather than any module that happens to declare it.
+    named_from: dict[str, set[int]] = field(default_factory=dict)
     aliases: dict[str, "_LoadedModule"] = field(default_factory=dict)
     pure_dependencies: set[int] = field(default_factory=set)
 
@@ -625,14 +630,17 @@ class _ModuleLoader:
                       name: str, line: int) -> None:
         if name in used.public_fns:
             importer.named_fns.add(name)
+            importer.named_from.setdefault(name, set()).add(id(used))
             importer.pure_dependencies.add(id(used))
             return
         if name in used.public_types:
             importer.named_types.add(name)
+            importer.named_from.setdefault(name, set()).add(id(used))
             importer.pure_dependencies.add(id(used))
             return
         if name in used.public_externs:
             importer.named_externs.add(name)
+            importer.named_from.setdefault(name, set()).add(id(used))
             importer.pure_dependencies.add(id(used))
             return
         if name in used.services:
@@ -987,11 +995,15 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # decls of the included modules are flattened into one program (below),
     # give every private fn/type/extern whose bare name is NOT unique across
     # the included set a per-module-qualified internal name, rewriting the
-    # references to it *inside its own module*. Only `pub` names keep their
-    # bare spelling, so two modules that each define a private `Ctx` (or
-    # `contains`) co-compile, and a `use {dedent}`-then-local-`rstrip` no
-    # longer collides — while a genuine duplicate of a `pub` name (neither is
-    # mangled) still refuses. See _apply_module_privacy.
+    # references to it *inside its own module*. `pub` names keep their bare
+    # spelling where the composition needs it — the module a name is `use`d
+    # from, an `as` alias's whole interface, a root module's own declaration —
+    # so two modules that each define a private `Ctx` (or `contains`) co-compile
+    # and a `use {dedent}`-then-local-`rstrip` no longer collides, while a
+    # genuine duplicate of an imported or root `pub` name still refuses. A `pub`
+    # name only `use`d modules declare is module-scoped too, exactly like a
+    # private one, and `use "./a.rvl" { label }` resolves to a.rvl's `label`
+    # (issue #1908). See _apply_module_privacy.
     # Issue #1899: a service imported on its own brings the record and variant
     # types its operations name. Importing only `Store` does not make its
     # module a pure dependency, so before this none of that module's types
@@ -1020,7 +1032,14 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                 for index in _service_type_closure(used, svc):
                     if (used, index) not in carried:
                         carried.append((used, index))
-    _apply_module_privacy(included, carried)
+    # Which modules are the composition's own (`root_modules`) and which are
+    # merely reached through a `use`. The tests merge below needs the
+    # distinction: a test that NAMES a component rides with the composition,
+    # not with the declaration closure (issue #1904). The privacy pass needs it
+    # too: a root module's own declaration is the composition's own name, not a
+    # module's (issue #1908).
+    root_ids = {id(module) for module in root_modules}
+    _apply_module_privacy(included, carried, root_ids)
 
     for module in included:
         for index, decl in enumerate(module.program.type_decls):
@@ -1079,7 +1098,20 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if declaration_key(module, "model_council", index) not in emitted_keys:
                 merged.model_councils.append(decl)
                 emitted_keys.add(declaration_key(module, "model_council", index))
+        # issue #1904: a `lifecycle test` names the components it `load`s, and
+        # components are never imported (`merged.components` above is built from
+        # the root modules only). Collecting an imported module's lifecycle test
+        # therefore put a `load` of a component this program does not declare
+        # into the merged program, and the importer stopped compiling with
+        # `unknown component`. A test that names a component rides with the
+        # composition's own modules, exactly as a `fault test` does above; it
+        # belongs to that module's own `revl test <module>` run, and
+        # `revl test a.rvl b.rvl` still collects it, because then both files are
+        # roots. A plain `test` (and a `prop test`) needs only pure
+        # declarations, so it keeps riding this closure unchanged.
         for index, decl in enumerate(module.program.tests):
+            if decl.lifecycle and id(module) not in root_ids:
+                continue
             if declaration_key(module, "test", index) not in emitted_keys:
                 merged.tests.append(decl)
                 emitted_keys.add(declaration_key(module, "test", index))
@@ -1199,7 +1231,6 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                                   included_host, profile)
     # ...and an imported module's placeholders with the compile's own profile, so
     # no `?<name>` realm ever reaches lowering unbound.
-    root_ids = {id(module) for module in root_modules}
     for module in included:
         if id(module) not in root_ids:
             _bind_realm_placeholders(module.program,
@@ -1410,8 +1441,94 @@ def _reject_cross_module_case_collisions(included: list[_LoadedModule]) -> None:
             )
 
 
+def _public_val_names(module: _LoadedModule) -> set[str]:
+    """The bare value names the module exports (`pub fn` + `pub extern`)."""
+    return set(module.public_fns) | set(module.public_externs)
+
+
+def _public_type_names(module: _LoadedModule) -> set[str]:
+    """The bare type names the module exports (`pub type`)."""
+    return set(module.public_types)
+
+
+def _imported_bare_names(included: list[_LoadedModule]) -> dict[str, set[int]]:
+    """{bare name: {id(module) it was imported from}} for the names the included
+    modules reach OUT of their own module — what `use "./m.rvl" { name }` names,
+    and every public name of a module `use`d `as` an alias, which the importing
+    module calls by bare name (`alias_fns`: `alias.fn(args)` lowers to a call of
+    the bare `fn`, item 230)."""
+    reaches: dict[str, set[int]] = {}
+    for module in included:
+        for name, sources in module.named_from.items():
+            reaches.setdefault(name, set()).update(sources)
+        for used in module.aliases.values():
+            for name in _public_val_names(used) | _public_type_names(used):
+                reaches.setdefault(name, set()).add(id(used))
+    return reaches
+
+
+def _two_copies_of_one_module(owner_ids: list[int], by_id: dict[int, _LoadedModule]) -> bool:
+    """Whether two of these owners are the same file under two paths (roadmap
+    394). Those are not two modules sharing a name but ONE module loaded twice,
+    which the duplicate report already names — with both resolved absolute
+    paths, and the copies called out."""
+    paths = [by_id[i].path for i in owner_ids]
+    return any(_same_file_two_copies(a, b)
+               for index, a in enumerate(paths) for b in paths[index + 1:])
+
+
+def _pub_names_to_scope(owners: dict[str, set[int]], by_id: dict[int, _LoadedModule],
+                        reaches: dict[str, set[int]], root_ids: set[int],
+                        publics) -> dict[str, set[int]]:
+    """{name: {id(module) that keeps the bare spelling}} for every `pub` name
+    this pass must give module scope to (issue #1908).
+
+    `owners` maps a bare name to the ids of the modules declaring it, and
+    `reaches` (`_imported_bare_names`) maps a name to the modules it was
+    imported FROM. A name at most ONE included module declares `pub` needs
+    nothing here: the private rule below already settles the rest. For a name
+    two or more modules declare `pub`, the merged program can hold only as many
+    bare spellings as it has claims on the bare name:
+
+    * the module a name was imported FROM — `use "./a.rvl" { label }` means the
+      importer's bare `label` IS `a.rvl`'s, so a.rvl's spelling must stand;
+    * a ROOT module's own declaration is the composition's own name rather than
+      a module's, so it stands too;
+    * a module outside `included` (a carried service type, issue #1899) cannot
+      be renamed by this pass, so its spelling stands.
+
+    When exactly one claim stands — the ordinary "one module exports `label`,
+    another module happens to use that name internally" — every other `pub`
+    owner is renamed apart like a private one, and `use "./a.rvl" { label }`
+    resolves to a.rvl's `label` (issue #1908). When more than one stands — two
+    roots, a name two modules are both imported for — no side is renamed, the
+    bare spelling is genuinely claimed twice, and the duplicate report naming
+    both files is the answer."""
+    scoped: dict[str, set[int]] = {}
+    for name, owner_ids in owners.items():
+        pub_ids = [i for i in owner_ids if i in by_id and name in publics(by_id[i])]
+        if len(pub_ids) < 2 or _two_copies_of_one_module(pub_ids, by_id):
+            continue
+        bare = {i for i in pub_ids if i in reaches.get(name, ()) or i in root_ids}
+        bare |= {i for i in owner_ids if i not in by_id}
+        if len(bare) <= 1:
+            scoped[name] = bare
+    return scoped
+
+
+def _module_scopes_apart(decl, module: _LoadedModule, owners: dict[str, set[int]],
+                         scoped: dict[str, set[int]]) -> bool:
+    """Whether `decl`'s bare name must be renamed to a per-module spelling: a
+    colliding PRIVATE name (roadmap 228), or a `pub` name `scoped` gave module
+    scope to while leaving the bare spelling to another module (issue #1908)."""
+    if not decl.public:
+        return len(owners.get(decl.name, ())) > 1
+    return decl.name in scoped and id(module) not in scoped[decl.name]
+
+
 def _apply_module_privacy(included: list[_LoadedModule],
-                          carried: list | None = None) -> None:
+                          carried: list | None = None,
+                          root_ids: set[int] | None = None) -> None:
     """Namespace every module-private top-level declaration (roadmap 228).
 
     The merged program flattens the included modules into one flat table keyed
@@ -1430,8 +1547,18 @@ def _apply_module_privacy(included: list[_LoadedModule],
     no churn: it strictly *adds* the ability for clashing privates to coexist.
 
     Functions and externs share one signature table, so they share a namespace
-    for this purpose; types are a separate namespace. `pub` duplicates stay a
-    hard error because neither side is a private and so neither is renamed.
+    for this purpose; types are a separate namespace.
+
+    Issue #1908: a `pub` name is module-scoped too. Two modules that each
+    declare `pub fn label` used to keep one bare `label` between them, and
+    lowering's name-keyed tables then checked one module's body against the
+    other's types (`'Red' is not a case of 'Size'`), so a file importing neither
+    could not be built at all. A `pub` name two included modules both declare is
+    therefore renamed apart here as well, unless the merged program genuinely
+    claims the bare spelling more than once: the module a name is `use`d FROM,
+    a root module's own declaration, and a spelling this pass cannot rewrite.
+    Where more than one such claim stands, nothing is renamed and the duplicate
+    report — naming both files — stays the answer.
     """
     # roadmap 393 (revl-harness F-H39.2): a clashing private EXTERN is not a
     # genuinely-local helper the way a private fn is. A private fn has its own
@@ -1464,15 +1591,26 @@ def _apply_module_privacy(included: list[_LoadedModule],
         decl = used.program.type_decls[index]
         type_owners.setdefault(decl.name, set()).add(id(used))
 
+    # issue #1908: which `pub` names this pass gives module scope to (see the
+    # docstring). Computed from the pre-rename spellings, before any module is
+    # rewritten below.
+    by_id = {id(module): module for module in included}
+    root_ids = root_ids or set()
+    reaches = _imported_bare_names(included)
+    scoped_vals = _pub_names_to_scope(val_owners, by_id, reaches, root_ids,
+                                      _public_val_names)
+    scoped_types = _pub_names_to_scope(type_owners, by_id, reaches, root_ids,
+                                       _public_type_names)
+
     for idx, module in enumerate(included):
         program = module.program
         val_renames: dict[str, str] = {}
         type_renames: dict[str, str] = {}
         for decl in list(program.fn_decls) + list(program.externs):
-            if not decl.public and len(val_owners.get(decl.name, ())) > 1:
+            if _module_scopes_apart(decl, module, val_owners, scoped_vals):
                 val_renames[decl.name] = f"{decl.name}__m{idx}"
         for decl in program.type_decls:
-            if not decl.public and len(type_owners.get(decl.name, ())) > 1:
+            if _module_scopes_apart(decl, module, type_owners, scoped_types):
                 type_renames[decl.name] = f"{decl.name}__m{idx}"
         if val_renames or type_renames:
             _rewrite_module(program, val_renames, type_renames)
@@ -1655,10 +1793,17 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
             arm = bound | ({bind} if bind is not None else set())
             recur(body, arm)
             if isinstance(body, _ast.ExprBlockArm):
+                # issue #1913: a block arm accepts the same statement set a fn
+                # body does (`let`, `var`, `while`, `if`, `for`, assignments,
+                # ...), so walk it with the same statement walk and take the
+                # binders it threads out of the tail. Reading `s.value`/`s.name`
+                # assumed every statement was a `let`, so the first `ForStmt`,
+                # `WhileStmt` or `IfStmt` in an arm raised `AttributeError`; a
+                # statement the let-shaped walk happened to accept (an
+                # assignment) was also only half-walked.
                 inner = set(arm)
                 for s in body.stmts:
-                    recur(s.value, inner)
-                    inner.add(s.name)
+                    _rewrite_stmt(s, val_renames, type_renames, inner)
                 recur(body.tail, inner)
     elif isinstance(expr, _ast.ExprHole):
         expr.type = _subst_type(expr.type, type_renames)

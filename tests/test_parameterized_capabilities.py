@@ -60,13 +60,22 @@ def test_bare_token_is_byte_identical():
     ('fs.write(path="/a/./b")', "`.` component"),
     ('fs.write(path="/a/../b")', "`..` component"),
     ('fs.write(path="/tmp",path="/etc")', "duplicate capability parameter"),
-    ('fs.write(path=notliteral)',
-     "must be a string literal, an integer, or a per-instance"),
 ])
 def test_parse_refusals(bad, needle):
     with pytest.raises(RevlError) as exc:
         caps_of(bad)
     assert needle in str(exc.value)
+
+
+def test_a_binding_that_names_no_parameter_is_still_refused():
+    # issue #1985 moved this refusal from the parser to `lower`: a bare name is
+    # now the caller-supplied spelling (`emission[fs.write(path=host)]`), so it
+    # cannot be judged before the signature is known. The program is refused,
+    # naming the argument and the parameters it could have named.
+    src = 'service S { emission[fs.write(path=notliteral)] fn f(x: Str) -> Int }'
+    with pytest.raises(RevlError) as exc:
+        compile_source(src, "1985.rvl")
+    assert "notliteral" in str(exc.value)
 
 
 # ---------------------------------------------------------------- the bridge

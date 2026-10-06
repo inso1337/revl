@@ -937,6 +937,19 @@ class Env:
         # a pass-through that only fails at the host runtime (item 401, the
         # item-84 crash shape).
         self.host_locals: dict[str, str] = {}
+        # HOST HANDLES (issue #1968). An activation `let <x> = effect <acq>
+        # undo <...>` whose acquisition yields a HOST family value binds a
+        # handle, not a stdlib value. `host_locals` above carries the family
+        # for the acquisitions spelled as a host call (`Map.new()`); this set
+        # is the same idea where the static type is the ONLY evidence:
+        # `let store = effect hole[Map[Str, Int]] "…" undo store.drop()` types
+        # `store` `Map[Str, Int]` with no host provenance, and `Map` is the one
+        # value head a host handle shares its name with, so the static type the
+        # stdlib value-method rule (`_VALUE_METHOD_HEADS`) reads cannot tell
+        # them apart. A binding recorded here is a handle and stands that rule
+        # aside. It grants no verb surface — only the leniency the handle had
+        # before `Map` joined the refused heads.
+        self.host_handles: set[str] = set()
         # PROVISION PROVENANCE (GHSA cluster, the aliasing arm). A spawn-handle
         # provision read (`w.task`) lowers to an `instance-get` node, and every
         # analysis that judges a crossing through a handle — the G4 marker
@@ -2103,8 +2116,27 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     fns: list[dict] = []
     # name -> the file that first declared it, so a duplicate names BOTH files
     # (roadmap 394): a same-named fn reached under two `use` spellings loads as
-    # two modules, and the diagnostic must show both resolved paths.
+    # two modules, and the diagnostic must show both resolved paths. The scan
+    # runs over the whole table BEFORE any body is lowered: two same-named fns
+    # of different types share the name-keyed `_signature_table` entry, so the
+    # first body would be checked against the second's shape and the duplicate
+    # would surface as that body's type error instead (issue #1908).
     seen: dict[str, str] = {}
+    for decl in program.fn_decls:
+        decl_file = decl.source or filename
+        if decl.name in seen:
+            first_file = seen[decl.name]
+            if os.path.abspath(first_file) == os.path.abspath(decl_file):
+                # two fns of one name in ONE file: the terse message already
+                # points at the sole file, so keep it byte-identical (roadmap
+                # 394 only widens the CROSS-FILE case).
+                raise RevlError(decl_file, decl.line,
+                                f"duplicate function `{decl.name}`")
+            raise RevlError(
+                decl_file, decl.line,
+                _duplicate_symbol_message("function", decl.name,
+                                          first_file, decl_file))
+        seen[decl.name] = decl_file
     # Install the block-arm lift sink for the duration of fn-body lowering: a
     # statement-block match arm is lambda-lifted into a synthetic helper fn
     # (`_lift_block_arm`) collected here, then appended to `fns` below. `taken`
@@ -2123,19 +2155,6 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         # (paths[0]); a fn parsed from a LATER file carries its own `source`, so
         # its diagnostics must name that file, not paths[0] (roadmap 312).
         decl_file = decl.source or filename
-        if decl.name in seen:
-            first_file = seen[decl.name]
-            if os.path.abspath(first_file) == os.path.abspath(decl_file):
-                # two fns of one name in ONE file: the terse message already
-                # points at the sole file, so keep it byte-identical (roadmap
-                # 394 only widens the CROSS-FILE case).
-                raise RevlError(decl_file, decl.line,
-                                f"duplicate function `{decl.name}`")
-            raise RevlError(
-                decl_file, decl.line,
-                _duplicate_symbol_message("function", decl.name,
-                                          first_file, decl_file))
-        seen[decl.name] = decl_file
         # the body sees the *marked* signature: this fn's own type parameters
         # are wildcards inside it (they are universally quantified there), while
         # a one-letter nominal type stays checked
@@ -4649,6 +4668,58 @@ def _route_response_ir(returns: str | None, types: dict, refuse, where: str) -> 
     return {"kind": "plain", "type": stripped}
 
 
+def _param_names(params) -> set[str]:
+    """The declared parameter names of a signature, whichever shape the parser
+    handed it: an extern's `Param` objects, a service operation's `(name, type)`
+    pairs, or bare names."""
+    names: set[str] = set()
+    for p in params or ():
+        if isinstance(p, str):
+            names.add(p)
+        elif isinstance(p, tuple):
+            names.add(p[0])
+        else:
+            names.add(p.name)
+    return names
+
+
+def _check_argument_bound_scopes(where: str, source: str, line: int,
+                                 capabilities, params) -> None:
+    """issue #1985: an argument-bound destination must name one of the
+    declaration's OWN parameters.
+
+    `emission[network.call(host=host)] fn get(url: Str, host: Str)` binds the
+    declaration's parameter into the token, so the declared destination is the
+    CALLER's value rather than a compile-time constant nothing relates to the
+    body. The binding is only as honest as the name it carries, so the name is
+    resolved HERE, against the signature, exactly as the item-373
+    `confined: <param>` and item-309 `idempotent(key: <param>)` role
+    annotations are (they are not resolved at parse either - the parameter list
+    is below). A binding naming no parameter is a destination nothing
+    enforces: fail closed rather than store an opaque token no caller can ever
+    satisfy."""
+    if not capabilities:
+        return
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    names = _param_names(params)
+    for cap, arg in cap_order.argument_bindings(capabilities):
+        if arg in names:
+            continue
+        declared = ", ".join(sorted(names)) or "(none)"
+        raise RevlError(
+            source, line,
+            f"{where} declares the argument-bound destination `{cap}`, but "
+            f"`{arg}` is not one of its parameters ({declared})",
+            hint="an argument binding names the PARAMETER that carries the "
+                 "destination, so the destination is caller-supplied data the "
+                 "host body cannot swap for a literal; a name that is not a "
+                 "parameter is a destination nothing enforces (item 294, "
+                 'issue #1985). A CONSTANT destination is spelled '
+                 '`network.call(host="api.example.test")` (item 246)',
+            code="G4", category="emission-scope",
+        )
+
+
 def _lower_externs(program: Program, filename: str, types: dict,
                    fns: list | None = None) -> list:
     externs: list[dict] = []
@@ -4843,6 +4914,13 @@ def _lower_externs(program: Program, filename: str, types: dict,
                          "body cannot swap for a literal, or the reach claim is "
                          "unreviewable (item 373)",
                 )
+        # issue #1985: the same rule for the emission SCOPE's own destination
+        # claim - `emission[network.call(host=host)]` names the declaration's
+        # parameter, so the name is resolved against the signature here, next
+        # to the sibling role annotations above.
+        _check_argument_bound_scopes(
+            f"{decl.classification} extern `{decl.name}`", filename, decl.line,
+            decl.capabilities, decl.params)
         # item 309: the `idempotent` emission modifier and its `idempotent(key: p)`
         # keyed form. Two rules, enforced here next to the sibling reach checks:
         #   (1) `idempotent`/`idempotent(key:)` is EMISSION-ONLY. It is item-44's
@@ -5748,23 +5826,28 @@ def _lower_tests(program: Program, filename: str, types: dict,
     tests: list[dict] = []
     seen: set[str] = set()
     for decl in program.tests:
+        # issue #1904: a test merged in from an imported module is lowered here,
+        # inside the importer's program, so every diagnostic below would name
+        # the IMPORTER's file with the imported file's line. The block's own
+        # file is the one to name (roadmap item 312's rule for fn/extern decls).
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate test `{decl.name}`")
+            raise RevlError(decl_file, decl.line, f"duplicate test `{decl.name}`")
         seen.add(decl.name)
         if decl.lifecycle:
             tests.append({
                 "name": decl.name,
                 "lifecycle": True,
-                "body": _lower_lifecycle_body(decl, program, services or {}, filename,
+                "body": _lower_lifecycle_body(decl, program, services or {}, decl_file,
                                               callables, types),
             })
             continue
         scope: dict[str, bool] = {}
         type_env: dict[str, str] = {}
-        check_list_index_bounds(decl.body, filename)
+        check_list_index_bounds(decl.body, decl_file)
         body: list[dict] = []
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
+            _lower_pure_stmt(stmt, scope, callables, {}, body, decl_file, type_env, types)
         tests.append({"name": decl.name, "body": body})
     return tests
 
@@ -5858,20 +5941,23 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
     units: list[dict] = []
     seen: set[str] = set()
     for decl in program.prop_tests:
+        # issue #1904, as in `_lower_tests`: a prop test carried in from an
+        # imported module names its OWN file, never the importer's.
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate prop test `{decl.name}`")
+            raise RevlError(decl_file, decl.line, f"duplicate prop test `{decl.name}`")
         seen.add(decl.name)
         scope: dict[str, bool] = {}
         type_env: dict[str, str] = {}
         for param in decl.params:
-            check_type_wellformed(filename, param.line, param.type)
-            _check_generatable(filename, param.line, param.type, types, decl.name)
+            check_type_wellformed(decl_file, param.line, param.type)
+            _check_generatable(decl_file, param.line, param.type, types, decl.name)
             scope[param.name] = False
             type_env[param.name] = param.type
         body: list[dict] = []
-        check_list_index_bounds(decl.body, filename)
+        check_list_index_bounds(decl.body, decl_file)
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
+            _lower_pure_stmt(stmt, scope, callables, {}, body, decl_file, type_env, types)
         units.append({
             "name": decl.name,
             "params": [{"name": _predeclared_mangle(p.name), "type": p.type}
@@ -5914,18 +6000,19 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
     units: list[dict] = []
     seen: set[str] = set()
     for decl in program.fault_tests:
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate fault test `{decl.name}`")
+            raise RevlError(decl_file, decl.line, f"duplicate fault test `{decl.name}`")
         seen.add(decl.name)
         component = by_name.get(decl.component)
         if component is None:
             known = ", ".join(sorted(by_name)) or "(none in this composition)"
-            raise RevlError(filename, decl.line,
+            raise RevlError(decl_file, decl.line,
                             f"fault test `{decl.name}` names unknown component `{decl.component}`",
                             hint=f"components in this composition: {known}")
         body = component.get("body") or []
         if not body:
-            raise RevlError(filename, decl.line,
+            raise RevlError(decl_file, decl.line,
                             f"component `{decl.component}` has an empty activation body — "
                             f"there is no point at which it can fail")
         if decl.at_effect is not None:
@@ -5934,7 +6021,7 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
                 bindings = [s.get("bind") for s in body if s.get("step") == "let-effect"]
                 known = ", ".join(f"`{b}`" for b in bindings) or "(none)"
                 raise RevlError(
-                    filename, decl.line,
+                    decl_file, decl.line,
                     f"fault test `{decl.name}`: component `{decl.component}` has no "
                     f"`let … effect` step bound to `{decl.at_effect}`",
                     hint=f"effect bindings in `{decl.component}`: {known}")
@@ -5942,7 +6029,7 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
             step = decl.at_step
             if step > len(body):
                 raise RevlError(
-                    filename, decl.line,
+                    decl_file, decl.line,
                     f"fault test `{decl.name}`: `fail at step {step}` is past the end of "
                     f"`{decl.component}` (its activation body has {len(body)} step(s))")
         known_config = {field.get("name") for field in component.get("config") or []}
@@ -5950,13 +6037,13 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
             if key not in known_config:
                 fields = ", ".join(sorted(known_config)) or "(none)"
                 raise RevlError(
-                    filename, decl.line,
+                    decl_file, decl.line,
                     f"fault test `{decl.name}`: `{decl.component}` has no config field `{key}`",
                     hint=f"config fields of `{decl.component}`: {fields}")
         asserts: list[str] = []
         for kind, line in decl.asserts:
             if kind not in _FAULT_ASSERTS:  # pragma: no cover — parser gates the spelling
-                raise RevlError(filename, line, f"unknown fault-test assertion `{kind}`")
+                raise RevlError(decl_file, line, f"unknown fault-test assertion `{kind}`")
             if kind not in asserts:
                 asserts.append(kind)
         unit = {
@@ -8468,6 +8555,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         for method in (svc.methods or {}).values():
             _reject_dunder_name(method.name, "method", f"service `{svc.name}`",
                                 program.filename, getattr(method, "line", svc.line))
+            # issue #1985: an argument-bound scope names the METHOD's own
+            # parameter, resolved against this signature (the same place the
+            # extern half is resolved in `_lower_externs`).
+            _check_argument_bound_scopes(
+                f"service method `{svc.name}.{method.name}`", program.filename,
+                getattr(method, "line", svc.line), method.capabilities,
+                method.params)
         services[svc.name] = svc
     for name, svc in ambient_services.items():
         services.setdefault(name, svc)
@@ -9665,7 +9759,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 # (host provenance is exempt — docs/stdlib-2.0.md).
                 recv_t = infer_ir({"kind": "name", "id": scope[root]},
                                   env.type_env, env.types, env.services)
-                _refuse_value_method(method, recv_t, filename, line)
+                _refuse_value_method(method, recv_t, filename, line,
+                                     host_handle=scope[root] in env.host_handles)
                 _refuse_record_method(method, recv_t, env, filename, line)
                 node = {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
@@ -9754,8 +9849,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             recv_t = infer_ir(callee_node["target"], env.type_env, env.types,
                               env.services)
             # a stdlib value written in place (`[1, 2].map(f)`, issue #1942):
-            # judged as the same value bound to a name is
-            _refuse_value_method(callee_node.get("name"), recv_t, filename, line)
+            # judged as the same value bound to a name is. A receiver this
+            # lowering reads back as a name is judged the same way the named
+            # path above judges it, host handle included (issue #1968).
+            _recv_node = callee_node["target"]
+            _refuse_value_method(
+                callee_node.get("name"), recv_t, filename, line,
+                host_handle=(_recv_node.get("kind") == "name"
+                             and _recv_node.get("id") in env.host_handles))
             # a record receiver read in place (`r.g.f(n)`, issue #1547)
             _refuse_record_method(callee_node.get("name"), recv_t, env,
                                   filename, line)
@@ -12861,6 +12962,16 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # `host_locals`), so the type is resolved here where it is known.
             if acquired_type is None:
                 acquired_type = _host_result_type(acquire, env)
+            # issue #1968: an effect-acquired binding whose type is a HOST
+            # family is a handle even when the acquisition spelled no host call
+            # (a typed hole, an extern's declared return). `Map` is the one
+            # family that is also a stdlib value head, so it is the one that
+            # needs the marking; the others are outside the value rule already.
+            if acquired_type:
+                _handle_head = parse_type(acquired_type)[0]
+                if _handle_head in _HOST_FAMILIES \
+                        and _handle_head in _VALUE_METHOD_HEADS:
+                    env.host_handles.add(safe)
             if acquired_type is not None:
                 env.type_env[safe] = acquired_type
             step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
@@ -15563,22 +15674,33 @@ def _is_record_type(ty, types: dict) -> bool:
 # typo or a misuse: no tier defines it, and py would raise AttributeError at
 # run time. The `fn` body refuses it on every receiver already.
 #
-# `Map` is left out on purpose: it is the one value head a HOST handle shares
-# its name with. `let store = effect <acq> undo store.drop()` whose acquisition
-# is typed `Map[K, V]` (a typed hole, an `acquire` extern's declared return)
-# gives `store` that static type with no host provenance, and its host verbs
-# (`insert`, `get`, `drop`) are not in the stdlib table. The static type cannot
-# tell the two apart, so a `Map` receiver keeps the lenient reading it had.
+# `Map` is the one value head a HOST handle shares its name with — which is
+# why issue #1942 left it out — but the shared NAME is the only thing the two
+# have in common: `let store = effect <acq> undo store.drop()` types `store`
+# `Map[K, V]` with no host provenance, and its host verbs (`insert`, `get`,
+# `drop`) are not in the stdlib table. So `Map` is refused too, and the
+# handle is told apart from the value by its BINDING rather than its type:
+# `Env.host_handles` records every effect-acquired handle whose acquisition
+# is a host value, and `_refuse_value_method` stands aside for those
+# (issue #1968).
 _VALUE_METHOD_HEADS = frozenset(
-    {"List", "Str", "Bytes", "Int", "Int32", "Float", "Bool"})
+    {"List", "Str", "Bytes", "Int", "Int32", "Float", "Bool", "Map"})
 
 
-def _refuse_value_method(method, recv_t, filename: str, line: int) -> None:
+def _refuse_value_method(method, recv_t, filename: str, line: int,
+                         host_handle: bool = False) -> None:
     """A non-builtin method on a receiver whose static type is a stdlib value,
     in a component body: refused with the message a named receiver has always
     had. Named and written-in-place receivers take the same rule (issue
-    #1942); before it, only a named Str/List/Bytes receiver was checked."""
-    if not method or method in _BUILTIN_METHODS or not recv_t:
+    #1942); before it, only a named Str/List/Bytes receiver was checked.
+
+    `host_handle` marks a receiver `Env.host_handles` names — a name bound by
+    an activation `let <x> = effect <acq> undo <...>` over a host value. Such
+    a handle is a value of a host family, not a stdlib value, and keeps the
+    lenient reading; the type it carries (`Map[K, V]`) is the same one a real
+    value `Map` carries, so the binding is the only thing that tells them
+    apart (issue #1968)."""
+    if not method or method in _BUILTIN_METHODS or not recv_t or host_handle:
         return
     if parse_type(recv_t)[0] not in _VALUE_METHOD_HEADS:
         return
@@ -16840,6 +16962,16 @@ def _widening_reason(cap: "object", held: set) -> str | None:
     # config field to a literal at the spawn site so it resolves into the cone.
     for name, cval in cap.params:
         if isinstance(cval, cap_order.Symbol):
+            if cval.is_arg:
+                # issue #1985: an argument-bound destination is supplied by the
+                # CALLER, not by a spawn `with { }` block, so there is no
+                # spawn-site fix to name - the parent must hold the same binding
+                # or the bare token (`substitute` never resolves an argument).
+                return (f"a destination bound to the argument `{cval.ref}` on "
+                        f"`{cap.token}` is supplied by the CALLER, so it is not "
+                        f"covered by the parent's constant destination "
+                        f"(`{_cap_render(same_token[0])}`); hold the same "
+                        f"argument binding, or the bare `{cap.token}`")
             return (f"a per-instance value `{cval.ref}` on `{cap.token}` is "
                     f"unresolved, so it is incomparable to the parent's cone "
                     f"(`{_cap_render(same_token[0])}`); bind `{cval.field}` to a "

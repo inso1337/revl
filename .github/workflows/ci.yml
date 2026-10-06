@@ -1115,16 +1115,25 @@ jobs:
   # conflict in the records, is `python3 tools/census_artifact.py --write`.
   #
   # A diff that moves no input is not checked, and says so. On every other
-  # event (push to main, schedule, dispatch) it always checks, so a merge race
-  # between two regenerating pull requests shows up on main. The filter's exit
-  # 2 (it could not decide) runs the check, never skips it.
+  # event (push to main, schedule, dispatch, and a merge_group candidate) it
+  # always checks, so a merge race between two regenerating pull requests shows
+  # up on main. The filter's exit 2 (it could not decide) runs the check, never
+  # skips it.
+  #
+  # merge_group is listed because this job is intended to become a required
+  # status context on main (issue #1987), and a required check that reports on no
+  # queued candidate hangs the merge queue. The job always reports a context: on
+  # a pull request the `decide` step still runs and publishes `run`, it just
+  # leaves the substantive steps skipped when the diff moved no input. That is
+  # the precondition that makes requiring it safe.
   census-artifact:
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule'
+      github.event_name == 'schedule' ||
+      github.event_name == 'merge_group'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:

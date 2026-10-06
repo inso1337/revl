@@ -502,3 +502,14 @@ def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
     with pytest.raises(reference.EmitError, match="fault tests do not lower"):
         reference.emit(ir)
     assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_ts_src"](ir)
+
+
+def test_a_host_identifier_collision_is_refused_by_name(reference):
+    """`tests/fixtures/emit_ts_refusals/host_identifier_collision.rvl`: a
+    namespaced key and the unqualified key that already spells its mangled
+    identifier are two DISTINCT wiring keys that must not land on one host
+    identifier. This reference refuses to guess which one was meant."""
+    ir = compile_files([str(REFUSALS_DIR / "host_identifier_collision.rvl")])
+    with pytest.raises(reference.EmitError,
+                       match="both spell the host identifier"):
+        reference.emit(ir)

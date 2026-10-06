@@ -1,0 +1,51 @@
+// A namespaced provision key and an unqualified key that spells its host
+// identifier. `acme::greeter` is mangled to `acme__greeter` for the host
+// (docs/namespacing.md), which is exactly what the unqualified `acme__greeter`
+// already spells, so the two DISTINCT wiring keys land on one name. That is the
+// one collision the injective mangling cannot rule out, and this tier refuses
+// it by name rather than binding two providers to one identifier:
+//
+//   provision keys 'acme__greeter' and 'acme::greeter' both spell the host
+//   identifier 'acme__greeter': an unqualified key that already contains `__`
+//   collides with the mangled namespaced key. Rename one of them (issue #1914).
+//
+// It is therefore not a byte-agreement case -- the reference has no bytes to
+// agree with -- and it can never live in tests/fixtures/emit_ts_corpus. It
+// lives here instead, where `tools/selfhost_line_coverage.py` drives both halves
+// over it: this document is the only corpus input that reaches the mangling's
+// namespaced branch and the refusal arm of
+// `backends/ts/emit.py::_check_host_keys`, which the byte corpus (which
+// holds no namespaced key) structurally cannot reach.
+//
+// The refusal text is pinned by
+// tests/test_selfhost_emit_ts.py::test_a_host_identifier_collision_is_refused_by_name
+// and by tests/test_namespaced_key_emit_1914.py::
+// test_a_flat_key_that_already_spells_a_mangled_key_is_refused, which asserts
+// the same rule on every hosted tier.
+//
+// The PORT does not implement the mangling at all (selfhost/emit_ts.rvl
+// carries provision keys unqualified), so it has no collision to report and
+// emits this document -- a pre-existing gap recorded in docs/namespacing.md,
+// not a refusal the port is expected to mirror.
+
+service Greeter { fn hello(name: Str) -> Str }
+
+component Flat provides acme__greeter: Greeter {
+  provide acme__greeter { fn hello(name) = "flat " + name }
+}
+
+component Ns provides acme::greeter: Greeter {
+  provide acme::greeter { fn hello(name) = "ns " + name }
+}
+
+lifecycle test "two keys, one host identifier" {
+  load Flat
+  load Ns
+  let a = call acme__greeter.hello("x")
+  let b = call acme::greeter.hello("x")
+  assert a == "flat x"
+  assert b == "ns x"
+  unload Ns
+  unload Flat
+  assert no_residue
+}

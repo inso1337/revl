@@ -85,6 +85,15 @@ fn helper() -> Int { ... }                        // default: module-private
 
 - `pub` marks exported declarations; services are `pub` by default (they are
   interfaces), components are never exported (composed, not imported).
+- **A `pub` name is module-scoped, not document-scoped (issue #1908).** Two
+  modules may each declare a `pub fn` (or `pub type`) with the same name and
+  co-compile into one document: a declaration is qualified by the module that
+  declares it, exactly as a private one is, so one never replaces the other.
+  `use "./a.rvl" { label }` names **a.rvl's** `label`, and a.rvl is the module
+  that keeps the bare spelling; another module's same-named declaration is
+  renamed apart. Importing two same-named `pub` declarations into ONE file is a
+  genuine clash and is refused with a `duplicate function` diagnostic naming
+  both modules; so is one document whose two root files each declare the name.
 - Import cycles between modules are a compile error (distinct from G3, which
   governs runtime component graphs).
 - **Resolution (roadmap 319).** `use` resolves the path relative to the

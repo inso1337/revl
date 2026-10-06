@@ -1359,3 +1359,23 @@ def test_the_whole_native_chain_runs_as_rust_and_matches_the_reference(
     corrupted = _one_byte_corrupted(reference.emit(compile_files([str(path)])))
     assert len(corrupted) == len(got) and corrupted != got, (
         "the byte comparison above cannot fail — it is a tautology, not evidence")
+
+
+# item 560 / issue #1914: the one key pair the injective mangling cannot split
+# ---------------------------------------------------------------------------
+# `tests/fixtures/emit_rust_refusals/host_identifier_collision.rvl` is the only
+# input that reaches the namespaced branch of the mangling and the refusal arm of
+# `_check_host_keys`, so `tools/selfhost_line_coverage.py` drives both halves
+# over it. Its refusal text is asserted here.
+_COLLISION_DOC = (ROOT / "tests" / "fixtures" / "emit_rust_refusals"
+                  / "host_identifier_collision.rvl")
+
+
+def test_a_host_identifier_collision_is_refused_by_name(reference):
+    """A namespaced key and the unqualified key that already spells its mangled
+    identifier are two DISTINCT wiring keys that must not land on one host
+    identifier. The reference refuses to guess which one was meant, by name."""
+    ir = compile_files([str(_COLLISION_DOC)])
+    with pytest.raises(reference.EmitError,
+                       match="both spell the Rust identifier"):
+        reference.emit(ir)

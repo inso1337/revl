@@ -1,0 +1,13 @@
+// the same rule for a value `Map` reached through a record FIELD (issue
+// #1968): the reader's static type is `Map[Str, Int]` and nothing binds it as
+// a host handle
+type Box = { m: Map[Str, Int] }
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math {
+    fn go(n) {
+      let b: Box = { m: Map.empty() }
+      return b.m.frob()
+    }
+  }
+}

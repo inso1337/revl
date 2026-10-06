@@ -3682,8 +3682,15 @@ class Parser:
         no `(` returns unchanged (byte-identical to every pre-294 token), so the
         extension is purely additive.
 
-        Values are STATIC literals (a string or a non-negative integer). The
-        parse funnels through `cap_order.make_cap`, the ONE canonical point: it
+        Values are STATIC literals (a string or a non-negative integer), a
+        per-instance `config.<field>`, or - issue #1985 - the declaration's OWN
+        parameter (`host=host`, or the positional shorthand `host`): the
+        ARGUMENT-bound form, where the declared destination IS the argument the
+        caller supplies, so the scope stays a static upper bound (`covers` is a
+        static relation) while no destination nothing enforces is ever named. As
+        with `confined:` and `idempotent(key: ...)`, the name is NOT resolved
+        here - lower checks it against the declaration's actual parameter list.
+        The parse funnels through `cap_order.make_cap`, the ONE canonical point: it
         validates against the CLOSED parameter registry (an unknown name like
         `pth=` refuses HERE, at parse, never silently inert), canonicalizes a
         path value (trailing slash dropped, `.`/`..`/`//`/`"/"` refused), refuses
@@ -3697,31 +3704,46 @@ class Parser:
         raw: list[tuple[str, object]] = []
         while not self.at(")"):
             name = self.expect("ident", what="a capability parameter name").value
-            self.expect("=", what="`=` after a capability parameter name")
-            vtok = self.peek()
-            if vtok.kind in ("string", "int"):
+            if self.at("="):
                 self.next()
-                value: object = vtok.value
-            elif vtok.kind == "kw" and vtok.value == "config":
-                # a per-instance value (item 294 Slice 2): `path=config.job_root`
-                # names a config field the spawn site's `with { }` block binds to
-                # a literal; opaque to the static order until then.
-                self.next()
-                self.expect(".", what="`.` after `config` in a per-instance "
-                                      "capability value")
-                field = self.expect(
-                    "ident", what="a config field name after `config.`").value
-                value = cap_order.Symbol("config." + field)
+                vtok = self.peek()
+                if vtok.kind in ("string", "int"):
+                    self.next()
+                    value: object = vtok.value
+                elif vtok.kind == "kw" and vtok.value == "config":
+                    # a per-instance value (item 294 Slice 2): `path=config.job_root`
+                    # names a config field the spawn site's `with { }` block binds to
+                    # a literal; opaque to the static order until then.
+                    self.next()
+                    self.expect(".", what="`.` after `config` in a per-instance "
+                                          "capability value")
+                    field = self.expect(
+                        "ident", what="a config field name after `config.`").value
+                    value = cap_order.Symbol("config." + field)
+                elif vtok.kind == "ident":
+                    # issue #1985: `host=host` - the ARGUMENT-bound destination.
+                    # The value names the declaration's own parameter, so what the
+                    # scope declares is exactly what the caller can pass and the
+                    # token is a function of the argument, never a constant that
+                    # nothing relates to the body.
+                    self.next()
+                    value = cap_order.Symbol(vtok.value)
+                else:
+                    raise self.err(
+                        vtok.line,
+                        "a capability parameter value must be a string literal, an "
+                        "integer, a per-instance `config.<field>` value, or one of "
+                        "the declaration's own parameters, found "
+                        f"{vtok.value!r}",
+                        hint='write `path="/data/incoming"`, `calls=10`, '
+                             "`path=config.job_root` (a spawn `with { }` binding "
+                             "resolves the per-instance value), or `host=host` for "
+                             "an argument-bound destination")
+                raw.append((name, value))
             else:
-                raise self.err(
-                    vtok.line,
-                    "a capability parameter value must be a string literal, an "
-                    "integer, or a per-instance `config.<field>` value, found "
-                    f"{vtok.value!r}",
-                    hint='write `path="/data/incoming"`, `calls=10`, or '
-                         "`path=config.job_root` (a spawn `with { }` binding "
-                         "resolves the per-instance value)")
-            raw.append((name, value))
+                # issue #1985: `network.call(host)` - the positional shorthand for
+                # `host=host`, where the destination IS the argument `host`.
+                raw.append((name, cap_order.Symbol(name)))
             if self.at(","):
                 self.next()
         self.expect(")")
@@ -9488,6 +9510,14 @@ def parse_file(path: str) -> Program:
     for layer in program.layers:
         layer.source = source
     for decl in (*program.fn_decls, *program.externs, *program.services):
+        program.decl_files[id(decl)] = source
+    # issue #1904: a `test`/`prop test`/`fault test` block carries no `.source`
+    # of its own, so it records its declaring file here as an extern does. A
+    # test block reached through a `use` is lowered inside the IMPORTER's
+    # merged program, whose `filename` is the importer's; without this entry
+    # every diagnostic raised in the imported block named the importer's file
+    # with the imported file's line number.
+    for decl in (*program.tests, *program.prop_tests, *program.fault_tests):
         program.decl_files[id(decl)] = source
     for fn in program.fn_decls:
         fn.source = source
