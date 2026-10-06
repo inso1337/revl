@@ -798,6 +798,70 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     return name
 
 
+KEY_NAMESPACE_SEP = "::"
+
+
+def _key_binding(key: str) -> str:
+    """The BINDING an IR `req` node carries for a wiring key: the last `::`
+    segment. `acme::greeter` -> `greeter`, `greeter` -> `greeter` (issue #1914)."""
+    return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1] if KEY_NAMESPACE_SEP in key else key
+
+
+def _host_key(key: str) -> str:
+    """A wiring key as a HOST identifier (issue #1914).
+
+    docs/namespacing.md: a namespaced provision key (`acme::greeter`) is one
+    qualified string, and that string is the WIRING identity — what the
+    compiler compares for G2, what `isolate`/`intercept`/`routes` name, and
+    what the runtime registry is keyed by. The Java surface cannot spell it,
+    so the identifier is a MANGLED spelling while every runtime lookup keeps
+    the qualified string.
+
+    The rule, and its injectivity proof:
+
+        _host_key(k) = k                                        if "::" not in k
+        _host_key(k) = "__".join(p.replace("_", "_u")           otherwise
+                                 for p in k.split("::"))
+
+    so `acme::greeter` -> `acme__greeter`, `a::b__c` -> `a__b_u_uc` and
+    `a__b::c` -> `a_u_ub__c`. Write `_esc(p) = p.replace("_", "_u")`.
+
+      1. `_esc` is injective: every `_` in `_esc(p)` is immediately followed by
+         the `u` that produced it, so decoding is forced (`_u` -> `_`).
+      2. a segment image never ends in `_` and never contains `__`, so
+         splitting a qualified image on `__` recovers the part list exactly —
+         the map is injective on qualified keys.
+      3. an UNQUALIFIED key is returned unchanged and a qualified image always
+         contains `__`, so the only residual collision is a flat key that
+         already spells a mangled qualified key (`a__b` beside `a::b`).
+         `_check_host_keys` refuses that program by name rather than emitting
+         two declarations for one identifier.
+
+    Hence `acme::greeter` and `acme2::greeter` stay distinct here, and an
+    unqualified key is byte-identical to what this emitter wrote before.
+    """
+    if KEY_NAMESPACE_SEP not in key:
+        return key
+    return "__".join(part.replace("_", "_u") for part in key.split(KEY_NAMESPACE_SEP))
+
+
+def _check_host_keys(ir: dict) -> None:
+    """Refuse the one collision `_host_key` cannot represent (see its proof):
+    a flat key that already spells a mangled qualified key. Two wiring keys
+    that would land on one Java identifier is a rename, not a miscompile."""
+    seen: dict[str, str] = {}
+    for component in ir.get("components") or []:
+        for table in ("provides", "requires", "routes", "isolate", "intercept"):
+            for key in (component.get(table) or {}):
+                host = _host_key(key)
+                first = seen.setdefault(host, key)
+                if first != key:
+                    raise EmitError(
+                        f"wiring keys {first!r} and {key!r} both lower to the "
+                        f"Java identifier {host!r}; rename one of them"
+                    )
+
+
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
@@ -3901,13 +3965,31 @@ class _Env:
         self.component = component
         self.services = services
         self.name = component["name"]
-        self.reqs: dict[str, str] = dict(component.get("requires") or {})
-        self.provides: dict[str, str] = dict(component.get("provides") or {})
+        # issue #1914: the RAW wiring tables keep the qualified key (what the
+        # compiler compares, what `isolate`/`intercept`/`routes` name, and what
+        # `ServiceKey.of(..)` is keyed by). `reqs` is keyed by the BINDING a
+        # body's `req` node carries, with `req_keys` recovering the qualified
+        # key and `req_fields` the Java identifier each one is named by.
+        self.requires_raw: dict[str, str] = dict(component.get("requires") or {})
+        self.provides_raw: dict[str, str] = dict(component.get("provides") or {})
+        self.reqs: dict[str, str] = {
+            _key_binding(key): service for key, service in self.requires_raw.items()
+        }
+        self.req_keys: dict[str, str] = {
+            _key_binding(key): key for key in self.requires_raw
+        }
+        self.req_fields: dict[str, str] = {
+            binding: _ident(binding, "requirement") for binding in self.reqs
+        }
+        self.provides: dict[str, str] = dict(self.provides_raw)
         # item 173: routed requires (item 162 `routes` IR): key -> {"realms":
         # [...], "strategy": ...}. A routed key resolves per named realm through
         # an emitted router class, never a single `ctx.get(...)` handle. Empty
         # for every routes-less component.
         self.routes: dict[str, dict] = dict(component.get("routes") or {})
+        # a body reference names a requirement by its binding, `routes` by its
+        # wiring key (issue #1914)
+        self.route_of: dict[str, str] = {_key_binding(key): key for key in self.routes}
 
 
 def _format_java(template: str, args: list[str]) -> str:
@@ -6077,7 +6159,7 @@ def _method_body(env: _Env, key: str, method: dict) -> str:
             return "return;"
         rename = {b: f"this.{b}" for b in _binds(env.component)}
         # A required service is a field of the provider class, same as a bind.
-        rename.update({local: f"this.{local}" for local in env.reqs})
+        rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
         value = _expr(steps[0]["expr"], None, rename, env)
         # A `void` service operation cannot `return <expr>;` in Java — run
         # the expression for its effect instead.
@@ -7266,7 +7348,7 @@ def _method_body_lines(
     v3_ctx.arrows = {}  # arrow bindings are local to one body
     _pin_value_map_locals(method.get("body"), method.get("params"), v3_ctx)
     rename = {b: f"this.{b}" for b in _binds(env.component)}
-    rename.update({local: f"this.{local}" for local in env.reqs})
+    rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
 
     def render(steps: list, lines: list[str], pad: str) -> None:
       for stmt in steps or []:
@@ -7717,10 +7799,10 @@ def _emit_component_stmts(
         elif kind == "provide":
             key = step.get("name")
             service = step.get("service")
-            struct = f"{cname}{_camel(key)}"
+            struct = f"{cname}{_camel(_host_key(key))}"
             ctor_args = ", ".join(
                 ["ctx", "fx"] + (["frame"] if frame_expr else [])
-                + list(env.reqs) + list(_binds(component))
+                + [env.req_fields[b] for b in env.reqs] + list(_binds(component))
                 + [_ident(f.get("name"), "config field")
                    for f in _provider_config_fields(component)]
             )
@@ -7961,7 +8043,7 @@ def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str
     body. Wired as the component's handle for the routed key, so a provide
     method's `<key>.<op>(..)` forwards through it (G2: one provider downstream).
     """
-    struct = f"RevlRouter{cname}{_camel(key)}"
+    struct = f"RevlRouter{cname}{_camel(_host_key(key))}"
     realms = list(route.get("realms") or [])
     strategy = route.get("strategy") or "round_robin"
     realm_lits = ", ".join(_string(r) for r in realms)
@@ -8081,11 +8163,12 @@ def _emit_component_modern(
     v3_ctx.crossing_frame = frame_expr
     provider_config = _provider_config_fields(component)
 
+    # `isolate`/`intercept` name the RAW wiring key, not the binding (issue #1914)
     for key in isolate:
-        if key not in env.reqs and key not in env.provides:
+        if key not in env.requires_raw and key not in env.provides_raw:
             raise EmitError(f"{name}: isolate key {key!r} is not declared")
     for key in intercept:
-        if key not in env.reqs:
+        if key not in env.requires_raw:
             raise EmitError(f"{name}: intercept key {key!r} is not a requirement")
 
     out: list[str] = []
@@ -8100,15 +8183,15 @@ def _emit_component_modern(
         # provider. Mirrors the go tier, which emits only from body provide steps.
         if key in env.routes:
             continue
-        _ident(key, "provision")
-        struct = f"{cname}{_camel(key)}"
+        _ident(_host_key(key), "provision")
+        struct = f"{cname}{_camel(_host_key(key))}"
         out.append(f"public static final class {struct} implements {service} {{")
         out.append("    private final Context ctx;")
         out.append("    private final Context.EffectScope fx;")
         if needs_frame:
             out.append("    private final RevlFrame frame;")
         for local, service in env.reqs.items():
-            out.append(f"    private final {service} {local};")
+            out.append(f"    private final {service} {env.req_fields[local]};")
         for b in _binds(component):
             btype = _bind_type(component, b, v3_ctx, map_values)
             out.append(f"    private final {btype} {b};")
@@ -8120,7 +8203,7 @@ def _emit_component_modern(
         ctor_params = ", ".join(
             ["Context ctx", "Context.EffectScope fx"]
             + (["RevlFrame frame"] if needs_frame else [])
-            + [f"{service} {local}" for local, service in env.reqs.items()]
+            + [f"{service} {env.req_fields[local]}" for local, service in env.reqs.items()]
             + [f"{_bind_type(component, b, v3_ctx, map_values)} {b}" for b in _binds(component)]
             + [f"{_java_v3_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
                for f in provider_config]
@@ -8131,7 +8214,8 @@ def _emit_component_modern(
         if needs_frame:
             out.append("        this.frame = frame;")
         for local in env.reqs:
-            out.append(f"        this.{local} = {local};")
+            field = env.req_fields[local]
+            out.append(f"        this.{field} = {field};")
         for b in _binds(component):
             out.append(f"        this.{b} = {b};")
         for f in provider_config:
@@ -8215,10 +8299,10 @@ def _emit_component_modern(
     else:
         out.append("    public Disposable apply(Context ctx) {")
     for key, realm in isolate.items():
-        service = env.provides.get(key) or env.reqs[key]
+        service = env.provides.get(key) or env.requires_raw[key]
         out.append(f"        ctx = ctx.isolate({service}.class, {_string(realm)});")
     for key, metadata in intercept.items():
-        service = env.reqs[key]
+        service = env.requires_raw[key]
         out.append(
             f"        ctx.intercept(ServiceKey.of({service}.class, {_string(key)}), "
             f"{_metadata_lit(metadata)});"
@@ -8230,15 +8314,17 @@ def _emit_component_modern(
         # registration below shares the same commit/abort discriminator.
         out.append("        RevlFrame frame = new RevlFrame();")
     for local, service in env.reqs.items():
-        if local in env.routes:
+        field = env.req_fields[local]
+        raw = env.req_keys.get(local, local)
+        if local in env.route_of:
             # item 173: a routed require resolves per named realm through the
             # emitted router, never a single committed-view `ctx.get`.
-            out.append(f"        {service} {local} = "
-                       f"new RevlRouter{cname}{_camel(local)}(ctx);")
+            out.append(f"        {service} {field} = "
+                       f"new RevlRouter{cname}{_camel(_host_key(raw))}(ctx);")
             continue
         out.append(
-            f"        {service} {local} = "
-            f"ctx.get(ServiceKey.of({service}.class, {_string(local)}));"
+            f"        {service} {field} = "
+            f"ctx.get(ServiceKey.of({service}.class, {_string(raw)}));"
         )
     # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
     # fiber until apply returns it, so a failing activation must dispose
@@ -8293,7 +8379,7 @@ def _emit_component_modern(
     # service interface by strict per-realm resolution + strategy + failover.
     for rkey, route in env.routes.items():
         _emit_java_router_class(
-            env, cname, rkey, env.reqs[rkey], route, services, render_type, out)
+            env, cname, rkey, env.requires_raw[rkey], route, services, render_type, out)
     return out
 
 
@@ -8363,8 +8449,8 @@ def _emit_component(
         # no-op here, but it keeps the two emitters consistent.
         if key in env.routes:
             continue
-        _ident(key, "provision")
-        struct = f"{cname}{_camel(key)}"
+        _ident(_host_key(key), "provision")
+        struct = f"{cname}{_camel(_host_key(key))}"
         out.append(f"public static final class {struct} implements {service} {{")
         # `requires` bindings are captured exactly like `let-effect` binds:
         # a final field, assigned from the constructor. `apply` resolves them
@@ -8372,19 +8458,19 @@ def _emit_component(
         # reaches one had nothing in scope to name until the provider class
         # held it too (the rust/TypeScript instances of this same bug).
         for local, req_service in env.reqs.items():
-            out.append(f"    private final {req_service} {_ident(local, 'requirement')};")
+            out.append(f"    private final {req_service} {env.req_fields[local]};")
         for b in _binds(component):
             out.append(
                 f"    private final {_bind_decl_type(component, b, render_type, map_values)} {b};")
         ctor_args = ", ".join(
-            [f"{req_service} {_ident(local, 'requirement')}"
+            [f"{req_service} {env.req_fields[local]}"
              for local, req_service in env.reqs.items()]
             + [f"{_bind_decl_type(component, b, render_type, map_values)} {b}"
                for b in _binds(component)]
         )
         out.append(f"    {struct}({ctor_args}) {{")
         for local in env.reqs:
-            out.append(f"        this.{local} = {local};")
+            out.append(f"        this.{env.req_fields[local]} = {env.req_fields[local]};")
         for b in _binds(component):
             out.append(f"        this.{b} = {b};")
         out.append("    }")
@@ -8418,8 +8504,9 @@ def _emit_component(
     out.append("    public Disposable apply(Context ctx) {")
     for local, service in env.reqs.items():
         out.append(
-            f"        {service} {local} = "
-            f"ctx.get(ServiceKey.of({service}.class, {_string(local)}));"
+            f"        {service} {env.req_fields[local]} = "
+            f"ctx.get(ServiceKey.of({service}.class, "
+            f"{_string(env.req_keys.get(local, local))}));"
         )
     # A8 self-revert: undos accumulate as the steps land; if a later step
     # throws mid-activation, the accumulated inverses run (reverse order)
@@ -8447,8 +8534,9 @@ def _emit_component(
         elif kind == "provide":
             key = step.get("name")
             service = step.get("service")
-            struct = f"{cname}{_camel(key)}"
-            ctor_args = ", ".join(list(env.reqs) + list(_binds(component)))
+            struct = f"{cname}{_camel(_host_key(key))}"
+            ctor_args = ", ".join(
+                [env.req_fields[b] for b in env.reqs] + list(_binds(component)))
             # The provision's disposable joins the teardown list — the
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
             # it would leave the provision registered after unload.
@@ -9037,6 +9125,7 @@ def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
 
 
 def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
+    _check_host_keys(ir)
     """Emit one Java source file for an IR document (ir_version 1, 2, or 3).
 
     `record` (item 322 Slice 2) additionally emits the durable WAL recording

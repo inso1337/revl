@@ -589,6 +589,13 @@ def cardinality(ir: dict) -> dict:
     # multiplicity is unchecked, not the authority token beside it (item 343,
     # "cardinality's per-capability ceilings stay keyed by extern name").
     fn_caps_map = _emitting_extern_names(fns, ir.get("externs") or [])
+    # The externs that ARE a boundary crossing: the two classes the emission
+    # fixed point seeds (`emission`, `witnessed`). A `pure`/`acquire` extern is
+    # host code ON the call path, never a crossing, so there is no crossing
+    # multiplicity for the table to be `unbounded` about (§1, §5.1: the
+    # obligation is on a CROSSING whose only reach is behind host code).
+    crossings = {ext["name"] for ext in ir.get("externs") or []
+                 if ext.get("class") in ("emission", "witnessed")}
 
     # --- the fn call graph over the IR, for recursion and loop classification.
     # `_fn_call_names` records both component-body (`{kind: fn, name}`) and
@@ -646,21 +653,33 @@ def cardinality(ir: dict) -> dict:
                     types=ir.get("types") or {})
         return certify_cache[name]
 
-    def _classify(name: str) -> tuple[str, str]:
-        """Why a crossing reached through fn `name` is `unbounded` in Slice 1.
+    closure_cache: dict[str, set] = {}
+
+    def _classify(name: str, ext: str) -> tuple[str, str] | None:
+        """Why a crossing of `ext` reached through fn `name` is `unbounded`.
 
         Recursion outranks a loop outranks a plain host-extern reach, so the
-        loudest true cause is named. Deterministic: the culprit is the
-        lexicographically-first member of the reachable closure with that
-        property."""
-        closure = _closure(name)
-        rec = sorted(closure & recursive)
-        if rec:
-            return ("recursion", rec[0])
-        loops = sorted(closure & has_loop)
-        if loops:
-            return ("loop", loops[0])
-        return ("host", name)
+        loudest true cause is named. Deterministic AND reachability-first: the
+        culprit is the lexicographically-first member of `name`'s reachable
+        closure that BOTH carries the property AND can itself reach `ext`
+        (`reach` is transitive, so a loop that reaches `ext` through a helper
+        counts). A loop that does not reach `ext` neither makes it `unbounded`
+        nor is cited as the reason (issue #1905).
+
+        `None` when nothing on the reachable graph reaches a `pure`/`acquire`
+        `ext`: no loop and no recursion connects the two, and the extern is not
+        a crossing at all, so it has no place in a table of crossing counts."""
+        closure = closure_cache.get(name)
+        if closure is None:
+            closure = closure_cache[name] = _closure(name)
+        for kind, flagged in (("recursion", recursive), ("loop", has_loop)):
+            culprits = sorted(node for node in closure & flagged
+                              if ext in reach.get(node, ()))
+            if culprits:
+                return (kind, culprits[0])
+        if ext in crossings:
+            return ("host", name)
+        return None
 
     def _reason(kind: str, detail: str) -> str:
         if kind == "recursion":
@@ -1073,18 +1092,26 @@ def cardinality(ir: dict) -> dict:
         dispatch = False
         for name in called:
             if name in externs:
-                # a host extern reached directly from the component body
-                _mark(name, "host", name)
+                # a host extern reached directly from the component body: the
+                # extern body is unchecked, so a crossing it reveals is never
+                # counted as zero (§5.1) unless it declares a `calls` ceiling.
+                # A `pure`/`acquire` extern reveals no crossing at all.
+                if name in crossings:
+                    _mark(name, "host", name)
                 continue
-            kind, detail = _classify(name)
-            for ext in reach.get(name, set()):
-                _mark(ext, kind, detail)
+            reached = reach.get(name, set())
+            for ext in reached:
+                cause = _classify(name, ext)
+                if cause is not None:
+                    _mark(ext, *cause)
             fn_caps = fn_caps_map.get(name) or set()
             for cap in fn_caps:
                 if cap == _UNKNOWN_DISPATCH:
                     dispatch = True
                     continue
-                _mark(cap, kind, detail)
+                cause = _classify(name, cap)
+                if cause is not None:
+                    _mark(cap, *cause)
 
         # the first-class launder: an emitting callable handed to a dispatcher is
         # named in no call position; `_calls_in`'s value channel records it.

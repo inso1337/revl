@@ -12,10 +12,15 @@ such call already.
 The rule (`lower._refuse_value_method`) is one for both spellings: a
 non-builtin method on a receiver whose static type is List, Str, Bytes, Int,
 Int32, Float or Bool is refused with the named receiver's message. A receiver
-with no static type (an arrow parameter, a host-acquired handle) stays
-lenient, as before, and so does a `Map`: it is the one value head a host
-handle shares its name with, so a `Map[K, V]`-typed acquisition keeps its host
-verbs (`drop`, `insert`, `get`).
+with no static type (an arrow parameter) stays lenient, as before.
+
+`Map` joined the refused heads in issue #1968 and is left to its own file,
+`tests/test_value_map_method_1968.py`. It is the one value head a host handle
+shares its name with, so the two cannot be told apart by the type the rule
+reads; `lower.Env.host_handles` records which bindings an `effect` bracket
+made a handle and `_refuse_value_method` stands aside for those, so a
+`Map[K, V]`-typed acquisition keeps its host verbs (`drop`, `insert`, `get`).
+`ok_typed_host_acquisition` and `ok_host_handle_verbs` here are that guard.
 
 tests/fixtures/value_method_call/ is the corpus: `t1_` refused, `ok_`
 admitted. tests/test_gate_reference_census.py holds the self-host gate to the
@@ -48,14 +53,17 @@ def _message(method: str, recv: str) -> str:
 REFUSED = {
     "t1_inplace_effect_arg": ("frob", "List[Int]"),
     "t1_inplace_list": ("map", "List[Int]"),
+    "t1_inplace_map": ("frob", "Map[Str, Int]"),
     "t1_inplace_paren_int": ("frob", "Int"),
     "t1_inplace_req_result": ("map", "List[Int]"),
     "t1_inplace_str_call": ("frob", "Str"),
     "t1_named_int": ("frob", "Int"),
     "t1_named_list": ("map", "List[Int]"),
+    "t1_named_map": ("frob", "Map[Str, Int]"),
+    "t1_record_map_field": ("frob", "Map[Str, Int]"),
 }
-ADMITTED = ("ok_arrow_param", "ok_host_map", "ok_inplace_builtin", "ok_named_map",
-            "ok_typed_host_acquisition")
+ADMITTED = ("ok_arrow_param", "ok_host_handle_verbs", "ok_host_map",
+            "ok_inplace_builtin", "ok_typed_host_acquisition")
 
 
 def _src(stem: str) -> str:

@@ -16,8 +16,6 @@
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "default_for_rust_type", 11, 11]
 
-["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "emit_host_stubs", 1, 1]
-
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "ind", 1, 1]
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "is_addsubmul", 1, 1]
@@ -66,9 +64,7 @@
 
 ["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test sections, marked rather than emitted (issue #1123): `deferred_test_markers` names each `lifecycle test` with an `<<UNSUPPORTED-TEST:...>>` marker and each `fault test` with an `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block in. A plain `test` is EMITTED since item 391 (`emit_v3_tests`, held to byte agreement by emit_rust_corpus/in_file_tests.rvl); the two sections still marked drive a live composition or are a reference refusal, so no byte-agreement corpus document can carry either, and the marker is what keeps them loud rather than silently skipped, as all six emitters did before #1123."]
 
-["function", "deferred-in-file-test-section-marked-rather-than", "deferred_test_markers", 2, 2]
-
-["function", "deferred-in-file-test-section-marked-rather-than", "emit_rust_src", 1, 1]
+["function", "deferred-in-file-test-section-marked-rather-than", "deferred_test_markers", 1, 1]
 
 ["reason", "extern-declared-compensate-item-254-issue-1592-declared", "Extern-declared compensate (item 254, issue #1592): `declared_compensate_marker` returns the `<<DEFER-declared-compensate>>` marker for a document whose emission extern declares its own `compensate`. The port lowers the site-spelled compensation (item 391) but not the declared one, so such a document cannot be a byte-agreement case, and the marker keeps it a loud divergence rather than a silently missing registration. The reference half is recorded under the same issue in the reference ledger."]
 
@@ -168,7 +164,7 @@
 
 ["reason", "the-in-file-test-declarations-that-drive-the", "The in-file `test` declarations that drive the clock. Consulted only when no component arms a timer: `uses_timer(..) || tests_use_advance(ir)` short-circuits on the left. Since item 391 emit_rust_corpus/in_file_tests.rvl reaches it (a test section and no component), so its walk runs; what is left is the `advance` match and its early returns, because no corpus test drives the clock: an `advance` is a lifecycle step, and the lifecycle section is still marked (tests/fixtures/selfhost_blind_spots.json, `step=advance`) (issue 1153)."]
 
-["function", "the-in-file-test-declarations-that-drive-the", "tests_use_advance", 3, 3]
+["function", "the-in-file-test-declarations-that-drive-the", "tests_use_advance", 1, 1]
 
 ["reason", "the-port-s-own-json-dumps-for-the", "The port's own `json.dumps` for the typed-event contract schema (`json_str`, `json_dumps`) and the non-BMP `\\uXXXX` escape arm inside it (`hex4`). They are reached only through `Stream::contract` at selfhost/emit_rust.rvl:4889, which the corpus's `comp_stream.rvl` `Handler` component does not reach; the reference calls python's `json`, so it has no counterpart in `backends/rust/emit.py` (issue 1153)."]
 

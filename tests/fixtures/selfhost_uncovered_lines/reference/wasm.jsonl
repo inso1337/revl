@@ -258,7 +258,7 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower", 61, 61]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower_instance_get_call", 37, 37]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower_instance_get_call", 35, 35]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._lower_spawn", 26, 26]
 
