@@ -201,11 +201,12 @@ $ revl explain G2 --json
 ```
 
 Codes are case-insensitive; an unknown code answers with the roster rather
-than nothing. Every code the compiler can emit has an entry, not only the
-guarantee catalogue's: the host-boundary codes (`HOST-METHOD`, `HOST-ARITY`),
-the termination codes (`L1`, `L4`), `lifecycle`, and the gate's own verdicts
-(`UNKNOWN_TIER`, `TIER_REFUSED`, `STATE_UNDISCLOSED`, ...) all answer here
-(issue #2028). A code that enforces no named guarantee reports
+than nothing. Every code the compiler can emit has an entry except the handful
+the evolution curriculum reserves as work for an agent to do: `SYNTAX`, the
+host-boundary codes (`HOST-METHOD`, `HOST-ARITY`), the termination codes
+(`L1`, `L4`) and `lifecycle` all answer "no diagnostic code", while the
+gate's own verdicts (`UNKNOWN_TIER`, `TIER_REFUSED`, `STATE_UNDISCLOSED`, ...)
+answer here (issue #2028). A code that enforces no named guarantee reports
 `"guarantee": "unclassified"` rather than leaving the field out.
 
 The same table is served over MCP by `revl_grammar` as

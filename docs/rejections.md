@@ -18,9 +18,9 @@ two executable sources of truth:
 
 `GUARANTEES`/`FIXES` are the *design catalogue* — the obligations a program
 must satisfy. The compiler, the gate, the session and the MCP faces also mint
-codes that enforce no named obligation: a host-boundary mistake, a parse
-error, a tier the build does not carry, a verdict about the run rather than
-about the source. Those live in `OTHER_CODES` in the same module, and
+codes that enforce no named obligation: a tier the build does not carry, a
+gate verdict about the run rather than about the source. Those live in
+`OTHER_CODES` in the same module, and
 `revl explain` answers for them too (issue #2028). The roster is derived, not
 hand-listed: `src/revl/emitted_codes.py` walks the emitter sources for the
 sites that mint a code, and `tests/test_explain_coverage_2028.py` holds
