@@ -1623,6 +1623,20 @@ def diverged_paths(texts: dict, paths) -> list[str]:
     return [p for p in paths if _diverges(texts.get(p), p)]
 
 
+def _disk_state_of(held: dict) -> dict:
+    """The `disk` block for one held source set (issue #2032).
+
+    `inSync` is true when every held file's text equals the bytes on disk,
+    false with the differing paths in `stale`. A set naming no files — an
+    inline composition, or a session holding nothing — has nothing on disk to
+    be out of step with, so it is `inSync`. The single place `diverged_paths`
+    is turned into the published `{inSync, stale}` shape, so the change loop's
+    answer and the unload preflight's cannot drift."""
+    stale = diverged_paths(held.get(_edit.ORIGIN_FILES_CONTENT) or {},
+                           held.get(_edit.ORIGIN_FILES) or [])
+    return {"inSync": not stale, "stale": stale}
+
+
 def _disk_state() -> dict:
     """The held source against the bytes on disk (issue #2032).
 
@@ -1630,18 +1644,49 @@ def _disk_state() -> dict:
     has not been exported leaves the two disagreeing — silently, because every
     field of the success payload is session-scoped. `_export_plan` already
     filters on exactly this predicate; this reports it where the change loop
-    can act on it instead of a bare success over an unchanged file.
+    can act on it instead of a bare success over an unchanged file."""
+    return _disk_state_of(_edit.virtual_source(SESSION))
 
-    `inSync` is the whole answer for a files-loaded composition: true when
-    every held file's text equals the bytes on disk, false with the differing
-    paths in `stale`. A composition loaded from inline source names no path,
-    so there is nothing on disk to be out of step with and it is `inSync` —
-    and so is a session holding no files at all.
-    """
-    held = _edit.virtual_source(SESSION)
-    stale = diverged_paths(held.get(_edit.ORIGIN_FILES_CONTENT) or {},
-                           held.get(_edit.ORIGIN_FILES) or [])
-    return {"inSync": not stale, "stale": stale}
+
+def _unload_disk_state() -> dict:
+    """What an unload is about to discard, on the authoring axis (issue #2036).
+
+    `revl_unload`'s contract is to prove nothing was left behind, and it used
+    to answer `noResidue: true` while destroying the session's only copy of an
+    unexported edit. This is the same answer `_disk_state` publishes for the
+    change loop, over the source set the unload would drop: an open edit
+    buffer, else what runs, else the draft a cold unload discards. Read
+    straight from the held dicts rather than through `virtual_source`, which
+    re-reads disk for a path the session holds no text for — a preflight must
+    not refuse on a file it was only going to compare against."""
+    if SESSION.loaded:
+        held = getattr(SESSION, "draft", None) or SESSION.origin or {}
+    else:
+        draft = _draft.pending(SESSION)
+        held = (draft or {}).get("vs") or {}
+    return _disk_state_of(held)
+
+
+# issue #2036: the unload preflight's prose. It names the loss and the one verb
+# that writes the held source out, and does NOT point at the `undo` the unload
+# hands back — that document cannot be restored (#2033).
+_UNLOAD_STALE_NOTE = ("this unload discards {paths} — the held source never "
+                      "reached disk and is lost; revl_export writes it out")
+
+
+def _unload_stale_refusal(disk: dict) -> dict:
+    """Refuse an unload that would destroy the only copy of an edit (#2036).
+
+    Fail-closed, like `revl_step_back`'s `force`: the work has no other copy,
+    and the `undo` the unload would hand back cannot restore it (#2033). The
+    stale paths are named, and the remedy is a callable `next` — `revl_export`
+    writes the held source out — never the returned `undo`."""
+    stale = ", ".join(disk["stale"])
+    return _session_error(
+        f"refused: the held source of {stale} has not reached disk and this "
+        "unload would destroy it; call revl_export to write it, or pass "
+        "`force: true` to discard it",
+        refused=True, disk=disk, next=_remedy.call("revl_export", {}))
 
 
 def _ride_disk(name: str, payload) -> None:
@@ -1841,16 +1886,31 @@ def _tool_unload(arguments: dict) -> dict:
     """Tear the running composition down. Under a policy that enforces leases,
     refused while another operator leases any component it would take down:
     otherwise an operator refused a swap could unload the component and boot
-    its own. The holder may unload what it holds."""
+    its own. The holder may unload what it holds.
+
+    Issue #2036: the authoring preflight, before anything is torn down. An
+    unload whose held source has not reached disk destroys the session's only
+    copy of that work, so it is refused (fail-closed, like `revl_step_back`'s
+    `force`) until the caller either exports it or passes `force: true`; the
+    `disk` block says which files are stale either way. `noResidue` is left to
+    its runtime-teardown meaning — it is not overloaded to carry this answer.
+    """
     if SESSION.loaded:
         refusal = _leases.check(SESSION, "unload", arguments)
         if refusal is not None:
             return _refused_by_lease(refusal)
-    elif _draft.discard(SESSION):
-        return {"ok": True, "discardedDraft": True,
-                "note": "the held draft was discarded; nothing was running"}
+    disk = _unload_disk_state()
+    if not disk["inSync"] and arguments.get("force") is not True:
+        return _unload_stale_refusal(disk)
+    lost = None if disk["inSync"] else _UNLOAD_STALE_NOTE.format(
+        paths=", ".join(disk["stale"]))
+    if not SESSION.loaded and _draft.discard(SESSION):
+        return {"ok": True, "discardedDraft": True, "disk": disk,
+                "note": lost or "the held draft was discarded; nothing was "
+                                "running"}
     try:
-        return {"ok": True, **SESSION.unload()}
+        return {"ok": True, **SESSION.unload(), "disk": disk,
+                **({"note": lost} if lost else {})}
     except SessionError as error:
         return _session_error(error)
 
@@ -3977,8 +4037,18 @@ TOOLS = [
         "name": "revl_unload",
         "description": "Tear the composition down and report the residue checks "
                        "(registry, provisions, effects, listeners) — prove a component "
-                       "leaves nothing behind before you commit it to disk.",
-        "inputSchema": {"type": "object", "properties": {}},
+                       "leaves nothing behind before you commit it to disk. Refused "
+                       "(issue #2036) when the held source of a loaded file never "
+                       "reached disk, because the unload would destroy its only copy: "
+                       "the refusal names the stale paths and `revl_export` as the "
+                       "remedy, and `force: true` discards the work anyway. The `disk` "
+                       "block reports the same answer; `noResidue` keeps its "
+                       "runtime-teardown meaning.",
+        "inputSchema": {"type": "object", "properties": {
+            "force": {"type": "boolean",
+                      "description": "unload even though the held source of "
+                                     "loaded file(s) never reached disk, "
+                                     "discarding that work (issue #2036)"}}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_unload,
     },
