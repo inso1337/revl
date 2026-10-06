@@ -301,6 +301,13 @@ class ClassMap:
         # not its name).
         class_c: set[str] = set()
         comp = scope["component"]
+        # issue #1707: a `witnessed` extern is class (a) only where its declared
+        # inverse is actually REGISTERED — an effect-position call. Registration
+        # is a property of the call site, so the set is read off this scope's own
+        # steps, and only when the scope reaches a witnessed extern at all.
+        registered = (self.index.witnessed_registered(scope["nodes"])
+                      if any(f.get("class") == "witnessed"
+                             for f in facts["externs"]) else set())
 
         # direct service-op emissions fire AT the call: class (c). Deferral is an
         # extern-declaration property, not spellable on a service method, so a
@@ -361,15 +368,27 @@ class ClassMap:
                     "kind": "extern", "component": comp, "scope": scope["kind"],
                     "name": name, "class": klass, "actionClass": c})
             elif klass == "witnessed":
-                # a witnessed extern crosses the boundary but is revertible by a
-                # registered inverse (243): class (a), auto-approved silently.
-                cls = worse(cls, "a")
+                # a witnessed extern crosses the boundary and is revertible by a
+                # registered inverse (243): class (a), auto-approved silently —
+                # but ONLY where that inverse was registered, i.e. where the call
+                # is the acquisition of an `effect`/`let-effect` step. Reached any
+                # other way (`let r = stash_path(p)` or `return stash_path(p)` in a
+                # provide-method body, which the checker's effect-position refusal
+                # did not cover, issue #1707) the call fires the host mutation and
+                # registers NOTHING: nothing can undo it, so it is a class-(c)
+                # crossing and prompts. A relay over it then keeps (c) too, since
+                # `_classify_relaxed` only relaxes a target whose closure is (a)/(b).
+                c = "a" if name in registered else "c"
+                cls = worse(cls, c)
                 for cap in (self.index.externs.get(name) or {}).get(
                         "capabilities") or [name]:
                     caps.add(cap)
+                    if c == "c":
+                        class_c.add(cap)  # an unregistered witness needs a grant
                 crossings.append({
                     "kind": "extern", "component": comp, "scope": scope["kind"],
-                    "name": name, "class": klass, "actionClass": "a"})
+                    "name": name, "class": klass, "actionClass": c,
+                    **({"registered": False} if c == "c" else {})})
             # pure / acquire externs are not boundary crossings.
 
         # the `*` first-class-value widening (Fix 10): an emitting callable
