@@ -28,6 +28,16 @@ by `_root_dirfd` — the descriptor every mutation needs before its first syscal
 — so all four refuse with the `ENOTSUP` refusal the PINNED binder
 (`bind_workspace_root`) already raised, before any partial work.
 
+One follow-up defect in that predicate is pinned here too. The walk's capability
+is a property of the HOST, so the predicate must read the function objects
+CPython registered in `os.supports_follow_symlinks` — never the `os` module
+attribute of the moment. `tests/test_fs_pinned_root.py`'s boundary barrier wraps
+`os.stat` for the duration of a boundary, so a live read made the guard refuse
+`ENOTSUP` on the runtime's own unwind and the barrier's preimage `stat` never
+ran. The wrapped-stat tests below FAIL on the commit that shipped the predicate
+(`a3c8e4091`, the #2020 merge) and pass once the module binds `os.stat` at
+import, exactly as it already did for `_DIRFD_WALK_REQUIRED`.
+
 # How a Windows-only failure is tested on macOS
 
 There is no Windows here, so the host capability is SIMULATED by patching the
@@ -314,6 +324,82 @@ def test_each_capability_the_walk_needs_can_alone_make_the_predicate_false(
     with monkeypatch.context() as m:
         m.setattr(os, "supports_follow_symlinks", set())
         assert ws.dirfd_walk_supported() is False
+
+
+# ---------------------------------------------------------------------------
+# The predicate asks the HOST, not the module attribute of the moment
+# ---------------------------------------------------------------------------
+
+def _wrap_os_stat(m) -> list:
+    """`os.stat` replaced by a DELEGATING wrapper — what a tracer, an audit
+    shim or a test barrier does to the module attribute — while the capability
+    sets stay exactly as CPython declared them. Returns the list the wrapper
+    records its calls in."""
+    real = os.stat
+    seen: list = []
+
+    @functools.wraps(real)
+    def wrapper(*args, **kwargs):
+        seen.append(args)
+        return real(*args, **kwargs)
+
+    m.setattr(os, "stat", wrapper)
+    assert os.stat is wrapper
+    return seen
+
+
+def test_a_wrapped_os_stat_does_not_make_a_capable_host_look_incapable(
+        monkeypatch):
+    """The walk's capability is a property of the HOST, so the probe must read
+    the function objects CPython registered in `os.supports_follow_symlinks` —
+    never the `os` module attribute of the moment. Wrapping `os.stat` changes
+    the attribute and leaves the set intact, so a host WITH the walk must still
+    be admitted, and the probe must not CALL `os.stat` either: it asks the set
+    about the capability, it does not exercise it.
+
+    This is the CLASS, not an instance. `tests/test_fs_pinned_root.py`'s
+    `_barrier` wraps `os.stat` for the duration of a boundary, so a live read
+    made the guard refuse `ENOTSUP` on the runtime's own unwind
+    (`session.abort` -> `runtime.drain` -> `_replay` -> `restore` ->
+    `_root_dirfd`), and the preimage `stat` the barrier was waiting for never
+    ran: `stat boundary was not exercised`."""
+    if not ws.dirfd_walk_supported():
+        pytest.skip("this host has no directory-fd walk for the probe to admit")
+    real_stat = os.stat
+
+    with monkeypatch.context() as m:
+        seen = _wrap_os_stat(m)
+
+        assert real_stat in os.supports_follow_symlinks, \
+            "the capability set still names the real stat: it is untouched"
+        assert ws.dirfd_walk_supported() is True
+        assert seen == [], "the probe asks the set; it does not call os.stat"
+
+
+def test_a_wrapped_os_stat_does_not_refuse_a_mutation(
+        workspace, monkeypatch):
+    """The reach, not just the predicate: `_root_dirfd()` is the descriptor
+    every mutation needs before its first syscall, and the real `write` body
+    must still complete while `os.stat` is wrapped. No cordis needed — this
+    calls the guard and the emitted `@py` body directly."""
+    monkeypatch.setattr(ws, "_pinned_root", None)
+    if not ws.dirfd_walk_supported():
+        pytest.skip("this host has no directory-fd walk to hand out")
+    mod = _fs_module()
+
+    with monkeypatch.context() as m:
+        _wrap_os_stat(m)
+
+        fd = ws._root_dirfd()
+        try:
+            assert fd >= 0
+            assert stat.S_ISDIR(os.fstat(fd).st_mode)
+        finally:
+            os.close(fd)
+
+        result = mod.write("target.txt", "payload")
+        assert isinstance(result, mod.Ok), result
+        assert (workspace / "target.txt").read_text(encoding="utf-8") == "payload"
 
 
 # ---------------------------------------------------------------------------

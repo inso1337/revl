@@ -1981,7 +1981,7 @@ fn secret_scaffold(externs: List[Any]) -> List[Str] {
   o = o.push("    throw new Error(")
   o = o.push('      "capability-bound secret `" + name + "` was not " +')
   o = o.push('      "installed before its extern body ran; the run driver " +')
-  o = o.push('      "must resolve it at plug (item 256). No default exists " +')
+  o = o.push('      "has not resolved it (item 256). No default exists " +')
   o = o.push('      "for a secret.",')
   o = o.push("    );")
   o = o.push("  }")

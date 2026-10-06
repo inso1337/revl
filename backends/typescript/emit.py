@@ -4846,7 +4846,7 @@ def _ts_secret_scaffold(externs: list) -> list[str]:
         "    throw new Error(",
         '      "capability-bound secret `" + name + "` was not " +',
         '      "installed before its extern body ran; the run driver " +',
-        '      "must resolve it at plug (item 256). No default exists " +',
+        '      "has not resolved it (item 256). No default exists " +',
         '      "for a secret.",',
         "    );",
         "  }",
