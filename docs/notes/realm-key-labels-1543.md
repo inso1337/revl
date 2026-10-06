@@ -103,7 +103,7 @@ provision by.
 |---|---|---|---|
 | python | `_REALM_LABELS[(name, key)]` in `backends/python/runtime.py`; cordis-py's `_isolate` is one symbol per key | fixed by #1549 | BEFORE/AFTER transcripts above; 3 py tests |
 | typescript | `realmLabels: Map<string, symbol>` keyed by `JSON.stringify([name, key])` in `backends/typescript/runtime.ts` | fixed by #1549 | real `node` run of the emitted program: all three fibers ACTIVE, `ping == "db"`, `up == "api:db"` |
-| rust | `_revl_realm(label)` mints one `cordis::Isolation` per realm **string** (`REVL_REALM_TAG \| index`, `backends/rust/emit.py:5281`) | **still defective** — see below | strict xfail: `api` collides with `db` (`DuplicateService`) |
+| rust | `_revl_realm(realm, key)` mints one `cordis::Isolation` per `(realm, key)` **pair** (`REVL_REALM_TAG \| index`, `backends/rust/emit.py:5281`) | **fixed by #2014** — see below | at survey time: strict xfail, `api` collides with `db` (`DuplicateService`); now: the reproducer runs and passes |
 | go | `provKey{realm, key}` (`forks/stc-go/key.go`) | clean by construction | guard test passes |
 | java | `ServiceRegistry`'s store key is `ServiceKey.of(key.type(), realm)`; the realm override is `Map<Class<?>, String>` (`cordis4j-core/.../internal/ServiceRegistry.java:42,72,91-92,153-154`), and the emitted `ctx.isolate(Database.class, "wa")` / `ctx.isolate(Api.class, "wa")` binds it per service **class** | clean by construction — the key dimension is carried by the class | `cordis4j-core` compiled from `1na-ko/cordis4j@82072f4`; `tests/test_realm_conformance.py::test_cordis4j_realm_conformance` now runs for real and xfails on cordis4j's *other*, already-characterized divergence (equal realm strings share instead of refusing) |
 | wasm | there is no store: `_scoped_key` composes the realm into the capability address (`wa/db`, `wa/api`) | clean by construction | emitted `provide:wa/db.ping`, `coeffect:wa/db`, `provide:wa/api.up`; `test_cordis_wasm_realm_conformance` passes against the real cordis-wasm substrate |
@@ -125,23 +125,34 @@ capability address, `Front` — which consumes both keys in one realm — import
 two different coeffects. The guard test added alongside this note asserts
 exactly that, so the survey's claim is executable rather than prose.
 
-## Follow-up: the rust tier is still defective
+## Follow-up: the rust tier (fixed by #2014)
 
-`backends/rust/emit.py:5281` `_collect_realm_labels` collects distinct realm
-**strings**, and the emitted helper is
+At the time of this survey `backends/rust/emit.py:5281`
+`_collect_realm_labels` collected distinct realm **strings**, and the emitted
+helper was
 
 ```rust
 pub fn _revl_realm(label: &str) -> cordis::Isolation   // REVL_REALM_TAG | index
 ```
 
-so every key in realm `wa` receives the *same* `Isolation`, and cordis-rs
-(which keys `implementations` by `Isolation` alone) sees `api` collide with
-`db` (`DuplicateService`). This is precisely the #1543 defect, one tier over,
-and it is **not** fixed here: the fix changes the emitted helper in
-`backends/rust/emit.py` **and** `selfhost/emit_rust.rvl`, which is inside the
-`crates/revl-gate` digest, so it needs a sequenced `crates/revl-gate`
-regeneration rather than a drive-by edit. It is pinned by a strict xfail in
-`tests/test_realm_key_labels_1543.py` so it cannot silently pass.
+so every key in realm `wa` received the *same* `Isolation`, and cordis-rs
+(which keys `implementations` by `Isolation` alone) saw `api` collide with
+`db` (`DuplicateService`). That was precisely the #1543 defect, one tier over,
+and it was pinned by a strict xfail in `tests/test_realm_key_labels_1543.py`
+so it could not silently pass.
+
+#2014 closed it the way the py/ts tiers were closed by #1549: the helper now
+takes the pair and mints one index per `(realm, key)`.
+
+```rust
+pub fn _revl_realm(realm: &str, key: &str) -> cordis::Isolation
+    // match (realm, key) { ("wa", "api") => 0, ("wa", "db") => 1, ... }
+```
+
+As this note predicted, the fix changes `backends/rust/emit.py` **and**
+`selfhost/emit_rust.rvl`, which is inside the `crates/revl-gate` digest, so it
+carried the sequenced `crates/revl-gate` regeneration; the strict xfail is gone
+and the reproducer runs and passes.
 
 `docs/design-v2-realms.md:105-120` already records the same finding.
 
@@ -155,8 +166,8 @@ deliberately out of scope for #1543.
 
 ## Residual uncertainty
 
-- The rust gap is *described and pinned*, not fixed; closing it requires the
-  gate-crate regeneration above.
+- The rust gap was *described and pinned* by this survey and is now fixed by
+  #2014, together with the gate-crate regeneration it required.
 - The java and wasm rows are measured against a locally compiled
   `cordis4j-core` and the local `cordis-wasm` prototype respectively. Neither
   is part of CI's default path (`REVL_CORDIS4J_CLASSES` unset and the
