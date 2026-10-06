@@ -258,7 +258,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="a component config field; repeatable")
     scaffold.add_argument("--resource", default=None, metavar="Type",
                           help="the type of the effect-acquired resource "
-                               "(default: <Service>Resource)")
+                               "(default: <Service>Resource); a type "
+                               "application like 'Map[Str, Str]' names a host "
+                               "family whose Unit-returning operations a Unit "
+                               "method's fill spec lists")
     scaffold.add_argument("--no-effect", action="store_true",
                           help="omit the acquire/undo effect block")
     scaffold.add_argument("-o", "--out", default=None, metavar="PATH",
