@@ -271,6 +271,48 @@ class Composition:
         second class fold blind to it)."""
         return self._host_routes(*_channels(nodes))[1]
 
+    def witnessed_registered(self, nodes) -> set:
+        """The `witnessed` externs `nodes` reach in EFFECT position — the ones
+        whose declared inverse the runtime actually registers.
+
+        A witnessed extern is class (a) — auto-approved with no prompt — only
+        because the accumulator registers the inverse its declaration names, so
+        the effect can be undone on abort (docs/design/243-witnessed-externs.md).
+        Registration is a property of the CALL SITE, not of the declaration, and
+        the emitter's test for it is `_witnessed_extern(step["acquire"])`: a step
+        whose kind is `effect`/`let-effect` and whose acquisition is a call naming
+        the extern (`backends/python/emit.py`, `_body_step` for an activation body
+        and `_method_step` for a provide-method body). Everywhere else the call
+        still fires the host mutation and registers NOTHING, so the effect is as
+        irreversible as an emission — the same reading `emission_analysis` states
+        as "reversibility ties to *registration*, not to the mere presence of a
+        declared inverse".
+
+        The checker refuses a witnessed call anywhere but effect position in a
+        `fn`/`test` body (`lower.py`, "only valid in effect position", G4), but a
+        provide-method body was not covered, so `let r = stash_path(p)` and
+        `return stash_path(p)` compile and register nothing (issue #1707). Both
+        class folds — the auto-approve `ClassMap` and the erase report's
+        `_crossings` — read THIS predicate, so neither can call such a crossing
+        revertible, and the two cannot disagree (the item-414 discipline).
+
+        The predicate is deliberately the emitter's own, so it can only ever
+        UNDER-claim registration: a witnessed call nested in an argument
+        (`effect f(stash_path(p))`), reached by an indirect call, or handed on as
+        a value is not counted, and the scope keeps its class (c)."""
+        registered: set = set()
+        for step in _walk(nodes):
+            if step.get("step") not in ("effect", "let-effect"):
+                continue
+            acquire = step.get("acquire")
+            if not isinstance(acquire, dict) or acquire.get("kind") != "fn":
+                continue
+            name = acquire.get("name")
+            if (name in self.externs
+                    and self.externs[name].get("class") == "witnessed"):
+                registered.add(name)
+        return registered
+
     def emission_routes(self, nodes) -> dict:
         """Every `emission` extern `nodes` reach -> whether EVERY route to it is
         a call naming the extern itself in this scope.
