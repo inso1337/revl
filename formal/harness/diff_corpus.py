@@ -1543,6 +1543,48 @@ def model_role_reach_rows(rel: str, roles: dict, caps_seen: set) -> list[str]:
     return rows
 
 
+# ---------------------------------------- G-COUNCIL-SPLIT (issue #1811)
+
+#: The tie-policy refusal the `CTV` row decides: `on_tie` written to admit
+#: when the members disagree. The other `model-council` refusals (an unknown
+#: tie outcome, the aggregation vocabulary, the member rules, the quorum
+#: basis, "exactly one aggregation") are other rules of the same code.
+MODEL_COUNCIL_MESSAGE = "admits when the members disagree"
+
+#: The tie outcome the checker reads when a council's `aggregate` clause
+#: omits `on_tie` (`model_council._check_one`, rule 10). The exporter
+#: resolves the default here for the same reason the `MO`/`MP` rows resolve a
+#: role's residence: the row judges the outcome the checker judges, not the
+#: spelling of its absence.
+DEFAULT_TIE = "split"
+
+#: The tie outcomes the checker refuses, spelled out in the harness rather
+#: than read off the checker, so the reference's verdict is an independent
+#: recomputation: widening `model_council.ADMITTING_TIE_OUTCOMES` moves the
+#: checker alone and the disagreement surfaces as `missed-G-COUNCIL-SPLIT`.
+COUNCIL_ADMITTING_TIES = ("allow", "admit", "proceed", "accept", "first", "any")
+
+
+def council_rows(rel: str, prog) -> list[str]:
+    """The `CV` rows of a file: one per DECLARED council, carrying the tie
+    outcome the checker reads for it.
+
+    Read off `prog.model_councils` and not off `_model_tables`' validated
+    table: that table is empty when the file's declarations are refused, so
+    exporting it would emit no row for exactly the files the row exists to
+    catch. A council that declares no `aggregate` clause at all emits no row
+    — no tie outcome was written for it, so the tie rule has nothing to
+    decide and the refusal belongs to the aggregation rule."""
+    rows: list[str] = []
+    for decl in getattr(prog, "model_councils", ()):
+        if not decl.aggregates:
+            continue
+        clause = decl.aggregates[0]
+        tie = clause.on_tie if clause.on_tie is not None else DEFAULT_TIE
+        rows.append("\t".join(["CV", rel, decl.name, tie]))
+    return rows
+
+
 # ------------------------------- out of scope by kind (issue #1810)
 #
 # `out-of-fragment` collects refusals under a rule the model states no row
@@ -2665,6 +2707,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         model_roles, model_councils = _model_tables(prog, str(path))
         file_has_mp = False
         tsv.extend(model_role_reach_rows(rel, model_roles, caps_seen))
+        tsv.extend(council_rows(rel, prog))
         # async names (AN, issue #1808), file-wide
         for name in async_names(prog):
             tsv.append("\t".join(["AN", rel, name]))
@@ -3982,6 +4025,28 @@ def model_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided for each council's tie policy (issue #1811):
+#: `(file, council) -> admitted`. Read by `council_coverage`.
+_COUNCIL_ROWS: dict = {}
+
+
+def council_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `CTV` row (issue #1811): a tie policy
+    the row admits and one it refuses, so the printed verdict is
+    mutation-sensitive rather than uniformly `ok`. Returns findings, treated
+    as gate failures."""
+    witnesses = {
+        "an admitted tie policy": any(_COUNCIL_ROWS.values()),
+        "a refused tie policy": any(not v for v in _COUNCIL_ROWS.values()),
+    }
+    findings = [f"council coverage: NO witness of {k} — the row would agree "
+                "vacuously" for k, ok in witnesses.items() if not ok]
+    if not findings:
+        print(f"council coverage: {len(_COUNCIL_ROWS)} council tie policies, "
+              "both admitted and refused")
+    return findings
+
+
 #: What the REFERENCE read for each component's declaration rules: (steps,
 #: intercept targets, provides, operations). Read by `prelude_coverage`.
 _PRELUDE_ROWS: dict = {}
@@ -4165,7 +4230,9 @@ class Verdicts(NamedTuple):
     `async_sigs` A1S rows (A1 async colour, issue #1808), and `preludes`
     PL, `intercepts` IC and `methods` MS rows (prelude ordering, intercept
     target and method in service, issue #1809), `places` MPV and
-    `model_reach` MAV rows (G-MODEL-PLACE, issue #1811)."""
+    `model_reach` MAV rows (G-MODEL-PLACE, issue #1811), `councils` CTV rows
+    (G-COUNCIL-SPLIT: no declared council admits when its members disagree,
+    issue #1811)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -4191,6 +4258,7 @@ class Verdicts(NamedTuple):
     methods: dict[tuple[str, str], str]
     places: dict[tuple[str, str], str]
     model_reach: dict[tuple[str, str, str], str]
+    councils: dict[tuple[str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -4204,7 +4272,8 @@ class Verdicts(NamedTuple):
                 + len(self.access) + len(self.async_sites)
                 + len(self.async_sigs) + len(self.preludes)
                 + len(self.intercepts) + len(self.methods)
-                + len(self.places) + len(self.model_reach))
+                + len(self.places) + len(self.model_reach)
+                + len(self.councils))
 
 
 
@@ -4241,6 +4310,7 @@ def parse_verdicts(text: str) -> Verdicts:
     methods: dict[tuple[str, str], str] = {}
     places: dict[tuple[str, str], str] = {}
     model_reach: dict[tuple[str, str, str], str] = {}
+    councils: dict[tuple[str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -4329,6 +4399,9 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "MAV" and len(parts) == 5:
             model_reach[(parts[1], parts[2], parts[3])] = \
                 parts[4].split("=", 1)[1]
+        elif parts[0] == "CTV" and len(parts) == 4:
+            # G-COUNCIL-SPLIT tie policy: (file, council) -> ok|fail.
+            councils[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         elif parts[0] in ("PL", "IC", "MS") and len(parts) == 4:
             # the three declaration rules: (file, comp) -> ok|fail.
             {"PL": preludes, "IC": intercepts, "MS": methods}[parts[0]][
@@ -4346,7 +4419,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach)
+                    places, model_reach, councils)
 
 
 
@@ -4566,6 +4639,19 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             resource, ceiling = attenuation_halves(hset, rset)
             model_reach[(r[1], r[2], r[3])] = "ok" if resource and ceiling else "fail"
             _MODEL_ROWS[("reach", r[1], r[2], r[3])] = (resource and ceiling, True)
+
+    # CTV verdicts (G-COUNCIL-SPLIT, issue #1811): each declared council's tie
+    # outcome, recomputed here from the exported column. The vocabulary is
+    # spelled out rather than read off `model_council.ADMITTING_TIE_OUTCOMES`,
+    # so that widening the checker's list moves the checker alone and the
+    # reference's `fail` becomes the harness's `missed-G-COUNCIL-SPLIT`.
+    councils: dict[tuple[str, str], str] = {}
+    _COUNCIL_ROWS.clear()
+    for r in rows:
+        if r and r[0] == "CV" and len(r) == 4:
+            ok = r[3] not in COUNCIL_ADMITTING_TIES
+            councils[(r[1], r[2])] = "ok" if ok else "fail"
+            _COUNCIL_ROWS[(r[1], r[2])] = ok
 
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
@@ -4901,7 +4987,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach)
+                    places, model_reach, councils)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -5023,7 +5109,7 @@ def a9_coverage() -> list[str]:
 FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
                  "missed-G6", "missed-A1", "missed-A6", "missed-A9",
                  "missed-A2", "missed-prelude", "missed-intercept",
-                 "missed-G-MODEL-PLACE",
+                 "missed-G-MODEL-PLACE", "missed-G-COUNCIL-SPLIT",
                  "formal-strict", "formal-found-other")
 
 
@@ -5182,6 +5268,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         pl_fail = any(x == "fail" for k, x in v.preludes.items() if k[0] == rel)
         mp_fail = any(x == "fail" for k, x in v.places.items() if k[0] == rel)
         ma_fail = any(x == "fail" for k, x in v.model_reach.items() if k[0] == rel)
+        cv_fail = any(x == "fail" for k, x in v.councils.items() if k[0] == rel)
         ic_fail = any(x == "fail" for k, x in v.intercepts.items() if k[0] == rel)
         ms_fail = any(x == "fail" for k, x in v.methods.items() if k[0] == rel)
         a1_fail = any(x == "fail" for k, x in v.async_sites.items()
@@ -5202,7 +5289,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
             and not df_fail and not bu_fail and not g1_fail and not a1_fail \
             and not pl_fail and not ic_fail and not ms_fail \
-            and not mp_fail and not ma_fail
+            and not mp_fail and not ma_fail and not cv_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -5305,6 +5392,12 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # Model reach (issue #1811, item 519), decided by the `MAV` row.
             record("agree-G-MODEL-PLACE" if ma_fail else "missed-G-MODEL-PLACE",
                    rel)
+        elif code == "G-COUNCIL-SPLIT" and category == "model-council" \
+                and MODEL_COUNCIL_MESSAGE in checker_message(rel):
+            # The tie policy (issue #1811): a council that admits when its
+            # members disagree, decided by the `CTV` row.
+            record("agree-G-COUNCIL-SPLIT" if cv_fail
+                   else "missed-G-COUNCIL-SPLIT", rel)
         elif code == "A6" and METHOD_MESSAGE in checker_message(rel):
             # Method in service (issue #1809), the call-site half of A6.
             record("agree-A6" if ms_fail else "missed-A6", rel)
@@ -5898,7 +5991,8 @@ def main() -> int:
             ("intercept", ref.intercepts, formal.intercepts),
             ("method", ref.methods, formal.methods),
             ("model_place", ref.places, formal.places),
-            ("model_reach", ref.model_reach, formal.model_reach)):
+            ("model_reach", ref.model_reach, formal.model_reach),
+            ("council", ref.councils, formal.councils)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -5928,7 +6022,8 @@ def main() -> int:
         f"{len(ref.async_sigs)} async signatures + "
         f"{len(ref.preludes)} x 3 declaration-rule components + "
         f"{len(ref.places)} model placements + "
-        f"{len(ref.model_reach)} model reach edges) — "
+        f"{len(ref.model_reach)} model reach edges + "
+        f"{len(ref.councils)} council tie policies) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -5948,6 +6043,7 @@ def main() -> int:
     mismatches.extend(async_coverage())
     mismatches.extend(prelude_coverage(ref))
     mismatches.extend(model_coverage())
+    mismatches.extend(council_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
