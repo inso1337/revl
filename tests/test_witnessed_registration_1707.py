@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -373,6 +374,28 @@ def test_the_erase_report_counts_the_unregistered_witness_as_irreversible():
     assert sorted(cross["bareTokens"]) == ["emit:Front:ops.stash",
                                            "host:Agent:stash_path"]
     assert cross["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# the guide's printed claim (part 3 of #1707)
+# ---------------------------------------------------------------------------
+
+
+def test_the_guide_s_three_spellings_classify_as_the_guide_says():
+    """`docs/harness-gate-guide.md` prints the three spellings and their classes.
+    tests/test_doc_examples.py compiles that block but checks only its syntax, so
+    the classes it prints are checked here: a guide that told a reader the `let`
+    spelling keeps the auto-approve would be the same silent downgrade in prose."""
+    doc = (ROOT / "docs" / "harness-gate-guide.md").read_text(encoding="utf-8")
+    (block,) = [b for b in re.findall(r"^```revl\n(.*?)^```", doc, re.M | re.S)
+                if "stash_let" in b]
+    ir = compile_source(block, "harness-gate-guide.md")
+    assert _class("ops", "stash", ir) == "a"
+    assert _class("ops", "stash_let", ir) == "c"
+    assert _class("ops", "stash_ret", ir) == "c"
+    # and the (c) two say WHY, not just that they are (c)
+    for method in ("stash_let", "stash_ret"):
+        assert _reach("ops", method, ir)["crossings"][0]["registered"] is False
 
 
 # ---------------------------------------------------------------------------

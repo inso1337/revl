@@ -137,12 +137,26 @@ of an `effect`/`let-effect` step. Reached any other way the call fires the host
 mutation and registers nothing, so nothing can undo it and it is class (c):
 
 ```revl
-provide ops {
-  fn stash(p) { effect stash_path(p) }      // (a): the inverse is registered
-  fn stash(p) { let r = stash_path(p) }     // (c): the same mutation, no inverse
-  fn stash(p) { return stash_path(p) }      // (c): likewise
+type Stash = { path: Str, bak: Str }
+type FsError = { code: Str }
+extern pure fn unstash(w: Stash) -> Unit = @py { return }
+extern witnessed[fs] fn stash_path(p: Str) -> Result[Stash, FsError] undo unstash(result) = @py { return Ok({}) }
+service Ops {
+  emission fn stash(p: Str)
+  emission fn stash_let(p: Str)
+  emission fn stash_ret(p: Str)
+}
+component Agent provides ops: Ops {
+  provide ops {
+    fn stash(p) { effect stash_path(p) }       // (a): the inverse is registered
+    fn stash_let(p) { let r = stash_path(p) }  // (c): the same mutation, no inverse
+    fn stash_ret(p) { return stash_path(p) }   // (c): likewise
+  }
 }
 ```
+
+The three operations are the same mutation reached three ways: `ops.stash` is class
+(a), `ops.stash_let` and `ops.stash_ret` are class (c).
 
 Both class folds — the auto-approve `ClassMap` and the erase report — read the
 one predicate `Composition.witnessed_registered`, which is exactly the test the
