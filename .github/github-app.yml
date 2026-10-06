@@ -55,10 +55,22 @@ instructions: |
     (`OWN_FILES` / `CHECKER_SOURCES` / `REPORT_INPUTS`), **a gate crate source**
     (`GATE_CRATE_GLOBS`, i.e. `build_gate_crate.py`'s `SELFHOST_CLOSURE` — which is why
     `selfhost/emit_rust.rvl` is one even though it rotates no digest), and a new `.rvl`
-    under a census corpus directory. So `selfhost/emit_rust.rvl` is a gate crate source
-    and the regenerated `crates/revl-gate/src/selfhost.rs` is a **pinned deciding file**:
-    a diff touching either owes `python3 tools/census_artifact.py --write`, even at an
-    unchanged digest. Only an empty answer is permission to skip the job.
+    under a census corpus directory. Only an empty answer is permission to skip the job.
+  - **`--moved-inputs` says the job RUNS; it does not say a record CHANGED, and it is not
+    by itself a licence to send a lane after `--write`.** The records are `pins.jsonl` —
+    `[group, path]` pairs with **no content hash**, so only the *set* of pinned paths can
+    move it, never an edit to one of them — plus `facts.json` (engine, admissions,
+    reference faults, mechanism, schema) and `cases/*.json` (per-program verdicts).
+    Nothing records the bytes of a pinned file or of a gate crate source:
+    `crates/revl-gate/src/selfhost.rs` is pinned in the `report_inputs` group, and an
+    emitter-only diff (the three `selfhost/emit_*.rvl`, the gate crate) normally changes
+    no record at all. Let the verdict decide —
+    `tools/census_artifact.py --verify --strict` reporting "the committed artifact is
+    current" means **you owe no `--write`** (on such a tree `--write` writes nothing), and
+    a *named* difference is the only thing that owes one. Telling a lane it owes
+    `--write` on the strength of `--moved-inputs` alone sends it looking for a change
+    that does not exist, while the real cause of its census red is almost always a
+    **stale base** — its committed records predate a rotation that already landed.
   - **`--write` does not record the crate reproduction — that is a second, separate red.**
     `--verify --strict` also fails on `no crate reproduction is recorded at the current
     checker version <version>`. That record is
