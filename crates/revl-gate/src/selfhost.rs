@@ -6786,21 +6786,22 @@ fn emit_provide_construction(comp: Value, step: Value, effectful: bool, indent: 
     return out;
 }
 
-fn collect_realm_labels(components: Vec<Value>) -> Vec<String> {
+fn collect_realm_labels(components: Vec<Value>) -> std::collections::HashMap<String, String> {
     let mut seen = std::collections::HashMap::new();
     for comp in components {
         let iso = value_field(comp.clone(), String::from("isolate"));
         for key in value_keys(iso.clone()) {
-            seen.insert(value_str(value_field(iso.clone(), key.clone())), String::from("1"));
+            let rm = value_str(value_field(iso.clone(), key.clone()));
+            seen.insert(format!("{}/{}", rm, key), format!("{}, {}", string_lit(Value::new(serde_json::Value::from(rm.clone()))), string_lit(Value::new(serde_json::Value::from(key.clone())))));
         }
         let routes = value_field(comp.clone(), String::from("routes"));
         for key in value_keys(routes.clone()) {
             for r in value_list(value_field(value_field(routes.clone(), key.clone()), String::from("realms"))) {
-                seen.insert(value_str(r.clone()), String::from("1"));
+                seen.insert(format!("{}/{}", value_str(r.clone()), key), format!("{}, {}", string_lit(Value::new(serde_json::Value::from(value_str(r.clone())))), string_lit(Value::new(serde_json::Value::from(key.clone())))));
             }
         }
     }
-    return list_sort({ let mut ks: std::vec::Vec<String> = seen.keys().cloned().collect(); ks.sort(); ks });
+    return seen;
 }
 
 fn needs_realm_helper(components: Vec<Value>) -> bool {
@@ -6813,16 +6814,17 @@ fn needs_realm_helper(components: Vec<Value>) -> bool {
 }
 
 fn revl_realm_helper(components: Vec<Value>) -> Vec<String> {
-    let labels = collect_realm_labels(components.clone());
+    let seen = collect_realm_labels(components.clone());
+    let labels = list_sort({ let mut ks: std::vec::Vec<String> = seen.keys().cloned().collect(); ks.sort(); ks });
     let mut out: Vec<String> = vec![];
-    out.push(String::from("pub fn _revl_realm(label: &str) -> cordis::Isolation {"));
+    out.push(String::from("pub fn _revl_realm(realm: &str, key: &str) -> cordis::Isolation {"));
     out.push(String::from("    // Top bit reserved for realm labels: disjoint from cordis-rs's"));
     out.push(String::from("    // monotonic scope counter (starts at 1, +1 each isolate())."));
     out.push(String::from("    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;"));
-    out.push(String::from("    let index: u64 = match label {"));
+    out.push(String::from("    let index: u64 = match (realm, key) {"));
     let mut i = 0i64;
     while (i < labels.revl_length()) {
-        out.push(format!("        {} => {},", string_lit(Value::new(serde_json::Value::from((labels)[(i) as usize].clone()))), num_str(Value::new(serde_json::Value::from(i)))));
+        out.push(format!("        ({}) => {},", map_get(seen.clone(), (labels)[(i) as usize].clone()), num_str(Value::new(serde_json::Value::from(i)))));
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     out.push(String::from("        other => panic!(\"revl: realm label {other:?} missing from compile-time registry\"),"));
@@ -7812,7 +7814,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             let snk = snake(value_str(value_field(comp.clone(), String::from("name"))));
             let mut expr = String::from("ctx");
             for key in value_keys(iso.clone()) {
-                expr = format!("{}.isolate_with({}, _revl_realm({}))", expr, string_lit(Value::new(serde_json::Value::from(key.clone()))), string_lit(Value::new(serde_json::Value::from(value_str(value_field(iso.clone(), key.clone()))))));
+                expr = format!("{}.isolate_with({}, _revl_realm({}, {}))", expr, string_lit(Value::new(serde_json::Value::from(key.clone()))), string_lit(Value::new(serde_json::Value::from(value_str(value_field(iso.clone(), key.clone()))))), string_lit(Value::new(serde_json::Value::from(key.clone()))));
             }
             out.push(format!("        \"{}\" => {},", snk, expr));
         }
