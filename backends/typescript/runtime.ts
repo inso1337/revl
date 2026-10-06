@@ -388,6 +388,102 @@ export function record(entry: string): void {
 export const liveResources = new Set<string>()
 
 // ---------------------------------------------------------------------------
+// The host-map write journal (issue #1945 part 2, ported to this tier by
+// issue #2009)
+//
+// R4's `liveResources` says a map was dropped. It cannot say the map was
+// dropped *having destroyed what a bracketed write overwrote*: `effect
+// store.insert(k, v)` / `undo store.remove(k)` on a key that already held a
+// value reverses NOTHING — the undo removes the entry the insert overwrote —
+// and yet leaves the registry clean, so `assert no_residue` passes. That is
+// the hole issue #1945 closed on the py tier and #2009 asks the other tiers to
+// close the same way.
+//
+// The py fold is `backends/python/runtime.py`: `_journal_note` (7400) records,
+// for each host-map write running under a bracket, the value the key held
+// BEFORE the first such write; `_not_reversed` (7412) reports a `NotReversed`
+// residue when that value is not the value the key holds now; `_judge_journal`
+// (7428) runs the check at the map's own release (`Map.drop`, 7473), and
+// `Frame._journal_begin` (3620) / `Frame._take_journal` (3630) / `Frame._guard`
+// (3690) arm the journal around the bracket's forward write and re-arm it
+// while the bracket's `undo` runs.
+//
+// This is the same mechanism, spelled with this tier's idioms. Emitted code
+// calls `<frame>.journalBegin()` immediately before a bracket's forward write —
+// the emitter's analog of the `_revl_frame._journal_begin()` py emits at
+// backends/python/emit.py:2066 (let-effect), :2096 (effect) and :3103
+// (provide-method effect) — and every host-map writer consults `journalNote`.
+// The journal is CLOSED where the bracket yields its undo, never at the write
+// site: py's `Frame._guard` (3690) calls `_take_journal` (3630) on the disposer
+// it is handed, and on this tier those two yield sites are `Frame.bracket` (an
+// activation-body bracket) and `Frame.guard` (a method-body `ctx.effect`
+// disposer, which cordis calls directly and which therefore never reaches
+// `bracket`). Both re-arm the journal while the undo runs, so a key only the
+// undo writes is judged too — the inverse is part of what the bracket did.
+//
+// `journalStack` is the port of py's `_JOURNAL` ContextVar (7397): the frames
+// whose brackets are writing right now, innermost last. It is a plain module
+// array, not an `AsyncLocalStorage`, because a bracket's forward write never
+// crosses an `await` on this tier (a bracket's `acquire` is synchronous — the
+// async forms in `_await_statement` are `emit`s and plain awaits, not
+// acquisitions), so a task-local stack would buy nothing a module stack cannot
+// express. An activation frame's own save/restore (`Frame.journalBegin` /
+// `Frame.journalTake`) is what makes a raise out of a forward write harmless:
+// the next `journalBegin` on that frame discards the stale entry first, exactly
+// as py's `_journal_begin` does (runtime.py:3623).
+const journalStack: Frame[] = []
+
+/** `(map, key) -> [value before the first bracketed write, the verb]` — py's
+ *  `Map._journaled` (7449). First write wins (`setdefault`, py 7407). */
+const journaled = new Map<MapHandle, Map<any, [any, string]>>()
+
+/** One message per key a bracketed write failed to reverse, judged at its
+ *  map's `drop` — py's `_not_reversed` residue, surfaced here through
+ *  `snapshotRuntime` so `assert no_residue` fails on it. */
+export const journalMisses: string[] = []
+
+/** py's `_ABSENT` (7393): "the key was not in the map", distinct from a stored
+ *  `undefined`/`null`. */
+const ABSENT = Symbol('revl-absent')
+
+function journalShown(value: any): string {
+  return value === ABSENT ? 'absent' : JSON.stringify(value) ?? String(value)
+}
+
+function journalSame(a: any, b: any): boolean {
+  return a === ABSENT || b === ABSENT ? a === b : Object.is(a, b)
+}
+
+/** py's `_journal_note` (7400): remember `key`'s value BEFORE this write, if a
+ *  bracket is writing. A no-op outside a journal, so an unbracketed method-body
+ *  write is exactly as observable as it was before this change. */
+function journalNote(store: MapHandle, key: any, verb: string): void {
+  if (journalStack.length === 0) return
+  let entries = journaled.get(store)
+  if (entries === undefined) journaled.set(store, (entries = new Map()))
+  if (entries.has(key)) return
+  entries.set(key, [store.peek(key), verb])
+}
+
+/** py's `_judge_journal` (7428) — run at the map's own release, before it is
+ *  cleared: every key a bracketed write touched must hold, again, the value it
+ *  held before that write. */
+function journalJudge(store: MapHandle): void {
+  const entries = journaled.get(store)
+  if (entries === undefined) return
+  journaled.delete(store)
+  for (const [key, [prior, verb]] of entries) {
+    const now = store.peek(key)
+    if (journalSame(prior, now)) continue
+    journalMisses.push(
+      `${store.label} key ${JSON.stringify(key)} held ${journalShown(prior)} before the ` +
+        `first bracketed \`${verb}\` of it and ${journalShown(now)} when the map was released: ` +
+        'an undo did not reverse its write',
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Host builtins (docs/backend-ir.md §Host builtins)
 
 let poolCounter = 0
@@ -762,8 +858,17 @@ export class MapHandle {
     return this.data.get(key)
   }
 
+  /** The stored value, or `ABSENT` — the journal's "not in the map" reading of
+   *  a key (py's `store.data.get(key, _ABSENT)`, 7402). Unlike `get`, this does
+   *  not assert liveness: `drop` judges its journal after marking the map
+   *  dropped. */
+  peek(key: any): any {
+    return this.data.has(key) ? this.data.get(key) : ABSENT
+  }
+
   insert(key: any, value: any): void {
     this.assertLive('insert')
+    journalNote(this, key, 'insert')
     record(`${this.label}.insert(${key}, ${value})`)
     this.data.set(key, value)
   }
@@ -775,6 +880,7 @@ export class MapHandle {
     // inserted; a `false` (key already present) leaves the existing value
     // untouched.
     this.assertLive('insert_if_absent')
+    journalNote(this, key, 'insert_if_absent')
     if (this.data.has(key)) {
       record(`${this.label}.insert_if_absent(${key}) -> false`)
       return false
@@ -786,6 +892,7 @@ export class MapHandle {
 
   remove(key: any): void {
     this.assertLive('remove')
+    journalNote(this, key, 'remove')
     record(`${this.label}.remove(${key})`)
     this.data.delete(key)
   }
@@ -825,6 +932,10 @@ export class MapHandle {
 
   drop(): void {
     this.assertLive('drop')
+    // issue #2009: judge this map's write journal BEFORE it is cleared — the
+    // last moment the values a bracketed write was supposed to restore are
+    // still readable (py's `Map.drop` -> `_judge_journal`, 7473/7428).
+    journalJudge(this)
     this.dropped = true
     this.data.clear()
     liveResources.delete(this.label)
@@ -1215,6 +1326,10 @@ export class Frame {
    * transactional entry — activation-body and method-deferred alike — replays
    * and the mutations revert. */
   private aborting = false
+  /** issue #2009: the `journalStack` depth this frame saved when it armed the
+   *  host-map write journal, or `null` when it has none open — py's
+   *  `Frame._open_journal` (backends/python/runtime.py:3620-3628). */
+  private openJournal: number | null = null
   /** issue #1369: the runs failed UI transaction units performed, newest
    * last, as py's `ui_transaction_runs`. */
   readonly uiTransactionRuns: UiTransactionRun[] = []
@@ -1264,6 +1379,63 @@ export class Frame {
     })
   }
 
+  // -- host-map write journal (issue #1945 part 2 / #2009) -------------------
+
+  /** py's `Frame._journal_begin` (backends/python/runtime.py:3620): open the
+   *  write journal for the effect bracket about to run its forward write, so a
+   *  host-map writer can remember what the key it overwrites held.
+   *
+   *  Called by emitted code immediately before the bracket's `acquire` — the
+   *  analog of the `_revl_frame._journal_begin()` py emits at
+   *  backends/python/emit.py:2066/:2096 (activation body) and :3103 (method
+   *  body). Closing it is NOT the emitter's job on either tier: py closes it
+   *  where the bracket yields its undo (`_guard` -> `_take_journal`), which on
+   *  this tier is `bracket` / `guard` below.
+   *
+   *  A forward write that RAISED left the journal open; this discards that
+   *  stale entry first, so a raising acquisition cannot leave the journal
+   *  armed for the rest of the run. */
+  journalBegin(): void {
+    if (this.openJournal !== null) this.journalTake()
+    this.openJournal = journalStack.length
+    journalStack.push(this)
+  }
+
+  /** py's `Frame._take_journal` (3630): close this frame's open write journal,
+   *  if any; whether one was open. */
+  journalTake(): boolean {
+    const prev = this.openJournal
+    this.openJournal = null
+    if (prev === null) return false
+    journalStack.length = prev
+    return true
+  }
+
+  /** py's `Frame._guard` (3690), the journal half of it: wrap one disposer so
+   *  it runs with the journal re-armed, because the UNDO of a bracketed write
+   *  is part of what the bracket did — a key only the undo touches must be
+   *  judged too. Closing the journal first is the other half, and the reason
+   *  this is a Frame method rather than a free function: only the frame that
+   *  opened the journal may close it.
+   *
+   *  An activation-body bracket routes through `bracket` below, which does the
+   *  same two things inline. A method-body bracket is a bare `ctx.effect`
+   *  disposer cordis calls directly — it never passes through `bracket` — so
+   *  the emitter hands its inverse to this instead. */
+  guard<T extends (...args: any[]) => any>(inverse: T): T {
+    const journal = this.journalTake()
+    const frame = this
+    const guarded = (...args: any[]): any => {
+      if (journal) journalStack.push(frame)
+      try {
+        return inverse(...args)
+      } finally {
+        if (journal) journalStack.pop()
+      }
+    }
+    return guarded as unknown as T
+  }
+
   // -- entry registration ---------------------------------------------------
 
   /** Register a bracket (acquire) inverse. Replays on every teardown —
@@ -1275,12 +1447,24 @@ export class Frame {
    * contract's commit-path pseudocode has no catch on this arm ("still
    * runs"): a failure there is not this loop's to swallow. */
   bracket(crossing: Crossing, undoMethod: string, inverse: () => unknown): () => unknown {
+    // issue #2009: the bracket has just yielded its undo, so the write journal
+    // closes HERE (py's `_guard` -> `_take_journal`, runtime.py:3690/3630) —
+    // not at the write site. It is re-armed around the undo, so a key only the
+    // undo writes is judged as well (py re-enters `_JOURNAL` around the
+    // disposer for exactly this reason).
+    const journal = this.journalTake()
+    const frame = this
     return () => {
-      if (this.committed) return inverse()
+      if (journal) journalStack.push(frame)
       try {
-        return inverse()
-      } catch (err) {
-        this.pushResidue('bracket-fault', crossing, { call: undoMethod, args: crossing.args, phase: 1 }, err)
+        if (this.committed) return inverse()
+        try {
+          return inverse()
+        } catch (err) {
+          this.pushResidue('bracket-fault', crossing, { call: undoMethod, args: crossing.args, phase: 1 }, err)
+        }
+      } finally {
+        if (journal) journalStack.pop()
       }
     }
   }
@@ -2710,6 +2894,9 @@ export interface RuntimeSnapshot {
   hookCounts: Record<string, number>
   /** Open host resources (pools, maps). */
   liveHostResources: string[]
+  /** issue #2009: bracketed host-map writes whose `undo` did not reverse them
+   *  (see `journalMisses`). Empty ⇔ every bracketed write was reversed. */
+  journalMisses: string[]
 }
 
 export function snapshotRuntime(ctx: Context): RuntimeSnapshot {
@@ -2727,6 +2914,7 @@ export function snapshotRuntime(ctx: Context): RuntimeSnapshot {
         .map(([name, list]) => [name, list.length]),
     ),
     liveHostResources: [...liveResources].sort(),
+    journalMisses: [...journalMisses],
   }
 }
 

@@ -1610,11 +1610,23 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             acquire = _expr(step["acquire"], ctx)
             undo = _expr(step["undo"], ctx)
             lines.append(f"{indent}ctx.effect(() => {{")
+            # issue #2009: arm the host-map write journal immediately before the
+            # bracket's forward write — the method-body analog of py's
+            # `_revl_frame._journal_begin()` at backends/python/emit.py:3103.
+            # The journal closes where the bracket's inverse is registered
+            # (`Frame.guard` below), exactly as py closes it at the yield site
+            # (`Frame._guard` -> `_take_journal`, runtime.py:3690/3630).
+            if frame_var is not None:
+                lines.append(f"{indent}  {frame_var}.journalBegin()")
             if bind is not None:
                 lines.append(f"{indent}  {bind} = {acquire}")
             else:
                 lines.append(f"{indent}  {acquire}")
             inverse = _pinned_arrow(step, "undo", f"() => {undo}")
+            # issue #2009: the inverse runs with the journal re-armed, so a key
+            # only the undo writes is judged too (py `Frame._guard`, 3690).
+            if frame_var is not None:
+                inverse = f"{frame_var}.guard({inverse})"
             if bind is not None and _is_map_cas(step.get("acquire")):
                 # item 397: result-guarded undo. A `false` CAS registers the
                 # identity inverse (a no-op disposer), so teardown never removes
@@ -2254,9 +2266,38 @@ def _has_bracket(component: dict) -> bool:
             if kind == "if":
                 if walk(step.get("then") or []) or walk(step.get("else") or []):
                     return True
+            # issue #2009: a provide-method body's ordinary effect bracket is a
+            # bare `ctx.effect` disposer, so it never reaches `Frame.bracket` —
+            # but its `undo` IS handed to `Frame.guard`, which is what closes
+            # the journal that bracket's `journalBegin` opened. That needs the
+            # component's `Frame` to exist, exactly as an activation-body
+            # bracket does, so the same gate must see it. A witnessed method
+            # effect or a method-body compensation is not a bracket, but
+            # `_needs_frame` already forces the Frame for both, so counting them
+            # here would only be redundant.
+            if kind == "provide":
+                for method in step.get("methods") or []:
+                    if _method_body_has_bracket(method.get("body") or []):
+                        return True
         return False
 
     return walk(component.get("body") or [])
+
+
+def _method_body_has_bracket(steps: list) -> bool:
+    """True iff a provide-method body contains an ordinary `effect`/`let-effect`
+    step, in any position (issue #2009; see `_has_bracket`)."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in ("let-effect", "effect"):
+            return True
+        if kind == "if":
+            if (_method_body_has_bracket(step.get("then") or [])
+                    or _method_body_has_bracket(step.get("else") or [])):
+                return True
+        if kind in ("while", "for") and _method_body_has_bracket(step.get("body") or []):
+            return True
+    return False
 
 
 def _component_body(component: dict, services: dict, indent: str, doc_ctx: "_Ctx",
@@ -2363,6 +2404,16 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             # suspension-free). A sync acquisition carries no flag and is
             # byte-identical to before.
             cas_bind: Optional[str] = None
+            # issue #2009: arm the host-map write journal immediately before the
+            # bracket's forward write — the emitter's analog of py's
+            # `_revl_frame._journal_begin()` at backends/python/emit.py:2066
+            # (let-effect) and :2096 (effect). Nothing is emitted to CLOSE it:
+            # py closes the journal where the bracket yields its undo
+            # (`Frame._guard` -> `_take_journal`, runtime.py:3690/3630), and on
+            # this tier that yield site is `Frame.bracket` itself, which
+            # `_bracket_yield` below emits.
+            if frame_var is not None:
+                lines.append(f"{indent}{frame_var}.journalBegin()")
             if step.get("async"):
                 if kind == "let-effect":
                     bind_name = scope.bind(step["bind"])

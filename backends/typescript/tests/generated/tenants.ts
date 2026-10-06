@@ -21,6 +21,7 @@ export const TenantAStore = {
   apply(ctx: Context) {
     const $revl_frame = new Frame(ctx, "TenantAStore")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       const store = host.Map.new()
       yield $revl_frame.bracket({ key: "store", method: "Map.new", args: [], site: "TenantAStore.body:store" }, "drop", () => store.drop())
       yield ctx.provide("kv", {
@@ -29,8 +30,9 @@ export const TenantAStore = {
         },
         set(k: string, v: string) {
           ctx.effect(() => {
+            $revl_frame.journalBegin()
             store.insert(k, v)
-            return () => store.remove(k)
+            return $revl_frame.guard(() => store.remove(k))
           })
         },
       } satisfies Kv)
@@ -46,6 +48,7 @@ export const TenantBStore = {
   apply(ctx: Context) {
     const $revl_frame = new Frame(ctx, "TenantBStore")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       const store = host.Map.new()
       yield $revl_frame.bracket({ key: "store", method: "Map.new", args: [], site: "TenantBStore.body:store" }, "drop", () => store.drop())
       yield ctx.provide("kv", {
@@ -54,8 +57,9 @@ export const TenantBStore = {
         },
         set(k: string, v: string) {
           ctx.effect(() => {
+            $revl_frame.journalBegin()
             store.insert(k, v)
-            return () => store.remove(k)
+            return $revl_frame.guard(() => store.remove(k))
           })
         },
       } satisfies Kv)
@@ -70,6 +74,7 @@ export const TenantAApp = {
   apply(ctx: Context) {
     const $revl_frame = new Frame(ctx, "TenantAApp")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       ctx.kv.set("who", "alice")
       yield $revl_frame.bracket({ key: "set", method: "set", args: [], site: "TenantAApp.body:set" }, "set", () => ctx.kv.set("who", ""))
     }, "TenantAApp.body")
@@ -83,6 +88,7 @@ export const TenantBApp = {
   apply(ctx: Context) {
     const $revl_frame = new Frame(ctx, "TenantBApp")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       ctx.kv.set("who", "bob")
       yield $revl_frame.bracket({ key: "set", method: "set", args: [], site: "TenantBApp.body:set" }, "set", () => ctx.kv.set("who", ""))
     }, "TenantBApp.body")
