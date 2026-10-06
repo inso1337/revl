@@ -292,7 +292,12 @@ _STEP = re.compile(r'\s*step\s+"([^"]*)"\s*(.*)$')
 _BARE_INTERPRETERS = ("python", "python3")
 # Tokens that run the command *after* them, so the interpreter is not `cmd[0]`.
 # `env` is peeled apart from these because it also takes `NAME=value` words.
-_WRAPPERS = ("command", "exec", "nohup", "time", "xargs")
+_WRAPPERS = ("command", "exec", "nohup", "time", "nice", "sudo", "stdbuf",
+             "timeout", "xargs")
+# `env` short options that take an operand (`env -u FOO python3 ...`).
+_ENV_OPERAND_OPTIONS = ("-u", "-C", "-S")
+# `command -v python3` looks a name up instead of exec'ing it.
+_LOOKUP_OPTIONS = ("-v", "-V")
 # A shell with `-c` takes the command as a single argument: `sh -c "python3 ..."`.
 _SHELLS = ("sh", "bash", "dash", "zsh", "ksh")
 # Where a shell would start a new command inside one `-c` payload.
@@ -356,30 +361,45 @@ def _executables(tokens):
     """Every token of a step command that would actually be exec'd as a program.
 
     `cmd[0]` only sees the bare `python3 ...` shape. A step that reaches the
-    interpreter through a wrapper -- `env FOO=1 python3 ...`, `exec python3 ...`,
-    `nohup python3 ...`, `time python3 ...`, `xargs python3 ...` -- or hands a
-    whole line to a shell (`sh -c "python3 ..."`) puts it further in, so those
-    prefixes are peeled off and a `-c` payload is walked too.
+    interpreter through a wrapper -- `env FOO=1 python3 ...`, `nohup python3 ...`,
+    `nice -n 5 python3 ...`, `timeout 5 python3 ...`, `xargs -n 1 python3 ...` --
+    or hands a whole line to a shell (`sh -c "python3 ..."`) puts it further in,
+    so those prefixes are peeled off and a `-c` payload is walked too.
 
     Only executable positions come back: `python3` as an *argument* (a script
-    path, a `--python python3` flag, an interpreter handed to a tool) is
-    deliberately not one of them, which is the false positive a blanket
-    "no token is `python3`" ban would report.
+    path, a `--python python3` flag, an interpreter handed to a tool) and
+    `command -v python3` (a name looked up, not run) are deliberately not
+    executables, which is the false positive a blanket "no token is `python3`"
+    ban would report.
     """
     executables = []
     for segment in _segments(tokens):
         rest = segment
         while rest:
             head = rest[0]
+            # A leading `NAME=value` is an environment word in any segment, not
+            # only in `env`'s argument list (`FOO=1 python3 ...`).
+            if _ASSIGNMENT.match(head):
+                rest = rest[1:]
+                continue
             if head == "env":
                 rest = rest[1:]
-                while rest and (rest[0].startswith("-")
-                                or _ASSIGNMENT.match(rest[0])):
-                    rest = rest[1:]
+                while rest:
+                    option = rest[0]
+                    if option in _ENV_OPERAND_OPTIONS:
+                        rest = rest[2:]
+                        continue
+                    if option.startswith("-") or _ASSIGNMENT.match(option):
+                        rest = rest[1:]
+                        continue
+                    break
+                continue
+            if head == "command" and rest[1:2] and rest[1] in _LOOKUP_OPTIONS:
+                rest = []
                 continue
             if head in _WRAPPERS:
                 rest = rest[1:]
-                while rest and rest[0].startswith("-"):
+                while rest and (rest[0].startswith("-") or rest[0].isdigit()):
                     rest = rest[1:]
                 continue
             if head in _SHELLS:
@@ -401,6 +421,11 @@ def _bare_interpreter_offenders(steps):
     return [(label, executable) for label, cmd in steps
             for executable in _executables(cmd)
             if executable in _BARE_INTERPRETERS]
+
+
+def _synthetic_steps(pairs):
+    """A `step` block from (label, command) pairs, as `tools/pre_merge.sh` writes it."""
+    return "".join(f'step "{label}" {command}\n' for label, command in pairs)
 
 
 def test_no_step_invokes_a_bare_python():
@@ -429,24 +454,33 @@ def test_no_step_invokes_a_bare_python():
 
 
 def test_a_wrapped_or_continued_step_is_caught():
-    """The `cmd[0]`-only guard's two blind spots, pinned as offenders.
+    """Every shape that hides the interpreter from `cmd[0]`, pinned as offenders.
 
-    A wrapper prefix (`env FOO=1 python3 ...`) and a line continuation
-    (`step "x" \\` + `python3 ...`) both put the interpreter where `cmd[0]`
+    A wrapper prefix (`env FOO=1 python3 ...`, `nice -n 5 python3 ...`), a
+    leading assignment (`FOO=1 python3 ...`) and a line continuation
+    (`step "x" \\` + `python3 ...`) all put the interpreter where `cmd[0]`
     cannot see it, so the old pin passed while the defect was present.
     """
-    wrapped = _bare_interpreter_offenders(_step_commands(
-        "step \"env prefix\" env FOO=1 python3 tools/regen_goldens.py --check\n"
-        "step \"command\" command python3 tools/regen_goldens.py\n"
-        "step \"exec\" exec python3 tools/regen_goldens.py\n"
-        "step \"nohup\" nohup python3 tools/regen_goldens.py\n"
-        "step \"time\" time python3 tools/regen_goldens.py\n"
-        "step \"xargs\" xargs python3 tools/regen_goldens.py\n"
-        "step \"sh -c\" sh -c 'cd tools && python3 check.py'\n"
-    ))
-    assert [label for label, _ in wrapped] == [
-        "env prefix", "command", "exec", "nohup", "time", "xargs", "sh -c",
-    ], wrapped
+    shapes = (
+        ("env prefix", "env FOO=1 python3 tools/regen_goldens.py --check"),
+        ("env -i", "env -i python3 tools/regen_goldens.py"),
+        ("env --", "env -- python3 tools/regen_goldens.py"),
+        ("env -u", "env -u FOO python3 tools/regen_goldens.py"),
+        ("assignment", "FOO=1 python3 tools/regen_goldens.py"),
+        ("command", "command python3 tools/regen_goldens.py"),
+        ("exec", "exec python3 tools/regen_goldens.py"),
+        ("nohup", "nohup python3 tools/regen_goldens.py"),
+        ("time", "time python3 tools/regen_goldens.py"),
+        ("nice", "nice -n 5 python3 tools/regen_goldens.py"),
+        ("sudo", "sudo python3 tools/regen_goldens.py"),
+        ("stdbuf", "stdbuf -oL python3 tools/regen_goldens.py"),
+        ("timeout", "timeout 5 python3 tools/regen_goldens.py"),
+        ("xargs", "xargs -n 1 python3 tools/regen_goldens.py"),
+        ("sh -c", "sh -c 'cd tools && python3 check.py'"),
+    )
+    offenders = _bare_interpreter_offenders(_step_commands(_synthetic_steps(shapes)))
+    assert offenders == [(label, "python3") for label, _ in shapes], offenders
+
     continued = _bare_interpreter_offenders(_step_commands(
         "step \"continued\" \\\n    python3 tools/check.py\n"
     ))
@@ -461,16 +495,34 @@ def test_an_interpreter_in_argument_position_is_not_an_offender():
     still execs the resolved `$PYTHON`, so it is not defect 1's shape. A blanket
     substring ban flags all of these, which is why they are pinned as passing.
     """
-    steps = _step_commands(
-        "step \"flag\" \"$PYTHON\" tools/x.py --python python3\n"
-        "step \"argument\" \"$PYTHON\" tools/x.py python3 tools/y.py\n"
-        "step \"wrapped flag\" env FOO=1 \"$PYTHON\" tools/x.py --python python3\n"
-        "step \"sh -c flag\" sh -c '\"$PYTHON\" tools/x.py --python python3'\n"
-    )
+    steps = _step_commands(_synthetic_steps((
+        ("flag", '"$PYTHON" tools/x.py --python python3'),
+        ("argument", '"$PYTHON" tools/x.py python3 tools/y.py'),
+        ("wrapped flag", 'env FOO=1 "$PYTHON" tools/x.py --python python3'),
+        ("sh -c flag", 'sh -c \'"$PYTHON" tools/x.py --python python3\''),
+    )))
     offenders = _bare_interpreter_offenders(steps)
     assert not offenders, (
         "`python3` in argument position is not the defect shape; this is the "
         f"false positive a blanket substring ban would report: {offenders}"
+    )
+
+
+def test_a_command_v_probe_is_not_an_executable():
+    """`command -v python3` looks a name up; it execs nothing.
+
+    The real gate's selector uses the idiom (`command -v go`), so a step
+    adopting it must not red for a reason that is not defect 1's shape.
+    """
+    steps = _step_commands(_synthetic_steps((
+        ("probe", "command -v python3"),
+        ("probe -V", "command -V python3"),
+        ("probe in a step", "command -v python3 >/dev/null 2>&1 || true"),
+    )))
+    offenders = _bare_interpreter_offenders(steps)
+    assert not offenders, (
+        "`command -v python3` is a lookup, not an interpreter in executable "
+        f"position: {offenders}"
     )
 
 
