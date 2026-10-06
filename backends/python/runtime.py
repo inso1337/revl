@@ -2451,7 +2451,7 @@ def _inverse_label(disposer: Any) -> Optional[str]:
     emit.py), so there is no entry object carrying an identity. The lambda's
     own code object does carry one: the undo is a call, and the callee's name
     is the last global/attribute the closure loads (`lambda: a.close()` ->
-    `close`, `lambda: blow('x')` -> `blow`). Best-effort by construction —
+    `close`, `lambda: close_b(b)` -> `close_b`). Best-effort by construction —
     `None` when nothing is readable — but it is what lets the record NAME the
     inverse that faulted instead of reporting an anonymous failure."""
     entry = getattr(disposer, "_revl_entry", disposer)
