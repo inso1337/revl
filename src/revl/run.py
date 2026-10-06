@@ -505,8 +505,9 @@ def _secret_rows(ir: dict) -> list[dict]:
     return list(ir.get("secrets") or [])
 
 
-def _resolve_secrets(ir: dict, source: dict | None = None) -> dict:
-    """Resolve each bound secret's VALUE once at plug (item 256, §3), keyed by the
+def _resolve_secrets(ir: dict, source: dict | None = None, *,
+                     allow_absent: bool = False) -> dict:
+    """Resolve each bound secret's VALUE at plug (item 256, §3), keyed by the
     secret NAME. Sourced from `source` (a caller-supplied name->value store) or,
     by default, the environment variable `REVL_SECRET_<NAME>` (NAME upper-cased),
     so a secret store or a `--secret-file` seam can front it later without moving
@@ -516,7 +517,20 @@ def _resolve_secrets(ir: dict, source: dict | None = None) -> dict:
     at plug, naming the secret but NEVER its value - there is no silent fallback
     for a provider key (unlike config's defaults path). The resolved value is
     installed into the emitted module's `_REVL_SECRETS` and never logged, never
-    echoed by `--plan`, and never serialized into any trace."""
+    echoed by `--plan`, and never serialized into any trace.
+
+    `allow_absent` is the caller's EXPLICIT opt-in to the other half of §3
+    (issue #1936, part 2): a declared secret that resolves to nothing is left
+    UNSET rather than raising, so a composition whose operator configures or
+    rotates the key after start can boot. It changes only WHEN the miss is
+    reported, never whether it is: the emitted body's own `_revl_secret` is still
+    fail-loud at the call, naming the secret and never a value, and there is still
+    no default. The name is not optional and not a pattern - `allow_absent` is a
+    single flag for the whole document, so a name this composition does not
+    declare cannot be excused by it, and a typo in the environment variable still
+    surfaces (as a call-time refusal naming the declared secret). The caller then
+    installs the value through `_Driver.set_secret`, which is the same
+    name-keyed, value-free audit surface as plug-time resolution."""
     rows = _secret_rows(ir)
     if not rows:
         return {}
@@ -529,6 +543,11 @@ def _resolve_secrets(ir: dict, source: dict | None = None) -> dict:
         env_key = "REVL_SECRET_" + name.upper()
         if env_key in os.environ:
             resolved[name] = os.environ[env_key]
+            continue
+        if allow_absent:
+            # the caller opted this document into post-plug resolution: leave the
+            # name unset instead of refusing the plug. The body's `_revl_secret`
+            # is the fail-loud gate, and it names the secret, never a value.
             continue
         # never name the value or a guessed default - a bound key has none.
         raise RuntimeError(
@@ -1129,6 +1148,7 @@ class _Driver:
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
                  root_dirs: list | None = None, secrets: dict | None = None,
+                 secrets_may_be_absent: bool = False,
                  estop_latch: str | None = None, ambient: dict | None = None,
                  ambient_check=None):
         self.ir = ir
@@ -1138,6 +1158,17 @@ class _Driver:
         # every bound secret from the environment" (`REVL_SECRET_<NAME>`). Never
         # logged, never echoed by `--plan`.
         self.secrets = secrets
+        # issue #1936, part 2: the explicit opt-in to §3's other half. When set, a
+        # declared secret with no value at plug is left unset instead of refusing
+        # the boot, and `set_secret` is how the host installs it afterwards - the
+        # operator who configures a mailbox after start, or rotates a password.
+        # Default False, so an existing caller's plug is byte-identically strict.
+        self.secrets_may_be_absent = bool(secrets_may_be_absent)
+        # the emitted module whose `_REVL_SECRETS` `set_secret` writes after plug,
+        # and the name-only record of what was installed when. A value is never
+        # recorded (§5a: a name may appear in an audit surface, a value never).
+        self._secret_module: types.ModuleType | None = None
+        self.secret_events: list[dict] = []
         self.emit = emit
         # item 396 option B: the composition's root compile directories, the
         # import roots a `= @py ref` file must be reachable through at deploy.
@@ -1612,16 +1643,25 @@ class _Driver:
         extern_config = _resolve_extern_config(ir, self.config)
         if extern_config and hasattr(module, "_REVL_EXTERN_CONFIG"):
             module._REVL_EXTERN_CONFIG.update(extern_config)
-        # item 256 Slice 1: resolve each bound secret's value once at plug and
-        # install it into the module's `_REVL_SECRETS` map, so a bound extern body
-        # reads the key as its first local at the sanctioned seam - resolved ONCE
-        # here, never per call, never logged. A composition with no bound secret
-        # leaves the map (which the emitter only defines when one exists)
-        # untouched. Sourced from `self.secrets` (the caller-supplied store) or the
-        # environment; fail-loud when a declared secret has no value.
-        secrets = _resolve_secrets(ir, getattr(self, "secrets", None))
+        # item 256 Slice 1: resolve each bound secret's value at plug and install
+        # it into the module's `_REVL_SECRETS` map, so a bound extern body reads
+        # the key as its first local at the sanctioned seam - installed here,
+        # never logged. The map is what the emitted body reads on EVERY call, so
+        # a value replaced later (see `set_secret`) is the value the next call
+        # sees. A composition with no bound secret leaves the map (which the
+        # emitter only defines when one exists) untouched. Sourced from
+        # `self.secrets` (the caller-supplied store) or the environment;
+        # fail-loud when a declared secret has no value, unless the caller opted
+        # into `secrets_may_be_absent` (issue #1936, part 2), in which case the
+        # miss is reported by the body's own `_revl_secret` at the call instead.
+        secrets = _resolve_secrets(
+            ir, getattr(self, "secrets", None),
+            allow_absent=getattr(self, "secrets_may_be_absent", False))
         if secrets and hasattr(module, "_REVL_SECRETS"):
             module._REVL_SECRETS.update(secrets)
+        # remember the live module so `set_secret` can reach its map after plug.
+        self._secret_module = (
+            module if hasattr(module, "_REVL_SECRETS") else None)
         if self.recorder is not None:
             # between emit and plugin: recording replaces each component's
             # `apply`, and the fiber's context chain is fixed at plugin time
@@ -1634,6 +1674,63 @@ class _Driver:
                 # ahead of it mattering (docs/crash-recovery.md)
                 self.recorder.open_wal(self.wal_path, self.generation)
         return module
+
+    def set_secret(self, name: str, value: str) -> dict:
+        """Install, or ROTATE, one bound secret's value on the LIVE composition
+        (issue #1936, part 2). Returns the name-only record that was appended to
+        `self.secret_events`.
+
+        The emitted body reads the key from the module's `_REVL_SECRETS` map as
+        its first local on EVERY call, so a value installed here is the value the
+        next call sees - that is what makes rotation work without a re-plug. The
+        plug-time install in `_emit_module` is the same map written earlier; this
+        is the sanctioned seam for writing it later, which a composition can only
+        reach when it opted into `secrets_may_be_absent` (its plug then succeeds
+        with the name unset) or when it is rotating an already-installed key.
+
+        Strict on the NAME, never on the value: a name the running composition
+        does not declare is REFUSED, so this seam cannot introduce a binding that
+        no `secret ... for ...` declared and no audit surface names, and a typo
+        cannot become a silently-installed key. The value must be a non-empty
+        string and is never echoed - not in the refusal, not in the record, not
+        anywhere (item 256, §5a: an audit surface may name a secret, never its
+        value)."""
+        declared = {row["name"]: row.get("capability")
+                    for row in _secret_rows(getattr(self, "ir", None) or {})}
+        if name not in declared:
+            known = ", ".join(sorted(declared)) or "none"
+            raise ValueError(
+                f"`{name}` is not a bound secret of the running composition, so "
+                f"it has no binding to install a value into (declared: {known}). "
+                f"A value is installed only through a `secret NAME for CAP` "
+                f"binding (item 256).")
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"capability-bound secret `{name}` needs a non-empty string "
+                f"value; nothing was installed. A secret has no default, and the "
+                f"value is never echoed here (item 256).")
+        if self.secrets is None:
+            self.secrets = {}
+        module = getattr(self, "_secret_module", None)
+        live = getattr(module, "_REVL_SECRETS", None) if module is not None else None
+        # "rotate" means a value was already in force for this name - either one
+        # this seam installed earlier, or one the plug resolved (which the module
+        # map holds but the caller-supplied store need not).
+        rotating = bool(live is not None and name in live) or name in self.secrets
+        self.secrets[name] = value
+        if live is not None:
+            live[name] = value
+        record = {
+            "name": name,
+            "capability": declared[name],
+            "action": "rotate" if rotating else "install",
+            "generation": getattr(self, "generation", 0),
+        }
+        events = getattr(self, "secret_events", None)
+        if events is None:
+            events = self.secret_events = []
+        events.append(record)
+        return record
 
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
         by_name = {c["name"]: c for c in _components(ir)}
