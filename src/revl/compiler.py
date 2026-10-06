@@ -31,7 +31,7 @@ from .hostref import resolve_assets as _resolve_assets
 from .hostref import resolve_refs as _resolve_refs
 from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .lower import _same_file_two_copies
-from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
+from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_text
 from .typecheck import format_type, parse_type
 
 
@@ -209,6 +209,20 @@ def escaping_use_path(path: str) -> bool:
     return normalized == ".." or normalized.startswith(".." + os.sep)
 
 
+def _read_module_text(abs_path: str) -> str:
+    """Read a `use`d module's text from disk, exactly once (issue #1779).
+
+    `_ModuleLoader.load` reads through this and parses the text it returns, so
+    the text recorded for a `use`-reached module is the text that was COMPILED
+    rather than a later re-read of a path that may have moved. A module-level
+    name, like `escaping_use_path`, so that a caller can patch the read without
+    holding a loader: `tests/test_admission_use_confinement.py` patches it to
+    prove that a confined compile consults nothing on disk, and that the
+    patched seam is on the read path at all."""
+    with open(abs_path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 class _ModuleLoader:
     """Loads modules and resolves `use` with cycle detection.
 
@@ -234,7 +248,7 @@ class _ModuleLoader:
         self._stack: list[str] = []
         # Keys are normalised to abspath ONCE here. Every lookup below is by
         # abspath (`has_source`, `load`), so a relative key would never match
-        # and the loader would fall through to `parse_file` on the SAME relative
+        # and the loader would fall through to a disk read on the SAME relative
         # path — silently admitting whatever sits on disk under that name in
         # place of the text the caller submitted (`gate_service.admit` passed
         # its keys through verbatim). A caller's in-memory source now stands in
@@ -272,6 +286,29 @@ class _ModuleLoader:
         # issue #1896: each `revl gen-types` file the compile loaded, as
         # `{"file", "model", "sha256"}`, its model digest checked at load.
         self.generated_from: list[dict] = []
+        # issue #1779: abspath -> the exact text this compile read from disk
+        # for a USER-ORIGIN module it did not take as a root (a `use`-reached
+        # module: a vendored truc's `component.rvl`). OUTSIDE the IR, by
+        # construction: it is reported through `compile_files`'s `report=`
+        # out-parameter, never added to the document, so IR bytes stay
+        # byte-identical whether or not a caller asks for it. The text is the
+        # text that was PARSED, not a later re-read: a session anchors
+        # knowledge records to what it compiled (see `mcp/notes.load_vendored`).
+        self.dependencies: dict[str, str] = {}
+
+    def _note_dependency(self, abs_path: str, text: str) -> None:
+        """Record a module this compile read from disk that the caller did not
+        name as a root (issue #1779).
+
+        A root is the caller's own source: the session holds its text as an
+        editable buffer already. An install-origin module (a `REVL_IMPORT_PATH`
+        entry, the shipped stdlib) is not the project's: nothing about it is
+        editable or a truc's, so it is not a dependency buffer either."""
+        if abs_path in self._root_paths:
+            return
+        if self._origin_install_root(abs_path) is not None:
+            return
+        self.dependencies[abs_path] = text
 
     def _profile_for(self, abs_path: str) -> AdmissionProfile | None:
         """The admission profile the root at `abs_path` compiles under (item 426
@@ -537,8 +574,17 @@ class _ModuleLoader:
         self._stack.append(abs_path)
         try:
             virtual = self._sources.get(abs_path)
-            program = (Parser(virtual, abs_path).parse() if virtual is not None
-                       else parse_file(abs_path))
+            if virtual is not None:
+                program = Parser(virtual, abs_path).parse()
+            else:
+                # issue #1779: read ONCE and parse that text, so the report
+                # below is the text that was compiled rather than a later
+                # re-read of a path that may have moved. The read goes through
+                # the named `_read_module_text` seam so a confined compile can
+                # still be proved to touch nothing on disk.
+                read = _read_module_text(abs_path)
+                program = parse_text(read, abs_path)
+                self._note_dependency(abs_path, read)
             self._check_generated(abs_path, virtual)
             # item 396: for a ROOT module under a no-extern profile, refuse
             # BEFORE any body file is resolved, read, or stat'd, so the refusal
@@ -668,7 +714,8 @@ def compile_source(source: str, filename: str = "<string>",
                    manifest: dict | None = None,
                    replacing: tuple[str, ...] = (),
                    modules: dict[str, str] | None = None,
-                   profile: AdmissionProfile | None = None) -> dict:
+                   profile: AdmissionProfile | None = None,
+                   report: dict | None = None) -> dict:
     """Compile source text. Nothing is read from or written to the disk.
 
     `manifest` is the runtime-admission gate (see compile_files); `modules`
@@ -682,6 +729,12 @@ def compile_source(source: str, filename: str = "<string>",
     direction), it forbids new `extern`/host-block declarations and bounds the
     services the turn may reach to an explicit granted set. A refusal is a
     compile error, not a runtime check. `None` = trusted author, unchanged.
+
+    `report` (issue #1779) is a caller-supplied out-parameter: when given, the
+    compile records what it READ there instead of in the returned document, so
+    the IR bytes stay identical whether or not a caller asked. `report
+    ["dependencies"]` maps each user-origin module the compile loaded from the
+    disk to the exact text it compiled for it.
     """
     if manifest is None and not modules:
         program = Parser(source, filename).parse()
@@ -759,13 +812,15 @@ def compile_source(source: str, filename: str = "<string>",
             program, taint_strict=bool(profile and profile.taint_strict),
             untrusted=bool(profile and profile.untrusted))
         _enforce_document(document, profile)
+        if report is not None:
+            report["dependencies"] = {}
         return document
 
     virtual = {os.path.abspath(filename): source}
     for path, text in (modules or {}).items():
         virtual[os.path.abspath(path)] = text
     return compile_files([filename], manifest=manifest, replacing=replacing,
-                         sources=virtual, profile=profile)
+                         sources=virtual, profile=profile, report=report)
 
 
 def _refuse_unknown_ir_fields(manifest: dict, filename: str) -> None:
@@ -834,7 +889,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                   sources: dict[str, str] | None = None,
                   profile: AdmissionProfile | None = None,
                   profiles: dict[str, AdmissionProfile | None] | None = None,
-                  operator_sources: dict[str, str] | None = None) -> dict:
+                  operator_sources: dict[str, str] | None = None,
+                  report: dict | None = None) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
 
@@ -874,6 +930,11 @@ def compile_files(paths: list[str], manifest: dict | None = None,
 
     The returned document's `components` are only the newly compiled ones;
     its `manifest` describes the whole resulting composition.
+
+    `report` (issue #1779) is the caller-supplied out-parameter described on
+    `compile_source`: it carries `report["dependencies"]`, every user-origin
+    module the loader read from the disk mapped to the text compiled for it.
+    It is never part of the returned document.
     """
     # item 426 S4: resolve the per-root profile map keyed by abspath. Every root
     # in `paths` gets an entry: its own profile from `profiles` (looked up by the
@@ -1291,6 +1352,12 @@ def compile_files(paths: list[str], manifest: dict | None = None,
         # one into a running composition is not: a hole has a type and no
         # implementation (docs/holes.md).
         refuse_admission(document)
+    if report is not None:
+        # issue #1779: what the compile READ, reported OUTSIDE the document so
+        # the IR bytes are identical whether or not a caller asked for it. Only
+        # the loader knows which paths a `use` resolved to and what text it
+        # compiled for each.
+        report["dependencies"] = dict(loader.dependencies)
     return document
 
 
