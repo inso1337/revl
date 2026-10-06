@@ -168,8 +168,18 @@ def test_ts_cas_undo_is_result_guarded_at_both_sites():
     assert ("bracket({ key: \"fresh\", method: \"insert_if_absent\", args: [], "
             "site: \"Boot.body:fresh\" }, \"remove\", "
             "fresh ? () => ledger.remove(\"boot\") : () => {})") in src
-    # method body: `return won ? () => ledger.remove(ticket) : () => {}`
-    assert "return won ? () =>" in src and "ledger.remove(ticket)" in src
+    # method body: `return won ? $revl_frame.guard(() => ledger.remove(ticket))
+    # : () => {}`. The result ternary is the same one; what changed with issue
+    # #2009 is that its TRUE arm is now the undo wrapped in `Frame.guard`
+    # (`backends/typescript/runtime.ts:1425`, py's `Frame._guard`,
+    # `backends/python/runtime.py:3648`). A method-body bracket is a bare
+    # `ctx.effect` disposer cordis calls directly, so it never passes through
+    # `Frame.bracket` — `guard` is the only thing on that path that takes the
+    # host-map write journal the emitter armed with `journalBegin()` (and
+    # re-arms it around the undo). The pin is the WHOLE line, not a prefix, so
+    # neither the unguarded `return won ? () =>` form nor a bare remove passes.
+    assert ("return won ? $revl_frame.guard(() => ledger.remove(ticket)) "
+            ": () => {}") in src
     # the false arm is the identity (a no-op disposer), never a bare remove
     assert "yield () => ledger.remove" not in src
     assert "return () => ledger.remove" not in src
