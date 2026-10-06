@@ -177,13 +177,27 @@ def test_with_nothing_loaded_source_and_modules_load_and_edit_in_one_call(
 
 
 @needs_runtime
-def test_files_with_a_composition_loaded_is_refused_not_reloaded(composition):
+def test_files_with_a_composition_loaded_is_ignored_not_reloaded(composition):
+    """Issue #2035: `files` is the load set, so on a warm session it is not a
+    request to load and not a refusal either — the call shape the cold path
+    taught keeps working, and the note says what became of the argument.
+
+    The anchor is the text the *running* composition holds, which the disk does
+    not: an edit that landed live is what the second call has to reach, so an
+    implementation that read `files` as "reload from disk" would not find it."""
+    svc, lib, main = composition
     _call("revl_load", {"files": composition})
-    result = _call("revl_edit", {"files": composition, "edits": [
-        {"anchor": '"v1"', "replacement": '"x"'}]})
-    assert result["ok"] is False and result["swapped"] is False
-    assert "already loaded" in result["diagnostics"][0]["message"]
-    assert _describe() == "v1"
+    assert _call("revl_edit", {"target": lib, "edits": [
+        {"anchor": '"v1"', "replacement": '"live"'}]})["ok"] is True
+    result = _call("revl_edit", {"files": composition, "target": lib, "edits": [
+        {"anchor": '"live"', "replacement": '"x"'}]})
+    assert result["ok"] is True, result
+    assert result["swapped"] is True and result["loaded"] is True
+    assert result["note"].startswith("files is ignored: a composition is "
+                                     "already loaded; the edit is applied to "
+                                     "the running composition")
+    assert _describe() == "x"
+    assert _disk(composition) == [SERVICE, LIB, MAIN]
 
 
 @needs_runtime
