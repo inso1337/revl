@@ -80,9 +80,14 @@ g1_undeclared_access.rvl:12: `db` is not a declared requirement of Logger
 ```
 
 Fix: add the key to the component's `requires` clause, or drop the access.
-The same rule refuses an undeclared name inside a function body
-(`` `nobody` is not declared in this function ``) and an `intercept` of a
-key the component does not require.
+
+`G1` is one guarantee refused for several reasons, and the rewrite on the
+diagnostic is chosen by the reason, not by the code. An undeclared name inside
+a function body (`` `nobody` is not declared in this function ``) is not a
+requirement and is not told to add one: declare it with `let`/`var` or add it
+as a parameter. An `intercept` of a key the component does not require takes
+the `requires` rewrite above; a `Delegate[X]` that names no service names one;
+and a requirement key that spells a builtin type or a host root is renamed.
 
 ## G2 — provision disjointness
 
