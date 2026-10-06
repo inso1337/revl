@@ -2250,9 +2250,15 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
     sigs: dict = {}
     for decl in list(program.fn_decls) + list(program.externs):
         raw_params = [p.type for p in decl.params]
+        # In a multi-file composition `program.filename` is only the first
+        # source (paths[0]); a decl parsed from a LATER file carries its own
+        # `source` (or a `decl_files` entry for an extern, which has no
+        # `.source` field), so its diagnostics must name that file, not
+        # paths[0] (roadmap 312).
+        decl_file = program.decl_files.get(id(decl), program.filename)
         explicit = validate_explicit_tparams(
             getattr(decl, "type_params", ()) or (), declared,
-            program.filename, decl.line)
+            decl_file, decl.line)
         tparams = collect_tparams(raw_params + [decl.returns], declared,
                                   explicit=explicit)
         # default-value expressions (roadmap item 187), aligned with `params`.
@@ -7638,6 +7644,11 @@ def _validate_default_params(program: Program, types: dict,
     effectful = {ext.name for ext in program.externs
                  if ext.classification != "pure"} | set(emitting_fns or ())
     for decl in program.fn_decls:
+        # In a multi-file composition `program.filename` is only the first
+        # source (paths[0]); a fn parsed from a LATER file carries its own
+        # `source`, so its diagnostics must name that file, not paths[0]
+        # (roadmap 312).
+        decl_file = decl.source or program.filename
         for p in decl.params:
             default = getattr(p, "default", None)
             if default is None:
@@ -7647,7 +7658,7 @@ def _validate_default_params(program: Program, types: dict,
             bad = sorted(reached & effectful)
             if bad:
                 raise RevlError(
-                    program.filename, p.line,
+                    decl_file, p.line,
                     f"default for parameter `{p.name}` calls `{bad[0]}`, which "
                     "is effectful",
                     hint="a default value must be a pure expression — it is "
@@ -7656,9 +7667,9 @@ def _validate_default_params(program: Program, types: dict,
                          "source",
                     code="G6", category="purity",
                 )
-            dt = infer_ast(default, {}, types, program.filename)
+            dt = infer_ast(default, {}, types, decl_file)
             if dt is not None and not compatible(p.type, dt, types):
-                raise mismatch(program.filename, p.line,
+                raise mismatch(decl_file, p.line,
                                f"default for parameter `{p.name}`", p.type, dt)
 
 

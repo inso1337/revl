@@ -138,3 +138,66 @@ def test_duplicate_top_level_fn_names_the_later_file(tmp_path, monkeypatch):
     assert error.filename.endswith("second.rvl"), error.filename
     assert error.line == 4
     assert len(first.read_text().splitlines()) < error.line
+
+
+def test_type_param_shadowing_names_the_declaring_file(tmp_path, monkeypatch):
+    """Issue #2027: a type-parameter shadowing refusal raised from the
+    signature table must name the file that declares the fn, not argv[0]. The
+    error lives in the SECOND file; reordering the arguments must not move the
+    reported filename."""
+    monkeypatch.chdir(tmp_path)
+    first = tmp_path / "first.rvl"
+    second = tmp_path / "second.rvl"
+    first.write_text("fn ok(x: Str) -> Str { return x }\n")
+    # padding so the shadowing decl sits at a line that does not exist in
+    # first.rvl
+    second.write_text(
+        "type S = A | B\n"
+        "// padding\n"
+        "fn bad[S](x: S) -> S { return x }\n"
+    )
+
+    for order in ([first, second], [second, first]):
+        with pytest.raises(RevlError) as excinfo:
+            compile_files(order)
+        error = excinfo.value
+        assert error.message == "type parameter `S` shadows a declared type"
+        assert error.filename.endswith("second.rvl"), error.filename
+        assert not error.filename.endswith("first.rvl"), error.filename
+        assert error.line == 3
+        assert len(first.read_text().splitlines()) < error.line
+
+        diag = report(error)["diagnostics"][0]
+        assert diag["file"].endswith("second.rvl")
+        assert diag["line"] == 3
+
+
+def test_default_param_purity_names_the_declaring_file(tmp_path, monkeypatch):
+    """Issue #2027: a default-parameter purity refusal (item 187) must name the
+    file that declares the fn, not argv[0]. The error lives in the SECOND file;
+    reordering the arguments must not move the reported filename."""
+    monkeypatch.chdir(tmp_path)
+    first = tmp_path / "first.rvl"
+    second = tmp_path / "second.rvl"
+    first.write_text("fn ok(x: Str) -> Str { return x }\n")
+    # padding so the offending default sits at a line that does not exist in
+    # first.rvl
+    second.write_text(
+        "extern emission fn log(msg: Str) -> Unit = @py { return None }\n"
+        "// padding\n"
+        "fn bad(x: Str = log(\"hi\")) -> Str { return x }\n"
+    )
+
+    for order in ([first, second], [second, first]):
+        with pytest.raises(RevlError) as excinfo:
+            compile_files(order)
+        error = excinfo.value
+        assert error.message == "default for parameter `x` calls `log`, which is effectful"
+        assert error.filename.endswith("second.rvl"), error.filename
+        assert not error.filename.endswith("first.rvl"), error.filename
+        assert error.line == 3
+        assert len(first.read_text().splitlines()) < error.line
+
+        diag = report(error)["diagnostics"][0]
+        assert diag["file"].endswith("second.rvl")
+        assert diag["line"] == 3
