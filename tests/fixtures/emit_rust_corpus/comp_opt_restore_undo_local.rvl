@@ -1,0 +1,22 @@
+// issue #1980: the admitted restored-value inverse in the `Opt` shape. The
+// acquire appends with `??`, whose lowering consumes its left operand, and the
+// `undo` is a `match` that re-reads the local the acquire moved. The reference
+// pre-clones it (`let prev_undo = prev.clone();`, `_acquire_moved_locals`); the
+// self-host emitter skipped that step and emitted a closure over the moved
+// `prev`, which did not compile (E0382).
+service Cache {
+  fn put(k: Str, v: Str) -> Opt[List[Str]]
+}
+
+component Slots provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn put(k, v) {
+      let prev = store.get(k)
+      effect store.insert(k, prev ?? [])
+      undo   match prev { Some(old) => store.insert(k, old), None => store.remove(k) }
+      return store.get(k)
+    }
+  }
+}
