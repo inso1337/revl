@@ -24,6 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from revl.admission import _service_equal, _service_from_ir  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
 
 # The issue's own reproducer, comment included.
@@ -143,4 +144,51 @@ def test_an_ir_without_operation_comments_is_byte_identical():
         '"returns": "Str"}, '
         '"send": {"emission": true, "params": [{"name": "to", "type": "Str"}, '
         '{"name": "body", "type": "Str"}], "returns": "Str"}}}}'
+    )
+
+
+def test_a_block_of_bare_slashes_is_a_block_with_nothing_in_it():
+    """The absent key means "no block"; a run of bare `//` lines IS one.
+
+    The contract defines the block as contiguous `//` lines, and a line that
+    holds only the prefix is one of them, so the key is PRESENT and its text is
+    what the prefix left — nothing. Stated here so the rule is a decision on the
+    record rather than something a reader has to infer from `is not None`.
+    """
+    source = (
+        'service Foo {\n'
+        '  //\n'
+        '  fn look(id: Str) -> Str\n'
+        '}\n'
+    )
+    assert _methods(source)["look"]["doc"] == ""
+
+
+def test_the_doc_survives_the_ir_to_declaration_round_trip():
+    """`_service_from_ir` projects an IR entry back onto a ServiceDecl.
+
+    A projection that dropped `doc` would lose the author's text on that path,
+    and the IR is exactly the surface a host reads, so the rebuild is faithful
+    to the entry it came from — including the absent key.
+    """
+    ir = compile_source(REPRODUCER, "<1952>.rvl")
+    rebuilt = _service_from_ir("Foo", ir["services"]["Foo"])
+    assert rebuilt.methods["look"].doc == (
+        'Look up a record by its id. Example: "42".'
+    )
+    assert rebuilt.methods["send"].doc is None
+
+
+def test_a_doc_only_change_is_not_an_interface_change():
+    """`doc` is documentation, not interface.
+
+    The admission gate compares two projections of an IR entry, so carrying the
+    text through `_service_from_ir` must not make adding a comment to an
+    operation read as a service replacement.
+    """
+    plain = compile_source(REPRODUCER_NO_COMMENT, "<1952>.rvl")
+    documented = compile_source(REPRODUCER, "<1952>.rvl")
+    assert _service_equal(
+        _service_from_ir("Foo", plain["services"]["Foo"]),
+        _service_from_ir("Foo", documented["services"]["Foo"]),
     )
