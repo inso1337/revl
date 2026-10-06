@@ -53,6 +53,13 @@ def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
         methods[mname].untrusted_params = frozenset(
             i for i, p in enumerate(ps) if p.get("untrusted"))
         methods[mname].returns_qualifier = mspec.get("returns_qualifier")
+        # issue #1952: the comment block the IR carries on the operation, read
+        # back so this projection is faithful to the entry it came from — the
+        # rebuilt decl re-emits the author's text rather than dropping it. `doc`
+        # is not part of the interface relation below (`_service_equal` /
+        # `_service_compatible` read named fields), so carrying it cannot make a
+        # doc-only edit read as an interface change.
+        methods[mname].doc = mspec.get("doc")
     return ServiceDecl(name, methods, 0, commutative=bool(spec.get("commutative")))
 
 

@@ -169,6 +169,7 @@
               "returns": "Opt[Str]"
             },
             "put": {
+              "doc": "`put` writes the cache log through `db` \u2014 a service declaration is an\nupper bound on what its providers may do.",
               "emission": true,
               "params": [
                 {
