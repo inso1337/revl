@@ -31,16 +31,88 @@ cd "$root"
 # main checkout. Resolve the frontend interpreter the same way the pre-commit
 # hook does: this worktree's .venv, else the primary checkout's, else a bare
 # pytest, else nothing (and the frontend step loud-skips).
+#
+# A candidate is SELECTED only when its interpreter can actually run the suite
+# (issue #2074). Testing existence alone let the primary checkout's .venv win
+# the chain even though it was built without the `[test]` extras, so the
+# frontend step died at collection instead of taking the loud-skip branch the
+# script already has. An incomplete venv must skip loudly, never red: a
+# collection error is strictly worse than the no-interpreter case the script
+# already handles on purpose.
 main_root=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd || echo "$root")
-if [ -x .venv/bin/pytest ]; then
-    PYTEST=.venv/bin/pytest
-elif [ -x "$main_root/.venv/bin/pytest" ]; then
-    PYTEST="$main_root/.venv/bin/pytest"
-elif command -v pytest >/dev/null 2>&1; then
-    PYTEST=pytest
-else
-    PYTEST=""
+
+# The interpreter a `pytest` script runs under: its `#!` when that names a
+# python, else the sibling `python` of the venv layout. Empty when neither is
+# found — what an unusable candidate looks like.
+pytest_python() {
+    py=$(sed -n '1s/^#!//p' "$1" 2>/dev/null)
+    case "${py##*/}" in
+        python*) [ -x "$py" ] && { printf '%s\n' "$py"; return 0; } ;;
+    esac
+    dir=$(dirname "$1")
+    for cand in "$dir/python" "$dir/python3"; do
+        [ -x "$cand" ] && { printf '%s\n' "$cand"; return 0; }
+    done
+    return 1
+}
+
+# The modules `pytest tests/` imports hard from pyproject.toml's `[test]` extra
+# (`yaml` is pyyaml, `pytest_asyncio` backs the async tests). A venv missing one
+# dies at COLLECTION, so this is the bar a candidate pytest has to clear before
+# the frontend step may run it. `coverage` is in the extra too but is imported
+# inside functions, so it is deliberately not part of the bar: requiring it
+# would loud-skip a venv that runs the suite perfectly well.
+suite_ok() {
+    [ -x "$1" ] || return 1
+    "$1" -c 'import pytest, pytest_asyncio, yaml, cryptography, llguidance' \
+        >/dev/null 2>&1
+}
+
+# The weaker bar the pure-python tool steps need. `tools/conformance.py` reads
+# `tests/test_cross_tier_execution.py`, which imports pytest, so a python
+# without pytest turns that step into a `ModuleNotFoundError` that is no defect
+# in the diff (issue #2074 defect 1).
+tools_ok() {
+    [ -x "$1" ] || return 1
+    "$1" -c 'import pytest' >/dev/null 2>&1
+}
+
+PYTEST=""
+PYTHON=""
+try_pytest() {
+    [ -x "$1" ] || return 1
+    py=$(pytest_python "$1" || true)
+    if [ -n "$py" ] && suite_ok "$py"; then
+        PYTEST=$1
+        PYTHON=$py
+        return 0
+    fi
+    return 1
+}
+try_pytest .venv/bin/pytest ||
+    try_pytest "$main_root/.venv/bin/pytest" ||
+    { command -v pytest >/dev/null 2>&1 && try_pytest "$(command -v pytest)"; } ||
+    true
+
+# PYTHON runs the pure-python tool steps. Prefer the chosen pytest's own
+# interpreter; else any of the same candidates that can import pytest — a venv
+# that fails `suite_ok` (no llguidance) can still run conformance.py; else the
+# bare python3 the other tool steps already use.
+if [ -z "$PYTHON" ]; then
+    for cand in .venv/bin/python "$main_root/.venv/bin/python"; do
+        if tools_ok "$cand"; then PYTHON=$cand; break; fi
+    done
 fi
+if [ -z "$PYTHON" ] && command -v pytest >/dev/null 2>&1; then
+    cand=$(pytest_python "$(command -v pytest)" || true)
+    if [ -n "$cand" ] && tools_ok "$cand"; then PYTHON=$cand; fi
+fi
+if [ -z "$PYTHON" ]; then
+    for cand in "$(command -v python3 2>/dev/null)" "$(command -v python 2>/dev/null)"; do
+        if tools_ok "$cand"; then PYTHON=$cand; break; fi
+    done
+fi
+[ -n "$PYTHON" ] || PYTHON=$(command -v python3 || command -v python || echo python3)
 
 # --affected: the FAST inner-loop gate. Runs ONLY the pre-merge targets that
 # tools/affected_tests.py selects for the current diff (base = merge-base with
@@ -196,7 +268,7 @@ elif [ -n "$PYTEST" ]; then
     else flabel="frontend  (pytest, $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s))"; fi
     step "$flabel" "$PYTEST" $SEL_PYTEST -q -p no:cacheprovider
 else
-    skip "frontend  (pytest tests/)" "no pytest on PATH or in .venv"
+    skip "frontend  (pytest tests/)" "no pytest that can import the suite's deps"
 fi
 
 # 2. The python backend semantics + golden suite — the suite item 247's respec
@@ -214,10 +286,17 @@ fi
 # 3. The tier emit/golden suites. go's suite is toolchain-light (sub-second) and
 #    needs `go` on PATH for its generated-current check, so it runs with the real
 #    PATH; the other three run emit-only with compilers hidden (see emit_step).
+#    Every one of these needs a suite-capable pytest; when the chain above found
+#    none, they loud-skip like the frontend step rather than exec an empty
+#    command (issue #2074: a rejected candidate leaves PYTEST empty).
 if ! want backend go; then
     note "backend-go  (emit goldens)"
 elif command -v go >/dev/null 2>&1; then
-    step "backend-go  (emit goldens)" "$PYTEST" backends/go/test_emit_go.py -q -p no:cacheprovider
+    if [ -z "$PYTEST" ]; then
+        skip "backend-go  (emit goldens)" "no pytest"
+    else
+        step "backend-go  (emit goldens)" "$PYTEST" backends/go/test_emit_go.py -q -p no:cacheprovider
+    fi
 else
     skip "backend-go  (emit goldens)" "no go toolchain"
 fi
@@ -240,7 +319,7 @@ gemit java "backend-java (emit goldens)" backends/java/test_emit_java.py
 # is supposed to be present, and a gate that skipped compared nothing. Locally
 # a missing gofmt is an ordinary fact about the machine, so this line does not
 # pass it.
-step "goldens      (drift, all targets)" python3 tools/regen_goldens.py --check
+step "goldens      (drift, all targets)" "$PYTHON" tools/regen_goldens.py --check
 
 # 4. Generated-artifact gates (pure Python, always run): the README conformance
 #    matrix must match a fresh generation, the same contract the frontend CI job
@@ -249,12 +328,12 @@ step "goldens      (drift, all targets)" python3 tools/regen_goldens.py --check
 #    that pages.yml still builds it, under the name the two playground pages
 #    fetch, from what git tracks.
 if want gate conformance; then
-    step "conformance matrix (--check-readme)" python3 tools/conformance.py --check-readme
+    step "conformance matrix (--check-readme)" "$PYTHON" tools/conformance.py --check-readme
 else
     note "conformance matrix (--check-readme)"
 fi
 if want gate site-wheel; then
-    step "site wheel deploy contract"          python3 tools/check_site_wheel.py
+    step "site wheel deploy contract"        "$PYTHON" tools/check_site_wheel.py
 else
     note "site wheel deploy contract"
 fi
@@ -265,7 +344,7 @@ fi
 # all. Same contract as the matrix above. `make docs-gen` is the fix for a stale
 # block; prose is the fix for a coverage failure.
 if want gate docs; then
-    step "docs drift      (docgen --check)"    python3 tools/docgen.py --check
+    step "docs drift      (docgen --check)"  "$PYTHON" tools/docgen.py --check
 else
     note "docs drift      (docgen --check)"
 fi
@@ -276,8 +355,8 @@ fi
 # a red here rather than a green line that checked nothing. CI runs both in
 # `lint`; this mirrors them. It resolves the commands, it does not run them.
 if want gate docs; then
-    step "vision claims   (self-test)"  python3 tools/check_vision_claims.py --self-test
-    step "vision claims   (--check)"    python3 tools/check_vision_claims.py --check
+    step "vision claims   (self-test)"  "$PYTHON" tools/check_vision_claims.py --self-test
+    step "vision claims   (--check)"    "$PYTHON" tools/check_vision_claims.py --check
 else
     note "vision claims   (--check)"
 fi
@@ -303,8 +382,8 @@ fi
 # self-test runs first, as with the vision gate, so a gate that stopped firing
 # is a red here and not a green line that checked nothing.
 if want gate vocabulary; then
-    step "vocabulary mirrors (self-test)" python3 tools/check_vocabulary_mirrors.py --self-test
-    step "vocabulary mirrors (--check)"   python3 tools/check_vocabulary_mirrors.py --check
+    step "vocabulary mirrors (self-test)" "$PYTHON" tools/check_vocabulary_mirrors.py --self-test
+    step "vocabulary mirrors (--check)"   "$PYTHON" tools/check_vocabulary_mirrors.py --check
 else
     note "vocabulary mirrors (--check)"
 fi
