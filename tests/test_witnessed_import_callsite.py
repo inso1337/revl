@@ -165,10 +165,16 @@ def test_plain_imported_extern_with_site_undo_compiles():
     ir = _compile_with_plainmod(src)
     comp = next(c for c in ir["components"] if c["name"] == "C")
     assert comp["body"] == [
-        {"step": "let-effect", "bind": "h",
+        # issue #1859: `open_conn` DECLARES `undo close_conn(result)` and the
+        # site spells that inverse, so the bracket records `declared` — the
+        # declared-extern branch, not the `_method_effect_inverse` fallthrough.
+        {"step": "let-effect", "bind": "h", "inverse": "declared",
          "acquire": {"kind": "fn", "name": "open_conn", "args": []},
          "undo": {"kind": "fn", "name": "close_conn", "args": [{"kind": "name", "id": "h"}]}},
     ]
+    # issue #1859: the value is drawn from the documented small domain, and a
+    # bracket whose inverse the checker PROVED stamps no key at all.
+    assert comp["body"][0]["inverse"] in {"asserted", "declared"}
 
 
 # ---------------------------------------------------------------------------
