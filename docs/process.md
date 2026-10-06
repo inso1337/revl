@@ -280,8 +280,8 @@ root suite.
 
 `census-artifact` is intended to become an eighth required check (issue #1987):
 the committed census artifact had gone stale on `main` three times (#1986, the
-826 red, and again) with no status context able to block the merge, so the red
-was durable. It is safe to require because it always reports a context: on a
+826 red, and the `e09b69b77aa0` red this issue reports) with no status context
+able to block the merge, so the red was durable. It is safe to require because it always reports a context: on a
 pull request its `decide` step still runs and publishes `run`, skipping only the
 substantive steps when the diff moved no input, and its `if:` carries
 `merge_group` alongside `pull_request`, `push`, `schedule` and
