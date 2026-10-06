@@ -825,6 +825,12 @@ pub struct TaintDecl {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SrcText {
+    lines: Vec<String>,
+    nl: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CCtx {
     reqs: Vec<String>,
     cases: Vec<Bind>,
@@ -23439,10 +23445,79 @@ fn ir_caps_json(cs: &[String]) -> String {
     return out;
 }
 
-fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::collections::HashMap<String, String>) -> IrMethR {
+fn src_text(src: &str, src_revl_cs: &[char]) -> SrcText {
+    let mut lines: Vec<String> = vec![];
+    let mut start = 0i64;
+    let mut i = 0i64;
+    let mut nl = String::from("");
+    while (i < (src_revl_cs.len() as i64)) {
+        if ({ ({ src_revl_cs[(i) as usize].to_string() }).chars().nth((0i64) as usize).unwrap() as u32 as i64 } == 10i64) {
+            if (nl == "") {
+                nl = { src_revl_cs[(i) as usize].to_string() };
+            }
+            lines.push({ let _rsn = src_revl_cs.len() as i64; let _rsa = { let x = (start) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; src_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() });
+            start = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return SrcText { lines: lines.revl_push({ let _rsn = src_revl_cs.len() as i64; let _rsa = { let x = (start) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((src_revl_cs.len() as i64)) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; src_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }), nl: nl.clone() };
+}
+
+fn ltrim_ws(s: &str) -> String {
+    let mut a = 0i64;
+    let mut go = true;
+    while go {
+        if (a >= s.revl_length()) {
+            go = false;
+        } else {
+            let cc = { ({ s.chars().nth((a) as usize).unwrap().to_string() }).chars().nth((0i64) as usize).unwrap() as u32 as i64 };
+            if (((((cc == 32i64) || (cc == 9i64)) || (cc == 13i64)) || (cc == 11i64)) || (cc == 12i64)) {
+                a = (a).checked_add(1i64).expect("revl: Int overflow");
+            } else {
+                go = false;
+            }
+        }
+    }
+    return s.revl_slice(a, s.revl_length());
+}
+
+fn ir_doc_key(st: SrcText, line: i64, starts: bool) -> String {
+    if (!starts) {
+        return String::from("");
+    }
+    let mut idx = (line).checked_sub(2i64).expect("revl: Int overflow");
+    if ((idx < 0i64) || (idx >= st.lines.revl_length())) {
+        return String::from("");
+    }
+    let mut n = 0i64;
+    let mut out = String::from("");
+    let mut go = true;
+    while go {
+        let s = ltrim_ws(&(st.lines)[(idx) as usize]);
+        if starts_with__m2(&s, "//") {
+            let mut text = s.revl_slice(2i64, s.revl_length());
+            if starts_with__m2(&text, " ") {
+                text = text.revl_slice(1i64, text.revl_length());
+            }
+            out = if (n == 0i64) { text.clone() } else { (text.revl_concat(&st.nl)).revl_concat(&out) };
+            n = (n).checked_add(1i64).expect("revl: Int overflow");
+            idx = (idx).checked_sub(1i64).expect("revl: Int overflow");
+            if (idx < 0i64) {
+                go = false;
+            }
+        } else {
+            go = false;
+        }
+    }
+    return if (n == 0i64) { String::from("") } else { String::from(", \"doc\": ").revl_concat(&jstr(&out)) };
+}
+
+fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::collections::HashMap<String, String>, st: SrcText) -> IrMethR {
     if ((i >= end) || atk(&ts, i, "}")) {
         return mk_irmethr(acc.clone(), i, v3);
     }
+    let dline = tkc(&ts, i).line;
+    let dstarts = if (i == 0i64) { true } else { (tkc(&ts, (i).checked_sub(1i64).expect("revl: Int overflow")).line != dline) };
     let mut j = i;
     let mut em = false;
     let mut scoped = false;
@@ -23507,6 +23582,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     if (retQual != "") {
         mj = (mj.revl_concat(", \"returns_qualifier\": ")).revl_concat(&jstr(&retQual));
     }
+    mj.push_str(&ir_doc_key(st.clone(), dline, dstarts));
     if (term != "") {
         mj = (mj.revl_concat(", \"termination\": ")).revl_concat(&jstr(&term));
     }
@@ -23522,14 +23598,14 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     }
     mj.push_str("}");
     let nacc = if (acc == "") { mj.clone() } else { (acc.revl_concat(", ")).revl_concat(&mj) };
-    return ir_methods(ts.clone(), nexti, end, nacc, ((v3 || isAsync) || isIdempotent), al.clone());
+    return ir_methods(ts.clone(), nexti, end, nacc, ((v3 || isAsync) || isIdempotent), al.clone(), st.clone());
 }
 
-fn ir_service(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>) -> IrSvcR {
+fn ir_service(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>, st: SrcText) -> IrSvcR {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let end = close_brace(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
     let hi = if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (i).checked_add(3i64).expect("revl: Int overflow") } else { (end).checked_sub(1i64).expect("revl: Int overflow") };
-    let ms = ir_methods(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), hi, String::from(""), false, al.clone());
+    let ms = ir_methods(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), hi, String::from(""), false, al.clone(), st.clone());
     return mk_irsvcr(((jstr(&nm).revl_concat(": {\"methods\": {")).revl_concat(&ms.js)).revl_concat("}}"), ms.v3);
 }
 
@@ -29356,55 +29432,55 @@ fn types_walk(ts: Vec<Token>, i: i64, acc: String, al: std::collections::HashMap
     return types_walk(ts.clone(), skip_line(&ts, i), acc.clone(), al.clone());
 }
 
-fn ir_walk(ts: Vec<Token>, i: i64, a: IrAcc, fname: &str, al: std::collections::HashMap<String, String>) -> IrAcc {
+fn ir_walk(ts: Vec<Token>, i: i64, a: IrAcc, fname: &str, al: std::collections::HashMap<String, String>, st: SrcText) -> IrAcc {
     if ((i >= ts.revl_length()) || atk(&ts, i, "eof")) {
         return a;
     }
     let t = tkc(&ts, i);
     if at_boot(&ts, i) {
-        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone(), fname, al.clone());
+        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone(), fname, al.clone(), st.clone());
     }
     if at_event(&ts, i) {
-        return ir_walk(ts.clone(), event_decl_end(&ts, i), a.clone(), fname, al.clone());
+        return ir_walk(ts.clone(), event_decl_end(&ts, i), a.clone(), fname, al.clone(), st.clone());
     }
     if (t.kind != "kw") {
-        return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname, al.clone());
+        return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname, al.clone(), st.clone());
     }
     if at_pub_prefix(&ts, i) {
-        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone(), fname, al.clone());
+        return ir_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), a.clone(), fname, al.clone(), st.clone());
     }
     if (t.text == "use") {
-        return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname, al.clone());
+        return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname, al.clone(), st.clone());
     }
     if (t.text == "test") {
         let na = mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2);
         let e = test_block_end(&ts, i);
         if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return ir_walk(ts.clone(), e, na.clone(), fname, al.clone());
+            return ir_walk(ts.clone(), e, na.clone(), fname, al.clone(), st.clone());
         }
-        return ir_walk(ts.clone(), skip_line(&ts, i), na.clone(), fname, al.clone());
+        return ir_walk(ts.clone(), skip_line(&ts, i), na.clone(), fname, al.clone(), st.clone());
     }
     if (t.text == "type") {
         let survives = (!al.contains_key(&tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text));
-        return ir_walk(ts.clone(), type_decl_end(&ts, (i).checked_add(1i64).expect("revl: Int overflow")), mk_iracc(a.svcs.clone(), a.comps.clone(), (a.v3 || survives), a.v2), fname, al.clone());
+        return ir_walk(ts.clone(), type_decl_end(&ts, (i).checked_add(1i64).expect("revl: Int overflow")), mk_iracc(a.svcs.clone(), a.comps.clone(), (a.v3 || survives), a.v2), fname, al.clone(), st.clone());
     }
     if (t.text == "extern") {
-        return ir_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2), fname, al.clone());
+        return ir_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2), fname, al.clone(), st.clone());
     }
     if (t.text == "fn") {
-        return ir_walk(ts.clone(), p_fn(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2), fname, al.clone());
+        return ir_walk(ts.clone(), p_fn(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), a.comps.clone(), true, a.v2), fname, al.clone(), st.clone());
     }
     if (t.text == "service") {
-        let sv = ir_service(ts.clone(), i, al.clone());
+        let sv = ir_service(ts.clone(), i, al.clone(), st.clone());
         let svcs2 = if (a.svcs == "") { sv.js } else { (a.svcs.revl_concat(", ")).revl_concat(&sv.js) };
-        return ir_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, mk_iracc(svcs2, a.comps.clone(), (a.v3 || sv.v3), a.v2), fname, al.clone());
+        return ir_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, mk_iracc(svcs2, a.comps.clone(), (a.v3 || sv.v3), a.v2), fname, al.clone(), st.clone());
     }
     if (t.text == "component") {
         let cp = ir_component(ts.clone(), i, fname, al.clone());
         let comps2 = if (a.comps == "") { cp.js } else { (a.comps.revl_concat(", ")).revl_concat(&cp.js) };
-        return ir_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), comps2, (a.v3 || cp.v3), (a.v2 || cp.v2)), fname, al.clone());
+        return ir_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, mk_iracc(a.svcs.clone(), comps2, (a.v3 || cp.v3), (a.v2 || cp.v2)), fname, al.clone(), st.clone());
     }
-    return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname, al.clone());
+    return ir_walk(ts.clone(), skip_line(&ts, i), a.clone(), fname, al.clone(), st.clone());
 }
 
 pub fn lower_to_ir(src: String) -> String {
@@ -29416,9 +29492,10 @@ fn default_filename() -> String {
 }
 
 pub fn lower_to_ir_at(src: String, fname: String) -> String {
+    let src_revl_cs: std::vec::Vec<char> = src.chars().collect();
     let ts = lex_src(src.clone());
     let al = alias_map(ts.clone());
-    let a = ir_walk(ts.clone(), 0i64, mk_iracc(String::from(""), String::from(""), false, false), &fname, al.clone());
+    let a = ir_walk(ts.clone(), 0i64, mk_iracc(String::from(""), String::from(""), false, false), &fname, al.clone(), src_text(&src, &src_revl_cs));
     let ver = if a.v3 { String::from("3") } else { if a.v2 { String::from("2") } else { String::from("1") } };
     let pg = parse_prog_ts(ts.clone());
     let colored = async_colored(&pg.fns, async_slots_map(&pg.fns));

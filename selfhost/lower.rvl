@@ -19749,12 +19749,101 @@ fn ir_caps_json(cs: List[Str]) -> Str {
   return out
 }
 
+// The line list the doc recovery below reads, plus the line break it joins the
+// recovered lines with. Built by CODE POINT (10) because revl has no escape
+// processing: a `"\n"` literal is the two characters `\` `n`, never a line break
+// (see `json_escape` above), so a `split` on it would never match. Same
+// segmentation Python's `str.split("\n")` gives, including the trailing empty
+// line a final `\n` produces. Computed ONCE per program and threaded.
+type SrcText = { lines: List[Str], nl: Str }
+
+fn src_text(src: Str) -> SrcText {
+  var lines: List[Str] = []
+  var start = 0
+  var i = 0
+  var nl = ""
+  while (i < src.length()) {
+    if (src.charAt(i).charCodeAt(0) == 10) {
+      if (nl == "") { nl = src.charAt(i) }
+      lines = lines.push(src.slice(start, i))
+      start = i + 1
+    }
+    i += 1
+  }
+  return { lines: lines.push(src.slice(start, src.length())), nl: nl }
+}
+
+// `lstrip()` for the doc recovery below: the leading whitespace Python strips,
+// by code point (space, tab, CR, VT, FF) — nothing else, so the text after the
+// `// ` prefix keeps the TRAILING whitespace the reference keeps (a plain
+// `ty_trim` would eat it and the two producers would differ).
+fn ltrim_ws(s: Str) -> Str {
+  var a = 0
+  var go = true
+  while (go) {
+    if (a >= s.length()) { go = false } else {
+      let cc = s.charAt(a).charCodeAt(0)
+      if (cc == 32 || cc == 9 || cc == 13 || cc == 11 || cc == 12) { a += 1 } else { go = false }
+    }
+  }
+  return s.slice(a, s.length())
+}
+
+// issue #1952: the comment block directly above an operation, as the JSON key
+// fragment to append — `, "doc": "..."`, or `""` when the operation carries no
+// such block, so an IR whose operations carry no comments keeps the ABSENT key
+// and stays byte-identical to the reference's. The token stream carries no
+// comments (neither lexer keeps them), so the block is read backwards out of the
+// RAW SOURCE: `line` is the 1-based line of the operation's FIRST token (for a
+// single-line `service Log { emission fn write(msg: Str) }` that is the `service`
+// line itself, which is exactly what the reference's `self.peek().line` anchors
+// on) and every preceding line must itself be a `//` line — a blank line ends
+// the block. Leading indentation, the two slashes and ONE following space are
+// removed; the line breaks are kept. `n` rather than an empty accumulator, so a
+// block that happens to be empty still emits `"doc": ""` as the reference does.
+//
+// `starts` is the reference's `mstarts_line`: the block belongs to the operation
+// only when the operation OPENS its line. In `service Cache { fn size() -> Int }`
+// the `fn` sits on the `service` header line, so the block above that line is the
+// SERVICE's, and reading it as `size`'s would make a comment above a `service`
+// line into a member's doc.
+fn ir_doc_key(st: SrcText, line: Int, starts: Bool) -> Str {
+  if (!starts) { return "" }
+  var idx = line - 2
+  if (idx < 0 || idx >= st.lines.length()) { return "" }
+  var n = 0
+  var out = ""
+  var go = true
+  while (go) {
+    let s = ltrim_ws(st.lines[idx])
+    if (starts_with(s, "//")) {
+      var text = s.slice(2, s.length())
+      if (starts_with(text, " ")) { text = text.slice(1, text.length()) }
+      out = n == 0 ? text : text.concat(st.nl).concat(out)
+      n += 1
+      idx -= 1
+      if (idx < 0) { go = false }
+    } else {
+      go = false
+    }
+  }
+  return n == 0 ? "" : ", \"doc\": ".concat(jstr(out))
+}
+
 // One service's method table -> `"m": {params, returns, emission[, caps][, async][, idempotent]}`
 // pairs. Mirrors the reference's per-method dict (check_and_lower's `services`
 // comprehension): `capabilities` present iff a SCOPED `emission[..]`, `async`
 // iff the op is `async` (each of which also bumps `ir_version` to 3).
-fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str]) -> IrMethR {
+fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str], st: SrcText) -> IrMethR {
   if (i >= end || atk(ts, i, "}")) { return mk_irmethr(acc, i, v3) }
+  // the operation's first token line, captured before the modifier loop — the
+  // anchor the reference reads off `self.peek().line` for the doc block above.
+  let dline = tkc(ts, i).line
+  // ... and whether that token OPENS its line, the reference's `mstarts_line`:
+  // the token before it is the enclosing `{` (or the previous member's last
+  // token), so an equal line means the operation shares a line with what came
+  // before and the block above it is that declaration's, not the operation's.
+  let dstarts = i == 0 ? true : tkc(ts, i - 1).line != dline
   var j = i
   var em = false
   var scoped = false
@@ -19819,6 +19908,7 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   if (retQual != "") {
     mj = mj.concat(", \"returns_qualifier\": ").concat(jstr(retQual))
   }
+  mj = mj.concat(ir_doc_key(st, dline, dstarts))
   if (term != "") {
     mj = mj.concat(", \"termination\": ").concat(jstr(term))
   }
@@ -19830,14 +19920,14 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   if (isIdempotent) { mj = mj.concat(", \"idempotent\": true") }
   mj = mj.concat("}")
   let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al)
+  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al, st)
 }
 
-fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str]) -> IrSvcR {
+fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str], st: SrcText) -> IrSvcR {
   let nm = tkc(ts, i + 1).text
   let end = close_brace(ts, i + 2)
   let hi = end == 0 - 1 ? i + 3 : end - 1
-  let ms = ir_methods(ts, i + 3, hi, "", false, al)
+  let ms = ir_methods(ts, i + 3, hi, "", false, al, st)
   return mk_irsvcr(jstr(nm).concat(": {\"methods\": {").concat(ms.js).concat("}}"),
                    ms.v3)
 }
@@ -25995,19 +26085,19 @@ fn types_walk(ts: List[Token], i: Int, acc: Str, al: Map[Str, Str]) -> Str {
 
 // ---------------------------------------------------------------- top level
 
-fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str]) -> IrAcc {
+fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st: SrcText) -> IrAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return a }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a, fname, al) }
-  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a, fname, al) }
-  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a, fname, al) }
-  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname, al) }
-  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname, al) }
+  if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a, fname, al, st) }
+  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a, fname, al, st) }
+  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a, fname, al, st) }
+  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname, al, st) }
+  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname, al, st) }
   if (t.text == "test") {
     let na = mk_iracc(a.svcs, a.comps, true, a.v2)
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return ir_walk(ts, e, na, fname, al) }
-    return ir_walk(ts, skip_line(ts, i), na, fname, al)
+    if (e != 0 - 1) { return ir_walk(ts, e, na, fname, al, st) }
+    return ir_walk(ts, skip_line(ts, i), na, fname, al, st)
   }
   if (t.text == "type") {
   // a `type` is stepped over to the end of the DECLARATION, not of its first
@@ -26021,29 +26111,29 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str]) -> 
     // `ir_version`; only one that survives the erasure is.
     let survives = !al.has(tkc(ts, i + 1).text)
     return ir_walk(ts, type_decl_end(ts, i + 1),
-                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2), fname, al)
+                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2), fname, al, st)
   }
   if (t.text == "extern") {
     return ir_walk(ts, p_extern(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al)
+                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
   }
   if (t.text == "fn") {
     return ir_walk(ts, p_fn(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al)
+                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
   }
   if (t.text == "service") {
-    let sv = ir_service(ts, i, al)
+    let sv = ir_service(ts, i, al, st)
     let svcs2 = a.svcs == "" ? sv.js : a.svcs.concat(", ").concat(sv.js)
     return ir_walk(ts, p_service(ts, i, empty_prog()).i,
-                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname, al)
+                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname, al, st)
   }
   if (t.text == "component") {
     let cp = ir_component(ts, i, fname, al)
     let comps2 = a.comps == "" ? cp.js : a.comps.concat(", ").concat(cp.js)
     return ir_walk(ts, p_component(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname, al)
+                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname, al, st)
   }
-  return ir_walk(ts, skip_line(ts, i), a, fname, al)
+  return ir_walk(ts, skip_line(ts, i), a, fname, al, st)
 }
 
 // The IR producer (SEAM 1). Returns the covered surface of the interchange IR
@@ -26081,7 +26171,7 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
   // checker, for the same reason: an alias that reached either of them would be
   // an undeclared type name.
   let al = alias_map(ts)
-  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname, al)
+  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname, al, src_text(src))
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   // The async COLOUR is a whole-program property, so the streaming function
   // producer cannot decide it one declaration at a time: the reference runs the

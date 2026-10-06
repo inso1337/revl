@@ -49,6 +49,7 @@
             }
           ],
           "returns": null,
+          "doc": "emission: `put` writes the cache log through `db` (a service\ndeclaration is an upper bound on what its providers may do)",
           "emission": true
         }
       }
