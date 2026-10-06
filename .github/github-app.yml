@@ -12,14 +12,15 @@ instructions: |
   - Run narrow selections only — `pytest <specific test file(s)>` — from an
     **out-of-tree** virtualenv. An in-tree `.venv` makes the tooling resolve a different
     interpreter than the one under test and produces false collection errors.
-  - **`tools/hooks/pre-commit` runs the whole root suite when the selector answers
-    `FULL`.** For an unmapped path under `backends/`, `stdlib/`, `selfhost/`, `examples/`,
-    `crates/` or `tck/`, or a structural change to `Makefile`, `tools/pre_merge.sh`, the
-    CI config, shared test scaffolding or `tests/fixtures/**`, the hook runs
-    `pytest tests/` **unsharded** with the commit blocked — minutes to tens of minutes,
-    and it is the hook doing it, not the lane. For such a diff commit with
-    `git commit --no-verify` and write the selector's `FULL` line into the commit
-    message, so the record shows why the hook was skipped.
+  - **`tools/hooks/pre-commit` bounds its `FULL` fallback (issue #2059).** For an
+    unmapped path under `backends/`, `stdlib/`, `selfhost/`, `examples/`, `crates/` or
+    `tck/`, or a structural change to `Makefile`, `tools/pre_merge.sh`, the CI config,
+    shared test scaffolding or `tests/fixtures/**`, the selector answers `FULL`. The hook
+    gives that step a wall-clock ceiling (`REVL_HOOK_FULL_BUDGET`, default 60s) and, when
+    it is exceeded, SKIPS it with the selector's `FULL <reason>` and the `--no-verify`
+    instruction — it no longer runs `pytest tests/` unsharded to completion. For such a
+    diff commit with `git commit --no-verify` and write the selector's `FULL` line into
+    the commit message, so the record shows why the hook was skipped.
   - **Never reproduce CI's sharding by hand.** `REVL_TEST_SHARD` is read only by
     `.github/workflows/ci.yml`; a local `REVL_TEST_SHARD=1..8` loop is a hand-rolled copy
     of CI that pins several cores and starves every other lane. There is no local
@@ -47,7 +48,40 @@ instructions: |
     still only if the diff touched one of the five `CHECKER_SOURCES` in
     `tools/census_artifact.py`, of which `selfhost/lower.rvl` is the only one under
     `selfhost/`. `emit_py.rvl`, `emit_ts.rvl` and `emit_rust.rvl` are **not** checker
-    sources and rotate nothing.
+    sources and do not move that digest.
+  - **But "the digest does not move" is not "you owe no census work" — ask the predicate,
+    never read `CHECKER_SOURCES` yourself.** `tools/census_artifact.py --moved-inputs`
+    accepts five kinds of input: a file the artifact pins (`decides_verdicts` /
+    `reference` / `report_inputs`), a program it carries, a declared-list file
+    (`OWN_FILES` / `CHECKER_SOURCES` / `REPORT_INPUTS`), **a gate crate source**
+    (`GATE_CRATE_GLOBS`, i.e. `build_gate_crate.py`'s `SELFHOST_CLOSURE` — which is why
+    `selfhost/emit_rust.rvl` is one even though it rotates no digest), and a new `.rvl`
+    under a census corpus directory. Only an empty answer is permission to skip the job.
+  - **`--moved-inputs` says the job RUNS; it does not say a record CHANGED, and it is not
+    by itself a licence to send a lane after `--write`.** The records are `pins.jsonl` —
+    `[group, path]` pairs with **no content hash**, so only the *set* of pinned paths can
+    move it, never an edit to one of them — plus `facts.json` (engine, admissions,
+    reference faults, mechanism, schema) and `cases/*.json` (per-program verdicts).
+    Nothing records the bytes of a pinned file or of a gate crate source:
+    `crates/revl-gate/src/selfhost.rs` is pinned in the `report_inputs` group, and an
+    emitter-only diff (the three `selfhost/emit_*.rvl`, the gate crate) normally changes
+    no record at all. Let the verdict decide —
+    `tools/census_artifact.py --verify --strict` reporting "the committed artifact is
+    current" means **you owe no `--write`** (on such a tree `--write` writes nothing), and
+    a *named* difference is the only thing that owes one. Telling a lane it owes
+    `--write` on the strength of `--moved-inputs` alone sends it looking for a change
+    that does not exist, while the real cause of its census red is almost always a
+    **stale base** — its committed records predate a rotation that already landed.
+  - **`--write` does not record the crate reproduction — that is a second, separate red.**
+    `--verify --strict` also fails on `no crate reproduction is recorded at the current
+    checker version <version>`. That record is
+    `tests/fixtures/census_crate_reproduction/<version>.json`, keyed by the checker
+    VERSION (issue #1768 moved it off `DIGEST_INPUTS`), and only
+    `python3 tools/regen_generated.py --only census` (cargo, minutes) writes it. If a red
+    names exactly that line and the lane moved no `CHECKER_SOURCE`, the missing record is
+    **`main`'s debt**: merge `origin/main` forward after the lane that owns the record
+    lands — do not run the re-record yourself, and never delete a record to clear the
+    check.
   - **For a root-suite "expected vs actual" diff, read the shape.** If the *actual* has more
     keys than the *expected*, the reference on `main` has gained a key your stale ref lacks:
     the red is an artifact, not your regression. Confirm by running that one test on a tree
@@ -66,6 +100,30 @@ instructions: |
     wrote, the default branch lands red at a digest nothing recorded. Check `main` after
     every landing.
 
+  ## A green run validates the merge tree, not your tip
+
+  A `pull_request` run checks out `refs/pull/<n>/merge` — **your tip merged with its base
+  branch** — so a green check run has already exercised the tree that lands, base commits
+  included. Proved on the policy PR itself: a branch that did not contain
+  `tests/fixtures/census_crate_reproduction/<current version>.json` still passed
+  `census-artifact`, because the merge ref the job checked out carried `main`'s record.
+
+  So the risk of a head that is behind `main` is **not** that it "lacks" commits — a merge
+  or a squash from it keeps every file `main` advanced. The risk is **overlap**: a lane
+  that *regenerates* a file `main` has since advanced overwrites `main`'s newer version
+  with the stale one (`pins.jsonl`, `facts.json`, a crate record, any generated artifact),
+  and that is a real revert. Decide by overlap, per file:
+
+  - `git diff --name-only origin/main...HEAD` — what your lane actually changes.
+  - `git log --name-only --format= <merge-base>..origin/main` — what `main` advanced.
+  - **Disjoint ⇒ the merge ref CI already validated is the tree that lands**: land without
+    a merge-forward; a full re-run would only re-prove the same tree. **Overlap ⇒ merge
+    `origin/main` forward** (`git merge --no-edit origin/main`, never a rebase) and re-run
+    the checks that touch the overlap.
+  - A regenerated artifact is always an overlap even when the file "looks unchanged": its
+    bytes are a function of the tree it was generated from. Regenerate on the
+    merge-forwarded tree rather than keeping the copy written on the stale one.
+
   ## Working across worktrees
 
   - **Do not run `git stash`.** The stash is shared by every worktree of this repository,
@@ -82,8 +140,31 @@ instructions: |
   - Never hand-edit `docs/census-artifact/**` or
     `tests/fixtures/census_crate_reproduction/**`; they are generator-owned.
   - The census digest covers the checker sources, so **merge `origin/main` first and
-    record once**, immediately before the final push. Recording before merging produces
-    a record for a mixed tree and fails the `census-artifact` check.
+    record last**, immediately before the final push. The record is keyed by the digest of
+    the **merge ref** CI checks out (`refs/pull/<n>/merge` — your tip merged with its
+    base), so recording on an un-merged tip leaves the merge ref uncovered and goes red
+    even though your own tree is self-consistent. A record for the **merged** tree is the
+    one that is needed; it is the record for the un-merged tree that fails.
+  - **Every digest-mover owes its own record — "only the last mover re-records" is false.**
+    `checker_version()` hashes the five `CHECKER_SOURCES`' **bytes**, so it is
+    branch-independent and a record can never change the digest it is filed under. Two
+    lanes that each rotate the digest therefore need **two** records, and the digest of the
+    tree they produce **together** is a third value that neither can compute from its own
+    branch. Measured on the pair #2044/#2054: base == `main` == `7c9d31bc9d9c`, #2044 alone
+    == `c16c68948df2`, #2054 alone == `ce305ffcef90`, both together == `36d25a4bd658`
+    (`git merge-tree --write-tree A B` merges clean; merged `selfhost/lower.rvl` blob
+    `09caad12ade7`). Four of the five `CHECKER_SOURCES` were byte-identical across all four
+    trees, so `selfhost/lower.rvl` alone moved every one of those digests.
+  - **Because that digest is branch-independent it is computable without cargo** — hash the
+    merged blobs exactly as `checker_version()` does — so the *order* of two movers can be
+    decided before either lands. Prefer the order that owes one record to the order that
+    owes two: a mover whose record already matches its merge ref owes nothing, so landing
+    it first leaves only the other's `--only census` run. Merging `origin/main` is likewise
+    **free** while `main` has not landed a rotation — `main`'s `selfhost/lower.rvl` equals
+    the merge base's, so a merge-forward cannot invalidate a lane's existing record.
+    Confirm with `git diff --name-only origin/main...HEAD -- selfhost/lower.rvl
+    tools/gate_reference_census.py tools/corpus_provenance.py tools/build_gate_crate.py
+    tests/test_gate_reference_census.py`. Never `M`/`D` a record another lane authored.
   - A **squash** merge can undo that: it may land a head that predates the lane's own
     record commit, leaving the default branch red at a digest nothing recorded. The
     correction is to restore the record that was written for that tree and prove it with

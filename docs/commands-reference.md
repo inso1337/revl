@@ -128,7 +128,11 @@ revl compile app.rvl --json-diagnostics    # CI: parse the rejection
 ### `revl explain`
 
 What a diagnostic code guarantees and how to satisfy it. No sources; it reads
-the built-in guarantee/fix table (`src/revl/diagnostics.py`).
+the machine table in `src/revl/diagnostics.py` — `GUARANTEES`/`FIXES` for the
+codes of the design catalogue, plus `OTHER_CODES` for every remaining code the
+compiler, the gate, the session and the MCP faces emit. So a code a rejection
+can hand back has an answer, not just the catalogue ones (issue #2028). The
+exceptions are deliberate and are named below.
 
 - `CODE` - a diagnostic code, e.g. `G4` (case-insensitive), required.
 - `--json` - machine-readable output.
@@ -136,7 +140,34 @@ the built-in guarantee/fix table (`src/revl/diagnostics.py`).
 ```bash
 revl explain G4
 revl explain t3 --json
+revl explain r1
 ```
+
+The two tables cannot drift apart: `src/revl/emitted_codes.py` derives the
+emitted roster by walking the emitter sources for the sites that mint a code,
+and `tests/test_explain_coverage_2028.py` holds `OTHER_CODES` to
+`emitted - GUARANTEES - reserved` in both directions, so a new `code=` site
+fails that file until it is explained.
+
+The one exception is the codes the evolution curriculum reserves as tasks an
+agent must solve from the refusal itself; `emitted_codes.reserved_codes()`
+derives them by the same rule the curriculum uses, and `revl explain` refuses
+them on purpose (`HOST-ARITY` is one).
+
+A code that enforces no named guarantee — a verdict about the *run* rather
+than about the source — says so: `classify()` reports
+`"guarantee": "unclassified"` rather than leaving the field out, so a consumer
+has something to branch on. The reserved codes are the deliberate exception
+here too: `classify()` adds no machine field of its own for them, and a parse
+error still projects the site-specific `fix` the parser attached to the exact
+token, which is more use than a canned one.
+
+The text renderer re-spells the same envelope field by field, and
+`tests/fixtures/vocabulary_mirror_ledger.json` records the pair, so
+`tools/check_vocabulary_mirrors.py` reds if a field the producer emits stops
+reaching the terminal — a field the producer emits and the renderer never
+reads is invisible to the human. `tests/test_explain_coverage_2028.py` holds
+the same edge behaviourally, per entry.
 
 ### `revl idiom`
 

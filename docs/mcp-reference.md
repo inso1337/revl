@@ -500,8 +500,10 @@ change what the compiler sees and `formatted` is NOT returned ([fmt.md](fmt.md))
 
 What a diagnostic code means and how to fix it, the MCP twin of `revl explain`.
 The other half of a structured `revl_check` / `revl_admit` rejection, which
-already carries the code. An unknown code answers with the roster of known ones
-rather than with nothing.
+already carries the code. Every code the compiler, the gate, the session and
+the HTTP faces emit has an entry — not only the design catalogue's, and
+barring the curriculum's reserved set noted below — and an unknown code
+answers with the roster of known ones rather than with nothing.
 
 - Inputs: `code` (required; a diagnostic code such as `G4`, case-insensitive).
 
