@@ -168,8 +168,14 @@ Failures raise the exported `FsOpError` / `ConfinementError` with explicit
 codes: `EBOUND` for duplicate or late binding, `EIDENTITY` for identity/type
 mismatch, `EINVAL` for malformed arguments, ordinary descriptor/path errno
 codes where applicable, and `ENOTSUP` if directory-fd/no-follow primitives are
-unavailable. A failed bind releases its duplicate and leaves no partial binding.
-There is no unsafe platform fallback. Without binding, legacy relative paths,
+unavailable. That last check is read on **both** surfaces — the bind, and the
+confined walk itself — so on a host without those primitives (Windows) every
+witnessed mutation (`write`, `mkdir`, `rename`, `unlink`, `rmdir`) is refused
+`ENOTSUP` before its first syscall, whether or not a root is bound and rather
+than an errno about a path that exists (issue #1946; pinned by
+`tests/test_fs_dirfd_capability_1946.py`). A failed bind releases its duplicate
+and leaves no partial binding. There is no unsafe platform fallback. Without
+binding, legacy relative paths,
 symlink resolution and environment-based root selection remain unchanged;
 root replacement is still outside that legacy mode's guarantee.
 

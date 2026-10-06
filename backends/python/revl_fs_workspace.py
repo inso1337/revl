@@ -391,6 +391,33 @@ def _make_total(name: str, fn):
     return total
 
 
+#: The syscalls the confined walk needs `dir_fd` for — one per confined op
+#: (`open`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`).
+_DIRFD_OPS = (os.open, os.stat, os.mkdir, os.unlink, os.rmdir, os.rename)
+
+
+def _dirfd_walk_supported() -> bool:
+    """Whether this host can re-establish containment through directory fds.
+
+    The confined walk (see `_open_dirfd`) is built on `dir_fd`, `O_DIRECTORY`
+    and `O_NOFOLLOW`, and the pinned binder additionally needs stat's
+    `follow_symlinks`, `utime` on an fd, and `pread`. Windows provides none of
+    them: a directory cannot be held open as a descriptor, `O_DIRECTORY` and
+    `O_NOFOLLOW` do not exist, and `os.supports_dir_fd` is empty (issue #1946).
+
+    Both the binder and the walk read this one definition, so the two cannot
+    disagree about what "this host" supports. It is deliberately the same
+    capability set for both: the binder's extra legs (`follow_symlinks`,
+    `utime`, `pread`) are re-established through the very same fd walk, so a
+    host that cannot walk cannot serve a pinned root either."""
+    return bool(
+        _O_DIRECTORY and _O_NOFOLLOW
+        and all(fn in os.supports_dir_fd for fn in _DIRFD_OPS)
+        and os.stat in os.supports_follow_symlinks
+        and os.utime in os.supports_fd
+        and hasattr(os, "pread"))
+
+
 def bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int,
                         *, root_label: str) -> None:
     """Pin a caller-owned directory before any workspace use, once per process.
@@ -406,13 +433,7 @@ def bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int,
             raise ConfinementError(
                 "EBOUND", "workspace binding must precede all filesystem use "
                 "and cannot be repeated", _sanitized(root_label))
-        required = (os.open, os.stat, os.mkdir, os.unlink, os.rmdir,
-                    os.rename)
-        if (not _O_DIRECTORY or not _O_NOFOLLOW
-                or any(fn not in os.supports_dir_fd for fn in required)
-                or os.stat not in os.supports_follow_symlinks
-                or os.utime not in os.supports_fd
-                or not hasattr(os, "pread")):
+        if not _dirfd_walk_supported():
             raise ConfinementError(
                 "ENOTSUP", "pinned workspace requires directory-fd and "
                 "no-follow filesystem support", _sanitized(root_label))
@@ -881,7 +902,21 @@ def _open_dirfd(real_dir: str) -> int:
 
     Raises `ConfinementError` if `real_dir` is not inside the root; propagates
     `OSError` (`ENOENT` for a missing component, `ELOOP` for a swapped one) for
-    the caller to translate."""
+    the caller to translate.
+
+    On a host without directory-fd support (Windows) there is no walk to build
+    at all, so every caller is refused `ENOTSUP` here — before the first
+    syscall, and for the pinned and unpinned paths alike (issue #1946). Without
+    it the unpinned witnessed write path walked with `dir_fd` on a host that
+    has none and surfaced whatever errno fell out of `os.open` (`[Errno 2] No
+    such file or directory` for a file it never created) instead of refusing."""
+    if not _dirfd_walk_supported():
+        raise ConfinementError(
+            "ENOTSUP",
+            "the confined filesystem walk needs directory-fd and no-follow "
+            "filesystem support, which this platform does not provide",
+            _sanitized(real_dir),
+        )
     root = workspace_root()
     if _pinned_root is not None:
         real_dir = _bound_path(real_dir)
@@ -1201,7 +1236,12 @@ def open_confined_write(path: str, *, create: bool = True) -> WriteHandle:
         through a hardlink and writing through the fd would still mutate the
         shared inode, so a multiply-linked target is refused outright;
       * `ERACE`      - a concurrent writer kept the leaf appearing and vanishing
-        for more attempts than `_open_leaf` will spend."""
+        for more attempts than `_open_leaf` will spend;
+      * `ENOTSUP`    - the host cannot re-establish containment through
+        directory fds at all (Windows; issue #1946). Checked before the
+        workspace root is read, so it is the answer whether or not a root is
+        configured, and refused before any syscall rather than failing with an
+        errno that says nothing about the cause."""
     real = resolve_within(path)
     parent, leaf = _split(real)
     try:
