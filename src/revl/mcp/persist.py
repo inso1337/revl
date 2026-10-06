@@ -48,6 +48,12 @@ ORIGIN_SOURCE = "source"
 ORIGIN_FILES = "files"
 ORIGIN_FILES_CONTENT = "files_content"
 ORIGIN_MODULES = "modules"
+#: issue #1779: the READ-ONLY buffers of the files this composition reached
+#: through `use`, keyed by abspath, holding the exact text the compile read for
+#: each. Reported by the compile OUTSIDE the IR (`compile_*`'s `report=`) and
+#: kept here for the one thing that needs a buffer for a `use`d file: anchoring
+#: a knowledge record to a declaration in a vendored truc. Nothing edits one.
+ORIGIN_DEPENDENCIES = "dependencies"
 
 SNAPSHOT_VERSION = 1
 
@@ -98,6 +104,10 @@ def _materialize(origin: dict) -> dict:
         sources[ORIGIN_FILES_CONTENT] = {
             path: held[path] if path in held else _read_text(path)
             for path in files}
+    # issue #1779: a dependency's text is already the compiled bytes, so it is
+    # carried as it stands — there is nothing to re-read from disk.
+    if origin.get(ORIGIN_DEPENDENCIES):
+        sources[ORIGIN_DEPENDENCIES] = dict(origin[ORIGIN_DEPENDENCIES])
     return sources
 
 
@@ -237,6 +247,12 @@ def _recompile(sources: dict, name: str = "<snapshot>.rvl") -> dict:
         # re-admits the snapshotted sources rather than trusting the disk
         virtual = {os.path.abspath(path): text
                    for path, text in (sources.get(ORIGIN_FILES_CONTENT) or {}).items()}
+        # issue #1779: the same for a `use`-reached dependency. The loader
+        # would otherwise read the file from disk, and the restored session
+        # would hold text that is not what it compiled.
+        virtual.update({os.path.abspath(path): text
+                        for path, text in
+                        (sources.get(ORIGIN_DEPENDENCIES) or {}).items()})
         return compile_files(list(files), sources=virtual or None)
 
     from .session import SessionError  # noqa: PLC0415
@@ -297,6 +313,10 @@ def _origin_from(sources: dict) -> dict:
         # later snapshot or revl_edit starts from it (issue #1690)
         if sources.get(ORIGIN_FILES_CONTENT):
             origin[ORIGIN_FILES_CONTENT] = dict(sources[ORIGIN_FILES_CONTENT])
+    # issue #1779: the read-only dependency buffers ride a snapshot round-trip
+    # too, so a restored composition still anchors records reached through `use`
+    if sources.get(ORIGIN_DEPENDENCIES):
+        origin[ORIGIN_DEPENDENCIES] = dict(sources[ORIGIN_DEPENDENCIES])
     return origin
 
 

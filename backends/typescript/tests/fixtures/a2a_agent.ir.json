@@ -12,6 +12,7 @@
           ],
           "returns": "Str",
           "returns_qualifier": "Untrusted",
+          "doc": "skill `invoice-lookup` \u2014 Invoice lookup\ntags (the agent's own claim): billing\n`emission` with NO inverse: a remote effect has no local undo (see the header).\nA `Str` message in, an `Untrusted[Str]` reply out \u2014 the peer is not\nthis composition's trust domain. A `Bytes` side is an A2A file `Part`.\n`async`: a network round trip SUSPENDS on this tier, so callers need an\nasync context (see the header).",
           "emission": true,
           "async": true
         },
@@ -24,6 +25,7 @@
           ],
           "returns": "Str",
           "returns_qualifier": "Untrusted",
+          "doc": "skill `draft-reminder` \u2014 Draft reminder\n`emission` with NO inverse: a remote effect has no local undo (see the header).\nA `Str` message in, an `Untrusted[Str]` reply out \u2014 the peer is not\nthis composition's trust domain. A `Bytes` side is an A2A file `Part`.\n`async`: a network round trip SUSPENDS on this tier, so callers need an\nasync context (see the header).",
           "emission": true,
           "async": true
         }

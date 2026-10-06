@@ -15,6 +15,7 @@ import RevL.Theorems.G1_KeyAccess
 import RevL.Theorems.A1_AsyncColour
 import RevL.Theorems.Prelude_InterceptMethod
 import RevL.Theorems.ModelPlacement
+import RevL.Theorems.ModelCouncil
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -2127,6 +2128,52 @@ def modelVerdicts (p : String) (rows : ModelRows)
 
 end ModelPlacement
 
+/-! ## Deciding G-COUNCIL-SPLIT (issue #1811)
+
+`CV` rows are the councils a file DECLARES, each carrying the tie outcome the
+checker reads for it: the exporter resolves `on_tie`'s `split` default, so the
+model judges the outcome and not the spelling of its absence. They are judged
+by `RevL.ModelCouncil.splitB`. A file declaring no council emits no row, so a
+council refusal this row does not decide (a missing aggregation, a bad
+vocabulary, a member rule) files under `out-of-fragment` rather than being
+read as an agreement the row cannot make. -/
+
+section ModelCouncil
+
+structure CVRow where
+  path : String
+  council : String
+  tie : String
+
+def parseCV (f : List String) : Option CVRow :=
+  match f with
+  | ["CV", path, council, tie] => some ⟨path, council, tie⟩
+  | _ => none
+
+def councilRowB (councils : List RevL.ModelCouncil.CouncilDecl) : Bool :=
+  RevL.ModelCouncil.splitB councils
+
+theorem councilRowB_iff (councils : List RevL.ModelCouncil.CouncilDecl) :
+    councilRowB councils = true ↔ RevL.ModelCouncil.SplitOK councils :=
+  RevL.ModelCouncil.splitB_iff councils
+
+/-- The `CTV` rows of one file. Kept out of `main` so its elaboration stays
+within the default heartbeat budget. -/
+structure CouncilRows where
+  cv : List CVRow
+
+def parseCouncilRows (fields : List (List String)) : CouncilRows :=
+  { cv := fields.filterMap parseCV }
+
+def councilVerdicts (p : String) (rows : CouncilRows) : String := Id.run do
+  let mut out := ""
+  for r in rows.cv.filter (fun r => r.path == p) do
+    let ctv := if councilRowB [⟨r.council, r.tie⟩] then "ok" else "fail"
+    out := out ++ s!"CTV\t{p}\t{r.council}\ttie={ctv}\n"
+  return out
+
+end ModelCouncil
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -2254,6 +2301,7 @@ def main (args : List String) : IO UInt32 := do
     let agrows := fields.filterMap parseAG
     let psrows := fields.filterMap parsePS
     let mrows' := parseModelRows fields
+    let crows := parseCouncilRows fields
     let itrows := fields.filterMap parseIT
     let mcrows := fields.filterMap parseMC
     let aerows := fields.filterMap parseAE
@@ -2416,6 +2464,8 @@ def main (args : List String) : IO UInt32 := do
         out := out ++ s!"P\t{p}\t{k.1}\t{k.2.1}\t{k.2.2.1}\t{k.2.2.2}\tbound={pv}\n"
       -- MPV / MAV verdicts (G-MODEL-PLACE, issue #1811)
       out := out ++ modelVerdicts p mrows' held capTable
+      -- CTV verdicts (G-COUNCIL-SPLIT, issue #1811)
+      out := out ++ councilVerdicts p crows
       -- W verdicts (spawn attenuation) per edge
       for e in edges do
         let childCaps := (lookupCaps closed e.2).filterMap (capOf capTable)
@@ -2575,3 +2625,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.methodRowB_iff
 #print axioms RevLOracle.placeRowB_iff
 #print axioms RevLOracle.modelReachB_iff
+#print axioms RevLOracle.councilRowB_iff

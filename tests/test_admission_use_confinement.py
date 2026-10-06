@@ -143,7 +143,7 @@ def test_the_refusal_is_not_itself_an_existence_oracle(secret, monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("the loader touched the filesystem under confinement")
 
-    monkeypatch.setattr(_compiler, "parse_file", _boom)
+    monkeypatch.setattr(_compiler, "_read_module_text", _boom)
     monkeypatch.setattr(_compiler._ModuleLoader, "_exists", _boom)
 
     with pytest.raises(RevlError) as a:
@@ -151,6 +151,35 @@ def test_the_refusal_is_not_itself_an_existence_oracle(secret, monkeypatch):
     with pytest.raises(RevlError) as b:
         _session_admit(_TURN.format(path=absent))
     assert str(a.value).replace(present, "X") == str(b.value).replace(absent, "X")
+
+
+def test_the_read_seam_is_on_the_path_a_use_actually_takes(tmp_path, monkeypatch):
+    """Positive control for the two confinement tripwires.
+
+    A tripwire retargeted at a seam that is never reached is a deleted test
+    with a new name. So prove `_read_module_text` IS the read a `use`d module
+    takes when nothing confines it: with the seam patched to raise for the
+    imported file only, an ordinary `compile_files` of a normally-resolvable
+    `use` must trip it rather than quietly succeed.
+    """
+    lib = tmp_path / "lib.rvl"
+    lib.write_text(_LIB, encoding="utf-8")
+    root = tmp_path / "root.rvl"
+    root.write_text('use "./lib.rvl" { q }\ncomponent T { }\n', encoding="utf-8")
+
+    # unpatched, the seam is what returns the imported module's text
+    assert _compiler._read_module_text(str(lib)) == _LIB
+
+    real = _compiler._read_module_text
+
+    def _boom_on_lib(path, *a, **k):
+        if str(path).endswith("lib.rvl"):
+            raise AssertionError("the loader read the use'd module from disk")
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(_compiler, "_read_module_text", _boom_on_lib)
+    with pytest.raises(AssertionError, match="read the use'd module from disk"):
+        compile_files([str(root)])
 
 
 def test_a_use_inside_a_supplied_module_is_refused_too():
@@ -304,7 +333,7 @@ def test_the_bridge_refusal_is_not_an_existence_oracle(secret, monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("the loader touched the filesystem under confinement")
 
-    monkeypatch.setattr(_compiler, "parse_file", _boom)
+    monkeypatch.setattr(_compiler, "_read_module_text", _boom)
     monkeypatch.setattr(_compiler._ModuleLoader, "_exists", _boom)
 
     def _diag(path):

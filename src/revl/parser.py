@@ -173,6 +173,13 @@ class MethodDecl:
     # operation declares one, so every existing method's IR is byte-identical
     # (the check it arms lives entirely in lower, keyed off this field).
     within: "WithinClause | None" = None
+    # issue #1952: the comment block DIRECTLY ABOVE the operation — contiguous
+    # `//` lines with no blank line between them and the `fn` — with the `// `
+    # prefix removed and line breaks kept. The lexer drops comments, so this is
+    # recovered from the source text by `Parser._doc_above`. `None` (the absent
+    # key in the IR) when the operation carries no such block, so every IR
+    # without operation comments stays byte-identical.
+    doc: str | None = None
 
 
 @dataclass
@@ -2431,6 +2438,13 @@ class Parser:
         # every checker diagnostic on them carry the line the fragment occupies
         # in the real file instead of line 1 (issue #313).
         self.toks = lex(source, filename, line_offset=line_offset)
+        # issue #1952: the lexer drops `//` comments, so the raw text is kept
+        # (already split into lines, so a file with many operations is scanned
+        # once, not once per operation) to recover the comment block directly
+        # above a service operation (the IR `doc` key). `_doc_above` maps a
+        # token line back into these lines via `line_offset`.
+        self._src_lines = source.split("\n")
+        self._line_offset = line_offset
         self.pos = 0
         # When set, the next `_bor` call does not consume a top-level `|` — it
         # is the functional-record-update separator `{base | f = e}`, not the
@@ -2533,6 +2547,46 @@ class Parser:
 
     def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
         return RevlError(self.filename, line, message, hint)
+
+    def _doc_above(self, line: int, floor: int | None = None) -> str | None:
+        """The comment block directly above `line` (issue #1952).
+
+        `line` is a token line (1-based, already carrying `line_offset`), so it
+        is mapped back into `self._src_lines` and the block is read upward: each
+        preceding line must itself be a `//` comment, and the first line that is
+        not ends the block. A blank line therefore ends it — the block must sit
+        directly above the declaration. The `// ` prefix (leading indentation,
+        the two slashes, and one following space) is removed and the remaining
+        line breaks are kept. `None` when there is no such block, so a caller
+        emits no `doc` key at all.
+
+        `floor` bounds the walk at the enclosing declaration: the block may only
+        be read from lines strictly BELOW the declaration's start line, so a
+        comment above the `service` keyword is never a member's doc. It is
+        belt-and-braces with the caller's own-line rule (`mstarts_line`, which
+        also refuses a block above a PREVIOUS member sharing the operation's
+        line); the bound is what states the rule in the reader's terms.
+        """
+        lines = self._src_lines
+        idx = line - 1 - self._line_offset
+        if idx <= 0 or idx > len(lines):
+            return None
+        lowest = -1 if floor is None else floor - self._line_offset - 1
+        block: list[str] = []
+        i = idx - 1
+        while i > lowest:
+            stripped = lines[i].lstrip()
+            if not stripped.startswith("//"):
+                break
+            text = stripped[2:]
+            if text.startswith(" "):
+                text = text[1:]
+            block.append(text)
+            i -= 1
+        if not block:
+            return None
+        block.reverse()
+        return "\n".join(block)
 
     # -- item 157: `;` as an optional statement separator/terminator
 
@@ -4238,6 +4292,16 @@ class Parser:
             # scope); the parser only records the shape.
             method_route: dict | None = None
             mline = self.peek().line
+            # issue #1952: a doc block is the OPERATION's only when the
+            # operation OPENS its line. `mline` is the operation's FIRST token,
+            # so in `service Cache { fn size() -> Int }` it is the `service`
+            # header line and the block above it is the SERVICE's. Reading it
+            # as `size`'s would make any comment above a `service` line into a
+            # member's doc, and `format_source(..., comments=False)` — which
+            # drops comments and is the `revl_source` read path — would stop
+            # compiling to the same program (issue #1714).
+            mstarts_line = (self.pos == 0
+                            or self.toks[self.pos - 1].line != mline)
             if self.at("ident", "route"):
                 rline = self.next().line
                 _ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head")
@@ -4403,6 +4467,13 @@ class Parser:
                 cache=cache, validated=method_validated, retry=method_retry,
                 termination=termination, route=method_route, within=within,
                 witnessed=method_witnessed,
+                # issue #1952: the comment block directly above the operation,
+                # read from the raw source (the lexer drops comments). `None`
+                # when there is none — and when the operation does not open its
+                # line, since then the block above it is the enclosing
+                # declaration's — so the IR key is absent. `floor=line` bounds
+                # the walk at the `service` line itself.
+                doc=(self._doc_above(mline, floor=line) if mstarts_line else None),
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)
@@ -9495,7 +9566,17 @@ def _dotted_path(expr) -> str | None:
 
 def parse_file(path: str) -> Program:
     with open(path, encoding="utf-8") as handle:
-        program = Parser(handle.read(), path).parse()
+        return parse_text(handle.read(), path)
+
+
+def parse_text(text: str, path: str) -> Program:
+    """Parse `text` as the module at `path`, with `parse_file`'s provenance.
+
+    The split exists so a caller that already holds a file's text can parse
+    exactly that text without re-reading the path (issue #1779: the compiler
+    reports the text it compiled, and the session anchors knowledge records to
+    it). `parse_file` is this, one read earlier, and is byte-identical."""
+    program = Parser(text, path).parse()
     # provenance is recorded relative to the invocation cwd so IR documents
     # stay machine-independent when compiled from the project root; a file on
     # another Windows drive has no relative path and keeps its absolute one

@@ -293,12 +293,21 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
+#: `os.stat` as CPython registered it, snapshotted at import for the same
+#: reason `_DIRFD_WALK_REQUIRED` is: the capability SETS are read live (a test
+#: narrows them to simulate a host without the walk), but the function OBJECTS
+#: must be the ones the interpreter put in those sets. Reading `os.stat` back
+#: off the module at call time asks a different question — "what is `os.stat`
+#: right now?" — which a caller that wraps or patches it for its own reasons
+#: answers wrongly, making a capable host refuse its own confined walk.
+_STAT_FN = os.stat
+
 #: The `os` operations the confined walk performs with `dir_fd=` (the component
 #: walk and the leaf open, the no-follow stat, and the four mutations). This is
 #: the same set `bind_workspace_root` requires for a PINNED root; the unpinned
 #: path needs exactly these, and used to discover their absence one syscall at a
 #: time — as `EACCES` from `os.open(dir)`, misreported as a lost race (#1946).
-_DIRFD_WALK_REQUIRED: tuple = (os.open, os.stat, os.mkdir, os.unlink,
+_DIRFD_WALK_REQUIRED: tuple = (os.open, _STAT_FN, os.mkdir, os.unlink,
                                os.rmdir, os.rename)
 
 
@@ -318,7 +327,7 @@ def dirfd_walk_supported() -> bool:
         _O_DIRECTORY
         and _O_NOFOLLOW
         and all(fn in os.supports_dir_fd for fn in _DIRFD_WALK_REQUIRED)
-        and os.stat in os.supports_follow_symlinks
+        and _STAT_FN in os.supports_follow_symlinks
     )
 
 #: The supported host binding contract, also exported by `revl.fs_workspace`.

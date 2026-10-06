@@ -282,3 +282,10 @@ RevL.ModelPlace.open_origin_anywhere	instance	RevL.ModelPlace.placement_not_vacu
 RevL.ModelPlace.on_device_admitted	instance	RevL.ModelPlace.placement_not_vacuous	confidential placed on the device is admitted
 RevL.ModelPlace.fixtures_decided	concrete	-	the role and council placements of the two fixtures refused; on-device and open-origin twins admitted
 RevL.ModelPlace.placement_not_vacuous	concrete	-	the off-device placement refused, the on-device one and an open origin off the device admitted
+RevL.ModelCouncil.splitB_iff	instance	RevL.ModelCouncil.council_not_vacuous,RevL.ModelCouncil.fixtures_decided	splitB is false on on_tie allow and true on on_tie split and on_tie deny, so the printed CTV verdict is mutation-sensitive
+RevL.ModelCouncil.admitting_refused	necessity	RevL.ModelCouncil.council_not_vacuous	an admitting tie is refused; on_tie split (the default) is admitted, so the refusal is not universal
+RevL.ModelCouncil.split_admitted	instance	RevL.ModelCouncil.council_not_vacuous	on_tie split is admitted, the default the exporter resolves an omitted clause to
+RevL.ModelCouncil.deny_admitted	instance	RevL.ModelCouncil.council_not_vacuous	on_tie deny is admitted, so the rule narrows the tie policy without banning it
+RevL.ModelCouncil.unknown_tie_not_this_row	instance	RevL.ModelCouncil.council_not_vacuous	a tie spelling outside both vocabularies is admitted by this row; the unknown-tie rule is what refuses it
+RevL.ModelCouncil.fixtures_decided	concrete	-	the gcouncilsplit fixture refused; the on_tie split and on_tie deny shapes admitted
+RevL.ModelCouncil.council_not_vacuous	concrete	-	the admitting tie refused, on_tie split and on_tie deny admitted
