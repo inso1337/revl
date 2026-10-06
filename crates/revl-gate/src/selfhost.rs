@@ -897,6 +897,7 @@ pub struct BlkR {
     ok: bool,
     setup: String,
     acq: String,
+    acqE: Expr,
     wit: bool,
 }
 
@@ -6786,21 +6787,22 @@ fn emit_provide_construction(comp: Value, step: Value, effectful: bool, indent: 
     return out;
 }
 
-fn collect_realm_labels(components: Vec<Value>) -> Vec<String> {
+fn collect_realm_labels(components: Vec<Value>) -> std::collections::HashMap<String, String> {
     let mut seen = std::collections::HashMap::new();
     for comp in components {
         let iso = value_field(comp.clone(), String::from("isolate"));
         for key in value_keys(iso.clone()) {
-            seen.insert(value_str(value_field(iso.clone(), key.clone())), String::from("1"));
+            let rm = value_str(value_field(iso.clone(), key.clone()));
+            seen.insert(format!("{}/{}", rm, key), format!("{}, {}", string_lit(Value::new(serde_json::Value::from(rm.clone()))), string_lit(Value::new(serde_json::Value::from(key.clone())))));
         }
         let routes = value_field(comp.clone(), String::from("routes"));
         for key in value_keys(routes.clone()) {
             for r in value_list(value_field(value_field(routes.clone(), key.clone()), String::from("realms"))) {
-                seen.insert(value_str(r.clone()), String::from("1"));
+                seen.insert(format!("{}/{}", value_str(r.clone()), key), format!("{}, {}", string_lit(Value::new(serde_json::Value::from(value_str(r.clone())))), string_lit(Value::new(serde_json::Value::from(key.clone())))));
             }
         }
     }
-    return list_sort({ let mut ks: std::vec::Vec<String> = seen.keys().cloned().collect(); ks.sort(); ks });
+    return seen;
 }
 
 fn needs_realm_helper(components: Vec<Value>) -> bool {
@@ -6813,16 +6815,17 @@ fn needs_realm_helper(components: Vec<Value>) -> bool {
 }
 
 fn revl_realm_helper(components: Vec<Value>) -> Vec<String> {
-    let labels = collect_realm_labels(components.clone());
+    let seen = collect_realm_labels(components.clone());
+    let labels = list_sort({ let mut ks: std::vec::Vec<String> = seen.keys().cloned().collect(); ks.sort(); ks });
     let mut out: Vec<String> = vec![];
-    out.push(String::from("pub fn _revl_realm(label: &str) -> cordis::Isolation {"));
+    out.push(String::from("pub fn _revl_realm(realm: &str, key: &str) -> cordis::Isolation {"));
     out.push(String::from("    // Top bit reserved for realm labels: disjoint from cordis-rs's"));
     out.push(String::from("    // monotonic scope counter (starts at 1, +1 each isolate())."));
     out.push(String::from("    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;"));
-    out.push(String::from("    let index: u64 = match label {"));
+    out.push(String::from("    let index: u64 = match (realm, key) {"));
     let mut i = 0i64;
     while (i < labels.revl_length()) {
-        out.push(format!("        {} => {},", string_lit(Value::new(serde_json::Value::from((labels)[(i) as usize].clone()))), num_str(Value::new(serde_json::Value::from(i)))));
+        out.push(format!("        ({}) => {},", map_get(seen.clone(), (labels)[(i) as usize].clone()), num_str(Value::new(serde_json::Value::from(i)))));
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     out.push(String::from("        other => panic!(\"revl: realm label {other:?} missing from compile-time registry\"),"));
@@ -7812,7 +7815,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             let snk = snake(value_str(value_field(comp.clone(), String::from("name"))));
             let mut expr = String::from("ctx");
             for key in value_keys(iso.clone()) {
-                expr = format!("{}.isolate_with({}, _revl_realm({}))", expr, string_lit(Value::new(serde_json::Value::from(key.clone()))), string_lit(Value::new(serde_json::Value::from(value_str(value_field(iso.clone(), key.clone()))))));
+                expr = format!("{}.isolate_with({}, _revl_realm({}, {}))", expr, string_lit(Value::new(serde_json::Value::from(key.clone()))), string_lit(Value::new(serde_json::Value::from(value_str(value_field(iso.clone(), key.clone()))))), string_lit(Value::new(serde_json::Value::from(key.clone()))));
             }
             out.push(format!("        \"{}\" => {},", snk, expr));
         }
@@ -24237,6 +24240,29 @@ fn bare_callee(e: Expr) -> String {
 };
 }
 
+fn proved_host_acq(e: Expr) -> bool {
+    return match e {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
+    Expr::Var(v) => (host_acquire_release(&v, &fl.name) != ""),
+    _ => false,
+} },
+    _ => false,
+} },
+    _ => false,
+};
+}
+
+fn site_effect_inverse(acq: Expr, acqJs: &str, und: Expr, undJs: &str, hostSc: &[String], cx: CCtx) -> String {
+    if (starts_with__m2(acqJs, "{\"kind\": \"hole\"") || starts_with__m2(undJs, "{\"kind\": \"hole\"")) {
+        return String::from("");
+    }
+    if proved_host_acq(acq.clone()) {
+        return String::from("");
+    }
+    return method_inverse(acq.clone(), und.clone(), hostSc, cx.clone());
+}
+
 fn is_witnessed_acq(e: Expr, cx: CCtx) -> bool {
     return match e {
     Expr::Call(c) => { let c = *c; match c.target {
@@ -25577,28 +25603,35 @@ fn cir_effect_block(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
     while ((j < hi) && (!atk(&ts, j, "}"))) {
         let st = cir_setup_stmt(ts.clone(), j, cx.clone(), scope.clone(), hostSc.clone(), mu.clone());
         if (!st.ok) {
-            return BlkR { ok: false, setup: String::from(""), acq: String::from(""), wit: false };
+            return BlkR { ok: false, setup: String::from(""), acq: String::from(""), acqE: Expr::Bad(String::from("")), wit: false };
         }
         if ((st.i >= hi) || atk(&ts, st.i, "}")) {
             if (!st.isExpr) {
-                return BlkR { ok: false, setup: String::from(""), acq: String::from(""), wit: false };
+                return BlkR { ok: false, setup: String::from(""), acq: String::from(""), acqE: Expr::Bad(String::from("")), wit: false };
             }
             let ae = cir_expr(st.e.clone(), scope.clone(), hostSc.clone(), cx.clone());
             if (!ae.ok) {
-                return BlkR { ok: false, setup: String::from(""), acq: String::from(""), wit: false };
+                return BlkR { ok: false, setup: String::from(""), acq: String::from(""), acqE: Expr::Bad(String::from("")), wit: false };
             }
-            return BlkR { ok: true, setup: setup.clone(), acq: ae.js.clone(), wit: is_witnessed_acq(st.e.clone(), cx.clone()) };
+            return BlkR { ok: true, setup: setup.clone(), acq: ae.js.clone(), acqE: st.e.clone(), wit: is_witnessed_acq(st.e.clone(), cx.clone()) };
         }
         setup = if (setup == "") { st.js } else { (setup.revl_concat(", ")).revl_concat(&st.js) };
         scope = st.sc;
         mu = st.muts;
         j = st.i;
     }
-    return BlkR { ok: false, setup: String::from(""), acq: String::from(""), wit: false };
+    return BlkR { ok: false, setup: String::from(""), acq: String::from(""), acqE: Expr::Bad(String::from("")), wit: false };
 }
 
 fn step_async(js: &str) -> String {
     return (js.revl_slice(0i64, (js.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(", \"async\": true}");
+}
+
+fn with_inverse(js: String, inv: &str) -> String {
+    if (inv == "") {
+        return js;
+    }
+    return (((js.revl_slice(0i64, (js.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(", \"inverse\": ")).revl_concat(&jstr(inv))).revl_concat("}");
 }
 
 fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Vec<Bind>, hostSc: Vec<String>, acc: String) -> IrRes {
@@ -25648,7 +25681,7 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
         if (!ue.ok) {
             return mk_irres(false, String::from(""));
         }
-        let step = (((((String::from("{\"step\": \"let-effect\", \"bind\": ").revl_concat(&jstr(&name))).revl_concat(", \"acquire\": ")).revl_concat(&sp.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat("}");
+        let step = with_inverse((((((String::from("{\"step\": \"let-effect\", \"bind\": ").revl_concat(&jstr(&name))).revl_concat(", \"acquire\": ")).revl_concat(&sp.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat("}"), "asserted");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
         return cir_body(ts.clone(), und.i, end, cx.clone(), provs.clone(), sc2.clone(), hostSc.clone(), nacc.clone());
     }
@@ -25671,6 +25704,7 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
             let bsc = sc.revl_push(Bind { name: name.clone(), ty: String::from("") });
             let mut bstep = String::from("{\"step\": \"let-effect\", \"acquire\": ").revl_concat(&blk.acq);
             let mut bnext = bend;
+            let mut binv = String::from("");
             if atw(&ts, bend, "undo") {
                 let bund = expr_at(ts.clone(), (bend).checked_add(1i64).expect("revl: Int overflow"));
                 if is_bad(bund.e.clone()) {
@@ -25681,6 +25715,7 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
                     return mk_irres(false, String::from(""));
                 }
                 bstep = (bstep.revl_concat(", \"undo\": ")).revl_concat(&bue.js);
+                binv = site_effect_inverse(blk.acqE.clone(), &blk.acq, bund.e.clone(), &bue.js, &hostSc, cx.clone());
                 bnext = bund.i;
             } else {
                 if (!blk.wit) {
@@ -25691,7 +25726,7 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
             if (blk.setup != "") {
                 bstep = ((bstep.revl_concat(", \"setup\": [")).revl_concat(&blk.setup)).revl_concat("]");
             }
-            bstep.push_str("}");
+            bstep = with_inverse(bstep.revl_concat("}"), &binv);
             let bacc = if (acc == "") { bstep.clone() } else { (acc.revl_concat(", ")).revl_concat(&bstep) };
             return cir_body(ts.clone(), bnext, end, cx.clone(), provs.clone(), bsc.clone(), hostSc.clone(), bacc);
         }
@@ -25717,7 +25752,8 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
             return mk_irres(false, String::from(""));
         }
         let step0 = (((((String::from("{\"step\": \"let-effect\", \"bind\": ").revl_concat(&jstr(&name))).revl_concat(", \"acquire\": ")).revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat("}");
-        let step = if isAsync { step_async(&step0) } else { step0.clone() };
+        let step1 = with_inverse(step0.clone(), &site_effect_inverse(acq.e.clone(), &ae.js, und.e.clone(), &ue.js, &hostSc2, cx_at(cx.clone(), tkc(&ts, (acq.i).checked_add(1i64).expect("revl: Int overflow")).line)));
+        let step = if isAsync { step_async(&step1) } else { step1.clone() };
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
         return cir_body(ts.clone(), und.i, end, cx.clone(), provs.clone(), sc2.clone(), hostSc2.clone(), nacc.clone());
     }
@@ -25753,7 +25789,8 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
             return mk_irres(false, String::from(""));
         }
         let step0 = (((String::from("{\"step\": \"effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat("}");
-        let step = if isAsync { step_async(&step0) } else { step0.clone() };
+        let step1 = with_inverse(step0.clone(), &site_effect_inverse(acq.e.clone(), &ae.js, und.e.clone(), &ue.js, &hostSc, cx_at(cx.clone(), tkc(&ts, (acq.i).checked_add(1i64).expect("revl: Int overflow")).line)));
+        let step = if isAsync { step_async(&step1) } else { step1.clone() };
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
         return cir_body(ts.clone(), und.i, end, cx.clone(), provs.clone(), sc.clone(), hostSc.clone(), nacc.clone());
     }
@@ -34476,7 +34513,7 @@ fn lower_to_ir_lowers_a_config_read_in_a_provide_method__component_spine_() {
 
 #[test]
 fn lower_to_ir_lowers_a_simple_effect_provide_body() {
-    assert!((lower_to_ir(String::from("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")) == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"));
+    assert!((lower_to_ir(String::from("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")) == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}, \"inverse\": \"asserted\"}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"));
 }
 
 #[test]

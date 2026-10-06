@@ -39,6 +39,7 @@
         {
           "step": "let-effect",
           "bind": "lock",
+          "inverse": "asserted",
           "acquire": {
             "kind": "call",
             "target": {

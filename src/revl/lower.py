@@ -12630,6 +12630,44 @@ def _method_effect_inverse(st: dict, env: "Env", filename: str, line: int,
     return "asserted"
 
 
+def _site_effect_inverse(st: dict, env: "Env", filename: str, line: int,
+                         before=None) -> str | None:
+    """The inverse provenance of one ACTIVATION-scope effect (issue #1859).
+
+    The activation body judged only the two families `_check_site_release`
+    proves at the site: a host acquisition's `undo` must be its family's release
+    and an `extern acquire`'s must be the inverse its declaration names. Every
+    OTHER bracket at this scope was admitted with no `undo` judgment at all —
+    and with no record that there was none — so a bracket nothing had checked
+    tore down behind a `noResidue: true` verdict. Those record what they are
+    (`asserted`; `declared` when an extern's declaration names its inverse) and
+    the teardown report lists them under `trustTheAuthor`, beside the verdict
+    rather than inside it.
+
+    A host WRITE at this scope is judged, not merely recorded: the same table
+    rule a provide method uses (`_method_effect_inverse`) refuses an `undo` that
+    is not the write's table inverse, since a write left in place behind a clean
+    release is not a provenance question. *before* is the activation body's
+    statements ahead of the effect, which issue #1980's restore form is judged
+    against.
+
+    Returns the provenance to stamp, or None when the bracket carries none: a
+    proved family (the host acquisition and the declared extern inverse above,
+    and a `subscribe`/lease bracket, whose disposer shape its own lowering
+    checks), a bracket with no `undo` (a witnessed extern registers its own),
+    and an unfilled hole, which is an obligation judged when it is filled."""
+    acquire, undo = st.get("acquire"), st.get("undo")
+    if not isinstance(acquire, dict) or not isinstance(undo, dict):
+        return None
+    if acquire.get("kind") == "hole" or undo.get("kind") == "hole":
+        return None
+    if _host_release_of(acquire) is not None:
+        return None
+    if _extern_acquire_of(acquire, env) is not None:
+        return "declared"
+    return _method_effect_inverse(st, env, filename, line, before)
+
+
 def _key_spelling(key, env: "Env") -> str:
     """The key argument as the author wrote it, when it is a name or a literal;
     otherwise a placeholder for the same expression."""
@@ -13278,6 +13316,13 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                                 bind=stmt.bind, safe=safe)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
+            # issue #1859: the activation body's own inverse judgment and its
+            # provenance, the twin of the provide method's (`_method_effect_inverse`
+            # at the method call site). Judged after every check above, so a
+            # program they refuse keeps its message.
+            inv = _site_effect_inverse(step, env, filename, stmt.line, body)
+            if inv is not None:
+                step["inverse"] = inv
             # item 130 (rule 3.6): a stream source whose inverse CLOSES it is a
             # terminal-delivering provider — the only shape a subscription may be
             # admitted against. `Stream.source() undo s.close()` records `s`; a
@@ -13339,6 +13384,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             _check_site_release(step, env, filename, stmt.line, bind=None, safe=None)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
+            # issue #1859: the unbound activation bracket carries the same
+            # provenance as the bound one above.
+            inv = _site_effect_inverse(step, env, filename, stmt.line, body)
+            if inv is not None:
+                step["inverse"] = inv
             body.append(step)
         elif isinstance(stmt, FailStmt):
             body.append({
