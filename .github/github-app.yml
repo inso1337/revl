@@ -99,6 +99,30 @@ instructions: |
     wrote, the default branch lands red at a digest nothing recorded. Check `main` after
     every landing.
 
+  ## A green run validates the merge tree, not your tip
+
+  A `pull_request` run checks out `refs/pull/<n>/merge` — **your tip merged with its base
+  branch** — so a green check run has already exercised the tree that lands, base commits
+  included. Proved on the policy PR itself: a branch that did not contain
+  `tests/fixtures/census_crate_reproduction/<current version>.json` still passed
+  `census-artifact`, because the merge ref the job checked out carried `main`'s record.
+
+  So the risk of a head that is behind `main` is **not** that it "lacks" commits — a merge
+  or a squash from it keeps every file `main` advanced. The risk is **overlap**: a lane
+  that *regenerates* a file `main` has since advanced overwrites `main`'s newer version
+  with the stale one (`pins.jsonl`, `facts.json`, a crate record, any generated artifact),
+  and that is a real revert. Decide by overlap, per file:
+
+  - `git diff --name-only origin/main...HEAD` — what your lane actually changes.
+  - `git log --name-only --format= <merge-base>..origin/main` — what `main` advanced.
+  - **Disjoint ⇒ the merge ref CI already validated is the tree that lands**: land without
+    a merge-forward; a full re-run would only re-prove the same tree. **Overlap ⇒ merge
+    `origin/main` forward** (`git merge --no-edit origin/main`, never a rebase) and re-run
+    the checks that touch the overlap.
+  - A regenerated artifact is always an overlap even when the file "looks unchanged": its
+    bytes are a function of the tree it was generated from. Regenerate on the
+    merge-forwarded tree rather than keeping the copy written on the stale one.
+
   ## Working across worktrees
 
   - **Do not run `git stash`.** The stash is shared by every worktree of this repository,
