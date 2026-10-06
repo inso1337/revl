@@ -276,12 +276,18 @@ def _reset_v3_typed_component_state() -> None:
     resetting to defaults here never changes a real emit's output."""
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _UI_EXTERNS, _UI_METHOD_SCOPES, _COMP_NEEDS_UI
+    global _JOURNAL_MODE
     _V3_MODE = False
     _V3_TYPES = {}
     _V3_TYPED_COMPONENTS = False
     _UI_EXTERNS = {}
     _UI_METHOD_SCOPES = {}
     _COMP_NEEDS_UI = False
+    # issue #2009: same reasoning as the globals above -- `_emit` and
+    # `_emit_v3_combined` each re-decide this on entry, so resetting it to the
+    # default here only stops a leaked True from reaching a tool that pokes
+    # `_host_runtime()` outside a real emit.
+    _JOURNAL_MODE = False
 
 
 def _go_type(t) -> str:
@@ -3433,7 +3439,14 @@ def _bracket_writes_host_map(step) -> bool:
     the #2009 write journal: `Map`'s own writers are the sole recorders, so a
     bracket that never touches a map (a `Pool.new()`/`Dispose()`, a
     `subscribe`/`Close`, a timer) emits byte-identically to before and its
-    inverse text stays unwrapped."""
+    inverse text stays unwrapped.
+
+    Also False whenever the document cannot READ the journal at all
+    (`_JOURNAL_MODE`): the only reader on this tier is `assert no_residue` in a
+    `lifecycle test`, so a document without one gets no journal runtime, no
+    frame, and no per-bracket arming -- byte-identical to before the fold."""
+    if not _JOURNAL_MODE:
+        return False
     if _node_writes_host_map(step.get("acquire")):
         return True
     if _node_writes_host_map(step.get("undo")):
@@ -4896,6 +4909,12 @@ def _host_runtime() -> str:
                       _SECRET_PREAMBLE if _SECRET_MODE else "")
     src = src.replace("@SECRET_SCRUB@", _SECRET_SCRUB if _SECRET_MODE else "")
     src = src.replace("@SECRET_RESET@", _SECRET_RESET if _SECRET_MODE else "")
+    # issue #2009: the host-map write journal and its seams into `Map`, filled
+    # only for a document that can read it (`_JOURNAL_MODE`). Substituted
+    # BEFORE the collision rename below so a `RevlMap` document renames the
+    # journal's `*Map[V]` receivers along with the type they hang off.
+    for token, off_text, on_text in _JOURNAL_SLOTS:
+        src = src.replace(token, on_text if _JOURNAL_MODE else off_text)
     if _V3_TYPED_COMPONENTS:
         for name in _HOST_RUNTIME_RENAMES:
             if name not in _V3_TYPES:
@@ -5392,7 +5411,98 @@ func (p *Pool) Execute(sql string) @INT@ {
 	return 0
 }
 
-// ---- host-map write journal (issue #2009) ------------------------------
+@JOURNAL@
+// Map is a thread-safe map with Str keys. The value type is generic — each
+// site's `Map.new()` pins `V` from how the map is used (FR-4: a revl
+// `Map[Str, Int]` counter or `Map[Str, List[Msg]]` ledger, not only String),
+// mirroring backends/rust/emit.py's `struct Map<V>`. Emit instantiates it at
+// the acquisition (`MapNew[int64]()`), so the boundary carries the declared
+// value type and Insert/Get type-check against the component's real values.
+type Map[V any] struct {
+	mu sync.Mutex
+	m  map[string]V
+	@JOURNAL_FIELDS@
+}
+
+func MapNew[V any]() *Map[V] {
+	hostRecord("map.new")
+	revlHostAcquire()
+	return &Map[V]{m: map[string]V{}}
+}
+@JOURNAL_DROP@
+func (m *Map[V]) Insert(k string, v V) {
+	@JOURNAL_INSERT@
+	m.mu.Lock()
+	m.m[k] = v
+	m.mu.Unlock()
+}
+
+// InsertIfAbsent is the atomic compare-and-set (item 397). The per-op mutex is
+// held across BOTH the membership test AND the insert, so the whole CAS is one
+// critical section: no concurrent caller can witness the probe and the write as
+// separable steps. Returns whether it inserted; a false (key already present)
+// leaves the existing value untouched. Under N concurrent callers on one map,
+// exactly one receives true.
+func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
+	@JOURNAL_INSERT_IF_ABSENT@
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.m[k]; ok {
+		return false
+	}
+	m.m[k] = v
+	return true
+}
+func (m *Map[V]) Remove(k string) {
+	@JOURNAL_REMOVE@
+	m.mu.Lock()
+	delete(m.m, k)
+	m.mu.Unlock()
+}
+func (m *Map[V]) Get(k string) (V, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.m[k]
+	return v, ok
+}
+
+// Iteration surface (docs/stdlib-2.0.md §Map): the checker promises
+// `size()`/`keys()` on a host `Map.new()` receiver too, and emit lowers both
+// as method calls on this object. `Size` is the entry count as the tier's
+// revl Int (@INT@, matching the service-method return type); `Keys`
+// yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —
+// go string < is exactly code-point order, and slices.Sort on []string orders
+// by <, so the order is identical to the insertion sort this replaced, as it
+// is in revlMapKeys). keys() IS the Map iteration surface, so this sits on
+// every map traversal: O(n log n), not O(n^2) (item 434 (h)). Both are
+// read-only queries, no host trace — like Get.
+func (m *Map[V]) Size() @INT@ {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return @INT@(len(m.m))
+}
+func (m *Map[V]) Keys() []string {
+	m.mu.Lock()
+	ks := make([]string, 0, len(m.m))
+	for k := range m.m {
+		ks = append(ks, k)
+	}
+	m.mu.Unlock()
+	slices.Sort(ks)
+	return ks
+}
+'''
+
+# issue #2009: the host-map write journal, extracted from `_HOST_RUNTIME`
+# above so it can be emitted only where it can be READ. Its one reader on
+# this tier is `assert no_residue` inside a `lifecycle test` (the R4 host-map
+# half below); a document without one can never consult the journal, so it
+# gets none of it and emits byte-identically to before the fold -- which is
+# what the self-host byte-agreement oracle (tests/test_selfhost_emit_go.py)
+# pins. The five `@JOURNAL*@` slots below are the seams it cuts into the
+# shared `Map` stub; `_host_runtime` fills all six together, so an emitted
+# program either carries the whole journal or none of it.
+_JOURNAL_RUNTIME = r'''// ---- host-map write journal (issue #2009) ------------------------------
 //
 // The R1 live-resource counter above proves every host object was RELEASED. It
 // cannot see whether the release left the object's CONTENTS the way the bracket
@@ -5699,109 +5809,41 @@ func (m *Map[V]) journalNote(k string, verb string) {
 	revlJournalMu.Unlock()
 }
 
-// Map is a thread-safe map with Str keys. The value type is generic — each
-// site's `Map.new()` pins `V` from how the map is used (FR-4: a revl
-// `Map[Str, Int]` counter or `Map[Str, List[Msg]]` ledger, not only String),
-// mirroring backends/rust/emit.py's `struct Map<V>`. Emit instantiates it at
-// the acquisition (`MapNew[int64]()`), so the boundary carries the declared
-// value type and Insert/Get type-check against the component's real values.
-type Map[V any] struct {
-	mu sync.Mutex
-	m  map[string]V
-	// journaled / reported are the map's own half of the write journal (issue
-	// #2009) -- py's `Map._journaled` / `Map._reported`
-	// (backends/python/runtime.py:7449). `journaled[key]` is the first
-	// bracketed write of that key: what it held before, and which verb wrote
-	// it. `Drop` judges it.
-	journaled map[string]revlJournalEntry
-	reported  map[string]bool
-	// closed is py's `Map.closed` (backends/python/runtime.py:7449): set once
-	// `Drop` has run. The frame's unload check skips a released map, because
-	// the map's own check already judged it.
-	closed bool
-}
-
-func MapNew[V any]() *Map[V] {
-	hostRecord("map.new")
-	revlHostAcquire()
-	return &Map[V]{m: map[string]V{}}
-}
-func (m *Map[V]) Drop() {
-	hostRecord("map.drop")
-	// issue #2009: judge the journal BEFORE the entries go -- the point at
-	// which py's `Map.drop` calls `_judge_journal(self)`
-	// (backends/python/runtime.py:7473), the last moment the map can still
-	// say what it holds.
-	m.journalJudge()
-	m.mu.Lock()
-	m.closed = true
-	m.mu.Unlock()
-	revlHostRelease()
-}
-func (m *Map[V]) Insert(k string, v V) {
-	m.journalNote(k, "insert")
-	m.mu.Lock()
-	m.m[k] = v
-	m.mu.Unlock()
-}
-
-// InsertIfAbsent is the atomic compare-and-set (item 397). The per-op mutex is
-// held across BOTH the membership test AND the insert, so the whole CAS is one
-// critical section: no concurrent caller can witness the probe and the write as
-// separable steps. Returns whether it inserted; a false (key already present)
-// leaves the existing value untouched. Under N concurrent callers on one map,
-// exactly one receives true.
-func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
-	// the note is taken BEFORE the membership test, as py's
-	// `insert_if_absent` does (backends/python/runtime.py:7506)
-	m.journalNote(k, "insert_if_absent")
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.m[k]; ok {
-		return false
-	}
-	m.m[k] = v
-	return true
-}
-func (m *Map[V]) Remove(k string) {
-	m.journalNote(k, "remove")
-	m.mu.Lock()
-	delete(m.m, k)
-	m.mu.Unlock()
-}
-func (m *Map[V]) Get(k string) (V, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	v, ok := m.m[k]
-	return v, ok
-}
-
-// Iteration surface (docs/stdlib-2.0.md §Map): the checker promises
-// `size()`/`keys()` on a host `Map.new()` receiver too, and emit lowers both
-// as method calls on this object. `Size` is the entry count as the tier's
-// revl Int (@INT@, matching the service-method return type); `Keys`
-// yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —
-// go string < is exactly code-point order, and slices.Sort on []string orders
-// by <, so the order is identical to the insertion sort this replaced, as it
-// is in revlMapKeys). keys() IS the Map iteration surface, so this sits on
-// every map traversal: O(n log n), not O(n^2) (item 434 (h)). Both are
-// read-only queries, no host trace — like Get.
-func (m *Map[V]) Size() @INT@ {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return @INT@(len(m.m))
-}
-func (m *Map[V]) Keys() []string {
-	m.mu.Lock()
-	ks := make([]string, 0, len(m.m))
-	for k := range m.m {
-		ks = append(ks, k)
-	}
-	m.mu.Unlock()
-	slices.Sort(ks)
-	return ks
-}
 '''
+
+# (token, text when the journal is OFF, text when it is ON). Off is
+# byte-for-byte the pre-#2009 `_HOST_RUNTIME`; the four pure insertions
+# therefore have an empty off-text and `Drop` keeps its original one-liner.
+_JOURNAL_SLOTS = (
+    ("@JOURNAL@\n", "", _JOURNAL_RUNTIME),
+    ("\t@JOURNAL_FIELDS@\n", "", "\t// journaled / reported are the map's own half of the write journal (issue\n\t// #2009) -- py's `Map._journaled` / `Map._reported`\n\t// (backends/python/runtime.py:7449). `journaled[key]` is the first\n\t// bracketed write of that key: what it held before, and which verb wrote\n\t// it. `Drop` judges it.\n\tjournaled map[string]revlJournalEntry\n\treported  map[string]bool\n\t// closed is py's `Map.closed` (backends/python/runtime.py:7449): set once\n\t// `Drop` has run. The frame's unload check skips a released map, because\n\t// the map's own check already judged it.\n\tclosed bool\n"),
+    ("@JOURNAL_DROP@\n", 'func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }\n', 'func (m *Map[V]) Drop() {\n\thostRecord("map.drop")\n\t// issue #2009: judge the journal BEFORE the entries go -- the point at\n\t// which py\'s `Map.drop` calls `_judge_journal(self)`\n\t// (backends/python/runtime.py:7473), the last moment the map can still\n\t// say what it holds.\n\tm.journalJudge()\n\tm.mu.Lock()\n\tm.closed = true\n\tm.mu.Unlock()\n\trevlHostRelease()\n}\n'),
+    ("\t@JOURNAL_INSERT@\n", "", '\tm.journalNote(k, "insert")\n'),
+    ("\t@JOURNAL_INSERT_IF_ABSENT@\n", "", '\t// the note is taken BEFORE the membership test, as py\'s\n\t// `insert_if_absent` does (backends/python/runtime.py:7506)\n\tm.journalNote(k, "insert_if_absent")\n'),
+    ("\t@JOURNAL_REMOVE@\n", "", '\tm.journalNote(k, "remove")\n'),
+)
+
+# Set from the document at the entry of each path that emits a host runtime
+# (`_emit` and `_emit_v3_combined`, both of which call `_host_runtime`): True
+# only when this document holds a `lifecycle test` with an `assert
+# no_residue`, i.e. only when something can read the journal at all.
+_JOURNAL_MODE = False
+
+
+def _journal_readable(ir: dict) -> bool:
+    """issue #2009: can this document READ the host-map write journal?
+
+    Its one reader on this tier is the R4 host-map half of `assert
+    no_residue`, and `assert no_residue` only exists inside a `lifecycle
+    test` (src/revl/lower.py:6150). Without one, nothing can ever consult
+    the journal, so a document that has no such reader emits byte-identically
+    to before the fold -- which is what the self-host byte-agreement oracle
+    (tests/test_selfhost_emit_go.py) pins."""
+    return any(
+        step.get("step") == "assert_no_residue"
+        for test in (ir.get("tests") or []) if test.get("lifecycle")
+        for step in (test.get("body") or [])
+    )
 
 
 # ==========================================================================
@@ -11202,6 +11244,15 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
     _refuse_inadmissible_document(ir)
     _check_host_keys(ir)
+    # issue #2009: is the host-map write journal READABLE in this document? Its
+    # one reader on this tier is the R4 host-map half of `assert no_residue`,
+    # and `assert no_residue` only exists inside a `lifecycle test`
+    # (src/revl/lower.py:6150). Without one, nothing can ever consult the
+    # journal, so a document that has no such reader emits byte-identically to
+    # before the fold -- which is what the self-host byte-agreement oracle
+    # (tests/test_selfhost_emit_go.py) pins.
+    global _JOURNAL_MODE
+    _JOURNAL_MODE = _journal_readable(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old
@@ -12100,6 +12151,10 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     _COMP_NEEDS_DECLARED = False
     global _COMP_NEEDS_JOURNAL
     _COMP_NEEDS_JOURNAL = False
+    # issue #2009: this path emits the host runtime too, so it must decide
+    # for itself whether the document can read the write journal.
+    global _JOURNAL_MODE
+    _JOURNAL_MODE = _journal_readable(ir)
     # items 243/247: the document's witnessed externs by name. `_emit` has
     # built this registry since item 243; this path never did, so
     # `_witnessed_extern` matched nothing and a witnessed effect in a carried
