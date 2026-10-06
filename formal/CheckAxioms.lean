@@ -426,3 +426,14 @@ import RevL
 #print axioms RevL.ModelCouncil.unknown_tie_not_this_row
 #print axioms RevL.ModelCouncil.fixtures_decided
 #print axioms RevL.ModelCouncil.council_not_vacuous
+-- Issue #1811 group 2: G9 / G-SECRET-FLOW. The taint rule is decided by the
+-- oracle's `TAINT` row on the sink and label the CHECKER reports, not on the
+-- coverage of the checker's own walk; see RevL/Theorems/G9Flow.lean.
+#print axioms RevL.G9Flow.admitsB_iff
+#print axioms RevL.G9Flow.g9RowB_iff
+#print axioms RevL.G9Flow.reported_walk_reaches_the_reported_label
+#print axioms RevL.G9Flow.escapeFlow
+#print axioms RevL.G9Flow.labelOfString_is_the_label
+#print axioms RevL.G9Flow.corpus_rows_decided
+#print axioms RevL.G9Flow.escape_moves_the_label
+#print axioms RevL.G9Flow.g9_not_vacuous

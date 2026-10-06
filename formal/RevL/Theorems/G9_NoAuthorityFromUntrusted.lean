@@ -106,40 +106,17 @@ namespace RevL.G9
 
 open RevL.Lemmas RevL.Typing RevL.Syntax
 
-/-! ## Flows -/
+/-! ## Flow notation
 
-/-- One step of a data-flow path. -/
-inductive Step where
-  /-- a crossing whose return mints origin `o` (`model.sources`). -/
-  | source : Origin → Step
-  /-- a join with another value's label (`_join` / `_union_children`). -/
-  | join : Label → Step
-  /-- an opaque or pure hop that carries the label through. -/
-  | propagate : Step
-  /-- the one weakening step: an admitted declassifier. -/
-  | declassify : Declassifier → Step
-  deriving Repr
+`Step` and `Flow` themselves are in the L1 farm `RevL.Lemmas.TaintLemmas`
+(the differential-oracle row `RevL.G9Flow` states theorems over the same
+walk, and two L2 files may not import each other). What is local to G9 is
+the notation: how a crossing names its origin. -/
 
 /-- A crossing named by its declared capability scope: the origin is
 *derived* (`taint._origin_of`), never guessed. `crossing ["web.fetch"]`
 mints `web`; `crossing []` — an unscoped crossing — mints `input`. -/
 def crossing (caps : List String) : Step := .source (mintedBy caps)
-
-/-- `Flow P G ℓin steps ℓout`: under profile `P` and the enclosing
-declaration's grants `G`, a value entering the path labelled `ℓin` leaves
-it labelled `ℓout`. A `declassify` step carries its admission side
-condition, so an inadmissible declassification is not a flow at all. -/
-inductive Flow (P : Profile) (G : Grants) : Label → List Step → Label → Prop where
-  | nil : ∀ ℓ, Flow P G ℓ [] ℓ
-  | source : ∀ (o : Origin) (ℓ : Label) (st : List Step) (out : Label),
-      Flow P G (o :: ℓ) st out → Flow P G ℓ (.source o :: st) out
-  | join : ∀ (m ℓ : Label) (st : List Step) (out : Label),
-      Flow P G (join m ℓ) st out → Flow P G ℓ (.join m :: st) out
-  | propagate : ∀ (ℓ : Label) (st : List Step) (out : Label),
-      Flow P G ℓ st out → Flow P G ℓ (.propagate :: st) out
-  | declassify : ∀ (d : Declassifier) (ℓ : Label) (st : List Step) (out : Label),
-      DeclassOK P G d ℓ → Flow P G (applyD d ℓ) st out →
-      Flow P G ℓ (.declassify d :: st) out
 
 /-- The declassifiers a path performs — the audit surface of the flow
 (`_FlowChecker.declassify_records`). -/

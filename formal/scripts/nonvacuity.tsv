@@ -289,3 +289,11 @@ RevL.ModelCouncil.deny_admitted	instance	RevL.ModelCouncil.council_not_vacuous	o
 RevL.ModelCouncil.unknown_tie_not_this_row	instance	RevL.ModelCouncil.council_not_vacuous	a tie spelling outside both vocabularies is admitted by this row; the unknown-tie rule is what refuses it
 RevL.ModelCouncil.fixtures_decided	concrete	-	the gcouncilsplit fixture refused; the on_tie split and on_tie deny shapes admitted
 RevL.ModelCouncil.council_not_vacuous	concrete	-	the admitting tie refused, on_tie split and on_tie deny admitted
+RevL.G9Flow.admitsB_iff	instance	RevL.G9Flow.g9_not_vacuous,RevL.G9Flow.corpus_rows_decided	admitsB decides Admits at all four sink classes; the corpus authority and disclosure shapes land in the two classes the rule states
+RevL.G9Flow.g9RowB_iff	instance	RevL.G9Flow.g9_not_vacuous,RevL.G9Flow.corpus_rows_decided,RevL.G9Flow.labelOfString_is_the_label	g9RowB decides Admits directly, so the printed TAINT verdict is `ok` exactly where the rule holds and `fail` where it is violated; both corpus shapes print fail and their clean twins print ok, and the verdict is read off the origins column the label row fixes
+RevL.G9Flow.reported_walk_reaches_the_reported_label	instance	RevL.G9Flow.g9_not_vacuous,RevL.G9Flow.escape_moves_the_label	the reported label is reachable from the empty label by the reported step count, at every count, so the hop column cannot move the verdict; the escape witness shows a label that does move it
+RevL.G9Flow.escapeFlow	instance	RevL.G9Flow.escape_moves_the_label	a DeclassOK declassifier can be appended to the reported walk and lands on applyD of the entry label, which is what the row's "route it through a declared point" advice claims
+RevL.G9Flow.labelOfString_is_the_label	concrete	-	the origins column read as a label: the empty string is the empty label, the corpus labels are the origins their names denote, an unknown name is none
+RevL.G9Flow.corpus_rows_decided	concrete	-	the two corpus sink and label shapes refused, the same two sinks on a clean label admitted
+RevL.G9Flow.escape_moves_the_label	concrete	-	endorse[fs] on an fs label leaves the empty label, which the authority sink admits where it refused the original
+RevL.G9Flow.g9_not_vacuous	concrete	-	both corpus sink kinds refused and both clean twins admitted, so the TAINT row is mutation-sensitive in both directions
