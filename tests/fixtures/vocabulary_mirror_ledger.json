@@ -43,10 +43,12 @@
         "src/revl/diagnostics.py::explain"
       ],
       "tokens": [
+        "category",
         "code",
         "fix",
         "guarantee",
         "known",
+        "meaning",
         "message",
         "ok"
       ],

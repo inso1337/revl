@@ -27,7 +27,12 @@ def _run_explain(args) -> int:
         print(f"error: {record['message']}", file=sys.stderr)
         print(f"known codes: {', '.join(record['known'])}", file=sys.stderr)
         return 1
-    print(f"{record['code']}  {record['guarantee']}")
+    headline = record.get("guarantee") or record.get("meaning", "")
+    print(f"{record['code']}  {headline}")
+    if record.get("category"):
+        print(f"  category: {record['category']}")
+    if record.get("guarantee") and record.get("meaning"):
+        print(f"  {record['meaning']}")
     if record.get("fix"):
         print(f"  fix: {record['fix']}")
     return 0
