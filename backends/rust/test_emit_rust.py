@@ -2158,11 +2158,12 @@ component SessionLedger provides sessions: SessionStore {
   provide sessions {
     fn load(id) = store.get(id) ?? []
     fn append(id, msg) {
-      let prev = store.get(id) ?? []
-      // issue #1945: a provide-method insert's undo is its table inverse,
-      // `remove` on the same key; restoring `prev` is not in the table
-      effect store.insert(id, prev.push(msg))
-      undo   store.remove(id)
+      // issue #1980: `prev` is read from the same table at the same key before
+      // the effect, so restoring it IS the inverse -- in the `Opt` shape the
+      // read has (an absent key is restored by `remove`).
+      let prev = store.get(id)
+      effect store.insert(id, (prev ?? []).push(msg))
+      undo   match prev { Some(v) => store.insert(id, v), None => store.remove(id) }
     }
   }
 }
@@ -2233,7 +2234,12 @@ def test_ledger_shape_carries_the_map_value_type():
     assert "store: Arc<Map<Vec<Msg>>>" in src
     assert "let store = Arc::new(Map::<Vec<Msg>>::new());" in src
     assert "self.store.get(&id).unwrap_or_else(|| vec![])" in src
-    assert "store_undo.remove(&id_undo);" in src
+    # issue #1980: the undo restores the value read from the same table at the
+    # same key, in the `Opt` shape that read has — an absent key is restored by
+    # `remove`, an existing one by putting the old value back. Both arms are
+    # pinned, so neither half can silently become a `remove`-only teardown.
+    assert "Some(v) => store_undo.insert(id_undo, v)," in src
+    assert "None => store_undo.remove(&id_undo)," in src
     # the historical hardcoding is gone
     assert "HashMap<String, String>" not in src
 

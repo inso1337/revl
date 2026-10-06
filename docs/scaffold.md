@@ -72,7 +72,7 @@ scaffold with the minimal fill its spec offers and compiles the result.
 | `--method 'name(p: T) -> R'` | a pure service method; repeatable |
 | `--emits 'name(p: T) -> R'` | an emission service method, bound to the wired capabilities; repeatable |
 | `--config name:Type` | a component config field; repeatable |
-| `--resource Type` | the effect-acquired resource's type (default: `<Service>Resource`) |
+| `--resource Type` | the effect-acquired resource's type (default: `<Service>Resource`). A type application like `Map[Str, Str]` names a host family whose `Unit`-returning operations a `Unit` method's fill spec lists (issue #1948) |
 | `--no-effect` | omit the acquire/undo effect block |
 | `-o, --out PATH` | write the skeleton here (default: stdout) |
 | `--json` | print the skeleton, its obligations, and each hole's fill spec as one document |
@@ -113,9 +113,15 @@ language: the generator never grants authority the spec did not ask for.
   value, so a `Unit` hole is filled only by a call that returns nothing. An
   `--emits` method returning `Unit` gets a hole whose fill is the crossing:
   declare the operation on the stub service, then `emit` it (its fill spec
-  lists it once declared). A pure `--methods` entry returning `Unit` computes
-  nothing a caller can see, so it is refused with that reason instead of
-  being written as a hole nothing can fill (issue #1857).
+  lists it once declared). A `--methods` entry returning `Unit` over a declared
+  `--resource` gets a hole whose fill is a write on that resource: the resource
+  the component acquired itself, in scope for its own method, the shape of
+  `fn seed(k) = data.insert(k, 1)` in `examples/verified_effect.rvl`. Its fill
+  spec lists the resource's operations that write it and return nothing
+  (`Map.insert`, `Map.remove`). A `--methods` entry returning `Unit` with no
+  resource and no emission computes nothing a caller can see and offers no such
+  write, so it is refused with that reason instead of being written as a hole
+  nothing can fill (issues #1857, #1948).
 
 ## `--json`: the skeleton and its remaining work in one response
 

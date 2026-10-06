@@ -67,6 +67,19 @@ class Spec:
     config: list[tuple[str, str]] = field(default_factory=list)
     effect: bool = True
     resource_type: str = ""
+    #: True when the spec NAMED the resource (`--resource <Type>`), as opposed
+    #: to the `<Service>Resource` placeholder the generator synthesizes.
+    resource_declared: bool = False
+
+    def owns_resource(self) -> bool:
+        """Whether this spec declares a resource the component itself holds.
+
+        Only then is the resource in scope for the component's own methods, so
+        only then can a pure `Unit` method's body be a write on it (issue
+        #1948). The synthesized `<Service>Resource` default is a placeholder,
+        not a declared resource: nothing builds it, so the #1857 refusal stands
+        for it."""
+        return self.resource_declared and self.effect
 
     def wired_roots(self) -> list[str]:
         """Capability roots whose boundary the spec injects (`--requires`).
@@ -95,6 +108,22 @@ class Spec:
 def _ident(value: str, what: str) -> str:
     if not _IDENT.match(value):
         raise ScaffoldError(f"{what} must be an identifier, found {value!r}")
+    return value
+
+
+def _type(value: str, what: str) -> str:
+    """A type: an identifier, optionally applied to arguments (`Map[Str, Str]`).
+
+    A resource's type is a type like any other the spec carries, and the only
+    host family with `Unit`-returning writes (`Map`) is applied, so an
+    identifier-only check would make a resource that offers a write
+    undeclarable. The shape is still checked, so the `hole[...]` the scaffold
+    writes is well-formed; whether the type exists is the checker's to say.
+    """
+    value = value.strip()
+    if not _IDENT.match(value.partition("[")[0].strip()) \
+            or value.count("[") != value.count("]"):
+        raise ScaffoldError(f"{what} must be a type, found {value!r}")
     return value
 
 
@@ -147,10 +176,13 @@ def build_spec(*, service: str, provides: str | None = None,
                resource_type: str | None = None) -> Spec:
     """Validate the raw CLI strings into a `Spec`, filling defaults.
 
-    The one conservative refusal lives here: an emission method with no wired
+    The conservative refusals live here. An emission method with no wired
     capability would have to be bound to nothing, which revl spells as bare
     `emission` — "any boundary". That is exactly the silent widening the
-    generator exists to avoid, so it refuses instead."""
+    generator exists to avoid, so it refuses instead. And a pure method
+    returning `Unit` is refused unless the spec declares a resource: with no
+    resource and no emission there is nothing in scope a fill could be (#1857),
+    while with one the fill is a write on it (#1948)."""
     service = _ident(service, "a service name")
     provides = _ident(provides or (service[:1].lower() + service[1:]),
                       "a provides key")
@@ -169,8 +201,9 @@ def build_spec(*, service: str, provides: str | None = None,
         requires=req, capabilities=list(capabilities or []),
         config=[parse_config(c) for c in config or []],
         effect=effect,
-        resource_type=_ident(resource_type or f"{service}Resource",
-                              "a resource type"),
+        resource_type=_type(resource_type or f"{service}Resource",
+                            "a resource type"),
+        resource_declared=bool(resource_type and resource_type.strip()),
     )
 
     parsed = [parse_method(m, emits=False) for m in methods or []]
@@ -184,12 +217,15 @@ def build_spec(*, service: str, provides: str | None = None,
     spec.methods = parsed
 
     for m in spec.methods:
-        if m.returns == "Unit" and not m.emits:
+        if m.returns == "Unit" and not m.emits and not spec.owns_resource():
             raise ScaffoldError(
                 f"`{m.name}` returns `Unit` and is pure, so it computes nothing "
                 "a caller can see and no fill can be written for it (revl has "
-                "no unit value): give it the return type it computes, or "
-                "declare it with --emits so its body is the crossing it makes")
+                "no unit value): give it the return type it computes, declare "
+                "it with --emits so its body is the crossing it makes, or "
+                "declare the resource it writes with --resource <Type> (with "
+                "the effect block, so that resource is in scope for its "
+                "methods)")
     if any(m.emits for m in spec.methods) and not spec.wired_roots():
         raise ScaffoldError(
             "an emission method needs a capability whose boundary is injected: "
@@ -225,7 +261,8 @@ def _split_body(method: Method, names: str, bound: list[str]) -> str:
 
 
 def _provide_body(method: Method, unwired: list[str],
-                  bound: list[str] | None = None) -> str:
+                  bound: list[str] | None = None,
+                  resource: bool = False) -> str:
     """A provide method: `fn m(p) = hole[R] "obligation"`. The message names the
     boundary a fill may cross, and flags any capability the spec asked for but
     did not inject — a gap the fill must not paper over by emitting."""
@@ -240,6 +277,13 @@ def _provide_body(method: Method, unwired: list[str],
                 " boundary that returns nothing, declared on its service first)")
     elif method.emits:
         note = " (a fill here may emit through the declared boundary)"
+    elif method.returns == "Unit" and resource:
+        # #1948: not pure — a later read sees what it wrote. The fill is a call
+        # on the resource this component acquired, which its own methods may
+        # write; nothing else in scope may be.
+        note = (" (the fill is a write on `resource`, the resource this component"
+                " acquired: a call on it that returns nothing; a fill must not"
+                " emit)")
     elif unwired:
         note = (f" — the spec named capability {', '.join(unwired)} but injected"
                 " no boundary for it, so a fill here must stay pure; add"
@@ -303,7 +347,8 @@ def build_skeleton(spec: Spec) -> str:
     lines.append("")
     lines.append(f"  provide {spec.provides} {{")
     for method in spec.methods:
-        lines.append(_provide_body(method, unwired, wired))
+        lines.append(_provide_body(method, unwired, wired,
+                                   resource=spec.owns_resource()))
     lines.append("  }")
     lines.append("}")
     lines.append("")

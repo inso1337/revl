@@ -117,16 +117,22 @@ A method effect has no round trip, so its `undo` is judged statically instead
 | activation body, `verified effect` | the round trip (this document) | measured, in-process state |
 | activation body, host acquisition (`Map.new`, `Pool.open`, `Stream.source`) | its family's release on the bound handle (#1859) | proven |
 | provide method, host Map `insert(k, v)` / `insert_if_absent(k, v)` | `remove(k)` on the same handle and key | `inverse: table`; `insert` also needs the key absent before it, which the runtime checks |
+| provide method, host Map `insert(k, new)` undone by the value read back | that read, restored in the `Opt` shape it has (#1980) | `inverse: table`: `prev` is read from the same handle and key in the same body before the effect, with no write to `m` at `k` in between |
 | provide method, host Map `remove(k)` | `insert(k, e)` on the same handle and key | `inverse: asserted`: the restored value `e` is the author's word |
 | provide method, an extern with a declared `undo` | that declared inverse | `inverse: declared`: what the host body reverts is the declaration's word |
 | provide method, a service call, `Pool.execute`, any other effect | receiver, non-emission and by-value capture only | `inverse: asserted`: trust-the-author |
 
 A host Map write whose `undo` is not its table inverse (a read, `drop`, the
 same verb, another handle or another key) is refused with G4, naming the
-inverse it needs. The session's teardown report lists every `asserted` and
-`declared` method effect of the composition it tore down under
-`trustTheAuthor` (`{component, method, inverse}`), beside the verdict and never
-counted against it: `noResidue` judges what the runtime can observe. A write in a provide method that is not bracketed at all
+inverse it needs. A restore whose `prev` is a *defaulted* read
+(`let prev = m.get(k) ?? []`) erases the `Opt`, so the read no longer says
+whether the key was there: that `undo` is refused too, naming the `match`
+form (`undo match prev { Some(v) => m.insert(k, v), None => m.remove(k) }`)
+that restores the absence as well as the value. The session's teardown report
+lists every `asserted` and `declared` method effect of the composition it tore
+down under `trustTheAuthor` (`{component, method, inverse}`), beside the
+verdict and never counted against it: `noResidue` judges what the runtime can
+observe. A write in a provide method that is not bracketed at all
 (`fn seed(k) = data.insert(k, 1)`) is legal: the caller brackets the crossing,
 as `Seeder` does above.
 

@@ -338,3 +338,155 @@ def test_a_table_inverse_adds_nothing_to_the_report():
     report = session.unload()
     assert report["noResidue"] is True
     assert "trustTheAuthor" not in report
+
+
+# ------------------- restoring the value the body read (issue #1980)
+#
+# The table inverse of `insert(k, v)` is `remove(k)` — but that is the inverse
+# only when the key was ABSENT. `insert(k, v)` over an existing entry REPLACES
+# it, and `remove(k)` cannot put the old value back: the write is not reversed
+# and teardown fails loudly (tests/test_method_effect_reversed_1945.py). The
+# body can restore it itself, because it can read the entry first:
+#
+#     let prev = store.get(k)
+#     effect store.insert(k, v)
+#     undo   match prev { Some(x) => store.insert(k, x), None => store.remove(k) }
+#
+# `store.get(k)` is `Opt`, so `prev` carries absence: the `Some` arm restores
+# the value that was there and the `None` arm removes the key the effect
+# created. That is the same exactness `remove(k)` has, so the undo is PROVEN
+# (`inverse: table`) rather than the author's word (`asserted`). The rule holds
+# when the restored name was bound from a read of the SAME table at the SAME
+# key, in the same body BEFORE the effect, with no write to that table at that
+# key in between; a defaulted read (`??`) erases the `Opt` and keeps the
+# refusal, naming the `match` form.
+
+_RESTORE_SERVICE = """service Kv {
+  fn get(k: Str) -> Str
+  fn set(k: Str, v: Str, p: Str) -> Str
+}
+fn noop() -> Int { return 0 }
+"""
+
+#: The admitted form: `prev`'s own `Opt` shape, absence included.
+MATCH_RESTORE = ("match prev { Some(x) => store.insert(k, x), "
+                 "None => store.remove(k) }")
+
+
+def _restoring(read: str | None = "let prev = store.get(k)",
+               effect: str = "store.insert(k, v)",
+               undo: str = MATCH_RESTORE,
+               between: str = "",
+               after: str = "") -> str:
+    """`set` reading the table at the key before it writes it — the shape issue
+    #1980 asks the checker to admit. `p` is a third parameter, so a program
+    that restores a name no read bound still names something in scope."""
+    lines = [f"      {read}"] if read is not None else []
+    lines += [f"      {extra}" for extra in between.splitlines()]
+    lines += [f"      effect {effect}", f"      undo   {undo}"]
+    if after:
+        lines.append(f"      {after}")
+    lines.append("      return v")
+    return (_RESTORE_SERVICE
+            + "component Store provides kv: Kv {\n"
+            "  let store = effect Map.new() undo store.drop()\n"
+            "  let other = effect Map.new() undo other.drop()\n"
+            "  provide kv {\n"
+            "    fn get(k) = store.get(k)\n"
+            "    fn set(k, v, p) {\n"
+            + "\n".join(lines) + "\n"
+            "    }\n"
+            "  }\n"
+            "}\n")
+
+
+def _restore_step(source: str) -> dict:
+    """The judged effect step — the LAST one, so a program that also writes
+    before its read can still be read back."""
+    ir = compile_source(source, "t.rvl")
+    [store] = [c for c in ir["components"] if c["name"] == "Store"]
+    [provide] = [s for s in store["body"] if s.get("step") == "provide"]
+    [set_] = [m for m in provide["methods"] if m["name"] == "set"]
+    return [s for s in set_["body"] if s.get("step") == "effect"][-1]
+
+
+#: The five reasons a restored name is not the read the rule asks for. They are
+#: the checker's own clauses, spelled out so a refusal is held to naming the
+#: required form rather than merely failing.
+UNREAD = "no read of this table at this key bound it earlier in the same body"
+ELSEWHERE = "it is read from another handle or another key"
+WRITTEN = "this table is written at this key between the read and the effect"
+DEFAULTED = ("its read is defaulted (`??`), which erases the `Opt` the "
+             "inverse follows")
+PLAIN = "it is `Opt`-shaped, so the undo must branch on it"
+
+
+def _restore_needs(why: str, bind: str = "prev", k: str = "k") -> str:
+    return (f"the `undo` of `effect store.insert(...)` cannot restore `{bind}` "
+            f"({why}): write `undo match {bind} {{ Some(v) => "
+            f"store.insert({k}, v), None => store.remove({k}) }}`")
+
+
+def test_the_match_restoring_the_read_value_is_the_table_inverse():
+    """The issue's central case: `insert(k, v)` undone by the `Opt` read's own
+    shape is EXACT — the old value goes back and the key the insert created
+    goes away — so it is PROVEN, not asserted."""
+    assert _restore_step(_restoring())["inverse"] == "table"
+
+
+def test_a_literal_key_read_is_restored_just_the_same():
+    source = _restoring(read='let prev = store.get("a")',
+                        effect='store.insert("a", v)',
+                        undo=('match prev { Some(x) => store.insert("a", x), '
+                              'None => store.remove("a") }'))
+    assert _restore_step(source)["inverse"] == "table"
+
+
+def test_a_write_at_another_key_between_the_read_and_the_effect_is_not_this_key():
+    """The rule forbids a write to THIS table at THIS key between the read and
+    the effect; a write at another key does not move what `prev` holds."""
+    source = _restoring(
+        between='effect store.insert("j", "mid")\nundo   store.remove("j")')
+    assert _restore_step(source)["inverse"] == "table"
+
+
+@pytest.mark.parametrize("case, kwargs, why, bind", [
+    ("a defaulted read",
+     dict(read="let prev = store.get(k) ?? []", undo="store.insert(k, prev)"),
+     DEFAULTED, "prev"),
+    ("a defaulted read under the match form",
+     dict(read="let prev = store.get(k) ?? []"), DEFAULTED, "prev"),
+    ("a plain restore of the `Opt` read",
+     dict(undo="store.insert(k, prev)"), PLAIN, "prev"),
+    ("a read from another handle",
+     dict(read="let prev = other.get(k)"), ELSEWHERE, "prev"),
+    ("a read from another key",
+     dict(read='let prev = store.get("j")'), ELSEWHERE, "prev"),
+    ("a write to this key between the read and the effect",
+     dict(between='effect store.insert(k, "mid")\nundo   store.remove(k)'),
+     WRITTEN, "prev"),
+    ("a restore of a name no read bound",
+     dict(read=None, undo="store.insert(k, p)"), UNREAD, "p"),
+    ("a read AFTER the effect",
+     dict(read=None, undo="store.insert(k, p)",
+          after="let later = store.get(k)"), UNREAD, "p"),
+], ids=lambda case: case if isinstance(case, str) else "")
+def test_a_restore_that_is_not_the_read_is_refused_naming_the_match_form(
+        case, kwargs, why, bind):
+    """Everything outside the rule keeps #1945's refusal, and the refusal names
+    the form that would be admitted — `match` over the read, both arms."""
+    error = _refusal(_restoring(**kwargs))
+    assert error.code == "G4"
+    assert error.message == _restore_needs(why, bind=bind)
+    assert "undo match" in error.message
+
+
+@needs_cordis
+def test_a_restored_read_is_proven_and_so_is_not_trust_the_author():
+    from revl.mcp.session import Session  # noqa: PLC0415
+    session = Session()
+    session.load(compile_source(_restoring(), "t.rvl"))
+    session.call("kv", "set", ["alpha", "one", "unused"])
+    report = session.unload()
+    assert report["noResidue"] is True
+    assert "trustTheAuthor" not in report
