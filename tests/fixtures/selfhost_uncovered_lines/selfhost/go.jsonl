@@ -124,10 +124,6 @@
 
 ["function", "remaining-equality-aliases-are-normalized-by-the-frontend", "go_bin_op", 3, 3]
 
-["reason", "remaining-fallback-emits-an-unsupported-step-marker-effectfu", "Remaining fallback emits an unsupported-step marker; effectful/component steps are outside the pure function module port."]
-
-["function", "remaining-fallback-emits-an-unsupported-step-marker-effectfu", "v3_stmt", 1, 1]
-
 ["reason", "remaining-fallback-handles-a-function-type-string-without", "Remaining fallback handles a function-type string without canonical opening parenthesis; frontend signatures are parenthesized."]
 
 ["function", "remaining-fallback-handles-a-function-type-string-without", "split_fn_type", 1, 1]

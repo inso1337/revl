@@ -3118,6 +3118,29 @@ fn handoff_twice_msg(cname: Str) -> Str {
     .concat("activation frame, so it hands off one state shape")
 }
 
+// A provision KEY, optionally namespace-qualified as `ns::key`
+// (docs/namespacing.md). The separator is two ADJACENT `:` tokens, not a lexed
+// `::`, so a qualified key is 4 tokens (`ns`, `:`, `:`, `local`) where a bare
+// one is 1 — `qkey_len` is that token count and `qkey_text` joins the spelling
+// back into the key's wiring identity. This is the reconstruction the
+// reference's `_provision_key` performs, and it is the reason the lexer needs
+// no `::` kind at all. Reading the key as one bare token instead made a
+// namespaced `provide` head fail the WHOLE component with `bad provide block
+// in component <C>` while the reference admits the document — a false
+// rejection of legal first-party code, which is what the reference census
+// tracks and refuses to tolerate.
+fn qkey_len(ts: List[Token], i: Int) -> Int {
+  if (atk(ts, i + 1, ":") && atk(ts, i + 2, ":")) { return 4 }
+  return 1
+}
+
+fn qkey_text(ts: List[Token], i: Int) -> Str {
+  if (qkey_len(ts, i) == 4) {
+    return tkc(ts, i).text.concat("::").concat(tkc(ts, i + 3).text)
+  }
+  return tkc(ts, i).text
+}
+
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                reqh: List[Bind], cname: Str, provs: List[Provide],
                setup: List[Stmt], iso: List[ProvKey], rts: List[Route],
@@ -3134,15 +3157,16 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        rts, icept, hoff, action)
   }
   if (atw(ts, i, "provide")) {
-    let key = tkc(ts, i + 1).text
-    if (!atk(ts, i + 2, "{")) {
-      return mk_provr(provs, setup, iso, rts, "", i + 2, false)
+    let key = qkey_text(ts, i + 1)
+    let kl = qkey_len(ts, i + 1)
+    if (!atk(ts, i + 1 + kl, "{")) {
+      return mk_provr(provs, setup, iso, rts, "", i + 1 + kl, false)
     }
-    let pend = close_brace(ts, i + 2)
+    let pend = close_brace(ts, i + 1 + kl)
     if (pend == 0 - 1) {
       return mk_provr(provs, setup, iso, rts, "", ts.length(), false)
     }
-    let ms = p_prov_methods(ts, i + 3, pend - 1, [])
+    let ms = p_prov_methods(ts, i + 2 + kl, pend - 1, [])
     if (!ms.ok) { return mk_provr(provs, setup, iso, rts, "", pend, false) }
     // a `provide` block is an action: it counts against later prelude decls.
     return p_comp_body(ts, pend, end, provh, reqh, cname,
@@ -3377,20 +3401,22 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
     var k = j + 1
     while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
            && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
-      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
-        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+      let kl = qkey_len(ts, k)
+      if (atk(ts, k, "ident") && atk(ts, k + kl, ":")
+          && atk(ts, k + kl + 1, "ident")) {
+        let pair = { name: qkey_text(ts, k), ty: tkc(ts, k + kl + 1).text }
         if (isReq) { reqs = reqs.push(pair) } else { provh = provh.push(pair) }
         // `Stream[T]` and every other PARAMETERIZED capability is skipped: the
         // reference resolves only a bare service name against its service
         // table, and the bracketed forms are out of this slice entirely.
-        if (!atk(ts, k + 3, "[")) {
-          let ref_ = { key: tkc(ts, k).text, svc: tkc(ts, k + 2).text,
+        if (!atk(ts, k + kl + 2, "[")) {
+          let ref_ = { key: qkey_text(ts, k), svc: tkc(ts, k + kl + 1).text,
                        line: tkc(ts, k).line,
                        clause: isReq ? "requires" : "provides" }
           if (isReq) { reqRefs = reqRefs.push(ref_) }
           else { provRefs = provRefs.push(ref_) }
         }
-        k += 3
+        k += kl + 2
       } else { k += 1 }
     }
     j = k

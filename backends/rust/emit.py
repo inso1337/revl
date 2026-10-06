@@ -1544,6 +1544,77 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     return name
 
 
+KEY_NAMESPACE_SEP = "::"
+"""The lexeme separating a provision key's namespaces (docs/namespacing.md).
+Re-declared here on purpose: a backend never imports the frontend."""
+
+
+def _key_binding(key: str) -> str:
+    """The local a qualified provision key is BOUND as, and the name a body's
+    `req` node carries. A `req` IR node names `greeter` for the key
+    `acme::greeter`; every registry/inject site names the whole key. Issue #1914."""
+    return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1] if KEY_NAMESPACE_SEP in key else key
+
+
+def _host_key(key: str) -> str:
+    """The HOST spelling of a provision key (issue #1914). A qualified key
+    (`acme::greeter`) is a legal wiring identity but never a legal Rust
+    identifier, so it is mangled here into one — and *only* here.
+
+    The rule is INJECTIVE. With `_u` the escape for a literal underscore:
+
+        _host_key(k) = k                                        if "::" not in k
+        _host_key(k) = "__".join(p.replace("_", "_u")            otherwise
+                                 for p in k.split("::"))
+
+    Proof. (1) `p -> p.replace("_", "_u")` is injective: every `_` in the image
+    is followed by the `u` it emitted, so reading an image left to right decodes
+    `_u` back to `_` and no other `_` can appear. (2) No part's image ends in
+    `_` and no image contains `__` (an escape always contributes `_u`), so
+    splitting the image on `__` recovers the part list exactly. Hence `_host_key`
+    is injective on qualified keys, and an unqualified key is returned unchanged.
+    (3) A qualified image always contains `__` while an unqualified key is
+    unchanged, so the only possible collision is a FLAT key that already spells
+    a mangled qualified key — `a__b` beside `a::b`. `_check_host_keys` refuses
+    exactly that pair, loudly, with a rename hint: the composition is
+    unambiguous or it does not compile, never silently wrong.
+    """
+    if KEY_NAMESPACE_SEP not in key:
+        return key
+    return "__".join(part.replace("_", "_u") for part in key.split(KEY_NAMESPACE_SEP))
+
+
+def _provide_local(key: str) -> str:
+    """The identifier a provide body binds its boxed implementation to
+    (`let <this>_box: Box<dyn Svc> = Box::new(<struct> { .. })`), issue #1914.
+
+    An UNQUALIFIED key is used VERBATIM, exactly as before item 560: the binding
+    is the key plus a `_box` suffix, which is a legal Rust identifier even when
+    the key is itself a Rust keyword (`box` -> `box_box`), so routing it through
+    `_ident`/`_mangle` would move every existing document's bytes for no reason.
+    A qualified key (`acme::greeter`) is no identifier at all, so it takes
+    `_host_key` — whose image always contains `__` and therefore can never be a
+    Rust keyword, so this position needs no `_mangle` ladder."""
+    return key if KEY_NAMESPACE_SEP not in key else _host_key(key)
+
+
+def _check_host_keys(ir: dict) -> None:
+    """Refuse the one collision `_host_key` cannot represent (see its proof):
+    a flat key that already spells another key's host spelling. Every tier
+    refuses it identically, so such a program is never emitted at all."""
+    seen: dict[str, str] = {}
+    for component in ir.get("components") or []:
+        for table in ("provides", "requires", "routes", "isolate", "intercept"):
+            for key in (component.get(table) or {}):
+                host = _host_key(key)
+                prior = seen.setdefault(host, key)
+                if prior != key:
+                    raise EmitError(
+                        f"provision key {key!r} and {prior!r} both spell the "
+                        f"Rust identifier {host!r} — rename one of them"
+                    )
+
+
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
@@ -2346,12 +2417,27 @@ class _Env:
         self.component = component
         self.services = services
         self.name = component["name"]
-        self.reqs: dict[str, str] = dict(component.get("requires") or {})
-        self.provides: dict[str, str] = dict(component.get("provides") or {})
+        # issue #1914: the RAW wiring tables keep the qualified key (what the
+        # compiler compares, what `isolate`/`intercept`/`routes` name, and what
+        # the runtime registry is keyed by); `reqs` is keyed by the BINDING a
+        # body's `req` node carries, with `req_keys` recovering the key a Rust
+        # identifier is built from.
+        self.requires_raw: dict[str, str] = dict(component.get("requires") or {})
+        self.provides_raw: dict[str, str] = dict(component.get("provides") or {})
+        self.reqs: dict[str, str] = {
+            _key_binding(key): service for key, service in self.requires_raw.items()
+        }
+        self.req_keys: dict[str, str] = {
+            _key_binding(key): key for key in self.requires_raw
+        }
+        self.provides: dict[str, str] = dict(self.provides_raw)
         # item 167: routed requires (item 162's `routes` IR) — a required key
         # bound across N named realms with a strategy. Its handle is a router
         # struct (re-resolving live workers per call), not a single `ctx.require`.
         self.routes: dict[str, dict] = dict(component.get("routes") or {})
+        # a body reference names a requirement by its binding, `routes` by its
+        # wiring key (issue #1914)
+        self.route_of: dict[str, str] = {_key_binding(key): key for key in self.routes}
         self.types: dict = types or {}
         self.functions: list = functions or []
         self.externs: list = externs or []
@@ -4512,19 +4598,25 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
     return parts
 
 
-def _req_ident(local: str) -> str:
+def _req_ident(local: str, env: "_Env | None" = None) -> str:
     """A requirement key as a Rust identifier: its local, its provider-struct
     field and its `self.` capture. A key that is a Rust keyword (`box`,
     `type`, `match`) takes the same `_` ladder every other user identifier
     does (`box` -> `box_`), as `_render_expr`'s `req` arm already spells it.
     The STRING key (`ctx.require::<..>("box")`, the inject gate) stays the
-    surface spelling (issue #1927)."""
-    return _ident(local, "requirement")
+    surface spelling (issue #1927).
+
+    `local` is the BINDING a `req` node carries; `env` resolves it to the
+    qualified key, whose HOST spelling is the identifier (`acme::greeter` ->
+    `acme__greeter`, issue #1914). Without `env` (a caller already holding the
+    key) the argument is mangled as it stands."""
+    key = local if env is None else env.req_keys.get(local, local)
+    return _ident(_host_key(key), "requirement")
 
 
 def _method_body(env: _Env, method: dict) -> str:
     rename = {b: _self_bind(env, b) for b in _binds(env.component)}
-    rename.update({local: f"self.{_req_ident(local)}" for local in env.reqs})
+    rename.update({local: f"self.{_req_ident(local, env)}" for local in env.reqs})
     if _has_config(env.component):
         rename["config"] = "self.config"
     return _pure_method_statements(env, method, rename)
@@ -4654,7 +4746,7 @@ def _self_bind(env: _Env, bind: str) -> str:
 def _method_scope_rename(env: _Env) -> dict[str, str]:
     rename = {b: _self_bind(env, b) for b in _binds(env.component)}
     for req in env.reqs:
-        rename[req] = f"self.{_req_ident(req)}"
+        rename[req] = f"self.{_req_ident(req, env)}"
     if _has_config(env.component):
         rename["config"] = "self.config"
     return rename
@@ -4741,7 +4833,7 @@ def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) ->
     for bind in _binds(env.component):
         out.append(f"{pad}let {bind}_undo = self.{_ident(bind, 'binding')}.clone();")
     for req in env.reqs:
-        out.append(f"{pad}let {req}_undo = self.{_req_ident(req)}.clone();")
+        out.append(f"{pad}let {req}_undo = self.{_req_ident(req, env)}.clone();")
     for param in method.get("params") or []:
         out.append(f"{pad}let {param}_undo = {param}.clone();")
 
@@ -4997,18 +5089,19 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
         component, _compensated_table(ir.get("externs") or []))
 
     for local, service in env.reqs.items():
-        _ident(local, "requirement")
+        _req_ident(local, env)
         if service not in services:
             raise EmitError(f"requirement {local!r} names unknown service {service!r}")
     for key, service in env.provides.items():
-        _ident(key, "provision")
+        _ident(_host_key(key), "provision")
         if service not in services:
             raise EmitError(f"provision {key!r} names unknown service {service!r}")
+    # `isolate`/`intercept` name the RAW wiring key, not the binding (issue #1914)
     for key in isolate:
-        if key not in env.reqs and key not in env.provides:
+        if key not in env.requires_raw and key not in env.provides_raw:
             raise EmitError(f"{name}: isolate key {key!r} is not declared")
     for key in intercept:
-        if key not in env.reqs:
+        if key not in env.requires_raw:
             raise EmitError(f"{name}: intercept key {key!r} is not a requirement")
 
     out: list[str] = []
@@ -5030,14 +5123,14 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
         # steps and so never synthesized this struct.
         if key in env.routes:
             continue
-        _ident(key, "provision")
-        struct = f"{cname}{_camel(key)}"
+        _ident(_host_key(key), "provision")
+        struct = f"{cname}{_camel(_host_key(key))}"
         out.append(f"struct {struct} {{")
         for b in _binds(component):
             out.append(f"    {_ident(b, 'binding')}: {_bind_field_type(env, b, map_values)},")
         if env.reqs:
             for local, req_service in env.reqs.items():
-                out.append(f"    {_req_ident(local)}: Arc<Box<dyn {_svc(req_service)}>>,")
+                out.append(f"    {_req_ident(local, env)}: Arc<Box<dyn {_svc(req_service)}>>,")
         out.extend(_config_struct_field(component, key))
         if has_effectful:
             out.append("    ctx: Arc<cordis::Context>,")
@@ -5099,27 +5192,28 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     if intercept:
         inject_parts = []
         for local in env.reqs:
-            if local in intercept:
-                base = f"{cname}{_camel(local)}"
+            raw = env.req_keys.get(local, local)
+            if raw in intercept:
+                base = f"{cname}{_camel(_host_key(raw))}"
                 defs: list[str] = []
                 type_names: dict = {}
                 counter = [0]
                 # called for its side effect: it appends the generated struct
                 # defs to `defs` (emitted below). Its return type string is not
                 # needed here, only the literal from `_intercept_json_lit`.
-                _intercept_json_type(intercept[local], base, defs, type_names, counter)
-                meta_lit = _intercept_json_lit(intercept[local], base, defs, type_names, counter)
+                _intercept_json_type(intercept[raw], base, defs, type_names, counter)
+                meta_lit = _intercept_json_lit(intercept[raw], base, defs, type_names, counter)
                 out.extend(defs)
-                inject_parts.append(f".require_with({_string(local)}, {meta_lit})")
+                inject_parts.append(f".require_with({_string(raw)}, {meta_lit})")
             else:
-                inject_parts.append(f".require({_string(local)})")
+                inject_parts.append(f".require({_string(raw)})")
         inject = "Inject::none()" + "".join(inject_parts)
     else:
         inject = _rust_inject(env)
 
     # item 167: a per-(component, key) router struct for each routed require.
     for key in env.routes:
-        out.extend(_emit_router_struct(env, cname, key, env.reqs[key], env.routes[key]))
+        out.extend(_emit_router_struct(env, cname, key, env.requires_raw[key], env.routes[key]))
 
     uses_await = _component_uses_await(component)
     plugin_fn = "cordis::plugin_async::<{0}, _, _>" if uses_await else "cordis::plugin_sync::<{0}, _>"
@@ -5151,15 +5245,17 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
         if step.get("step") == "provide":
             key = step.get("name")
             service = step.get("service")
-            struct = f"{env.name}{_camel(key)}"
+            pkey = _provide_local(key)
+            struct = f"{env.name}{_camel(_host_key(key))}"
             fields = ", ".join(
                 [f"{_ident(b, 'binding')}: {_ident(b, 'binding')}.clone()" for b in _binds(env.component)]
-                + [f"{_req_ident(local)}: {_req_ident(local)}.clone()" for local in env.reqs]
+                + [f"{_req_ident(local, env)}: {_req_ident(local, env)}.clone()"
+                   for local in env.reqs]
                 + _config_ctor_field(env.component, key)
                 + (["ctx: Arc::new(ctx.clone())"] if has_effectful else [])
             )
-            out.append(f"            let {key}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
-            out.append(f"            ctx.provide({_string(key)}, {key}_box)?;")
+            out.append(f"            let {pkey}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
+            out.append(f"            ctx.provide({_string(key)}, {pkey}_box)?;")
         else:
             _emit_step(step, env, out, indent=3)
     if env.needs_teardown:
@@ -5257,7 +5353,7 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
     as the component's `Arc<Box<dyn S>>` handle, so a provide-method's
     `<key>.<op>(…)` forwards straight through it (G2: one provider downstream).
     """
-    struct = f"RevlRouter{cname}{_camel(key)}"
+    struct = f"RevlRouter{cname}{_camel(_host_key(key))}"
     boxed = f"std::sync::Arc<Box<dyn {_svc(service)}>>"
     realms = list(route.get("realms") or [])
     strategy = route.get("strategy") or "round_robin"
@@ -5402,15 +5498,15 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         # here would yield an empty `impl <Svc>` that does not compile; skip it.
         if key in env.routes:
             continue
-        _ident(key, "provision")
-        struct = f"{cname}{_camel(key)}"
+        _ident(_host_key(key), "provision")
+        struct = f"{cname}{_camel(_host_key(key))}"
         out.append(f"struct {struct} {{")
         for b in _binds(component):
             out.append(f"    {_ident(b, 'binding')}: {_bind_field_type(env, b, map_values)},")
         # a provide-method may call a required service, so the provider owns
         # the same bindings the effectful path captures (java does this too)
         for local, req_service in env.reqs.items():
-            out.append(f"    {_req_ident(local)}: Arc<Box<dyn {_svc(req_service)}>>,")
+            out.append(f"    {_req_ident(local, env)}: Arc<Box<dyn {_svc(req_service)}>>,")
         out.extend(_config_struct_field(component, key))
         out.append("}")
         out.append(f"impl {_svc(service)} for {struct} {{")
@@ -5451,7 +5547,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
 
     # item 167: a per-(component, key) router struct for each routed require.
     for key in env.routes:
-        out.extend(_emit_router_struct(env, cname, key, env.reqs[key], env.routes[key]))
+        out.extend(_emit_router_struct(env, cname, key, env.requires_raw[key], env.routes[key]))
 
     inject = _rust_inject(env)
     uses_await = _component_uses_await(component)
@@ -5488,7 +5584,7 @@ def _rust_inject(env: "_Env") -> str:
     """The `Inject` gate. item 167: routed keys never enter the gate — they have
     no single-realm provider (the workers live in the named realms), so a fiber
     waiting on one would hang Pending forever; the router resolves them per call."""
-    gated = [k for k in env.reqs if k not in env.routes]
+    gated = [env.req_keys.get(k, k) for k in env.reqs if k not in env.route_of]
     return "Inject::none()" if not gated else f"Inject::new({_string(gated)})"
 
 
@@ -5523,12 +5619,13 @@ def _emit_req_bindings(env: "_Env", cname: str, out: list[str], indent: int) -> 
     require binds the single active provider through the Inject gate."""
     pad = "    " * indent
     for local, service in env.reqs.items():
-        if local in env.routes:
-            struct = f"RevlRouter{cname}{_camel(local)}"
-            out.append(f"{pad}let {_req_ident(local)}: std::sync::Arc<Box<dyn {_svc(service)}>> = "
+        raw = env.req_keys.get(local, local)
+        if local in env.route_of:
+            struct = f"RevlRouter{cname}{_camel(_host_key(raw))}"
+            out.append(f"{pad}let {_req_ident(local, env)}: std::sync::Arc<Box<dyn {_svc(service)}>> = "
                        f"{struct}::_revl_new(ctx.clone());")
         else:
-            out.append(f"{pad}let {_req_ident(local)} = ctx.require::<Box<dyn {_svc(service)}>>({_string(local)})?;")
+            out.append(f"{pad}let {_req_ident(local, env)} = ctx.require::<Box<dyn {_svc(service)}>>({_string(raw)})?;")
 
 
 def _emit_setup_value(node: dict, env: _Env) -> str:
@@ -5767,7 +5864,7 @@ def _emit_activation_compensation(env: "_Env", compensate_node: dict, out: list[
     rename: dict[str, str] = {}
     for req in env.reqs:
         req_c = f"{req}_comp"
-        out.append(f"{pad}let {req_c} = {_req_ident(req)}.clone();")
+        out.append(f"{pad}let {req_c} = {_req_ident(req, env)}.clone();")
         rename[req] = req_c
     for local in sorted(referenced & set(env.activation_binds)):
         local_c = f"{local}_comp"
@@ -5807,7 +5904,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         undo_rename = {step["bind"]: undo_name}
         for req in env.reqs:
             req_undo = f"{req}_undo"
-            out.append(f"{pad}let {req_undo} = {_req_ident(req)}.clone();")
+            out.append(f"{pad}let {req_undo} = {_req_ident(req, env)}.clone();")
             undo_rename[req] = req_undo
         is_cas = _is_map_cas(step.get("acquire"))
         if is_cas:
@@ -5847,7 +5944,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         undo_rename: dict[str, str] = {}
         for req in env.reqs:
             req_undo = f"{req}_undo"
-            out.append(f"{pad}let {req_undo} = {_req_ident(req)}.clone();")
+            out.append(f"{pad}let {req_undo} = {_req_ident(req, env)}.clone();")
             undo_rename[req] = req_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         out.append(f"{pad}let _ = {acquire};")
@@ -5884,7 +5981,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         rename: dict[str, str] = {}
         for req in env.reqs:
             cloned = f"{req}_t{n}"
-            out.append(f"{pad}let {cloned} = {_req_ident(req)}.clone();")
+            out.append(f"{pad}let {cloned} = {_req_ident(req, env)}.clone();")
             rename[req] = cloned
         # a firing that emits an extern declaring its own `compensate` registers
         # it on the activation's accumulator, once per firing, after the fire
@@ -5958,14 +6055,16 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
     elif kind == "provide":
         key = step.get("name")
         service = step.get("service")
-        struct = f"{env.name}{_camel(key)}"
+        pkey = _provide_local(key)
+        struct = f"{env.name}{_camel(_host_key(key))}"
         fields = ", ".join(
             [f"{_ident(b, 'binding')}: {_ident(b, 'binding')}.clone()" for b in _binds(env.component)]
-            + [f"{_req_ident(local)}: {_req_ident(local)}.clone()" for local in env.reqs]
+            + [f"{_req_ident(local, env)}: {_req_ident(local, env)}.clone()"
+               for local in env.reqs]
             + _config_ctor_field(env.component, key)
         )
-        out.append(f"{pad}let {key}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
-        out.append(f"{pad}ctx.provide({_string(key)}, {key}_box)?;")
+        out.append(f"{pad}let {pkey}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
+        out.append(f"{pad}ctx.provide({_string(key)}, {pkey}_box)?;")
     elif kind == "stream-iter":
         # item 130 Slice 4: `every <x> in <sub> { … }` on this blocking tier is
         # a plain `loop` over the cancel-channel `next`, the SAME shape the go
@@ -10695,6 +10794,7 @@ def emit(ir: dict, record: bool = False) -> str:
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
     _refuse_validated_emissions(ir)
+    _check_host_keys(ir)
 
     _refuse_fault_tests(ir)
 

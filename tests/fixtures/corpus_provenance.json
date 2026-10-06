@@ -1,6 +1,6 @@
 {
  "note": "Which generation authored each scoring document (roadmap item 542, issue #1221). Generation 0 is PRE-LOOP: it predates the self-improvement loop, which is what the floors are about. It is not a claim that a person typed it, and issue #1397 measured why not. A name absent from every list is UNDECLARED, which counts as loop-authored at every threshold and is an error under `python3 tools/corpus_provenance.py --check`: an unknown provenance must never read as pre-loop, or a document dropped into a globbed corpus would raise the measured independence. `human_authored` is the second, orthogonal axis: the case ids a person typed, which a person names one at a time. It is fail-closed the same way, a document not named there reads as model-authored, and it carries no floor. Names only, no counts and no fractions, for the same reason tests/fixtures/oracle_construct_reach_ledger.json records names only: a derived number in a recorded artifact rots against what it was derived from. `floors` is the minimum percent of each scoring corpus that must remain independent of generation 1 and up; it is an operator decision and the tool holds whatever is written here.",
- "current_generation": 0,
+ "current_generation": 1,
  "floors": {
   "census": 80,
   "emit_go_corpus": 75,
@@ -1276,6 +1276,13 @@
    "tests/fixtures/verified_method_effect/t1_emit.rvl",
    "tests/fixtures/verified_method_effect/t1_let_bound.rvl",
    "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
+  ],
+  "1": [
+   "tests/fixtures/emit_go_refusals/host_identifier_collision.rvl",
+   "tests/fixtures/emit_java_refusals/host_identifier_collision.rvl",
+   "tests/fixtures/emit_py_refusals/host_identifier_collision.rvl",
+   "tests/fixtures/emit_rust_refusals/host_identifier_collision.rvl",
+   "tests/fixtures/emit_ts_refusals/host_identifier_collision.rvl"
   ]
  }
 }

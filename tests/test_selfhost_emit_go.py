@@ -814,3 +814,24 @@ def test_a_fault_test_the_reference_refuses_is_named_here_too(emitted, reference
     got = emitted["emit_go_src"](ir)
     assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in got
     assert "<<UNSUPPORTED-COMPONENT:P>>" in got
+
+
+# item 560 / issue #1914: the one key pair the injective mangling cannot split
+# ---------------------------------------------------------------------------
+# `tests/fixtures/emit_go_refusals/host_identifier_collision.rvl` is the only
+# input that reaches the namespaced branch of the mangling and the refusal arm of
+# `_check_host_keys`, so `tools/selfhost_line_coverage.py` drives both halves
+# over it. Its refusal text is asserted here.
+COLLISION_DOC = (ROOT / "tests" / "fixtures" / "emit_go_refusals"
+                 / "host_identifier_collision.rvl")
+
+
+def test_a_host_identifier_collision_is_refused_by_name(reference):
+    """A namespaced key and the unqualified key that already spells its mangled
+    identifier are two DISTINCT wiring keys that must not land on one identifier
+    -- and on this tier `_` is not significant in an identifier, so the collision
+    is even wider than the raw spelling. The reference refuses by name."""
+    ir = compile_files([str(COLLISION_DOC)])
+    with pytest.raises(reference.EmitError,
+                       match="both mangle to the Go identifier"):
+        reference.emit(ir)
