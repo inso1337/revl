@@ -301,9 +301,10 @@ never has to touch the filesystem. This is your primary interface.
 The complete verb set comes from
 `src/revl/mcp/server.py` and `query_tools.py`. `tools/list` shows the
 core tier by default; call `revl_verbs` for any other verb's
-schema, or call it by name. It is grouped below by what you reach for;
-each verb's exact inputs and outputs are in
-[mcp-reference.md](mcp-reference.md).
+schema, and pass it `name` and `args` to CALL one — that call is the
+call, so every verb is reachable from the list you were given. It is
+grouped below by what you reach for; each verb's exact inputs and
+outputs are in [mcp-reference.md](mcp-reference.md).
 <!-- docgen:agents-mcp-count end -->
 
 | verb(s) | use | detail |

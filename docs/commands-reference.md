@@ -1941,9 +1941,11 @@ the server whose verbs are documented in [mcp-reference.md](mcp-reference.md).
   `revl_estop` are refused while it settles. `0` removes the protection against
   adopting a half-written file; write the profile atomically either way.
 - `--all-tools` - advertise every verb in `tools/list`. Without it, `tools/list`
-  shows the core tier plus `revl_verbs`, which returns any other verb's schema;
-  every verb is callable by name either way. `REVL_MCP_ALL_TOOLS=1` does the
-  same (issue #1697, [mcp-reference.md](mcp-reference.md#find-a-verb)).
+  shows the core tier plus `revl_verbs`, which returns any other verb's schema
+  and — given `name` and `args` — calls that verb, so every verb is reachable
+  from the advertised list; `--all-tools` costs about 22,800 extra cold-start
+  tokens, the hatch about a hundred. `REVL_MCP_ALL_TOOLS=1` does the same
+  (issue #1697, #2073, [mcp-reference.md](mcp-reference.md#find-a-verb)).
 
 `revl mcp schema FILES` - project provided services to MCP tool definitions
 (the `revl -> MCP` direction, annotations derived from the checker).

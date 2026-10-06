@@ -5274,7 +5274,22 @@ for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
 def _tool_verbs(arguments: dict) -> dict:
     """Discovery (issue #1697): with no arguments, every verb by topic, each
     with one sentence and no schema; with `topic` or `names`, those verbs'
-    exact advertised schemas. Every verb is callable by name either way."""
+    exact advertised schemas. With `name` and `args` this is not a lookup at
+    all but a CALL of the named verb (issue #2073), which `handle` resolves
+    before dispatch — see `_hatch_call`."""
+    if _disclosure.is_hatch(arguments):
+        # the hatch (#2073) is a CALL: `handle` resolves it before dispatch so
+        # the verb it names runs the whole pipeline and answers what a direct
+        # call answers. Reaching this handler with `name` means a transport
+        # bypassed that dispatch, and answering the index here would be exactly
+        # the silent no-op the hatch exists to prevent.
+        _verb, _args, reason = _disclosure.hatch(arguments)
+        return _session_error(
+            reason or (f"`{_disclosure.HATCH_NAME}` selects the escape hatch, "
+                       f"which is dispatched before this handler; call "
+                       f"`{_disclosure.DISCOVERY}` with no arguments for the "
+                       f"index"),
+            next=_remedy.call(_disclosure.DISCOVERY, {}))
     names = list(arguments.get("names") or [])
     topic = arguments.get("topic")
     if topic is None and not names:
@@ -5298,11 +5313,13 @@ def _tool_verbs(arguments: dict) -> dict:
 
 TOOLS.append({
     "name": _disclosure.DISCOVERY,
-    "description": "Find a verb. tools/list shows the core verbs; this returns "
-                   "the rest. With no arguments: every verb grouped by topic, "
-                   "one sentence each. With `topic` or `names`: those verbs' "
-                   "exact schemas. Any verb can be called by name, listed or "
-                   "not.",
+    "description": "Find a verb, or call one. tools/list shows the core verbs; "
+                   "this reaches the rest. With no arguments: every verb "
+                   "grouped by topic, one sentence each. With `topic` or "
+                   "`names`: those verbs' exact schemas. With `name` and "
+                   "`args`: CALL that verb — the same result it returns when "
+                   "called directly, so every verb is callable even when it is "
+                   "not listed.",
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -5310,9 +5327,17 @@ TOOLS.append({
                       "description": "a topic from the no-argument answer"},
             "names": {"type": "array", "items": {"type": "string"},
                       "description": "verb names whose schemas to return"},
+            **_disclosure.HATCH_SCHEMA,
         },
     },
-    "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    # issue #2073: `revl_verbs` is no longer read-only. Its lookup form is,
+    # but the hatch form reaches every verb, including the ones this server
+    # annotates `destructiveHint: true` (`revl_export` overwrites files,
+    # `revl_change` hot-swaps). Annotations are per tool, not per call, so a
+    # verb that CAN write must not claim it cannot: this repo calls a false
+    # `readOnlyHint` a liar and tests for it
+    # (`tests/fixtures/mcp_proxy_fake_upstream.py`).
+    "annotations": {"readOnlyHint": False, "destructiveHint": True},
     "handler": _tool_verbs,
 })
 
@@ -5340,8 +5365,10 @@ def set_runtime_available(available: bool | None) -> None:
 # issue #1704: the authoring loop, in order, with the exact verbs
 _INSTRUCTIONS = _authoring_loop.INSTRUCTIONS
 _TIERED_INSTRUCTIONS = ("tools/list shows the core verbs only; call revl_verbs "
-                        "to see every other verb by topic and get its schema. "
-                        "Any verb can be called by name.")
+                        "to see every other verb by topic and get its schema, "
+                        "or to CALL one: pass `name` (the verb) and `args` and "
+                        "that call is the call, with the result it would have "
+                        "returned directly. Any verb is reachable that way.")
 
 
 def _instructions() -> str:
@@ -5379,7 +5406,16 @@ def handle(message: dict) -> dict | None:
         name = params.get("name")
         if _HANDLERS.get(name) is None:
             return _error(request_id, -32602, f"unknown tool: {name}")
-        payload = _call_tool(name, params.get("arguments") or {})
+        arguments = params.get("arguments") or {}
+        # issue #2073: the escape hatch. `revl_verbs` with `name` is not a
+        # lookup but a CALL of the verb it names, resolved here to that verb's
+        # own name so the pipeline below cannot tell the difference. The
+        # tiered list therefore stays exactly `CORE`: every verb is one listed
+        # tool away without a fifteenth listed verb.
+        if name == _disclosure.DISCOVERY and _disclosure.is_hatch(arguments):
+            payload = _hatch_call(arguments)
+        else:
+            payload = _call_tool(name, arguments)
         # issue #1693: every response, success or refusal, says what the
         # session holds now; issue #1694: a refusal of the same call as the
         # refusal just before it says so instead of repeating byte for byte
@@ -5403,6 +5439,30 @@ def handle(message: dict) -> dict | None:
     if request_id is None:
         return None
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _hatch_call(arguments: dict) -> dict:
+    """`revl_verbs` with `name`: the call it names (issues #2042, #2073).
+
+    Resolved to the verb's OWN name before dispatch, so everything below runs
+    exactly as it would for a direct call — the jail, the authoring gate, the
+    operator gate, the runtime gate, the handler, the knowledge ride, the
+    `disk` ride, the undo attach — and the payload is the payload a direct
+    call returns. The hatch adds only the verdict on the hatch itself: a call
+    that cannot name the verb it means refuses by name, rather than quietly
+    answering the lookup, which would be a different answer to a different
+    question and so the silent no-op this exists to prevent."""
+    verb, args, reason = _disclosure.hatch(arguments)
+    if reason:
+        return _session_error(reason,
+                              next=_remedy.call(_disclosure.DISCOVERY, {}))
+    if _HANDLERS.get(verb) is None:
+        return _session_error(
+            f"no verb named {verb!r} to call through "
+            f"`{_disclosure.DISCOVERY}`",
+            fix=f"drop `{_disclosure.HATCH_NAME}` to look it up instead",
+            next=_remedy.call(_disclosure.DISCOVERY, {}))
+    return _call_tool(verb, args)
 
 
 def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:

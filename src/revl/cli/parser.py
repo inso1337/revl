@@ -1123,8 +1123,9 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_serve.add_argument("--all-tools", action="store_true",
                            help="advertise every verb in tools/list, not only the "
                                 "core tier plus revl_verbs (also: "
-                                "REVL_MCP_ALL_TOOLS=1). Every verb is callable "
-                                "by name either way")
+                                "REVL_MCP_ALL_TOOLS=1). Every verb is reachable "
+                                "without it: revl_verbs takes name and args and "
+                                "calls that verb")
     _add_mcp_http_arguments(mcp_serve)
     _add_profile_settle_argument(mcp_serve)
     mcp_schema = mcp_sub.add_parser("schema",
