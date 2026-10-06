@@ -404,7 +404,11 @@ def _guarantee_hover(text: str, line0: int, start: int, end: int,
         payload = explain(code) if isinstance(code, str) else {"ok": False}
         if not payload.get("ok"):
             continue
-        lines = [f"**{payload['code']} — {payload['guarantee']}**"]
+        # `explain` covers codes that enforce no guarantee (issue #2028), so the
+        # headline falls back to the meaning/category rather than indexing a key
+        # that need not be there.
+        headline = payload.get("guarantee") or payload.get("meaning") or payload.get("category")
+        lines = [f"**{payload['code']} — {headline}**"] if headline else [f"**{payload['code']}**"]
         if payload.get("fix"):
             lines.append("")
             lines.append(f"Fix: {payload['fix']}")
