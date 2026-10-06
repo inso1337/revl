@@ -23455,6 +23455,21 @@ fn ir_params_json(ps: &[ParamN]) -> String {
     return out;
 }
 
+fn ir_fn_params_json(ps: &[ParamN]) -> String {
+    let mut out = String::from("");
+    let mut i = 0i64;
+    while (i < ps.revl_length()) {
+        let mut e = ((String::from("{\"name\": ").revl_concat(&jstr(&predeclared_mangle((ps)[(i) as usize].name.clone())))).revl_concat(", \"type\": ")).revl_concat(&jstr(&taint_strip((ps)[(i) as usize].ty.clone())));
+        if taint_mentions_secret((ps)[(i) as usize].ty.clone()) {
+            e.push_str(", \"secret\": true");
+        }
+        e.push_str("}");
+        out = if (out == "") { e.clone() } else { (out.revl_concat(", ")).revl_concat(&e) };
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn taint_top_qualifier(ty: String) -> String {
     if ((ty == "") || (!taint_has_qualifier(&ty))) {
         return String::from("");
@@ -27155,7 +27170,7 @@ fn lir_arrow_at(a: ArrowN, env: Vec<Bind>, expected: &str, al: std::collections:
     while (i < a.params.revl_length()) {
         let p = (a.params)[(i) as usize].clone();
         let pty = if (p.ty != "") { alias_subst(p.ty.clone(), al.clone()) } else { if (i < expPs.revl_length()) { (expPs)[(i) as usize].clone() } else { String::from("") } };
-        pn = if (i == 0i64) { jstr(&p.name) } else { (pn.revl_concat(",")).revl_concat(&jstr(&p.name)) };
+        pn = if (i == 0i64) { jstr(&predeclared_mangle(p.name.clone())) } else { (pn.revl_concat(",")).revl_concat(&jstr(&predeclared_mangle(p.name.clone()))) };
         pt = if (i == 0i64) { jstr(&pty) } else { (pt.revl_concat(",")).revl_concat(&jstr(&pty)) };
         if (pty == "") {
             allTyped = false;
@@ -29009,7 +29024,7 @@ fn lir_function(ts: Vec<Token>, i: i64, cases: Vec<Bind>, public_fn: bool, color
     let om = own_marks(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), sm.clone());
     let tmarks = { let mut c = ({ let mut c = om.marks.clone(); c.insert(String::from("@try_fn"), i); c }).clone(); c.insert(String::from("@try_end"), bend); c };
     let bodyjs = lir_stmts(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), params_env(ps.ps.clone(), cases.clone(), tps.clone()), vec![], retTy.clone(), tmarks.clone(), om.births.clone(), al.clone());
-    let js = ((((((((((((String::from("{\"name\":").revl_concat(&jstr(&nm))).revl_concat(",\"params\":[")).revl_concat(&ir_params_json(&ps.ps))).revl_concat("],\"returns\":")).revl_concat(&retJson)).revl_concat(",\"public\":")).revl_concat(&if public_fn { String::from("true") } else { String::from("false") })).revl_concat(",\"body\":[")).revl_concat(&bodyjs)).revl_concat("]")).revl_concat(&if cache_pure { String::from(",\"cache\":{\"class\":\"pure_fn\"}") } else { String::from("") })).revl_concat(&if contains__m2(&colored, &nm) { String::from(",\"async\":true") } else { String::from("") })).revl_concat("}");
+    let js = ((((((((((((String::from("{\"name\":").revl_concat(&jstr(&nm))).revl_concat(",\"params\":[")).revl_concat(&ir_fn_params_json(&ps.ps))).revl_concat("],\"returns\":")).revl_concat(&retJson)).revl_concat(",\"public\":")).revl_concat(&if public_fn { String::from("true") } else { String::from("false") })).revl_concat(",\"body\":[")).revl_concat(&bodyjs)).revl_concat("]")).revl_concat(&if cache_pure { String::from(",\"cache\":{\"class\":\"pure_fn\"}") } else { String::from("") })).revl_concat(&if contains__m2(&colored, &nm) { String::from(",\"async\":true") } else { String::from("") })).revl_concat("}");
     return LirFn { js: js.clone(), i: bend };
 }
 
@@ -34492,6 +34507,11 @@ fn lower_to_ir_marks_an_emission_op_and_a_scoped_capability() {
 #[test]
 fn lower_to_ir_marks_sized_length_on_a_field_of_a_required_service_s_returned_record() {
     assert!(str_has(&lower_to_ir(String::from("type Label = { text: Str } service Geo { fn label(s: Str) -> Label } service S { fn m(s: Str) -> Int } component C requires geo: Geo provides p: S { provide p { fn m(s) = geo.label(s).text.length } }")), "\"name\": \"length\", \"sized_length\": true}"));
+}
+
+#[test]
+fn lower_to_ir_renames_a_predeclared_parameter_in_the_signature__issue__1633_() {
+    assert!((lower_to_ir(String::from("fn f(len: Int, error: Int) -> Int { return len + error }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"len_\", \"type\": \"Int\"}, {\"name\": \"error\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"len_\"},\"right\":{\"kind\":\"var\",\"name\":\"error\"},\"operands\":\"Int\"}}]}]}"));
 }
 
 #[test]

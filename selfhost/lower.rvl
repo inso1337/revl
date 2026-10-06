@@ -19762,6 +19762,27 @@ fn ir_params_json(ps: List[ParamN]) -> Str {
   return out
 }
 
+// A FUNCTION's `params` list: `ir_params_json` with each name run through
+// `predeclared_mangle`, so a parameter that shadows a predeclared name is
+// renamed in the SIGNATURE exactly as the body's references already are. The
+// reference does this at its own param-list construction (`_lower_fns` lowers
+// `p.name` through `_predeclared_mangle`), which is why `fn f(len: Int)` reads
+// as `len_` on both sides there. Only `fn` declarations are mangled: extern and
+// service-operation params keep the author's spelling, as in the reference.
+fn ir_fn_params_json(ps: List[ParamN]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ps.length()) {
+    var e = "{\"name\": ".concat(jstr(predeclared_mangle(ps[i].name)))
+      .concat(", \"type\": ").concat(jstr(taint_strip(ps[i].ty)))
+    if (taint_mentions_secret(ps[i].ty)) { e = e.concat(", \"secret\": true") }
+    e = e.concat("}")
+    out = out == "" ? e : out.concat(", ").concat(e)
+    i += 1
+  }
+  return out
+}
+
 // The outermost qualifier head of a DECLARED type (`Untrusted`, `Trusted` or
 // `Secret`) when it wraps exactly one type argument, else "": the reference's
 // `taint.top_qualifier` for the three heads the services IR stamps.
@@ -23717,7 +23738,14 @@ fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str, al: Map[Str, Str]) ->
     // unannotated arrow's return is inferred in this environment.
     let pty = p.ty != "" ? alias_subst(p.ty, al)
                          : (i < expPs.length() ? expPs[i] : "")
-    pn = i == 0 ? jstr(p.name) : pn.concat(",").concat(jstr(p.name))
+    // issue #1633, the arrow half of the `fn` repair below: the SIGNATURE must
+    // carry the same mangled spelling the body reads, because `lir_expr`'s
+    // in-scope `var` arm mangles a reference and a signature written from the
+    // raw `p.name` then declares a name its own body never mentions. The scope
+    // binding stays the author's spelling, exactly as at a declaration site —
+    // only the emitted name is escaped. `captures` already did this.
+    pn = i == 0 ? jstr(predeclared_mangle(p.name))
+                : pn.concat(",").concat(jstr(predeclared_mangle(p.name)))
     pt = i == 0 ? jstr(pty) : pt.concat(",").concat(jstr(pty))
     if (pty == "") { allTyped = false } else { inner = tenv_put(inner, p.name, pty) }
     i += 1
@@ -25637,7 +25665,7 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
   let tmarks = om.marks.set("@try_fn", i).set("@try_end", bend)
   let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
                          params_env(ps.ps, cases, tps), [], retTy, tmarks, om.births, al)
-  let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
+  let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_fn_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
     .concat(bodyjs).concat("]")
@@ -29472,6 +29500,15 @@ test "lower_to_ir marks an emission op and a scoped capability" {
 test "lower_to_ir marks sized_length on a field of a required service's returned record" {
   assert str_has(lower_to_ir("type Label = { text: Str } service Geo { fn label(s: Str) -> Label } service S { fn m(s: Str) -> Int } component C requires geo: Geo provides p: S { provide p { fn m(s) = geo.label(s).text.length } }"),
     "\"name\": \"length\", \"sized_length\": true}")
+}
+
+test "lower_to_ir renames a predeclared parameter in the signature (issue #1633)" {
+  // `len` is host-predeclared, so the reference renames the binder wherever it
+  // introduces it. The body reference was already renamed here; the parameter
+  // list was not, so the signature declared `len` while the body read `len_`,
+  // and the Go the fully-native chain emitted did not build.
+  assert lower_to_ir("fn f(len: Int, error: Int) -> Int { return len + error }")
+    == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"len_\", \"type\": \"Int\"}, {\"name\": \"error\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"len_\"},\"right\":{\"kind\":\"var\",\"name\":\"error\"},\"operands\":\"Int\"}}]}]}"
 }
 
 test "one member wearing a council's name is refused, and so is no proposer" {
