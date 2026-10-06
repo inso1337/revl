@@ -850,16 +850,34 @@ _RETURN_CANONICAL = {
 }
 
 
+def _fix_field(fix: str | None) -> dict:
+    """The diagnostic's mechanical-remedy entry, or nothing at all.
+
+    Spelled here rather than at the `_session_error` call site so the envelope
+    keeps one vocabulary across its copies (`tools/check_vocabulary_mirrors.py`
+    records the six fields `http_face._err`, `query_tools._require`,
+    `query_tools._run` and `_session_error` all spell; issue #2035). The entry
+    is omitted rather than set to null, so a reader can tell a refusal that has
+    a remedy from one that has none."""
+    return {} if fix is None else {"fix": fix}
+
+
 def _session_error(message: str | BaseException, category: str = "session",
-                   **extra) -> dict:
+                   fix: str | None = None, **extra) -> dict:
     """A session refusal. `message` is the prose, or the exception that
     refused. Its next call, when it has one (issue #1691), is resolved and
-    attached by `remedy`, which also names it at the end of the message."""
+    attached by `remedy`, which also names it at the end of the message.
+
+    `fix` is the mechanical remedy in the caller's own terms — the one edit to
+    the arguments that makes this same call work — and rides on the diagnostic
+    when the refusal has one (issue #2035). It is deliberately not the `next`
+    call: a next call is a *different* call to make, where `fix` is this call
+    with one argument dropped."""
     message, remedy = _remedy.resolve(message, extra)
-    return _remedy.attach({"ok": False, "diagnostics": [{
-        "severity": "error", "code": "REVL", "category": category,
-        "message": message,
-    }], **extra}, remedy)
+    diagnostic = {"severity": "error", "code": "REVL", "category": category,
+                  "message": message, **_fix_field(fix)}
+    return _remedy.attach({"ok": False, "diagnostics": [diagnostic], **extra},
+                          remedy)
 
 
 # -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---
@@ -1123,10 +1141,20 @@ def _tool_load(arguments: dict) -> dict:
     under a name another operator leases is refused, as a swap replacing it is
     (`leases.FENCED` says why a cold load is fenced too)."""
     source, files, modules = _candidate_of(arguments)
+    if source is None and files and SESSION.loaded:
+        # issue #2035: `files` is the load set and nothing is being loaded, so
+        # this is a no-op load on a warm session rather than a refusal — the
+        # argument means one thing in both states, and the note says it was
+        # ignored. The composition that runs is what `revl_load` boots.
+        arguments = {k: v for k, v in arguments.items() if k != "files"}
+        source, files, modules = _candidate_of(arguments)
+        ignored = True
+    else:
+        ignored = False
     if source is None and not files:
         if _draft.pending(SESSION) is not None and not SESSION.loaded:
             return _draft.boot_held(SESSION, arguments, _boot_draft)
-        return _nothing_to_load()
+        return _nothing_to_load(ignored)
     # issue #1700: terse punctuation completed before the compile; a draft is
     # held canonical, a booting load holds the (completed) text as sent
     sent, stored, canon = _canonical.prepare(arguments)
@@ -1171,15 +1199,25 @@ def _load_records(requested) -> bool:
     return bool(requested)
 
 
-def _nothing_to_load() -> dict:
+def _nothing_to_load(ignored: bool = False) -> dict:
     """`revl_load` with neither `source` nor `files` and no draft to boot
-    (issue #1851): a refusal that says which, not the compiler's ValueError."""
+    (issue #1851): a refusal that says which, not the compiler's ValueError.
+
+    `ignored` is the warm call that carried `files` and is having it ignored
+    (issue #2035): the same refusal, saying so, carrying the mechanical remedy
+    (drop `files`) and advising the way to load something else in the order
+    that does not destroy the session's only copy."""
     if SESSION.loaded:
+        extra = {"loaded": True}
+        if ignored:
+            extra["note"] = _files_ignored_note("nothing was booted")
         return _session_error(
             "a composition is already running and no draft is held, so "
             "`revl_load {}` has nothing to boot. Change what runs with revl_edit "
-            "or revl_swap, or revl_unload first to load something else",
-            loaded=True)
+            f"or revl_swap, {_load_another_advice()}",
+            fix=("drop `files` — it is the load set, and a composition is "
+                 "already loaded") if ignored else None,
+            **extra)
     return _session_error(
         "revl_load needs `source` (inline .rvl text) or `files` (.rvl paths); "
         "with neither it boots a held draft, and none is held",
@@ -1486,21 +1524,39 @@ def _swap_server_side(replacing: tuple) -> dict:
             **_effect_classes.report(full, running, against=True)}
 
 
-def _tool_edit(arguments: dict, verify=None) -> dict:
+def _tool_edit(arguments: dict, verify=None, caller: str = "revl_edit") -> dict:
     """Patch the server-side source of the running composition and re-admit —
     deltas, not documents (roadmap item 50, docs/mcp-bridge.md).
 
     With nothing loaded, a call that carries `files` or `source` loads it first,
     through `revl_load` itself, then edits it (issue #1690): an agent never has
-    to learn that the edit verb needs a load verb before it."""
+    to learn that the edit verb needs a load verb before it.
+
+    With a composition already loaded, the same call is not refused (issue
+    #2035). `files` is the load set and nothing is being loaded, so it is
+    ignored and the note says so; the edit lands on what runs either way. A
+    carried `source` is still refused, because there is nothing else it can
+    mean — a whole composition's text is what `revl_unload` then `revl_load` is
+    for — and the refusal names the verb the caller actually used and carries
+    the mechanical remedy. `caller` is that verb: `revl_change` reaches here
+    through its own intent-shaped call, so a message that said `revl_edit`
+    named a tool the caller had not called."""
     carried = any(arguments.get(k) is not None for k in ("source", "files"))
     if not carried and not SESSION.loaded and _draft.pending(SESSION) is not None:
         return _edit_draft(arguments, verify)
+    ignored = False
     if carried and SESSION.loaded:
-        return _session_error(
-            "a composition is already loaded: revl_edit patches it, so omit "
-            "`files`/`source` (or revl_unload first to load another)",
-            edited=False, swapped=False)
+        if arguments.get("source") is not None:
+            return _session_error(
+                f"a composition is already loaded: {caller} patches it, so omit "
+                f"`source` ({_load_another_advice()})",
+                fix="drop `source` — the edit is applied to the running "
+                    "composition, and a whole composition's text is what "
+                    "revl_unload then revl_load is for",
+                edited=False, swapped=False)
+        arguments = {k: v for k, v in arguments.items() if k != "files"}
+        carried = any(arguments.get(k) is not None for k in ("source", "files"))
+        ignored = True
     loaded = None
     if carried:
         load_arguments = {k: arguments[k] for k in
@@ -1517,6 +1573,10 @@ def _tool_edit(arguments: dict, verify=None) -> dict:
         if loaded.get("draft"):
             return _edit_draft(arguments, verify)
     result = _edit_loaded(arguments, verify)
+    if ignored and result.get("ok"):
+        # the note is composed here, not at the drop: whether the held source
+        # has reached disk is a question about what the edit just did
+        result = {**result, "note": _files_ignored_note(existing=result.get("note"))}
     return {**result, "loaded": True} if loaded is not None else result
 
 
@@ -1559,7 +1619,8 @@ def _tool_change(arguments: dict) -> dict:
                 if arguments.get("gauntlet") is True else None)
     refused = (_change.cascade_refusal(arguments, plan)
                if intent == "withdraw" else None)
-    result = refused or _tool_edit(edit_arguments, verify=verifier)
+    result = refused or _tool_edit(edit_arguments, verify=verifier,
+                                   caller="revl_change")
     return _change.shape(intent, result, plan,
                          _change.withdrawn_names(edit_arguments), verifier)
 
@@ -1743,6 +1804,43 @@ def _ride_disk(name: str, payload) -> None:
     if not disk["inSync"] and payload.get("ok") and not payload.get("note"):
         payload["note"] = (_DISK_NOTE_REVERT if name in _DISK_REVERTS
                            else _DISK_NOTE)
+
+
+# -- the `files` argument (issue #2035) -------------------------------------
+#
+# `files` names the load set, so it means something on a cold session and, on a
+# warm one, nothing: a composition is already loaded and the change loop
+# patches what runs rather than reloading it. Refusing it there made the call
+# shape an agent learns first invalid — the identical second call became a
+# refusal with a remedy the first call had never mentioned. A warm call now
+# ignores it and says so, so the argument means one thing in both states.
+
+def _files_ignored_note(clause: str = "the edit is applied to the running "
+                                      "composition",
+                        existing: str | None = None) -> str:
+    """The note a warm call that carried `files` reports back (issue #2035).
+
+    It carries the disk advice itself when the held source has diverged, because
+    `_ride_disk` adds that note only where nothing else has set one — and a
+    caller has more use for both facts than for either alone."""
+    note = f"files is ignored: a composition is already loaded; {clause}"
+    if not _disk_state()["inSync"]:
+        note = f"{note}; {_DISK_NOTE}"
+    return f"{note}; {existing}" if existing else note
+
+
+def _load_another_advice() -> str:
+    """How to load something else — a question only while the held source has
+    reached disk (issue #2035).
+
+    `revl_unload` destroys the session's only copy of a composition loaded from
+    `files`, so naming it first would name losing the work. While a divergence
+    is reportable the order is `revl_export` first; with nothing to export the
+    unload is free and named as it always was."""
+    if _disk_state()["inSync"]:
+        return "or revl_unload first to load another"
+    return ("or revl_export first to write the held source, then revl_unload "
+            "to load another")
 
 
 def _tool_export(arguments: dict) -> dict:
