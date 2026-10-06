@@ -432,7 +432,45 @@ def _resource_family(acquire, acquired_type) -> str | None:
     return _host_family(acquire)
 
 
-def _resource_writes(name: str, family: str | None) -> list[str]:
+def _type_args(declared: str | None) -> list[str]:
+    """The type arguments a declared resource type names, in order: `Map[Int,
+    Str]` -> `["Int", "Str"]`, `Map` -> `[]`.
+
+    Split at bracket depth, so a nested argument stays whole
+    (`Map[Str, List[Int]]` -> `["Str", "List[Int]"]`)."""
+    if not isinstance(declared, str) or "[" not in declared:
+        return []
+    head, _, rest = declared.partition("[")
+    if not head.strip() or not rest.rstrip().endswith("]"):
+        return []
+    body = rest.rstrip()[:-1]
+    out, depth, current = [], 0, ""
+    for ch in body:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        out.append(current.strip())
+    return out
+
+
+def _param_name(type_name: str) -> str:
+    """A placeholder NAME for a parameter of `type_name`: the lowercased type
+    when that is an identifier (`Str` -> `str`), else a flattened one
+    (`List[Int]` -> `list_int`). A type is not always a word — the placeholder
+    is `<name: Type>`, so the name has to stay writable code."""
+    flat = re.sub(r"\W+", "_", type_name.lower()).strip("_")
+    return flat if flat.isidentifier() else "arg"
+
+
+def _resource_writes(name: str, family: str | None,
+                     declared: str | None = None) -> list[str]:
     """The operations of the component's OWN resource `name` that write it and
     return nothing — the calls a `Unit` fill can be.
 
@@ -441,17 +479,29 @@ def _resource_writes(name: str, family: str | None) -> list[str]:
     `Map.drop` is not a write), and `_HOST_RESULT_SIG` says which of those
     return a value (`Map.insert_if_absent` is a `Bool`, so it is not a `Unit`).
     An unknown family yields nothing: this offers what the checker knows, never
-    what a name suggests."""
+    what a name suggests.
+
+    Issue #2034: the checker's `_HOST_ARG_SIG` is the family's *default*
+    instantiation (`Map` is Str-keyed there), so on its own it offers
+    `Str`/`Str` whatever the author declared. The declared type's arguments ARE
+    the family's type parameters, in order — `Map[K, V]`'s `insert` takes
+    `(k: K, v: V)` and `remove` takes `(k: K)` — so verb parameter *i* takes
+    the declared argument in its position, and the table's own type when the
+    declaration supplies none. A resource declared without type arguments
+    (`Map`) is therefore offered exactly as before."""
     if not family:
         return []
+    args = _type_args(declared)
     out = []
     for key in sorted(_HOST_WRITE_INVERSE):
         fam, _, verb = key.partition(".")
         if fam != family or key in _HOST_RESULT_SIG:
             continue
-        args = ", ".join(f"<{param.lower()}_{i}: {param}>"
-                         for i, param in enumerate(_HOST_ARG_SIG.get(key) or []))
-        out.append(f"{name}.{verb}({args})")
+        params = [args[i] if i < len(args) else p
+                  for i, p in enumerate(_HOST_ARG_SIG.get(key) or [])]
+        rendered = ", ".join(f"<{_param_name(p)}_{i}: {p}>"
+                             for i, p in enumerate(params))
+        out.append(f"{name}.{verb}({rendered})")
     return out
 
 
@@ -493,7 +543,8 @@ def _fillable(expected: str | None, visible: list[dict],
     writes = 0
     if expected == "Unit":
         for res in resources:
-            for write in _resource_writes(res.get("name"), res.get("family")):
+            for write in _resource_writes(res.get("name"), res.get("family"),
+                                          res.get("type")):
                 producers.append({"kind": "resource", "write": write})
                 writes += 1
     if producers:
