@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -270,3 +271,57 @@ def test_go_two_keys_in_one_realm_all_activate(tmp_path):
     for name in ("Db", "App", "Front"):
         assert any(f"| {name} " in line and "state=active" in line
                    for line in loaded), out
+
+
+# --------------------------------------------------------------------------- #
+# cordis-wasm: the realm is part of the capability ADDRESS, not a store slot
+# --------------------------------------------------------------------------- #
+
+# The Str-returning program above cannot be emitted for wasm (a Str crossing a
+# component boundary is issue #1601), so this guard returns Int. The realm
+# composition under test is the same one, and `Front` calls both keys so its
+# imports are emitted rather than elided as unused.
+_WASM_TWO_KEYS_ONE_REALM = """
+service Database { fn ping() -> Int }
+service Api { fn up() -> Int }
+service Front { fn probe() -> Int }
+component Db provides db: Database {
+  isolate db in realm("wa")
+  provide db { fn ping() = 1 }
+}
+component App requires db: Database provides api: Api {
+  isolate db in realm("wa")
+  isolate api in realm("wa")
+  provide api { fn up() = db.ping() + 1 }
+}
+component Front requires db: Database, api: Api provides front: Front {
+  isolate db in realm("wa")
+  isolate api in realm("wa")
+  provide front { fn probe() = db.ping() + api.up() }
+}
+"""
+
+
+def test_wasm_two_keys_in_one_realm_get_distinct_capability_addresses():
+    """The wasm tier has no label-keyed provision store: `_scoped_key` composes
+    the realm into the capability address (`wa/db`, `wa/api`), so two keys in
+    one realm are two distinct imports and two distinct exports and cannot
+    collide. Guard: `Front` consumes both keys in one realm and reaches two
+    different addresses."""
+    spec = importlib.util.spec_from_file_location(
+        "revl_wasm_emit_1543", ROOT / "backends" / "wasm" / "emit.py")
+    emit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit)
+    modules = emit.emit(compile_source(_WASM_TWO_KEYS_ONE_REALM, "k.rvl"))
+    assert isinstance(modules, dict), modules
+
+    def addresses(name: str) -> set[str]:
+        return set(re.findall(r"(?:provide|coeffect):[A-Za-z0-9_/]+",
+                              modules[name]))
+
+    assert "provide:wa/db" in addresses("Db"), modules["Db"]
+    assert "provide:wa/api" in addresses("App"), modules["App"]
+    front = addresses("Front")
+    assert {"coeffect:wa/db", "coeffect:wa/api"} <= front, modules["Front"]
+    # The realm alone is never an address on this tier.
+    assert "coeffect:wa" not in front, modules["Front"]
