@@ -1623,3 +1623,111 @@ def test_the_idempotent_fixture_lowers_to_the_reference(lower_to_ir):
     assert [e.get("register") for e in reference["externs"]] == ["declared",
                                                                  "keyed"]
     assert native["externs"] == reference["externs"]
+
+
+# ------------------------------------------- issue #2012: bound secrets
+#
+# `secret NAME for CAP` is a top-level statement that binds a NAME to a
+# CAPABILITY, and the reference's `_lower_secrets` (src/revl/lower.py) writes it
+# into the IR twice: a top-level `secrets` row per declaration (`name` +
+# `capability`, in declaration order) and a `secrets` NAME LIST stamped on every
+# `emission` extern whose capability scope serves the bound capability. The
+# native producer read neither — `secret` heads a statement, and no walker in
+# `selfhost/lower.rvl` named it — so the whole seam was absent from the native
+# IR while the GATE refused the document outright (`BAD|unexpected token at top
+# level`).
+#
+# The one document in the tree that binds a secret sits OUTSIDE every census
+# corpus directory (`tests/noncensus_corpus/`, deliberately, so a native
+# false-reject never had to enter the census baseline), which is exactly why no
+# oracle in this file globbed it. So this test names it rather than relying on
+# the corpus: a round trip that no glob can silently stop covering.
+BOUND_SECRET_DOC = (ROOT / "tests" / "noncensus_corpus"
+                    / "emit_ts_bound_secret.rvl")
+
+
+def test_native_ir_lowers_a_capability_bound_secret(lower_to_ir):
+    """Both halves of the IR, asserted against the reference on the one document
+    that binds a secret. `ping` is the control: it is an `emission`-free extern
+    on the SAME tier as the two bound ones, so the reference stamps it with no
+    `secrets` key at all — the seam belongs to the externs that SERVE the
+    capability, not to every extern in the document."""
+    source = BOUND_SECRET_DOC.read_text(encoding="utf-8")
+    reference = compile_files([str(BOUND_SECRET_DOC)])
+    native = json.loads(lower_to_ir(source))
+
+    # the reference's own answer, stated so the comparison cannot pass vacuously
+    assert reference["secrets"] == [
+        {"name": "api_key", "capability": "net.send"},
+        {"name": "audit_key", "capability": "net.send"},
+    ]
+
+    assert "secrets" in native, "the `secrets` section was dropped"
+    assert native["secrets"] == reference["secrets"]
+
+    assert "externs" in native, "the `externs` section was dropped"
+    assert [(e["name"], e.get("secrets")) for e in native["externs"]] == [
+        ("send", ["api_key", "audit_key"]),
+        ("send_async", ["api_key", "audit_key"]),
+        ("ping", None),
+    ]
+    assert native["externs"] == reference["externs"]
+
+
+# The four shapes `_lower_secrets` refuses, each on the smallest program that
+# reaches it, and the line the reference stamps the refusal with. `admit_src` is
+# the gate's wire (`<TAG>|<msg>`) and `secret_scan` the sink row; the reference
+# raises a `RevlError` with NO `code`, so the tag `SECRET` is the gate's own
+# name for it and the MESSAGE is the part that must be byte-identical.
+_SECRET_REFUSALS = [
+    ("nowhere", "no emission extern serves the capability", 1,
+     "secret api_key for net.send\n"
+     "extern emission fn send(m: Str) -> Int = @ts { return 1 }\n"),
+    ("duplicate", "the same NAME is declared twice", 2,
+     "secret api_key for send\n"
+     "secret api_key for send\n"
+     "extern emission fn send(m: Str) -> Int = @ts { return 1 }\n"),
+    ("collision", "the NAME is also a parameter of a bound extern", 1,
+     "secret api_key for send\n"
+     "extern emission fn send(api_key: Str) -> Int = @ts { return 1 }\n"),
+    ("tier", "the only bound body is on a tier with no injection", 1,
+     "secret api_key for send\n"
+     "extern emission fn send(m: Str) -> Int = @wasm { return 1 }\n"),
+]
+
+
+_SECRET_MESSAGES = {
+    "nowhere":
+        "secret `api_key` is bound to capability `net.send`, but no emission "
+        "extern serves it - the key would be injected nowhere",
+    "duplicate": "duplicate secret `api_key`",
+    "collision":
+        "secret `api_key` collides with a parameter of extern `send` - the "
+        "injected secret local would shadow the parameter",
+    "tier":
+        "secret `api_key` is bound to a capability whose only extern body is on "
+        "the @wasm tier, which has no plug-time secret injection (emission "
+        "extern `send`)",
+}
+
+
+@pytest.mark.parametrize("name,why,line,src", _SECRET_REFUSALS,
+                         ids=[c[0] for c in _SECRET_REFUSALS])
+def test_the_native_gate_refuses_a_bad_secret_binding(ns, name, why, line, src):
+    """`_lower_secrets` runs at the END of lowering, after `_lower_externs`, so
+    each of these is the program's FIRST refusal and both frontends report it
+    alone. The message is the reference's, byte for byte (see the message table
+    above), and the LINE is the `secret` declaration's — which is also what pins
+    `admit_all`'s row, since the census engine reads a refusal's line off that
+    sink and falls back to 0 (i.e. "no line") when the row is missing."""
+    try:
+        compile_source(src, "secret.rvl")
+        raise AssertionError(f"{name}: the reference admitted this program")
+    except RevlError as exc:
+        assert exc.code is None, (name, exc.code)
+        assert exc.line == line, (name, exc.line, line)
+        assert exc.message == _SECRET_MESSAGES[name], (name, exc.message)
+
+    wire = ns["admit_src"](src)
+    assert wire == f"SECRET|{_SECRET_MESSAGES[name]}", (name, why, wire)
+    assert ns["admit_all"](src) == f"{line}|{wire}", (name, ns["admit_all"](src))
