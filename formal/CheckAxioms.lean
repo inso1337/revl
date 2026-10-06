@@ -417,3 +417,12 @@ import RevL
 #print axioms RevL.ModelPlace.on_device_admitted
 #print axioms RevL.ModelPlace.fixtures_decided
 #print axioms RevL.ModelPlace.placement_not_vacuous
+-- Issue #1811: G-COUNCIL-SPLIT tie policy. A council may not admit when its
+-- members disagree, decided by the oracle's `CTV` row.
+#print axioms RevL.ModelCouncil.splitB_iff
+#print axioms RevL.ModelCouncil.admitting_refused
+#print axioms RevL.ModelCouncil.split_admitted
+#print axioms RevL.ModelCouncil.deny_admitted
+#print axioms RevL.ModelCouncil.unknown_tie_not_this_row
+#print axioms RevL.ModelCouncil.fixtures_decided
+#print axioms RevL.ModelCouncil.council_not_vacuous

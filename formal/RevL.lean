@@ -35,3 +35,4 @@ import RevL.Theorems.G1_KeyAccess
 import RevL.Theorems.A1_AsyncColour
 import RevL.Theorems.Prelude_InterceptMethod
 import RevL.Theorems.ModelPlacement
+import RevL.Theorems.ModelCouncil

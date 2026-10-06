@@ -468,8 +468,14 @@ def format_source(source: str, filename: str = "<source>", *,
 
     `comments=False` drops every comment, and a line that held only a comment
     with it, so what is left is the code alone in canonical form (issue #1714:
-    a symbol read without its prose). Comments are trivia to the lexer, so the
-    token stream, and therefore the IR, is the same either way.
+    a symbol read without its prose).
+
+    Comments are trivia to the LEXER — it keeps none of them, so the token
+    stream is the same either way — but since issue #1952 they are not trivia
+    to the PROGRAM: the comment block directly above a service operation is
+    that operation's `doc` in the IR. The two renderings therefore agree except
+    where an operation carries such a block, which is the one place a comment
+    is program content rather than prose.
     """
     pieces = _scan(source, filename)
     if split_members:
