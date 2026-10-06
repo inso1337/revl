@@ -50,9 +50,12 @@ pay for it every iteration. The same two files cover most of it:
 
 Before committing, run the tests your change affects, not the whole tree
 between every edit. The pre-commit hook already does this for you: it selects
-the affected tests with `tools/affected_tests.py` and only falls back to the
-whole suite when the selector is unavailable or reports FULL. For the fast
-inner-loop gate over the same selection, `make pre-merge-affected`.
+the affected tests with `tools/affected_tests.py`. When the selector reports
+`FULL` — or is unavailable — the hook gives that fallback a wall-clock ceiling
+(`REVL_HOOK_FULL_BUDGET`, default 60s) and skips it with the selector's reason
+and the `--no-verify` instruction, rather than running the whole suite to
+completion; the suite is CI's job, sharded there. For the fast inner-loop gate
+over the same selection, `make pre-merge-affected`.
 
 **Where the code lives (a two-minute map).** The compiler is `src/revl/`
 (`parser.py` → `typecheck.py` → `lower.py` → `apply.py`). The **emitters are
