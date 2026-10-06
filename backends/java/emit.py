@@ -445,6 +445,17 @@ _HOST_STUBS = {
     },
 }
 
+# issue #1980: the host-Map verbs whose Java return is `void` (derived from
+# the stub table above, so the two cannot drift). A `match` over `Opt` whose
+# arms are BOTH of these cannot lower to the `map(..).orElseGet(..)` chain
+# `_v3_match_expr` otherwise emits — `Optional.map` needs a
+# `Function<? super T, ? extends U>`, and two `void` bodies leave `U` with no
+# bound (javac: "inference variable U has incompatible bounds / upper bounds:
+# Object / lower bounds: void"). See `_v3_match_expr`.
+_MAP_VOID_VERBS = tuple(
+    m for m, (ret, _args) in _HOST_STUBS["Map"].items() if ret == "void"
+)
+
 # Host builtins whose result is an asynchronous handle. An `await` step over
 # one must *join* it (A1: "evaluate expr, await its result, discard the
 # value") rather than merely evaluate the call — abandoning the handle leaves
@@ -2642,6 +2653,25 @@ def _v3_spawn(
     )
 
 
+def _void_map_arm(node: object) -> bool:
+    """Whether an arm body renders as a `void` host-Map write (issue #1980).
+
+    Follows `_map_expr_inserts`' shape test for a map write — a `call` node
+    with a bare-receiver `target` — over `_MAP_VOID_VERBS`, whose Java returns
+    the stub table declares `void`. Two such arms are what makes the
+    `map(..).orElseGet(..)` lowering of a built-in `Some`/`None` match
+    uncompilable.
+    """
+    if not isinstance(node, dict) or node.get("kind") != "call":
+        return False
+    if "callee" in node:
+        return False
+    target = node.get("target") or {}
+    if target.get("kind") not in ("name", "var", "host"):
+        return False
+    return node.get("method") in _MAP_VOID_VERBS
+
+
 def _v3_match_expr(
     node: dict,
     ctx: _V3Ctx,
@@ -2673,6 +2703,21 @@ def _v3_match_expr(
                      else "__revl_v")
         some_body = _expr((some_arm or wild).get("body"), ctx, rename, env)
         none_body = _expr((none_arm or wild).get("body"), ctx, rename, env)
+        # issue #1980: when BOTH arms are a `void` host-Map write — the shape
+        # of the restored-value inverse this issue admits, `undo match prev
+        # { Some(v) => m.insert(k, v), None => m.remove(k) }` — the `map`
+        # chain above does not compile, because `Optional.map`'s `U` has no
+        # bound to infer. `ifPresentOrElse` is the same computation for a
+        # discarded value: the `Some` arm becomes a `Consumer` and the `None`
+        # arm a `Runnable`, both satisfied by a void body. Each arm body is a
+        # BLOCK, not a parenthesised expression: JLS 14.8 makes a parenthesised
+        # method invocation something other than a `StatementExpression`, so
+        # `v -> (m.insert(k, v))` is refused as "lambda body is not compatible
+        # with a void functional interface". Value-returning matches (the
+        # common case, and every existing golden) keep the `map` form.
+        if all(_void_map_arm(arm.get("body")) for arm in arms):
+            return (f"({scrutinee}).ifPresentOrElse({some_bind} -> {{ {some_body}; }}, "
+                    f"() -> {{ {none_body}; }})")
         return (f"({scrutinee}).map({some_bind} -> ({some_body}))"
                 f".orElseGet(() -> ({none_body}))")
     if any(arm.get("pattern") in ("Ok", "Err") and _builtin(arm.get("pattern")) for arm in arms):

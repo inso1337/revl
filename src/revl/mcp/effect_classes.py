@@ -7,6 +7,15 @@ factor it behind a helper that also reaches a non-witnessed crossing and it
 becomes class (c), prompting on every call. Nothing said so: the verbs that
 compile, admit, edit and swap answered with the same summary either way.
 
+A `witnessed` extern is class (a) only where its declared inverse is actually
+REGISTERED, which is a property of the call site: the call must be the
+acquisition of an `effect`/`let-effect` step (`Composition.witnessed_registered`
+reads exactly the test `backends/python/emit.py` registers on). A witnessed
+extern reached any other way — `let r = stash_path(p)` or
+`return stash_path(p)` in a provide-method body — fires the host mutation and
+registers nothing, so it is class (c) and its relay is class (c) too. The class
+is therefore never more optimistic than the runtime's own behaviour.
+
 This module turns the class map into two things a response carries:
 
 * `effectClasses`: every provided operation with its class and the crossings
@@ -41,7 +50,13 @@ def _label(crossing: dict) -> str:
     if kind == "emission":
         return f"`emit {crossing.get('key')}.{crossing.get('method')}` in {comp}"
     if kind == "extern":
-        return f"`{crossing.get('name')}` ({crossing.get('class')} extern) in {comp}"
+        # issue #1707: a `witnessed` extern reached OUTSIDE effect position
+        # registers no inverse, so it is not the class-(a) crossing its
+        # declaration suggests. Say so where the reader meets it.
+        why = (" — no inverse registered at this call site"
+               if crossing.get("registered") is False else "")
+        return (f"`{crossing.get('name')}` ({crossing.get('class')} extern) "
+                f"in {comp}{why}")
     if kind == "widening":
         return f"an emitting callable handed on as a value in {comp}"
     return f"a {kind} crossing in {comp}"
@@ -55,7 +70,8 @@ def _identity(crossing: dict) -> tuple:
 def _shown(crossing: dict) -> dict:
     """The fields of a crossing a response carries, plus its text."""
     shown = {k: crossing[k] for k in ("kind", "component", "key", "method",
-                                      "name", "capability", "actionClass")
+                                      "name", "capability", "actionClass",
+                                      "registered")
              if crossing.get(k) is not None}
     shown["text"] = _label(crossing)
     return shown

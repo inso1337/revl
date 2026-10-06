@@ -1,0 +1,106 @@
+instructions: |
+  ## Gate policy
+
+  **CI is the gate.** Every pull request runs `root-suite-affected` in four parallel
+  shards plus each backend tier (`backend-python`, `backend-java`, `backend-go`,
+  `backend-rust`, `backend-typescript`, `backend-wasm`), and also `lint`,
+  `census-artifact`, `gate-wasm`, `held-out`, and `merged-prs-landed`, on dedicated
+  machines. Read the verdict with `gh pr checks <n>`.
+
+  - **Do not run `tools/pre_merge.sh` or a full `pytest tests/` locally.** They duplicate
+    CI, take tens of minutes, and starve every other lane running on the same machine.
+  - Run narrow selections only — `pytest <specific test file(s)>` — from an
+    **out-of-tree** virtualenv. An in-tree `.venv` makes the tooling resolve a different
+    interpreter than the one under test and produces false collection errors.
+  - **`tools/hooks/pre-commit` runs the whole root suite when the selector answers
+    `FULL`.** For an unmapped path under `backends/`, `stdlib/`, `selfhost/`, `examples/`,
+    `crates/` or `tck/`, or a structural change to `Makefile`, `tools/pre_merge.sh`, the
+    CI config, shared test scaffolding or `tests/fixtures/**`, the hook runs
+    `pytest tests/` **unsharded** with the commit blocked — minutes to tens of minutes,
+    and it is the hook doing it, not the lane. For such a diff commit with
+    `git commit --no-verify` and write the selector's `FULL` line into the commit
+    message, so the record shows why the hook was skipped.
+  - **Never reproduce CI's sharding by hand.** `REVL_TEST_SHARD` is read only by
+    `.github/workflows/ci.yml`; a local `REVL_TEST_SHARD=1..8` loop is a hand-rolled copy
+    of CI that pins several cores and starves every other lane. There is no local
+    substitute for CI — push and read `gh pr checks <n>`.
+  - `tools/affected_tests.py` is bounded by `git merge-base` and includes the working
+    tree, so a `FULL` verdict means *your own diff*, or a path it has no mapping for
+    (for example the generated `crates/revl-gate/src/selfhost.rs`) — never that `main`
+    is broken.
+
+  ## A red check is not always yours
+
+  A `pull_request` run pins its merge ref when the **run** is created, but the checkout
+  resolves that ref wall-clock when the **job** starts. Under a deep runner queue the jobs
+  therefore test `main@before-your-fix` plus your diff, and redden on code your diff never
+  touches. Establish which world a red ran in before treating it as a regression:
+
+  - **Read the failing job's timestamps.** `gh api /repos/inso1337/revl/actions/jobs/<id>`
+    gives `created_at`/`started_at`; `gh api .../actions/runs/<id>` gives the run's
+    `created_at`; `gh api .../actions/runs/<id>/jobs` matches one to the other. If
+    `run.created_at < main's fixing commit < job.started_at`, the job predates the fix and
+    the red is an artifact.
+  - **For `census-artifact`, compare the digest, not the clock alone.** The failing log
+    names `GATE-CENSUS-1+<digest>`. Same digest as the record already on `main` ⇒ stale-ref
+    artifact: **re-run, never re-record.** A *different* digest is a genuine rotation — and
+    still only if the diff touched one of the five `CHECKER_SOURCES` in
+    `tools/census_artifact.py`, of which `selfhost/lower.rvl` is the only one under
+    `selfhost/`. `emit_py.rvl`, `emit_ts.rvl` and `emit_rust.rvl` are **not** checker
+    sources and rotate nothing.
+  - **For a root-suite "expected vs actual" diff, read the shape.** If the *actual* has more
+    keys than the *expected*, the reference on `main` has gained a key your stale ref lacks:
+    the red is an artifact, not your regression. Confirm by running that one test on a tree
+    with current `main` merged in — `pytest <the failing test>::<the failing name> -q`.
+  - **A `lint` red may be the vocabulary-mirror gate, not ruff.** If the log names a closed
+    vocabulary declared in more than one place, either resolve the copies into one
+    definition or record the reason with `tools/check_vocabulary_mirrors.py --write` plus a
+    `note`. **If the mirror is already green on `main`** —
+    `tools/check_vocabulary_mirrors.py --check` reports "all recorded and in step" — do
+    **not** run `--write`: you would record a divergence that does not exist.
+  - **The remedy for an artifact is a re-run, or a merge of `origin/main` (which produces a
+    fresh run) — never a re-lane, never a weakened check.** Re-runs are refused while the
+    run still has pending jobs ("cannot be rerun; This workflow is already running"), and
+    re-pushing does not jump the queue: `ci.yml` concurrency is per ref.
+  - **A squash merge can undo a lane's own fix.** If a head predates the record its lane
+    wrote, the default branch lands red at a digest nothing recorded. Check `main` after
+    every landing.
+
+  ## Working across worktrees
+
+  - **Do not run `git stash`.** The stash is shared by every worktree of this repository,
+    so a `stash push` in one lane can later pop another lane's entry. Use a scratch clone
+    under `/private/tmp` when you need a pristine tree.
+  - Stay inside your own session worktree. Do not read or write another worktree's files.
+  - Do not `git rebase`, force-push, or delete branches; merge `origin/main` when the
+    update is needed rather than rebasing onto it.
+  - Do not use `apply_patch` here — patches fail to parse in this repository. Use the
+    `edit` tool or a script.
+
+  ## Generated artifacts
+
+  - Never hand-edit `docs/census-artifact/**` or
+    `tests/fixtures/census_crate_reproduction/**`; they are generator-owned.
+  - The census digest covers the checker sources, so **merge `origin/main` first and
+    record once**, immediately before the final push. Recording before merging produces
+    a record for a mixed tree and fails the `census-artifact` check.
+  - A **squash** merge can undo that: it may land a head that predates the lane's own
+    record commit, leaving the default branch red at a digest nothing recorded. The
+    correction is to restore the record that was written for that tree and prove it with
+    `tools/census_artifact.py --verify --strict` (exit 0, `the committed artifact is
+    current`) — never to weaken the check or the record.
+
+  ## Pull requests
+
+  - **Never weaken, skip, or delete a test to make a gate pass.** If a test opposes the
+    change, say so and report it instead.
+  - Report the pull request number, the head sha, and the narrow-test evidence. Unless
+    you have been asked to land the work, do not merge the pull request and do not
+    enable auto-merge; the merge-gate owner lands it.
+  - **Push the branch and open the pull request before running any long gate.** A session
+    that errors with its commits unpushed loses them: no remote ref, no pull request, and
+    the worktree goes with the session. Pushing first costs nothing and is the only thing
+    that makes a worked-on change recoverable.
+  - Two lanes must not edit the same file in parallel. `src/revl/mcp/server.py` and
+    `selfhost/lower.rvl` are the most contended paths in this repository; a lane that needs
+    one of them should say so and expect to merge `origin/main` before its final push.

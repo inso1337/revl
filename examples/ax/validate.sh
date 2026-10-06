@@ -140,6 +140,34 @@ func TestManifestDecodesAndValidates(t *testing.T) {
 	if !strings.Contains(strings.Join(gate.GetArgs(), " "), "revl mcp serve") {
 		t.Fatalf("revl-gate does not run `revl mcp serve`: %v", gate.GetArgs())
 	}
+
+	var proxy *v1alpha1.MCPServer
+	for _, s := range ws.GetSpec().GetMcp().GetServers() {
+		if s.GetName() == "revl-proxy" {
+			proxy = s
+		}
+	}
+	if proxy == nil {
+		t.Fatal("no MCP server named revl-proxy")
+	}
+	if proxy.GetEndpoint() != "" || proxy.GetCommand() == "" {
+		t.Fatalf("revl-proxy must be a command (stdio) server: %+v", proxy)
+	}
+	proxyArgs := strings.Join(proxy.GetArgs(), " ")
+	if !strings.Contains(proxyArgs, "revl mcp proxy") {
+		t.Fatalf("revl-proxy does not run `revl mcp proxy`: %v", proxy.GetArgs())
+	}
+	// issue #1463 landed, so this entry is live: it names its upstream after
+	// `--` and declares the inverse that makes close_ticket witnessed.
+	if !strings.Contains(proxyArgs, "-- python3 tickets-mcp.py") {
+		t.Fatalf("revl-proxy does not name its upstream after `--`: %v", proxy.GetArgs())
+	}
+	if !strings.Contains(proxyArgs, "--undo close_ticket=reopen_ticket") {
+		t.Fatalf("revl-proxy does not declare an undo: %v", proxy.GetArgs())
+	}
+	if strings.Contains(proxyArgs, "--trust-read-only-hints") {
+		t.Fatalf("revl-proxy trusts read-only hints; the example's point is that it does not: %v", proxy.GetArgs())
+	}
 }
 
 // The controller hands bound workspaces to the runner as AX_WORKSPACES_YAML
@@ -173,8 +201,16 @@ func TestWorkspaceSurvivesTheRunnerHandoff(t *testing.T) {
 	}
 	got := back.GetSpec().GetMcp().GetServers()
 	want := orig.GetSpec().GetMcp().GetServers()
-	if len(got) != len(want) || strings.Join(got[0].GetArgs(), "\x00") != strings.Join(want[0].GetArgs(), "\x00") {
-		t.Fatalf("mcp servers changed in the handoff: %v != %v", got, want)
+	if len(got) != len(want) {
+		t.Fatalf("mcp servers lost in the handoff: %d != %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].GetName() != want[i].GetName() ||
+			got[i].GetCommand() != want[i].GetCommand() ||
+			got[i].GetEndpoint() != want[i].GetEndpoint() ||
+			strings.Join(got[i].GetArgs(), "\x00") != strings.Join(want[i].GetArgs(), "\x00") {
+			t.Fatalf("mcp server %d changed in the handoff: %v != %v", i, got[i], want[i])
+		}
 	}
 }
 

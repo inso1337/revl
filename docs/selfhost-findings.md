@@ -1819,7 +1819,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `routed_timers.rvl`
 - `ref_externs.rvl`
 - `extern_compensate.rvl`
-- `../../noncensus_corpus/emit_ts_bound_secret.rvl`
 - `lifecycle_abort.rvl`
 
 `go`:

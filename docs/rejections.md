@@ -80,9 +80,14 @@ g1_undeclared_access.rvl:12: `db` is not a declared requirement of Logger
 ```
 
 Fix: add the key to the component's `requires` clause, or drop the access.
-The same rule refuses an undeclared name inside a function body
-(`` `nobody` is not declared in this function ``) and an `intercept` of a
-key the component does not require.
+
+`G1` is one guarantee refused for several reasons, and the rewrite on the
+diagnostic is chosen by the reason, not by the code. An undeclared name inside
+a function body (`` `nobody` is not declared in this function ``) is not a
+requirement and is not told to add one: declare it with `let`/`var` or add it
+as a parameter. An `intercept` of a key the component does not require takes
+the `requires` rewrite above; a `Delegate[X]` that names no service names one;
+and a requirement key that spells a builtin type or a host root is renamed.
 
 ## G2 — provision disjointness
 
@@ -246,6 +251,15 @@ component Store provides kv: Kv {
 the `undo` of `effect store.insert(...)` must be its inverse on the same
   handle and key: write `undo store.remove(k)`
 ```
+
+A write may also be undone by putting the old value back, when that value was
+read from the same table at the same key earlier in the same body and nothing
+wrote to `m` at `k` in between (issue #1980). The read's shape decides the
+inverse: `let prev = m.get(k)` is an `Opt`, so the key may have been absent,
+and the `undo` must restore that too — `undo match prev { Some(v) =>
+m.insert(k, v), None => m.remove(k) }`. A defaulted read
+(`let prev = m.get(k) ?? []`) erases the `Opt`, so the undo is refused,
+naming that `match` form.
 
 For an `extern acquire` or a user `effect` over a service, revl has no table
 to check the `undo` against, so a wrong inverse there is still the author's

@@ -19,7 +19,25 @@ def _resolve(vs: dict, wanted: str):
     try:
         return _resolve_buffer(vs, wanted)
     except EditError as error:
+        read_only = _read_only(vs, wanted)
+        if read_only is not None:
+            return read_only
         raise _symbols.SymbolError(str(error)) from None
+
+
+def _read_only(vs: dict, wanted: str):
+    """The read-only dependency buffer `wanted` names, or None (issue #1779).
+
+    `_resolve_buffer` refuses a dependency buffer by name, because nothing may
+    WRITE one. Addressing a declaration inside one by `<buffer>:Name` is a read,
+    though, and `revl_source` has to be able to reach a truc reached through
+    `use` the same way it reaches a loaded file — so the refusal is answered
+    with the buffer itself. An edit that resolves through here still cannot
+    write it: `_set_text` refuses the same buffer by name."""
+    from .edit import _readonly_match  # noqa: PLC0415 - cycle
+
+    path = _readonly_match(vs, wanted)
+    return ("dependency", path) if path is not None else None
 
 
 def canonical(fragment: str) -> str:

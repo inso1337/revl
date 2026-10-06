@@ -4595,7 +4595,7 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         out.add(2, "raise RuntimeError(")
         out.add(3, "\"capability-bound secret `\" + _name + \"` was not \"")
         out.add(3, "\"installed before its extern body ran; the run driver \"")
-        out.add(3, "\"must resolve it at plug (item 256). No default exists \"")
+        out.add(3, "\"has not resolved it (item 256). No default exists \"")
         out.add(3, "\"for a secret.\")")
         out.add(1, "return _REVL_SECRETS[_name]")
         out.add(0)

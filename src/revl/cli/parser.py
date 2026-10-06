@@ -345,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
+    audit.add_argument("--json-diagnostics", action="store_true",
+                       help="on rejection, print a structured diagnostic (code, guarantee, "
+                            "expected/actual, hint) instead of the human rendering")
     # item 439: a COMPOSITION document argument is resolved rather than
     # compiled as a module, so its rows — and the providers a `remote` row
     # synthesizes — are on the surface. Row provenance is recorded against the
@@ -598,6 +601,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--current-version", metavar="X.Y.Z", default=None,
         help="the previous composition's declared version; when given, the "
              "computed next version is printed too")
+    version_cmd.add_argument("--json-diagnostics", action="store_true",
+                             help="on rejection, print a structured diagnostic (code, "
+                                  "guarantee, expected/actual, hint) instead of the "
+                                  "human rendering")
     version_cmd.add_argument(
         "--emit-manifest", action="store_true",
         help="print the compiled composition document (the diff input a later "
@@ -658,6 +665,10 @@ def build_parser() -> argparse.ArgumentParser:
              "arguments")
     erase.add_argument("--json", action="store_true",
                        help="machine-readable, versioned report document")
+    erase.add_argument("--json-diagnostics", action="store_true",
+                       help="on rejection, print a structured diagnostic (code, "
+                            "guarantee, expected/actual, hint) instead of the "
+                            "human rendering")
     erase.add_argument("--no-residue-proof", action="store_true",
                        help="skip the runtime teardown proof (static sections "
                             "only; use where the cordis runtime is unavailable)")
@@ -812,6 +823,10 @@ def build_parser() -> argparse.ArgumentParser:
         sub_cmd.add_argument("files", nargs="+")
         sub_cmd.add_argument("--json", action="store_true",
                              help="machine-readable output")
+        sub_cmd.add_argument("--json-diagnostics", action="store_true",
+                             help="on rejection, print a structured diagnostic (code, "
+                                  "guarantee, expected/actual, hint) instead of the "
+                                  "human rendering")
         sub_cmd.add_argument(
             "--root", default=None, metavar="DIR",
             help="with a COMPOSITION document argument: the project root "
@@ -985,6 +1000,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="print one PASS/FAIL line per test with its duration "
                            "(the py tier already prints one line per test; -v "
                            "adds the per-test timing)")
+    test.add_argument("--json-diagnostics", action="store_true",
+                      help="on rejection, print a structured diagnostic (code, guarantee, "
+                           "expected/actual, hint) instead of the human rendering")
     test.add_argument("--report", choices=("json", "tap"), default=None,
                       help="machine-readable per-test report (name/status/"
                            "duration) on the py tier, instead of the human "

@@ -1,0 +1,1 @@
+{"case": "oracle-accept:issue 1980: a write at another key between the read and the effect", "buckets": ["agree-admit"]}

@@ -689,6 +689,54 @@ fn model_council_end(ts: List[Token], i: Int) -> Int {
   return e == 0 - 1 ? i + 1 : e
 }
 
+// item 256: `secret NAME for CAP`, the bound-capability secret declaration, is a
+// CONTEXTUAL keyword — the `boot` / `event` / `model role` discipline. `secret`
+// is an IDENTIFIER in BOTH frontends: the reference lexer's `KEYWORDS` table
+// ends at `idempotent` (`src/revl/lexer.py`), and `parser.py` recognises the
+// declaration contextually ("the self-hosted lexer's KEYWORDS table needs no
+// sync"). The reference's WHOLE recognition rule is the three tokens below —
+// `ident secret`, then an `ident` name, then the `for` keyword — so a program
+// that only ever spells the word as an ordinary name (`let secret = 1`, a
+// parameter or a record field called `secret`) is untouched by this.
+//
+// Without it the gate answered `BAD|unexpected token at top level`: `secret`
+// lexes as an `ident` and `p_top` refused every non-keyword head, so no program
+// that binds a secret reached admission at all. Whether the BINDING is legal is
+// a LOWERING concern, exactly as it is in the reference (where `secret_decl` is
+// the parser's whole contribution and `_lower_secrets` decides), so this
+// predicate recognises the SHAPE only, the declaration is stepped over, and
+// `secret_scan` reports the refusals.
+fn at_secret(ts: List[Token], i: Int) -> Bool {
+  return at_word(ts, i, "secret") && atk(ts, i + 1, "ident")
+      && atw(ts, i + 2, "for")
+}
+
+// The dotted capability spelling at `i` (`net.send`), joined with `.` exactly as
+// the reference's `secret_decl` joins its ident parts — so `net.send` is ONE
+// capability, as `cap_list_at` renders one inside an `emission[net.send]` scope.
+// "" when `i` is not an ident, i.e. a malformed declaration the reference
+// refuses at parse and this one reports as bound to nothing.
+fn cap_tok(ts: List[Token], i: Int) -> Str {
+  if (!atk(ts, i, "ident")) { return "" }
+  var out = tkc(ts, i).text
+  var j = i + 1
+  while (atk(ts, j, ".") && atk(ts, j + 1, "ident")) {
+    out = out.concat(".").concat(tkc(ts, j + 1).text)
+    j += 2
+  }
+  return out
+}
+
+// Index just past a `secret NAME for CAP` declaration: the capability run and
+// nothing after it. NOT `skip_line` — the reference's top-level loop resumes at
+// the next TOKEN, so a declaration sharing the line is still reached.
+fn secret_end(ts: List[Token], i: Int) -> Int {
+  var j = i + 3
+  if (!atk(ts, j, "ident")) { return i + 3 }
+  while (atk(ts, j + 1, ".") && atk(ts, j + 2, "ident")) { j += 2 }
+  return j + 1
+}
+
 // Whether a token starts a TOP-LEVEL declaration — where a `type` declaration's
 // token span ends. Kept next to `type_ctors`, its only reader.
 fn at_top_decl(ts: List[Token], i: Int) -> Bool {
@@ -696,6 +744,7 @@ fn at_top_decl(ts: List[Token], i: Int) -> Bool {
       || atw(ts, i, "service") || atw(ts, i, "component") || atw(ts, i, "use")
       || atw(ts, i, "test") || at_boot(ts, i) || at_event(ts, i)
       || at_qual_test(ts, i) || at_model_role(ts, i) || at_model_council(ts, i)
+      || at_secret(ts, i)
 }
 
 // `pub` is a visibility PREFIX, not a declaration head. The reference accepts it
@@ -3528,6 +3577,13 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   if (at_model_council(ts, i)) {
     return p_top(ts, model_council_end(ts, i), pg)
   }
+  // item 256: `secret NAME for CAP`, stepped over WHOLE for the same reason as
+  // the four above — it is CONTEXTUAL (`secret` is an identifier in both
+  // frontends; see `at_secret`), nothing about the binding rides in `Prog`, and
+  // whether it is LEGAL is a lowering concern the reference reads off its
+  // `Program.secrets` after the declaration checks. `secret_end`, not
+  // `skip_line`: the reference's top-level loop resumes at the next token.
+  if (at_secret(ts, i)) { return p_top(ts, secret_end(ts, i), pg) }
   if (t.kind != "kw") {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
@@ -4498,7 +4554,7 @@ fn method_release_msg(ss: List[Stmt], i: Int, cx: Ctx, maps: List[Str]) -> Str {
   let m = ss[i - 1].bind == "" ? release_msg_at(ss, i, cx, true) : ""
   if (m != "") { return m }
   let w = ss[i].kind == "undo" && ss[i - 1].kind == "effect"
-    ? write_inverse_msg(ss[i - 1].e, ss[i].e, maps) : ""
+    ? write_inverse_msg(ss, i, maps) : ""
   if (w != "") { return w }
   return method_release_msg(ss, i + 1, cx, maps)
 }
@@ -4532,7 +4588,9 @@ fn host_write_verb(e: Expr, names: List[Str]) -> Str {
 
 // The reference's `_method_effect_inverse` refusal: a host Map write's `undo`
 // is its table inverse on the same handle with the same key expression.
-fn write_inverse_msg(acq: Expr, und: Expr, maps: List[Str]) -> Str {
+fn write_inverse_msg(ss: List[Stmt], i: Int, maps: List[Str]) -> Str {
+  let acq = ss[i - 1].e
+  let und = ss[i].e
   let verb = host_write_verb(acq, maps)
   if (verb == "" || is_hole_expr(und)) { return "" }
   let inverse = verb == "remove" ? "insert" : "remove"
@@ -4540,6 +4598,15 @@ fn write_inverse_msg(acq: Expr, und: Expr, maps: List[Str]) -> Str {
   let key = first_arg(acq)
   if (call_recv(und) == recv && call_verb(und) == inverse
       && key_expr_same(key, first_arg(und))) { return "" }
+  // issue #1980: an `insert` undone by RESTORING the value this body read from
+  // the same table at the same key is the exact inverse, through the `Opt` the
+  // read carries, so it is admitted rather than refused. `restore_verdict`
+  // answers whether the `undo` took that shape at all and, when it did, the
+  // message it is refused with if it fell short.
+  if (verb == "insert") {
+    let rv = restore_verdict(ss, i, maps, recv, key, und, verb)
+    if (rv[0] == "1") { return rv[1] }
+  }
   let k = key_spelling(key)
   let spelled = inverse == "remove"
     ? recv.concat(".remove(").concat(k).concat(")")
@@ -4547,6 +4614,180 @@ fn write_inverse_msg(acq: Expr, und: Expr, maps: List[Str]) -> Str {
   return "the `undo` of `effect ".concat(recv).concat(".").concat(verb)
     .concat("(...)` must be its inverse on the same handle and key: write `undo ")
     .concat(spelled).concat("`")
+}
+
+// issue #1980: the value-RESTORE form of a host `Map` write's `undo`.
+//
+// `effect m.insert(k, new) undo m.insert(k, prev)` IS the exact inverse of the
+// insert when `prev` is bound from `m.get(k)` — the same handle, the same key
+// expression, in the same body BEFORE the effect, with no write to `m` at `k`
+// in between — because `m.get(k)` is `Opt[V]`: it carries the value the key
+// HELD, which is the value the insert overwrote. The `Opt` decides the inverse
+// (a value to restore, or an absence to remove), so the proven form branches on
+// it:
+//
+//   undo match prev { Some(v) => m.insert(k, v), None => m.remove(k) }
+//
+// Restoring `prev` without the branch is refused (the key may be absent, where
+// the inverse is a `remove`), and so is a defaulted read (`m.get(k) ?? d`),
+// which erases the `Opt`. Each refusal names the `match` form. An `undo` that
+// is not restore-SHAPED keeps the #1945 refusal.
+//
+// `[handled, message]`: `["0", ""]` when the `undo` is not restore-shaped (the
+// caller falls through to #1945), and `["1", message]` when it is — admitted
+// exactly when the message is empty.
+fn restore_verdict(ss: List[Stmt], i: Int, maps: List[Str], recv: Str,
+                   key: Expr, und: Expr, verb: Str) -> List[Str] {
+  let sh = restore_shape(und, recv, key)
+  if (sh.length() == 0) { return ["0", ""] }
+  let bind = sh[0]
+  let v = read_verdict(ss, i - 1, bind, i - 1, recv, key, maps)
+  if (v != 0) {
+    return ["1", restore_form_msg(recv, verb, bind, restore_why(v),
+                                  key_spelling(key))]
+  }
+  if (sh[1] == "plain") {
+    return ["1", restore_form_msg(recv, verb, bind,
+      "it is `Opt`-shaped, so the undo must branch on it", key_spelling(key))]
+  }
+  return ["1", ""]
+}
+
+// issue #1980: the `[binding, form]` of a restore-SHAPED `undo` on `recv` at
+// `key`, else `[]`. `[prev, "match"]` for
+// `match prev { Some(v) => recv.insert(key, v), None => recv.remove(key) }` and
+// `[prev, "plain"]` for `recv.insert(key, prev)`. The SHAPE is what keys the
+// refusal, so the reason a restore-shaped `undo` fell short never changes the
+// form the message names.
+fn restore_shape(und: Expr, recv: Str, key: Expr) -> List[Str] {
+  return match und {
+    Match(m) => restore_match_shape(m, recv, key),
+    Call(c) => restore_plain_shape(c, recv, key),
+    _ => [],
+  }
+}
+
+fn restore_match_shape(m: MatchN, recv: Str, key: Expr) -> List[Str] {
+  if (m.arms.length() != 2) { return [] }
+  let si = arm_index(m.arms, "Some", 0)
+  let ni = arm_index(m.arms, "None", 0)
+  if (si < 0 || ni < 0 || m.arms[si].bind == "") { return [] }
+  let scrut = match m.scrut { Var(v) => v, _ => "", }
+  if (scrut == "") { return [] }
+  let ins = call_of(m.arms[si].body, recv, "insert", [key, Var(m.arms[si].bind)])
+  let rem = call_of(m.arms[ni].body, recv, "remove", [key])
+  return ins && rem ? [scrut, "match"] : []
+}
+
+fn restore_plain_shape(c: CallN, recv: Str, key: Expr) -> List[Str] {
+  if (calln_recv(c) != recv || calln_verb(c) != "insert") { return [] }
+  if (c.args.length() != 2 || !key_expr_same(c.args[0], key)) { return [] }
+  return match c.args[1] { Var(v) => [v, "plain"], _ => [], }
+}
+
+fn arm_index(arms: List[ArmN], pat: Str, i: Int) -> Int {
+  if (i >= arms.length()) { return 0 - 1 }
+  return arms[i].pat == pat ? i : arm_index(arms, pat, i + 1)
+}
+
+fn call_of(e: Expr, recv: Str, verb: Str, args: List[Expr]) -> Bool {
+  return match e {
+    Call(c) => call_recv(e) == recv && call_verb(e) == verb
+      && key_args_same(c.args, args, 0),
+    _ => false,
+  }
+}
+
+fn calln_recv(c: CallN) -> Str {
+  return match c.target { Field(f) => match f.target { Var(v) => v, _ => "", }, _ => "", }
+}
+
+fn calln_verb(c: CallN) -> Str {
+  return match c.target { Field(f) => f.name, _ => "", }
+}
+
+// issue #1980: whether the value this `undo` restores was read from `recv` at
+// `key` — 0 admitted, 1 no read of this table at this key bound it earlier in
+// the same body, 2 it is read from another handle or another key, 3 this table
+// is written at this key between the read and the effect, 4 its read is
+// defaulted. `at` is the exclusive upper bound of the region to scan and `eff`
+// the index of the effect itself, so the region between a read at `at - 1` and
+// the effect is `at .. eff - 1`. The LAST binding of the name ahead of the
+// effect is the one in force; a statement that is not a pure `let` (an
+// acquisition, an emit, a spawn) carries a different statement kind and is
+// skipped, exactly as the reference skips it.
+fn read_verdict(ss: List[Stmt], at: Int, name: Str, eff: Int, recv: Str,
+                key: Expr, maps: List[Str]) -> Int {
+  if (at <= 0) { return 1 }
+  let s = ss[at - 1]
+  if (s.kind == "expr" && s.bind == name) {
+    let rr = read_recv(s.e, maps)
+    if (rr == "") { return 1 }
+    if (rr != recv || !key_expr_same(read_key(s.e), key)) { return 2 }
+    if (written_between(ss, at, eff, recv, key, maps)) { return 3 }
+    if (read_defaulted(s.e)) { return 4 }
+    return 0
+  }
+  return read_verdict(ss, at - 1, name, eff, recv, key, maps)
+}
+
+// Whether this body writes `recv` at `key` between the read that bound the
+// restored value and the effect. A write at another key leaves the read intact;
+// one at this key makes the restored value the value the EFFECT overwrote, so
+// the `undo` is no longer its inverse.
+fn written_between(ss: List[Stmt], i: Int, eff: Int, recv: Str, key: Expr,
+                   maps: List[Str]) -> Bool {
+  if (i >= eff) { return false }
+  let s = ss[i]
+  if (s.kind == "effect" && host_write_verb(s.e, maps) != ""
+      && call_recv(s.e) == recv && key_expr_same(first_arg(s.e), key)) {
+    return true
+  }
+  return written_between(ss, i + 1, eff, recv, key, maps)
+}
+
+// The receiver of a host `Map.get` read, looking THROUGH a defaulting `??` (it
+// is the same read, and the `??` is exactly what the rule refuses); "" when `e`
+// is not such a read.
+fn read_recv(e: Expr, maps: List[Str]) -> Str {
+  return match e {
+    Bin(b) => b.op == "??" ? read_recv(b.l, maps) : "",
+    _ => call_verb(e) == "get" && contains(maps, call_recv(e)) ? call_recv(e) : "",
+  }
+}
+
+// The key a host read is asked for, looking through a defaulting `??`.
+fn read_key(e: Expr) -> Expr {
+  return match e {
+    Bin(b) => b.op == "??" ? read_key(b.l) : first_arg(e),
+    _ => first_arg(e),
+  }
+}
+
+fn read_defaulted(e: Expr) -> Bool {
+  return match e { Bin(b) => b.op == "??", _ => false, }
+}
+
+fn restore_why(v: Int) -> Str {
+  if (v == 1) {
+    return "no read of this table at this key bound it earlier in the same body"
+  }
+  if (v == 2) { return "it is read from another handle or another key" }
+  if (v == 3) {
+    return "this table is written at this key between the read and the effect"
+  }
+  if (v == 4) {
+    return "its read is defaulted (`??`), which erases the `Opt` the inverse follows"
+  }
+  return "it is `Opt`-shaped, so the undo must branch on it"
+}
+
+fn restore_form_msg(name: Str, verb: Str, bind: Str, why: Str, k: Str) -> Str {
+  return "the `undo` of `effect ".concat(name).concat(".").concat(verb)
+    .concat("(...)` cannot restore `").concat(bind).concat("` (").concat(why)
+    .concat("): write `undo match ").concat(bind).concat(" { Some(v) => ")
+    .concat(name).concat(".insert(").concat(k).concat(", v), None => ")
+    .concat(name).concat(".remove(").concat(k).concat(") }`")
 }
 
 fn call_recv(e: Expr) -> Str {
@@ -17991,7 +18232,15 @@ pub fn admit_src(src: Str) -> Str {
   // yields exactly the wire it did before the sink existed.
   let refs = collect_refusals(ts, pg)
   // issue #1813: a fn and an extern of one name, when nothing else refuses.
-  if (refs.length() == 0) { return fn_extern_scan(ts).v }
+  if (refs.length() == 0) {
+    let fev = fn_extern_scan(ts).v
+    if (fev != "") { return fev }
+    // issue #2012: the `secret NAME for CAP` bindings. The reference runs
+    // `_lower_secrets` at the END of lowering (`check_and_lower`, after
+    // `_lower_externs`), so a secret refusal is reported only once nothing
+    // earlier in the pipeline refuses.
+    return secret_scan(ts).v
+  }
   return pick_min(refs)
 }
 
@@ -18022,6 +18271,14 @@ pub fn admit_all(src: Str) -> Str {
   let refs = collect_refusals(ts, pg)
   let fxe = fn_extern_scan(ts)
   if (refs.length() == 0 && fxe.v != "") { return fmt_all([fxe]) }
+  // issue #2012: the `secret NAME for CAP` refusals, in the same tail position
+  // `admit_src` gives them, so this sink stays the WHOLE collected list and
+  // `admit_src`'s wire is always one of its rows (which is what the census
+  // engine's `line()` matches on).
+  if (refs.length() == 0) {
+    let ssv = secret_scan(ts)
+    if (ssv.v != "") { return fmt_all([ssv]) }
+  }
   return fmt_all(refs)
 }
 
@@ -18979,7 +19236,12 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   let refs = append_verds(wrefs,
     link_refusals(pg, keptProvs, keptReqs, keptRoutes, keptNames))
   // issue #1813, as in `admit_src`: only when nothing else refuses.
-  if (refs.length() == 0) { return fn_extern_scan(ts).v }
+  if (refs.length() == 0) {
+    let fev = fn_extern_scan(ts).v
+    if (fev != "") { return fev }
+    // issue #2012, as in `admit_src`: the bound-secret refusals.
+    return secret_scan(ts).v
+  }
   return pick_min(refs)
 }
 
@@ -19500,6 +19762,27 @@ fn ir_params_json(ps: List[ParamN]) -> Str {
   return out
 }
 
+// A FUNCTION's `params` list: `ir_params_json` with each name run through
+// `predeclared_mangle`, so a parameter that shadows a predeclared name is
+// renamed in the SIGNATURE exactly as the body's references already are. The
+// reference does this at its own param-list construction (`_lower_fns` lowers
+// `p.name` through `_predeclared_mangle`), which is why `fn f(len: Int)` reads
+// as `len_` on both sides there. Only `fn` declarations are mangled: extern and
+// service-operation params keep the author's spelling, as in the reference.
+fn ir_fn_params_json(ps: List[ParamN]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ps.length()) {
+    var e = "{\"name\": ".concat(jstr(predeclared_mangle(ps[i].name)))
+      .concat(", \"type\": ").concat(jstr(taint_strip(ps[i].ty)))
+    if (taint_mentions_secret(ps[i].ty)) { e = e.concat(", \"secret\": true") }
+    e = e.concat("}")
+    out = out == "" ? e : out.concat(", ").concat(e)
+    i += 1
+  }
+  return out
+}
+
 // The outermost qualifier head of a DECLARED type (`Untrusted`, `Trusted` or
 // `Secret`) when it wraps exactly one type argument, else "": the reference's
 // `taint.top_qualifier` for the three heads the services IR stamps.
@@ -19543,12 +19826,101 @@ fn ir_caps_json(cs: List[Str]) -> Str {
   return out
 }
 
+// The line list the doc recovery below reads, plus the line break it joins the
+// recovered lines with. Built by CODE POINT (10) because revl has no escape
+// processing: a `"\n"` literal is the two characters `\` `n`, never a line break
+// (see `json_escape` above), so a `split` on it would never match. Same
+// segmentation Python's `str.split("\n")` gives, including the trailing empty
+// line a final `\n` produces. Computed ONCE per program and threaded.
+type SrcText = { lines: List[Str], nl: Str }
+
+fn src_text(src: Str) -> SrcText {
+  var lines: List[Str] = []
+  var start = 0
+  var i = 0
+  var nl = ""
+  while (i < src.length()) {
+    if (src.charAt(i).charCodeAt(0) == 10) {
+      if (nl == "") { nl = src.charAt(i) }
+      lines = lines.push(src.slice(start, i))
+      start = i + 1
+    }
+    i += 1
+  }
+  return { lines: lines.push(src.slice(start, src.length())), nl: nl }
+}
+
+// `lstrip()` for the doc recovery below: the leading whitespace Python strips,
+// by code point (space, tab, CR, VT, FF) — nothing else, so the text after the
+// `// ` prefix keeps the TRAILING whitespace the reference keeps (a plain
+// `ty_trim` would eat it and the two producers would differ).
+fn ltrim_ws(s: Str) -> Str {
+  var a = 0
+  var go = true
+  while (go) {
+    if (a >= s.length()) { go = false } else {
+      let cc = s.charAt(a).charCodeAt(0)
+      if (cc == 32 || cc == 9 || cc == 13 || cc == 11 || cc == 12) { a += 1 } else { go = false }
+    }
+  }
+  return s.slice(a, s.length())
+}
+
+// issue #1952: the comment block directly above an operation, as the JSON key
+// fragment to append — `, "doc": "..."`, or `""` when the operation carries no
+// such block, so an IR whose operations carry no comments keeps the ABSENT key
+// and stays byte-identical to the reference's. The token stream carries no
+// comments (neither lexer keeps them), so the block is read backwards out of the
+// RAW SOURCE: `line` is the 1-based line of the operation's FIRST token (for a
+// single-line `service Log { emission fn write(msg: Str) }` that is the `service`
+// line itself, which is exactly what the reference's `self.peek().line` anchors
+// on) and every preceding line must itself be a `//` line — a blank line ends
+// the block. Leading indentation, the two slashes and ONE following space are
+// removed; the line breaks are kept. `n` rather than an empty accumulator, so a
+// block that happens to be empty still emits `"doc": ""` as the reference does.
+//
+// `starts` is the reference's `mstarts_line`: the block belongs to the operation
+// only when the operation OPENS its line. In `service Cache { fn size() -> Int }`
+// the `fn` sits on the `service` header line, so the block above that line is the
+// SERVICE's, and reading it as `size`'s would make a comment above a `service`
+// line into a member's doc.
+fn ir_doc_key(st: SrcText, line: Int, starts: Bool) -> Str {
+  if (!starts) { return "" }
+  var idx = line - 2
+  if (idx < 0 || idx >= st.lines.length()) { return "" }
+  var n = 0
+  var out = ""
+  var go = true
+  while (go) {
+    let s = ltrim_ws(st.lines[idx])
+    if (starts_with(s, "//")) {
+      var text = s.slice(2, s.length())
+      if (starts_with(text, " ")) { text = text.slice(1, text.length()) }
+      out = n == 0 ? text : text.concat(st.nl).concat(out)
+      n += 1
+      idx -= 1
+      if (idx < 0) { go = false }
+    } else {
+      go = false
+    }
+  }
+  return n == 0 ? "" : ", \"doc\": ".concat(jstr(out))
+}
+
 // One service's method table -> `"m": {params, returns, emission[, caps][, async][, idempotent]}`
 // pairs. Mirrors the reference's per-method dict (check_and_lower's `services`
 // comprehension): `capabilities` present iff a SCOPED `emission[..]`, `async`
 // iff the op is `async` (each of which also bumps `ir_version` to 3).
-fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str]) -> IrMethR {
+fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str], st: SrcText) -> IrMethR {
   if (i >= end || atk(ts, i, "}")) { return mk_irmethr(acc, i, v3) }
+  // the operation's first token line, captured before the modifier loop — the
+  // anchor the reference reads off `self.peek().line` for the doc block above.
+  let dline = tkc(ts, i).line
+  // ... and whether that token OPENS its line, the reference's `mstarts_line`:
+  // the token before it is the enclosing `{` (or the previous member's last
+  // token), so an equal line means the operation shares a line with what came
+  // before and the block above it is that declaration's, not the operation's.
+  let dstarts = i == 0 ? true : tkc(ts, i - 1).line != dline
   var j = i
   var em = false
   var scoped = false
@@ -19613,6 +19985,7 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   if (retQual != "") {
     mj = mj.concat(", \"returns_qualifier\": ").concat(jstr(retQual))
   }
+  mj = mj.concat(ir_doc_key(st, dline, dstarts))
   if (term != "") {
     mj = mj.concat(", \"termination\": ").concat(jstr(term))
   }
@@ -19624,14 +19997,14 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   if (isIdempotent) { mj = mj.concat(", \"idempotent\": true") }
   mj = mj.concat("}")
   let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al)
+  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al, st)
 }
 
-fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str]) -> IrSvcR {
+fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str], st: SrcText) -> IrSvcR {
   let nm = tkc(ts, i + 1).text
   let end = close_brace(ts, i + 2)
   let hi = end == 0 - 1 ? i + 3 : end - 1
-  let ms = ir_methods(ts, i + 3, hi, "", false, al)
+  let ms = ir_methods(ts, i + 3, hi, "", false, al, st)
   return mk_irsvcr(jstr(nm).concat(": {\"methods\": {").concat(ms.js).concat("}}"),
                    ms.v3)
 }
@@ -23365,7 +23738,14 @@ fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str, al: Map[Str, Str]) ->
     // unannotated arrow's return is inferred in this environment.
     let pty = p.ty != "" ? alias_subst(p.ty, al)
                          : (i < expPs.length() ? expPs[i] : "")
-    pn = i == 0 ? jstr(p.name) : pn.concat(",").concat(jstr(p.name))
+    // issue #1633, the arrow half of the `fn` repair below: the SIGNATURE must
+    // carry the same mangled spelling the body reads, because `lir_expr`'s
+    // in-scope `var` arm mangles a reference and a signature written from the
+    // raw `p.name` then declares a name its own body never mentions. The scope
+    // binding stays the author's spelling, exactly as at a declaration site —
+    // only the emitted name is escaped. `captures` already did this.
+    pn = i == 0 ? jstr(predeclared_mangle(p.name))
+                : pn.concat(",").concat(jstr(predeclared_mangle(p.name)))
     pt = i == 0 ? jstr(pty) : pt.concat(",").concat(jstr(pty))
     if (pty == "") { allTyped = false } else { inner = tenv_put(inner, p.name, pty) }
     i += 1
@@ -25285,7 +25665,7 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
   let tmarks = om.marks.set("@try_fn", i).set("@try_end", bend)
   let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
                          params_env(ps.ps, cases, tps), [], retTy, tmarks, om.births, al)
-  let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
+  let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_fn_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
     .concat(bodyjs).concat("]")
@@ -25566,31 +25946,320 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str])
 
 // Collect every top-level `extern` into the `externs` list. A single extern
 // outside the covered surface drops the whole section (ok=false), mirroring the
-// component-body omission discipline.
+// component-body omission discipline. `bnd` is the resolved bound-secret index
+// (`secrets_bind`), so each extern that serves a bound capability carries the
+// secret names it receives as a trailing `"secrets"` key — the reference's
+// `entry["secrets"]`, appended the same way `ir_extern` appends `"bodies"`.
 fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
-                 decls: List[TaintDecl], al: Map[Str, Str]) -> ExAcc {
+                 decls: List[TaintDecl], al: Map[Str, Str],
+                 bnd: Map[Str, List[Str]]) -> ExAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return { js: acc, ok: ok } }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al) }
-  if (at_event(ts, i)) { return externs_walk(ts, event_decl_end(ts, i), acc, ok, decls, al) }
-  if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al) }
-  if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al) }
+  if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al, bnd) }
+  if (at_event(ts, i)) { return externs_walk(ts, event_decl_end(ts, i), acc, ok, decls, al, bnd) }
+  if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd) }
+  if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al, bnd) }
   if (t.text == "extern") {
     let ex = ir_extern(ts, i, decls, al)
     let ni = p_extern(ts, i, empty_prog()).i
-    let acc2 = ex.ok ? (acc == "" ? ex.js : acc.concat(", ").concat(ex.js)) : acc
-    return externs_walk(ts, ni, acc2, ok && ex.ok, decls, al)
+    let ns = sec_of(bnd, fn_name_at(ts, i))
+    let js = ex.ok && ns.length() > 0
+      ? ex.js.slice(0, ex.js.length() - 1)
+          .concat(", \"secrets\": [").concat(sec_names_json(ns)).concat("]}")
+      : ex.js
+    let acc2 = ex.ok ? (acc == "" ? js : acc.concat(", ").concat(js)) : acc
+    return externs_walk(ts, ni, acc2, ok && ex.ok, decls, al, bnd)
   }
-  if (t.text == "type") { return externs_walk(ts, type_decl_end(ts, i + 1), acc, ok, decls, al) }
+  if (t.text == "type") { return externs_walk(ts, type_decl_end(ts, i + 1), acc, ok, decls, al, bnd) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls, al) }
-    return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al)
+    if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls, al, bnd) }
+    return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd)
   }
-  if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok, decls, al) }
-  if (t.text == "service") { return externs_walk(ts, p_service(ts, i, empty_prog()).i, acc, ok, decls, al) }
-  if (t.text == "component") { return externs_walk(ts, p_component(ts, i, empty_prog()).i, acc, ok, decls, al) }
-  return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al)
+  if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok, decls, al, bnd) }
+  if (t.text == "service") { return externs_walk(ts, p_service(ts, i, empty_prog()).i, acc, ok, decls, al, bnd) }
+  if (t.text == "component") { return externs_walk(ts, p_component(ts, i, empty_prog()).i, acc, ok, decls, al, bnd) }
+  return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd)
+}
+
+// ============================================================ bound secrets IR
+//
+// item 256: `secret NAME for CAP` binds a plug-time secret local into every
+// `emission` extern that serves `CAP`, and nowhere else. The reference reads the
+// statement in its PARSER (contextually — see `at_secret`) and resolves it in
+// `_lower_secrets`, which produces two IR surfaces:
+//
+//   * the top-level `secrets` rows, `{"name", "capability"}`, in declaration
+//     order, written between `externs` and `tests` (the value is NEVER in the
+//     IR); and
+//   * the per-extern name list, `externs[i]["secrets"] = ["api_key", ...]`, so
+//     each bound extern's emitter binds them as its first body locals.
+//
+// Both are read here in ONE brace-structural pass over the token stream, the
+// `boot_names` discipline: a per-token recursion over a whole file would be a
+// stack risk, and an extern's verbatim `@ts { ... }` body is a single
+// `hostbody` token whose closing brace the lexer has already consumed, so its
+// braces cannot perturb the depth. The reference instead cross-indexes its
+// LOWERED extern list; this reads the same facts off the DECLARED surface
+// (`p_extern` + `params_at`, exactly the readers that produce that list), which
+// is what keeps it byte-identical without threading the lowered JSON back.
+//
+// The four walkers need no new arm for `secret`: it is CONTEXTUAL, so the line
+// is ident-headed and `ir_walk` / `fns_walk` / `types_walk` / `externs_walk`
+// already step over it with `skip_line`, and `p_top` recognises it (with
+// `at_top_decl` naming it, so a `type` declaration's span ends at one).
+
+// One top-level `secret NAME for CAP`. `line` is the declaration's line, which
+// is what the reference stamps its refusals with.
+type SecDecl = { name: Str, cap: Str, line: Int }
+
+// One top-level `emission` extern's SECRET surface — exactly what `_lower_secrets`
+// reads off a LOWERED extern entry: `_extern_emission_caps`'s `name` and
+// `capabilities`, the `params` names the collision rule compares against, and
+// the `bodies` keys the tier gate reads. (`refs` is the other half of the
+// reference's `body_tiers` union, but it is the item-396 `= @backend ref` form,
+// outside this producer's covered extern surface — an extern carrying one drops
+// the whole `externs` section — so it can never reach here.)
+type SecExt = { name: Str, caps: List[Str], params: List[Str], tiers: List[Str] }
+
+// The resolved binding: the manifest-visible rows, the per-extern bound-name
+// lists, and — when the reference would refuse — its first refusal, verbatim.
+// `bad` is "" for a program that binds nothing, and for every program that binds
+// legally, so the refusal path is inert unless a source spells `secret NAME for
+// CAP` and that binding is one of the four illegal shapes.
+type SecBnd = { rows: List[SecDecl], bound: Map[Str, List[Str]], bad: Str, line: Int }
+
+// Every top-level `secret NAME for CAP`, in declaration order — the order
+// `_lower_secrets` refuses in.
+fn secret_decls(ts: List[Token]) -> List[SecDecl] {
+  var out: List[SecDecl] = []
+  var depth = 0
+  var i = 0
+  while (i < ts.length()) {
+    if (atk(ts, i, "{")) {
+      depth += 1
+    } else if (atk(ts, i, "}")) {
+      depth -= 1
+    } else if (depth == 0 && at_secret(ts, i)) {
+      out = out.push({ name: tkc(ts, i + 1).text, cap: cap_tok(ts, i + 3),
+                       line: tkc(ts, i).line })
+      i = secret_end(ts, i) - 1
+    }
+    i += 1
+  }
+  return out
+}
+
+// The `(` of a top-level extern's parameter list, or -1. `next_fn_name` is the
+// fn/extern duplicate scan's reader: it stops at the first `fn`, bounded by the
+// `{` or `=` that ends the search. No modifier slot — `async`, `deferred`,
+// `idempotent(key: p)`, the capability scope, a type-parameter bracket — can
+// spell the `fn` keyword, so the first one after `extern` heads the declaration,
+// exactly as the reference's `extern_decl` reads it.
+fn extern_lparen(ts: List[Token], i: Int) -> Int {
+  let k = next_fn_name(ts, i + 1)
+  if (!atw(ts, k, "fn")) { return 0 - 1 }
+  var j = k + 2
+  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  return atk(ts, j, "(") ? j : 0 - 1
+}
+
+// The NAME of the top-level extern headed at `i` (the token after its `fn`),
+// which is the key the reference annotates and indexes `bound_names` by.
+fn fn_name_at(ts: List[Token], i: Int) -> Str {
+  let k = next_fn_name(ts, i + 1)
+  return atk(ts, k + 1, "ident") ? tkc(ts, k + 1).text : ""
+}
+
+// One `emission` extern's secret surface. `end` is `p_extern`'s own span end, so
+// the body scan is bounded by the declaration it belongs to; the `bodies` keys
+// come off the `hostbody` tokens exactly as `ir_extern` reads them (the lexer
+// writes `<backend>{<body without its closing brace>`, so the key is the text
+// before the first `{`).
+fn secret_ext_at(ts: List[Token], i: Int, end: Int, f: FnD) -> SecExt {
+  var params: List[Str] = []
+  let lp = extern_lparen(ts, i)
+  if (lp > 0) { params = param_names(params_at(ts, lp + 1).ps) }
+  var tiers: List[Str] = []
+  var k = i + 1
+  while (k < end) {
+    if (atk(ts, k, "hostbody")) {
+      let raw = tkc(ts, k).text
+      let b = raw.indexOf("{")
+      if (b > 0) { tiers = tiers.push(raw.slice(0, b)) }
+    }
+    k += 1
+  }
+  return { name: f.name, caps: f.caps, params: params, tiers: tiers }
+}
+
+// Every top-level `emission` extern's secret surface, in declaration order. The
+// `p_extern` span end bounds each body scan; the scan itself advances one TOKEN
+// at a time rather than jumping to that end, because `p_extern`'s trailing scan
+// runs to the next declaration HEAD and a `secret` line between two externs is
+// not one — jumping would step over the binding.
+fn secret_exts(ts: List[Token]) -> List[SecExt] {
+  var out: List[SecExt] = []
+  var depth = 0
+  var i = 0
+  while (i < ts.length()) {
+    if (atk(ts, i, "{")) {
+      depth += 1
+    } else if (atk(ts, i, "}")) {
+      depth -= 1
+    } else if (depth == 0 && atw(ts, i, "extern")
+               && atw(ts, i + 1, "emission")) {
+      let f = p_extern(ts, i, empty_prog())
+      out = out.push(secret_ext_at(ts, i, f.i, f.pg.fns[f.pg.fns.length() - 1]))
+      i = f.i - 1
+    }
+    i += 1
+  }
+  return out
+}
+
+// `_extern_emission_caps`'s rule: a DECLARED scope replaces the extern's name,
+// and only an unscoped (`bare`) emission is its own capability — the
+// name-as-capability seed `emit_caps_reach` already writes for the
+// emission-reach fold, applied here to one surface row.
+fn sec_ext_caps(e: SecExt) -> List[Str] {
+  return e.caps.length() > 0 ? e.caps : [e.name]
+}
+
+fn sec_serves(e: SecExt, cap: Str) -> Bool {
+  return sec_in(sec_ext_caps(e), cap)
+}
+
+fn sec_in(xs: List[Str], w: Str) -> Bool {
+  var i = 0
+  while (i < xs.length()) {
+    if (xs[i] == w) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The reference's `_CONFIG_INJECTION_TIERS` (py/ts/go/java/rs): the tiers that
+// bind a secret as a plug-time body local. A bound extern whose bodies are ALL
+// on other tiers (today only `wasm`) has nowhere to inject the key.
+fn sec_tier_ok(e: SecExt) -> Bool {
+  var i = 0
+  while (i < e.tiers.length()) {
+    let t = e.tiers[i]
+    if (t == "py" || t == "ts" || t == "go" || t == "java" || t == "rs") {
+      return true
+    }
+    i += 1
+  }
+  return false
+}
+
+fn sec_of(bnd: Map[Str, List[Str]], n: Str) -> List[Str] {
+  return match bnd.lookup(n) { Some(v) => v, None => [] }
+}
+
+fn sec_fail(msg: Str, line: Int) -> SecBnd {
+  return { rows: [], bound: Map.empty(), bad: msg, line: line }
+}
+
+// `_lower_secrets`, verbatim. For each secret, in declaration order: duplicate
+// NAME; then the bound emission externs, in extern declaration order, each
+// checked for a NAME/parameter collision and then for the injection tier (the
+// reference's order — collision BEFORE tier, per extern, not per family); then
+// the no-bound-extern refusal, which is tested BEFORE the per-extern loop and so
+// outranks both. Messages are byte-identical to `src/revl/lower.py`'s; the
+// reference's `hint` is NOT part of the diagnostic message and is not carried
+// here.
+//
+// The reference RAISES on the first of these, so this reports exactly one — the
+// first — and `bad` is "" the moment the whole program binds legally.
+fn secrets_bind(ts: List[Token]) -> SecBnd {
+  let ds = secret_decls(ts)
+  if (ds.length() == 0) { return { rows: [], bound: Map.empty(), bad: "", line: 0 } }
+  let es = secret_exts(ts)
+  var rows: List[SecDecl] = []
+  var bound: Map[Str, List[Str]] = Map.empty()
+  var seen: List[Str] = []
+  var i = 0
+  while (i < ds.length()) {
+    let s = ds[i]
+    if (sec_in(seen, s.name)) {
+      return sec_fail("duplicate secret `".concat(s.name).concat("`"), s.line)
+    }
+    seen = seen.push(s.name)
+    var hit: List[SecExt] = []
+    var b = 0
+    while (b < es.length()) {
+      if (sec_serves(es[b], s.cap)) { hit = hit.push(es[b]) }
+      b += 1
+    }
+    if (hit.length() == 0) {
+      let m = "secret `".concat(s.name).concat("` is bound to capability `")
+        .concat(s.cap)
+        .concat("`, but no emission extern serves it - the key would be ")
+        .concat("injected nowhere")
+      return sec_fail(m, s.line)
+    }
+    var q = 0
+    while (q < hit.length()) {
+      let e = hit[q]
+      if (sec_in(e.params, s.name)) {
+        let m = "secret `".concat(s.name).concat("` collides with a parameter ")
+          .concat("of extern `").concat(e.name)
+          .concat("` - the injected secret local would shadow the parameter")
+        return sec_fail(m, s.line)
+      }
+      if (e.tiers.length() > 0 && !sec_tier_ok(e)) {
+        let m = "secret `".concat(s.name).concat("` is bound to a capability ")
+          .concat("whose only extern body is on the @")
+          .concat(join_comma(sort_strs(e.tiers), 0, ""))
+          .concat(" tier, which has no plug-time secret injection (emission ")
+          .concat("extern `").concat(e.name).concat("`)")
+        return sec_fail(m, s.line)
+      }
+      bound = bound.set(e.name, sec_of(bound, e.name).push(s.name))
+      q += 1
+    }
+    rows = rows.push(s)
+    i += 1
+  }
+  return { rows: rows, bound: bound, bad: "", line: 0 }
+}
+
+// The `secrets` rows as JSON, in declaration order — `[{"name": "api_key",
+// "capability": "net.send"}, ...]`. The value is never written (§1b).
+fn sec_rows_json(rs: List[SecDecl]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < rs.length()) {
+    let seg = "{\"name\": ".concat(jstr(rs[i].name))
+      .concat(", \"capability\": ").concat(jstr(rs[i].cap)).concat("}")
+    out = i == 0 ? seg : out.concat(", ").concat(seg)
+    i += 1
+  }
+  return out
+}
+
+// One bound extern's `"secrets": [...]` array body, in secret declaration order.
+fn sec_names_json(ns: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ns.length()) {
+    out = i == 0 ? jstr(ns[i]) : out.concat(", ").concat(jstr(ns[i]))
+    i += 1
+  }
+  return out
+}
+
+// The first refusal `_lower_secrets` would raise, as the gate's `<TAG>|<msg>`
+// wire. The tag is `SECRET`: the reference's `RevlError` here carries NO `code`,
+// so there is no registered code to name (the four are lowering refusals, not
+// `G-SECRET` flow obligations), and a TAGGED wire is what keeps the census
+// reading a refusal as a refusal rather than as a malformed gate answer.
+fn secret_scan(ts: List[Token]) -> Verd {
+  let s = secrets_bind(ts)
+  if (s.bad == "") { return no_verd() }
+  return mk_verd(tagged("SECRET", s.bad), s.line)
 }
 
 // ================================================================ types IR
@@ -25782,19 +26451,19 @@ fn types_walk(ts: List[Token], i: Int, acc: Str, al: Map[Str, Str]) -> Str {
 
 // ---------------------------------------------------------------- top level
 
-fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str]) -> IrAcc {
+fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st: SrcText) -> IrAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return a }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a, fname, al) }
-  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a, fname, al) }
-  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a, fname, al) }
-  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname, al) }
-  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname, al) }
+  if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a, fname, al, st) }
+  if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a, fname, al, st) }
+  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a, fname, al, st) }
+  if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname, al, st) }
+  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname, al, st) }
   if (t.text == "test") {
     let na = mk_iracc(a.svcs, a.comps, true, a.v2)
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return ir_walk(ts, e, na, fname, al) }
-    return ir_walk(ts, skip_line(ts, i), na, fname, al)
+    if (e != 0 - 1) { return ir_walk(ts, e, na, fname, al, st) }
+    return ir_walk(ts, skip_line(ts, i), na, fname, al, st)
   }
   if (t.text == "type") {
   // a `type` is stepped over to the end of the DECLARATION, not of its first
@@ -25808,29 +26477,29 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str]) -> 
     // `ir_version`; only one that survives the erasure is.
     let survives = !al.has(tkc(ts, i + 1).text)
     return ir_walk(ts, type_decl_end(ts, i + 1),
-                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2), fname, al)
+                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2), fname, al, st)
   }
   if (t.text == "extern") {
     return ir_walk(ts, p_extern(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al)
+                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
   }
   if (t.text == "fn") {
     return ir_walk(ts, p_fn(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al)
+                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
   }
   if (t.text == "service") {
-    let sv = ir_service(ts, i, al)
+    let sv = ir_service(ts, i, al, st)
     let svcs2 = a.svcs == "" ? sv.js : a.svcs.concat(", ").concat(sv.js)
     return ir_walk(ts, p_service(ts, i, empty_prog()).i,
-                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname, al)
+                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname, al, st)
   }
   if (t.text == "component") {
     let cp = ir_component(ts, i, fname, al)
     let comps2 = a.comps == "" ? cp.js : a.comps.concat(", ").concat(cp.js)
     return ir_walk(ts, p_component(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname, al)
+                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname, al, st)
   }
-  return ir_walk(ts, skip_line(ts, i), a, fname, al)
+  return ir_walk(ts, skip_line(ts, i), a, fname, al, st)
 }
 
 // The IR producer (SEAM 1). Returns the covered surface of the interchange IR
@@ -25868,7 +26537,7 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
   // checker, for the same reason: an alias that reached either of them would be
   // an undeclared type name.
   let al = alias_map(ts)
-  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname, al)
+  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname, al, src_text(src))
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   // The async COLOUR is a whole-program property, so the streaming function
   // producer cannot decide it one declaration at a time: the reference runs the
@@ -25880,12 +26549,17 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
   let colored = async_colored(pg.fns, async_slots_map(pg.fns))
   let fnsjs = fns_walk(ts, 0, "", case_binds(ts, al), colored, own_program_summary(ts), al)
   let typesjs = types_walk(ts, 0, "", al)
-  let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts), al)
+  // The bound-secret table is computed once, ahead of the extern walk, because
+  // the walk needs it: a secret bound to a capability stamps the NAME onto every
+  // emission extern that serves that capability (`externs[i]["secrets"]`).
+  let bnd = secrets_bind(ts)
+  let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts), al, bnd.bound)
   var out = "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
     .concat(a.svcs).concat("}, \"components\": [").concat(a.comps).concat("]")
   if (typesjs != "") { out = out.concat(", \"types\": {").concat(typesjs).concat("}") }
   if (fnsjs != "") { out = out.concat(", \"functions\": [").concat(fnsjs).concat("]") }
   if (exres.ok && exres.js != "") { out = out.concat(", \"externs\": [").concat(exres.js).concat("]") }
+  if (bnd.rows.length() > 0) { out = out.concat(", \"secrets\": [").concat(sec_rows_json(bnd.rows)).concat("]") }
   return out.concat("}")
 }
 
@@ -28826,6 +29500,15 @@ test "lower_to_ir marks an emission op and a scoped capability" {
 test "lower_to_ir marks sized_length on a field of a required service's returned record" {
   assert str_has(lower_to_ir("type Label = { text: Str } service Geo { fn label(s: Str) -> Label } service S { fn m(s: Str) -> Int } component C requires geo: Geo provides p: S { provide p { fn m(s) = geo.label(s).text.length } }"),
     "\"name\": \"length\", \"sized_length\": true}")
+}
+
+test "lower_to_ir renames a predeclared parameter in the signature (issue #1633)" {
+  // `len` is host-predeclared, so the reference renames the binder wherever it
+  // introduces it. The body reference was already renamed here; the parameter
+  // list was not, so the signature declared `len` while the body read `len_`,
+  // and the Go the fully-native chain emitted did not build.
+  assert lower_to_ir("fn f(len: Int, error: Int) -> Int { return len + error }")
+    == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"len_\", \"type\": \"Int\"}, {\"name\": \"error\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"len_\"},\"right\":{\"kind\":\"var\",\"name\":\"error\"},\"operands\":\"Int\"}}]}]}"
 }
 
 test "one member wearing a council's name is refused, and so is no proposer" {

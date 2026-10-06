@@ -400,14 +400,30 @@ def sidecar_writes(session, vs: dict) -> list[tuple[str, str]]:
 
 # ---------------------------------------------------------------- vendored trucs
 
+def vendored_path(path: str) -> tuple[str, str, str] | None:
+    """(truc name, path, project dir) when `path` is a vendored truc's
+    `trucs/<name>/component.rvl`, else `None` (issue #1769)."""
+    parts = os.path.normpath(os.path.abspath(path)).split(os.sep)
+    if len(parts) >= 3 and parts[-1] == "component.rvl" and parts[-3] == "trucs":
+        return (parts[-2], path, os.sep.join(parts[:-3]) or os.sep)
+    return None
+
+
 def vendored_trucs(vs: dict) -> list[tuple[str, str, str]]:
     """(truc name, loaded path, project dir) of every loaded file that is a
-    vendored truc's `trucs/<name>/component.rvl`."""
-    out = []
-    for path in vs.get("files") or []:
-        parts = os.path.normpath(os.path.abspath(path)).split(os.sep)
-        if len(parts) >= 3 and parts[-1] == "component.rvl" and parts[-3] == "trucs":
-            out.append((parts[-2], path, os.sep.join(parts[:-3]) or os.sep))
+    vendored truc's `trucs/<name>/component.rvl`.
+
+    Both the `files` the session was loaded with and the READ-ONLY dependency
+    buffers a `use` resolved to are walked (issue #1779): a truc reached
+    through `use` is loaded, and its records are served on the same terms."""
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for path in [*(vs.get("files") or []), *(vs.get("dependencies") or {})]:
+        found = vendored_path(path)
+        norm = os.path.normpath(os.path.abspath(path))
+        if found is not None and norm not in seen:
+            seen.add(norm)
+            out.append(found)
     return out
 
 
@@ -446,7 +462,13 @@ def load_vendored(session, vs: dict) -> int:
     with the truc's name. While the component holds the bytes the lock pins, the
     records are re-based on it, since they shipped with exactly that code; an
     edit to it in the session then stales them as usual. A record
-    whose id the project already has is the project's, and is skipped."""
+    whose id the project already has is the project's, and is skipped.
+
+    A truc reached through `use` rather than named in `files` counts as loaded
+    (issue #1779): its bytes ride the read-only dependency buffers, which hold
+    the exact text the compile read, so `held` — and therefore the publisher
+    trust the lock can earn — is measured against what compiled, not against a
+    fresh read of the disk."""
     from .. import registry  # noqa: PLC0415
 
     count = 0
@@ -455,7 +477,10 @@ def load_vendored(session, vs: dict) -> int:
         if doc is None:
             continue
         row = _lock_row(project, name)
-        held = _holds_pinned_bytes(row, (vs.get("files_content") or {}).get(path))
+        text = (vs.get("files_content") or {}).get(path)
+        if text is None:
+            text = (vs.get("dependencies") or {}).get(path)
+        held = _holds_pinned_bytes(row, text)
         trust = _vendored_trust(row, doc, held)
         for record in doc["records"]:
             if record["id"] in _records(session):
@@ -556,5 +581,5 @@ def _declarations(text: str, name: str) -> list:
 __all__ = ["KINDS", "EVIDENCE_KINDS", "query_verbs", "RERUNNABLE", "run_evidence",
            "NoteError", "notes", "add", "op_record",
            "refresh", "served", "concerning", "load_sidecar", "sidecar_writes",
-           "load_vendored", "vendored_trucs",
+           "load_vendored", "vendored_trucs", "vendored_path",
            "render", "import_marked"]
