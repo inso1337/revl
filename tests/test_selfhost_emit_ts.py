@@ -439,6 +439,13 @@ export class Frame {
   drain = undefined
   constructor(_ctx: unknown, _name: string) {}
   bracket(_crossing: unknown, _method: string, dispose: () => void) { return dispose }
+  // issue #2009: the reference emitter now arms the host-map write journal at a
+  // bracket site and wraps the bracket's inverse in `Frame.guard`, so a stub
+  // standing in for runtime.ts's `Frame` must carry both. Neither changes what
+  // this probe asserts (`removals`, `returncode`); the real methods live in
+  // backends/typescript/runtime.ts:1398 and its `guard`.
+  journalBegin() {}
+  guard(dispose: () => void) { return dispose }
 }
 export function record() {}
 """.replace("INSERT_RESULT", str(insert_result).lower())
