@@ -5,6 +5,14 @@
 # `spec.files` below first appeared after v0.3.1, so v0.3.1 itself rejects this
 # file. Run ./validate.sh before using it with any other AX commit.
 #
+# Two routes into the same gate, both as ordinary MCP servers:
+#
+#   revl-gate    revl mcp serve --provider tickets.rvl   the operator's .rvl
+#   revl-proxy   revl mcp proxy -- python3 tickets-mcp.py  an existing server
+#
+# Take one, or both. `revl mcp proxy` (issue #1463) landed in revl 2.0; the
+# flags below are parsed by revl's own parser in tests/test_examples_ax.py.
+#
 #   ax apply -f examples/ax/ax.yaml
 #   ax resume task revl-gated-triage
 #
@@ -55,9 +63,79 @@ spec:
           [ -e "$wal" ] || continue
           name=$(basename "$wal" .wal)
           revl recover --wal "$wal" --json > "$here/recovery/$name.json"
-          echo "revl recover $name: exit $? (0 clean, 1 residue); verdict in $here/recovery/$name.json"
+          recover_status=$?
+          echo "revl recover $name: exit $recover_status (0 clean, 1 residue, 3 a model stood in); verdict in $here/recovery/$name.json"
         done
         exit "$status"
+    # A stand-in for an MCP server you already run, so `revl-proxy` below has
+    # something to gate. It is an ordinary stdio MCP server over newline
+    # JSON-RPC, stdlib only. Replace the proxy entry's command with your own
+    # server's; nothing else changes. Its effects go to $TICKETS_OUTBOX so the
+    # outside world is visible to the tests, and one tool claims to be
+    # read-only, which the proxy declines to take on trust.
+    - path: .revl/tickets-mcp.py
+      content: |
+        #!/usr/bin/env python3
+        """A ticket system's MCP server. Stand-in for one you already run."""
+        import json
+        import os
+        import sys
+
+        TOOLS = [
+            {"name": "list_tickets", "description": "Read the ticket log.",
+             "inputSchema": {"type": "object"},
+             "annotations": {"readOnlyHint": True}},
+            {"name": "close_ticket", "description": "Close a ticket.",
+             "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}},
+                             "required": ["id"]},
+             "annotations": {"destructiveHint": True}},
+            {"name": "reopen_ticket", "description": "Reopen a ticket.",
+             "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}},
+                             "required": ["id"]},
+             "annotations": {"destructiveHint": True}},
+        ]
+
+        def outbox(line):
+            with open(os.environ["TICKETS_OUTBOX"], "a", encoding="utf-8") as out:
+                out.write(line + chr(10))
+
+        def call(name, args):
+            if name == "list_tickets":
+                path = os.environ["TICKETS_OUTBOX"]
+                body = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+                return body
+            if name in ("close_ticket", "reopen_ticket"):
+                outbox(("closed:" if name == "close_ticket" else "reopened:") + args["id"])
+                return "ok"
+            raise ValueError("no such tool: " + name)
+
+        def send(message):
+            sys.stdout.write(json.dumps(message) + chr(10))
+            sys.stdout.flush()
+
+        for line in sys.stdin:
+            request = json.loads(line)
+            method = request.get("method")
+            rid = request.get("id")
+            if method == "initialize":
+                send({"jsonrpc": "2.0", "id": rid, "result": {
+                    "protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "tickets", "version": "1"}}})
+            elif method == "tools/list":
+                send({"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}})
+            elif method == "tools/call":
+                params = request["params"]
+                try:
+                    text = call(params["name"], params.get("arguments") or {})
+                    send({"jsonrpc": "2.0", "id": rid,
+                          "result": {"content": [{"type": "text", "text": text}]}})
+                except Exception as error:                      # noqa: BLE001
+                    send({"jsonrpc": "2.0", "id": rid,
+                          "result": {"content": [{"type": "text", "text": str(error)}],
+                                     "isError": True}})
+            elif rid is not None:
+                send({"jsonrpc": "2.0", "id": rid,
+                      "error": {"code": -32601, "message": method}})
   mcp:
     servers:
       # The one MCP server this task gets. Every outside effect goes through
@@ -77,16 +155,31 @@ spec:
             --grant Tickets
             --root /workspace/app
             --approval-policy advisory
-      # Slot for `revl mcp proxy` (issue #1463, not released yet). It is meant
-      # to sit in front of an existing MCP server with no .rvl written. Once
-      # it ships, an entry here would launch the proxy with the upstream
-      # server's command. Its flags are not final: take them from
-      # `revl mcp proxy --help` in the release you install, then re-run
-      # ./validate.sh.
+      # The other route: an MCP server you already run, gated with no .rvl
+      # written. `revl mcp proxy` (issue #1463) landed in revl 2.0; this is the
+      # entry the commented slot here was waiting for.
       #
-      # - name: git-tools
-      #   command: revl
-      #   args: [mcp, proxy, <flags from the release>, <upstream server command>]
+      # `--undo close_ticket=reopen_ticket` is the operator's statement that
+      # reopen_ticket reverts close_ticket. It makes close_ticket `witnessed`:
+      # it runs with no prompt, and the proxy reverts it on a clean abort. It
+      # is the proxy's only way to make a tool reversible, and the proxy
+      # cannot check it.
+      #
+      # No --trust-read-only-hints: the upstream's `list_tickets` claims to be
+      # read-only, and an unchecked claim is gated like any other emission.
+      - name: revl-proxy
+        command: sh
+        args:
+          - -c
+          - >-
+            cd /workspace/app/.revl &&
+            exec env
+            TICKETS_OUTBOX=/workspace/app/.revl/outbox.log
+            revl mcp proxy
+            --wal /workspace/app/.revl/wal/tickets-upstream.wal
+            --undo close_ticket=reopen_ticket
+            --
+            python3 tickets-mcp.py
 ---
 apiVersion: ax.io/v1alpha1
 kind: Task

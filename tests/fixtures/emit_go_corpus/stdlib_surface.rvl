@@ -123,8 +123,11 @@ type RevlOpt = { a: Int }
 type RevlFrame = { b: Int }
 type Subscription = { c: Int }
 type RevlSpawnHandle = { d: Int }
-fn predeclared(rune: Int, error: Int, int32: Int, any: Int, comparable: Int, string: Int) -> Int {
-  return rune + error + int32 + any + comparable + string
+// issue #1633: `len` is the predeclared name the native IR producer used to
+// escape in a function BODY but not in its SIGNATURE, so it was left out of
+// this parameter list while the divergence stood. Both halves rename it now.
+fn predeclared(rune: Int, len: Int, error: Int, int32: Int, any: Int, comparable: Int, string: Int) -> Int {
+  return rune + len + error + int32 + any + comparable + string
 }
 
 // The two-value `match` without its present arm, a wildcard as the only arm,
