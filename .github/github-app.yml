@@ -1,0 +1,62 @@
+instructions: |
+  ## Gate policy
+
+  **CI is the gate.** Every pull request runs `root-suite-affected` in four parallel
+  shards plus each backend tier (`backend-python`, `backend-java`, `backend-go`,
+  `backend-rust`, `backend-typescript`, `backend-wasm`), and also `lint`,
+  `census-artifact`, `gate-wasm`, `held-out`, and `merged-prs-landed`, on dedicated
+  machines. Read the verdict with `gh pr checks <n>`.
+
+  - **Do not run `tools/pre_merge.sh` or a full `pytest tests/` locally.** They duplicate
+    CI, take tens of minutes, and starve every other lane running on the same machine.
+  - Run narrow selections only — `pytest <specific test file(s)>` — from an
+    **out-of-tree** virtualenv. An in-tree `.venv` makes the tooling resolve a different
+    interpreter than the one under test and produces false collection errors.
+  - **`tools/hooks/pre-commit` runs the whole root suite when the selector answers
+    `FULL`.** For an unmapped path under `backends/`, `stdlib/`, `selfhost/`, `examples/`,
+    `crates/` or `tck/`, or a structural change to `Makefile`, `tools/pre_merge.sh`, the
+    CI config, shared test scaffolding or `tests/fixtures/**`, the hook runs
+    `pytest tests/` **unsharded** with the commit blocked — minutes to tens of minutes,
+    and it is the hook doing it, not the lane. For such a diff commit with
+    `git commit --no-verify` and write the selector's `FULL` line into the commit
+    message, so the record shows why the hook was skipped.
+  - **Never reproduce CI's sharding by hand.** `REVL_TEST_SHARD` is read only by
+    `.github/workflows/ci.yml`; a local `REVL_TEST_SHARD=1..8` loop is a hand-rolled copy
+    of CI that pins several cores and starves every other lane. There is no local
+    substitute for CI — push and read `gh pr checks <n>`.
+  - `tools/affected_tests.py` is bounded by `git merge-base` and includes the working
+    tree, so a `FULL` verdict means *your own diff*, or a path it has no mapping for
+    (for example the generated `crates/revl-gate/src/selfhost.rs`) — never that `main`
+    is broken.
+
+  ## Working across worktrees
+
+  - **Do not run `git stash`.** The stash is shared by every worktree of this repository,
+    so a `stash push` in one lane can later pop another lane's entry. Use a scratch clone
+    under `/private/tmp` when you need a pristine tree.
+  - Stay inside your own session worktree. Do not read or write another worktree's files.
+  - Do not `git rebase`, force-push, or delete branches; merge `origin/main` when the
+    update is needed rather than rebasing onto it.
+  - Do not use `apply_patch` here — patches fail to parse in this repository. Use the
+    `edit` tool or a script.
+
+  ## Generated artifacts
+
+  - Never hand-edit `docs/census-artifact/**` or
+    `tests/fixtures/census_crate_reproduction/**`; they are generator-owned.
+  - The census digest covers the checker sources, so **merge `origin/main` first and
+    record once**, immediately before the final push. Recording before merging produces
+    a record for a mixed tree and fails the `census-artifact` check.
+  - A **squash** merge can undo that: it may land a head that predates the lane's own
+    record commit, leaving the default branch red at a digest nothing recorded. The
+    correction is to restore the record that was written for that tree and prove it with
+    `tools/census_artifact.py --verify --strict` (exit 0, `the committed artifact is
+    current`) — never to weaken the check or the record.
+
+  ## Pull requests
+
+  - **Never weaken, skip, or delete a test to make a gate pass.** If a test opposes the
+    change, say so and report it instead.
+  - Report the pull request number, the head sha, and the narrow-test evidence. Unless
+    you have been asked to land the work, do not merge the pull request and do not
+    enable auto-merge; the merge-gate owner lands it.
