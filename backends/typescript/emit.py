@@ -336,6 +336,71 @@ EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
 EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
 
+KEY_NAMESPACE_SEP = "::"
+
+
+def _key_binding(key: str) -> str:
+    """The trailing segment of a (possibly namespaced) provision key — the
+    `req` IR names a requirement by its BINDING, never by the qualified key
+    (src/revl/lower.py::_key_binding)."""
+    return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1]
+
+
+def _host_key(key: str) -> str:
+    """The host identifier/registry spelling of a provision key (issue #1914).
+
+    A namespaced key (`acme::greeter`, docs/namespacing.md) is the compiler's
+    WIRING identity: G2 conflict checks, `revl audit`, dependency queries and
+    the IR all compare the qualified string. No host, though, has an identifier
+    containing `::` — Python, TypeScript, Java, Rust, Go and the wasm ABI all
+    need one spelling for the emitted field/property/registry entry. This is
+    that spelling, and it is the ONLY place a key becomes one.
+
+    The rule: an unqualified key is returned UNCHANGED (so every program that
+    uses no namespacing emits byte-identically to before), and a qualified key
+    escapes each `_` of each segment to `_u`, then joins the segments on `__`:
+
+        acme::greeter  ->  acme__greeter
+        a::b__c        ->  a__b_u_uc
+        a__b::c        ->  a_u_ub__c
+
+    INJECTIVE, in three steps. (1) The per-segment escape is injective: every
+    `_` in its image is followed by the `u` it was emitted from, so decoding is
+    forced (`_u` -> `_`, any other character stands for itself). (2) Because of
+    (1) a segment's image never ends in `_` and never contains `__`, so the
+    segment list of an image is recovered exactly by splitting on `__` —
+    `_host_key` is injective on qualified keys (the two examples above are
+    distinct inputs landing on distinct images). (3) An unqualified key is
+    unchanged and a qualified key's image always contains `__`, so the only
+    residual collision is an unqualified key that already spells a mangled
+    qualified one (`a__b` beside `a::b`). That pair is refused loudly by
+    `_check_host_keys` at the top of `emit()` rather than aliased silently."""
+    if KEY_NAMESPACE_SEP not in key:
+        return key
+    return "__".join(part.replace("_", "_u")
+                     for part in key.split(KEY_NAMESPACE_SEP))
+
+
+def _check_host_keys(ir: dict) -> None:
+    """Refuse the one pair `_host_key` cannot separate (issue #1914): a
+    qualified key and a flat key whose spelling is already its image. Refusing
+    is the honest answer — the alternative is two distinct wiring identities
+    silently resolving to one host field."""
+    seen: dict = {}
+    for component in ir.get("components") or []:
+        for table in ("provides", "requires", "routes", "isolate", "intercept"):
+            for key in (component.get(table) or {}):
+                host = _host_key(key)
+                first = seen.setdefault(host, key)
+                if first != key:
+                    raise EmitError(
+                        f"provision keys {first!r} and {key!r} both spell the "
+                        f"host identifier {host!r}: an unqualified key that "
+                        f"already contains `__` collides with the mangled "
+                        f"namespaced key. Rename one of them (issue #1914)."
+                    )
+
+
 def _mangle(name: str, extra: frozenset = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *JS/TS*
     reserved word, so a valid revl identifier that happens to be a JS keyword
@@ -597,21 +662,37 @@ class _Scope:
 
     def __init__(self, component: dict):
         self.component = component
-        self.requires: dict = component.get("requires") or {}
+        # issue #1914: a `req` IR node names a requirement by its BINDING, so
+        # this table is keyed by the binding and `req_keys` maps it to the
+        # host spelling the runtime knows the key by (its `ctx.<field>` member,
+        # and the key the provider registered). Both are the raw key for an
+        # unqualified key, so a program that uses no namespacing is unchanged.
+        requires_raw: dict = component.get("requires") or {}
+        self.requires: dict = {
+            _key_binding(key): service for key, service in requires_raw.items()
+        }
+        self.req_keys: dict = {
+            _key_binding(key): _host_key(key) for key in requires_raw
+        }
         self.config_fields = {f["name"] for f in component.get("config") or []}
         self.locals: set[str] = set()
         # item 167: routed requires (item 162's `routes` IR) — read through a
         # per-key router proxy the apply() builds, not a single-realm committed
         # view (see the `req` branch of `_expr`).
         self.routes: dict = component.get("routes") or {}
+        # a body reference names a requirement by its BINDING; `routes` names
+        # it by its wiring key, so map one to the other (issue #1914)
+        self.route_of: dict = {_key_binding(key): key for key in self.routes}
 
     def child(self) -> "_Scope":
         child = _Scope.__new__(_Scope)
         child.component = self.component
         child.requires = self.requires
+        child.req_keys = self.req_keys
         child.config_fields = self.config_fields
         child.locals = set(self.locals)
         child.routes = self.routes
+        child.route_of = self.route_of
         return child
 
     def bind(self, name: str) -> str:
@@ -994,11 +1075,12 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             # re-resolves a live per-realm worker on every call (failover). The
             # proxy is a local the apply() built; a provide-method's
             # `<key>.<op>(…)` closes over it.
-            if name in scope.routes:
-                return f"_revl_route_{_ident(name, 'requirement')}"
+            route = scope.route_of.get(name)
+            if route is not None:
+                return f"_revl_route_{_ident(_host_key(route), 'requirement')}"
             # Committed-view access: resolved through the fiber's snapshot, so
             # it stays readable during this component's own teardown (R3).
-            return f"ctx.{_ident(name, 'requirement')}"
+            return (f"ctx.{_ident(_host_key(scope.req_keys.get(name, name)), 'requirement')}")
         if kind == "host":
             fn = node.get("fn")
             if not isinstance(fn, str) or not all(IDENT_RE.match(p) for p in fn.split(".")):
@@ -2363,7 +2445,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         # R5: the withdrawal inverse is the runtime's own (ctx.provide is
         # revertible); yielding the wrapper slots it into this body
         # effect's LIFO sequence.
-        lines.append(f"{indent}yield ctx.provide({_string(name)}, {{")
+        lines.append(f"{indent}yield ctx.provide({_string(_host_key(name))}, {{")
         lines.extend(_provide_impl(step, ctx, services, indent + "  ", frame_var,
                                    component.get("name")))
         lines.append(f"{indent}}} satisfies {_ident(step['service'], 'service')})")
@@ -2618,13 +2700,16 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     routes = component.get("routes") or {}
 
     for local, service in requires.items():
-        _ident(local, "requirement")
-        _reject_service_key(local, "requirement", name)
+        # issue #1914: the emitted `ctx.<field>` is the MANGLED spelling of the
+        # key; the key itself stays the wiring identity in the IR and in every
+        # G2 check below.
+        _ident(_host_key(local), "requirement")
+        _reject_service_key(_host_key(local), "requirement", name)
         if service not in services:
             raise EmitError(f"requirement {local!r} names unknown service {service!r}")
     for key, service in provides.items():
-        _ident(key, "provision key")
-        _reject_service_key(key, "provision", name)
+        _ident(_host_key(key), "provision key")
+        _reject_service_key(_host_key(key), "provision", name)
         if service not in services:
             raise EmitError(f"provision {key!r} names unknown service {service!r}")
     for key in isolate:
@@ -2647,14 +2732,16 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     if intercept:
         # v2: dict-form inject — non-null values are copied into the fiber
         # context's intercept chain (the consumer-declared d(k)); null marks a
-        # required-but-not-intercepted key.
-        inject = {key: intercept.get(key) for key in inject_keys}
+        # required-but-not-intercepted key. `intercept` is keyed by the raw
+        # wiring identity, the JSON key is the runtime's host spelling
+        # (issue #1914).
+        inject = {_host_key(key): intercept.get(key) for key in inject_keys}
         lines.append(f"  inject: {_json(inject)},")
     else:
-        inject = ", ".join(_string(k) for k in inject_keys)
+        inject = ", ".join(_string(_host_key(k)) for k in inject_keys)
         lines.append(f"  inject: [{inject}],")
     if provides:
-        keys = ", ".join(_string(k) for k in provides)
+        keys = ", ".join(_string(_host_key(k)) for k in provides)
         lines.append(f"  provide: [{keys}],")
 
     # item 131: a body containing an `await` step (or an async-flagged
@@ -2740,8 +2827,8 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         realms = "[" + ", ".join(_string(r) for r in route.get("realms") or []) + "]"
         strategy = _string(route["strategy"]) if route.get("strategy") else "undefined"
         lines.append(
-            f"    const _revl_route_{_ident(key, 'requirement')} = "
-            f"revlRouter(ctx, {_string(key)}, {realms}, {strategy})"
+            f"    const _revl_route_{_ident(_host_key(key), 'requirement')} = "
+            f"revlRouter(ctx, {_string(_host_key(key))}, {realms}, {strategy})"
         )
 
     # One generator per body: cordis runs disposers of a single effect
@@ -5206,7 +5293,8 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                     raise EmitError(f"{where}: unknown method {step['method']!r}")
                 args = ", ".join(_expr(arg, ctx) for arg in step.get("args") or [])
                 await_ = "await " if method.get("async") else ""
-                call = f"root.{_ident(key, 'provision key')}.{_method_ident(step['method'])}({args})"
+                call = (f"root.{_ident(_host_key(key), 'provision key')}."
+                        f"{_method_ident(step['method'])}({args})")
                 bind = step.get("bind")
                 if bind is not None:
                     body.append(f"  const {_ident(bind, 'lifecycle binding')} = {await_}{call}")
@@ -5312,7 +5400,7 @@ def _context_augmentation(components: list) -> list[str]:
     if not keys:
         return []
     return (["declare module 'cordis' {", "  interface Context {"]
-            + [f"    {key}: {service}" for key, service in keys.items()]
+            + [f"    {_host_key(key)}: {service}" for key, service in keys.items()]
             + ["  }", "}", ""])
 
 
@@ -5832,6 +5920,7 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
     _refuse_validated_emissions(ir)
+    _check_host_keys(ir)
 
     _refuse_fault_tests(ir)
 

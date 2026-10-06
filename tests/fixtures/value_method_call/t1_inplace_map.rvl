@@ -1,0 +1,12 @@
+// and for a value `Map` written in place, the #1942 spelling: the paren is
+// transparent, so the receiver types `Map[Str, Int]` exactly as the named one
+// does (issue #1968)
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math {
+    fn go(n) {
+      let m: Map[Str, Int] = Map.empty()
+      return (m).frob()
+    }
+  }
+}

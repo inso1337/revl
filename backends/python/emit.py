@@ -583,6 +583,72 @@ def _ident(name: Any, what: str, *, attr: bool = False) -> str:
     return _mangle_kw(name) if attr else _mangle(name, extra)
 
 
+# -- namespaced provision keys (issue #1914, docs/namespacing.md) ------------
+#
+# A provision key may be QUALIFIED (`acme::greeter`). The qualified string is
+# the wiring identity the *compiler* compares (G2 conflict checks, injection
+# resolution, `revl audit`) and every tier keeps it in the IR; a host
+# identifier cannot contain `:`, so every site that turns a key into an
+# identifier -- or into the runtime key string that the emitted provider and
+# its consumers must agree on -- goes through `_host_key`.
+#
+#   _host_key(k) = k                                       if k is unqualified
+#                = "__".join(_esc(p) for p in k.split("::"))   otherwise
+#   _esc(p)      = p.replace("_", "_u")
+#
+# so `acme::greeter` mangles to `acme__greeter` (docs/namespacing.md).
+# INJECTIVITY, in three steps:
+#  1. `_esc` is injective: every `_` in its image is followed by the `u` it was
+#     emitted with, so decoding is forced (`_u` -> `_`, everything else
+#     literal) and two distinct parts cannot share a spelling.
+#  2. `_esc(p)` never ends in `_` (every `_` is paired) and never contains
+#     `__`, so splitting the joined form on `__` recovers the part list
+#     exactly. 1 + 2 => `_host_key` is injective ON QUALIFIED KEYS: `a::b__c`
+#     and `a__b::c` stay distinct (`a__b_u_uc` vs `a_u_ub__c`).
+#  3. An unqualified key is returned unchanged and a qualified key's image
+#     ALWAYS contains `__`, so an unqualified key can only be captured by a
+#     qualified one when it already spells a mangled qualified key (`a__b`
+#     beside `a::b`). That single residual is refused loudly by
+#     `_check_host_keys` instead of being silently aliased.
+# `_host_key` is a pure function of the key, exactly like `_mangle`, so the
+# declaring site and every use site agree without threading a table around.
+KEY_NAMESPACE_SEP = "::"
+
+
+def _host_key(key: Any) -> Any:
+    """Mangle a qualified provision key into a host identifier; an unqualified
+    key is returned unchanged, so a document that uses no namespacing emits
+    byte-for-byte what it emitted before."""
+    if not isinstance(key, str) or KEY_NAMESPACE_SEP not in key:
+        return key
+    return "__".join(part.replace("_", "_u") for part in key.split(KEY_NAMESPACE_SEP))
+
+
+def _key_binding(key: str) -> str:
+    """The local binding a qualified key introduces: its trailing segment
+    (`acme::greeter` -> `greeter`), which is what an IR `req` node and the
+    isolate/intercept/route tables carry (mirrors `src/revl/lower.py`)."""
+    return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1]
+
+
+def _check_host_keys(ir: dict) -> None:
+    """Refuse the one residual collision `_host_key` cannot escape: two distinct
+    provision keys whose mangled spellings are the same identifier. Empty (and
+    so a no-op) for every document that uses no namespacing."""
+    seen: dict = {}
+    for comp in ir.get("components") or []:
+        for table in ("provides", "requires", "routes", "isolate", "intercept"):
+            for key in (comp.get(table) or {}):
+                first = seen.setdefault(_host_key(key), key)
+                if first != key:
+                    raise EmitError(
+                        f"provision keys {first!r} and {key!r} both mangle to "
+                        f"the Python identifier {_host_key(key)!r}: rename one "
+                        f"of them (a key containing '__' collides with a "
+                        f"namespaced key's mangled spelling)"
+                    )
+
+
 def _snake(name: str) -> str:
     return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
 
@@ -1240,7 +1306,7 @@ class _ComponentEmitter:
         # item 522 slice 3 (issue #1369): the `(provide key, method)` pairs of
         # this component that run in a call scope, mapped to `ui_transaction`
         # or `call_scope` (`_crossing_facts`).
-        self.scopes: dict = {(_ident(key, "provides key"), method): kind
+        self.scopes: dict = {(_ident(_host_key(key), "provides key"), method): kind
                              for (key, method), kind in (scopes or {}).items()}
         # item 259 slice 2: every declared extern by name, so an `emit` step's
         # forward-delivery idempotence (the fan-out eligibility gate) is readable
@@ -1284,14 +1350,25 @@ class _ComponentEmitter:
             if ext.get("class") == "emission" and ext.get("compensate") is not None
         }
         self.name = _ident(component.get("name"), "component name")
+        # issue #1914: a `req` node carries the key's BINDING (`greeter`), not
+        # its qualified spelling, so the table is keyed by the binding; the same
+        # spelling for an unqualified key, so a document that uses no
+        # namespacing emits exactly as before.
+        # the RAW wiring tables: the qualified key is what `isolate`,
+        # `intercept`, `routes` and the provide step all name (issue #1914)
+        self.requires_raw = dict(component.get("requires") or {})
+        self.provides_raw = dict(component.get("provides") or {})
         self.requires = {
-            _ident(local, "requires key"): service
-            for local, service in (component.get("requires") or {}).items()
+            _key_binding(local): service
+            for local, service in self.requires_raw.items()
         }
-        self.provides = {
-            _ident(key, "provides key"): service
-            for key, service in (component.get("provides") or {}).items()
+        # the runtime key spelling each `req` resolves through -- the mangled
+        # QUALIFIED key, which is what the provider registers in `_revl_ctx`
+        self.require_keys = {
+            _key_binding(local): _ident(_host_key(local), "requires key")
+            for local in self.requires_raw
         }
+        self.provides = dict(self.provides_raw)
         self.config_fields = component.get("config") or []
         self.snake = _snake(self.name)
         self.uses: set[str] = set()
@@ -1328,14 +1405,18 @@ class _ComponentEmitter:
         # fiber's inject gate (it has no single-realm provider — the workers
         # live in the named realms — so injecting it would pend forever).
         self.routes = component.get("routes") or {}
+        # a body reference names a requirement by its BINDING; `routes` names it
+        # by its wiring key, so map one to the other (issue #1914)
+        self.route_of = {_key_binding(key): key for key in self.routes}
+        declared = set(self.requires_raw) | set(self.provides_raw)
         for key in self.routes:
-            if key not in self.requires:
+            if key not in declared:
                 raise EmitError(f"{self.name}: routed key {key!r} is not a requirement")
         for key in self.isolate:
-            if key not in self.requires and key not in self.provides:
+            if key not in declared:
                 raise EmitError(f"{self.name}: isolate key {key!r} is not declared")
         for key in self.intercept:
-            if key not in self.requires:
+            if key not in declared:
                 raise EmitError(f"{self.name}: intercept key {key!r} is not a requirement")
         # item 259 slice 2: the checked fan-out plan for THIS component, reduced to
         # the groups the runtime may actually fire concurrently in the activation
@@ -1543,11 +1624,12 @@ class _ComponentEmitter:
             # re-resolves a live per-realm worker on every call (failover). The
             # proxy is a local `_revl_route_<key>` the apply() builds before the
             # body; a provide-method's `<key>.<op>(…)` closes over it.
-            if name in self.routes:
-                return f"_revl_route_{name}"
+            route = self.route_of.get(name)
+            if route is not None:
+                return f"_revl_route_{_host_key(route)}"
             # committed-view access: resolves through the fiber's store, so it
             # stays readable during this component's own teardown (R3)
-            return f"_revl_ctx.{name}"
+            return f"_revl_ctx.{self.require_keys.get(name, name)}"
         if kind == "call":
             if "target" in expr:
                 target = self._expr(expr.get("target"), where)
@@ -1924,7 +2006,7 @@ class _ComponentEmitter:
             # through the instance's own private local realm — only the spawner
             # holding this handle reaches it (supervision-tree addressing).
             target = self._expr(expr.get("target"), where)
-            key = expr.get("key")
+            key = _host_key(expr.get("key"))
             if not isinstance(key, str) or not key.isidentifier():
                 raise EmitError(f"{where}: bad instance-get key {key!r}")
             return f"{target}.get({key!r})"
@@ -2845,7 +2927,11 @@ class _ComponentEmitter:
                         f"{self._expr(ext_comp['compensate'], where)})")
 
     def _provide(self, out: _Lines, indent: int, step: dict, where: str) -> None:
-        name = _ident(step.get("name"), f"{where}: provide key")
+        # issue #1914: the step names the key by its raw wiring identity (what
+        # `self.provides` is keyed by); the HOST spelling is what the runtime is
+        # handed and what `_revl_ctx.<field>` is read through.
+        raw = step.get("name")
+        name = _ident(_host_key(raw), f"{where}: provide key")
         if name in _CONTEXT_MEMBERS:
             raise EmitError(
                 f"{where}: provision key {name!r} collides with a cordis-py "
@@ -2855,7 +2941,7 @@ class _ComponentEmitter:
         service = step.get("service")
         if service not in self.services:
             raise EmitError(f"{where}: provide {name!r} names unknown service {service!r}")
-        if self.provides.get(name) != service:
+        if self.provides.get(raw) != service:
             raise EmitError(f"{where}: provide {name!r} does not match the component header")
         cls = f"_{_pascal(name)}"
         out.add(indent, f"class {cls}:")
@@ -2865,7 +2951,7 @@ class _ComponentEmitter:
             out.add(indent + 1, "pass")
         for method in methods:
             out.add(0)
-            self._method(out, indent + 1, name, method, where)
+            self._method(out, indent + 1, name, method, where, raw)
         out.add(0)
         # issue #1474: a method whose `def` had to be renamed is registered
         # under its contract name too, which is what every dispatcher looks up.
@@ -2879,10 +2965,12 @@ class _ComponentEmitter:
         out.add(indent, f"yield _revl_ctx.provide({name!r})")
         out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
 
-    def _method(self, out: _Lines, indent: int, provide_name: str, method: dict, where: str) -> None:
+    def _method(self, out: _Lines, indent: int, provide_name: str, method: dict,
+                where: str, raw_key: str | None = None) -> None:
         contract = method.get("name")
         name = _method_def_name(contract, f"{where}: method name")
-        service = self.services.get(self.provides.get(provide_name)) or {}
+        key = provide_name if raw_key is None else raw_key
+        service = self.services.get(self.provides.get(key)) or {}
         spec = (service.get("methods") or {}).get(contract)
         if spec is None:
             raise EmitError(f"{where}: method {contract!r} is not part of the provided service")
@@ -3225,7 +3313,7 @@ class _ComponentEmitter:
             route = self.routes[key]
             realms = list(route.get("realms") or [])
             strategy = route.get("strategy")
-            out.add(1, f"_revl_route_{key} = _revl_router("
+            out.add(1, f"_revl_route_{_host_key(key)} = _revl_router("
                        f"_revl_ctx, {key!r}, {realms!r}, {strategy!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
@@ -3264,14 +3352,18 @@ class _ComponentEmitter:
         # item 167: routed keys never enter the inject gate — they have no
         # single-realm provider, so a fiber waiting on one would pend forever.
         # The router proxy resolves them lazily per call instead.
-        inject_keys = [key for key in self.requires if key not in self.routes]
+        inject_keys = [key for key in self.requires_raw
+                       if key not in self.routes]
+        # `intercept` is keyed by the raw wiring identity; the runtime hands the
+        # fiber its dependencies under the HOST spelling (issue #1914)
+        inject_host = {self.require_keys.get(_key_binding(key), key):
+                       self.intercept.get(key) for key in inject_keys}
         if self.intercept:
             # v2: dict-form inject — non-null values land in the fiber
             # context's intercept chain (the consumer-declared d(k))
-            inject = {key: self.intercept.get(key) for key in inject_keys}
-            out.add(1, f"'inject': {inject!r},")
+            out.add(1, f"'inject': {inject_host!r},")
         else:
-            out.add(1, f"'inject': {inject_keys!r},")
+            out.add(1, f"'inject': {list(inject_host)!r},")
         out.add(1, f"'apply': _{self.snake}_apply,")
         if self.config_fields:
             # cordis-py reads Config off dict plugins via dict.get (fork
@@ -4834,7 +4926,8 @@ def _render_providers(ir: dict) -> str:
     providers: dict = {}
     for comp in ir.get("components") or []:
         for key in comp.get("provides") or {}:
-            providers.setdefault(key, []).append(_ident(comp["name"], "component name"))
+            providers.setdefault(_ident(_host_key(key), "provides key"), []).append(
+                _ident(comp["name"], "component name"))
     return "{" + ", ".join(
         f"{key!r}: [{', '.join(map(repr, names))}]"
         for key, names in sorted(providers.items())) + "}"
@@ -4925,7 +5018,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         out.add(indent, "await _revl_settle()")
     elif kind == "call":
         args = ", ".join(_expr(arg) for arg in step.get("args") or [])
-        call = (f"await _revl_call(root, {step['key']!r}, {step['method']!r}, "
+        call = (f"await _revl_call(root, {_host_key(step['key'])!r}, {step['method']!r}, "
                 f"[{args}], {where!r})")
         bind = step.get("bind")
         out.add(indent, f"{_ident(bind, 'lifecycle binding')} = {call}" if bind else call)
@@ -5733,6 +5826,7 @@ def emit(ir: dict) -> str:
         raise EmitError("IR document must be a dict")
     _refuse_holes(ir)
     _refuse_validated_externs(ir)
+    _check_host_keys(ir)
     if ir.get("ir_version") not in (IR_VERSION, 2, 3):
         raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION}, 2, or 3)")
 

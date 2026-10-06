@@ -1,8 +1,6 @@
 ["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_java_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry"]
 
-["function", "deferred-in-file-test-section-marked-rather-than", "deferred_test_markers", 2, 2]
-
-["function", "deferred-in-file-test-section-marked-rather-than", "emit_java_src", 1, 1]
+["function", "deferred-in-file-test-section-marked-rather-than", "deferred_test_markers", 1, 1]
 
 ["reason", "issue-1512-the-port-of-the-reference-method-name-service-par", "Issue #1512, the port of the reference `_method_name`: `service_param_type`'s `Object` fallback is no longer reached (the one corpus document that reached it, double_tool.rvl, looked its renamed method up in the service table), and `method_name`'s rung for a method named with underscores alone is reached by no corpus document, as on the reference side."]
 
@@ -231,10 +229,6 @@
 ["reason", "selfhost-emit-java-rvl-type-map-only-unit", "selfhost/emit_java.rvl::type_map: Only Unit-to-void remains. Its sole caller java_v3_type returns void for raw Unit before calling type_map, making this redundant table arm unreachable."]
 
 ["function", "selfhost-emit-java-rvl-type-map-only-unit", "type_map", 1, 1]
-
-["reason", "selfhost-emit-java-rvl-uses-equality-only-equality", "selfhost/emit_java.rvl::uses_equality: Only equality found in the tests subtree remains. In-file tests are explicitly deferred; equality in functions and components is covered."]
-
-["function", "selfhost-emit-java-rvl-uses-equality-only-equality", "uses_equality", 1, 1]
 
 ["reason", "selfhost-emit-java-rvl-uses-revl-frame-only", "selfhost/emit_java.rvl::uses_revl_frame: Only the missing-components early return remains. lower.py always materializes components, even when empty, in every versioned document (6637)."]
 

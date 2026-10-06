@@ -3118,6 +3118,29 @@ fn handoff_twice_msg(cname: Str) -> Str {
     .concat("activation frame, so it hands off one state shape")
 }
 
+// A provision KEY, optionally namespace-qualified as `ns::key`
+// (docs/namespacing.md). The separator is two ADJACENT `:` tokens, not a lexed
+// `::`, so a qualified key is 4 tokens (`ns`, `:`, `:`, `local`) where a bare
+// one is 1 — `qkey_len` is that token count and `qkey_text` joins the spelling
+// back into the key's wiring identity. This is the reconstruction the
+// reference's `_provision_key` performs, and it is the reason the lexer needs
+// no `::` kind at all. Reading the key as one bare token instead made a
+// namespaced `provide` head fail the WHOLE component with `bad provide block
+// in component <C>` while the reference admits the document — a false
+// rejection of legal first-party code, which is what the reference census
+// tracks and refuses to tolerate.
+fn qkey_len(ts: List[Token], i: Int) -> Int {
+  if (atk(ts, i + 1, ":") && atk(ts, i + 2, ":")) { return 4 }
+  return 1
+}
+
+fn qkey_text(ts: List[Token], i: Int) -> Str {
+  if (qkey_len(ts, i) == 4) {
+    return tkc(ts, i).text.concat("::").concat(tkc(ts, i + 3).text)
+  }
+  return tkc(ts, i).text
+}
+
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                reqh: List[Bind], cname: Str, provs: List[Provide],
                setup: List[Stmt], iso: List[ProvKey], rts: List[Route],
@@ -3134,15 +3157,16 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        rts, icept, hoff, action)
   }
   if (atw(ts, i, "provide")) {
-    let key = tkc(ts, i + 1).text
-    if (!atk(ts, i + 2, "{")) {
-      return mk_provr(provs, setup, iso, rts, "", i + 2, false)
+    let key = qkey_text(ts, i + 1)
+    let kl = qkey_len(ts, i + 1)
+    if (!atk(ts, i + 1 + kl, "{")) {
+      return mk_provr(provs, setup, iso, rts, "", i + 1 + kl, false)
     }
-    let pend = close_brace(ts, i + 2)
+    let pend = close_brace(ts, i + 1 + kl)
     if (pend == 0 - 1) {
       return mk_provr(provs, setup, iso, rts, "", ts.length(), false)
     }
-    let ms = p_prov_methods(ts, i + 3, pend - 1, [])
+    let ms = p_prov_methods(ts, i + 2 + kl, pend - 1, [])
     if (!ms.ok) { return mk_provr(provs, setup, iso, rts, "", pend, false) }
     // a `provide` block is an action: it counts against later prelude decls.
     return p_comp_body(ts, pend, end, provh, reqh, cname,
@@ -3377,20 +3401,22 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
     var k = j + 1
     while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
            && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
-      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
-        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+      let kl = qkey_len(ts, k)
+      if (atk(ts, k, "ident") && atk(ts, k + kl, ":")
+          && atk(ts, k + kl + 1, "ident")) {
+        let pair = { name: qkey_text(ts, k), ty: tkc(ts, k + kl + 1).text }
         if (isReq) { reqs = reqs.push(pair) } else { provh = provh.push(pair) }
         // `Stream[T]` and every other PARAMETERIZED capability is skipped: the
         // reference resolves only a bare service name against its service
         // table, and the bracketed forms are out of this slice entirely.
-        if (!atk(ts, k + 3, "[")) {
-          let ref_ = { key: tkc(ts, k).text, svc: tkc(ts, k + 2).text,
+        if (!atk(ts, k + kl + 2, "[")) {
+          let ref_ = { key: qkey_text(ts, k), svc: tkc(ts, k + kl + 1).text,
                        line: tkc(ts, k).line,
                        clause: isReq ? "requires" : "provides" }
           if (isReq) { reqRefs = reqRefs.push(ref_) }
           else { provRefs = provRefs.push(ref_) }
         }
-        k += 3
+        k += kl + 2
       } else { k += 1 }
     }
     j = k
@@ -6622,11 +6648,23 @@ fn vm_parts(xs: List[PartN], i: Int, cx: Ctx, env: List[Bind]) -> Str {
   return ct_first(v, vm_parts(xs, i + 1, cx, env))
 }
 // `lower._VALUE_METHOD_HEADS`: the stdlib values whose whole method surface is
-// the builtin table. Not `Map`, the one value head a host handle shares its
-// name with (a `Map[K, V]`-typed acquisition keeps its host verbs).
+// the builtin table. `Map` is included (issue #1968): it is the one value head
+// a host handle shares its name with, and the shared NAME is all they have in
+// common — a handle's host verbs (`insert`, `get`, `drop`) are not in the
+// builtin table, so `Map` cannot be told apart from a value by the type alone.
+//
+// The handle is spared by what its BINDING is, not what its type says: the
+// reference records an effect-acquired handle whose type is a host family in
+// `Env.host_handles` and stands its value-method rule aside for it. Here the
+// same bindings carry no type at all — `ct_crossing` above withholds the type
+// of every `effect` binding, since the reference's `infer_ir` answers nothing
+// for a host acquire node — so `tk_infer` on a handle answers `""` and
+// `vm_call` returns before this table is consulted, which is the same
+// leniency by the same route (`let store = effect hole[Map[Str, Int]] "…"
+// undo store.drop()` and `store.insert`/`store.get` after it stay admitted).
 fn value_method_head(h: Str) -> Bool {
   return h == "List" || h == "Str" || h == "Bytes"
-    || h == "Int" || h == "Int32" || h == "Float" || h == "Bool"
+    || h == "Int" || h == "Int32" || h == "Float" || h == "Bool" || h == "Map"
 }
 
 fn ct_scan(e: Expr, cx: Ctx, env: List[Bind]) -> Str {
@@ -8227,6 +8265,16 @@ fn emis_surface_map(comps: List[CompD], cx: Ctx) -> SurfMap {
 // is decided by the dedicated budget check, the same split `_strip_ceilings`
 // and `_ceiling_attenuation_check` make.
 //
+// The ARGUMENT-BOUND destination (issue #1985) IS modelled, and unlike the
+// per-instance symbol below it needs no substitution to be decided:
+// `cap_order.substitute` resolves a `config.` symbol and never an argument, so
+// `host=host` compares as itself on both sides — equal to the identical
+// spelling, incomparable to a literal. `_parse_value` reads the bare name,
+// `_param_leq` compares it, and the name is resolved against the declaration's
+// own signature (`ext_arg_verdict` here, `_check_argument_bound_scopes` in the
+// reference), because a binding that names no parameter is a destination
+// nothing enforces.
+//
 // WHAT IS NOT, AND WHY THAT IS SILENCE RATHER THAN A WRONG ANSWER. A
 // per-instance `config.<field>` symbol resolves against a spawn site's literal
 // `with { … }` bindings (`cap_order.substitute`), and this gate's spawn reader
@@ -8236,12 +8284,18 @@ fn emis_surface_map(comps: List[CompD], cx: Ctx) -> SurfMap {
 // the direction this gate is allowed to err in. The same bail covers a
 // parameter list this reader cannot canonicalize; those are reference PARSE
 // errors, not this slice's verdict either. Both are marked with the token `?`,
-// a spelling no capability token can have (a token is a dotted ident).
+// a spelling no capability token can have (a token is a dotted ident). The
+// argument-bound value (issue #1985) is deliberately NOT in that set any more:
+// `network.call(host)` and `network.call(host=host)` canonicalize to one
+// spelling the reference accepts, so a list carrying one is read rather than
+// bailed.
 
 // A canonical capability parameter. `ord` is its registered value order —
-// "path" (a component cone), "disc" (equality), "ceil" (a numeric ceiling) or
-// "sym" (an unresolved per-instance `config.` value). `sv` carries the path /
-// discrete / symbol spelling, `iv` the canonical ceiling integer.
+// "path" (a component cone), "disc" (equality), "ceil" (a numeric ceiling),
+// "sym" (an unresolved per-instance `config.` value) or "arg" (an
+// argument-bound destination, issue #1985, whose `sv` is the bare parameter
+// name). `sv` carries the path / discrete / symbol / argument spelling, `iv`
+// the canonical ceiling integer.
 type CapP = { name: Str, ord: Str, sv: Str, iv: Int }
 // A capability as a point in the order: a token and a valuation sorted by
 // parameter name, so one capability has exactly one canonical spelling.
@@ -8433,9 +8487,18 @@ fn cap_pr_bad(i: Int) -> CapPR { return { name: "", rend: "", ok: false, i: i } 
 
 fn cap_param_at(ts: List[Token], i: Int) -> CapPR {
   if (!atk(ts, i, "ident")) { return cap_pr_bad(i + 1) }
-  if (!atk(ts, i + 1, "=")) { return cap_pr_bad(i + 2) }
   let nm = cap_alias(tkc(ts, i).text)
   let ord = cap_ord(nm)
+  // The POSITIONAL shorthand (issue #1985): `network.call(host)` binds the
+  // declaration's own `host` parameter, the spelling the issue asks for, and
+  // renders as the canonical `host=host`. A CEILING takes no binding at all
+  // (`calls` with no `=` is not a count), so it refuses here — the reference's
+  // `_parse_value` on `"calls"` returns an int rather than a symbol, which its
+  // `_canon_value` then refuses.
+  if (!atk(ts, i + 1, "=")) {
+    if (ord == "" || ord == "ceil") { return cap_pr_bad(i + 1) }
+    return { name: nm, rend: nm, ok: true, i: i + 1 }
+  }
   if (ord == "") { return cap_pr_bad(i + 3) }
   let v = tkc(ts, i + 2)
   // a per-instance value (item 294 Slice 2): `path=config.job_root`. `config`
@@ -8461,6 +8524,14 @@ fn cap_param_at(ts: List[Token], i: Int) -> CapPR {
       return { name: nm, rend: n.to_str(), ok: true, i: i + 3 }
     }
     return cap_pr_bad(i + 3)
+  }
+  // the ARGUMENT-bound value (issue #1985): an unquoted ident naming one of the
+  // declaration's own parameters, `network.call(host=host)`. Placed after the
+  // `config` arm for the same reason the reference's `_parse_value` puts its
+  // `ident` arm last — `config` is a keyword and never an `ident`, so the two
+  // cannot collide, but a later arm must not shadow an earlier one.
+  if (v.kind == "ident") {
+    return { name: nm, rend: v.text, ok: true, i: i + 3 }
   }
   if (v.kind != "string" || cap_forbidden(v.text)) { return cap_pr_bad(i + 3) }
   if (ord == "path") {
@@ -8531,8 +8602,11 @@ fn cap_list_at(ts: List[Token], i: Int, end: Int) -> CapsRd {
 //
 // `cap_order.parse_cap` over a canonical stored spelling. Every value that
 // reaches here was rendered by the reader above, so the shapes are exactly the
-// three the renderer emits: a quoted string, a bare integer, or an unquoted
-// `config.<field>`.
+// four the renderer emits: a quoted string, a bare integer, an unquoted
+// `config.<field>`, or an unquoted parameter name (the argument-bound
+// destination, issue #1985).
+
+fn cap_arg_name(v: Str) -> Bool { return bare_ident(v, 0) }
 
 fn cap_piece(p: Str) -> CapP {
   let eq = p.indexOf("=")
@@ -8543,6 +8617,10 @@ fn cap_piece(p: Str) -> CapP {
     return { name: nm, ord: cap_ord(nm), sv: v.slice(1, v.length() - 1), iv: 0 }
   }
   if (starts_with(v, "config.")) { return { name: nm, ord: "sym", sv: v, iv: 0 } }
+  // the ARGUMENT-bound destination (issue #1985): an unquoted bare name, which
+  // `cap_val_str` renders back verbatim. A CEILING spelling is always an
+  // integer, so an ident here is an argument and never a count.
+  if (cap_arg_name(v)) { return { name: nm, ord: "arg", sv: v, iv: 0 } }
   return { name: nm, ord: "ceil", sv: "", iv: dec_value(v) }
 }
 
@@ -8571,7 +8649,7 @@ fn cap_parse(s: Str) -> CapT {
 }
 
 fn cap_val_str(p: CapP) -> Str {
-  if (p.ord == "sym") { return p.sv }
+  if (p.ord == "sym" || p.ord == "arg") { return p.sv }
   if (p.ord == "ceil") { return p.iv.to_str() }
   return "\"".concat(p.sv).concat("\"")
 }
@@ -8609,9 +8687,13 @@ fn leq_path(narrow: Str, wide: Str) -> Bool {
 
 // `cap_order._param_leq`: narrow is at-or-below wide in the parameter's order.
 fn cap_param_leq(narrow: CapP, wide: CapP) -> Bool {
-  // an unresolved per-instance symbol is comparable ONLY to the identical
-  // symbol; a symbol against a literal, on either side, is incomparable
-  if (narrow.ord == "sym" || wide.ord == "sym") {
+  // an unresolved per-instance symbol — and, since issue #1985, an
+  // argument-bound destination — is comparable ONLY to the identical spelling;
+  // either against a literal, on either side, is incomparable. `substitute`
+  // resolves a `config.` symbol and never an argument, so the argument is
+  // decided by this same equality and needs no bail.
+  if (narrow.ord == "sym" || wide.ord == "sym"
+      || narrow.ord == "arg" || wide.ord == "arg") {
     return narrow.ord == wide.ord && narrow.sv == wide.sv
   }
   if (wide.ord == "path") { return leq_path(narrow.sv, wide.sv) }
@@ -8713,7 +8795,9 @@ fn cap_offending_join(xs: List[Str]) -> Str {
 // Whether every capability in a set is one this section models. A `?` is a
 // parameter list the reader could not canonicalize; a `sym` is a per-instance
 // value whose spawn-site substitution is not ported. Both make the attenuation
-// verdict unavailable rather than wrong — see the header.
+// verdict unavailable rather than wrong — see the header. An `arg`
+// (issue #1985) is NOT one of them: no substitution applies to an argument
+// binding, so the comparison above decides it exactly.
 fn cap_modelled(s: Str) -> Bool {
   if (s == "?") { return false }
   let c = cap_parse(s)
@@ -12142,6 +12226,146 @@ fn ext_idem_verdict(cls: Str, nm: Str, mods: ExtMods, ps: List[ParamN],
   return no_verd()
 }
 
+// issue #1985: the argument-bound destinations of a declaration's own emission
+// scope, each resolved against its signature. `emission[network.call(host=host)]
+// fn get(url: Str, host: Str)` binds the declaration's parameter into the token,
+// so the declared destination is the CALLER's value rather than a compile-time
+// constant nothing relates to the body. A binding that names no parameter is a
+// destination nothing enforces, so it fails closed rather than being stored as
+// an opaque token no caller can satisfy. The sentence is `ext_idem_verdict`'s:
+// the reference resolves its two role annotations with the same wording, in the
+// same place, because the parameter list is below the scope in both.
+// One declaration's argument-bound scope destinations, resolved against its own
+// signature (issue #1985). `where` is the REFERENCE's own phrase for the
+// declaration, so both surfaces share the refusal and its sentence: the extern
+// half reads `emission extern `do_get`` and the service half ``service method
+// `Http.get``. The name set is the signature's parameters as the reader above
+// collected them, sorted for the message the way `ext_idem_verdict` sorts its
+// own. An `arg` that IS a parameter passes: `cap_param_leq` decides the
+// `covers` order for it, so this is a resolution check and not a second order.
+fn arg_bind_verdict(where: Str, xs: List[Str], ps: List[ParamN],
+                    line: Int) -> Verd {
+  var names: List[Str] = []
+  var p = 0
+  while (p < ps.length()) {
+    names = names.push(ps[p].name)
+    p += 1
+  }
+  var i = 0
+  while (i < xs.length()) {
+    let c = cap_parse(xs[i])
+    var q = 0
+    while (q < c.ps.length()) {
+      let v = c.ps[q]
+      if (v.ord == "arg" && !contains(names, v.sv)) {
+        let listed = names.length() == 0 ? "(none)" : join_comma(sort_strs(names), 0, "")
+        return mk_verd(tagged("G4", where
+          .concat(" declares the argument-bound destination `").concat(xs[i])
+          .concat("`, but `").concat(v.sv)
+          .concat("` is not one of its parameters (").concat(listed).concat(")")),
+          line)
+      }
+      q += 1
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// One `extern` declaration's own scope bindings, read from the DECLARATION
+// rather than from `ext_mods`, because the modifier slot deliberately leads
+// (`caps && !idem`) and a lead is not "no scope". `(confined: p)` — the
+// item-373 reach clause — is still skipped whole: it is a separate axis this
+// phase does not judge, and the reference raises it BEFORE the bindings.
+fn ext_arg_at(ts: List[Token], i: Int) -> Verd {
+  let cl = ext_class_at(ts, i + 1)
+  if (cl == "") { return no_verd() }
+  if (!atk(ts, i + 2, "[")) { return no_verd() }
+  var j = i + 3
+  while (j < ts.length() && !atk(ts, j, "]")) { j += 1 }
+  j += 1
+  if (atk(ts, j, "(")) { return no_verd() }
+  // the modifier slot, `idempotent(key: p)`-style clauses included
+  var depth = 0
+  while (j < ts.length() && (depth > 0 || !atw(ts, j, "fn"))) {
+    if (atk(ts, j, "(")) { depth += 1 }
+    else if (atk(ts, j, ")")) { depth -= 1 }
+    else if (depth == 0 && (atk(ts, j, "{") || atk(ts, j, "}")
+             || atk(ts, j, "=") || atk(ts, j, ";"))) { return no_verd() }
+    j += 1
+  }
+  if (!atw(ts, j, "fn")) { return no_verd() }
+  let nm = tkc(ts, j + 1).text
+  let ps = params_at(ts, j + 3)
+  if (!ps.ok) { return no_verd() }
+  return arg_bind_verdict(
+    cl.concat(" extern `").concat(nm).concat("`"),
+    cap_list_at(ts, i + 2, ts.length()).xs, ps.ps, tkc(ts, i).line)
+}
+
+// A `service` block's argument-bound scopes (issue #1985). The reference
+// resolves them where it lowers each service, which is AHEAD of `_lower_externs`
+// (the service loop runs before the extern call in `_check_and_lower`), and
+// anchors them at the METHOD's own line — which `MSig` does not carry, so this
+// reads the signature sites off the token stream the way `ext_arg_at` reads a
+// declaration's. A service method is a signature and nothing else (its body
+// lives in the provider), so stepping one is `p_methods`' own step: past the
+// declared return and any `cache` clause.
+fn svc_arg_at(ts: List[Token], i: Int) -> Verd {
+  // A LOOP, not one frame per token. The scan walks the whole token stream,
+  // and the native chain runs this file inside a translated host whose frame
+  // budget is the host's, so a per-token recursion overflows the stack on any
+  // document long enough to reach its first `service` — the stream here is the
+  // tier corpus, thousands of tokens before any declaration.
+  var i0 = i
+  while (i0 < ts.length()) {
+    if (!atw(ts, i0, "service")) {
+      i0 += 1
+    } else {
+      if (!atk(ts, i0 + 2, "{")) { return no_verd() }
+      let end = close_brace(ts, i0 + 2)
+      if (end == 0 - 1) { return no_verd() }
+      let v = svc_arg_in(ts, i0 + 3, end - 1, tkc(ts, i0 + 1).text)
+      if (v.v != "") { return v }
+      i0 = end
+    }
+  }
+  return no_verd()
+}
+
+// Inside one service block. A scope is written as a modifier ahead of `fn`
+// (`emission[network.call(host)] fn get(...)`), so the scope nearest a `fn` in
+// the block is the one that method declared, and the carry is cleared at each
+// `fn` — an unscoped method is never judged against the method above it.
+fn svc_arg_in(ts: List[Token], j: Int, end: Int, sn: Str) -> Verd {
+  var k = j
+  var caps: List[Str] = []
+  var scoped = false
+  while (k < end) {
+    if ((atw(ts, k, "emission") || atw(ts, k, "witnessed")) && atk(ts, k + 1, "[")) {
+      let cl = cap_list_at(ts, k + 1, end)
+      caps = cl.xs
+      scoped = true
+      k = cl.i
+    } else if (atw(ts, k, "fn")) {
+      let ps = params_at(ts, k + 3)
+      if (!ps.ok) { return no_verd() }
+      if (scoped) {
+        let v = arg_bind_verdict(
+          "service method `".concat(sn).concat(".").concat(tkc(ts, k + 1).text)
+            .concat("`"), caps, ps.ps, tkc(ts, k).line)
+        if (v.v != "") { return v }
+      }
+      caps = []
+      scoped = false
+      k = cache_clause_end(ts, ret_at(ts, ps.i))
+    } else {
+      k += 1
+    }
+  }
+  return no_verd()
+}
+
 // The first verdict one `extern` declaration raises, `no_verd()` when it
 // raises none. `undo` precedes `compensate` because the reference checks them
 // in that order.
@@ -12202,6 +12426,15 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str],
   if (cls == "emission" && atw(ts, k, "undo")) {
     return mk_verd(tagged("G4", ext_emission_undo_msg(nm)), line)
   }
+  // issue #1985: the scope's argument-bound destinations are resolved against
+  // THIS declaration's signature, after the class rules and before the item-309
+  // key, which is the reference's order for its two role annotations.
+  if (mods.caps) {
+    let w: Str = cls.concat(" extern `").concat(nm).concat("`")
+    let av = arg_bind_verdict(w,
+                              cap_list_at(ts, i + 2, ts.length()).xs, ps.ps, line)
+    if (av.v != "") { return av }
+  }
   if (mods.idem) {
     let iv = ext_idem_verdict(cls, nm, mods, ps.ps, line, al)
     if (iv.v != "") { return iv }
@@ -12249,6 +12482,12 @@ fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
       if (nm == "" || !contains(seen, nm)) {
         let v = ext_decl_verdict(ts, i, declared, gtys, al)
         if (v.v != "") { return v }
+        // issue #1985: after this declaration's class rules (above) and before
+        // the inverse slots, which is where the reference resolves its scope's
+        // argument-bound destinations. A declaration the phase already judged
+        // whole returns above, so this is reached only for a scope it skips.
+        let av = ext_arg_at(ts, i)
+        if (av.v != "") { return av }
       }
       if (nm != "") { seen = seen.push(nm) }
     }
@@ -17471,6 +17710,16 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // discipline below and every phase that follows it.
   let cshv = csh_refusal(ts)
   if (cshv.v != "") { return { done: true, refs: [cshv] } }
+  // the SERVICE-METHOD emission scope (issue #1985): a scope parameter may name
+  // one of the method's own parameters (`network.call(host=host)`), and the
+  // reference refuses such a binding when the name is not a parameter of the
+  // method it is declared on. The reference's `_check_and_lower` walks
+  // `program.services` BEFORE it calls `_lower_fns` and `_lower_externs`, so the
+  // phase sits here — after the pre-lowering `_refuse_*` validations above and
+  // ahead of the fn binding discipline below. The extern section's half of the
+  // same rule rides `extern_decl_refusal`.
+  let sav = svc_arg_at(ts, 0)
+  if (sav.v != "") { return { done: true, refs: [sav] } }
   // the module-`fn` BINDING DISCIPLINE (item 391): `_lower_fns` walks every `fn`
   // body before `_lower_externs` and raises on the first scope violation, so the
   // phase sits here — after the declared-type validation and ahead of the extern
@@ -27402,6 +27651,26 @@ fn full() -> List[Int] { let ys: List[Int] = [1] return ys }
 fn widened(n: Int32) -> Int { let w: Int = n return w }
 `)
     == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"empty","params":[],"returns":"List[Int]","public":false,"body":[{"step":"let","name":"xs","value":{"kind":"list","items":[],"expected":"List[Int]"},"mutable":false},{"step":"return","expr":{"kind":"var","name":"xs"}}]},{"name":"full","params":[],"returns":"List[Int]","public":false,"body":[{"step":"let","name":"ys","value":{"kind":"list","items":[{"kind":"lit","value":1}]},"mutable":false},{"step":"return","expr":{"kind":"var","name":"ys"}}]},{"name":"widened","params":[{"name": "n", "type": "Int32"}],"returns":"Int","public":false,"body":[{"step":"let","name":"w","value":{"kind":"var","name":"n","widen":"Int"},"mutable":false},{"step":"return","expr":{"kind":"var","name":"w"}}]}]}"""
+}
+
+// issue #1985: the emission scope's destination may name one of the declaring
+// method's own parameters (`network.call(host=host)`) instead of a baked-in
+// literal, and the name is resolved against that signature. The admitted twin
+// pins that the binding is inert where the body stays inside the bound; the
+// refusal pins that a name no parameter carries is never silently trusted.
+test "an argument-bound capability destination admits at its declaration" {
+  assert admit_src("""service Http { emission[network.call(host=host)] fn get(url: Str, host: Str) -> Str }
+component Kit provides http: Http {
+  provide http { fn get(url, host) { return "x" } }
+}""") == ""
+}
+
+test "an argument-bound capability destination that names no parameter is refused (G4)" {
+  let v = admit_src("""service Http { emission[network.call(host=nope)] fn get(host: Str) -> Str }
+component Kit provides http: Http {
+  provide http { fn get(host) { return "x" } }
+}""")
+  assert v == "G4|service method `Http.get` declares the argument-bound destination `network.call(host=nope)`, but `nope` is not one of its parameters (host)"
 }
 
 // ------------------------------------------- binding a council (item 516 S2)
