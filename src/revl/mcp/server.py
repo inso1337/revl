@@ -1462,11 +1462,19 @@ def _change_working_set() -> dict:
 
 # issue #2032: the verbs whose answer says how the held source stands against
 # disk — the change loop's own mutators, the read that verifies them, and the
-# export that reconciles them
+# export that reconciles them — plus issue #2037's three revert verbs, where
+# disk *leads* the session: it still holds the change the session retracted.
 _DISK_RIDES = frozenset({"revl_change", "revl_edit", "revl_source",
-                         "revl_export"})
+                         "revl_export", "revl_undo", "revl_rollback",
+                         "revl_step_back"})
+
+# issue #2037: the three verbs that revert the session. Their divergence is the
+# mirror of #2032's — the session has retracted a change disk still carries, so
+# a cold `revl_load {files}` (which reads disk) would resurrect it.
+_DISK_REVERTS = frozenset({"revl_undo", "revl_rollback", "revl_step_back"})
 
 _DISK_NOTE = "the held source differs from disk; call revl_export to write it"
+_DISK_NOTE_REVERT = "the reverted source is not on disk; revl_export writes it"
 
 
 def _diverges(text, path) -> bool:
@@ -1513,18 +1521,22 @@ def _disk_state() -> dict:
 
 
 def _ride_disk(name: str, payload) -> None:
-    """Say whether the held source reached disk (issue #2032).
+    """Say whether the held source reached disk (issue #2032), or whether a
+    revert left the retracted change behind on disk (issue #2037).
 
-    On the change loop's verbs only, because that is where the question is
-    asked; the ambient footer keeps its pinned key set (#1693). A stale answer
-    that is also a success also carries the `note` naming the one verb that
-    writes it, matching the failure path's use of `note`."""
+    On the change loop's verbs and the three revert verbs, because that is
+    where the question is asked; the ambient footer keeps its pinned key set
+    (#1693). A stale answer that is also a success also carries the `note`
+    naming the one verb that writes it, matching the failure path's use of
+    `note` — the revert note says the *reverted* source is the one not yet on
+    disk, since that is the change the agent believes it has undone."""
     if name not in _DISK_RIDES or not isinstance(payload, dict):
         return
     disk = _disk_state()
     payload["disk"] = disk
     if not disk["inSync"] and payload.get("ok") and not payload.get("note"):
-        payload["note"] = _DISK_NOTE
+        payload["note"] = (_DISK_NOTE_REVERT if name in _DISK_REVERTS
+                           else _DISK_NOTE)
 
 
 def _tool_export(arguments: dict) -> dict:
@@ -3798,7 +3810,11 @@ TOOLS = [
     },
     {
         "name": "revl_rollback",
-        "description": "Restore the generation that was running before the last swap.",
+        "description": "Restore the generation that was running before the last "
+                       "swap. The answer carries a `disk` block (issue #2037): "
+                       "when disk still holds the change this retracted, it names "
+                       "the stale path and points at `revl_export`, the one verb "
+                       "that writes the reverted source out.",
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_rollback,
@@ -3816,7 +3832,10 @@ TOOLS = [
                        "undo never bypasses the gate. The dossier rides along: what "
                        "unloads, what state drops (item 53's honesty in reverse), and "
                        "the interim boundary crossings that no undo can un-emit "
-                       "(compensation is not inversion — paper §6.1). "
+                       "(compensation is not inversion — paper §6.1). A revert of "
+                       "an exported change leaves disk holding the retracted text: "
+                       "the answer carries a `disk` block (issue #2037) naming the "
+                       "stale path and pointing at `revl_export`. "
                        "See docs/generation-history.md.",
         "inputSchema": {
             "type": "object",
@@ -4539,7 +4558,10 @@ TOOLS = [
                        "range crosses an emission with no `compensate` (an "
                        "emission cannot be undone); `force` crosses anyway and "
                        "reports what was crossed. The guarantee is 'the inverses "
-                       "ran in order', never 'state was restored'.",
+                       "ran in order', never 'state was restored'. The answer "
+                       "carries a `disk` block (issue #2037) naming the retracted "
+                       "change disk still holds, and `revl_export` when the revert "
+                       "is not yet durable.",
         "inputSchema": {
             "type": "object",
             "properties": {
