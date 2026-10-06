@@ -103,6 +103,7 @@ from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
 from . import ambient as _ambient
+from . import identity as _identity
 from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
@@ -4324,6 +4325,8 @@ TOOLS = [
         "name": "revl_state",
         "description": "What is loaded right now: fiber states, provided keys, whether "
                        "a rollback is available, and the trace since the last call. "
+                       "Always carries `revision` and `source_digest`, the identity "
+                       "of the compiler that answered (issue #2007), loaded or not. "
                        "Always carries `loopAxes`: reversibility rate, share "
                        "auto-approved with proof, prompts per session, preflight "
                        "coverage, violations caught before execution and residue "
@@ -4923,7 +4926,11 @@ def handle(message: dict) -> dict | None:
         result = {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": SERVER_INFO,
+            # issue #2007: the serverInfo block names the compiler that
+            # answered — `revision` (git SHA, or a build id when the SHA is
+            # unknown) and `source_digest` — so a client can assert the server
+            # it drives is the revision it pinned, before it asks anything.
+            "serverInfo": {**SERVER_INFO, **_identity.identity()},
             "instructions": _instructions(),
         }
     elif method == "tools/list":
