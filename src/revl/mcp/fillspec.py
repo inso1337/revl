@@ -488,7 +488,13 @@ def _resource_writes(name: str, family: str | None,
     `(k: K, v: V)` and `remove` takes `(k: K)` — so verb parameter *i* takes
     the declared argument in its position, and the table's own type when the
     declaration supplies none. A resource declared without type arguments
-    (`Map`) is therefore offered exactly as before."""
+    (`Map`) is therefore offered exactly as before.
+
+    The substitution is defined for every reachable input because `Map` is the
+    only family `_HOST_WRITE_INVERSE` offers a write for, and the checker
+    enforces `Map`'s arity at exactly 2 (`_GENERIC_ARITY`), so a declared
+    `Map[K, V]` always supplies both positions. Every other family is offered
+    nothing, with or without type arguments."""
     if not family:
         return []
     args = _type_args(declared)

@@ -123,6 +123,18 @@ def test_a_str_str_declaration_is_offered_exactly_as_before():
         "resource.remove(<str_0: Str>)"]
 
 
+def test_a_family_with_no_offered_writes_still_offers_nothing_when_typed():
+    """The positional substitution is defined only where the family's verbs
+    ARE its type parameters, and that is exactly where a write is offered at
+    all. A typed resource of a family with no offered write gets nothing, so
+    no argument can be substituted into a slot that is not its own."""
+    for resource in ("Pool[Int]", "Job[Str]", "Stream[Int]",
+                     "Subscription[Int]"):
+        spec = _unit_hole_spec(_scaffold(resource))
+        assert spec["fillable"]["producers"] == [], resource
+        assert {"name": "resource", "type": resource} in spec["bindings"]
+
+
 def test_a_resource_naming_no_host_family_still_offers_nothing():
     """The boundary is unchanged: a resource whose type names no host family
     invents no producer."""
