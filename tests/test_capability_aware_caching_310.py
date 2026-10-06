@@ -529,7 +529,10 @@ def test_surface_h_follows_the_transitive_service_closure():
     problem = _surface_h(_H_WITNESSED + (
         "service Inner { emission fn go(x: Str) -> Result[W, E] }\n"
         "service Outer { emission fn get(x: Str) -> Result[W, E] cache capability }\n"
-        "component I provides inner: Inner { provide inner { fn go(x) = rm(x) } }\n"
+        # emission position on purpose: a witnessed call in value position
+        # registers no inverse and is refused (issue #2044, G4). The subject
+        # here is the transitive `requires` closure, not the registration.
+        "component I provides inner: Inner { provide inner { fn go(x) = emit rm(x) } }\n"
         "component O provides outer: Outer requires inner: Inner {\n"
         "  provide outer { fn get(x) = emit inner.go(x) }\n"
         "}\n"))

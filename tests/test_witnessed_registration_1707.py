@@ -2,8 +2,8 @@
 (issue #1707, the soundness half of the class-preserving relay).
 
 `docs/design/243-witnessed-externs.md` rule 1 says a witnessed extern is
-"refused outside effect position", and the checker enforces that in a `fn` or
-`test` body (G4, `lower.py`). A PROVIDE-METHOD body was not covered, so
+"refused outside effect position". The checker enforced that in a `fn` or `test`
+body (G4, `lower.py`) but not in a PROVIDE-METHOD body, so
 
     provide ops { fn stash(p) { let r = stash_path(p) } }
 
@@ -15,6 +15,20 @@ the extern class (a) from its declaration alone, and the relay fold then
 relaxed a relay over it to (a) as well: the relay auto-approved with zero
 prompts and abort did not restore the file. That is the "D1" defect the guide
 warns about, in the one spelling the checker did not refuse.
+
+Issue #2044 closed that hole by extending rule 1 to a provide-method body: the
+`let`/`return`/`let r = …; return r` spellings are now REFUSED at the call site
+(their G4 diagnostic is pinned in
+`tests/test_witnessed_value_position_2044.py`), so they can no longer be class
+(a) or class (c) — they do not compile.
+
+What this file guards is the registration fact that survives that refusal: a
+witnessed extern reached where nothing registers. The spelling that still
+compiles is a marked `emit` of the extern, which builds an emission step and
+not an effect step, so the inverse is still never registered and the crossing
+is still class (c):
+
+    provide ops { fn stash(p) { emit stash_path(p) } }
 
 Registration is a property of the call site, so the class is now a property of
 the call site too: `Composition.witnessed_registered` reads exactly the test
@@ -103,9 +117,9 @@ def _source(body: str) -> str:
     )
 
 
-#: the spelling the checker's effect-position rule does not reach, and the
-#: positions in a provide-method body that compile and register nothing.
-UNREGISTERED = {
+#: the value-position spellings issue #2044 now REFUSES: a witnessed mutation
+#: is only valid in effect position, so these do not compile (G4).
+REFUSED = {
     "let": "let r = stash_path(p)",
     "return": "return stash_path(p)",
     "let_return": "let r = stash_path(p)\n return r",
@@ -113,6 +127,11 @@ UNREGISTERED = {
 
 #: the one spelling that registers, and so keeps class (a).
 REGISTERED = "effect stash_path(p)"
+
+#: a witnessed extern reached where nothing registers, which still compiles: a
+#: marked `emit` builds an emission step, not an effect step. This is the
+#: crossing the class map, the erase report and the relay fold must keep (c).
+UNREGISTERED = "emit stash_path(p)"
 
 
 def _ir(body: str) -> dict:
@@ -142,13 +161,20 @@ def test_the_effect_position_call_registers_and_the_others_do_not():
     assert len(scopes) == 1
     assert registered.witnessed_registered(scopes[0]["nodes"]) == {"stash_path"}
 
-    for spelling, body in UNREGISTERED.items():
-        index = Composition(_ir(body))
-        scopes = [s for s in index.scopes.values()
-                  if s["kind"] == "provide-method" and s["key"] == "ops"
-                  and s["method"] == "stash"]
-        assert len(scopes) == 1, spelling
-        assert index.witnessed_registered(scopes[0]["nodes"]) == set(), spelling
+    # the `emit` spelling still compiles and still registers nothing
+    index = Composition(_ir(UNREGISTERED))
+    scopes = [s for s in index.scopes.values()
+              if s["kind"] == "provide-method" and s["key"] == "ops"
+              and s["method"] == "stash"]
+    assert len(scopes) == 1
+    assert index.witnessed_registered(scopes[0]["nodes"]) == set()
+
+    # and the value spellings are refused outright (issue #2044), so they can
+    # no longer register OR silently fail to
+    for spelling, body in REFUSED.items():
+        with pytest.raises(RevlError) as ei:
+            _ir(body)
+        assert "cannot be called in a value position" in str(ei.value), spelling
 
 
 def test_the_registered_form_still_lowers_to_an_effect_step():
@@ -174,28 +200,35 @@ def test_the_effect_position_call_keeps_class_a():
     assert _class("relay", "stash", ir) == "a"
 
 
-@pytest.mark.parametrize("spelling", sorted(UNREGISTERED))
-def test_an_unregistered_witnessed_call_is_class_c(spelling):
+@pytest.mark.parametrize("spelling", sorted(REFUSED))
+def test_a_value_position_witnessed_call_is_refused(spelling):
+    """Issue #2044: a value position builds no effect step, so it is refused
+    rather than compiled into a call whose inverse never registers."""
+    with pytest.raises(RevlError) as ei:
+        _ir(REFUSED[spelling])
+    assert "cannot be called in a value position" in str(ei.value), spelling
+    assert "effect position" in str(ei.value), spelling
+
+
+def test_an_unregistered_witnessed_call_is_class_c():
     """A witnessed extern reached where nothing registers is as irreversible
     as an emission, whatever its declaration says."""
-    assert _class("ops", "stash", _ir(UNREGISTERED[spelling])) == "c"
+    assert _class("ops", "stash", _ir(UNREGISTERED)) == "c"
 
 
-@pytest.mark.parametrize("spelling", sorted(UNREGISTERED))
-def test_a_relay_over_an_unregistered_witnessed_call_is_class_c(spelling):
+def test_a_relay_over_an_unregistered_witnessed_call_is_class_c():
     """THE NEGATIVE CASE the issue demands: a relay that reaches a crossing
     without a registered inverse must never become class (a) or (b)."""
-    reach = _reach("relay", "stash", _ir(UNREGISTERED[spelling]))
-    assert reach["class"] == "c", spelling
+    reach = _reach("relay", "stash", _ir(UNREGISTERED))
+    assert reach["class"] == "c"
     assert reach["class"] not in ("a", "b")
     assert "fs" in reach["classC"]
 
 
-@pytest.mark.parametrize("spelling", sorted(UNREGISTERED))
-def test_the_crossing_says_the_inverse_was_not_registered(spelling):
-    reach = _reach("ops", "stash", _ir(UNREGISTERED[spelling]))
+def test_the_crossing_says_the_inverse_was_not_registered():
+    reach = _reach("ops", "stash", _ir(UNREGISTERED))
     externs = [c for c in reach["crossings"] if c["kind"] == "extern"]
-    assert len(externs) == 1, spelling
+    assert len(externs) == 1
     assert externs[0]["name"] == "stash_path"
     assert externs[0]["class"] == "witnessed"
     assert externs[0]["actionClass"] == "c"
@@ -213,7 +246,7 @@ def test_the_registered_crossing_is_not_marked_unregistered():
 def test_a_relay_that_also_reaches_a_non_witnessed_crossing_is_still_class_c():
     """The issue's third exit test, on the unregistered fixture: the worst
     rule is unchanged, so the (c) of the `announce` emission still wins."""
-    for body in (REGISTERED, *UNREGISTERED.values()):
+    for body in (REGISTERED, UNREGISTERED):
         reach = _reach("relay", "stash_and_shout", _ir(body))
         assert reach["class"] == "c", body
         assert "announce" in reach["classC"], body
@@ -221,8 +254,9 @@ def test_a_relay_that_also_reaches_a_non_witnessed_crossing_is_still_class_c():
 
 def test_the_helper_fn_spelling_is_refused_outright():
     """The other way to factor a witnessed call — behind a plain `fn` helper —
-    never compiles: rule 1's effect-position refusal covers a `fn` body. The
-    `let`/`return` spellings above are the hole this test file closes."""
+    never compiles: rule 1's effect-position refusal covers a `fn` body. Issue
+    #2044 makes the provide-method body agree, so the two spellings now refuse
+    with the same code and the same advice."""
     with pytest.raises(RevlError) as ei:
         compile_source(
             _HEAD
@@ -237,10 +271,10 @@ def test_the_helper_fn_spelling_is_refused_outright():
 # the report: the rise is named, with the operation and the crossing
 # ---------------------------------------------------------------------------
 
-def test_wrapping_the_witnessed_call_in_a_let_reports_the_class_rise():
+def test_dropping_the_effect_for_a_marked_emit_reports_the_class_rise():
     """Exit test (a) of the issue, as a diff against the running composition:
     the edit that drops the `effect` is reported, not silent."""
-    before, after = _ir(REGISTERED), _ir(UNREGISTERED["let"])
+    before, after = _ir(REGISTERED), _ir(UNREGISTERED)
     out = effect_classes.report(after, before, against=True)
     assert {"key": "ops", "method": "stash", "component": "Agent",
             "before": "a", "after": "c"} in out["effectClassChanges"]
@@ -249,7 +283,7 @@ def test_wrapping_the_witnessed_call_in_a_let_reports_the_class_rise():
 
 
 def test_the_warning_names_the_operation_and_the_crossing():
-    before, after = _ir(REGISTERED), _ir(UNREGISTERED["let"])
+    before, after = _ir(REGISTERED), _ir(UNREGISTERED)
     warnings = effect_classes.report(after, before, against=True)[
         "effectClassWarnings"]
     (warn,) = [w for w in warnings if w["key"] == "ops"]
@@ -266,7 +300,7 @@ def test_the_warning_names_the_operation_and_the_crossing():
 
 def test_the_provided_classes_carry_the_registered_flag_and_the_reason():
     classes = {(o["key"], o["method"]): o
-               for o in effect_classes.provided_classes(_ir(UNREGISTERED["let"]))}
+               for o in effect_classes.provided_classes(_ir(UNREGISTERED))}
     assert classes[("ops", "stash")]["class"] == "c"
     assert classes[("relay", "stash")]["class"] == "c"
     (raised,) = [c for c in classes[("ops", "stash")]["raisedBy"]
@@ -365,7 +399,7 @@ def test_the_erase_report_counts_the_registered_witness_as_revertible():
 def test_the_erase_report_counts_the_unregistered_witness_as_irreversible():
     """One predicate, two folds: the report cannot call revertible what the
     class map calls (c)."""
-    cross = _erase_crossings(UNREGISTERED["let"])
+    cross = _erase_crossings(UNREGISTERED)
     assert cross["witnessed"] == []
     (host,) = cross["externs"]
     assert host["name"] == "stash_path" and host["class"] == "witnessed"
@@ -381,21 +415,26 @@ def test_the_erase_report_counts_the_unregistered_witness_as_irreversible():
 # ---------------------------------------------------------------------------
 
 
-def test_the_guide_s_three_spellings_classify_as_the_guide_says():
-    """`docs/harness-gate-guide.md` prints the three spellings and their classes.
+def test_the_guide_s_witnessed_spelling_classifies_as_the_guide_says():
+    """`docs/harness-gate-guide.md` prints the witnessed spelling and its class.
     tests/test_doc_examples.py compiles that block but checks only its syntax, so
-    the classes it prints are checked here: a guide that told a reader the `let`
-    spelling keeps the auto-approve would be the same silent downgrade in prose."""
+    the class it prints is checked here: a guide that told a reader a value
+    spelling keeps the auto-approve would be the same silent downgrade in prose.
+    Issue #2044 supersedes the three-spelling table, so the guide prints only the
+    registering `effect` spelling and names the refused value spellings in prose.
+    """
     doc = (ROOT / "docs" / "harness-gate-guide.md").read_text(encoding="utf-8")
     (block,) = [b for b in re.findall(r"^```revl\n(.*?)^```", doc, re.M | re.S)
-                if "stash_let" in b]
+                if "stash_path" in b and "enqueue" not in b]
     ir = compile_source(block, "harness-gate-guide.md")
     assert _class("ops", "stash", ir) == "a"
-    assert _class("ops", "stash_let", ir) == "c"
-    assert _class("ops", "stash_ret", ir) == "c"
-    # and the (c) two say WHY, not just that they are (c)
-    for method in ("stash_let", "stash_ret"):
-        assert _reach("ops", method, ir)["crossings"][0]["registered"] is False
+    # the guide no longer prints a value spelling as a compiling class (c) ...
+    assert "let r = stash_path(p) }" not in block
+    assert "return stash_path(p) }" not in block
+    # ... but it still names the refused spellings and the rule that refuses them
+    assert "let r = stash_path(p)" in doc
+    assert "return stash_path(p)" in doc
+    assert "only valid in effect position" in " ".join(doc.split())
 
 
 # ---------------------------------------------------------------------------
@@ -425,13 +464,12 @@ def path(tmp_path):
 
 
 @needs_cordis
-@pytest.mark.parametrize("spelling", sorted(UNREGISTERED))
 def test_an_unregistered_witnessed_relay_prompts_instead_of_auto_approving(
-        spelling, path):
+        path):
     """THE SECURITY TEST. Before this fix the relay auto-approved with zero
     prompts and abort reported no residue while the file stayed renamed."""
     from revl.mcp.approval import ApprovalRequired
-    session = _session(UNREGISTERED[spelling])
+    session = _session(UNREGISTERED)
     with pytest.raises(ApprovalRequired):
         session.call("relay", "stash", [path])
     # nothing fired: the mutation never crossed the boundary
