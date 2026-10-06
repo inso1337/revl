@@ -720,6 +720,18 @@ _RETURN_CANONICAL = {
 }
 
 
+def _fix_field(fix: str | None) -> dict:
+    """The diagnostic's mechanical-remedy entry, or nothing at all.
+
+    Spelled here rather than at the `_session_error` call site so the envelope
+    keeps one vocabulary across its copies (`tools/check_vocabulary_mirrors.py`
+    records the six fields `http_face._err`, `query_tools._require`,
+    `query_tools._run` and `_session_error` all spell; issue #2035). The entry
+    is omitted rather than set to null, so a reader can tell a refusal that has
+    a remedy from one that has none."""
+    return {} if fix is None else {"fix": fix}
+
+
 def _session_error(message: str | BaseException, category: str = "session",
                    fix: str | None = None, **extra) -> dict:
     """A session refusal. `message` is the prose, or the exception that
@@ -733,9 +745,7 @@ def _session_error(message: str | BaseException, category: str = "session",
     with one argument dropped."""
     message, remedy = _remedy.resolve(message, extra)
     diagnostic = {"severity": "error", "code": "REVL", "category": category,
-                  "message": message}
-    if fix is not None:
-        diagnostic["fix"] = fix
+                  "message": message, **_fix_field(fix)}
     return _remedy.attach({"ok": False, "diagnostics": [diagnostic], **extra},
                           remedy)
 
