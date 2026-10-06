@@ -18,6 +18,7 @@ fn revl_lifecycle_crasher_lifecycle_boots_and_unloads_clean() {
     // drives the composition on a real cordis-rs context and
     // proves no residue after LIFO teardown (FR-5 / §7.1).
     let root = cordis::Context::new();
+    revl_journal_reset();
     let mut _revl_fibers: Vec<(&str, cordis::Fiber)> = Vec::new();
     {
         let _cfg = serde_json::json!({"Crasher": {}});
@@ -36,6 +37,8 @@ fn revl_lifecycle_crasher_lifecycle_boots_and_unloads_clean() {
     // registry/reflect half of `revl run --once`.
     assert!(root.registry().len() == 0 && root.reflect().services().len() == 0 && REVL_LIVE_HOST_RESOURCES.with(|c| c.get()) == 0,
             "lifecycle test \"crasher lifecycle boots and unloads clean\": residue — the host runtime still holds state (R4/R1)");
+    let _revl_journal_misses = revl_journal_misses();
+    assert!(_revl_journal_misses.is_empty(), "lifecycle test \"crasher lifecycle boots and unloads clean\": residue — {} un-reversed host-map write(s) (R4): {}", _revl_journal_misses.len(), _revl_journal_misses.join("; "));
 }
 
 pub trait Noop: Send + Sync {
@@ -49,6 +52,102 @@ thread_local! {
     static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {
         std::cell::Cell::new(0)
     };
+}
+
+// issue #2009: the host-map write journal. `assert no_residue`
+// observes host-map STATE, not just the live-resource count: every
+// key a bracketed effect wrote must be back where the first such
+// write found it when the map was released, or an `undo` did not
+// reverse its write. Mirrors backends/python/runtime.py's `_JOURNAL`
+// (7397), `_journal_note` (7400) and `_judge_journal` (7428).
+#[allow(dead_code)]
+struct RevlMapJournal<V> {
+    /// py `Map._journaled`: key -> (the value the key held before the
+    /// FIRST bracketed write of it, the verb that wrote it).
+    journaled: std::collections::HashMap<String, (Option<V>, String)>,
+    /// py `Map._reported`: a key already blamed is not blamed twice.
+    reported: std::collections::HashSet<String>,
+}
+
+impl<V> Default for RevlMapJournal<V> {
+    fn default() -> Self {
+        Self {
+            journaled: std::collections::HashMap::new(),
+            reported: std::collections::HashSet::new(),
+        }
+    }
+}
+
+thread_local! {
+    /// py `_JOURNAL`: non-zero while a bracket that writes the host Map
+    /// is open. A write made with no bracket open is not journalled --
+    /// only a bracketed write has an `undo` that must reverse it.
+    static REVL_JOURNAL_DEPTH: std::cell::Cell<i64> =
+        const { std::cell::Cell::new(0) };
+    /// The un-reversed writes found so far, read by `assert no_residue`.
+    /// Thread-local because `cargo test` runs tests on parallel threads.
+    static REVL_JOURNAL_MISSES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[allow(dead_code)]
+fn revl_journal_arm() {
+    REVL_JOURNAL_DEPTH.with(|d| d.set(d.get() + 1));
+}
+
+#[allow(dead_code)]
+fn revl_journal_disarm() {
+    REVL_JOURNAL_DEPTH.with(|d| d.set(d.get() - 1));
+}
+
+#[allow(dead_code)]
+fn revl_journal_reset() {
+    REVL_JOURNAL_DEPTH.with(|d| d.set(0));
+    REVL_JOURNAL_MISSES.with(|m| m.borrow_mut().clear());
+}
+
+#[allow(dead_code)]
+fn revl_journal_misses() -> Vec<String> {
+    REVL_JOURNAL_MISSES.with(|m| m.borrow().clone())
+}
+
+/// py `_shown` (7440): `absent`, else the value's debug form.
+#[allow(dead_code)]
+fn revl_journal_shown<V: std::fmt::Debug>(value: &Option<V>) -> String {
+    match value {
+        None => "absent".to_string(),
+        Some(v) => format!("{:?}", v),
+    }
+}
+
+/// py `_same_value` (7445): presence compared when either side is absent,
+/// else equality. This is the bound the journal needs, and the reason a
+/// journal-mode `Map<V>` requires `PartialEq` (see the PR gap list).
+#[allow(dead_code)]
+fn revl_journal_same<V: PartialEq>(a: &Option<V>, b: &Option<V>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// py `_not_reversed`'s `NotReversed` message (runtime.py:7412-7427).
+#[allow(dead_code)]
+fn revl_journal_message<V: std::fmt::Debug>(
+    key: &str,
+    prior: &Option<V>,
+    verb: &str,
+    now: &Option<V>,
+) -> String {
+    format!(
+        "map key {:?} held {} before the first bracketed `{}` of it and \
+{} when the map was released: an undo did not reverse its write",
+        key,
+        revl_journal_shown(prior),
+        verb,
+        revl_journal_shown(now),
+    )
 }
 
 /// item 243 / docs/design/teardown-contract.md: the per-activation

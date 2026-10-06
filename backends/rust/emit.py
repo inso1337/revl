@@ -2562,6 +2562,262 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
     return out
 
 
+# ---------------------------------------------------------------------------
+# issue #2009: the host-map write journal.
+#
+# The py reference tier's `assert no_residue` observes host-map STATE, not just
+# the live-resource count: every key a BRACKETED effect wrote must be back where
+# the first such write found it when the map is released, or an `undo` did not
+# reverse its write. That fold is `backends/python/runtime.py`'s `_journal_note`
+# (7400), `_not_reversed` (7412) and `_judge_journal` (7428); `_JOURNAL` (7397)
+# is the bracket stack and `Frame._guard` (3690) re-arms it while an inverse
+# runs. This module is the rust mirror of exactly those pieces.
+#
+# The journal is only ever READ by `assert no_residue`, and `src/revl/lower.py`
+# lowers that statement to the bare IR step `{"step": "assert_no_residue"}` --
+# it carries no data -- so the gate is document-level: a document whose
+# lifecycle test asserts no residue gets the journal, and every other document
+# emits byte-identically to before #2009, which is what keeps the self-host
+# byte-agreement oracle green.
+_JOURNAL_MODE = False
+
+
+def _journal_readable(ir: dict) -> bool:
+    """Whether some lifecycle test reads the journal (`assert no_residue`)."""
+    return any(
+        step.get("step") == "assert_no_residue"
+        for test in (ir.get("tests") or [])
+        if test.get("lifecycle")
+        for step in (test.get("body") or []))
+
+
+# The host Map verbs that WRITE. `insert`/`insert_if_absent` write a value,
+# `remove` writes absence; `Map.new`, `drop`, `get`, `size` and `keys` do not.
+_MAP_JOURNAL_VERBS = ("insert", "insert_if_absent", "remove")
+
+
+def _node_writes_host_map(node) -> bool:
+    """Whether a node is a host-Map write the journal must observe."""
+    if not _JOURNAL_MODE or not isinstance(node, dict):
+        return False
+    if node.get("kind") != "call":
+        return False
+    return node.get("method") in _MAP_JOURNAL_VERBS
+
+
+def _bracket_writes_host_map(step: dict) -> bool:
+    """Whether an effect bracket acquires or undoes a host-Map write.
+
+    Only such a bracket is armed/disarmed, so every other bracket emits the
+    byte-identical pre-#2009 text. A write sitting in a `setup` step is NOT
+    claimed here -- nothing arms around setup -- and stays unjournalled.
+    """
+    if not _JOURNAL_MODE:
+        return False
+    return any(_node_writes_host_map(step.get(key))
+               for key in ("acquire", "expr", "undo"))
+
+
+_MAP_JOURNAL_SLOTS = [
+    ("impl<V> Map<V> {",
+     "impl<V: Clone + PartialEq + std::fmt::Debug> Map<V> {"),
+    ("""pub struct Map<V> {
+    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, V>>>,
+}""",
+     """pub struct Map<V> {
+    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, V>>>,
+    journal: std::sync::Mutex<RevlMapJournal<V>>,
+}"""),
+    ("""        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }""",
+     """        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            journal: std::sync::Mutex::new(RevlMapJournal::default()),
+        }"""),
+    ("""    pub fn drop_(&self) {
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));
+        self.inner.lock().unwrap().clear();""",
+     """    pub fn drop_(&self) {
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));
+        // py judges at `Map` release (`_judge_journal`, runtime.py:7428).
+        self.journal_judge();
+        self.inner.lock().unwrap().clear();"""),
+    ("""    pub fn insert(&self, key: String, value: V) {
+        self.inner.lock().unwrap().insert(key, value);""",
+     """    pub fn insert(&self, key: String, value: V) {
+        self.journal_note(&key, "insert");
+        self.inner.lock().unwrap().insert(key, value);"""),
+    ("""    pub fn insert_if_absent(&self, key: String, value: V) -> bool {
+        use std::collections::hash_map::Entry;""",
+     """    pub fn insert_if_absent(&self, key: String, value: V) -> bool {
+        self.journal_note(&key, "insert_if_absent");
+        use std::collections::hash_map::Entry;"""),
+    ("""    pub fn remove(&self, key: &String) {
+        self.inner.lock().unwrap().remove(key);""",
+     """    pub fn remove(&self, key: &String) {
+        self.journal_note(key, "remove");
+        self.inner.lock().unwrap().remove(key);"""),
+]
+
+
+def _journal_runtime_lines() -> list[str]:
+    """The rust mirror of py's `_JOURNAL` / `Map._journaled` machinery.
+
+    `REVL_JOURNAL_DEPTH` is py's `_JOURNAL` stack reduced to the one fact the
+    write verbs need -- "is a bracket open?" -- because the rust journal is
+    owned by the Map rather than by the frame. `RevlMapJournal<V>` is py's
+    `Map._journaled` (first-write-wins) plus `Map._reported`.
+    """
+    return [
+        "// issue #2009: the host-map write journal. `assert no_residue`",
+        "// observes host-map STATE, not just the live-resource count: every",
+        "// key a bracketed effect wrote must be back where the first such",
+        "// write found it when the map was released, or an `undo` did not",
+        "// reverse its write. Mirrors backends/python/runtime.py's `_JOURNAL`",
+        "// (7397), `_journal_note` (7400) and `_judge_journal` (7428).",
+        "#[allow(dead_code)]",
+        "struct RevlMapJournal<V> {",
+        "    /// py `Map._journaled`: key -> (the value the key held before the",
+        "    /// FIRST bracketed write of it, the verb that wrote it).",
+        "    journaled: std::collections::HashMap<String, (Option<V>, String)>,",
+        "    /// py `Map._reported`: a key already blamed is not blamed twice.",
+        "    reported: std::collections::HashSet<String>,",
+        "}",
+        "",
+        "impl<V> Default for RevlMapJournal<V> {",
+        "    fn default() -> Self {",
+        "        Self {",
+        "            journaled: std::collections::HashMap::new(),",
+        "            reported: std::collections::HashSet::new(),",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "thread_local! {",
+        "    /// py `_JOURNAL`: non-zero while a bracket that writes the host Map",
+        "    /// is open. A write made with no bracket open is not journalled --",
+        "    /// only a bracketed write has an `undo` that must reverse it.",
+        "    static REVL_JOURNAL_DEPTH: std::cell::Cell<i64> =",
+        "        const { std::cell::Cell::new(0) };",
+        "    /// The un-reversed writes found so far, read by `assert no_residue`.",
+        "    /// Thread-local because `cargo test` runs tests on parallel threads.",
+        "    static REVL_JOURNAL_MISSES: std::cell::RefCell<Vec<String>> =",
+        "        const { std::cell::RefCell::new(Vec::new()) };",
+        "}",
+        "",
+        "#[allow(dead_code)]",
+        "fn revl_journal_arm() {",
+        "    REVL_JOURNAL_DEPTH.with(|d| d.set(d.get() + 1));",
+        "}",
+        "",
+        "#[allow(dead_code)]",
+        "fn revl_journal_disarm() {",
+        "    REVL_JOURNAL_DEPTH.with(|d| d.set(d.get() - 1));",
+        "}",
+        "",
+        "#[allow(dead_code)]",
+        "fn revl_journal_reset() {",
+        "    REVL_JOURNAL_DEPTH.with(|d| d.set(0));",
+        "    REVL_JOURNAL_MISSES.with(|m| m.borrow_mut().clear());",
+        "}",
+        "",
+        "#[allow(dead_code)]",
+        "fn revl_journal_misses() -> Vec<String> {",
+        "    REVL_JOURNAL_MISSES.with(|m| m.borrow().clone())",
+        "}",
+        "",
+        "/// py `_shown` (7440): `absent`, else the value's debug form.",
+        "#[allow(dead_code)]",
+        "fn revl_journal_shown<V: std::fmt::Debug>(value: &Option<V>) -> String {",
+        "    match value {",
+        "        None => \"absent\".to_string(),",
+        "        Some(v) => format!(\"{:?}\", v),",
+        "    }",
+        "}",
+        "",
+        "/// py `_same_value` (7445): presence compared when either side is absent,",
+        "/// else equality. This is the bound the journal needs, and the reason a",
+        "/// journal-mode `Map<V>` requires `PartialEq` (see the PR gap list).",
+        "#[allow(dead_code)]",
+        "fn revl_journal_same<V: PartialEq>(a: &Option<V>, b: &Option<V>) -> bool {",
+        "    match (a, b) {",
+        "        (None, None) => true,",
+        "        (Some(x), Some(y)) => x == y,",
+        "        _ => false,",
+        "    }",
+        "}",
+        "",
+        "/// py `_not_reversed`'s `NotReversed` message (runtime.py:7412-7427).",
+        "#[allow(dead_code)]",
+        "fn revl_journal_message<V: std::fmt::Debug>(",
+        "    key: &str,",
+        "    prior: &Option<V>,",
+        "    verb: &str,",
+        "    now: &Option<V>,",
+        ") -> String {",
+        "    format!(",
+        "        \"map key {:?} held {} before the first bracketed `{}` of it and \\",
+        "{} when the map was released: an undo did not reverse its write\",",
+        "        key,",
+        "        revl_journal_shown(prior),",
+        "        verb,",
+        "        revl_journal_shown(now),",
+        "    )",
+        "}",
+        "",
+    ]
+
+def _journal_impl_lines() -> list[str]:
+    """The journal methods, appended after the base `Map<V>` impls.
+
+    `journal_note` mirrors py `_journal_note` (7400): first write wins, so the
+    undo's own `remove` cannot overwrite the recorded prior. `journal_judge`
+    mirrors py `_judge_journal` (7428) and is called from `drop_` -- py judges
+    at `Map` release too.
+    """
+    return [
+        "impl<V: Clone + PartialEq + std::fmt::Debug> Map<V> {",
+        "    /// py `_journal_note` (runtime.py:7400): while a bracket is open,",
+        "    /// remember the value the key held BEFORE the first bracketed write",
+        "    /// of it, and the verb that wrote it.",
+        "    #[allow(dead_code)]",
+        "    fn journal_note(&self, key: &String, verb: &str) {",
+        "        if REVL_JOURNAL_DEPTH.with(|d| d.get()) <= 0 {",
+        "            return;",
+        "        }",
+        "        let prior = self.inner.lock().unwrap().get(key).cloned();",
+        "        let mut j = self.journal.lock().unwrap();",
+        "        if !j.journaled.contains_key(key) {",
+        "            j.journaled.insert(key.clone(), (prior, verb.to_string()));",
+        "        }",
+        "    }",
+        "    /// py `_judge_journal` (runtime.py:7428): every journalled key that is",
+        "    /// not where the first bracketed write found it is an un-reversed",
+        "    /// write -- py's `_not_reversed` (runtime.py:7412).",
+        "    #[allow(dead_code)]",
+        "    fn journal_judge(&self) {",
+        "        let taken: Vec<(String, Option<V>, String)> = {",
+        "            let mut j = self.journal.lock().unwrap();",
+        "            j.journaled.drain().map(|(k, (v, w))| (k, v, w)).collect()",
+        "        };",
+        "        for (key, prior, verb) in taken {",
+        "            if self.journal.lock().unwrap().reported.contains(&key) {",
+        "                continue;",
+        "            }",
+        "            let now = self.inner.lock().unwrap().get(&key).cloned();",
+        "            if revl_journal_same(&prior, &now) {",
+        "                continue;",
+        "            }",
+        "            self.journal.lock().unwrap().reported.insert(key.clone());",
+        "            let msg = revl_journal_message(&key, &prior, &verb, &now);",
+        "            REVL_JOURNAL_MISSES.with(|m| m.borrow_mut().push(msg));",
+        "        }",
+        "    }",
+        "}",
+        "",
+    ]
+
 def _emit_host_stubs(ir: dict) -> list[str]:
     """Emit the minimal revl host runtime for objects used by this document.
 
@@ -2621,6 +2877,13 @@ def _emit_host_stubs(ir: dict) -> list[str]:
             "}",
             "",
         ])
+    if _JOURNAL_MODE:
+        # The journal block must precede `Map<V>`: the struct holds one. It is
+        # emitted whenever a lifecycle test reads the journal, not only when
+        # this document happens to use a Map: `revl_journal_reset` and
+        # `revl_journal_misses` are called from `assert no_residue` either
+        # way, and a document whose components hold no map still has to link.
+        out.extend(_journal_runtime_lines())
     if "Map" in used:
         out.extend(
             [
@@ -2933,6 +3196,20 @@ def _emit_host_stubs(ir: dict) -> list[str]:
         # byte-identical.
         if stream_event:
             out.extend(_stream_event_host_rust())
+    if _JOURNAL_MODE and "Map" in used:
+        # issue #2009: rewrite the host Map text in place. A slot that no
+        # longer matches means the Map runtime moved under the journal, so
+        # fail loudly rather than emit an unjournalled map.
+        text = "\n".join(out)
+        for old, new in _MAP_JOURNAL_SLOTS:
+            hits = text.count(old)
+            if hits != 1:
+                raise EmitError(
+                    "issue #2009: the host Map runtime moved -- the "
+                    "journal slot %r matched %d times" % (old[:60], hits))
+            text = text.replace(old, new)
+        out = text.split("\n")
+        out.extend(_journal_impl_lines())
     return out
 
 
@@ -4940,11 +5217,24 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
                 undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
+            # issue #2009: arm the host-map journal across the acquire and
+            # across the inverse (py `Frame._guard`, runtime.py:3690).
+            jrn = _bracket_writes_host_map(step)
+            if jrn:
+                out.append(f"{pad}revl_journal_arm();")
             out.append(f"{pad}let _ = {acquire};")
+            if jrn:
+                out.append(f"{pad}revl_journal_disarm();")
             undo = _expr(undo_node, env, undo_rename)
-            out.append(
-                f"{pad}let _ = self.ctx.effect({label}, move || {{ {undo}; Ok(()) }});"
-            )
+            if jrn:
+                out.append(
+                    f"{pad}let _ = self.ctx.effect({label}, "
+                    f"move || {{ revl_journal_arm(); {undo}; revl_journal_disarm(); Ok(()) }});"
+                )
+            else:
+                out.append(
+                    f"{pad}let _ = self.ctx.effect({label}, move || {{ {undo}; Ok(()) }});"
+                )
         elif kind == "emit":
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
@@ -5041,14 +5331,26 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
                 undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
+            jrn = _bracket_writes_host_map(step)
+            if jrn:
+                out.append(f"{pad}revl_journal_arm();")
             out.append(f"{pad}let {bind} = {acquire};")
+            if jrn:
+                out.append(f"{pad}revl_journal_disarm();")
             env.v3_ctx().var_types[step.get("bind")] = "Bool"
             body_locals.add(step.get("bind"))
             undo = _expr(undo_node, env, undo_rename)
-            out.append(
-                f"{pad}let _ = self.ctx.effect({label}, "
-                f"move || {{ if {bind} {{ {undo}; }} Ok(()) }});"
-            )
+            if jrn:
+                out.append(
+                    f"{pad}let _ = self.ctx.effect({label}, "
+                    f"move || {{ if {bind} {{ revl_journal_arm(); {undo}; "
+                    f"revl_journal_disarm(); }} Ok(()) }});"
+                )
+            else:
+                out.append(
+                    f"{pad}let _ = self.ctx.effect({label}, "
+                    f"move || {{ if {bind} {{ {undo}; }} Ok(()) }});"
+                )
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         elif kind in ("if", "while", "for", "break", "continue"):
@@ -5895,10 +6197,15 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         if acq.get("kind") == "host" and acq.get("fn") == "Map.new":
             v = _component_map_values(env).get(step["bind"], "String")
             acquire = f"Map::<{v}>::new()"
+        jrn = _bracket_writes_host_map(step)
+        if jrn:
+            out.append(f"{pad}revl_journal_arm();")
         if _held_bind_type(env, step["bind"]) is not None:
             out.append(f"{pad}let {bind} = {acquire};")
         else:
             out.append(f"{pad}let {bind} = Arc::new({acquire});")
+        if jrn:
+            out.append(f"{pad}revl_journal_disarm();")
         undo_name = f"{bind}_undo"
         out.append(f"{pad}let {undo_name} = {bind}.clone();")
         undo_rename = {step["bind"]: undo_name}
@@ -5928,11 +6235,24 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             # result-guarded undo: the identity inverse on a `false` CAS, so
             # teardown never removes the winner's entry (`*` derefs the
             # `Arc<bool>` clone the closure owns).
-            out.append(
-                f"{pad}ctx.effect({label}, "
-                f"move || {{ if *{undo_name} {{ {undo}; }} Ok(()) }})?;")
+            if jrn:
+                out.append(
+                    f"{pad}ctx.effect({label}, "
+                    f"move || {{ if *{undo_name} {{ revl_journal_arm(); {undo}; "
+                    f"revl_journal_disarm(); }} Ok(()) }})?;")
+            else:
+                out.append(
+                    f"{pad}ctx.effect({label}, "
+                    f"move || {{ if *{undo_name} {{ {undo}; }} Ok(()) }})?;")
         else:
-            out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
+            if jrn:
+                out.append(
+                    f"{pad}ctx.effect({label}, "
+                    f"move || {{ revl_journal_arm(); {undo}; "
+                    f"revl_journal_disarm(); Ok(()) }})?;")
+            else:
+                out.append(
+                    f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "effect":
         for setup in step.get("setup") or []:
             _emit_setup_step(setup, env, out, indent)
@@ -5947,9 +6267,20 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             out.append(f"{pad}let {req_undo} = {_req_ident(req, env)}.clone();")
             undo_rename[req] = req_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
+        jrn = _bracket_writes_host_map(step)
+        if jrn:
+            out.append(f"{pad}revl_journal_arm();")
         out.append(f"{pad}let _ = {acquire};")
+        if jrn:
+            out.append(f"{pad}revl_journal_disarm();")
         label = _string(env.name + ".effect")
-        out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
+        if jrn:
+            out.append(
+                f"{pad}ctx.effect({label}, "
+                f"move || {{ revl_journal_arm(); {undo}; "
+                f"revl_journal_disarm(); Ok(()) }})?;")
+        else:
+            out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
         # one compensation per crossing, registered after the fire: the
@@ -8984,6 +9315,10 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
             # independent of any earlier lifecycle test (mirrors the py tier's
             # `Clock.reset()`). Load happens below, so this test's timers survive.
             out.append("    revl_clock_reset();")
+        if _JOURNAL_MODE:
+            # issue #2009: the host-map journal is thread-local and
+            # `cargo test` reuses threads, so reset it per test.
+            out.append("    revl_journal_reset();")
         out.append("    let mut _revl_fibers: Vec<(&str, cordis::Fiber)> = Vec::new();")
         for step in test.get("body") or []:
             kind = step.get("step")
@@ -9053,6 +9388,21 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                            " && REVL_LIVE_HOST_RESOURCES.with(|c| c.get()) == 0,")
                 msg = where + ": residue \u2014 the host runtime still holds state (R4/R1)"
                 out.append("            " + _string(_escape_format_braces(msg)) + ");")
+                if _JOURNAL_MODE:
+                    # issue #2009: the host-map half of R4. The R4/R1
+                    # assert above only counts live host objects; this
+                    # reads the journal for a bracketed write whose
+                    # `undo` did not put the key back where it found it
+                    # (py `NotReversed`, runtime.py:7412).
+                    out.append(
+                        "    let _revl_journal_misses = revl_journal_misses();")
+                    jmsg = (_escape_format_braces(where + ": residue \u2014 ")
+                            + "{} un-reversed host-map write(s) (R4): {}")
+                    out.append(
+                        "    assert!(_revl_journal_misses.is_empty(), "
+                        + _string(jmsg)
+                        + ", _revl_journal_misses.len(), "
+                        + "_revl_journal_misses.join(\"; \"));")
             else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         out.append("}")
@@ -10786,7 +11136,7 @@ def emit(ir: dict, record: bool = False) -> str:
     recording preamble and the per-descriptor `revl_record_transactional` calls.
     Mirrors backends/go/emit.py's `emit(..., record=...)`.
     """
-    global _RECORD_MODE, _SECRET_MODE
+    global _RECORD_MODE, _SECRET_MODE, _JOURNAL_MODE
     _RECORD_MODE = record
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
@@ -10803,6 +11153,12 @@ def emit(ir: dict, record: bool = False) -> str:
     # not left in secret mode by a previous one.
     saved_secret = _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
+    # issue #2009: the host-map journal is a pure function of the IR (does a
+    # lifecycle test assert no residue?), saved/restored for the same reason
+    # secret mode is: a caller emitting several documents must not be left in
+    # journal mode by a previous one.
+    saved_journal = _JOURNAL_MODE
+    _JOURNAL_MODE = _journal_readable(ir)
     global _UI_EXTERNS, _UI_SCOPES
     saved_ui = (_UI_EXTERNS, _UI_SCOPES)
     _UI_EXTERNS, _UI_SCOPES = _ui_transaction_facts(ir)
@@ -10816,6 +11172,7 @@ def emit(ir: dict, record: bool = False) -> str:
             return _emit_v3(ir)
     finally:
         _SECRET_MODE = saved_secret
+        _JOURNAL_MODE = saved_journal
         _UI_EXTERNS, _UI_SCOPES = saved_ui
     raise EmitError(
         f"unsupported ir_version: {version!r} — the Rust backend targets "
