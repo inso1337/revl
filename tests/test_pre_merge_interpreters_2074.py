@@ -288,14 +288,30 @@ _STEP = re.compile(r'\s*step\s+"([^"]*)"\s*(.*)$')
 # A bare interpreter in executable position is defect 1 of #2074: the step
 # ignores the `$PYTHON` the gate resolved and picks up whatever `python3` the
 # committer's PATH happens to hold (on the box in the issue, a python without
-# pytest).
-_BARE_INTERPRETERS = ("python", "python3")
+# pytest). A *versioned* interpreter is the same defect, so this is a shape
+# match rather than set membership: `python`, or `python3` with an optional
+# minor version. It is anchored, so the sibling name `python3-cli` is not one.
+_BARE_INTERPRETER = re.compile(r"python3(\.\d+)?")
 # Tokens that run the command *after* them, so the interpreter is not `cmd[0]`.
 # `env` is peeled apart from these because it also takes `NAME=value` words.
-_WRAPPERS = ("command", "exec", "nohup", "time", "nice", "sudo", "stdbuf",
-             "timeout", "xargs")
-# `env` short options that take an operand (`env -u FOO python3 ...`).
-_ENV_OPERAND_OPTIONS = ("-u", "-C", "-S")
+_WRAPPERS = ("command", "doas", "exec", "nice", "nohup", "nsenter", "stdbuf",
+             "su", "sudo", "time", "timeout", "xargs")
+# Per wrapper, the options that take an *operand*: without this, `sudo -u root
+# python3 ...` and `timeout -s KILL 5 python3 ...` stop at the operand and
+# report *it* as the executable, so the interpreter behind it is never read.
+# `env`'s `-u`/`-C`/`-S` are here too; `env` itself is peeled apart because it
+# also takes bare `NAME=value` words.
+_WRAPPER_OPERAND_OPTIONS = {
+    "doas": ("-C", "-u"),
+    "env": ("-u", "-C", "-S"),
+    "nsenter": ("-t", "-S", "-G"),
+    "su": ("-g", "-s", "-u"),
+    "sudo": ("-u", "-g", "-p", "-C"),
+    "timeout": ("-s", "-k"),
+}
+# Per wrapper, the options whose operand is a whole command line to walk the way
+# a `sh -c` payload is: `su -c "python3 ..."` execs what the payload names.
+_WRAPPER_PAYLOAD_OPTIONS = {"su": ("-c",)}
 # `command -v python3` looks a name up instead of exec'ing it.
 _LOOKUP_OPTIONS = ("-v", "-V")
 # A shell with `-c` takes the command as a single argument: `sh -c "python3 ..."`.
@@ -362,9 +378,10 @@ def _executables(tokens):
 
     `cmd[0]` only sees the bare `python3 ...` shape. A step that reaches the
     interpreter through a wrapper -- `env FOO=1 python3 ...`, `nohup python3 ...`,
-    `nice -n 5 python3 ...`, `timeout 5 python3 ...`, `xargs -n 1 python3 ...` --
-    or hands a whole line to a shell (`sh -c "python3 ..."`) puts it further in,
-    so those prefixes are peeled off and a `-c` payload is walked too.
+    `nice -n 5 python3 ...`, `timeout -s KILL 5 python3 ...`, `xargs -n 1 python3
+    ...` -- or hands a whole line to a shell (`sh -c "python3 ..."`) puts it
+    further in, so those prefixes are peeled off, options are dropped together
+    with the operands they take, and a `-c` payload is walked too.
 
     Only executable positions come back: `python3` as an *argument* (a script
     path, a `--python python3` flag, an interpreter handed to a tool) and
@@ -386,7 +403,7 @@ def _executables(tokens):
                 rest = rest[1:]
                 while rest:
                     option = rest[0]
-                    if option in _ENV_OPERAND_OPTIONS:
+                    if option in _WRAPPER_OPERAND_OPTIONS["env"]:
                         rest = rest[2:]
                         continue
                     if option.startswith("-") or _ASSIGNMENT.match(option):
@@ -399,8 +416,22 @@ def _executables(tokens):
                 continue
             if head in _WRAPPERS:
                 rest = rest[1:]
-                while rest and (rest[0].startswith("-") or rest[0].isdigit()):
-                    rest = rest[1:]
+                operands = _WRAPPER_OPERAND_OPTIONS.get(head, ())
+                payloads = _WRAPPER_PAYLOAD_OPTIONS.get(head, ())
+                while rest:
+                    option = rest[0]
+                    if option in payloads:
+                        if len(rest) > 1:
+                            executables.extend(_executables(shlex.split(rest[1])))
+                        rest = []
+                        break
+                    if option in operands:
+                        rest = rest[2:]
+                        continue
+                    if option.startswith("-") or option.isdigit():
+                        rest = rest[1:]
+                        continue
+                    break
                 continue
             if head in _SHELLS:
                 payload = next((rest[i + 1] for i, tok in enumerate(rest[1:], 1)
@@ -416,11 +447,16 @@ def _executables(tokens):
     return executables
 
 
+def _is_bare_interpreter(token):
+    """`python`, or `python3` with an optional version -- not `python3-cli`."""
+    return token == "python" or _BARE_INTERPRETER.fullmatch(token) is not None
+
+
 def _bare_interpreter_offenders(steps):
     """The (label, token) pairs whose step execs a bare interpreter."""
     return [(label, executable) for label, cmd in steps
             for executable in _executables(cmd)
-            if executable in _BARE_INTERPRETERS]
+            if _is_bare_interpreter(executable)]
 
 
 def _synthetic_steps(pairs):
@@ -457,29 +493,43 @@ def test_a_wrapped_or_continued_step_is_caught():
     """Every shape that hides the interpreter from `cmd[0]`, pinned as offenders.
 
     A wrapper prefix (`env FOO=1 python3 ...`, `nice -n 5 python3 ...`), a
-    leading assignment (`FOO=1 python3 ...`) and a line continuation
+    wrapper option *with an operand* (`sudo -u root python3 ...`, `timeout -s
+    KILL 5 python3 ...`), a leading assignment (`FOO=1 python3 ...`), a
+    versioned interpreter (`python3.11 ...`) and a line continuation
     (`step "x" \\` + `python3 ...`) all put the interpreter where `cmd[0]`
     cannot see it, so the old pin passed while the defect was present.
     """
     shapes = (
-        ("env prefix", "env FOO=1 python3 tools/regen_goldens.py --check"),
-        ("env -i", "env -i python3 tools/regen_goldens.py"),
-        ("env --", "env -- python3 tools/regen_goldens.py"),
-        ("env -u", "env -u FOO python3 tools/regen_goldens.py"),
-        ("assignment", "FOO=1 python3 tools/regen_goldens.py"),
-        ("command", "command python3 tools/regen_goldens.py"),
-        ("exec", "exec python3 tools/regen_goldens.py"),
-        ("nohup", "nohup python3 tools/regen_goldens.py"),
-        ("time", "time python3 tools/regen_goldens.py"),
-        ("nice", "nice -n 5 python3 tools/regen_goldens.py"),
-        ("sudo", "sudo python3 tools/regen_goldens.py"),
-        ("stdbuf", "stdbuf -oL python3 tools/regen_goldens.py"),
-        ("timeout", "timeout 5 python3 tools/regen_goldens.py"),
-        ("xargs", "xargs -n 1 python3 tools/regen_goldens.py"),
-        ("sh -c", "sh -c 'cd tools && python3 check.py'"),
+        ("env prefix", "env FOO=1 python3 tools/regen_goldens.py --check",
+         "python3"),
+        ("env -i", "env -i python3 tools/regen_goldens.py", "python3"),
+        ("env --", "env -- python3 tools/regen_goldens.py", "python3"),
+        ("env -u", "env -u FOO python3 tools/regen_goldens.py", "python3"),
+        ("assignment", "FOO=1 python3 tools/regen_goldens.py", "python3"),
+        ("command", "command python3 tools/regen_goldens.py", "python3"),
+        ("exec", "exec python3 tools/regen_goldens.py", "python3"),
+        ("nohup", "nohup python3 tools/regen_goldens.py", "python3"),
+        ("time", "time python3 tools/regen_goldens.py", "python3"),
+        ("nice", "nice -n 5 python3 tools/regen_goldens.py", "python3"),
+        ("sudo", "sudo python3 tools/regen_goldens.py", "python3"),
+        ("sudo -u root", "sudo -u root python3 tools/regen_goldens.py",
+         "python3"),
+        ("stdbuf", "stdbuf -oL python3 tools/regen_goldens.py", "python3"),
+        ("timeout", "timeout 5 python3 tools/regen_goldens.py", "python3"),
+        ("timeout -s KILL", "timeout -s KILL 5 python3 tools/regen_goldens.py",
+         "python3"),
+        ("xargs", "xargs -n 1 python3 tools/regen_goldens.py", "python3"),
+        ("nsenter", "nsenter python3 tools/regen_goldens.py", "python3"),
+        ("nsenter -t 1", "nsenter -t 1 -m python3 tools/regen_goldens.py",
+         "python3"),
+        ("su -c", "su -c 'cd tools && python3 check.py'", "python3"),
+        ("versioned", "python3.11 tools/regen_goldens.py", "python3.11"),
+        ("versioned wrapped", "env FOO=1 python3.12 tools/x.py", "python3.12"),
+        ("sh -c", "sh -c 'cd tools && python3 check.py'", "python3"),
     )
-    offenders = _bare_interpreter_offenders(_step_commands(_synthetic_steps(shapes)))
-    assert offenders == [(label, "python3") for label, _ in shapes], offenders
+    offenders = _bare_interpreter_offenders(_step_commands(_synthetic_steps(
+        [(label, command) for label, command, _ in shapes])))
+    assert offenders == [(label, token) for label, _, token in shapes], offenders
 
     continued = _bare_interpreter_offenders(_step_commands(
         "step \"continued\" \\\n    python3 tools/check.py\n"
@@ -494,12 +544,17 @@ def test_an_interpreter_in_argument_position_is_not_an_offender():
     `--python python3` flag, an interpreter handed to a tool -- and such a step
     still execs the resolved `$PYTHON`, so it is not defect 1's shape. A blanket
     substring ban flags all of these, which is why they are pinned as passing.
+    The interpreter test is anchored, so a differently named program that merely
+    starts the same way (`python3-cli`) is not one either.
     """
     steps = _step_commands(_synthetic_steps((
         ("flag", '"$PYTHON" tools/x.py --python python3'),
         ("argument", '"$PYTHON" tools/x.py python3 tools/y.py'),
         ("wrapped flag", 'env FOO=1 "$PYTHON" tools/x.py --python python3'),
         ("sh -c flag", 'sh -c \'"$PYTHON" tools/x.py --python python3\''),
+        ("sibling name", "python3-cli tools/x.py"),
+        ("versioned sibling", "python3.11-cli tools/x.py"),
+        ("argument to a wrapper", "sudo -u root $PYTHON tools/x.py python3"),
     )))
     offenders = _bare_interpreter_offenders(steps)
     assert not offenders, (
