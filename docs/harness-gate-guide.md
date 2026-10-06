@@ -133,8 +133,11 @@ so `revl_abort` undoes a relay exactly as it undoes the direct calls.
 The guarantee is REGISTRATION, not the declaration (issue #1707). A `witnessed`
 extern is class (a) only where its inverse is actually registered, and
 registration is a property of the CALL SITE: the call must be the acquisition
-of an `effect`/`let-effect` step. Reached any other way the call fires the host
-mutation and registers nothing, so nothing can undo it and it is class (c):
+of an `effect`/`let-effect` step. Any other position is REFUSED (issue #2044):
+`let r = stash_path(p)`, `return stash_path(p)` and `let r = …; return r` do not
+compile, because a value position builds no effect step, so the inverse would
+never register and the auto-approve guarantee would be silently downgraded to
+class (c) prompt-per-call:
 
 ```revl
 type Stash = { path: Str, bak: Str }
@@ -143,20 +146,17 @@ extern pure fn unstash(w: Stash) -> Unit = @py { return }
 extern witnessed[fs] fn stash_path(p: Str) -> Result[Stash, FsError] undo unstash(result) = @py { return Ok({}) }
 service Ops {
   emission fn stash(p: Str)
-  emission fn stash_let(p: Str)
-  emission fn stash_ret(p: Str)
 }
 component Agent provides ops: Ops {
   provide ops {
-    fn stash(p) { effect stash_path(p) }       // (a): the inverse is registered
-    fn stash_let(p) { let r = stash_path(p) }  // (c): the same mutation, no inverse
-    fn stash_ret(p) { return stash_path(p) }   // (c): likewise
+    fn stash(p) { effect stash_path(p) }  // (a): the inverse is registered
   }
 }
 ```
 
-The three operations are the same mutation reached three ways: `ops.stash` is class
-(a), `ops.stash_let` and `ops.stash_ret` are class (c).
+`ops.stash` is class (a). Spelling the same mutation in value position is refused
+at the call site with G4 ("a witnessed mutation is only valid in effect
+position"): write `effect stash_path(p)` instead.
 
 Both class folds — the auto-approve `ClassMap` and the erase report — read the
 one predicate `Composition.witnessed_registered`, which is exactly the test the
@@ -170,8 +170,9 @@ and still prompts.
 A relay stays class (c) when:
 
 - it also reaches any non-witnessed emission (the worst rule is unchanged);
-- it relays a `witnessed` op whose inverse is not registered (the `let`/`return`
-  spellings above) — the relay takes its target's (c);
+- it relays a `witnessed` op whose inverse is not registered (a `witnessed`
+  extern reached as a marked `emit`, which builds an emission step and not an
+  effect step) — the relay takes its target's (c);
 - the forwarding emission is `compensate`d (a compensation offsets an
   irreversible crossing, it does not make one revertible, 247);
 - its target is not provided inside the composition (a host-provided or
