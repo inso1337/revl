@@ -4498,7 +4498,7 @@ fn method_release_msg(ss: List[Stmt], i: Int, cx: Ctx, maps: List[Str]) -> Str {
   let m = ss[i - 1].bind == "" ? release_msg_at(ss, i, cx, true) : ""
   if (m != "") { return m }
   let w = ss[i].kind == "undo" && ss[i - 1].kind == "effect"
-    ? write_inverse_msg(ss[i - 1].e, ss[i].e, maps) : ""
+    ? write_inverse_msg(ss, i, maps) : ""
   if (w != "") { return w }
   return method_release_msg(ss, i + 1, cx, maps)
 }
@@ -4532,7 +4532,9 @@ fn host_write_verb(e: Expr, names: List[Str]) -> Str {
 
 // The reference's `_method_effect_inverse` refusal: a host Map write's `undo`
 // is its table inverse on the same handle with the same key expression.
-fn write_inverse_msg(acq: Expr, und: Expr, maps: List[Str]) -> Str {
+fn write_inverse_msg(ss: List[Stmt], i: Int, maps: List[Str]) -> Str {
+  let acq = ss[i - 1].e
+  let und = ss[i].e
   let verb = host_write_verb(acq, maps)
   if (verb == "" || is_hole_expr(und)) { return "" }
   let inverse = verb == "remove" ? "insert" : "remove"
@@ -4540,6 +4542,15 @@ fn write_inverse_msg(acq: Expr, und: Expr, maps: List[Str]) -> Str {
   let key = first_arg(acq)
   if (call_recv(und) == recv && call_verb(und) == inverse
       && key_expr_same(key, first_arg(und))) { return "" }
+  // issue #1980: an `insert` undone by RESTORING the value this body read from
+  // the same table at the same key is the exact inverse, through the `Opt` the
+  // read carries, so it is admitted rather than refused. `restore_verdict`
+  // answers whether the `undo` took that shape at all and, when it did, the
+  // message it is refused with if it fell short.
+  if (verb == "insert") {
+    let rv = restore_verdict(ss, i, maps, recv, key, und, verb)
+    if (rv[0] == "1") { return rv[1] }
+  }
   let k = key_spelling(key)
   let spelled = inverse == "remove"
     ? recv.concat(".remove(").concat(k).concat(")")
@@ -4547,6 +4558,180 @@ fn write_inverse_msg(acq: Expr, und: Expr, maps: List[Str]) -> Str {
   return "the `undo` of `effect ".concat(recv).concat(".").concat(verb)
     .concat("(...)` must be its inverse on the same handle and key: write `undo ")
     .concat(spelled).concat("`")
+}
+
+// issue #1980: the value-RESTORE form of a host `Map` write's `undo`.
+//
+// `effect m.insert(k, new) undo m.insert(k, prev)` IS the exact inverse of the
+// insert when `prev` is bound from `m.get(k)` — the same handle, the same key
+// expression, in the same body BEFORE the effect, with no write to `m` at `k`
+// in between — because `m.get(k)` is `Opt[V]`: it carries the value the key
+// HELD, which is the value the insert overwrote. The `Opt` decides the inverse
+// (a value to restore, or an absence to remove), so the proven form branches on
+// it:
+//
+//   undo match prev { Some(v) => m.insert(k, v), None => m.remove(k) }
+//
+// Restoring `prev` without the branch is refused (the key may be absent, where
+// the inverse is a `remove`), and so is a defaulted read (`m.get(k) ?? d`),
+// which erases the `Opt`. Each refusal names the `match` form. An `undo` that
+// is not restore-SHAPED keeps the #1945 refusal.
+//
+// `[handled, message]`: `["0", ""]` when the `undo` is not restore-shaped (the
+// caller falls through to #1945), and `["1", message]` when it is — admitted
+// exactly when the message is empty.
+fn restore_verdict(ss: List[Stmt], i: Int, maps: List[Str], recv: Str,
+                   key: Expr, und: Expr, verb: Str) -> List[Str] {
+  let sh = restore_shape(und, recv, key)
+  if (sh.length() == 0) { return ["0", ""] }
+  let bind = sh[0]
+  let v = read_verdict(ss, i - 1, bind, i - 1, recv, key, maps)
+  if (v != 0) {
+    return ["1", restore_form_msg(recv, verb, bind, restore_why(v),
+                                  key_spelling(key))]
+  }
+  if (sh[1] == "plain") {
+    return ["1", restore_form_msg(recv, verb, bind,
+      "it is `Opt`-shaped, so the undo must branch on it", key_spelling(key))]
+  }
+  return ["1", ""]
+}
+
+// issue #1980: the `[binding, form]` of a restore-SHAPED `undo` on `recv` at
+// `key`, else `[]`. `[prev, "match"]` for
+// `match prev { Some(v) => recv.insert(key, v), None => recv.remove(key) }` and
+// `[prev, "plain"]` for `recv.insert(key, prev)`. The SHAPE is what keys the
+// refusal, so the reason a restore-shaped `undo` fell short never changes the
+// form the message names.
+fn restore_shape(und: Expr, recv: Str, key: Expr) -> List[Str] {
+  return match und {
+    Match(m) => restore_match_shape(m, recv, key),
+    Call(c) => restore_plain_shape(c, recv, key),
+    _ => [],
+  }
+}
+
+fn restore_match_shape(m: MatchN, recv: Str, key: Expr) -> List[Str] {
+  if (m.arms.length() != 2) { return [] }
+  let si = arm_index(m.arms, "Some", 0)
+  let ni = arm_index(m.arms, "None", 0)
+  if (si < 0 || ni < 0 || m.arms[si].bind == "") { return [] }
+  let scrut = match m.scrut { Var(v) => v, _ => "", }
+  if (scrut == "") { return [] }
+  let ins = call_of(m.arms[si].body, recv, "insert", [key, Var(m.arms[si].bind)])
+  let rem = call_of(m.arms[ni].body, recv, "remove", [key])
+  return ins && rem ? [scrut, "match"] : []
+}
+
+fn restore_plain_shape(c: CallN, recv: Str, key: Expr) -> List[Str] {
+  if (calln_recv(c) != recv || calln_verb(c) != "insert") { return [] }
+  if (c.args.length() != 2 || !key_expr_same(c.args[0], key)) { return [] }
+  return match c.args[1] { Var(v) => [v, "plain"], _ => [], }
+}
+
+fn arm_index(arms: List[ArmN], pat: Str, i: Int) -> Int {
+  if (i >= arms.length()) { return 0 - 1 }
+  return arms[i].pat == pat ? i : arm_index(arms, pat, i + 1)
+}
+
+fn call_of(e: Expr, recv: Str, verb: Str, args: List[Expr]) -> Bool {
+  return match e {
+    Call(c) => call_recv(e) == recv && call_verb(e) == verb
+      && key_args_same(c.args, args, 0),
+    _ => false,
+  }
+}
+
+fn calln_recv(c: CallN) -> Str {
+  return match c.target { Field(f) => match f.target { Var(v) => v, _ => "", }, _ => "", }
+}
+
+fn calln_verb(c: CallN) -> Str {
+  return match c.target { Field(f) => f.name, _ => "", }
+}
+
+// issue #1980: whether the value this `undo` restores was read from `recv` at
+// `key` — 0 admitted, 1 no read of this table at this key bound it earlier in
+// the same body, 2 it is read from another handle or another key, 3 this table
+// is written at this key between the read and the effect, 4 its read is
+// defaulted. `at` is the exclusive upper bound of the region to scan and `eff`
+// the index of the effect itself, so the region between a read at `at - 1` and
+// the effect is `at .. eff - 1`. The LAST binding of the name ahead of the
+// effect is the one in force; a statement that is not a pure `let` (an
+// acquisition, an emit, a spawn) carries a different statement kind and is
+// skipped, exactly as the reference skips it.
+fn read_verdict(ss: List[Stmt], at: Int, name: Str, eff: Int, recv: Str,
+                key: Expr, maps: List[Str]) -> Int {
+  if (at <= 0) { return 1 }
+  let s = ss[at - 1]
+  if (s.kind == "expr" && s.bind == name) {
+    let rr = read_recv(s.e, maps)
+    if (rr == "") { return 1 }
+    if (rr != recv || !key_expr_same(read_key(s.e), key)) { return 2 }
+    if (written_between(ss, at, eff, recv, key, maps)) { return 3 }
+    if (read_defaulted(s.e)) { return 4 }
+    return 0
+  }
+  return read_verdict(ss, at - 1, name, eff, recv, key, maps)
+}
+
+// Whether this body writes `recv` at `key` between the read that bound the
+// restored value and the effect. A write at another key leaves the read intact;
+// one at this key makes the restored value the value the EFFECT overwrote, so
+// the `undo` is no longer its inverse.
+fn written_between(ss: List[Stmt], i: Int, eff: Int, recv: Str, key: Expr,
+                   maps: List[Str]) -> Bool {
+  if (i >= eff) { return false }
+  let s = ss[i]
+  if (s.kind == "effect" && host_write_verb(s.e, maps) != ""
+      && call_recv(s.e) == recv && key_expr_same(first_arg(s.e), key)) {
+    return true
+  }
+  return written_between(ss, i + 1, eff, recv, key, maps)
+}
+
+// The receiver of a host `Map.get` read, looking THROUGH a defaulting `??` (it
+// is the same read, and the `??` is exactly what the rule refuses); "" when `e`
+// is not such a read.
+fn read_recv(e: Expr, maps: List[Str]) -> Str {
+  return match e {
+    Bin(b) => b.op == "??" ? read_recv(b.l, maps) : "",
+    _ => call_verb(e) == "get" && contains(maps, call_recv(e)) ? call_recv(e) : "",
+  }
+}
+
+// The key a host read is asked for, looking through a defaulting `??`.
+fn read_key(e: Expr) -> Expr {
+  return match e {
+    Bin(b) => b.op == "??" ? read_key(b.l) : first_arg(e),
+    _ => first_arg(e),
+  }
+}
+
+fn read_defaulted(e: Expr) -> Bool {
+  return match e { Bin(b) => b.op == "??", _ => false, }
+}
+
+fn restore_why(v: Int) -> Str {
+  if (v == 1) {
+    return "no read of this table at this key bound it earlier in the same body"
+  }
+  if (v == 2) { return "it is read from another handle or another key" }
+  if (v == 3) {
+    return "this table is written at this key between the read and the effect"
+  }
+  if (v == 4) {
+    return "its read is defaulted (`??`), which erases the `Opt` the inverse follows"
+  }
+  return "it is `Opt`-shaped, so the undo must branch on it"
+}
+
+fn restore_form_msg(name: Str, verb: Str, bind: Str, why: Str, k: Str) -> Str {
+  return "the `undo` of `effect ".concat(name).concat(".").concat(verb)
+    .concat("(...)` cannot restore `").concat(bind).concat("` (").concat(why)
+    .concat("): write `undo match ").concat(bind).concat(" { Some(v) => ")
+    .concat(name).concat(".insert(").concat(k).concat(", v), None => ")
+    .concat(name).concat(".remove(").concat(k).concat(") }`")
 }
 
 fn call_recv(e: Expr) -> Str {
