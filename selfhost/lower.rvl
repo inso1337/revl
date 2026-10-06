@@ -20446,6 +20446,46 @@ fn bare_callee(e: Expr) -> Str {
   }
 }
 
+// issue #1859: a host acquisition whose release the site PROVES — the three
+// families `host_acquire_release` names (`Map.new`, `Pool.open`,
+// `Stream.source`), on the acquisition's own `Expr`. `host_acq_fn` asks the
+// same question of the lowered `Stmt`; the activation branch holds the
+// acquisition as an `Expr` before it is lowered, so the test is spelled here.
+fn proved_host_acq(e: Expr) -> Bool {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        Var(v) => host_acquire_release(v, fl.name) != "",
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+// issue #1859: the inverse provenance of one ACTIVATION-scope effect, the twin
+// of `method_inverse` for the component body. `_check_site_release` proves two
+// families at this scope — a host acquisition's release and an `extern
+// acquire`'s declared inverse — and those carry no key. Every OTHER bracket is
+// recorded as what it is: `declared` when an extern's declaration names its
+// inverse, else `asserted`. The teardown report lists them under
+// `trustTheAuthor`, beside the verdict rather than inside it, so a bracket
+// nothing proved is NAMED instead of hiding behind a bare `noResidue: true`.
+// A host WRITE at this scope is judged, not merely recorded: `write_inverse_msg`
+// refuses an `undo` that is not its table inverse, as it does in a method.
+// `acqJs`/`undJs` are the LOWERED nodes and the hole test reads them, exactly
+// as the reference reads `acquire["kind"] == "hole"` off its dict: an unfilled
+// hole is an obligation judged when it is filled, not a bracket carrying no
+// inverse.
+fn site_effect_inverse(acq: Expr, acqJs: Str, und: Expr, undJs: Str,
+                       hostSc: List[Str], cx: CCtx) -> Str {
+  if (starts_with(acqJs, "{\"kind\": \"hole\"")
+      || starts_with(undJs, "{\"kind\": \"hole\"")) { return "" }
+  if (proved_host_acq(acq)) { return "" }
+  return method_inverse(acq, und, hostSc, cx)
+}
+
 fn is_witnessed_acq(e: Expr, cx: CCtx) -> Bool {
   return match e {
     Call(c) => match c.target { Var(nm) => contains(cx.wit, nm), _ => false, },
@@ -21928,7 +21968,9 @@ fn cir_setup_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
 // The whole block: every statement but the LAST is setup, and the last is the
 // acquisition expression itself. `wit` records whether that acquisition names a
 // witnessed extern, which is what decides whether the step may carry no `undo`.
-type BlkR = { ok: Bool, setup: Str, acq: Str, wit: Bool }
+// `acqE` carries the acquisition EXPRESSION alongside its lowered text so the
+// caller can stamp `inverse` provenance on the step (issue #1859).
+type BlkR = { ok: Bool, setup: Str, acq: Str, acqE: Expr, wit: Bool }
 
 fn cir_effect_block(ts: List[Token], lo: Int, hi: Int, cx: CCtx,
                     sc: List[Bind], hostSc: List[Str]) -> BlkR {
@@ -21938,14 +21980,14 @@ fn cir_effect_block(ts: List[Token], lo: Int, hi: Int, cx: CCtx,
   var mu: List[Str] = []
   while (j < hi && !atk(ts, j, "}")) {
     let st = cir_setup_stmt(ts, j, cx, scope, hostSc, mu)
-    if (!st.ok) { return { ok: false, setup: "", acq: "", wit: false } }
+    if (!st.ok) { return { ok: false, setup: "", acq: "", acqE: Bad(""), wit: false } }
     if (st.i >= hi || atk(ts, st.i, "}")) {
       // the tail of an effect block is the acquisition, so it must be a bare
       // expression — a `let`/`assign`/`if`/`assert` tail acquires nothing
-      if (!st.isExpr) { return { ok: false, setup: "", acq: "", wit: false } }
+      if (!st.isExpr) { return { ok: false, setup: "", acq: "", acqE: Bad(""), wit: false } }
       let ae = cir_expr(st.e, scope, hostSc, cx)
-      if (!ae.ok) { return { ok: false, setup: "", acq: "", wit: false } }
-      return { ok: true, setup: setup, acq: ae.js,
+      if (!ae.ok) { return { ok: false, setup: "", acq: "", acqE: Bad(""), wit: false } }
+      return { ok: true, setup: setup, acq: ae.js, acqE: st.e,
                wit: is_witnessed_acq(st.e, cx) }
     }
     setup = setup == "" ? st.js : setup.concat(", ").concat(st.js)
@@ -21953,7 +21995,7 @@ fn cir_effect_block(ts: List[Token], lo: Int, hi: Int, cx: CCtx,
     mu = st.muts
     j = st.i
   }
-  return { ok: false, setup: "", acq: "", wit: false }
+  return { ok: false, setup: "", acq: "", acqE: Bad(""), wit: false }
 }
 
 // The additive `"async": true` flag on an activation step whose SURFACE spelled
@@ -21964,6 +22006,17 @@ fn cir_effect_block(ts: List[Token], lo: Int, hi: Int, cx: CCtx,
 // step writer has to thread.
 fn step_async(js: Str) -> Str {
   return js.slice(0, js.length() - 1).concat(", \"async\": true}")
+}
+
+// The additive `"inverse"` provenance key (issue #1859), spliced onto an
+// already-closed step object exactly as `step_async` splices `"async"`. An
+// empty verdict writes NO key: the reference appends one only when the site has
+// something to record, so a bracket whose inverse it proved (a host
+// acquisition's release, a `subscribe`'s disposer) stays byte-identical.
+fn with_inverse(js: Str, inv: Str) -> Str {
+  if (inv == "") { return js }
+  return js.slice(0, js.length() - 1)
+    .concat(", \"inverse\": ").concat(jstr(inv)).concat("}")
 }
 
 // A component activation body -> its `body` step list. `config` is a header
@@ -22012,8 +22065,12 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (is_bad(und.e)) { return mk_irres(false, "") }
     let ue = cir_expr(und.e, sc2, hostSc, cx_at(cx, tkc(ts, sp.i + 1).line))
     if (!ue.ok) { return mk_irres(false, "") }
-    let step = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
-      .concat(", \"acquire\": ").concat(sp.js).concat(", \"undo\": ").concat(ue.js).concat("}")
+    // issue #1859: a spawn's `undo` is the author's own disposer call — no
+    // table proves it reverts — so the step records `asserted` rather than
+    // tearing down behind a bare `noResidue: true`.
+    let step = with_inverse("{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
+      .concat(", \"acquire\": ").concat(sp.js).concat(", \"undo\": ").concat(ue.js).concat("}"),
+      "asserted")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, und.i, end, cx, provs, sc2, hostSc, nacc)
   }
@@ -22038,12 +22095,17 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       let bsc = sc.push({ name: name, ty: "" })
       var bstep = "{\"step\": \"let-effect\", \"acquire\": ".concat(blk.acq)
       var bnext = bend
+      // issue #1859: an absent `undo` records NO key, exactly as the reference
+      // reads a step with no `undo` dict; a witnessed acquisition registers its
+      // own inverse, so there is nothing for the report to name.
+      var binv = ""
       if (atw(ts, bend, "undo")) {
         let bund = expr_at(ts, bend + 1)
         if (is_bad(bund.e)) { return mk_irres(false, "") }
         let bue = cir_expr(bund.e, bsc, hostSc, cx)
         if (!bue.ok) { return mk_irres(false, "") }
         bstep = bstep.concat(", \"undo\": ").concat(bue.js)
+        binv = site_effect_inverse(blk.acqE, blk.acq, bund.e, bue.js, hostSc, cx)
         bnext = bund.i
       } else {
         if (!blk.wit) { return mk_irres(false, "") }
@@ -22052,7 +22114,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       if (blk.setup != "") {
         bstep = bstep.concat(", \"setup\": [").concat(blk.setup).concat("]")
       }
-      bstep = bstep.concat("}")
+      bstep = with_inverse(bstep.concat("}"), binv)
       let bacc = acc == "" ? bstep : acc.concat(", ").concat(bstep)
       return cir_body(ts, bnext, end, cx, provs, bsc, hostSc, bacc)
     }
@@ -22073,7 +22135,9 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (!ue.ok) { return mk_irres(false, "") }
     let step0 = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
       .concat(", \"acquire\": ").concat(ae.js).concat(", \"undo\": ").concat(ue.js).concat("}")
-    let step = isAsync ? step_async(step0) : step0
+    let step1 = with_inverse(step0, site_effect_inverse(acq.e, ae.js, und.e, ue.js,
+      hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line)))
+    let step = isAsync ? step_async(step1) : step1
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, und.i, end, cx, provs, sc2, hostSc2, nacc)
   }
@@ -22098,7 +22162,9 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (!ue.ok) { return mk_irres(false, "") }
     let step0 = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
       .concat(", \"undo\": ").concat(ue.js).concat("}")
-    let step = isAsync ? step_async(step0) : step0
+    let step1 = with_inverse(step0, site_effect_inverse(acq.e, ae.js, und.e, ue.js,
+      hostSc, cx_at(cx, tkc(ts, acq.i + 1).line)))
+    let step = isAsync ? step_async(step1) : step1
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, und.i, end, cx, provs, sc, hostSc, nacc)
   }
@@ -28980,7 +29046,7 @@ test "lower_to_ir lowers a config read in a provide method (component spine)" {
 
 test "lower_to_ir lowers a simple effect/provide body" {
   assert lower_to_ir("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")
-    == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"
+    == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"source\": \"<string>\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}, \"inverse\": \"asserted\"}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"
 }
 
 test "lower_to_ir lowers a timer step with interval_ms (component spine)" {

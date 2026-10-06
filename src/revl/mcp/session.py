@@ -42,12 +42,16 @@ from .approval import _args_digest as _cache_args_digest
 
 
 def _trust_the_author(ir) -> list:
-    """The provide-method effects whose `undo` revl cannot prove reverses
-    them (issue #1945): every step the compiler stamped `inverse: asserted`
-    (a service, extern or SQL reversal) or `inverse: declared` (an extern's
-    declared inverse, whose host body is the declaration's word). They are
-    listed beside the verdict, never counted against it: `noResidue` judges
-    what the runtime can observe."""
+    """The effects whose `undo` revl cannot prove reverses them (issue #1945):
+    every step the compiler stamped `inverse: asserted` (a service, extern or
+    SQL reversal) or `inverse: declared` (an extern's declared inverse, whose
+    host body is the declaration's word). They are listed beside the verdict,
+    never counted against it: `noResidue` judges what the runtime can observe.
+
+    Both bracket positions are walked (issue #1859): a provide method's body,
+    and the component's ACTIVATION body, whose own effect brackets carry the
+    same key. An activation-scope entry has no method, so its `method` is the
+    `<activation>` placeholder rather than a `service.method` name."""
     out: list = []
 
     def walk(steps, component, method):
@@ -61,6 +65,7 @@ def _trust_the_author(ir) -> list:
                 walk(step.get(arm), component, method)
 
     for comp in (ir or {}).get("components") or []:
+        walk(comp.get("body"), comp.get("name"), "<activation>")
         for step in comp.get("body") or []:
             if step.get("step") != "provide":
                 continue
