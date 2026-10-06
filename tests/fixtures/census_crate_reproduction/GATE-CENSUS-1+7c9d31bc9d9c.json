@@ -1,5 +1,5 @@
 {
- "checker_version": "GATE-CENSUS-1+48641216be07",
+ "checker_version": "GATE-CENSUS-1+7c9d31bc9d9c",
  "engine": "crate",
  "false_admissions": [],
  "note": "A recorded `tools/gate_reference_census.py --engine crate` run, read by tools/census_artifact.py. It is recorded rather than re-run because it needs cargo and takes minutes. The checker version it was taken at is recorded with it, and a reproduction taken at a different version is reported as stale and lifts no claim.",
@@ -942,7 +942,6 @@
   "tests/fixtures/emit_py_corpus/type_aliases.rvl",
   "tests/fixtures/emit_py_corpus/type_aliases_control.rvl",
   "tests/fixtures/emit_py_corpus/types.rvl",
-  "tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl",
   "tests/fixtures/emit_py_corpus/ui_unit.rvl",
   "tests/fixtures/emit_py_corpus/value_accessors.rvl",
   "tests/fixtures/emit_py_corpus/variant_multiline.rvl",
