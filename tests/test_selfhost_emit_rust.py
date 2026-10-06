@@ -328,14 +328,14 @@ CORPUS = [
     "keyword_keys.rvl",      # issue #1927: a requirement key that is a Rust
                              #   keyword (`box`) takes the mangled spelling as
                              #   an identifier, the surface key as a string
-    "../emit_py_corpus/ui_transaction_unit.rvl",  # issue #1972: the
-                             #   computer-use UI transaction unit (item 522
-                             #   slice 3, issue #1369) — the `RevlUiScope`/
-                             #   `catch_unwind` body, `revl_ui_cross` per
-                             #   crossing, the `compensate` registration, and a
-                             #   method that reaches a crossing through a module
-                             #   `fn` and must get NO scope (the IR marks it
-                             #   `"unit": "ui"`; the reference does not)
+    # issue #1972 deliberately does NOT join
+    # `../emit_py_corpus/ui_transaction_unit.rvl` here. That document's fourth
+    # case is a computer-use extern that DECLARES `compensate`, which the
+    # reference registers at every crossing; `selfhost/emit_rust.rvl` refuses it
+    # with `<<DEFER-declared-compensate>>` (issue #1592, recorded blind in
+    # `selfhost_blind_spots.json`). Adding the document would make this oracle
+    # red, so the UI transaction unit stays unported on this tier and
+    # `class=emission` stays a recorded blind spot.
 ]
 
 

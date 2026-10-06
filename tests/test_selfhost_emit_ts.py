@@ -302,7 +302,10 @@ CORPUS = [
     # /`uiTransactionAsync` scope, the `uiCrossing` wrapper on each
     # computer-use extern, the `compensate` thunk, and a method that reaches a
     # crossing through a module `fn` and must get NO scope (the IR marks it
-    # `"unit": "ui"`; the reference derivation does not).
+    # `"unit": "ui"`; the reference derivation does not). NOT joined by the
+    # rust and java oracles: each records the construct this document needs as
+    # an open gap (`selfhost_blind_spots.json`), and those two oracle modules
+    # say why in their own `CORPUS` comment.
     "../emit_py_corpus/ui_transaction_unit.rvl",
 ]
 
