@@ -277,7 +277,9 @@ first `approvalRequired`:
   `{key, method, component, class, raisedBy}`. `class` is `a`, `b`, `c`, or
   null for an operation that touches no boundary. `raisedBy` lists the
   crossings at that class, each with a `text` such as
-  ``"`emit stage.stage` in Agent"``.
+  ``"`emit stage.stage` in Agent"``. A `witnessed` extern reached where its
+  inverse is not registered carries `registered: false`, and its `text` says so
+  (issue #1707).
 - `effectClassChanges` (on `revl_admit`, `revl_plan`, `revl_ship`, `revl_swap`
   and `revl_edit`): every operation whose class differs from the running
   composition, `{key, method, component, before, after}`. An operation added

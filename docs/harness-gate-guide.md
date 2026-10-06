@@ -112,9 +112,9 @@ at runtime or in the harness can move a call between classes.
 
 | class | derivation | policy posture | what the harness sees |
 |---|---|---|---|
-| (a) revertible | every crossing is a `witnessed` extern with its registered inverse (243), or a relay to an operation whose own reach is (a) | auto-approve silently | the call returns; no ticket, no prompt |
+| (a) revertible | every crossing is a `witnessed` extern whose inverse is REGISTERED at the call site (243), or a relay to an operation whose own reach is (a) | auto-approve silently | the call returns; no ticket, no prompt |
 | (b) deferrable | every non-(a) crossing is a `deferred` emission (245), or a relay to an operation whose own reach is (b) | auto-approve; enumerate at commit | the call returns; the crossing appears in the commit manifest's `summary` |
-| (c) immediate | any emission crossing that is neither (a `compensate` does not change this, 247) | prompt per call | `revl_call` returns `approvalRequired` with a ticket; nothing fired |
+| (c) immediate | any emission crossing that is neither (a `compensate` does not change this, 247), and any `witnessed` extern reached where its inverse is not registered | prompt per call | `revl_call` returns `approvalRequired` with a ticket; nothing fired |
 
 A call's class is the worst class over every crossing its checked reach
 includes: one prompt covers the whole call or none of it.
@@ -125,14 +125,39 @@ worst over what it relays (D1, issue #1707). A service emission
 operation's body in the same session, and the fold already reads that body's
 crossings through the reach closure. So an `emission fn` that forwards to a
 class-(a) `witnessed` op is class (a) too, 0-prompt, and so is a relay of a
-relay. Factoring witnessed calls behind a helper keeps the auto-approve
-guarantee, and the helper's inverse is the inner inverses replayed in reverse
+relay. Factoring witnessed calls behind a relay keeps the auto-approve
+guarantee, and the relay's inverse is the inner inverses replayed in reverse
 order of firing: each witnessed effect registers its own inverse as it fires,
 so `revl_abort` undoes a relay exactly as it undoes the direct calls.
+
+The guarantee is REGISTRATION, not the declaration (issue #1707). A `witnessed`
+extern is class (a) only where its inverse is actually registered, and
+registration is a property of the CALL SITE: the call must be the acquisition
+of an `effect`/`let-effect` step. Reached any other way the call fires the host
+mutation and registers nothing, so nothing can undo it and it is class (c):
+
+```revl
+provide ops {
+  fn stash(p) { effect stash_path(p) }      // (a): the inverse is registered
+  fn stash(p) { let r = stash_path(p) }     // (c): the same mutation, no inverse
+  fn stash(p) { return stash_path(p) }      // (c): likewise
+}
+```
+
+Both class folds — the auto-approve `ClassMap` and the erase report — read the
+one predicate `Composition.witnessed_registered`, which is exactly the test the
+emitter registers on, so a class can never be more optimistic than the runtime's
+behaviour and the two folds cannot disagree. The predicate can only ever
+UNDER-claim registration: a witnessed call nested in an argument, reached
+indirectly, or handed on as a value is not counted, and the scope keeps its (c).
+A relay over any crossing without a registered inverse is therefore still (c)
+and still prompts.
 
 A relay stays class (c) when:
 
 - it also reaches any non-witnessed emission (the worst rule is unchanged);
+- it relays a `witnessed` op whose inverse is not registered (the `let`/`return`
+  spellings above) — the relay takes its target's (c);
 - the forwarding emission is `compensate`d (a compensation offsets an
   irreversible crossing, it does not make one revertible, 247);
 - its target is not provided inside the composition (a host-provided or
