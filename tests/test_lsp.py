@@ -76,6 +76,24 @@ def test_hover_on_a_diagnostic_token_surfaces_the_guarantee():
     assert "Fix:" in value
 
 
+def test_hover_survives_a_covered_code_with_no_guarantee(monkeypatch):
+    """issue #2028: `explain` now answers codes that enforce no guarantee, so
+    the hover headline must not index `guarantee` directly — the reference
+    raised `KeyError: 'guarantee'` here and the Rust reference-agreement suite
+    caught it, the binary answering `result: null` where the reference 500'd."""
+    from revl.lsp import analysis
+
+    monkeypatch.setattr(analysis, "explain", lambda code: {
+        "ok": True, "code": code, "category": "lifecycle",
+        "meaning": "the session was halted", "fix": "reload the composition",
+    })
+    hover = compute_hover(REJECTED, Position(1, 13))
+    value = hover["contents"]["value"]
+    assert "G1" in value
+    assert "the session was halted" in value
+    assert "Fix: reload the composition" in value
+
+
 def test_hover_on_a_valid_symbol_beside_the_error_shows_its_type():
     # `a` sits on the same line as the rejection but is a valid parameter; its
     # hover is its own type, not the neighbouring diagnostic's guarantee

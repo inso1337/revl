@@ -143,6 +143,302 @@ FIXES = {
                     "declares it in the same `revl compile` invocation",
 }
 
+# The one `guarantee` value that is not an obligation: the fallback refusal
+# matched no code and no message pattern, and saying so is the honest answer.
+UNCLASSIFIED = "unclassified"
+
+# Every OTHER code the compiler, the gate, the session and the MCP faces mint —
+# the codes outside the guarantee catalogue above, which is what `revl explain`
+# used to answer for alone (issue #2028). `GUARANTEES`/`FIXES` are deliberately
+# untouched by this table: a guarantee is a named obligation of the DESIGN
+# catalogue, and a code that enforces none must not claim one.
+#
+# This table plus `GUARANTEES` is the roster `revl explain` answers for, and it
+# is closed over the emitters *except* for the reserved codes (see `ALL_CODES`
+# below), which the evolution curriculum keeps a task per code for. Neither the
+# closure nor the reservation is a hand-list: `revl.emitted_codes` derives both
+# from the reference's own raise sites, and
+# `tests/test_explain_coverage_2028.py` asserts the two sets close over each
+# other, so a new `code=` site in the compiler fails that file until it has an
+# entry here.
+#
+# `guarantee` is the obligation the refusal enforces, in one line, or `None`
+# where the code records no guarantee at all — a parse error, or a verdict
+# about the *run* rather than about the source. `fix` is the rewrite that
+# satisfies it, or `None` where no single rewrite exists.
+OTHER_CODES = {
+    # ---- the runtime's verdicts
+    "R1": {
+        "category": "runtime",
+        "guarantee": "LIFO recovery: a teardown runs the accumulated undos in "
+                     "reverse order of their effects (docs/backend-ir.md)",
+        "meaning": "the fault sweep found residue — a host resource acquired "
+                   "during the activation and never released by its inverses, "
+                   "or an inverse that raised. The runtime's own counters "
+                   "returned to baseline, which is exactly why the trace is read",
+        "fix": "give the acquisition an `undo` that releases it (G4), so the "
+               "derived LIFO teardown reaches the host resource",
+    },
+    "R5": {
+        "category": "runtime",
+        "guarantee": "the conductor verifies the far host's signed receipts "
+                     "against a key it holds (docs/design/118-revl-deploy.md)",
+        "meaning": "a cross-machine deploy names no receipt-signing key, so the "
+                   "conductor cannot verify the far host's signed admission and "
+                   "COMMIT receipts",
+        "fix": "set `[processes.<p>.deploy].host_key` to a copy of the far "
+               "host's receipt-signing key",
+    },
+
+    # ---- the gate's verdicts about a run
+    "COMPILER_FAULT": {
+        "category": "gate",
+        "guarantee": "the compiler decides every source it is given, or the run "
+                     "is refused",
+        "meaning": "the compiler itself raised — a revl bug, not a fault in the "
+                   "author's source — so the gate refuses rather than reporting "
+                   "a verdict it never reached",
+        "fix": "not the author's to fix: re-run, and if it recurs the compiler "
+               "fault is the bug (the message names the exception)",
+    },
+    "UNKNOWN_TIER": {
+        "category": "gate",
+        "guarantee": "a tier is one of the reference backends",
+        "meaning": "`--tier` names a backend this build does not carry",
+        "fix": "name one of the tiers the message lists (`py`, `ts`, `rust`, "
+               "`java`, `wasm`, `go`)",
+    },
+    "TIER_REFUSED": {
+        "category": "gate",
+        "guarantee": "a tier lowers the document or says by name that it cannot",
+        "meaning": "the backend said, by name, that it cannot lower this "
+                   "document (issue #1406) — distinct from a compile refusal",
+        "fix": "read the message: the tier names the construct it cannot lower; "
+               "target a tier that carries it, or rewrite the construct",
+    },
+    "HALTED": {
+        "category": "gate",
+        "guarantee": "a halted instance dispatches nothing",
+        "meaning": "the session was halted by an operator's E-Stop (item 443) "
+                   "and no crossing was dispatched",
+        "fix": "the instance is dead and there is no resume: reconcile with "
+               "`revl recover --wal <file>`, or `unload` and start a fresh "
+               "session",
+    },
+    "FORBIDDEN_GRANT": {
+        "category": "gate",
+        "guarantee": "a candidate may not grant itself a gate or session service",
+        "meaning": "the granted set names a gate/session/decider service, "
+                   "refused before any compile and independent of the operator",
+        "fix": "drop the decider service from the granted set — authority over "
+               "the gate is the operator's, never the candidate's",
+    },
+    "STATE_UNDISCLOSED": {
+        "category": "gate",
+        "guarantee": "operator state crosses to a successor only over a "
+                     "declared §5 hand-off",
+        "meaning": "the successor re-declares a template with live instance "
+                   "state, or its `handoff` accept type is not §5-compatible "
+                   "with the running provider's export — the item-53 gate the "
+                   "successor's standalone compile never ran",
+        "fix": "quiesce the live instances (or use a trusted operator swap), or "
+               "make the successor's `handoff` accept the exported type",
+    },
+    "SWAP_REVERTED": {
+        "category": "gate",
+        "guarantee": "a reverted swap leaves generation N serving",
+        "meaning": "the post-activation health gate (or a migration reject) "
+                   "rolled the swap back, so nothing of generation N+1 is live",
+        "fix": "read the message for the gate's own diagnostic, fix the "
+               "candidate and propose again — generation N is intact",
+    },
+
+    # ---- the session's verdicts about a caller
+    "APPROVAL_REFUSED": {
+        "category": "session",
+        "guarantee": "an operator's refusal is final for that ticket",
+        "meaning": "an operator revoked the pending approval ticket for this "
+                   "call, and nothing fired",
+        "fix": "asking again opens a NEW question — change the request, or get "
+               "the operator to approve it",
+    },
+    "STALE_HANDLE": {
+        "category": "session",
+        "guarantee": "a handle names the turn it was minted for",
+        "meaning": "the handle names a turn a swap has since disposed; "
+                   "dispatching it would hand the successor a call addressed to "
+                   "the old turn (item 334)",
+        "fix": "admit the turn again against the live generation to get a "
+               "handle onto it",
+    },
+    "MCP-IDENTITY": {
+        "category": "identity",
+        "guarantee": "every answer comes from the revision the client pinned",
+        "meaning": "the server's own tree is not the revision the client "
+                   "pinned, so its answers are answers about a different "
+                   "compiler",
+        "fix": "point the client at the pinned checkout, or re-pin to the "
+               "revision the message names",
+    },
+    "REVL": {
+        "category": "unclassified",
+        "guarantee": UNCLASSIFIED,
+        "meaning": "the total fallback: a refusal no code and no message "
+                   "pattern matched, so the message and hint are the whole "
+                   "answer (docs/evolve-loop.md)",
+        "fix": None,
+    },
+    "REVL-INTERNAL": {
+        "category": "lsp",
+        "guarantee": "a compiler crash is reported as a diagnostic, not as a "
+                     "dead editor",
+        "meaning": "the language server's own internal error, standing in for a "
+                   "crash so the document still gets a diagnostic (anchored at "
+                   "the start, because a crash has no line)",
+        "fix": "a language-server bug, not the source's — the message names the "
+               "exception",
+    },
+    "EFFECT_CLASS_ROSE": {
+        "category": "effect-class",
+        "guarantee": "an admitted change does not silently widen what an "
+                     "operation can reach",
+        "meaning": "the successor raised `key.method`'s effect class: more "
+                   "crossings, and a wider posture than generation N",
+        "fix": "read `crossings`: either the widening is intended (accept it as "
+               "the recorded change) or the candidate reaches further than it "
+               "should",
+    },
+    # ---- the HTTP face's routed error bodies
+    "method": {
+        "category": "http",
+        "guarantee": "a route is called with the method it declares",
+        "meaning": "the request used a method this face does not allow for the "
+                   "path (`GET /` is the manifest; an operation is `POST`)",
+        "fix": "send the method the message names",
+    },
+    "route": {
+        "category": "http",
+        "guarantee": "a face serves only the operations on its public surface",
+        "meaning": "no operation is published at that path",
+        "fix": "`GET /` lists the operations this face serves",
+    },
+    "request": {
+        "category": "http",
+        "guarantee": "every argument a route binds is decoded and schema-checked "
+                     "before the call",
+        "meaning": "a path/query/body argument failed to decode or failed its "
+                   "declared schema, so nothing ran",
+        "fix": "read the message — it names the parameter and the schema it "
+               "missed",
+    },
+    "session": {
+        "category": "http",
+        "guarantee": "a session refusal is reported as data, not as a transport "
+                     "error",
+        "meaning": "the call reached the session and the session refused; the "
+                   "message is the session's own diagnostic",
+        "fix": "read the message — it is the refusal `revl_check`/`revl_call` "
+               "would give, with its code beside it",
+    },
+    "authority": {
+        "category": "http",
+        "guarantee": "a path withheld by policy answers 403, not 404",
+        "meaning": "the path exists but the face's exposure rules withhold it — "
+                   "a policy decision, not a missing route",
+        "fix": "read the message for the rule that withholds it; `GET /` lists "
+               "what this face does publish",
+    },
+    "forbidden-origin": {
+        "category": "http",
+        "guarantee": "a listener answers only requests whose `Host`/`Origin` it "
+                     "recognises (issue #1463)",
+        "meaning": "the shared `http_guard` refused the request before its body "
+                   "was read — a DNS-rebinding page and a browser page on "
+                   "another origin both look like this",
+        "fix": "call the listener by the name and origin its exposure declares",
+    },
+    "internal_error": {
+        "category": "http",
+        "guarantee": "a callee's exception is a result, not a crash",
+        "meaning": "the operation raised, so the face reports a server error "
+                   "and the listener stays up",
+        "fix": "the exception type and message are the operation's own — fix "
+               "the operation, not the transport",
+    },
+    "approval_refused": {
+        "category": "http",
+        "guarantee": "an operator's refusal runs nothing",
+        "meaning": "the call was refused at the approval gate, and nothing ran",
+        "fix": "sending the identical request again asks again",
+    },
+    "pending_approval": {
+        "category": "http",
+        "guarantee": "a class-(c) crossing does not fire without a human yes",
+        "meaning": "the request waits on an operator's approval, and nothing "
+                   "ran",
+        "fix": "send the identical request again once the operator has answered "
+               "— the ticket hash identifies the question",
+    },
+    "halted": {
+        "category": "http",
+        "guarantee": "a halted instance dispatches nothing",
+        "meaning": "the service was halted by its operator (E-Stop) and the "
+                   "request was not run",
+        "fix": "reconcile with `revl recover --wal <file>`; the instance does "
+               "not resume",
+    },
+    "ungated_emission": {
+        "category": "http",
+        "guarantee": "an irreversible crossing fires only where an approval "
+                     "policy can hold it",
+        "meaning": "the operation reaches an irreversible emission with no "
+                   "checked inverse, and this server refuses such a crossing "
+                   "when no approval policy can hold it",
+        "fix": "bind an approval policy to the session (`revl approve`), or "
+               "give the emission a `compensate`",
+    },
+}
+
+# The whole roster, for a miss: the catalogue plus the emitter codes above.
+#
+# Deliberately NOT every code the compiler can stamp. The evolution curriculum
+# (roadmap item 533, docs/design/533-evolution-curriculum.md) keeps one task per
+# *reserved* code — a refusal an agent receives and cannot look up — and the
+# easy rung of that curriculum IS the proof that the code is unanswerable. A row
+# here would not close that gap, it would delete the task, so the reserved set
+# is absent from both tables above by construction.
+#
+# The reserved set is derived, not listed here: `revl.emitted_codes` scans the
+# reference's own raise sites (`reserved_codes()` = the codes it *refuses* with,
+# minus `GUARANTEES`), which is the same rule the curriculum generator runs, and
+# `tests/test_explain_coverage_2028.py` asserts the two derivations agree and
+# that this roster is exactly the emitters' complement. So a `code="X"` raise
+# site added tomorrow fails that file until `X` has an entry or the curriculum
+# has a task — the roster and the curriculum cannot drift into disagreeing about
+# what `revl explain` answers for.
+#
+# That scan is not run here: parsing this package's 200-odd modules costs ~2s,
+# and `import revl.diagnostics` + `explain()` is 0.10s without it (measured), so
+# paying it at import would tax every `revl` command 20-fold to compute a set
+# the test already proves.
+ALL_CODES = tuple(sorted(set(GUARANTEES) | set(OTHER_CODES)))
+
+
+def _catalogue_code(name: str) -> str | None:
+    """The catalogue key `name` names, matched exactly and then folded.
+
+    The fold is what makes `revl explain g4` work. The exact match is what
+    keeps `HALTED` (the gate's verdict) and `halted` (the HTTP face's body)
+    apart: they are different codes that differ only in case."""
+    if name in GUARANTEES or name in OTHER_CODES:
+        return name
+    folded = name.upper()
+    for known in ALL_CODES:
+        if known.upper() == folded:
+            return known
+    return None
+
+
 # One code, several failure modes (issue #2029). A code is a *guarantee*, and a
 # guarantee is often refused for more than one reason, each needing a different
 # rewrite: `G1` (declared access) is raised when a `Delegate[X]` names no
@@ -190,16 +486,27 @@ GUARANTEES_BY_CATEGORY: dict[tuple[str, str], str] = {
 
 def explain(code: str) -> dict:
     """What a diagnostic code means and how to fix it — the `revl explain`
-    payload. Unknown codes answer with the roster rather than nothing, so a
-    typo is one command from the right code."""
-    normalized = (code or "").strip().upper()
-    if normalized not in GUARANTEES:
-        return {"ok": False, "code": normalized,
-                "message": f"no diagnostic code `{normalized}`",
-                "known": sorted(GUARANTEES)}
-    record = {"ok": True, "code": normalized, "guarantee": GUARANTEES[normalized]}
-    if normalized in FIXES:
-        record["fix"] = FIXES[normalized]
+    payload. Every code the compiler can emit is covered (issue #2028): the
+    guarantee catalogue plus `OTHER_CODES`. Unknown codes answer with the
+    roster rather than nothing, so a typo is one command from the right code."""
+    normalized = (code or "").strip()
+    known = _catalogue_code(normalized)
+    if known is None:
+        return {"ok": False, "code": normalized.upper(),
+                "message": f"no diagnostic code `{normalized.upper()}`",
+                "known": list(ALL_CODES)}
+    if known in GUARANTEES:
+        record = {"ok": True, "code": known, "guarantee": GUARANTEES[known]}
+        if known in FIXES:
+            record["fix"] = FIXES[known]
+        return record
+    entry = OTHER_CODES[known]
+    record = {"ok": True, "code": known, "category": entry["category"],
+              "meaning": entry["meaning"]}
+    if entry["guarantee"]:
+        record["guarantee"] = entry["guarantee"]
+    if entry["fix"]:
+        record["fix"] = entry["fix"]
     return record
 
 
@@ -251,9 +558,12 @@ def classify(error: RevlError) -> dict:
                 if pattern.search(error.message):
                     code, category = mapped_code, mapped_category
                     break
+    # the record always names a code: an unrecognised refusal is the `REVL`
+    # fallback, and `REVL` is an emitter code with its own entry below
+    effective = code or "REVL"
     record = {
         "severity": "error",
-        "code": code or "REVL",
+        "code": effective,
         "category": category or "check",
         "file": error.filename,
         "line": error.line,
@@ -268,8 +578,20 @@ def classify(error: RevlError) -> dict:
         record["actual"] = actual
     if code in GUARANTEES:
         # the code's headline guarantee, unless this failure mode has its own
+        # (issue #2029)
         record["guarantee"] = GUARANTEES_BY_CATEGORY.get(
             (code, record["category"]), GUARANTEES[code])
+    else:
+        # a code outside the guarantee catalogue declares its own obligation,
+        # or `None` where it enforces none (a parse error, or a verdict about
+        # the run rather than about the source). A code with no row at all — a
+        # reserved code, which `explain` refuses on purpose — adds no field
+        # rather than inventing one. The fallback `REVL` carries
+        # `unclassified` in its own row, so the honest degrade is unchanged
+        # (issue #2028).
+        declared = OTHER_CODES.get(effective, {}).get("guarantee")
+        if declared is not None:
+            record["guarantee"] = declared
     if getattr(error, "fix", None):
         # a rewrite specific to this rejection (a corrected line) outranks the
         # per-code one: the code's fix is written for its commonest shape
@@ -282,6 +604,10 @@ def classify(error: RevlError) -> dict:
         # the exact rewrite, beside the guarantee, so an agent gets the fix
         # without a second `explain` call or parsing the prose hint
         record["fix"] = FIXES[code]
+    elif OTHER_CODES.get(effective, {}).get("fix"):
+        # the same remedy `revl explain <code>` gives, for a code the
+        # guarantee/fix table never carried (issue #2028)
+        record["fix"] = OTHER_CODES[effective]["fix"]
     # the derivation behind a search-based rejection (why.py): the G4
     # emission chain, the G3 cycle path, the two G2 providers
     why = getattr(error, "why", None)
