@@ -70,6 +70,14 @@
 
 ["function", "issue-721-method-block-renders-pass-for-an", "method_block", 1, 1]
 
+["reason", "item-522-slice-3-issue-1369-the-ui", "Item 522 slice 3 (issue #1369), the UI transaction unit, ported into selfhost/emit_py.rvl by issue #1972, together with tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl. What the corpus leaves unexecuted here is structural rather than a missing document: `ui_verb_known` is one `return (... or ...)` statement and a short-circuit cannot execute part of a single statement; `is_computer_use_token`'s `len(segs) < 2` arm needs a capability token with no dot, and every capability in the corpus and in revl.ui_family.REVERSIBILITY is dotted (screen.observe, ui.find, ui.text, ui.click, ui.download); `reaches_computer_use`'s `{kind: 'call', callee: {kind: 'var'}}` arm is entered only from a body-level call node, and the corpus's one such node lives inside the module `fn peek_pane`, which `method_lines` reads at emit time and never at run time. The input family is tests/test_selfhost_emit_py.py and tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS."]
+
+["function", "item-522-slice-3-issue-1369-the-ui", "is_computer_use_token", 1, 1]
+
+["function", "item-522-slice-3-issue-1369-the-ui", "reaches_computer_use", 1, 1]
+
+["function", "item-522-slice-3-issue-1369-the-ui", "ui_verb_known", 1, 1]
+
 ["reason", "item-872-additivity-arm-of-the-transactional-scope", "item 872 additivity arm of the `.transactional(scope=...)` kwarg: every witnessed extern in the corpus declares a capability (`emit_py_corpus/witnessed.rvl` declares `witnessed[fs]`), so the branch that emits NO `scope=` for a cap-less witnessed extern never runs under the oracle. That branch is the byte-identical additivity guarantee a pre-872 witnessed extern depends on, and reaching it from a corpus document means adding a `tests/fixtures` input, which is a gate-crate census input this item must not move."]
 
 ["function", "item-872-additivity-arm-of-the-transactional-scope", "transactional_scope_kwargs", 1, 1]

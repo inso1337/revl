@@ -1,0 +1,83 @@
+// Computer-use transactions (item 522 slice 3, issue #1369; issue #1972 carries
+// the construct into the self-host emitters). A provide method
+// that crosses a computer-use verb is the UI transaction unit, so the reference
+// emitters run its body inside a transaction scope and mark the crossing itself
+// with `declared_crossing`/`uiCrossing`/`revl_ui_cross`. Covered here:
+//
+//   * `act` — a unit method: three crossings, one of them (`type_amount`,
+//     `ui.text`) COMPENSATABLE with a declared inverse through `compensate`;
+//   * `watch` — an ASYNC unit method: the same unit on an `async` provide
+//     method, whose body is a single crossing in tail position;
+//   * `count` — a method that crosses nothing and carries no scope at all;
+//   * `peek` — a method that REACHES a computer-use extern through a module
+//     `fn`. `lower` marks it `"unit": "ui"` (it follows callees), but the
+//     reference derivation reads ONE body and does not follow callees, so the
+//     reference gives it NO scope. A port that reads the IR's `unit` key
+//     instead of recomputing the derivation wraps this method and diverges.
+//   * the ACTIVATION body — `emit read_pane("boot")` before `provide`. It is
+//     the one other place a computer-use plan can come from, and
+//     `ui_transaction.plans` reports it under `key == "<activation>"`, which
+//     the derivation SKIPS when it collects units: the activation frame
+//     settles itself, so a crossing there gets no `ui_transaction` wrapper.
+//     It is the only corpus case that reaches that skip.
+//
+// `type_amount` is the `compensate` case: `clear_amount` is the pure inverse
+// the crossing declares, and the reference passes it to the crossing marker as
+// a thunk (`lambda: clear_amount()` in python, a `call=` table on the wire).
+//
+// This document joins the PY and TS oracles only. RUST and JAVA do not join it:
+// each still records a construct this document needs as an open gap in
+// `tests/fixtures/selfhost_blind_spots.json` — rust refuses the declared
+// `compensate` on `type_amount` (`<<DEFER-declared-compensate>>`, issue #1592),
+// java refuses the whole component (`<<DEFER-component-nonsimple:Agent>>`,
+// because its component renderer admits only `return`/`effect`/`emit` method
+// steps and `act` opens with `let`, and because it does not port the
+// declared-`compensate` registration, issue #1511). See the `CORPUS` comment in
+// each of those two oracle modules.
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
+extern emission[screen.observe] fn read_pane(region: Str) -> Str
+  = @py { return "" } = @ts { return ""; } = @rs { String::new() } = @java { return ""; }
+extern emission[ui.find] fn locate(pane: Str, name: Str) -> UiTarget
+  = @py { return None } = @ts { return null; } = @rs { todo!() } = @java { return null; }
+extern emission[ui.click] fn actuate(target: UiTarget)
+  = @py { return None } = @ts { } = @rs { } = @java { }
+extern pure fn clear_amount()
+  = @py { return None } = @ts { } = @rs { } = @java { }
+extern emission[ui.text] fn type_amount(target: UiTarget, s: Str) compensate clear_amount()
+  = @py { return None } = @ts { } = @rs { } = @java { }
+
+fn peek_pane(region: Str) -> Str { return read_pane(region) }
+
+service Desk {
+  emission fn act(region: Str) -> Int
+  emission async fn watch(region: Str) -> Str
+  fn count(n: Int) -> Int
+  emission fn peek(region: Str) -> Str
+}
+
+component Agent provides desk: Desk {
+  emit read_pane("boot")
+  provide desk {
+    fn act(region) {
+      let pane = emit read_pane(region)
+      let ok = emit locate(pane, "Approve")
+      emit type_amount(ok, "42")
+      return 1
+    }
+    async fn watch(region) = emit read_pane(region)
+    fn count(n) = n + 1
+    fn peek(region) = emit peek_pane(region)
+  }
+}
