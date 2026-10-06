@@ -25,11 +25,17 @@ exactly what each candidate can import, so importability is controlled without a
 network, a wheel cache, or any machine-specific interpreter. `git` is stubbed
 for the same reason -- `git rev-parse --git-common-dir` otherwise resolves to
 this machine's primary checkout and the assertions become machine-dependent.
+
+The completeness pins at the bottom PARSE the real `step` lines (continuations
+joined, wrapper prefixes peeled off) and assert that the token a step would
+actually exec is one the gate resolved, so a bare interpreter cannot come back
+behind `env`/`exec`/`nohup`/`sh -c` or a line continuation (issue #2077).
 """
 
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import sys
 import venv
@@ -279,30 +285,192 @@ def test_the_chain_accepts_a_venv_without_coverage(layout):
 
 _STEP = re.compile(r'\s*step\s+"([^"]*)"\s*(.*)$')
 
+# A bare interpreter in executable position is defect 1 of #2074: the step
+# ignores the `$PYTHON` the gate resolved and picks up whatever `python3` the
+# committer's PATH happens to hold (on the box in the issue, a python without
+# pytest).
+_BARE_INTERPRETERS = ("python", "python3")
+# Tokens that run the command *after* them, so the interpreter is not `cmd[0]`.
+# `env` is peeled apart from these because it also takes `NAME=value` words.
+_WRAPPERS = ("command", "exec", "nohup", "time", "xargs")
+# A shell with `-c` takes the command as a single argument: `sh -c "python3 ..."`.
+_SHELLS = ("sh", "bash", "dash", "zsh", "ksh")
+# Where a shell would start a new command inside one `-c` payload.
+_SEPARATORS = ("&&", "||", ";", "|")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
-def _step_commands():
-    text = SCRIPT.read_text(encoding="utf-8")
-    steps = [(m.group(1), m.group(2).split()) for m in
-             (_STEP.match(line) for line in text.splitlines()) if m]
-    assert len(steps) >= 10, (
-        f"only {len(steps)} `step` invocations were found in tools/pre_merge.sh; "
-        "this pin is reading the wrong text"
-    )
+
+def _step_lines(source=None):
+    """(label, command text) for every `step` invocation, continuations joined.
+
+    A `step` line ending in `\\` continues onto the next physical line, so a
+    per-line parse reads the command as `\\` and misses the interpreter the
+    continuation carries -- `backend-python` is split that way in the real file.
+    """
+    text = SCRIPT.read_text(encoding="utf-8") if source is None else source
+    lines = text.splitlines()
+    steps = []
+    i = 0
+    while i < len(lines):
+        match = _STEP.match(lines[i])
+        if not match:
+            i += 1
+            continue
+        command = match.group(2)
+        while command.endswith("\\") and i + 1 < len(lines):
+            i += 1
+            command = command[:-1] + " " + lines[i].strip()
+        steps.append((match.group(1), command))
+        i += 1
     return steps
+
+
+def _step_commands(source=None):
+    """Every `step` invocation as (label, tokens), the way a shell reads it.
+
+    `source` is for the synthetic cases below; the default reads the real gate.
+    """
+    steps = [(label, shlex.split(command)) for label, command in _step_lines(source)]
+    if source is None:
+        assert len(steps) >= 10, (
+            f"only {len(steps)} `step` invocations were found in "
+            "tools/pre_merge.sh; this pin is reading the wrong text"
+        )
+    return steps
+
+
+def _segments(tokens):
+    """One command line split where a shell would start a new command."""
+    segments, current = [], []
+    for token in tokens:
+        if token in _SEPARATORS:
+            segments.append(current)
+            current = []
+        else:
+            current.append(token)
+    segments.append(current)
+    return [segment for segment in segments if segment]
+
+
+def _executables(tokens):
+    """Every token of a step command that would actually be exec'd as a program.
+
+    `cmd[0]` only sees the bare `python3 ...` shape. A step that reaches the
+    interpreter through a wrapper -- `env FOO=1 python3 ...`, `exec python3 ...`,
+    `nohup python3 ...`, `time python3 ...`, `xargs python3 ...` -- or hands a
+    whole line to a shell (`sh -c "python3 ..."`) puts it further in, so those
+    prefixes are peeled off and a `-c` payload is walked too.
+
+    Only executable positions come back: `python3` as an *argument* (a script
+    path, a `--python python3` flag, an interpreter handed to a tool) is
+    deliberately not one of them, which is the false positive a blanket
+    "no token is `python3`" ban would report.
+    """
+    executables = []
+    for segment in _segments(tokens):
+        rest = segment
+        while rest:
+            head = rest[0]
+            if head == "env":
+                rest = rest[1:]
+                while rest and (rest[0].startswith("-")
+                                or _ASSIGNMENT.match(rest[0])):
+                    rest = rest[1:]
+                continue
+            if head in _WRAPPERS:
+                rest = rest[1:]
+                while rest and rest[0].startswith("-"):
+                    rest = rest[1:]
+                continue
+            if head in _SHELLS:
+                payload = next((rest[i + 1] for i, tok in enumerate(rest[1:], 1)
+                                if tok == "-c" and i + 1 < len(rest)), None)
+                if payload is None:
+                    executables.append(head)
+                else:
+                    executables.extend(_executables(shlex.split(payload)))
+                rest = []
+                continue
+            executables.append(head)
+            rest = []
+    return executables
+
+
+def _bare_interpreter_offenders(steps):
+    """The (label, token) pairs whose step execs a bare interpreter."""
+    return [(label, executable) for label, cmd in steps
+            for executable in _executables(cmd)
+            if executable in _BARE_INTERPRETERS]
 
 
 def test_no_step_invokes_a_bare_python():
     """Every step must exec an interpreter the gate resolved, never PATH's.
 
-    A `step ... python3 ...` line is the shape of defect 1: it ignores the
-    resolved `$PYTHON` and picks up whatever `python3` the committer's PATH
+    A bare `python3` in executable position is the shape of defect 1: it ignores
+    the resolved `$PYTHON` and picks up whatever `python3` the committer's PATH
     happens to hold, which on the box in the issue is a python without pytest.
+    The executable is read *after* wrapper prefixes and line continuations are
+    peeled off, so `env FOO=1 python3 ...`, `nohup python3 ...` and
+    `sh -c "python3 ..."` are caught too (issue #2077).
     """
-    offenders = [(label, cmd[0]) for label, cmd in _step_commands()
-                 if cmd and cmd[0] in ("python", "python3")]
+    steps = _step_commands()
+    offenders = _bare_interpreter_offenders(steps)
     assert not offenders, (
         "these steps exec a bare interpreter instead of the resolved one: "
         f"{offenders} (issue #2074 defect 1)"
+    )
+    # Non-vacuity: peeling must reach real executables rather than return
+    # nothing for every step. Every pure-python step execs the resolved `$PYTHON`.
+    resolved = {executable for _, cmd in steps for executable in _executables(cmd)}
+    assert "$PYTHON" in resolved, (
+        "no step resolved to `$PYTHON`, so the executable extraction is reading "
+        f"the wrong tokens: {sorted(resolved)}"
+    )
+
+
+def test_a_wrapped_or_continued_step_is_caught():
+    """The `cmd[0]`-only guard's two blind spots, pinned as offenders.
+
+    A wrapper prefix (`env FOO=1 python3 ...`) and a line continuation
+    (`step "x" \\` + `python3 ...`) both put the interpreter where `cmd[0]`
+    cannot see it, so the old pin passed while the defect was present.
+    """
+    wrapped = _bare_interpreter_offenders(_step_commands(
+        "step \"env prefix\" env FOO=1 python3 tools/regen_goldens.py --check\n"
+        "step \"command\" command python3 tools/regen_goldens.py\n"
+        "step \"exec\" exec python3 tools/regen_goldens.py\n"
+        "step \"nohup\" nohup python3 tools/regen_goldens.py\n"
+        "step \"time\" time python3 tools/regen_goldens.py\n"
+        "step \"xargs\" xargs python3 tools/regen_goldens.py\n"
+        "step \"sh -c\" sh -c 'cd tools && python3 check.py'\n"
+    ))
+    assert [label for label, _ in wrapped] == [
+        "env prefix", "command", "exec", "nohup", "time", "xargs", "sh -c",
+    ], wrapped
+    continued = _bare_interpreter_offenders(_step_commands(
+        "step \"continued\" \\\n    python3 tools/check.py\n"
+    ))
+    assert continued == [("continued", "python3")], continued
+
+
+def test_an_interpreter_in_argument_position_is_not_an_offender():
+    """The widening must not collapse into "no token is `python3`".
+
+    `python3` legitimately appears as an *argument* -- a script path, a
+    `--python python3` flag, an interpreter handed to a tool -- and such a step
+    still execs the resolved `$PYTHON`, so it is not defect 1's shape. A blanket
+    substring ban flags all of these, which is why they are pinned as passing.
+    """
+    steps = _step_commands(
+        "step \"flag\" \"$PYTHON\" tools/x.py --python python3\n"
+        "step \"argument\" \"$PYTHON\" tools/x.py python3 tools/y.py\n"
+        "step \"wrapped flag\" env FOO=1 \"$PYTHON\" tools/x.py --python python3\n"
+        "step \"sh -c flag\" sh -c '\"$PYTHON\" tools/x.py --python python3'\n"
+    )
+    offenders = _bare_interpreter_offenders(steps)
+    assert not offenders, (
+        "`python3` in argument position is not the defect shape; this is the "
+        f"false positive a blanket substring ban would report: {offenders}"
     )
 
 
