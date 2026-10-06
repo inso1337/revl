@@ -5625,23 +5625,28 @@ def _lower_tests(program: Program, filename: str, types: dict,
     tests: list[dict] = []
     seen: set[str] = set()
     for decl in program.tests:
+        # issue #1904: a test merged in from an imported module is lowered here,
+        # inside the importer's program, so every diagnostic below would name
+        # the IMPORTER's file with the imported file's line. The block's own
+        # file is the one to name (roadmap item 312's rule for fn/extern decls).
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate test `{decl.name}`")
+            raise RevlError(decl_file, decl.line, f"duplicate test `{decl.name}`")
         seen.add(decl.name)
         if decl.lifecycle:
             tests.append({
                 "name": decl.name,
                 "lifecycle": True,
-                "body": _lower_lifecycle_body(decl, program, services or {}, filename,
+                "body": _lower_lifecycle_body(decl, program, services or {}, decl_file,
                                               callables, types),
             })
             continue
         scope: dict[str, bool] = {}
         type_env: dict[str, str] = {}
-        check_list_index_bounds(decl.body, filename)
+        check_list_index_bounds(decl.body, decl_file)
         body: list[dict] = []
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
+            _lower_pure_stmt(stmt, scope, callables, {}, body, decl_file, type_env, types)
         tests.append({"name": decl.name, "body": body})
     return tests
 
@@ -5735,20 +5740,23 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
     units: list[dict] = []
     seen: set[str] = set()
     for decl in program.prop_tests:
+        # issue #1904, as in `_lower_tests`: a prop test carried in from an
+        # imported module names its OWN file, never the importer's.
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate prop test `{decl.name}`")
+            raise RevlError(decl_file, decl.line, f"duplicate prop test `{decl.name}`")
         seen.add(decl.name)
         scope: dict[str, bool] = {}
         type_env: dict[str, str] = {}
         for param in decl.params:
-            check_type_wellformed(filename, param.line, param.type)
-            _check_generatable(filename, param.line, param.type, types, decl.name)
+            check_type_wellformed(decl_file, param.line, param.type)
+            _check_generatable(decl_file, param.line, param.type, types, decl.name)
             scope[param.name] = False
             type_env[param.name] = param.type
         body: list[dict] = []
-        check_list_index_bounds(decl.body, filename)
+        check_list_index_bounds(decl.body, decl_file)
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
+            _lower_pure_stmt(stmt, scope, callables, {}, body, decl_file, type_env, types)
         units.append({
             "name": decl.name,
             "params": [{"name": _predeclared_mangle(p.name), "type": p.type}
@@ -5791,18 +5799,19 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
     units: list[dict] = []
     seen: set[str] = set()
     for decl in program.fault_tests:
+        decl_file = program.decl_files.get(id(decl), filename)
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate fault test `{decl.name}`")
+            raise RevlError(decl_file, decl.line, f"duplicate fault test `{decl.name}`")
         seen.add(decl.name)
         component = by_name.get(decl.component)
         if component is None:
             known = ", ".join(sorted(by_name)) or "(none in this composition)"
-            raise RevlError(filename, decl.line,
+            raise RevlError(decl_file, decl.line,
                             f"fault test `{decl.name}` names unknown component `{decl.component}`",
                             hint=f"components in this composition: {known}")
         body = component.get("body") or []
         if not body:
-            raise RevlError(filename, decl.line,
+            raise RevlError(decl_file, decl.line,
                             f"component `{decl.component}` has an empty activation body — "
                             f"there is no point at which it can fail")
         if decl.at_effect is not None:
@@ -5811,7 +5820,7 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
                 bindings = [s.get("bind") for s in body if s.get("step") == "let-effect"]
                 known = ", ".join(f"`{b}`" for b in bindings) or "(none)"
                 raise RevlError(
-                    filename, decl.line,
+                    decl_file, decl.line,
                     f"fault test `{decl.name}`: component `{decl.component}` has no "
                     f"`let … effect` step bound to `{decl.at_effect}`",
                     hint=f"effect bindings in `{decl.component}`: {known}")
@@ -5819,7 +5828,7 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
             step = decl.at_step
             if step > len(body):
                 raise RevlError(
-                    filename, decl.line,
+                    decl_file, decl.line,
                     f"fault test `{decl.name}`: `fail at step {step}` is past the end of "
                     f"`{decl.component}` (its activation body has {len(body)} step(s))")
         known_config = {field.get("name") for field in component.get("config") or []}
@@ -5827,13 +5836,13 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
             if key not in known_config:
                 fields = ", ".join(sorted(known_config)) or "(none)"
                 raise RevlError(
-                    filename, decl.line,
+                    decl_file, decl.line,
                     f"fault test `{decl.name}`: `{decl.component}` has no config field `{key}`",
                     hint=f"config fields of `{decl.component}`: {fields}")
         asserts: list[str] = []
         for kind, line in decl.asserts:
             if kind not in _FAULT_ASSERTS:  # pragma: no cover — parser gates the spelling
-                raise RevlError(filename, line, f"unknown fault-test assertion `{kind}`")
+                raise RevlError(decl_file, line, f"unknown fault-test assertion `{kind}`")
             if kind not in asserts:
                 asserts.append(kind)
         unit = {
