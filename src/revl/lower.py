@@ -9094,6 +9094,17 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # Absent unless declared, so existing IR is unchanged.
                         **({"returns_qualifier": m.returns_qualifier}
                            if getattr(m, "returns_qualifier", None) else {}),
+                        # issue #1952: the comment block directly above the
+                        # operation — contiguous `//` lines with the prefix
+                        # stripped and line breaks kept. Documentation a host
+                        # (MCP tools, a CLI, a generated client) can read
+                        # without re-scanning the source. ABSENT when the
+                        # operation carries no such block, so every IR without
+                        # operation comments stays byte-identical. `is not None`
+                        # rather than truthiness, so "absent" means "no block",
+                        # never "a block that happened to be empty".
+                        **({"doc": m.doc}
+                           if getattr(m, "doc", None) is not None else {}),
                         # roadmap item 441 / issue #120 (L5,
                         # docs/design/458-termination-language-surface.md §3, §6):
                         # which operations are termination criteria/guards is a
