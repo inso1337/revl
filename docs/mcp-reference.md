@@ -42,7 +42,9 @@ same three-way input, and you pass exactly one form:
 
 - `source` - inline `.rvl` text (use this for a generated component; it is
   never written to disk).
-- `files` - an array of `.rvl` paths.
+- `files` - an array of `.rvl` paths, absolute or relative. A relative path
+  resolves against the operator's sanctioned root(s), not the server's cwd; an
+  absolute one outside every root is refused.
 - `modules` - in-memory sources for `use` imports, keyed by the path the import
   names, so a multi-module candidate is checked without touching the
   filesystem.
@@ -155,6 +157,43 @@ cannot be un-emitted, a halt or an approval is recorded evidence, and
 `revl_step_back` with no arguments can still revert. A refused call changed
 nothing and carries no undo field.
 
+**Every response can say which compiler answered.** Since issue #2007, the
+`initialize` result's `serverInfo` block and every `revl_state` payload carry
+the identity of the process that answered:
+
+```json
+"serverInfo": {"name": "revl", "version": "2.0",
+               "revision": "8a2eb872b7350c004555a4290bde2d7fcf960fd8",
+               "source_digest": "c7e7f647073de315646c5007fd1d43ab54d9bf023ee35d748c6879233c181a73"}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `revision` | the commit the package was imported from (`git rev-parse HEAD`), or a build id `revl-<version>` when the server is not running from a checkout |
+| `source_digest` | sha256 over the compiler's own `*.py`, by path and by content |
+
+`revl_state` carries both fields at the top level, on the not-loaded branch too,
+so the identity is available before anything is loaded. The revision says *which
+commit*, the digest says *which bytes*: a checkout at the pinned commit whose
+working tree has been edited reports the pinned revision and a digest the pin
+does not name. `revl.mcp.identity` reads them (`identity()`) and compares them
+(`assert_identity(payload, revision=..., source_digest=...)`), the latter
+raising `IdentityMismatch`, naming both values, rather than warning, because a
+tool answering from the wrong tree is otherwise indistinguishable from one
+answering correctly.
+
+The same block rides on the other MCP wires this package serves. A
+`server/discover` result carries `serverInfo` under the reserved
+`_meta["io.modelcontextprotocol/serverInfo"]` key rather than at the top level,
+as does every result of the HTTP transport; `assert_identity` accepts that
+shape, a whole JSON-RPC response, or the block on its own. `revl mcp serve --mcp
+<composition>` serves a composition's own tools and advertises no `revl_state`,
+so its `initialize` `serverInfo` names the composition in `name` and carries the
+answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
+`serverInfo` names the proxy instead; read the compiler's identity off
+`revl_state`, whose handler is the compiler server's own, or off
+`revl_proxy_verdicts`, whose `upstream` block is the upstream's `serverInfo`.
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->
@@ -240,7 +279,9 @@ first `approvalRequired`:
   `{key, method, component, class, raisedBy}`. `class` is `a`, `b`, `c`, or
   null for an operation that touches no boundary. `raisedBy` lists the
   crossings at that class, each with a `text` such as
-  ``"`emit stage.stage` in Agent"``.
+  ``"`emit stage.stage` in Agent"``. A `witnessed` extern reached where its
+  inverse is not registered carries `registered: false`, and its `text` says so
+  (issue #1707).
 - `effectClassChanges` (on `revl_admit`, `revl_plan`, `revl_ship`, `revl_swap`
   and `revl_edit`): every operation whose class differs from the running
   composition, `{key, method, component, before, after}`. An operation added
@@ -567,6 +608,10 @@ the same.
 What is loaded right now: fiber states, provided keys, whether a rollback is
 available, and the trace since the last call. No inputs.
 
+It carries the answering compiler's `revision` and `source_digest` at the top
+level, loaded or not (issue #2007; see "Every response can say which compiler
+answered").
+
 It always carries `loopAxes`, loaded or not and with or without an approval
 policy: six measures of how the session used the loop, each
 `{numerator, denominator, value}` with `value` null while the denominator is 0,
@@ -765,6 +810,25 @@ provider` for a refused cascade. A proposal and a commit (with an intent, or
 of the held proposal) also carry `blastRadius`, as `revl_edit` does; a commit
 reads it off the composition running at commit time. A change that fails
 verification commits nothing, and the running composition is unchanged.
+
+**A change lives in the session, not on disk** (issue #2032). The held source
+is the truth and disk an export, so a committed change leaves the two
+disagreeing until `revl_export` runs. The verbs of the change loop
+(`revl_change`, `revl_edit`, `revl_source`, `revl_export`) carry
+`"disk": {"inSync": bool, "stale": [path]}`, where `stale` names every loaded
+file whose held text differs from the bytes on disk. When `inSync` is false on
+a success, the answer also carries a `note` naming `revl_export`. It is a
+sibling of `sessionState`, never a field of it: `sessionState.dirty` means a
+*speculative draft* differs from what is running, so it is `false` in exactly
+the case a stale disk is easy to miss. An inline-loaded composition names no
+path and is `inSync`.
+
+The three revert verbs (`revl_undo`, `revl_rollback`, `revl_step_back`) carry
+the same block in the mirror case (issue #2037): disk *leads* the session,
+still holding the change the revert retracted, so a cold `revl_load {files}` -
+which reads disk - would resurrect it. Their `note` names `revl_export` as the
+way to write the reverted source out. A revert of a change that was never
+exported leaves disk already holding the reverted text and is `inSync`.
 
 - Inputs: one of `edit` / `replace` / `withdraw` / `add`; `gauntlet`; `commit`
   (default false: propose only); `discard`; with nothing loaded, `files` /
@@ -1013,7 +1077,10 @@ lone session owner) emits the call normally.
 
 ### `revl_rollback`
 
-Restore the generation that was running before the last swap. No inputs.
+Restore the generation that was running before the last swap. No inputs. The
+answer carries the `"disk": {"inSync", "stale"}` block (issue #2037): when disk
+still holds the change the rollback retracted, `stale` names it and a `note`
+points at `revl_export`.
 
 ### `revl_undo`
 
@@ -1025,6 +1092,10 @@ gate a swap runs, so a target the current checker rejects is refused
 (`ok:false`, with the diagnostic) and the running composition is untouched. The
 dossier rides along: what unloads, what state drops, and the interim boundary
 crossings that no undo can un-emit ([generation-history.md](generation-history.md)).
+The answer carries the `"disk": {"inSync", "stale"}` block (issue #2037): a
+revert of a change that had been exported leaves disk holding the retracted
+change, so `stale` names it and a `note` points at `revl_export`; a revert of a
+change that was never exported is `inSync`.
 
 - Inputs: `to` (a retained generation number; omit for N−1).
 
@@ -1459,7 +1530,9 @@ reverts the change before it; a change that answered `undo: null` is not on the
 stack, so it is skipped rather than half-undone. The answer names the reverted
 change, the undo it ran (`via`, through the same gates as any call) and the
 `redo` call, with `undoDepth` left. With nothing left to revert it is a refusal
-with `undoDepth: 0`.
+with `undoDepth: 0`. The answer carries the `"disk": {"inSync", "stale"}` block
+(issue #2037), naming the retracted change disk still holds and pointing at
+`revl_export` when the revert is not yet durable.
 
 With `to`, unwind the accumulator to step k by running the registered inverses
 from the top down, newest first - leaving the component LIVE, not torn down.

@@ -4,10 +4,10 @@
 //! real cordis-rs runtime.
 //!
 //! H (sharing/conflict): SharedStoreA and SharedStoreB both isolate `kv` into
-//!   realm("shared") -> `isolate_with("kv", _revl_realm("shared"))` yields the
-//!   same Isolation, so the second provider of `kv` in that realm must be
-//!   refused (its activation fails / it does not land Active). Equal strings =
-//!   same realm (docs/design-v2-realms.md).
+//!   realm("shared") -> `isolate_with("kv", _revl_realm("shared", "kv"))`
+//!   yields the same Isolation, so the second provider of `kv` in that realm
+//!   must be refused (its activation fails / it does not land Active). Equal
+//!   realm/key pairs = same realm (docs/design-v2-realms.md).
 //! S (separation): realm("shared") vs realm("other") are distinct realms ->
 //!   both active, and disposing one leaves the other untouched.
 

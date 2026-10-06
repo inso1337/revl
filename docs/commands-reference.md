@@ -257,7 +257,9 @@ refuses it until every `hole[T]` is filled ([holes.md](holes.md)).
   capabilities; repeatable.
 - `--config name:Type` - a component config field; repeatable.
 - `--resource Type` - the type of the effect-acquired resource (default:
-  `<Service>Resource`).
+  `<Service>Resource`). A type application like `Map[Str, Str]` names a host
+  family whose `Unit`-returning operations a `Unit` method's fill spec lists
+  (issue #1948).
 - `--no-effect` - omit the acquire/undo effect block.
 - `-o`, `--out PATH` - write the `.rvl` skeleton here (default: stdout).
 - `--json` - print the skeleton, its obligations, and each hole's fill spec

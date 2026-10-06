@@ -5025,10 +5025,23 @@ fn expr_var_names(node: Any, acc: Map[Str, Str]) -> Map[Str, Str] {
 }
 // `_acquire_moved_locals`: the bare-identifier arguments a host-Map method
 // takes by value (`insert(key, value)`; `get`/`remove` borrow the key). Every
-// other acquire argument is already cloned at the call site.
+// other acquire argument is already cloned at the call site. The `??` operator
+// is the other such construct: its sole lowering consumes its left operand
+// (`<left>.unwrap_or_else(..)`), so the bare identifier there is flagged too
+// (issue #1980 -- the admitted restored-value inverse appends with
+// `(prev ?? []).push(msg)` and its `undo` is a `match prev { .. }`, so the undo
+// closure would otherwise find `prev` already moved, E0382).
 fn acquire_moved_locals(node: Any, vt: Map[Str, Str], acc: Map[Str, Str]) -> Map[Str, Str] {
   var m = acc
   if (value_kind(node) == "record") {
+    if (node_kind(node) == "bin" && value_str(value_field(node, "op")) == "??") {
+      let left = value_field(node, "left")
+      let lk = node_kind(left)
+      if (lk == "var" || lk == "name") {
+        let ident = ref_ident(left)
+        if (ident != "") { m = m.set(ident, "1") }
+      }
+    }
     if (node_kind(node) == "call" && value_is_null(value_field(node, "callee"))) {
       let recv = ref_ident(value_field(node, "target"))
       let mth = value_str(value_field(node, "method"))
@@ -5266,25 +5279,35 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
 }
 
 // ------------------------------------------------------- realms (issue 1153)
-// `_collect_realm_labels`: every distinct realm-label string the program
-// isolates on, sorted. Sorting makes index assignment a pure function of the
-// label SET, so the same source lowers to the same Isolation values on every
-// build. A router resolves its worker realms by label too (item 167); every
-// such realm normally has a provider and is therefore already collected, but
-// the reference registers them explicitly and so does this.
-fn collect_realm_labels(components: List[Any]) -> List[Str] {
+// `_collect_realm_labels`: every distinct `(realm, key)` pair the program
+// isolates on, keyed by a `realm/key` encoding (keys are identifiers, so the
+// encoding is injective and the last `/` recovers the split), mapped to the
+// Rust tuple pattern `realm_lit, key_lit` for the helper's match arm. Keyed by
+// the PAIR, not the realm string alone (issue #2014): cordis-rs keys its
+// provision store by `Isolation` alone, so one Isolation per realm string put
+// `isolate db in realm("wa")` and `isolate api in realm("wa")` in one slot
+// (DuplicateService), the same defect #1543 fixed for py/ts (#1549). Sorting
+// the encoded keys makes index assignment a pure function of the pair SET, so
+// the same source lowers to the same Isolation values on every build. A router
+// resolves its worker realms by label too (item 167); every such realm normally
+// has a provider and is therefore already collected, but the reference
+// registers them explicitly and so does this.
+fn collect_realm_labels(components: List[Any]) -> Map[Str, Str] {
   var seen: Map[Str, Str] = Map.empty()
   for (comp of components) {
     let iso = value_field(comp, "isolate")
-    for (key of value_keys(iso)) { seen = seen.set(value_str(value_field(iso, key)), "1") }
+    for (key of value_keys(iso)) {
+      let rm = value_str(value_field(iso, key))
+      seen = seen.set(`${rm}/${key}`, `${string_lit(rm)}, ${string_lit(key)}`)
+    }
     let routes = value_field(comp, "routes")
     for (key of value_keys(routes)) {
       for (r of value_list(value_field(value_field(routes, key), "realms"))) {
-        seen = seen.set(value_str(r), "1")
+        seen = seen.set(`${value_str(r)}/${key}`, `${string_lit(value_str(r))}, ${string_lit(key)}`)
       }
     }
   }
-  return list_sort(seen.keys())
+  return seen
 }
 
 // `_needs_realm_helper`: the preamble rides along only for a document that
@@ -5296,23 +5319,24 @@ fn needs_realm_helper(components: List[Any]) -> Bool {
   return false
 }
 
-// `_revl_realm_helper`: lower each distinct realm label to a STABLE,
+// `_revl_realm_helper`: lower each distinct `(realm, key)` pair to a STABLE,
 // DETERMINISTIC Isolation from a reserved high region of the u64 scope space.
 // cordis-rs mints framework scope labels from a monotonic counter starting at
 // 1, so every framework label lands in [1, 2^63); tagging realm labels with the
-// top bit puts them provably out of that counter's reach. Distinct labels get
-// distinct indices, so equal strings share a realm and no two realms collide.
+// top bit puts them provably out of that counter's reach. Distinct pairs get
+// distinct indices, so an equal pair shares a slot and no two pairs collide.
 fn revl_realm_helper(components: List[Any]) -> List[Str] {
-  let labels = collect_realm_labels(components)
+  let seen = collect_realm_labels(components)
+  let labels = list_sort(seen.keys())
   var out = []
-  out = out.push("pub fn _revl_realm(label: &str) -> cordis::Isolation {")
+  out = out.push("pub fn _revl_realm(realm: &str, key: &str) -> cordis::Isolation {")
   out = out.push("    // Top bit reserved for realm labels: disjoint from cordis-rs's")
   out = out.push("    // monotonic scope counter (starts at 1, +1 each isolate()).")
   out = out.push("    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;")
-  out = out.push("    let index: u64 = match label {")
+  out = out.push("    let index: u64 = match (realm, key) {")
   var i = 0
   while (i < labels.length()) {
-    out = out.push(`        ${string_lit(labels[i])} => ${num_str(i)},`)
+    out = out.push(`        (${map_get(seen, labels[i])}) => ${num_str(i)},`)
     i = i + 1
   }
   out = out.push("        other => panic!(\"revl: realm label {other:?} missing from compile-time registry\"),")
@@ -6404,7 +6428,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       let snk = snake(value_str(value_field(comp, "name")))
       var expr = "ctx"
       for (key of value_keys(iso)) {
-        expr = `${expr}.isolate_with(${string_lit(key)}, _revl_realm(${string_lit(value_str(value_field(iso, key)))}))`
+        expr = `${expr}.isolate_with(${string_lit(key)}, _revl_realm(${string_lit(value_str(value_field(iso, key)))}, ${string_lit(key)}))`
       }
       out = out.push(`        "${snk}" => ${expr},`)
     }

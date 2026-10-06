@@ -56,6 +56,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
 | **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | no | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly |
 | **G-MODEL-PLACE** model placement and model reach | partial: the placement and reach rules | 6 | **yes** (one MPV row per routed component, one MAV row per consulted role; 9 agree-G-MODEL-PLACE) | since issue #1811 `RevL.ModelPlace.PlaceOK` decides that a confidentiality origin is placed on the device only, through a council member that receives it too (`placeB_iff`), and the model-reach rule of item 519 (a consulted role's `reaches [...]` within what the component holds) is decided with the spawn rule's proved `attenuatesB`. Which roles a component consults, and whether it consults a model at all, are the exporter's, read as `lower._model_reach_edges` / `_consults_a_model` read them. Not modelled: the route-block shape rules and the value-level origin ceiling (item 514) |
+| **G-COUNCIL-SPLIT** tie policy | partial: the tie-outcome rule | 7 | **yes** (one CTV row per declared council; 1 agree-G-COUNCIL-SPLIT) | since issue #1811 `RevL.ModelCouncil.SplitOK` decides that no declared council admits when its members disagree, over the tie outcome the checker reads for each council — the declared `on_tie`, or the `split` default an omitted clause resolves to (`splitB_iff`). This is a finite check over declarations with no reach, so it needs no component body; the exporter reads `prog.model_councils` and nothing else. The other `model-council` refusals are different rules with the same code and this row is deliberately silent on them: the unknown tie outcome, the aggregation vocabulary and its totality on the declared member set, the member functions and their uniqueness, `quorum` bases other than `declared`, and "exactly one aggregate rule". A council declaring no aggregation emits no `CV` row at all, so its refusal lands in `out-of-fragment` rather than being read as an agreement this row cannot make |
 | **A1** iteration boundaries only during activation | partial: the async-colour rules | 10 | **yes** (one A1 row per site, one A1S row per provide method; 9 agree-A1) | the iteration boundary itself is not modelled (L0 has no `await`). Since issue #1808 the async-colour rules are: `RevL.A1Async` decides, per site, that a sync provide method, an unawaited `effect`/`emit` step and an `undo`/`compensate` slot reach nothing async and that an awaited step does, over the file's async names (async externs, async service operations) and its `fn` call graph within a fuel bound (`reachB_iff`, `siteB_iff`), and that a provide method's colour is its service's (`sigB_iff`). Not modelled: an arrow's type has no colour (`a1_async_arrow_sync_type.rvl` stays out of fragment), colour polymorphism through a callback parameter, and a stream `next` as a suspension |
 | **A2** no acquisition after a provision | full over the ordered activation body | 14 | **yes** (317 A2 rows, 1 agree-A2) | the body is a step list (`acquire` / `provide` / `other` — the checker's four refused forms, the `provide` block, and everything else) and `RevL.A2.a2B` is `lower._dispatch_action`'s fold verbatim, bridged to the declarative rule by `a2B_iff`. The content is over G7's stack: with a `bracket` per release and per withdrawal, `proof_pass_is_withdrawals_then_releases` proves that under A2 `RevL.Semantics.phase1` runs every withdrawal before every release under every settling verdict, and `fixture_opens_the_window` proves the fixture's shape runs a release first. The oracle folds the same rule over the exported `AQ` body steps on both sides; `a2_coverage` fails the gate unless the corpus carries an admitted body with both a provision and an acquisition and the refused shape. **Not modelled**: entries a provide-method body registers at call time (the G7 corpus's `method` seam), and whether the runtime withdraws a provision as a bracket at all — the theorem takes the LIFO premise the rule rests on and shows A2 is exactly the ordering condition under it |
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
@@ -361,6 +362,13 @@ Three summary readings of that map:
 | `RevL.ModelPlace.on_device_admitted` | G-MODEL-PLACE placement — admission | **proved** | none | placing every arm on the device is always admitted |
 | `RevL.ModelPlace.fixtures_decided` | G-MODEL-PLACE placement — the corpus shapes | **proved** | none | `gmodelplace_confidential_off_device` and the council-member fixture refused, their on-device and open-origin twins admitted |
 | `RevL.ModelPlace.placement_not_vacuous` | G-MODEL-PLACE placement — non-vacuity | **proved** | `propext, Quot.sound` | the rule refuses the off-device placement and admits the on-device one |
+| `RevL.ModelCouncil.splitB_iff` | G-COUNCIL-SPLIT tie policy — the bridge (issue #1811) | **proved** | `propext, Quot.sound` | the printed `CTV` verdict is exactly "no declared council admits when its members disagree" |
+| `RevL.ModelCouncil.admitting_refused` | G-COUNCIL-SPLIT tie policy — the refusal | **proved** | none | a council whose `on_tie` is an admitting outcome refuses the file |
+| `RevL.ModelCouncil.split_admitted` | G-COUNCIL-SPLIT tie policy — the default | **proved** | `propext, Quot.sound` | `on_tie split`, the default an omitted clause resolves to, is admitted |
+| `RevL.ModelCouncil.deny_admitted` | G-COUNCIL-SPLIT tie policy — the narrowing | **proved** | `propext, Quot.sound` | `on_tie deny` is admitted, so the rule narrows the tie policy without banning it |
+| `RevL.ModelCouncil.unknown_tie_not_this_row` | G-COUNCIL-SPLIT tie policy — what it does not decide | **proved** | `propext, Quot.sound` | a spelling outside both vocabularies is admitted here; the unknown-tie rule refuses it, and conflating the two would make this row claim a judgment it does not make |
+| `RevL.ModelCouncil.fixtures_decided` | G-COUNCIL-SPLIT tie policy — the corpus shapes | **proved** | none | `gcouncilsplit_on_tie_allow` refused, the `on_tie split` and `on_tie deny` shapes admitted |
+| `RevL.ModelCouncil.council_not_vacuous` | G-COUNCIL-SPLIT tie policy — non-vacuity | **proved** | `propext, Quot.sound` | the rule refuses the admitting tie and admits `split` and `deny`, so the printed verdict is mutation-sensitive in both directions |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -1059,6 +1067,32 @@ Verdicts:
   `model_coverage` fails the gate unless the corpus carries an admitted
   and a refused confidential placement and an admitted and a refused model
   reach.
+- **CTV row (G-COUNCIL-SPLIT, issue #1811)**: `Oracle.councilRowB`
+  — `RevL.ModelCouncil.splitB` — over the councils a file DECLARES, each
+  carrying the tie outcome the checker reads for it (`CV`: the declared
+  `on_tie`, or `split` where the `aggregate` clause omits it, resolved by
+  the exporter exactly as the checker's rule 10 resolves it). This is a
+  finite check over declarations with no reach: the row reads
+  `prog.model_councils` and nothing else, so it needs no component body. It
+  is exported from the RAW declarations and not from the validated table,
+  because that table is empty for a refused file and exporting it would
+  emit no row for exactly the file the row exists to catch. The reference
+  recomputes the verdict from the exported column against a vocabulary
+  spelled out in the harness rather than read off
+  `model_council.ADMITTING_TIE_OUTCOMES`, so widening the checker's list
+  moves the checker alone. A G-COUNCIL-SPLIT refusal in category
+  `model-council` carrying the tie message files under
+  `agree-G-COUNCIL-SPLIT` or the fatal `missed-G-COUNCIL-SPLIT`. Blinding
+  the printed verdict was seen to produce `missed-G-COUNCIL-SPLIT 1 FATAL`
+  (the `gcouncilsplit_on_tie_allow` fixture); a `splitB` that ignores the
+  tie outcome stops `splitB_iff` from elaborating. `council_coverage`
+  fails the gate unless the corpus carries both an admitted and a refused
+  tie policy. Not under this row, and refused by other rules of the same
+  code: the unknown tie outcome, the aggregation vocabulary and its
+  totality on the declared member set, the member functions and their
+  uniqueness, `quorum` bases other than `declared`, and "exactly one
+  aggregate rule"; a council declaring no aggregation emits no `CV` row at
+  all, so its refusal lands in `out-of-fragment`.
 
 ### The G7 row, and what it is evidence of
 
@@ -1271,6 +1305,7 @@ layer.
 | `agree-A2` | printed by the gate | informational |
 | `agree-A6` | printed by the gate | informational |
 | `agree-A9` | printed by the gate | informational |
+| `agree-G-COUNCIL-SPLIT` | printed by the gate | informational |
 | `agree-G-MODEL-PLACE` | printed by the gate | informational |
 | `agree-G1` | printed by the gate | informational |
 | `agree-G2` | printed by the gate | informational |
@@ -1287,6 +1322,7 @@ layer.
 | `missed-A2` | 0 | **FATAL** |
 | `missed-A6` | 0 | **FATAL** |
 | `missed-A9` | 0 | **FATAL** |
+| `missed-G-COUNCIL-SPLIT` | 0 | **FATAL** |
 | `missed-G-MODEL-PLACE` | 0 | **FATAL** |
 | `missed-G1` | 0 | **FATAL** |
 | `missed-G2` | 0 | **FATAL** |

@@ -339,7 +339,11 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   `producers` lists every way to build the expected type at this position: a
   literal (`"..."`, `0`, `[]`, `None`, a declared record or variant), a
   binding of that type, a callable service operation, extern, crossing or
-  function returning it. `Unit` has no literal (revl has no unit
+  function returning it. A component that acquired a resource offers that
+  resource's own writes, each parameter typed from the DECLARED resource's
+  type arguments (`Map[Int, Str]` offers `resource.insert(<int_0: Int>,
+  <str_1: Str>)`), the checker's signature table being the declaration-free
+  default. `Unit` has no literal (revl has no unit
   expression), so a `Unit` hole, such as an `effect`'s inverse, is built by a
   call that returns nothing: the inverse an `acquire` extern names, applied to
   the acquired binding, which is in scope in its own `undo`, or in an

@@ -18,13 +18,13 @@
 
 ["function", "canonical-type-parser-fallbacks-split-fn-type-rejects", "_v3_surface_type", 7, 7]
 
-["reason", "component-header-refusals-component-rejects-an-unknown-servi", "Component header refusals: `_component` rejects an unknown service behind a requirement or provision, and an isolate, intercept or routed key the header does not declare; `_context_augmentation` rejects one Context key bound to conflicting services; `_provide_impl` rejects unknown services, undeclared methods and arity mismatch. The frontend enforces these relationships, and routed requires are covered (issue #106)"]
+["reason", "component-header-refusals-component-rejects-an-unknown-servi", "Component header refusals: `_component` rejects an unknown service behind a requirement or provision, and an isolate, intercept or routed key the header does not declare; `_context_augmentation` rejects one Context key bound to conflicting services; `_provide_impl` rejects unknown services, undeclared methods and arity mismatch. The frontend enforces these relationships, and routed requires are covered (issue #106) Issue #1972 ported the UI transaction unit into selfhost/emit_ts.rvl and added tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl (joined to the ts oracle), whose `act` and `watch` are unit methods: the `uiTransaction`/`uiTransactionAsync` wrap of a unit's body now runs on both sides, which is why this budget fell 10 to 4."]
 
 ["function", "component-header-refusals-component-rejects-an-unknown-servi", "_component", 5, 5]
 
 ["function", "component-header-refusals-component-rejects-an-unknown-servi", "_context_augmentation", 2, 2]
 
-["function", "component-header-refusals-component-rejects-an-unknown-servi", "_provide_impl", 10, 10]
+["function", "component-header-refusals-component-rejects-an-unknown-servi", "_provide_impl", 4, 4]
 
 ["reason", "do-expression-refusals-and-one-annotation-v3-do", "`do` expression refusals and one annotation: `_v3_do_expr` rejects a `do` block outside a component/method body and a non-`let` statement in one, and annotates an empty-list binding inside the block. The frontend lowers `do` only in method bodies and only with `let` statements, and no corpus block binds `[]`. The block itself is covered (issue #106)"]
 
@@ -62,9 +62,9 @@
 
 ["function", "extern-declared-compensations-issue-1511-declared-call-rende", "_reaches_declared", 7, 7]
 
-["reason", "extern-residuals-emit-ts-externs-rejects-an-extern", "Extern residuals: `_emit_ts_externs` rejects an extern with neither a @ts body nor a @ts ref, and writes the empty-body comment for an async extern whose @ts body is empty. Verbatim bodies, `@ts ref` thunks, config scaffolding and binding, and Secret result marking are covered (issue #106) Issue #1936 (c) adds three: the statement that emits the bound-secret seam and the two that append a secret's first local (sync and async), reached only by an extern bound with `secret NAME for CAP`. No emit_ts corpus document binds a secret, because selfhost/emit_ts.rvl does not port the injection and such a document would make the byte-agreement oracle diverge; backends/typescript/test_secret_bound_ts.py runs the emitted seam under node and through the node runner."]
+["reason", "extern-residuals-emit-ts-externs-rejects-an-extern", "Extern residuals: `_emit_ts_externs` rejects an extern with neither a @ts body nor a @ts ref, and writes the empty-body comment for an async extern whose @ts body is empty. Verbatim bodies, `@ts ref` thunks, config scaffolding and binding, and Secret result marking are covered (issue #106) Issue #1936 (c) adds three: the statement that emits the bound-secret seam and the two that append a secret's first local (sync and async), reached only by an extern bound with `secret NAME for CAP`. tests/noncensus_corpus/emit_ts_bound_secret.rvl reaches all three (issue #1954 ported the injection into selfhost/emit_ts.rvl, so the byte-agreement oracle covers them), which is why this budget fell from 7 to 4. Issue #1972 ported the UI transaction unit into selfhost/emit_ts.rvl and added tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl (joined to the ts oracle), whose computer-use externs the `uiCrossing` wrapper now renders on both sides, which is why this budget fell 4 to 2."]
 
-["function", "extern-residuals-emit-ts-externs-rejects-an-extern", "_emit_ts_externs", 7, 7]
+["function", "extern-residuals-emit-ts-externs-rejects-an-extern", "_emit_ts_externs", 2, 2]
 
 ["reason", "frame-allocation-invariants-and-declared-transaction-paths-b", "Frame allocation invariants and declared transaction paths: `_bracket_yield`'s bare-arrow branch requires a bracket while `_has_bracket` reported false, which cannot occur for lowered activation effects; `_guard_frame_neutral_loop` rejects frame-owning loop steps, but G6 keeps activation effects out of source loop bodies. `_has_bracket.walk`'s recursive true return requires an effect or timer inside a component guard, which G6 rejects. `_needs_frame.walk`'s remaining true returns require a witnessed acquisition or compensation nested in such a guard; `_method_body_needs_frame`'s remaining true return requires a witnessed method acquisition. Witnessed transactions are explicitly refused by the port"]
 
@@ -83,10 +83,6 @@
 ["function", "in-file-test-pass-over-emit-ts-tests", "_emit_ts_lifecycle_tests", 1, 1]
 
 ["function", "in-file-test-pass-over-emit-ts-tests", "_emit_ts_tests", 1, 1]
-
-["reason", "issue-1936-c-the-ts-bound-secret-seam", "Issue #1936 (c): `_ts_secret_scaffold`, the ts tier's bound-secret seam (`_REVL_SECRET_NAMES`, `_REVL_SECRETS` and the fail-loud `_revlSecret`), the mirror of the py tier's item 256 injection. It is reached only by an extern bound with `secret NAME for CAP`. No emit_ts corpus document binds a secret: selfhost/emit_ts.rvl does not port the injection, so such a document would make the byte-agreement oracle diverge. backends/typescript/test_secret_bound_ts.py runs the emitted seam under node and through the node runner (placement_runner.ts)."]
-
-["function", "issue-1936-c-the-ts-bound-secret-seam", "_ts_secret_scaffold", 6, 6]
 
 ["reason", "issue-2009-the-frontend-refuses-a-bracketed-effect-inside-a-provide-method-if-while-for-body", "Issue #2009: the `if`/`while`/`for` arms of `_method_body_has_bracket`. They recurse into a provide method's control-flow bodies looking for a `bracket`, and the frontend makes that impossible: `src/revl/lower.py` refuses a teardown-registering step (`effect`/`let-effect`/`await`) inside a provide-method `if`/`while`/`for` body, because the activation frame owns every inverse and registers it at the method's top level (issue #548, docs/design/478-component-author-ergonomics.md Group 3). So the two `return True` bodies can only ever see a document the frontend rejects, which never reaches the emitter at all. The arms are kept so the walk mirrors `_has_bracket`'s recursion shape, exactly as that function's own `bracket`-outside-`provide` arms are kept (this file already budgets them). The bare `provide`-method arm IS reached: tests/fixtures/emit_ts_corpus/host_map_journal.rvl carries a component whose only bracket is inside `provide kv2 { fn set ... }`."]
 
@@ -166,21 +162,19 @@
 
 ["function", "ts-reactive-tier-refusals-item-130-stream-iter", "_stream_iter", 1, 1]
 
-["reason", "ui-transaction-unit-item-522-issue-1369", "The UI transaction unit (item 522 slice 3, issue #1369): `_ui_transaction_facts` and `_calls_any` derive the per-method units from revl.ui_transaction, `_runtime_imports` imports the scope runtime, `_ui_crossing_wrapper` exports each computer-use extern as a `uiCrossing` wrapper, and `_emit_compensations` skips the call-site registration a wrapper makes itself. `_statement` and `_balanced` drop the parentheses of an async `(await f(x))` emit statement, which a unit's `uiCrossingAsync` exposed to ASI. The same branches raise `_declared_call`, `_emit_ts_externs`, `_needs_frame.walk` and `_provide_impl`. selfhost/emit_ts.rvl does not port the unit (issue #1972), and the corpus has no computer-use document with @ts bodies; #1972's done criterion adds one. The runtime proof is backends/typescript/tests/ui_transaction.test.ts."]
+["reason", "ui-transaction-unit-item-522-issue-1369", "The UI transaction unit (item 522 slice 3, issue #1369): `_ui_transaction_facts` and `_calls_any` derive the per-method units from revl.ui_transaction, `_runtime_imports` imports the scope runtime, `_ui_crossing_wrapper` exports each computer-use extern as a `uiCrossing` wrapper, and `_emit_compensations` skips the call-site registration a wrapper makes itself. `_statement` and `_balanced` drop the parentheses of an async `(await f(x))` emit statement, which a unit's `uiCrossingAsync` exposed to ASI. The same branches raise `_declared_call`, `_emit_ts_externs`, `_needs_frame.walk` and `_provide_impl`. Issue #1972 ported the unit into selfhost/emit_ts.rvl and added tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl (a shared corpus document, joined to the ts oracle), so the unit, the wrapper, the runtime import and the call-site skip are now reached on both sides and these budgets fell (28 to 10, 11 to 1, 7 to 1, 5 to 1). What stays unexecuted is a structural floor, the fail-closed arms, and one genuinely future document. `_calls_any`'s `return True` is dead by construction: `_crossing_facts` calls it only for a method that is not already a unit, and the unit set was built by `method_plan`, whose own generic walk records every `{kind: 'fn', name}` node `_calls_any` matches, so a True `_calls_any` implies the method was already in `units`. The `call_scope` assignment in `_ui_transaction_facts` is that same dead `elif` and `_provide_impl`'s `callScopeAsync` opener is its only consumer, so no corpus document is given a `call_scope` scope; a method that reaches a computer-use extern only through a module `fn` is given no scope at all. Nine of `_ui_transaction_facts`'s ten are the standalone `python3 emit.py` import fallback and the fail-closed `raise EmitError` (every harness runs with `src` importable) plus the `return set(), {}` for a document with no `ui` or `screen` capability root; the tenth is the dead `call_scope` line. The one genuinely future document is an ASYNC computer-use extern: `_runtime_imports`'s remaining statement appends `uiCrossingAsync` and `_ui_crossing_wrapper`'s remaining statement is the `ext.get(\"async\")` wrapper arm, while the corpus's only `compensate`-declaring computer-use extern (`type_amount`) is sync. `_call_method_name`'s remaining statement is its `undo` fallback for a malformed compensation node, `_emit_ts_externs`'s two are the reject and the empty-async-body comment, and the rest of `_provide_impl`'s are the unknown-service, undeclared-method and arity raises. Measured, not assumed: a probe compiled all 363 corpus documents of the py, ts, rust, java and go tiers and found zero methods where the reach walk is True and the method is not already a unit. The runtime proof is backends/typescript/tests/ui_transaction.test.ts."]
 
 ["function", "ui-transaction-unit-item-522-issue-1369", "_balanced", 9, 9]
 
-["function", "ui-transaction-unit-item-522-issue-1369", "_calls_any", 7, 7]
+["function", "ui-transaction-unit-item-522-issue-1369", "_calls_any", 1, 1]
 
-["function", "ui-transaction-unit-item-522-issue-1369", "_emit_compensations", 1, 1]
-
-["function", "ui-transaction-unit-item-522-issue-1369", "_runtime_imports", 5, 5]
+["function", "ui-transaction-unit-item-522-issue-1369", "_runtime_imports", 1, 1]
 
 ["function", "ui-transaction-unit-item-522-issue-1369", "_statement", 1, 1]
 
-["function", "ui-transaction-unit-item-522-issue-1369", "_ui_crossing_wrapper", 11, 11]
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_crossing_wrapper", 1, 1]
 
-["function", "ui-transaction-unit-item-522-issue-1369", "_ui_transaction_facts", 28, 28]
+["function", "ui-transaction-unit-item-522-issue-1369", "_ui_transaction_facts", 10, 10]
 
 ["reason", "unselected-async-call-shapes-is-async-fn-type", "Unselected async-call shapes: `_is_async_fn_type` returns false for non-string legacy types; `_ts_emission_is_async` returns false for a call whose target is not a requirement and tests a variable callee. A timer body admits only emissions, and each lowers to a requirement-target `call` or a component-dialect `fn` node; an async extern reached from a timer is refused earlier (\"called outside an async context\")"]
 
@@ -192,11 +186,11 @@
 
 ["function", "v1-v2-live-component-routing-is-selected-before", "_emit_v1", 5, 5]
 
-["reason", "witness-call-decoding-fallbacks-bind-call-temps-returns", "Witness-call decoding fallbacks: `_bind_call_temps` returns None for a non-object compensation expression; `_call_method_name` falls back to `undo` for malformed host/fn/call nodes; `_crossing_key_name` uses `?` for absent name/var identifiers; `_replay_call` rejects a foreign node after its call/fn/host arms. Legal witnessed inputs are the separately excluded witnessed transaction family; call, fn, host and generic expression compensation are covered"]
+["reason", "witness-call-decoding-fallbacks-bind-call-temps-returns", "Witness-call decoding fallbacks: `_bind_call_temps` returns None for a non-object compensation expression; `_call_method_name` falls back to `undo` for malformed host/fn/call nodes; `_crossing_key_name` uses `?` for absent name/var identifiers; `_replay_call` rejects a foreign node after its call/fn/host arms. Legal witnessed inputs are the separately excluded witnessed transaction family; call, fn, host and generic expression compensation are covered Issue #1972 ported the UI transaction unit into selfhost/emit_ts.rvl and added tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl (joined to the ts oracle), whose unit methods walk a body through `_calls_any` and so through `_call_method_name`, which is why this budget fell 4 to 1."]
 
 ["function", "witness-call-decoding-fallbacks-bind-call-temps-returns", "_bind_call_temps", 1, 1]
 
-["function", "witness-call-decoding-fallbacks-bind-call-temps-returns", "_call_method_name", 4, 4]
+["function", "witness-call-decoding-fallbacks-bind-call-temps-returns", "_call_method_name", 1, 1]
 
 ["function", "witness-call-decoding-fallbacks-bind-call-temps-returns", "_crossing_key_name", 5, 5]
 

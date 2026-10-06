@@ -374,9 +374,9 @@
 
 ["function", "backends-java-emit-py-v3-lifecycle-step-load", "_v3_lifecycle_step", 32, 32]
 
-["reason", "backends-java-emit-py-v3-match-expr-residual", "backends/java/emit.py::_v3_match_expr: Residual Ok/Err Result switch emission is explicitly deferred. The other missing branch is the defensive nonexhaustive user-variant default; lower.py rejects nonexhaustive matches before emit."]
+["reason", "backends-java-emit-py-v3-match-expr-residual", "backends/java/emit.py::_v3_match_expr: Residual Ok/Err Result switch emission is explicitly deferred. The other missing branch is the defensive nonexhaustive user-variant default; lower.py rejects nonexhaustive matches before emit. Issue #1980 adds one more statement: the all-void-arm host-Map `match` -- the admitted restored-value inverse `undo match prev { Some(v) => m.insert(k, v), None => m.remove(k) }` -- lowers to `ifPresentOrElse` with BLOCK arm bodies (a parenthesised method invocation is not a Java `StatementExpression`, JLS 14.8). It is reached by backends/java/test_emit_java.py::LEDGER_SRC and can be reached by no corpus document, because the self-host java port defers every provide-method body that contains a method-body `let` (body_step_supported -> emit_component emits `<<DEFER-component-nonsimple:...>>`), so there are no reference bytes for a corpus document to agree with. Measured 21 -> 22."]
 
-["function", "backends-java-emit-py-v3-match-expr-residual", "_v3_match_expr", 21, 21]
+["function", "backends-java-emit-py-v3-match-expr-residual", "_v3_match_expr", 22, 22]
 
 ["reason", "backends-java-emit-py-v3-spawn-spawn-bindings", "backends/java/emit.py::_v3_spawn: Spawn bindings/requirements/config construction requires spawn expressions, explicitly deferred and reproduced by instance_accessor.rvl."]
 
@@ -405,6 +405,10 @@
 ["reason", "backends-java-emit-py-value-map-write-type", "backends/java/emit.py::_value_map_write_type: This helper only types writers for unannotated VALUE Map.empty local inference, explicitly deferred, distinct from covered host Map inference. Issue #957's `Map` subscript arm adds two statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py."]
 
 ["function", "backends-java-emit-py-value-map-write-type", "_value_map_write_type", 6, 6]
+
+["reason", "backends-java-emit-py-void-map-arm-issue-1980", "backends/java/emit.py::_void_map_arm (issue #1980): `_void_map_arm` recognizes a `match` whose every arm is a VOID host-Map method on the same receiver, key and value (`undo match prev { Some(v) => m.insert(k, v), None => m.remove(k) }`, the admitted restored-value inverse), so `_v3_match_expr` can lower it to `ifPresentOrElse` with block arm bodies instead of an expression `switch` (a void `insert`/`remove` has no value to select). A corpus document cannot reach it: the self-host java port defers every provide-method body containing a method-body `let` (body_step_supported -> emit_component emits `<<DEFER-component-nonsimple:...>>`), so the byte-agreement oracle has no reference bytes to compare. The refusal route does not apply either -- the reference EMITS this shape, it does not refuse it -- and no refusal document may be attached to it by pairing it with an unrelated later refusal. Measured 0 -> 6 with issue #1980."]
+
+["function", "backends-java-emit-py-void-map-arm-issue-1980", "_void_map_arm", 6, 6]
 
 ["reason", "backends-java-emit-py-witnessed-extern-for-residual", "backends/java/emit.py::_witnessed_extern_for: Residual named/target lookup of class=witnessed externs requires the explicitly deferred witnessed-extern surface; method_witnessed.rvl is a strict reproduction."]
 

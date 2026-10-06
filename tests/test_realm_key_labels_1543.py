@@ -214,14 +214,6 @@ fn two_keys_in_one_realm_each_activate() {
 """
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="cordis-rs keys `implementations` by `Isolation` alone and the "
-           "emitted `_revl_realm(label)` mints one Isolation per realm string, "
-           "so `api` collides with `db` (DuplicateService). The fix changes "
-           "the emitted helper in backends/rust/emit.py AND "
-           "selfhost/emit_rust.rvl, which is in the gate crate's digest, so it "
-           "needs a sequenced crates/revl-gate regeneration (issue #1543).")
 def test_rust_two_keys_in_one_realm_each_resolve_their_own_provider(tmp_path):
     cargo = shutil.which("cargo")
     if cargo is None:

@@ -157,6 +157,29 @@ reconstructing an inverse from a forged witness, src/revl/recovery.py) hits the
 same guard with no revl source involved. What remains is bounded by the jail
 itself, which is exactly the property the jail is supposed to provide.
 
+# Host capability: a host without the dir-fd walk refuses EARLY (issue #1946)
+
+The walk above is not an optimisation, it IS the confinement, so a host whose
+`os` cannot perform it cannot honestly host a witnessed fs mutation. Windows is
+that host: `os.supports_dir_fd` is empty, `O_DIRECTORY`/`O_NOFOLLOW` do not
+exist, and a directory cannot be opened as a descriptor. The pinned binder
+(`bind_workspace_root`) has always refused such a host with `ENOTSUP`; the
+DEFAULT unpinned path had no such check, so `_open_dirfd`'s `os.open(dir)`
+returned `EACCES`, and the generic `OSError` branch in `open_confined_write`
+reported that as `EOUTSIDE` — "the path to the write target changed under the
+confinement check". Nothing had raced: the platform cannot open a directory at
+all, and the message named a lost race that never happened.
+
+`dirfd_walk_supported()` is now the one predicate both paths share, and
+`_root_dirfd` — the descriptor every mutation needs before its first syscall —
+refuses with `ENOTSUP` when it is false. So `write`/`rm`/`mkdir`/`move` all fail
+before any partial work, with a message that names the platform limitation, and
+the pure observations (`resolve_within`, `lexists`, `is_dir`) keep working.
+Request (2) of the issue — a real Windows implementation built on `CreateFileW`
+with `FILE_FLAG_OPEN_REPARSE_POINT` plus `GetFinalPathNameByHandleW` — is
+deliberately NOT attempted here; the refusal is what makes a Windows caller's
+failure legible meanwhile.
+
 # Configuring the root
 
 The session workspace root is read from the `REVL_FS_WORKSPACE` environment
@@ -269,6 +292,43 @@ SYSCALL_PATH_ARGS: dict[str, tuple[int, ...]] = {
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+#: `os.stat` as CPython registered it, snapshotted at import for the same
+#: reason `_DIRFD_WALK_REQUIRED` is: the capability SETS are read live (a test
+#: narrows them to simulate a host without the walk), but the function OBJECTS
+#: must be the ones the interpreter put in those sets. Reading `os.stat` back
+#: off the module at call time asks a different question — "what is `os.stat`
+#: right now?" — which a caller that wraps or patches it for its own reasons
+#: answers wrongly, making a capable host refuse its own confined walk.
+_STAT_FN = os.stat
+
+#: The `os` operations the confined walk performs with `dir_fd=` (the component
+#: walk and the leaf open, the no-follow stat, and the four mutations). This is
+#: the same set `bind_workspace_root` requires for a PINNED root; the unpinned
+#: path needs exactly these, and used to discover their absence one syscall at a
+#: time — as `EACCES` from `os.open(dir)`, misreported as a lost race (#1946).
+_DIRFD_WALK_REQUIRED: tuple = (os.open, _STAT_FN, os.mkdir, os.unlink,
+                               os.rmdir, os.rename)
+
+
+def dirfd_walk_supported() -> bool:
+    """True iff this host's `os` can run the confined directory-fd walk.
+
+    False on Windows, where `os.supports_dir_fd` is empty, `O_DIRECTORY` and
+    `O_NOFOLLOW` do not exist, and a directory cannot be opened as a descriptor.
+    A host without the walk cannot confine a witnessed mutation — the walk IS
+    the confinement — so every mutation refuses with `ENOTSUP` rather than
+    falling back to a name-based syscall that would reopen the check-to-syscall
+    window. `os.stat(..., follow_symlinks=False)` is included because the walk's
+    leaf checks (`_leaf_is_handle`, `_bound_stat`) rely on it; `os.utime(fd=)`
+    and `os.pread` are NOT, because only the pinned path uses those and
+    `bind_workspace_root` checks them itself."""
+    return bool(
+        _O_DIRECTORY
+        and _O_NOFOLLOW
+        and all(fn in os.supports_dir_fd for fn in _DIRFD_WALK_REQUIRED)
+        and _STAT_FN in os.supports_follow_symlinks
+    )
 
 #: The supported host binding contract, also exported by `revl.fs_workspace`.
 PINNED_ROOT_API_VERSION = 1
@@ -406,11 +466,7 @@ def bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int,
             raise ConfinementError(
                 "EBOUND", "workspace binding must precede all filesystem use "
                 "and cannot be repeated", _sanitized(root_label))
-        required = (os.open, os.stat, os.mkdir, os.unlink, os.rmdir,
-                    os.rename)
-        if (not _O_DIRECTORY or not _O_NOFOLLOW
-                or any(fn not in os.supports_dir_fd for fn in required)
-                or os.stat not in os.supports_follow_symlinks
+        if (not dirfd_walk_supported()
                 or os.utime not in os.supports_fd
                 or not hasattr(os, "pread")):
             raise ConfinementError(
@@ -518,7 +574,33 @@ def _bound_path(path: str) -> str:
 
 
 def _root_dirfd() -> int:
+    """The descriptor every mutation walks down from — and the host-capability
+    gate (issue #1946).
+
+    A host whose `os` cannot walk with directory fds cannot confine a witnessed
+    mutation at all, so the refusal belongs HERE: every mutating entry point
+    (`open_confined_write`, `replace_confined`, `remove_confined`,
+    `mkdir_confined`, `rmdir_confined`) needs this descriptor before it performs
+    its first syscall, so `write`/`rm`/`mkdir`/`move` all fail with a named
+    `ENOTSUP` before touching the filesystem. Without the gate the first syscall
+    failed instead — `os.open(dir, O_DIRECTORY)` is `EACCES` on Windows, which
+    `open_confined_write`'s generic `OSError` branch misread as `EOUTSIDE`, a
+    lost race that never happened. The read-only surface does not come through
+    here, so it keeps working on such a host."""
     root = workspace_root()
+    if not dirfd_walk_supported():
+        raise ConfinementError(
+            "ENOTSUP",
+            "witnessed fs mutations are not supported on this platform: the "
+            "confinement needs directory descriptors (os.supports_dir_fd) plus "
+            "O_DIRECTORY and O_NOFOLLOW to close the window between the "
+            "membership check and the syscall, and this host's os module does "
+            "not provide them (on Windows a directory cannot be opened as a "
+            "descriptor at all). The operation was refused before it touched "
+            "the filesystem; read-only checks (resolve_within, lexists, "
+            "is_dir) are unaffected",
+            root,
+        )
     if _pinned_root is None:
         return os.open(root, os.O_RDONLY | _O_DIRECTORY)
     fd = os.dup(_pinned_root.fd)

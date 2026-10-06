@@ -222,7 +222,7 @@ def test_v2_realms_emit_isolate_and_intercept():
     assert ir["ir_version"] == 2
     src = emit.emit(ir)
     assert "fn _revl_realm" in src
-    assert 'isolate_with("kv", _revl_realm("tenant_a"))' in src
+    assert 'isolate_with("kv", _revl_realm("tenant_a", "kv"))' in src
     assert 'require_with("kv", TenantAAppKvIntercept1' in src
     assert "ctx: Arc<cordis::Context>" in src
     assert "self.ctx.effect" in src
@@ -232,9 +232,9 @@ def test_realm_lowering_is_a_deterministic_collision_free_registry():
     """The realm-label lowering must be a fixed compile-time registry, not a
     runtime hash. `DefaultHasher` is unstable across Rust releases and its
     64-bit output can collide with cordis-rs's monotonic scope counter; the
-    registry tags each distinct label into the reserved top-bit region of the
-    u64 scope space, which the counter (starts at 1, +1 per isolate) cannot
-    reach, and gives every distinct label a distinct index."""
+    registry tags each distinct `(realm, key)` pair into the reserved top-bit
+    region of the u64 scope space, which the counter (starts at 1, +1 per
+    isolate) cannot reach, and gives every distinct pair a distinct index."""
     ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
     src = emit.emit(ir)
 
@@ -244,9 +244,9 @@ def test_realm_lowering_is_a_deterministic_collision_free_registry():
 
     # Reserved high region, disjoint from the framework counter.
     assert "const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;" in src
-    # Each distinct label => a distinct index in a compile-time match.
-    assert '"tenant_a" => 0,' in src
-    assert '"tenant_b" => 1,' in src
+    # Each distinct (realm, key) pair => a distinct index in a compile-time match.
+    assert '("tenant_a", "kv") => 0,' in src
+    assert '("tenant_b", "kv") => 1,' in src
     assert "cordis::Isolation::from_raw(REVL_REALM_TAG | index)" in src
 
     # Byte-for-byte stable build-to-build: the same source lowers identically.
@@ -254,9 +254,9 @@ def test_realm_lowering_is_a_deterministic_collision_free_registry():
 
 
 def test_realm_registry_maps_equal_labels_together_and_distinct_apart():
-    """Determinism at the semantic level: equal label strings collapse to one
-    index (same realm), distinct labels get distinct indices (distinct
-    realms), regardless of how many components mention each label."""
+    """Determinism at the semantic level: equal `(realm, key)` pairs collapse to
+    one index (same realm), distinct pairs get distinct indices (distinct
+    realms), regardless of how many components mention each realm string."""
     ir = compile_source(
         """
         service Kv { fn get(k: Str) -> Opt[Str] }
@@ -277,12 +277,13 @@ def test_realm_registry_maps_equal_labels_together_and_distinct_apart():
     )
     src = emit.emit(ir)
     # Two components name realm("a") but there is exactly one registry entry
-    # for it, so both lower to the identical Isolation (same realm).
-    assert src.count('"a" => 0,') == 1
-    assert '"b" => 1,' in src
-    # Equal labels share one call value; the distinct label differs.
-    assert src.count('_revl_realm("a")') == 2
-    assert src.count('_revl_realm("b")') == 1
+    # for the (realm, key) pair, so both lower to the identical Isolation
+    # (same realm).
+    assert src.count('("a", "kv") => 0,') == 1
+    assert '("b", "kv") => 1,' in src
+    # Equal pairs share one call value; the distinct pair differs.
+    assert src.count('_revl_realm("a", "kv")') == 2
+    assert src.count('_revl_realm("b", "kv")') == 1
 
 
 def test_v3_types_functions_match_emit():
@@ -768,7 +769,7 @@ def test_router_emits_per_realm_routing_struct():
     # the router struct implements the required service and re-resolves per call
     assert "struct RevlRouterRouterWorker" in src
     assert "impl Worker for RevlRouterRouterWorker" in src
-    assert 'isolate_with(self.key.as_str(), _revl_realm(realm.as_str()))' in src
+    assert 'isolate_with(self.key.as_str(), _revl_realm(realm.as_str(), self.key.as_str()))' in src
     assert 'get::<Box<dyn Worker>>(self.key.as_str())' in src
     # the routed key is bound as the router, not a single-realm require, and is
     # not in the Router's Inject gate (it has no single-realm provider)
@@ -2158,11 +2159,12 @@ component SessionLedger provides sessions: SessionStore {
   provide sessions {
     fn load(id) = store.get(id) ?? []
     fn append(id, msg) {
-      let prev = store.get(id) ?? []
-      // issue #1945: a provide-method insert's undo is its table inverse,
-      // `remove` on the same key; restoring `prev` is not in the table
-      effect store.insert(id, prev.push(msg))
-      undo   store.remove(id)
+      // issue #1980: `prev` is read from the same table at the same key before
+      // the effect, so restoring it IS the inverse -- in the `Opt` shape the
+      // read has (an absent key is restored by `remove`).
+      let prev = store.get(id)
+      effect store.insert(id, (prev ?? []).push(msg))
+      undo   match prev { Some(v) => store.insert(id, v), None => store.remove(id) }
     }
   }
 }
@@ -2233,7 +2235,12 @@ def test_ledger_shape_carries_the_map_value_type():
     assert "store: Arc<Map<Vec<Msg>>>" in src
     assert "let store = Arc::new(Map::<Vec<Msg>>::new());" in src
     assert "self.store.get(&id).unwrap_or_else(|| vec![])" in src
-    assert "store_undo.remove(&id_undo);" in src
+    # issue #1980: the undo restores the value read from the same table at the
+    # same key, in the `Opt` shape that read has — an absent key is restored by
+    # `remove`, an existing one by putting the old value back. Both arms are
+    # pinned, so neither half can silently become a `remove`-only teardown.
+    assert "Some(v) => store_undo.insert(id_undo, v)," in src
+    assert "None => store_undo.remove(&id_undo)," in src
     # the historical hardcoding is gone
     assert "HashMap<String, String>" not in src
 

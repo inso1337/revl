@@ -49,9 +49,12 @@ both read). The report lists it under `relayed`, as `[RELAY (a)]` in the text
 form, with the class it took and a `relay:<component>:<key>.<method>` token,
 and leaves it out of `total`, `bareCount` and `bareTokens`. The crossings its
 target makes are listed where they land: a witnessed extern in `witnessed`, a
-deferred emission in `externs`. A forward the class map keeps at (c) is
-counted as an emission exactly as before. `relayed` is absent from a report
-that has no relay.
+deferred emission in `externs`. A witnessed extern reached where its inverse is
+NOT registered (issue #1707) is not revertible at all, so it lands in
+`externs` as `irreversible` with `registered: false`, and its target operation —
+and any relay of it — is counted at (c), not listed under `relayed`. A forward
+the class map keeps at (c) is counted as an emission exactly as before.
+`relayed` is absent from a report that has no relay.
 
 **[3] Other realms provably untouched — the `survivors` set.**
 Withdrawing the realm's components (`revl.query.withdrawal`, EXACT precision)

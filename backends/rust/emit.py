@@ -5058,12 +5058,23 @@ def _expr_var_names(node: object, acc: set[str]) -> None:
 def _acquire_moved_locals(node: object, ctx: "_V3Ctx", acc: set[str]) -> None:
     """Method-body locals the acquire consumes *by value without a clone*.
 
-    Only one acquire construct moves a bare local uncloned: a host-Map method
+    Two acquire constructs move a bare local uncloned. One is a host-Map method
     that takes its argument by value — `insert(key, value)` (its `get`/`remove`
     borrow the key, and service-call / record / free-fn arguments are already
-    cloned by `_by_value_arg`). Those bare-identifier arguments are the ones an
-    `undo` that re-reads them must clone ahead of (item 114)."""
+    cloned by `_by_value_arg`). The other is `??`, whose sole lowering is
+    `<left>.unwrap_or_else(..)`: the operator consumes its left operand whether
+    or not the default is taken (issue #1980 — the admitted restored-value
+    inverse appends with `(prev ?? []).push(msg)` and its `undo` is a `match
+    prev { .. }`, so the undo closure would find `prev` already moved, E0382).
+    Those bare-identifier operands are the ones an `undo` that re-reads them
+    must clone ahead of (item 114)."""
     if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("op") == "??"):
+            left = node.get("left")
+            if isinstance(left, dict) and left.get("kind") in ("var", "name"):
+                ident = left.get("id") or left.get("name")
+                if ident is not None:
+                    acc.add(ident)
         if node.get("kind") == "call" and "callee" not in node:
             target = node.get("target") or {}
             recv = target.get("id") or target.get("name") or ""
@@ -5580,23 +5591,32 @@ def _emit_component_auto(component: dict, services: dict, ir: dict | None = None
     return _emit_component_new(component, services, ir)
 
 
-def _collect_realm_labels(components: list) -> list[str]:
-    """Every distinct realm-label string the program isolates on, sorted.
+def _collect_realm_labels(components: list) -> list[tuple[str, str]]:
+    """Every distinct ``(realm, key)`` pair the program isolates on, sorted.
 
-    Sorting makes index assignment a pure function of the label *set*, so the
-    same source lowers to the same Isolation values on every build.
+    Keyed by the PAIR, not the realm string alone (issue #2014). cordis-rs keys
+    its provision store by ``Isolation`` alone, so one Isolation per realm
+    *string* put ``isolate db in realm("wa")`` and ``isolate api in
+    realm("wa")`` in one slot: the second provider failed with
+    ``DuplicateService`` and resolving ``api`` returned the ``db`` provider —
+    the same authority confusion #1543 fixed for the py/ts tiers (#1549).
+
+    Sorting by the ``realm/key`` encoding (keys are identifiers, so the encoding
+    is injective and the last ``/`` recovers the split) makes index assignment a
+    pure function of the pair *set*, so the same source lowers to the same
+    Isolation values on every build.
     """
-    labels: set[str] = set()
+    pairs: set[tuple[str, str]] = set()
     for component in components:
-        for realm in (component.get("isolate") or {}).values():
-            labels.add(realm)
+        for key, realm in (component.get("isolate") or {}).items():
+            pairs.add((realm, key))
         # item 167: a router resolves its worker realms by label too; every such
         # realm has a provider (G2, verified at link time) so it is normally
         # already collected, but register it explicitly to be robust.
-        for route in (component.get("routes") or {}).values():
+        for key, route in (component.get("routes") or {}).items():
             for realm in route.get("realms") or []:
-                labels.add(realm)
-    return sorted(labels)
+                pairs.add((realm, key))
+    return sorted(pairs, key=lambda pair: f"{pair[0]}/{pair[1]}")
 
 
 def _revl_realm_helper(components: list) -> list[str]:
@@ -5609,21 +5629,22 @@ def _revl_realm_helper(components: list) -> list[str]:
     the low range [1, 2^63). We tag realm labels with the top bit set, which
     that counter cannot reach without 2^63 allocations — provably disjoint
     from framework labels (the collision `Isolation::from_raw`'s own docs
-    warn about, context.rs:20-25). Distinct labels get distinct indices, so
-    equal strings share a realm and no two realms ever collide. Unlike the
+    warn about, context.rs:20-25). Distinct `(realm, key)` pairs get distinct
+    indices, so an equal pair shares a slot (a component resolving a sibling's
+    provision in the same realm) and no two pairs ever collide. Unlike the
     former `DefaultHasher`, this registry is fixed build-to-build and depends
     on no std hashing internals.
     """
     labels = _collect_realm_labels(components)
     lines = [
-        "pub fn _revl_realm(label: &str) -> cordis::Isolation {",
+        "pub fn _revl_realm(realm: &str, key: &str) -> cordis::Isolation {",
         "    // Top bit reserved for realm labels: disjoint from cordis-rs's",
         "    // monotonic scope counter (starts at 1, +1 each isolate()).",
         "    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;",
-        "    let index: u64 = match label {",
+        "    let index: u64 = match (realm, key) {",
     ]
-    for i, label in enumerate(labels):
-        lines.append(f"        {_string(label)} => {i},")
+    for i, (realm, key) in enumerate(labels):
+        lines.append(f"        ({_string(realm)}, {_string(key)}) => {i},")
     lines.append(
         '        other => panic!("revl: realm label {other:?} missing from '
         'compile-time registry"),'
@@ -5686,7 +5707,7 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
         "        let mut out = Vec::new();",
         "        for realm in &self.realms {",
         "            let scoped = self.ctx.isolate_with("
-        "self.key.as_str(), _revl_realm(realm.as_str()));",
+        "self.key.as_str(), _revl_realm(realm.as_str(), self.key.as_str()));",
         f"            if let Ok(Some(handle)) = scoped.get::<Box<dyn {_svc(service)}>>"
         "(self.key.as_str()) {",
         "                out.push((realm.clone(), handle));",
@@ -10802,7 +10823,8 @@ def _emit_bridge(ir: dict) -> list[str]:
         snake = _snake(component["name"])
         expr = "ctx"
         for key, realm in isolate.items():
-            expr += f".isolate_with({_string(key)}, _revl_realm({_string(realm)}))"
+            expr += (f".isolate_with({_string(key)}, "
+                     f"_revl_realm({_string(realm)}, {_string(key)}))")
         out.append(f'        "{snake}" => {expr},')
     out.append("        _ => ctx.clone(),")
     out.append("    }")

@@ -118,7 +118,7 @@ was corrected by hand and had drifted back within a day.
 | design-v2-realms.md | needs-work | 17 |  |
 | distribution-model.md | stale-fixed | 7 |  |
 | environment-binding.md | needs-work | 0 |  |
-| erase-report.md | needs-work | 19 |  |
+| erase-report.md | needs-work | 21 |  |
 | eval-protocol.md | needs-work | 0 |  |
 | evolve-loop.md | current | 18 |  |
 | expressible-iteration.md | needs-work | 14 |  |
@@ -137,7 +137,7 @@ was corrected by hand and had drifted back within a day.
 | guarantees.md | needs-work | 2 |  |
 | guide-ai-agents.md | stale-fixed | 3 |  |
 | guide-humans.md | stale-fixed | 1 | yes |
-| harness-gate-guide.md | needs-work | 2 |  |
+| harness-gate-guide.md | needs-work | 5 |  |
 | holes.md | needs-work | 29 |  |
 | import-a2a.md | current | 16 |  |
 | import-cordis.md | needs-work | 58 |  |
@@ -174,7 +174,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 47 | yes |
-| rejections.md | needs-work | 73 |  |
+| rejections.md | needs-work | 74 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |

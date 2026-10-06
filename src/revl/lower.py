@@ -6627,7 +6627,8 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         if stmt.name not in scope:
             _reject_foreign_name(stmt.name, filename, stmt.line)  # item 384
             raise RevlError(filename, stmt.line, f"`{stmt.name}` is not declared in this function",
-                            hint="declare it with `let` (single-assignment) or `var` (mutable)")
+                            hint="declare it with `let` (single-assignment) or `var` (mutable)",
+                            code="G1", category="binding")
         if not scope[stmt.name]:
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
@@ -7119,7 +7120,8 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         if expr.name not in scope and expr.name not in callables:
             _reject_foreign_name(expr.name, filename, expr.line)  # item 384
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
-                            hint="declare it with `let`/`var` or add it as a parameter (G1)")
+                            hint="declare it with `let`/`var` or add it as a parameter (G1)",
+                            code="G1", category="binding")
         # issue #320: an in-scope value binding that spells a host predeclared
         # name is renamed to match its (mangled) declaration; a callable
         # reference (module fn / extern / host) is left verbatim.
@@ -9094,6 +9096,17 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # Absent unless declared, so existing IR is unchanged.
                         **({"returns_qualifier": m.returns_qualifier}
                            if getattr(m, "returns_qualifier", None) else {}),
+                        # issue #1952: the comment block directly above the
+                        # operation — contiguous `//` lines with the prefix
+                        # stripped and line breaks kept. Documentation a host
+                        # (MCP tools, a CLI, a generated client) can read
+                        # without re-scanning the source. ABSENT when the
+                        # operation carries no such block, so every IR without
+                        # operation comments stays byte-identical. `is not None`
+                        # rather than truthiness, so "absent" means "no block",
+                        # never "a block that happened to be empty".
+                        **({"doc": m.doc}
+                           if getattr(m, "doc", None) is not None else {}),
                         # roadmap item 441 / issue #120 (L5,
                         # docs/design/458-termination-language-surface.md §3, §6):
                         # which operations are termination criteria/guards is a
@@ -9240,7 +9253,8 @@ def _component_scope(env: Env) -> dict[str, str]:
 def _component_req_call(env: Env, root: str, method: str, args: list, line: int) -> dict:
     if root not in env.requires:
         raise RevlError(env.filename, line,
-                        f"`{root}` is not a declared requirement of {env.component.name}")
+                        f"`{root}` is not a declared requirement of {env.component.name}",
+                        code="G1", category="requirement")
     # item 130: a required `Stream[T]` is a requirement but not a service, so a
     # method call on it is refused by name before the service table is indexed.
     if root in env.stream_requires:
@@ -9564,12 +9578,16 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 f"`{name}` is not a declared requirement of {env.component.name}",
                 hint=f"component {env.component.name} requires {declared} — "
                      f"add `requires {name}: <Service>`?",
+                code="G1", category="requirement",
             )
         _reject_foreign_name(name, filename, line)  # item 384
         raise RevlError(filename, line,
                         f"`{name}` is not declared in this component effect block",
                         hint="declare it with `let` in the effect block, or use a "
-                             "requirement/config field (G1)")
+                             "requirement/config field (G1)",
+                        code="G1", category="binding",
+                        fix="declare it with `let` in the effect block, or use a "
+                            "requirement/config field")
     if isinstance(expr, ExprField):
         if isinstance(expr.target, ExprVar) and expr.target.name == "config":
             if expr.name not in env.config_fields:
@@ -10060,7 +10078,9 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
             _reject_foreign_name(stmt.name, filename, stmt.line)  # item 384
             raise RevlError(filename, stmt.line,
                             f"`{stmt.name}` is not declared in this effect block",
-                            hint="declare it with `let`/`var` first (G1)")
+                            hint="declare it with `let`/`var` first (G1)",
+                            code="G1", category="binding",
+                            fix="declare it with `let`/`var` in the effect block")
         if stmt.name not in mutables:
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
@@ -12335,17 +12355,156 @@ def _host_write(acquire, env: "Env"):
     return target.get("id"), family, verb
 
 
-def _method_effect_inverse(st: dict, env: "Env", filename: str, line: int) -> str:
+#: issue #1980: the host write verbs whose `undo` may RESTORE the value this
+#: body read from the same table, and the read verb whose result carries the
+#: `Opt` that decides between restoring and removing. `Map.get(k)` is `Opt[V]`
+#: — `Some(v)` when the key held `v`, `None` when it was absent — so an
+#: `insert` undone by restoring that read is EXACT, absence included: the pair
+#: is `table`, not `asserted`, because the restored value is the one the table
+#: held and never the author's word (#1945 part 2's overwrite witness, resolved
+#: statically). A DEFAULTED read (`m.get(k) ?? d`) erases the `Opt`, so it is
+#: refused with the `match` form named.
+_HOST_RESTORE_WRITES: frozenset = frozenset({"Map.insert"})
+_HOST_READ_VERBS: frozenset = frozenset({"Map.get"})
+
+#: issue #1980: why a restore-SHAPED `undo` is not the admitted form, each
+#: clause naming the condition the rule requires. The message names the `match`
+#: form itself, once, after the clause, so a program that tried to restore is
+#: told the exact form the rule wants whatever it fell short of.
+_RESTORE_WHY: dict[str, str] = {
+    "unread": "no read of this table at this key bound it earlier in the same "
+              "body",
+    "elsewhere": "it is read from another handle or another key",
+    "written": "this table is written at this key between the read and the "
+               "effect",
+    "defaulted": "its read is defaulted (`??`), which erases the `Opt` the "
+                 "inverse follows",
+    "plain": "it is `Opt`-shaped, so the undo must branch on it",
+}
+
+
+def _host_read(expr, env: "Env"):
+    """`(receiver, key, defaulted)` when *expr* reads a host local
+    (`store.get(k)`), else None. A defaulted read (`store.get(k) ?? d`) is
+    looked THROUGH — it is the same read, and the `??` is exactly what the rule
+    refuses, so the flag rides out instead of hiding the read."""
+    if not isinstance(expr, dict):
+        return None
+    if expr.get("kind") == "bin" and expr.get("op") == "??":
+        read = _host_read(expr.get("left"), env)
+        return None if read is None else (read[0], read[1], True)
+    if expr.get("kind") != "call" or expr.get("method") != "get":
+        return None
+    target = expr.get("target")
+    if not isinstance(target, dict) or target.get("kind") != "name":
+        return None
+    family = (getattr(env, "host_locals", None) or {}).get(target.get("id"))
+    if family is None or f"{family}.get" not in _HOST_READ_VERBS:
+        return None
+    return target.get("id"), (expr.get("args") or [None])[0], False
+
+
+def _restore_reads(before, env: "Env") -> dict:
+    """The host reads this body bound BEFORE the effect, in the body's own
+    order: `<safe name> -> (receiver, key, defaulted, index)`. A later `let` of
+    a name replaces or drops the entry, so the rule sees the binding in force at
+    the effect (issue #1980)."""
+    reads: dict = {}
+    for i, st in enumerate(before or []):
+        if not isinstance(st, dict) or st.get("step") != "let":
+            continue
+        name = st.get("name")
+        if name is None:
+            continue
+        read = _host_read(st.get("value"), env)
+        if read is None:
+            reads.pop(name, None)
+        else:
+            reads[name] = (read[0], read[1], read[2], i)
+    return reads
+
+
+def _written_since(before, reads, name, receiver, key, env: "Env") -> bool:
+    """Whether this body writes *receiver* at *key* between the read that bound
+    *name* and the effect (issue #1980). A write at another key leaves the read
+    intact; one at this key makes the restored value the value the EFFECT
+    overwrote, so it is no longer its inverse."""
+    for st in (before or [])[reads[name][3] + 1:]:
+        if not isinstance(st, dict) or st.get("step") not in ("effect",
+                                                              "let-effect"):
+            continue
+        acq = st.get("acquire")
+        write = _host_write(acq, env)
+        if write is None or write[0] != receiver:
+            continue
+        if (acq.get("args") or [None])[0] == key:
+            return True
+    return False
+
+
+def _restore_shape(undo, receiver: str, key):
+    """The `(binding, form)` of a restore-SHAPED `undo` on *receiver* at *key*
+    (issue #1980), else None: `("prev", "match")` for `match prev { Some(v) =>
+    receiver.insert(key, v), None => receiver.remove(key) }` and `("prev",
+    "plain")` for `receiver.insert(key, prev)`. The SHAPE is what keys the
+    refusal, so the reason a restore-shaped `undo` fell short never changes the
+    form the message names."""
+    if not isinstance(undo, dict):
+        return None
+    if undo.get("kind") == "match":
+        scrut = undo.get("scrutinee")
+        arms = undo.get("arms")
+        if not (isinstance(scrut, dict) and scrut.get("kind") == "name"):
+            return None
+        if not isinstance(arms, list) or len(arms) != 2:
+            return None
+        by_pat = {a.get("pattern"): a for a in arms if isinstance(a, dict)}
+        some, none = by_pat.get("Some"), by_pat.get("None")
+        if some is None or none is None or not some.get("bind"):
+            return None
+        insert = {"kind": "call", "target": {"kind": "name",
+                                            "id": receiver},
+                  "method": "insert",
+                  "args": [key, {"kind": "name", "id": some.get("bind")}]}
+        remove = {"kind": "call", "target": {"kind": "name",
+                                            "id": receiver},
+                  "method": "remove", "args": [key]}
+        if some.get("body") != insert or none.get("body") != remove:
+            return None
+        return scrut.get("id"), "match"
+    if (undo.get("kind") == "call" and undo.get("method") == "insert"
+            and undo.get("target") == {"kind": "name", "id": receiver}):
+        args = undo.get("args") or []
+        value = args[1] if len(args) == 2 else None
+        if len(args) == 2 and args[0] == key and isinstance(value, dict) \
+                and value.get("kind") == "name":
+            return value.get("id"), "plain"
+    return None
+
+
+def _restore_message(name: str, verb: str, bind: str, why: str, k: str) -> str:
+    """The issue-#1980 refusal: a restore-shaped `undo` that is not the admitted
+    form, with the reason and the `match` form the rule requires."""
+    return (f"the `undo` of `effect {name}.{verb}(...)` cannot restore `{bind}` "
+            f"({why}): write `undo match {bind} {{ Some(v) => {name}.insert("
+            f"{k}, v), None => {name}.remove({k}) }}`")
+
+
+def _method_effect_inverse(st: dict, env: "Env", filename: str, line: int,
+                           before=None) -> str:
     """The inverse provenance of one provide-method effect (issue #1945):
     `table` (a host write undone by its table inverse), `declared` (an
     extern's declared inverse), or `asserted` (everything revl cannot prove:
     a service or extern reversal, a SQL write). A host write whose `undo` is
-    not its table inverse is refused, naming the inverse it needs."""
+    not its table inverse is refused, naming the inverse it needs. *before* is
+    the body's statements ahead of the effect, which issue #1980's restore form
+    is judged against."""
     acquire, undo = st.get("acquire"), st.get("undo")
     write = _host_write(acquire, env)
     if write is not None:
         receiver, family, verb = write
-        inverse, provenance = _HOST_WRITE_INVERSE[f"{family}.{verb}"]
+        entry = f"{family}.{verb}"
+        inverse, provenance = _HOST_WRITE_INVERSE[entry]
         key = (acquire.get("args") or [None])[0]
         target = undo.get("target") if isinstance(undo, dict) else None
         if (isinstance(undo, dict) and undo.get("kind") == "call"
@@ -12354,6 +12513,43 @@ def _method_effect_inverse(st: dict, env: "Env", filename: str, line: int) -> st
                 and target.get("id") == receiver
                 and (undo.get("args") or [None])[0] == key):
             return provenance
+        # issue #1980: `insert` undone by RESTORING the value this body read
+        # from the same table at the same key is the exact inverse, through the
+        # `Opt` the read carries — so it is `table` (proved), not `asserted`.
+        if entry in _HOST_RESTORE_WRITES:
+            shape = _restore_shape(undo, receiver, key)
+            if shape is not None:
+                bind, form = shape
+                reads = _restore_reads(before, env)
+                why = None
+                if bind not in reads:
+                    why = _RESTORE_WHY["unread"]
+                elif reads[bind][0] != receiver or reads[bind][1] != key:
+                    why = _RESTORE_WHY["elsewhere"]
+                elif _written_since(before, reads, bind, receiver, key, env):
+                    why = _RESTORE_WHY["written"]
+                elif reads[bind][2]:
+                    why = _RESTORE_WHY["defaulted"]
+                elif form == "plain":
+                    why = _RESTORE_WHY["plain"]
+                if why is None:
+                    return "table"
+                name = _source_spelling(receiver, env)
+                spelled = _source_spelling(bind, env)
+                raise RevlError(
+                    filename, line,
+                    _restore_message(name, verb, spelled, why,
+                                     _key_spelling(key, env)),
+                    hint="a value read from the same table at the same key is "
+                         "the exact inverse of the `insert`, but only through "
+                         "the `Opt` the read carries: `Some(v)` means the key "
+                         "held `v` (restore it) and `None` means it was "
+                         "absent (remove it). A defaulted read erases that, "
+                         "and a read from another handle, another key, after "
+                         "the effect, or across an intervening write to this "
+                         "key is not the value the `insert` overwrote "
+                         "(issue #1980)",
+                    code="G4", category="inverse")
         name = _source_spelling(receiver, env)
         k = _key_spelling(key, env)
         spelled = f"{name}.{inverse}({k})" if inverse == "remove" \
@@ -12406,7 +12602,8 @@ def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
     they are lowered."""
     method_owned: set = set()
     taint, _ = _resource_ctx(env.types)
-    for st in steps or []:
+    body = steps or []
+    for at, st in enumerate(body):
         if not isinstance(st, dict):
             continue
         stp = st.get("step")
@@ -12436,7 +12633,8 @@ def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
             # obligation, judged when it is filled.
             if undo is not None and not (isinstance(undo, dict)
                                          and undo.get("kind") == "hole"):
-                st["inverse"] = _method_effect_inverse(st, env, filename, line)
+                st["inverse"] = _method_effect_inverse(st, env, filename, line,
+                                                       body[:at])
             if acq_res and bind:
                 method_owned.add(bind)
         elif stp == "emit":
@@ -13237,6 +13435,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                     f"`{stmt.key}` is not a declared requirement of {comp.name}",
                     hint="`isolate ... in realms(...)` targets a key from the `requires` "
                          "clause (G1)",
+                    code="G1", category="requirement",
                 )
             # one binding per key: a key is pinned to one realm *or* routed across
             # a realm set, never both, and never two conflicting route sets.
@@ -13306,6 +13505,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                         filename, stmt.line,
                         f"`{stmt.key}` is not a declared requirement or provision of {comp.name}",
                         hint="`isolate` targets a key from the component header (G1)",
+                        code="G1", category="requirement",
                     )
                 if stmt.key in isolate:
                     raise RevlError(filename, stmt.line,
@@ -13325,6 +13525,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                         filename, stmt.line,
                         f"`{stmt.key}` is not a declared requirement of {comp.name}",
                         hint="`intercept` targets a key from the `requires` clause (G1)",
+                        code="G1", category="requirement",
                     )
                 if stmt.key in intercept:
                     raise RevlError(filename, stmt.line,
@@ -16219,6 +16420,7 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
             env.filename, expr.line,
             f"`{head}` is not a declared requirement of {comp.name}",
             hint=f"component {comp.name} requires {declared} — add `requires {head}: <Service>`?",
+            code="G1", category="requirement",
         )
 
     for op in ops:

@@ -271,6 +271,17 @@ CORPUS = [
     "../emit_py_corpus/annotated_lets.rvl",
     "../emit_rust_corpus/perf_index.rvl",
     "../emit_wasm_corpus/forloop.rvl",
+    # issue #1972 deliberately does NOT join
+    # `../emit_py_corpus/ui_transaction_unit.rvl` here. That document's fourth
+    # case is a computer-use extern that DECLARES `compensate`, which the
+    # reference registers at every crossing through `RevlDeclared`;
+    # `selfhost/emit_java.rvl` does not port that registration (issue #1511,
+    # recorded unported in `selfhost_blind_spots.json`). Its `act` method also
+    # carries a `let`, and the component renderer here admits only
+    # `return`/`effect`/`emit` method steps (`body_step_supported`), so the
+    # component is refused with `<<DEFER-component-nonsimple:Agent>>`. Adding
+    # the document would make this oracle red, so the UI transaction unit stays
+    # unported on this tier and `class=emission` stays a recorded unported gap.
 ]
 
 

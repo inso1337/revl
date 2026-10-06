@@ -277,6 +277,18 @@ and the ones nested inside a snapshot — is resolved with `realpath` and refuse
 if it lands outside a sanctioned root. The refusal runs before anything is
 opened or stat-ed, so it cannot report existence either.
 
+A **relative** path argument is resolved against the sanctioned roots, never
+against the directory the server process happens to have been started in (issue
+#2038: under `--root` those differ, so a relative path inside the root used to
+be refused as an escape the caller never attempted). With one root it resolves
+against that root; with several it is joined to each root in the order the
+operator declared them and the first join that lands inside the sanctioned set
+wins, deterministically. A relative path no root admits (one that traverses
+upward out of all of them) is refused with the caller's own spelling. An
+absolute path keeps the rule it always had: `realpath` then compare. The
+resolved absolute path is what the handler opens, so a relative spelling names
+the file it names and not a cwd-relative namesake.
+
 A `use` path written inside transport-carried source is the same path argument
 by another carrier: the compile follows it and reads the file, so an unconfined
 one was that oracle again. Source sent over this transport may not `use` an

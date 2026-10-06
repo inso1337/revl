@@ -1565,7 +1565,7 @@ fn secrets_block() -> List[Str] {
     "        raise RuntimeError(",
     "            \"capability-bound secret `\" + _name + \"` was not \"",
     "            \"installed before its extern body ran; the run driver \"",
-    "            \"must resolve it at plug (item 256). No default exists \"",
+    "            \"has not resolved it (item 256). No default exists \"",
     "            \"for a secret.\")",
     "    return _REVL_SECRETS[_name]", ""]
   return o
@@ -1620,10 +1620,100 @@ fn gated_extern_class(cls: Str) -> Bool {
   return cls == "emission" || cls == "witnessed" || cls == "acquire"
 }
 
+// ------------------------------------------- computer-use (item 522 slice 3)
+// issue #1972: the UI TRANSACTION UNIT. A provide method that crosses a
+// computer-use verb runs its body inside `Frame.ui_transaction`, and every
+// computer-use extern is decorated `declared_crossing`, so the unit registers
+// the crossing's declared compensation wherever the crossing is written (a
+// statement, a `let`, a `return`, an argument) and a raising crossing still
+// registers its own. The reference derives both from `revl.ui_transaction` /
+// `revl.ui_family`; this port recomputes the same two answers from the IR.
+//
+// WHY IT IS RECOMPUTED AND NOT READ OFF THE LOWERING. `lower.py` stamps
+// `method["unit"] = "ui"` for the same question, but it answers a WIDER one: it
+// follows a call into a module `fn`, so a method that only reaches a crossing
+// through `peek_pane` carries the stamp while the reference derives NO unit for
+// it (`_calls` reads one body and does not follow callees). The corpus
+// document's `peek` is exactly that method, so a port that read the stamp would
+// wrap a method the reference leaves alone.
+//
+// A document that declares no computer-use capability gets an empty list here
+// and is emitted byte-for-byte as before.
+
+// `ui_family.REVERSIBILITY`'s keys: the admissible `root.verb` tokens. The
+// class each maps to (reversible / compensatable / confirm-required /
+// irreversible / unknown) is not rendered by this backend, so membership is the
+// whole of what the derivation reads. `ui.click` and `ui.download` have NO
+// inverse, and they are still crossings the unit covers — the decorator is what
+// registers that fact.
+fn ui_verb_known(bare: Str) -> Bool {
+  return bare == "screen.observe" || bare == "ui.find" || bare == "ui.text"
+      || bare == "ui.click" || bare == "ui.download"
+}
+
+// `ui_family.reversibility(token) is not None`: the token names a computer-use
+// verb, spelled exactly (`ui.click`) or reached through a ladder rung
+// (`ui.click.pixel`). A rung is the SAME operation under a weaker naming, so
+// `verb_of` resolves it to its verb — a rung cannot escape the unit by being
+// spelled differently, and an exact-match lookup here would let it.
+fn is_computer_use_token(token: Str) -> Bool {
+  let bare = token.split("(")[0]
+  if (ui_verb_known(bare)) { return true }
+  let segs = bare.split(".")
+  if (segs.length() < 2) { return false }
+  return ui_verb_known(`${segs[0]}.${segs[1]}`)
+}
+
+// `ui_transaction._extern_index` + `_ui_transaction_facts`'s `ui_externs`: the
+// names of the EMISSION externs whose FIRST declared capability is a
+// computer-use verb. The index is keyed on the emission class, and the token
+// falls back to the extern's own name when it declares no capability — never a
+// computer-use verb — so the two cases are the same test.
+fn ui_extern_names(externs: List[Any]) -> List[Str] {
+  var out = []
+  for (ext of externs) {
+    if (value_str(value_field(ext, "class")) != "emission") { continue }
+    let caps = value_list(value_field(ext, "capabilities"))
+    if (caps.length() == 0) { continue }
+    if (is_computer_use_token(value_str(caps[0]))) {
+      out = out.push(value_str(value_field(ext, "name")))
+    }
+  }
+  return out
+}
+
+// `ui_transaction._walk_calls` / the `_reaches` half of `_crossing_facts`:
+// whether `node` calls one of `names`, at any depth and in any position — a
+// statement, a `let`, a `return`, an argument, either `if` arm, a loop body.
+// BOTH lowered call shapes count (a component body lowers `{kind: fn, name}`, a
+// pure fn body `{kind: call, callee: {kind: var, name}}`); a walk that knew only
+// the first would miss an arrow's call. The two keys it does NOT descend are
+// named: a `compensate`/`undo` slot that names a crossing is the INVERSE of a
+// crossing, not a crossing (`_REGISTERED_INVERSE`).
+fn reaches_computer_use(node: Any, names: List[Str]) -> Bool {
+  let kind = value_str(value_field(node, "kind"))
+  if (kind == "fn" && list_contains(names, value_str(value_field(node, "name")))) { return true }
+  if (kind == "call") {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var" && list_contains(names, value_str(value_field(callee, "name")))) {
+      return true
+    }
+  }
+  for (item of value_list(node)) {
+    if (reaches_computer_use(item, names)) { return true }
+  }
+  for (k of value_keys(node)) {
+    if (k == "compensate" || k == "undo") { continue }
+    if (reaches_computer_use(value_field(node, k), names)) { return true }
+  }
+  return false
+}
+
 fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
   var out = []
   var any_secret = false
   var any_config = false
+  let crossings = ui_extern_names(externs)
   for (ext of externs) {
     if (value_list(value_field(ext, "secrets")).length() > 0) { any_secret = true }
     if (value_list(value_field(ext, "config")).length() > 0) { any_config = true }
@@ -1652,6 +1742,21 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
     }
     if (value_bool(value_field(ext, "secret_return"))) {
       out = out.push("@".concat(runtime_ref("secret_result")))
+    }
+    // item 522 slice 3 (issue #1369, issue #1972): a computer-use extern is
+    // decorated so the UI transaction unit registers its declared compensation
+    // wherever the crossing is written, and a raising crossing still registers
+    // its own. Any OTHER extern that declares `compensate` registers at its
+    // site instead, so one crossing has one registrar and never two. The
+    // compensation slot runs with no variables in scope (lower refuses one that
+    // names a parameter), so it is a closed thunk. Pushed last, so it renders
+    // BELOW the E-Stop and secret-result decorators, and emitted only for a
+    // computer-use extern, so every other module is byte-identical.
+    if (list_contains(crossings, value_str(value_field(ext, "name")))) {
+      let comp = value_field(ext, "compensate")
+      let thunk = value_is_null(comp) ? "None" : `lambda: ${expr(comp)}`
+      let call = value_is_null(comp) ? "" : call_kwarg(comp, "")
+      out = out.push(`@${runtime_ref("declared_crossing")}(${py_repr(value_str(value_field(ext, "name")))}, ${thunk}, ui=True${call})`)
     }
     let py_body = value_field(value_field(ext, "bodies"), "py")
     // item 396 option B: a `@py ref` extern with no inline body is a lazy import
@@ -1955,6 +2060,10 @@ fn runtime_ref(name: Str) -> Str {
   if (name == "mark_secret") { return "_revl_mark_secret" }
   if (name == "secret_result") { return "_revl_secret_result" }
   if (name == "estop_gated") { return "_revl_estop_gated" }
+  // item 522 slice 3 (issue #1369, issue #1972): the decorator a computer-use
+  // extern carries, so the UI transaction unit a provide method runs in can
+  // register the crossing's declared compensation wherever it is written.
+  if (name == "declared_crossing") { return "_revl_declared_crossing" }
   // item 414 (ported per item 429(d)): the recording seam a DIRECT host-extern
   // emission fires through. The alias is the one the reference's `_IMPORT_ALIAS`
   // carries, so the `from runtime import` line and the call site that references
@@ -2594,8 +2703,24 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
     return { lines: out, counter: counter }
   }
   var c = counter
+  // item 522 slice 3 (issue #1369, issue #1972): a method that crosses a
+  // computer-use verb runs its body inside a UI TRANSACTION UNIT — the unit
+  // `ui_transaction.method_plan` reads — so the extern's `declared_crossing`
+  // decorator can register the compensation wherever the crossing is written,
+  // and the unit runs the call's own compensations LIFO if the call fails.
+  // The question is asked of THIS body alone (`_calls` does not follow a call
+  // into a module `fn`), which is why it is recomputed here rather than read
+  // off `lower.py`'s `unit` stamp: the stamp follows callees, so it would wrap
+  // `peek` — a method the reference leaves alone. The unit string is the HOST
+  // spelling of the pair (`_ident(_host_key(provide)) + '.' + method`). Every
+  // other method is byte-identical.
+  var body_indent = indent + 1
+  if (reaches_computer_use(body, ui_extern_names(externs))) {
+    out = out.push(line(indent + 1, `with _revl_frame.ui_transaction(${py_repr(`${provide_name}.${name}`)}):`))
+    body_indent = indent + 2
+  }
   for (s of body) {
-    let se = method_step(s, indent + 1, provide_name, name, comp_name, c, externs)
+    let se = method_step(s, body_indent, provide_name, name, comp_name, c, externs)
     out = out.concat(se.lines)
     c = se.counter
   }
@@ -4539,6 +4664,13 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   }
   var need_secret_result = false
   var need_estop_gated = false
+  // item 522 slice 3 (issue #1369, issue #1972): the `declared_crossing`
+  // decorator every computer-use extern carries is imported exactly when the
+  // document declares one, so a document with no computer-use capability emits
+  // the same import line it did before. Gated on the EXTERN TABLE (not on a
+  // component), matching the reference, which adds the import wherever the
+  // crossings table is non-empty.
+  let need_declared_crossing = ui_extern_names(value_list(value_field(ir, "externs"))).length() > 0
   for (e of value_list(value_field(ir, "externs"))) {
     if (value_bool(value_field(e, "secret_return"))) { need_secret_result = true }
     if (components.length() > 0 && gated_extern_class(value_str(value_field(e, "class")))) { need_estop_gated = true }
@@ -4587,6 +4719,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   }
   if (validates) { imports = imports.push("validate_response as _revl_validate") }
   if (need_estop_gated) { imports = imports.push("estop_gated as _revl_estop_gated") }
+  if (need_declared_crossing) { imports = imports.push("declared_crossing as _revl_declared_crossing") }
   // issue #1932: the built-in `Result` cases are DEFINED in the shared runtime
   // and imported, never written into the module (the reference moved
   // `_emit_builtin_result`'s two classes here). A per-module `class Ok` is a
