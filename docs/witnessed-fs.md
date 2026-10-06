@@ -168,7 +168,26 @@ Failures raise the exported `FsOpError` / `ConfinementError` with explicit
 codes: `EBOUND` for duplicate or late binding, `EIDENTITY` for identity/type
 mismatch, `EINVAL` for malformed arguments, ordinary descriptor/path errno
 codes where applicable, and `ENOTSUP` if directory-fd/no-follow primitives are
-unavailable. A failed bind releases its duplicate and leaves no partial binding.
+unavailable. That last test is the public host probe `dirfd_walk_supported()`,
+and it is read on **both** surfaces: the bind, and the confined walk itself. On
+the walk it gates `_root_dirfd`, the single choke point every mutating entry
+point reaches before its first syscall, since `_open_dirfd` (the leg `write`,
+`rm`, `mkdir` and `move` all take) and `_sidecar_dir_real` (the garbage/preimage
+sidecar leg `rm` takes first) both need that descriptor. A host without those
+primitives (Windows) therefore has every witnessed mutation refused `ENOTSUP` up
+front, whether or not a root is bound, and the refusal names the platform
+limitation rather than an errno. On the unbound path that is a correction, not
+just a clarification. Without the probe the walk failed at `os.open(root,
+O_RDONLY | O_DIRECTORY)`, and the default path reported the resulting `EACCES`
+as `EOUTSIDE` ("the path to the write target changed under the confinement
+check"), naming a race that never happened, while `rm`, `mkdir` and `move`
+surfaced the bare `EACCES` (`garbage_dir failed`, `mkdir_confined failed`,
+`replace_confined failed`). The probe is a capability test, never a fallback:
+the read half is untouched, because `resolve_within`, `lexists_confined` and
+`is_dir_confined` are name-based on the unbound path and never call
+`_root_dirfd`, so a caller on such a host can still observe the workspace (issue
+#1946; pinned by `tests/test_fs_dirfd_unsupported_1946.py`). A failed bind
+releases its duplicate and leaves no partial binding.
 There is no unsafe platform fallback. Without binding, legacy relative paths,
 symlink resolution and environment-based root selection remain unchanged;
 root replacement is still outside that legacy mode's guarantee.
