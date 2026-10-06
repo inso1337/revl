@@ -2018,6 +2018,14 @@ jobs:
       # REVL_CROSS_TIER_SLOW gate (the rust async-timer lifecycle), which had
       # the same problem and is not in the cross-tier file.
       #
+      # test_1850_show_cross_tier.py landed in #2013 and was NOT wired into any
+      # step that sets REVL_REQUIRE_TIERS, so its py and ts probes were free to
+      # skip in every job and tests/test_env_gated_skips_run_somewhere.py
+      # ::test_every_tier_test_is_required_to_actually_run_in_some_ci_job went
+      # red on main, which reddened the root-suite shard of every open PR. It
+      # belongs HERE rather than in the step below because its rust and java
+      # params are gated on REVL_CROSS_TIER_SLOW, which only this step sets.
+      #
       # Run under the cordis-py venv (setup.sh above) so the py-runtime probes
       # execute too. Measured cost of this step is minutes, not seconds, which
       # is the whole reason for the switch below; it is proportionate for a job
@@ -2049,6 +2057,7 @@ jobs:
           tests/test_str_index_bounds_cross_tier.py
           tests/test_realm_conformance.py
           tests/test_time_coeffect.py
+          tests/test_1850_show_cross_tier.py
           -q
         env:
           # LIVE as of item 445. This turns on the rust and java probes, the
