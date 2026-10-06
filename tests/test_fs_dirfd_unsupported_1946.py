@@ -165,9 +165,15 @@ def dirfdless_host(monkeypatch):
     monkeypatch.setattr(ws, "_O_DIRECTORY", 0)
     monkeypatch.setattr(ws, "_O_NOFOLLOW", 0)
 
-    assert ws.dirfd_walk_supported() is False, (
-        "the simulation did not convince the guard's own predicate; the test "
-        "would be proving nothing")
+    # On the base commit the predicate does not exist yet. Guarding the
+    # self-check is what makes the base failure BEHAVIOURAL rather than a
+    # collection-time AttributeError: the ops still run, reach the filesystem,
+    # and fail on the OBSERVED `Err(EOUTSIDE)` / `Err(EACCES)` — the symptom
+    # #1946 reports. On the fixed tree the self-check always runs.
+    if hasattr(ws, "dirfd_walk_supported"):
+        assert ws.dirfd_walk_supported() is False, (
+            "the simulation did not convince the guard's own predicate; the "
+            "test would be proving nothing")
     return monkeypatch
 
 
