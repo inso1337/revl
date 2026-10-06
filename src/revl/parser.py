@@ -173,6 +173,13 @@ class MethodDecl:
     # operation declares one, so every existing method's IR is byte-identical
     # (the check it arms lives entirely in lower, keyed off this field).
     within: "WithinClause | None" = None
+    # issue #1952: the comment block DIRECTLY ABOVE the operation — contiguous
+    # `//` lines with no blank line between them and the `fn` — with the `// `
+    # prefix removed and line breaks kept. The lexer drops comments, so this is
+    # recovered from the source text by `Parser._doc_above`. `None` (the absent
+    # key in the IR) when the operation carries no such block, so every IR
+    # without operation comments stays byte-identical.
+    doc: str | None = None
 
 
 @dataclass
@@ -2431,6 +2438,13 @@ class Parser:
         # every checker diagnostic on them carry the line the fragment occupies
         # in the real file instead of line 1 (issue #313).
         self.toks = lex(source, filename, line_offset=line_offset)
+        # issue #1952: the lexer drops `//` comments, so the raw text is kept
+        # (already split into lines, so a file with many operations is scanned
+        # once, not once per operation) to recover the comment block directly
+        # above a service operation (the IR `doc` key). `_doc_above` maps a
+        # token line back into these lines via `line_offset`.
+        self._src_lines = source.split("\n")
+        self._line_offset = line_offset
         self.pos = 0
         # When set, the next `_bor` call does not consume a top-level `|` — it
         # is the functional-record-update separator `{base | f = e}`, not the
@@ -2533,6 +2547,38 @@ class Parser:
 
     def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
         return RevlError(self.filename, line, message, hint)
+
+    def _doc_above(self, line: int) -> str | None:
+        """The comment block directly above `line` (issue #1952).
+
+        `line` is a token line (1-based, already carrying `line_offset`), so it
+        is mapped back into `self._src_lines` and the block is read upward: each
+        preceding line must itself be a `//` comment, and the first line that is
+        not ends the block. A blank line therefore ends it — the block must sit
+        directly above the declaration. The `// ` prefix (leading indentation,
+        the two slashes, and one following space) is removed and the remaining
+        line breaks are kept. `None` when there is no such block, so a caller
+        emits no `doc` key at all.
+        """
+        lines = self._src_lines
+        idx = line - 1 - self._line_offset
+        if idx <= 0 or idx > len(lines):
+            return None
+        block: list[str] = []
+        i = idx - 1
+        while i >= 0:
+            stripped = lines[i].lstrip()
+            if not stripped.startswith("//"):
+                break
+            text = stripped[2:]
+            if text.startswith(" "):
+                text = text[1:]
+            block.append(text)
+            i -= 1
+        if not block:
+            return None
+        block.reverse()
+        return "\n".join(block)
 
     # -- item 157: `;` as an optional statement separator/terminator
 
@@ -4403,6 +4449,10 @@ class Parser:
                 cache=cache, validated=method_validated, retry=method_retry,
                 termination=termination, route=method_route, within=within,
                 witnessed=method_witnessed,
+                # issue #1952: the comment block directly above the operation,
+                # read from the raw source (the lexer drops comments). `None`
+                # when there is none, so the IR key is absent.
+                doc=self._doc_above(mline),
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)
