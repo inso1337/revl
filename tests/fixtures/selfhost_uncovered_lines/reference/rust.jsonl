@@ -38,8 +38,6 @@
 
 ["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_emit_req_bindings", 2, 2]
 
-["function", "component-construction-fallbacks-residuals-cover-absent-malf", "_provide_let_type", 1, 1]
-
 ["reason", "concrete-any-boxing-coercion-coerce-any-arg-a", "Concrete->Any boxing coercion (`_coerce_any_arg`): a concrete scalar flowing into an `Any`/`Value` parameter is boxed as `Value::new(serde_json::Value::from(..))` (native `compile_to`, #106/#98). The firing path is not reached by the byte-agreement corpus yet: a concrete->Any document would need the self-host `emit_rust.rvl` call renderer to mirror the same boxing (a tracked follow-up), or the two tiers diverge on it. Recorded until that mirror + corpus case land. The count rose 3 -> 5 when the non-finite-`Float` arm was added: `serde_json::Value::from(f64)` maps a non-finite float to `Null` silently, so a `Float` argument boxes through a checked `serde_json::Number::from_f64` and refuses the `None` rather than substituting a different value. The `Some` arm is corpus-reachable in principle once the mirror lands. The `None` arm is structurally unreachable from ANY static corpus document: a non-finite `Float` has no literal spelling (the frontend refuses it, item 312) and arises only at runtime, through IEEE true division. Recorded rather than chased, because the corpus case cannot exist before the mirror does. The count rose 5 -> 7 with the RETURN and `??`-DEFAULT positions: a declared `-> Any` erases to the same opaque `Value`, so returning a concrete scalar from such a function is the identical E0308 the argument position had, and an `Opt[Any] ?? <scalar>` default fills the same slot through `unwrap_or_else`. Both route through this function, and both are blocked from the corpus by the same missing mirror. The `List[Any]` arm arrives with them: a `Vec<Value>` boxes as the JSON array `stdlib/value.rvl`'s `value_list` reads back, the one container with a canonical image, and it is the coercion that let `selfhost/emit_rust.rvl` itself build as rust (the Stage-4 precondition)."]
 
 ["function", "concrete-any-boxing-coercion-coerce-any-arg-a", "_coerce_any_arg", 7, 7]
@@ -88,7 +86,7 @@
 
 ["function", "host-map-binding-inference-these-functions-scan-let", "_map_insert_candidates", 6, 6]
 
-["function", "host-map-binding-inference-these-functions-scan-let", "_map_value_expr_type", 67, 67]
+["function", "host-map-binding-inference-these-functions-scan-let", "_map_value_expr_type", 52, 52]
 
 ["function", "host-map-binding-inference-these-functions-scan-let", "_map_value_rust_type", 1, 1]
 

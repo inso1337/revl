@@ -104,6 +104,7 @@ from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
 from . import ambient as _ambient
+from . import identity as _identity
 from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
@@ -1291,6 +1292,12 @@ def _tool_source(arguments: dict) -> dict:
         result = _symbols.read(vs, symbol,
                                deps="deps" in (arguments.get("with") or []),
                                comments=arguments.get("comments", True) is not False)
+    except RevlError as error:
+        # a path that cannot be opened is a PATH error, reported by the same
+        # `report`/`classify` the check and load verbs use, so `revl_source`
+        # refuses with the same `file not found: <path>` for the same path
+        # (issue #2031) — never a missing-declaration content error.
+        return report(error)
     except (_symbols.SymbolError, _edit.EditError) as error:
         return _session_error(str(error))
     if "knowledge" in (arguments.get("with") or []):
@@ -2531,7 +2538,10 @@ def _with_candidate_knowledge(payload: dict, arguments: dict, refused) -> dict:
             vs = {"source": arguments["source"],
                   "modules": dict(arguments.get("modules") or {})}
         elif arguments.get("files"):
-            vs = _edit._files_source({"files": list(arguments["files"])})
+            # descriptive only — the refusal, if any, was already decided by
+            # `_check_as_sent`, so an unreadable path just drops out here
+            vs = _edit._files_source({"files": list(arguments["files"])},
+                                     require_all=False)
         else:
             return payload
         payload["knowledge"] = _knowledge.for_candidate(vs, refused)
@@ -4365,6 +4375,8 @@ TOOLS = [
         "name": "revl_state",
         "description": "What is loaded right now: fiber states, provided keys, whether "
                        "a rollback is available, and the trace since the last call. "
+                       "Always carries `revision` and `source_digest`, the identity "
+                       "of the compiler that answered (issue #2007), loaded or not. "
                        "Always carries `loopAxes`: reversibility rate, share "
                        "auto-approved with proof, prompts per session, preflight "
                        "coverage, violations caught before execution and residue "
@@ -4643,7 +4655,12 @@ TOOLS.extend([
                                           "`name:Type`"},
                 "resource": {"type": "string",
                              "description": "the effect-acquired resource's "
-                                            "type (default: <Service>Resource)"},
+                                            "type (default: <Service>Resource); "
+                                            "a type application like "
+                                            "'Map[Str, Str]' names a host "
+                                            "family whose Unit-returning "
+                                            "operations a Unit method's fill "
+                                            "spec lists"},
                 "effect": {"type": "boolean",
                            "description": "include the acquire/undo effect "
                                           "block (default true)"},
@@ -4959,7 +4976,11 @@ def handle(message: dict) -> dict | None:
         result = {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": SERVER_INFO,
+            # issue #2007: the serverInfo block names the compiler that
+            # answered — `revision` (git SHA, or a build id when the SHA is
+            # unknown) and `source_digest` — so a client can assert the server
+            # it drives is the revision it pinned, before it asks anything.
+            "serverInfo": {**SERVER_INFO, **_identity.identity()},
             "instructions": _instructions(),
         }
     elif method == "tools/list":

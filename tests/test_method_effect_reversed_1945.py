@@ -306,3 +306,77 @@ def test_a_consumers_inverse_undo_is_clean(tmp_path):
     result = _revl_test_app(tmp_path, 'kv.unset("who")')
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS the consumer's bracket is reversed when it unloads" in result.stdout
+
+
+# ---------------------- restoring the value the body read (issue #1980)
+
+#: The same store, but `set` reads the entry before it overwrites it and its
+#: `undo` restores what it read. `store.get(k)` is `Opt`, so the `None` arm is
+#: the `remove(k)` the old form used and the `Some` arm puts the old value back
+#: — which is the arm `remove(k)` alone could not do (the D1 case above).
+RESTORE_STORE = """service Kv {
+  fn get(k: Str) -> Str
+  fn set(k: Str, v: Str) -> Str
+  fn put(k: Str, v: Str) -> Str
+}
+
+component Store provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      let prev = store.get(k)
+      effect store.insert(k, v)
+      undo   match prev { Some(x) => store.insert(k, x), None => store.remove(k) }
+      return v
+    }
+    fn put(k, v) = store.insert(k, v)
+  }
+}
+"""
+
+
+@needs_cordis
+@pytest.mark.parametrize("calls", [
+    [("set", ["alpha", "one"])],
+    [("put", ["alpha", "zero"]), ("set", ["alpha", "one"])],
+], ids=["an absent key", "an existing key"])
+def test_the_restored_read_reverses_the_key(calls):
+    """The #1966 net-per-frame check, on the form #1980 admits: the `None` arm
+    takes an absent key back out, and the `Some` arm puts an existing key's old
+    value back. Both frames end where they started, so neither is residue."""
+    report = _teardown(compile_source(RESTORE_STORE, "store.rvl"), calls)
+    assert report["noResidue"] is True
+    assert _messages(report) == []
+
+
+_RESTORE_LIFECYCLE = """
+lifecycle test "a restored write is reversed" {
+  load Store
+  CALLS
+  unload Store
+  assert no_residue
+}
+"""
+
+
+def _restore_revl_test(tmp_path: Path, calls: str) -> subprocess.CompletedProcess:
+    path = tmp_path / "restore.rvl"
+    path.write_text(RESTORE_STORE + _RESTORE_LIFECYCLE.replace("CALLS", calls),
+                    encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run([sys.executable, "-m", "revl", "test", str(path)],
+                          cwd=ROOT, env=env, capture_output=True, text=True,
+                          timeout=300)
+
+
+@needs_cordis
+def test_revl_test_passes_the_restored_write_over_an_existing_key(tmp_path):
+    """The very call `test_revl_test_fails_an_overwrite_naming_the_key` fails on
+    with `remove(k)` as the undo — same `put`, same `set`, same key. Restoring
+    the read value is what makes the loud path green."""
+    result = _restore_revl_test(tmp_path, 'call kv.put("alpha", "zero")\n'
+                                          '  call kv.set("alpha", "one")')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS a restored write is reversed" in result.stdout
