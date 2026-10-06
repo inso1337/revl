@@ -237,12 +237,87 @@ def _within_roots(path: str, roots: tuple[str, ...]) -> bool:
     """Whether `path` resolves inside one of `roots`. Resolved with `realpath`
     BEFORE the comparison, so `../` traversal and a symlink pointing out of the
     root are both caught, and resolved without stat-ing for existence, so the
-    check itself is not the oracle it is closing."""
+    check itself is not the oracle it is closing.
+
+    This is the ABSOLUTE-path rule, and `abspath` is right for what it is:
+    `_operator_text_of` reads the path it checks with the same cwd-relative
+    `open`, so resolving against the cwd there would be a lie. A caller-supplied
+    path ARGUMENT never arrives here relative — `_jail_refusal` absolutises it
+    against the roots first (`_absolutise_path_arguments`, issue #2038)."""
     real = os.path.realpath(os.path.abspath(path))
     for root in roots:
         if real == root or real.startswith(root + os.sep):
             return True
     return False
+
+
+def _root_resolved(path: str, roots: tuple[str, ...]) -> str | None:
+    """The absolute path a caller-supplied path argument names when it lies
+    inside a sanctioned root, else `None`.
+
+    An ABSOLUTE path gets exactly `_within_roots`'s rule: `realpath`-resolved
+    before the comparison, so `../` traversal and a symlink pointing out of a
+    root are both caught, and without stat-ing for existence, so the check is
+    not the oracle it closes.
+
+    A RELATIVE path is resolved against the sanctioned ROOTS, never against the
+    server process's cwd (issue #2038): the cwd is an accident of how the
+    operator launched the process and, under `--root`, is deliberately not the
+    sanctioned tree. The path is joined to each root in the operator's declared
+    order and the FIRST join that lands inside the sanctioned set wins, so the
+    rule stays deterministic when several roots are configured; a path no root
+    admits names nothing inside them."""
+    if os.path.isabs(path):
+        real = os.path.realpath(os.path.abspath(path))
+        return real if _within_roots(real, roots) else None
+    for root in roots:
+        real = os.path.realpath(os.path.join(root, path))
+        if _within_roots(real, roots):
+            return real
+    return None
+
+
+def _absolutise_path_arguments(node, roots: tuple[str, ...]) -> list[str]:
+    """Rewrite, in place, every caller-supplied RELATIVE path argument to the
+    absolute path it names inside a sanctioned root (`_root_resolved`), so the
+    handler opens the file the caller named and not a cwd-relative namesake.
+    Returns the path arguments no root admits, left exactly as the caller wrote
+    them, so a refusal quotes the caller's own spelling.
+
+    The traversal mirrors `_collect_path_arguments` — `_PATH_ARGUMENTS` is the
+    single source of truth for which arguments are paths — including the ones
+    nested inside a `revl_restore` snapshot document."""
+    unadmitted: list[str] = []
+    _walk_path_arguments(node, roots, unadmitted)
+    return unadmitted
+
+
+def _walk_path_arguments(node, roots: tuple[str, ...], unadmitted: list) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _PATH_ARGUMENTS:
+                if isinstance(value, str):
+                    node[key] = _rewrite_path_argument(value, roots, unadmitted)
+                elif isinstance(value, list):
+                    node[key] = [
+                        _rewrite_path_argument(v, roots, unadmitted)
+                        if isinstance(v, str) else v for v in value]
+            else:
+                _walk_path_arguments(value, roots, unadmitted)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_path_arguments(item, roots, unadmitted)
+
+
+def _rewrite_path_argument(path: str, roots: tuple[str, ...],
+                           unadmitted: list) -> str:
+    if not path or os.path.isabs(path):
+        return path
+    resolved = _root_resolved(path, roots)
+    if resolved is None:
+        unadmitted.append(path)
+        return path
+    return resolved
 
 
 def _collect_path_arguments(node, out: list) -> None:
@@ -371,11 +446,19 @@ def _jail_refusal(arguments: dict) -> dict | None:
 
     Two carriers, one jail: a path ARGUMENT (`files`, `traceFile`, ...) and a
     `use` path written inside transport-carried source (`_transport_use_escapes`,
-    roadmap 425 F2)."""
+    roadmap 425 F2).
+
+    A relative path argument is first resolved against the sanctioned roots
+    (`_absolutise_path_arguments`, issue #2038) — the operator sanctioned that
+    tree, so that tree is the only base a relative path in a call to this
+    server can mean. The comparison below then sees absolute paths only, and
+    every real escape (`../`, a symlink out, an absolute path outside every
+    root) is still refused with the caller's own spelling."""
+    roots = _file_roots()
+    unadmitted = _absolutise_path_arguments(arguments, roots)
     paths: list = []
     _collect_path_arguments(arguments, paths)
-    roots = _file_roots()
-    escaped = [p for p in paths if not _within_roots(p, roots)]
+    escaped = [p for p in paths if not _within_roots(p, roots)] + unadmitted
     imports = _transport_use_escapes(arguments) if not escaped else []
     if not escaped and not imports:
         return None

@@ -42,7 +42,9 @@ same three-way input, and you pass exactly one form:
 
 - `source` - inline `.rvl` text (use this for a generated component; it is
   never written to disk).
-- `files` - an array of `.rvl` paths.
+- `files` - an array of `.rvl` paths, absolute or relative. A relative path
+  resolves against the operator's sanctioned root(s), not the server's cwd; an
+  absolute one outside every root is refused.
 - `modules` - in-memory sources for `use` imports, keyed by the path the import
   names, so a multi-module candidate is checked without touching the
   filesystem.
