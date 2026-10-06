@@ -70,9 +70,9 @@
 
 ["function", "backends-java-emit-py-emit-component-residual-requirement", "_emit_component", 18, 18]
 
-["reason", "backends-java-emit-py-emit-component-stmts-residual", "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering."]
+["reason", "backends-java-emit-py-emit-component-stmts-residual", "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering. Issue #2009 adds nine to `_emit_component_stmts`, one to `_emit_v3_lifecycle_tests` and nine to `_method_body_lines.render`: the arm's document-level gate (`_journal_readable(ir)`), the `RevlJournal` slot on the generated provider, and the `REVL_JOURNAL_DEPTH` arm/disarm pair around every bracketed host-Map write."]
 
-["function", "backends-java-emit-py-emit-component-stmts-residual", "_emit_component_stmts", 17, 17]
+["function", "backends-java-emit-py-emit-component-stmts-residual", "_emit_component_stmts", 26, 26]
 
 ["reason", "backends-java-emit-py-emit-ftoa-helper-only", "backends/java/emit.py::_emit_ftoa_helper: Only the Float-to-Str formatter text is missing, an explicit port boundary reproduced by strict floats.rvl divergence; Float literals, arithmetic and widening are covered."]
 
@@ -142,9 +142,9 @@
 
 ["function", "backends-java-emit-py-emit-v3-externs-extern", "_emit_v3_externs", 32, 32]
 
-["reason", "backends-java-emit-py-emit-v3-lifecycle-tests", "backends/java/emit.py::_emit_v3_lifecycle_tests: Lifecycle test method assembly, load/unload state and conditional REVL_TESTS invocation require in-file lifecycle tests, explicitly deferred."]
+["reason", "backends-java-emit-py-emit-v3-lifecycle-tests", "backends/java/emit.py::_emit_v3_lifecycle_tests: Lifecycle test method assembly, load/unload state and conditional REVL_TESTS invocation require in-file lifecycle tests, explicitly deferred. Issue #2009 adds one statement: the generated lifecycle harness arms the provider's `RevlJournal` before each bracketed host-Map write and closes it at the frame's disposer."]
 
-["function", "backends-java-emit-py-emit-v3-lifecycle-tests", "_emit_v3_lifecycle_tests", 31, 31]
+["function", "backends-java-emit-py-emit-v3-lifecycle-tests", "_emit_v3_lifecycle_tests", 32, 32]
 
 ["reason", "backends-java-emit-py-emit-v3-remaining-assembly", "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458 adds one more: the `_uses_int_arith` call that pulls in the revlDivFloor/revlDivEuclid/revlMod block, on the same helper-demand boundary as the checked-division one beside it."]
 
@@ -258,9 +258,9 @@
 
 ["function", "backends-java-emit-py-metadata-lit-only-unsupported", "_metadata_lit", 1, 1]
 
-["reason", "backends-java-emit-py-method-body-lines-render", "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the two `void` return statements here: its return type lookup failed too, so `x + x` was emitted as a statement followed by `return;`. Its method now renders with its declared `long` signature."]
+["reason", "backends-java-emit-py-method-body-lines-render", "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the two `void` return statements here: its return type lookup failed too, so `x + x` was emitted as a statement followed by `return;`. Its method now renders with its declared `long` signature. Issue #2009 adds nine: the arm's document-level gate (`_journal_readable(ir)`) and the `REVL_JOURNAL_DEPTH` arm/disarm pair around every bracketed host-Map write in a provide method or activation body."]
 
-["function", "backends-java-emit-py-method-body-lines-render", "_method_body_lines.render", 56, 56]
+["function", "backends-java-emit-py-method-body-lines-render", "_method_body_lines.render", 65, 65]
 
 ["reason", "backends-java-emit-py-method-body-residual-empty", "backends/java/emit.py::_method_body: Residual empty/multistep effectful-body traps and nonvoid bare-return refusal are outside the simple legacy method gate; a value expression discarded by a void method requires the nonsimple legacy effect/call path. Void bare returns and scalar/name returns are covered."]
 
@@ -459,6 +459,18 @@
 ["function", "issue-1512-param-type-s-object-fallback-is-no-longer-reached", "_method_name", 1, 1]
 
 ["function", "issue-1512-param-type-s-object-fallback-is-no-longer-reached", "_param_type", 1, 1]
+
+["reason", "issue-2009-host-map-journal-arm-lines-inside-shared-helpers-java", "Issue #2009: the statements the host-map journal arm adds inside helpers the java corpus already calls. `_bracket_writes_host_map` asks whether a step carries a `bracket`, and `_emit_bracket_track` renders the `REVL_JOURNAL_DEPTH` arm/disarm pair around that bracket's forward write. Both answer about a document the corpus does not have, for the reason recorded on the arm's own helpers, and both sit behind the same `_JOURNAL_MODE` gate."]
+
+["function", "issue-2009-host-map-journal-arm-lines-inside-shared-helpers-java", "_bracket_writes_host_map", 1, 1]
+
+["function", "issue-2009-host-map-journal-arm-lines-inside-shared-helpers-java", "_emit_bracket_track", 1, 1]
+
+["reason", "issue-2009-host-map-journal-arm-no-java-corpus-document", "Issue #2009: the host-map journal arm's own helpers. `_node_writes_host_map` decides whether a document's host Map writes are journalled at all, and `_journal_runtime_lines` emits the `RevlJournal`/`RevlMapJournal` support the arm needs. No emit_java_corpus document has a host `Map` written under a `bracket` in a document that ALSO carries a lifecycle `assert no_residue`, so `_journal_readable(ir)` is False for every corpus document, `_JOURNAL_MODE` stays off and neither is called. Reaching them with a corpus document is not available at this tier: the document would first have to be ported into `selfhost/emit_java.rvl`, which carries no journal arm at all, so the byte-agreement oracle in tests/test_selfhost_emit_java.py would go RED before this ledger could be satisfied. The arm is exercised on all five tiers by tests/test_host_map_journal_2009.py, which drives the runtime path; the frontend refuses the untyped `store.insert(k, v)` form of that program, so it cannot be a compile-side corpus case on any tier."]
+
+["function", "issue-2009-host-map-journal-arm-no-java-corpus-document", "_journal_runtime_lines", 3, 3]
+
+["function", "issue-2009-host-map-journal-arm-no-java-corpus-document", "_node_writes_host_map", 1, 1]
 
 ["reason", "item-458-java-s-div-floor-div-euclid", "Item 458: java's `div_floor`/`div_euclid`/`mod` move from inline `Math.*` expressions to static helpers, because `Math.floorDiv` wraps at Int.MIN / -1 and `Math.abs(Long.MIN_VALUE)` is negative. `_emit_int_arith_helpers` is the block and `_uses_int_arith.walk` the demand scan; no java corpus document calls a named division, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl ports none of this family (item-429(d)). The reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py."]
 

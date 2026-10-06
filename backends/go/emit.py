@@ -276,12 +276,18 @@ def _reset_v3_typed_component_state() -> None:
     resetting to defaults here never changes a real emit's output."""
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _UI_EXTERNS, _UI_METHOD_SCOPES, _COMP_NEEDS_UI
+    global _JOURNAL_MODE
     _V3_MODE = False
     _V3_TYPES = {}
     _V3_TYPED_COMPONENTS = False
     _UI_EXTERNS = {}
     _UI_METHOD_SCOPES = {}
     _COMP_NEEDS_UI = False
+    # issue #2009: same reasoning as the globals above -- `_emit` and
+    # `_emit_v3_combined` each re-decide this on entry, so resetting it to the
+    # default here only stops a leaked True from reaching a tool that pokes
+    # `_host_runtime()` outside a real emit.
+    _JOURNAL_MODE = False
 
 
 def _go_type(t) -> str:
@@ -1430,6 +1436,11 @@ _COMP_NEEDS_METHOD_WITNESSED = False
 # issue #1592: whether some provide method calls an extern that declares its
 # own `compensate` in a value position, so `revlDeclared` is emitted.
 _COMP_NEEDS_DECLARED = False
+# issue #2009: whether some component emits an `effect ... undo ...` bracket, so
+# its Apply carries a `revlJournalFrame` and the lifecycle tests must reset the
+# package-global journal between scenarios (and assert it empty at
+# `assert no_residue`). A document with no bracket stays byte-identical.
+_COMP_NEEDS_JOURNAL = False
 # issue #1369 (item 522 slice 3): the document's computer-use externs, by name,
 # and its provide methods that run in a UI scope, keyed by the identity of the
 # method dict (see `_set_ui_facts`). `_COMP_NEEDS_UI` emits the scope runtime
@@ -1778,11 +1789,19 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
         or _ui_method_scope(m) is not None
         for m in methods)
 
+    # issue #2009: a provide method carrying an `effect ... undo ...` bracket
+    # arms the component's host-map write journal, so it needs the journal frame
+    # too. Only such a block gains the field, so every other impl stays
+    # byte-identical.
+    has_method_bracket = any(_steps_have_bracket(m.get("body")) for m in methods)
+
     # struct fields: ctx + config + every bind + every req (over-capture ok).
     out.append("type %s struct {" % struct)
     out.append("\tctx *stc.Context")
     if has_method_frame:
         out.append("\trevlFrame *RevlFrame")
+    if has_method_bracket:
+        out.append("\trevlJournal *revlJournalFrame")
     if has_config:
         out.append("\tcfg %sConfig" % _camel(comp_name))
     for b in binds:
@@ -2086,10 +2105,18 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             undo = step.get("undo")
             ctx = env.ctx_ref()
             out.append("%svar %s bool" % (pad, bind))
+            jref = _journal_ref(env)
+            jrn = undo is not None and _bracket_writes_host_map(step)
             out.append("%s%s.Effect(func() stc.Inverse {" % (pad, ctx))
             _emit_pins(step, "undo", out, pad + "\t")
+            if jrn:
+                # issue #2009: arm the journal before the forward write.
+                out.append("%s\t%s.Begin()" % (pad, jref))
             out.append("%s\t%s = %s" % (pad, bind, acquire))
-            if undo is not None:
+            if jrn:
+                out.append("%s\treturn %s.Guard(func() error { if %s { %s }; return nil })"
+                           % (pad, jref, bind, _expr(undo, env)))
+            elif undo is not None:
                 out.append("%s\treturn func() error { if %s { %s }; return nil }"
                            % (pad, bind, _expr(undo, env)))
             else:
@@ -2245,11 +2272,23 @@ def _emit_effect_step(step, env: _Env, out, indent):
     acquire = _expr(step["acquire"], env)
     undo = step.get("undo")
     ctx = env.ctx_ref()
+    jref = _journal_ref(env)
+    jrn = undo is not None and _bracket_writes_host_map(step)
     out.append("%s%s.Effect(func() stc.Inverse {" % (pad, ctx))
     _emit_pins(step, "undo", out, pad + "\t")
+    if jrn:
+        # issue #2009: arm the host-map write journal BEFORE the forward write,
+        # and close it where the inverse is REGISTERED (py's
+        # `_revl_frame._journal_begin()` at backends/python/emit.py:2096, closed
+        # by `Frame._guard`, backends/python/runtime.py:3690).
+        out.append("%s\t%s.Begin()" % (pad, jref))
     out.append("%s\t%s" % (pad, acquire))
-    if undo is not None:
-        out.append("%s\treturn func() error { %s; return nil }" % (pad, _expr(undo, env)))
+    if jrn:
+        out.append("%s\treturn %s.Guard(func() error { %s; return nil })"
+                   % (pad, jref, _expr(undo, env)))
+    elif undo is not None:
+        out.append("%s\treturn func() error { %s; return nil }"
+                   % (pad, _expr(undo, env)))
     else:
         out.append("%s\treturn nil" % pad)
     out.append("%s})" % pad)
@@ -2592,12 +2631,33 @@ def _emit_component(comp, services, out):
     # `runCompensationPhase` is a no-op (a5a — compensations never ran, so
     # there is nothing to drain).
     needs_frame = _body_needs_frame(body)
-    if needs_frame:
-        global _COMP_NEEDS_TEARDOWN
-        _COMP_NEEDS_TEARDOWN = True
-        out.append("\t\t\t_revlFrame := newRevlFrame()")
+    # issue #2009: the host-map write journal. `_revlJournal` is the activation's
+    # arming frame — created only where a bracket is emitted, so a component with
+    # none emits byte-identically to before.
+    needs_journal = _body_needs_journal(body)
+    if needs_journal:
+        global _COMP_NEEDS_JOURNAL
+        _COMP_NEEDS_JOURNAL = True
+        out.append("\t\t\t_revlJournal := revlJournalNew()")
+    if needs_frame or needs_journal:
+        # issue #2009: the journal is judged on the BOTTOM of the unwind stack
+        # -- py calls `_judge_frame` from `Frame.begin` (yielded FIRST, so
+        # disposed LAST, backends/python/runtime.py:4327), never from `drain`.
+        # That ordering is load-bearing: by the time this runs every bracket's
+        # own inverse has already replayed, so a map that was released has set
+        # its `closed` flag and the MAP's own check (`journalJudge` in `Drop`)
+        # owns the report; this arm only covers a map still open at unload.
+        if needs_frame:
+            global _COMP_NEEDS_TEARDOWN
+            _COMP_NEEDS_TEARDOWN = True
+            out.append("\t\t\t_revlFrame := newRevlFrame()")
+        tail = []
+        if needs_frame:
+            tail.append("_revlFrame.runCompensationPhase()")
+        if needs_journal:
+            tail.append("_revlJournal.Judge()")
         out.append("\t\t\tif err := ctx.Effect(func() stc.Inverse {")
-        out.append("\t\t\t\treturn func() error { _revlFrame.runCompensationPhase(); return nil }")
+        out.append("\t\t\t\treturn func() error { %s; return nil }" % "; ".join(tail))
         out.append("\t\t\t}); err != nil {")
         out.append("\t\t\t\treturn nil, err")
         out.append("\t\t\t}")
@@ -3340,6 +3400,115 @@ def _body_needs_frame(steps) -> bool:
     return False
 
 
+def _journal_ref(env: _Env) -> str:
+    """The `revlJournalFrame` expression in scope at the current emit site: the
+    Apply's `_revlJournal` local, or the provide impl's `revlJournal` field
+    inside a method body — the same seam `revlFrame` uses (issue #2009)."""
+    if env.receiver:
+        return "%s.revlJournal" % env.receiver
+    return "_revlJournal"
+
+
+_MAP_JOURNAL_VERBS = ("insert", "insert_if_absent", "remove")
+
+
+def _node_writes_host_map(node) -> bool:
+    """True iff `node` contains a call to a host-map WRITER (`insert`,
+    `insert_if_absent`, `remove`) on a bind this component acquired as a
+    `Map[V]` -- the only shape `Map.journalNote` records (issue #2009)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "call":
+            tgt = node.get("target") or {}
+            if (isinstance(tgt, dict) and tgt.get("kind") == "name"
+                    and node.get("method") in _MAP_JOURNAL_VERBS
+                    and str(_BIND_HOST.get(tgt.get("id"), "")).startswith("Map[")):
+                return True
+        for v in node.values():
+            if _node_writes_host_map(v):
+                return True
+    elif isinstance(node, (list, tuple)):
+        for v in node:
+            if _node_writes_host_map(v):
+                return True
+    return False
+
+
+def _bracket_writes_host_map(step) -> bool:
+    """True iff this `effect ... undo ...` bracket writes a host Map -- in its
+    forward acquire, its block-`setup`, or its undo. Only such a bracket needs
+    the #2009 write journal: `Map`'s own writers are the sole recorders, so a
+    bracket that never touches a map (a `Pool.new()`/`Dispose()`, a
+    `subscribe`/`Close`, a timer) emits byte-identically to before and its
+    inverse text stays unwrapped.
+
+    Also False whenever the document cannot READ the journal at all
+    (`_JOURNAL_MODE`): the only reader on this tier is `assert no_residue` in a
+    `lifecycle test`, so a document without one gets no journal runtime, no
+    frame, and no per-bracket arming -- byte-identical to before the fold."""
+    if not _JOURNAL_MODE:
+        return False
+    if _node_writes_host_map(step.get("acquire")):
+        return True
+    if _node_writes_host_map(step.get("undo")):
+        return True
+    for s in step.get("setup") or []:
+        if _node_writes_host_map(s):
+            return True
+    return False
+
+
+def _steps_have_bracket(steps) -> bool:
+    """True iff some step in `steps` emits an `effect ... undo ...` bracket whose
+    forward write must be journalled (issue #2009): a `let-effect`/`effect` step
+    carrying an `undo`, recursing into `if`/`while`/`for` bodies and a
+    block-effect's `setup`. A witnessed acquisition is NOT a bracket (it
+    registers a transactional entry on the frame), so it arms no journal."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in ("let-effect", "effect") and step.get("undo") is not None:
+            if (_witnessed_extern(step.get("acquire")) is None
+                    and _bracket_writes_host_map(step)):
+                return True
+        if _steps_have_bracket(step.get("setup")):
+            return True
+        if kind == "if":
+            if _steps_have_bracket(step.get("then")) or _steps_have_bracket(step.get("else")):
+                return True
+        elif kind in ("while", "for", "timer"):
+            if _steps_have_bracket(step.get("body")):
+                return True
+    return False
+
+
+def _provide_has_method_bracket(provide_step) -> bool:
+    """True iff any method of a `provide` step carries an `effect ... undo ...`
+    bracket, so the impl struct needs the `revlJournal` field and the activation
+    journal is handed to it."""
+    return any(_steps_have_bracket(m.get("body"))
+               for m in provide_step.get("methods", []) or [])
+
+
+def _body_needs_journal(steps) -> bool:
+    """True iff some step in `steps` (recursing into `if`) emits a bracket, OR a
+    `provide` block whose method brackets — i.e. this component's Apply needs the
+    `revlJournalFrame` local (issue #2009). A component with no bracket gets none
+    and emits byte-identically to before."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in ("let-effect", "effect") and step.get("undo") is not None:
+            if (_witnessed_extern(step.get("acquire")) is None
+                    and _bracket_writes_host_map(step)):
+                return True
+        if _steps_have_bracket(step.get("setup")):
+            return True
+        if kind == "provide" and _provide_has_method_bracket(step):
+            return True
+        if kind == "if":
+            if _body_needs_journal(step.get("then")) or _body_needs_journal(step.get("else")):
+                return True
+    return False
+
+
 def _call_descriptor(node) -> tuple[str, str]:
     """Best-effort static (key, method) naming for a residue record's
     `crossing`/`attempted` — the WAL discharge-descriptor's `receiver`/
@@ -3866,14 +4035,29 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             # runs its statements before the acquire, inside the effect closure.
             for setup_step in step.get("setup") or []:
                 _emit_method_body([setup_step], env, out, indent + 1)
+            jref = _journal_ref(env)
+            jrn = undo is not None and _bracket_writes_host_map(step)
+            if jrn:
+                # issue #2009: arm the host-map write journal BEFORE the
+                # acquisition's forward write (py `_journal_begin` at
+                # backends/python/emit.py:2066).
+                out.append("%s%s.Begin()" % (inner, jref))
             out.append("%s%s = %s" % (inner, _bind_field(bind), acquire))
-            if undo is not None and _is_map_cas(step["acquire"]):
+            if jrn and _is_map_cas(step["acquire"]):
                 # item 397: result-guarded undo — identity inverse on a `false`
                 # CAS, so teardown never removes the winner's entry.
-                out.append("%sreturn func() error { if %s { %s }; return nil }"
-                           % (inner, _bind_field(bind), _expr(undo, env)))
+                out.append("%sreturn %s.Guard(func() error { if %s { %s }; return nil })"
+                           % (inner, jref, _bind_field(bind), _expr(undo, env)))
+            elif jrn:
+                out.append("%sreturn %s.Guard(func() error { %s; return nil })"
+                           % (inner, jref, _expr(undo, env)))
             elif undo is not None:
-                out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
+                if _is_map_cas(step["acquire"]):
+                    out.append("%sreturn func() error { if %s { %s }; return nil }"
+                               % (inner, _bind_field(bind), _expr(undo, env)))
+                else:
+                    out.append("%sreturn func() error { %s; return nil }"
+                               % (inner, _expr(undo, env)))
             else:
                 out.append("%sreturn nil" % inner)
             out.append("%s}); err != nil {" % pad)
@@ -3887,10 +4071,19 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             # bare effect step at component top level
             acquire = _expr(step["acquire"], env)
             undo = step.get("undo")
+            jref = _journal_ref(env)
+            jrn = undo is not None and _bracket_writes_host_map(step)
             out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
+            if jrn:
+                # issue #2009: arm the journal before the forward write.
+                out.append("%s%s.Begin()" % (inner, jref))
             out.append("%s%s" % (inner, acquire))
-            if undo is not None:
-                out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
+            if jrn:
+                out.append("%sreturn %s.Guard(func() error { %s; return nil })"
+                           % (inner, jref, _expr(undo, env)))
+            elif undo is not None:
+                out.append("%sreturn func() error { %s; return nil }"
+                           % (inner, _expr(undo, env)))
             else:
                 out.append("%sreturn nil" % inner)
             out.append("%s}); err != nil {" % pad)
@@ -4024,6 +4217,10 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # component always needs the frame, see `_body_needs_frame`).
         if _provide_has_method_frame(step):
             fields.append("revlFrame: _revlFrame")
+        if _provide_has_method_bracket(step):
+            # issue #2009: hand the activation's journal frame to a provide
+            # block whose method brackets.
+            fields.append("revlJournal: _revlJournal")
         if comp.get("config"):
             fields.append("cfg: cfg")
         for b in [x["bind"] for x in comp.get("body", []) if x.get("step") == "let-effect"]:
@@ -4386,6 +4583,10 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
         # test's `advance` steps start from t=0 and see only its own timers,
         # independent of any earlier lifecycle test in the file (mirrors the
         # py/ts tiers' Clock/clockReset at test start).
+        if _COMP_NEEDS_JOURNAL:
+            # issue #2009: the write journal is package-global like the host
+            # resource counter; reset it so this test sees only its own writes.
+            out.append("\tRevlJournalReset()")
         if any(s.get("step") == "advance" for s in test.get("body") or []):
             out.append("\tRevlClockReset()")
         for step in test.get("body") or []:
@@ -4501,6 +4702,17 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 out.append("\tif !(len(root.Fibers()) == 0 && revlHostLive() == 0) {")
                 out.append("\t\trevlT.Fatalf(%s, len(root.Fibers()), revlHostLive())"
                            % _go_string(where + ": residue — %d fiber(s), %d host resource(s) (R4/R1)"))
+                out.append("\t}")
+                # issue #2009: R4's host-MAP half. The two counters above prove
+                # every host object was RELEASED; they cannot see whether a
+                # release left the object's contents the way the bracket found
+                # them, so an `undo` that destroys an entry another bracketed
+                # write put there passed silently. The write journal is what
+                # sees it (py `_judge_journal`, backends/python/runtime.py:7428;
+                # the py fold's `NotReversed`).
+                out.append("\tif misses := RevlJournalMisses(); len(misses) > 0 {")
+                out.append("\t\trevlT.Fatalf(%s, len(misses), misses)"
+                           % _go_string(where + ": residue — %d un-reversed host-map write(s) (R4): %v"))
                 out.append("\t}")
             elif kind == "advance":
                 # item 102: drive the clock coeffect forward (go has the same
@@ -4697,6 +4909,12 @@ def _host_runtime() -> str:
                       _SECRET_PREAMBLE if _SECRET_MODE else "")
     src = src.replace("@SECRET_SCRUB@", _SECRET_SCRUB if _SECRET_MODE else "")
     src = src.replace("@SECRET_RESET@", _SECRET_RESET if _SECRET_MODE else "")
+    # issue #2009: the host-map write journal and its seams into `Map`, filled
+    # only for a document that can read it (`_JOURNAL_MODE`). Substituted
+    # BEFORE the collision rename below so a `RevlMap` document renames the
+    # journal's `*Map[V]` receivers along with the type they hang off.
+    for token, off_text, on_text in _JOURNAL_SLOTS:
+        src = src.replace(token, on_text if _JOURNAL_MODE else off_text)
     if _V3_TYPED_COMPONENTS:
         for name in _HOST_RUNTIME_RENAMES:
             if name not in _V3_TYPES:
@@ -5193,6 +5411,7 @@ func (p *Pool) Execute(sql string) @INT@ {
 	return 0
 }
 
+@JOURNAL@
 // Map is a thread-safe map with Str keys. The value type is generic — each
 // site's `Map.new()` pins `V` from how the map is used (FR-4: a revl
 // `Map[Str, Int]` counter or `Map[Str, List[Msg]]` ledger, not only String),
@@ -5202,6 +5421,7 @@ func (p *Pool) Execute(sql string) @INT@ {
 type Map[V any] struct {
 	mu sync.Mutex
 	m  map[string]V
+	@JOURNAL_FIELDS@
 }
 
 func MapNew[V any]() *Map[V] {
@@ -5209,8 +5429,9 @@ func MapNew[V any]() *Map[V] {
 	revlHostAcquire()
 	return &Map[V]{m: map[string]V{}}
 }
-func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
+@JOURNAL_DROP@
 func (m *Map[V]) Insert(k string, v V) {
+	@JOURNAL_INSERT@
 	m.mu.Lock()
 	m.m[k] = v
 	m.mu.Unlock()
@@ -5223,6 +5444,7 @@ func (m *Map[V]) Insert(k string, v V) {
 // leaves the existing value untouched. Under N concurrent callers on one map,
 // exactly one receives true.
 func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
+	@JOURNAL_INSERT_IF_ABSENT@
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.m[k]; ok {
@@ -5232,6 +5454,7 @@ func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
 	return true
 }
 func (m *Map[V]) Remove(k string) {
+	@JOURNAL_REMOVE@
 	m.mu.Lock()
 	delete(m.m, k)
 	m.mu.Unlock()
@@ -5269,6 +5492,358 @@ func (m *Map[V]) Keys() []string {
 	return ks
 }
 '''
+
+# issue #2009: the host-map write journal, extracted from `_HOST_RUNTIME`
+# above so it can be emitted only where it can be READ. Its one reader on
+# this tier is `assert no_residue` inside a `lifecycle test` (the R4 host-map
+# half below); a document without one can never consult the journal, so it
+# gets none of it and emits byte-identically to before the fold -- which is
+# what the self-host byte-agreement oracle (tests/test_selfhost_emit_go.py)
+# pins. The five `@JOURNAL*@` slots below are the seams it cuts into the
+# shared `Map` stub; `_host_runtime` fills all six together, so an emitted
+# program either carries the whole journal or none of it.
+_JOURNAL_RUNTIME = r'''// ---- host-map write journal (issue #2009) ------------------------------
+//
+// The R1 live-resource counter above proves every host object was RELEASED. It
+// cannot see whether the release left the object's CONTENTS the way the bracket
+// found them, and neither can the fiber count: an `undo` that deletes an entry
+// some OTHER bracketed write put there returns both counters to zero and leaves
+// the map silently short. This is the go mirror of the py reference tier's
+// journal fold -- `_JOURNAL` / `_journal_note` / `_judge_journal` / `_not_reversed`
+// and `NotReversed` in backends/python/runtime.py (7393-7530), armed by
+// `Frame._journal_begin` (3620) and closed by `Frame._guard` (3690) -- so the
+// same non-reversal is observable on this tier.
+//
+// The discipline, ported:
+//
+//   * the emitter arms the journal immediately before a bracket's forward write
+//     (`Begin`, py `_journal_begin` -- emit.py:2066/2096/3103);
+//   * a host-map WRITER notes FIRST, before it mutates (`journalNote`, py
+//     `_journal_note` 7400), remembering what the key held;
+//   * the journal is CLOSED where the bracket's inverse is REGISTERED
+//     (`Guard`, py `_guard` 3690) and re-armed while that inverse RUNS, so a
+//     key only the undo writes is judged too;
+//   * the map judges its own journal as it is released (`journalJudge` as the
+//     first statement of `Drop`, py `_judge_journal` 7428) and the activation
+//     judges its frame's journal at unload (`Judge`, py `_judge_frame` 3638);
+//   * a miss is a residue, and `assert no_residue` fails on it.
+
+// revlJournalEntry is the FIRST bracketed write of one key: what the key held
+// immediately before it, and which verb wrote it (py
+// `store._journaled[key] = (prior, stack[0], verb)`, runtime.py:7400).
+type revlJournalEntry struct {
+	prior   any
+	present bool
+	verb    string
+}
+
+// revlFrameEntry is one key on the activation's own journal: the same three
+// facts, plus how to read the key back at unload (py keeps the store itself in
+// `frame._journal` and calls `store.data.get` at `_judge_frame`).
+type revlFrameEntry struct {
+	prior   any
+	present bool
+	verb    string
+	read    func() (any, bool)
+	// released reports whether the map this entry belongs to has already been
+	// dropped -- py's `if store.closed: continue` in `_judge_frame`
+	// (backends/python/runtime.py:3638): a released map is judged by its own
+	// check, so the frame must not judge it twice.
+	released func() bool
+	// reported/mark read and write the map's shared `reported` set (py
+	// `store._reported.add(key)` in `_not_reversed`, runtime.py:7412): a key
+	// this frame already named is not named a second time when the map that
+	// outlives the frame is finally released.
+	reported func(string) bool
+	mark     func(string)
+}
+
+// revlJournalKey identifies one (map, key) pair on an activation's journal --
+// py's `(id(store), key)` (runtime.py:7400).
+type revlJournalKey struct {
+	store string
+	key   string
+}
+
+// revlJournalFrame is the arming frame: the go counterpart of py's `Frame`
+// journal state (runtime.py:3620-3645). One per activation, created by
+// `revlJournalNew`; `open` is the stack depth it armed at, or -1 when closed.
+type revlJournalFrame struct {
+	open    int
+	journal map[revlJournalKey]revlFrameEntry
+}
+
+// revlJournalStack is py's `_JOURNAL` -- the stack of frames with an open
+// journal (runtime.py:7397), innermost last. revlJournalMisses is the judged
+// non-reversals: the journal half of `assert no_residue`.
+var (
+	revlJournalMu     sync.Mutex
+	revlJournalStack  []*revlJournalFrame
+	revlJournalMisses []string
+)
+
+func revlJournalNew() *revlJournalFrame { return &revlJournalFrame{open: -1} }
+
+// RevlJournalMisses returns the non-reversals judged so far.
+func RevlJournalMisses() []string {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	out := make([]string, len(revlJournalMisses))
+	copy(out, revlJournalMisses)
+	return out
+}
+
+// RevlJournalReset clears the journal between scenarios, beside HostReset.
+func RevlJournalReset() {
+	revlJournalMu.Lock()
+	revlJournalStack = nil
+	revlJournalMisses = nil
+	revlJournalMu.Unlock()
+}
+
+// revlJournalRecord appends one non-reversal (py `_not_reversed`, 7412).
+func revlJournalRecord(msg string) {
+	revlJournalMu.Lock()
+	revlJournalMisses = append(revlJournalMisses, msg)
+	revlJournalMu.Unlock()
+}
+
+// revlJournalArmed is the innermost frame with an open journal, or nil -- py's
+// `_JOURNAL.get()`, whose emptiness makes `_journal_note` a no-op (7400).
+func revlJournalArmed() *revlJournalFrame {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	if len(revlJournalStack) == 0 {
+		return nil
+	}
+	return revlJournalStack[len(revlJournalStack)-1]
+}
+
+// Begin arms the journal on f (py `Frame._journal_begin`, 3620). A forward
+// write that raised left the previous journal open, so a stale one is
+// discarded first (py: `if self._open_journal is not None: self._take_journal()`).
+func (f *revlJournalFrame) Begin() {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	if f.open >= 0 && f.open <= len(revlJournalStack) {
+		revlJournalStack = revlJournalStack[:f.open]
+	}
+	f.open = len(revlJournalStack)
+	revlJournalStack = append(revlJournalStack, f)
+}
+
+// take closes f's journal and reports whether it was open (py
+// `Frame._take_journal`, 3630). Truncating to the armed depth rather than
+// popping recovers from a raise inside a nested frame.
+func (f *revlJournalFrame) take() bool {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	if f.open < 0 {
+		return false
+	}
+	if f.open <= len(revlJournalStack) {
+		revlJournalStack = revlJournalStack[:f.open]
+	}
+	f.open = -1
+	return true
+}
+
+// Guard closes the journal and hands back an inverse that re-arms it while it
+// runs (py `Frame._guard`, 3690): a key only the undo writes is judged too, and
+// a raise out of the undo still disarms.
+func (f *revlJournalFrame) Guard(inverse func() error) func() error {
+	if !f.take() {
+		return inverse
+	}
+	return func() error {
+		revlJournalMu.Lock()
+		f.open = len(revlJournalStack)
+		revlJournalStack = append(revlJournalStack, f)
+		revlJournalMu.Unlock()
+		defer f.take()
+		return inverse()
+	}
+}
+
+// note records one key on f's own journal, first write wins (py
+// `frame._journal.setdefault((id(store), key), ...)`, 7400).
+func (f *revlJournalFrame) note(store string, k string, read func() (any, bool), released func() bool,
+	reported func(string) bool, mark func(string), prior any, present bool, verb string) {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	if f.journal == nil {
+		f.journal = map[revlJournalKey]revlFrameEntry{}
+	}
+	key := revlJournalKey{store: store, key: k}
+	if _, ok := f.journal[key]; !ok {
+		f.journal[key] = revlFrameEntry{prior: prior, present: present, verb: verb,
+			read: read, released: released, reported: reported, mark: mark}
+	}
+}
+
+// Judge is py `Frame._judge_frame` (3638), run at unload.
+func (f *revlJournalFrame) Judge() {
+	revlJournalMu.Lock()
+	journaled := f.journal
+	f.journal = nil
+	revlJournalMu.Unlock()
+	for key, e := range journaled {
+		if e.released() {
+			continue // released: the map's own check judged it
+		}
+		if e.reported(key.key) {
+			continue
+		}
+		now, nowPresent := e.read()
+		if revlNotReversed("map", key.key, e.prior, e.present, e.verb, now, nowPresent, "when it unloaded") {
+			e.mark(key.key)
+		}
+	}
+}
+
+// revlShown renders a journalled value for the message (py `_shown`, 7440).
+func revlShown(v any, present bool) string {
+	if !present {
+		return "absent"
+	}
+	return fmt.Sprintf("%q", fmt.Sprintf("%v", v))
+}
+
+// revlSameValue is py `_same_value` (7445): presence is compared when either
+// side is absent.
+func revlSameValue(prior any, present bool, now any, nowPresent bool) bool {
+	if !present || !nowPresent {
+		return present == nowPresent
+	}
+	return fmt.Sprintf("%v", prior) == fmt.Sprintf("%v", now)
+}
+
+// revlNotReversed is py `_not_reversed` (7412): the key is back to what it held
+// before the first bracketed write of it and no bracketed write put it there,
+// so some `undo` destroyed it.
+func revlNotReversed(tag string, k string, prior any, present bool, verb string, now any, nowPresent bool, when string) bool {
+	if revlSameValue(prior, present, now, nowPresent) {
+		return false
+	}
+	revlJournalRecord(fmt.Sprintf(
+		"%s key %q held %s before the first bracketed `%s` of it and %s %s: an undo did not reverse its write",
+		tag, k, revlShown(prior, present), verb, revlShown(now, nowPresent), when))
+	return true
+}
+
+// wasReported / markReported are py `Map._reported` (runtime.py:7449), the
+// shared set that keeps one key from being named twice -- once by the frame it
+// outlived, once by its own release.
+func (m *Map[V]) wasReported(k string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reported[k]
+}
+
+func (m *Map[V]) markReported(k string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reported == nil {
+		m.reported = map[string]bool{}
+	}
+	m.reported[k] = true
+}
+
+// journalJudge is py `_judge_journal` (7428): the map's own journal, judged as
+// the map is released.
+func (m *Map[V]) journalJudge() {
+	revlJournalMu.Lock()
+	journaled := m.journaled
+	m.journaled = nil
+	revlJournalMu.Unlock()
+	for k, e := range journaled {
+		if m.wasReported(k) {
+			continue
+		}
+		m.mu.Lock()
+		raw, present := m.m[k]
+		m.mu.Unlock()
+		if revlNotReversed("map", k, e.prior, e.present, e.verb, raw, present, "when the map was released") {
+			m.markReported(k)
+		}
+	}
+}
+
+// journalNote remembers what the key this write is about to touch held, on the
+// innermost armed frame and on the map itself (py `_journal_note`, 7400).
+// Called FIRST by every host-map writer, so the memory is of the pre-write
+// state. A no-op when no frame has armed the journal.
+func (m *Map[V]) journalNote(k string, verb string) {
+	frame := revlJournalArmed()
+	if frame == nil {
+		return
+	}
+	m.mu.Lock()
+	raw, present := m.m[k]
+	m.mu.Unlock()
+	frame.note(fmt.Sprintf("%p", m), k, func() (any, bool) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		v, ok := m.m[k]
+		if !ok {
+			return nil, false
+		}
+		return v, true
+	}, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.closed
+	}, m.wasReported, m.markReported, raw, present, verb)
+	revlJournalMu.Lock()
+	if m.journaled == nil {
+		m.journaled = map[string]revlJournalEntry{}
+	}
+	// FIRST write of the key wins: a later write of the same key would
+	// otherwise overwrite the pre-bracket state with the state some other
+	// write left, and the question this journal answers is what the map held
+	// before the FIRST bracketed write of it (py's `if key not in
+	// store._journaled`).
+	if _, ok := m.journaled[k]; !ok {
+		m.journaled[k] = revlJournalEntry{prior: raw, present: present, verb: verb}
+	}
+	revlJournalMu.Unlock()
+}
+
+'''
+
+# (token, text when the journal is OFF, text when it is ON). Off is
+# byte-for-byte the pre-#2009 `_HOST_RUNTIME`; the four pure insertions
+# therefore have an empty off-text and `Drop` keeps its original one-liner.
+_JOURNAL_SLOTS = (
+    ("@JOURNAL@\n", "", _JOURNAL_RUNTIME),
+    ("\t@JOURNAL_FIELDS@\n", "", "\t// journaled / reported are the map's own half of the write journal (issue\n\t// #2009) -- py's `Map._journaled` / `Map._reported`\n\t// (backends/python/runtime.py:7449). `journaled[key]` is the first\n\t// bracketed write of that key: what it held before, and which verb wrote\n\t// it. `Drop` judges it.\n\tjournaled map[string]revlJournalEntry\n\treported  map[string]bool\n\t// closed is py's `Map.closed` (backends/python/runtime.py:7449): set once\n\t// `Drop` has run. The frame's unload check skips a released map, because\n\t// the map's own check already judged it.\n\tclosed bool\n"),
+    ("@JOURNAL_DROP@\n", 'func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }\n', 'func (m *Map[V]) Drop() {\n\thostRecord("map.drop")\n\t// issue #2009: judge the journal BEFORE the entries go -- the point at\n\t// which py\'s `Map.drop` calls `_judge_journal(self)`\n\t// (backends/python/runtime.py:7473), the last moment the map can still\n\t// say what it holds.\n\tm.journalJudge()\n\tm.mu.Lock()\n\tm.closed = true\n\tm.mu.Unlock()\n\trevlHostRelease()\n}\n'),
+    ("\t@JOURNAL_INSERT@\n", "", '\tm.journalNote(k, "insert")\n'),
+    ("\t@JOURNAL_INSERT_IF_ABSENT@\n", "", '\t// the note is taken BEFORE the membership test, as py\'s\n\t// `insert_if_absent` does (backends/python/runtime.py:7506)\n\tm.journalNote(k, "insert_if_absent")\n'),
+    ("\t@JOURNAL_REMOVE@\n", "", '\tm.journalNote(k, "remove")\n'),
+)
+
+# Set from the document at the entry of each path that emits a host runtime
+# (`_emit` and `_emit_v3_combined`, both of which call `_host_runtime`): True
+# only when this document holds a `lifecycle test` with an `assert
+# no_residue`, i.e. only when something can read the journal at all.
+_JOURNAL_MODE = False
+
+
+def _journal_readable(ir: dict) -> bool:
+    """issue #2009: can this document READ the host-map write journal?
+
+    Its one reader on this tier is the R4 host-map half of `assert
+    no_residue`, and `assert no_residue` only exists inside a `lifecycle
+    test` (src/revl/lower.py:6150). Without one, nothing can ever consult
+    the journal, so a document that has no such reader emits byte-identically
+    to before the fold -- which is what the self-host byte-agreement oracle
+    (tests/test_selfhost_emit_go.py) pins."""
+    return any(
+        step.get("step") == "assert_no_residue"
+        for test in (ir.get("tests") or []) if test.get("lifecycle")
+        for step in (test.get("body") or [])
+    )
 
 
 # ==========================================================================
@@ -10669,6 +11244,15 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
     _refuse_inadmissible_document(ir)
     _check_host_keys(ir)
+    # issue #2009: is the host-map write journal READABLE in this document? Its
+    # one reader on this tier is the R4 host-map half of `assert no_residue`,
+    # and `assert no_residue` only exists inside a `lifecycle test`
+    # (src/revl/lower.py:6150). Without one, nothing can ever consult the
+    # journal, so a document that has no such reader emits byte-identically to
+    # before the fold -- which is what the self-host byte-agreement oracle
+    # (tests/test_selfhost_emit_go.py) pins.
+    global _JOURNAL_MODE
+    _JOURNAL_MODE = _journal_readable(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old
@@ -10787,6 +11371,8 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     _COMP_NEEDS_TEARDOWN = False
     _COMP_NEEDS_METHOD_WITNESSED = False
     _COMP_NEEDS_DECLARED = False
+    global _COMP_NEEDS_JOURNAL
+    _COMP_NEEDS_JOURNAL = False
     _WITNESSED_COUNTER = 0
     # item 102: a lifecycle test's `advance` step drives the clock coeffect
     # (RevlClockAdvance / RevlClockReset), which lives in the timer preamble.
@@ -11563,6 +12149,12 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     _COMP_NEEDS_TEARDOWN = False
     _COMP_NEEDS_METHOD_WITNESSED = False
     _COMP_NEEDS_DECLARED = False
+    global _COMP_NEEDS_JOURNAL
+    _COMP_NEEDS_JOURNAL = False
+    # issue #2009: this path emits the host runtime too, so it must decide
+    # for itself whether the document can read the write journal.
+    global _JOURNAL_MODE
+    _JOURNAL_MODE = _journal_readable(ir)
     # items 243/247: the document's witnessed externs by name. `_emit` has
     # built this registry since item 243; this path never did, so
     # `_witnessed_extern` matched nothing and a witnessed effect in a carried

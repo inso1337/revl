@@ -731,6 +731,43 @@ def test_host_map_defaults_to_string_when_no_insert_pins_a_type():
     assert "store = MapNew[string]()" in src
 
 
+# ---- the let-effect CAS arm of a provide-method body (issue #2009) ---------
+
+_LET_CAS_METHOD_SRC = """
+service CasOps {
+  fn run() -> Int
+}
+
+component CasProvider provides ops: CasOps {
+  let ledger = effect Map.new() undo ledger.drop()
+
+  provide ops {
+    fn run() {
+      var key = "method"
+      let token = effect ledger.insert_if_absent(key, 2) undo ledger.remove(key)
+      key = "later"
+      return 2
+    }
+  }
+}
+"""
+
+
+def test_a_method_body_let_effect_cas_indents_its_site_spelled_undo():
+    """A `let-effect` map CAS inside a provide-method body lowers to the
+    result-guarded inverse `if token { ... }` on the effect ledger, and that
+    undo text is emitted INDENTED: the leading `%s\\t` of the format string is
+    the pad. Substituting the tuple without it is a `TypeError` at emit time
+    (three placeholders, two arguments) the first time a document reaches this
+    arm, and deleting the placeholder instead would unindent emitted Go. The
+    document carries no `lifecycle test`, so the #2009 write journal is
+    unreadable and the bracket takes the unjournaled arm — the arm this test
+    exists to cover (issue #2009)."""
+    src = emit.emit(_compile(_LET_CAS_METHOD_SRC), package="casops")
+    assert ("\t\treturn func() error { if token { revlSelf.ledger.Remove(key) };"
+            " return nil }") in src
+
+
 # --------------------------------------------------------------------------
 # v3 typed-core placement (FR-8 follow-up): a v3 composition with components
 # AND top-level types/functions places on the go backend — the typed-core tier

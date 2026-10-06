@@ -29,6 +29,7 @@ export const Worker = {
     const config = host.applyConfigDefaults("Worker", rawConfig, { tag: { required: true } }) as Required<WorkerConfig>
     const $revl_frame = new Frame(ctx, "Worker")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       const m = host.Map.new()
       yield $revl_frame.bracket({ key: "m", method: "Map.new", args: [], site: "Worker.body:m" }, "drop", () => m.drop())
       yield ctx.provide("counter", {
@@ -47,8 +48,10 @@ export const Supervisor = {
   apply(ctx: Context) {
     const $revl_frame = new Frame(ctx, "Supervisor")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       const w1 = spawn(ctx, Worker, {"tag": "a"}, ["counter"])
       yield $revl_frame.bracket({ key: "w1", method: "spawn", args: [], site: "Supervisor.body:w1" }, "dispose", () => w1.dispose())
+      $revl_frame.journalBegin()
       const w2 = spawn(ctx, Worker, {"tag": "b"}, ["counter"])
       yield $revl_frame.bracket({ key: "w2", method: "spawn", args: [], site: "Supervisor.body:w2" }, "dispose", () => w2.dispose())
       yield ctx.provide("ctl", {

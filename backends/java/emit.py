@@ -78,6 +78,13 @@ _UI_SCOPES: dict = {}
 # which carries a lifecycle test) unchanged.
 _LIFECYCLE_MODE = False
 
+# item 2009: the host-map write journal. True when some lifecycle test
+# carries `assert no_residue`, which is the only step that reads it. Like
+# `_LIFECYCLE_MODE` this is document-level (the lowerer emits the step as a
+# bare `{"step": "assert_no_residue"}`, src/revl/lower.py:6150), and like
+# it, default False keeps every golden without such a test byte-identical.
+_JOURNAL_MODE = False
+
 # The document's declared type names (ir_version 3), so `_java_v3_type` can tell
 # a user's `type Row = { .. }` from the host Pool's undeclared query-result row.
 # Set by `emit()`; empty for the v1/v2 dialects, which do not use that renderer.
@@ -3800,6 +3807,143 @@ def _java_lifecycle_method_name(name: object, used: set[str]) -> str:
     return candidate
 
 
+def _journal_runtime_lines() -> list[str]:
+    """The item-2009 host-map journal runtime, when the document reads it.
+
+    Emitted from the same place as the R1 counter — i.e. under
+    `_LIFECYCLE_MODE` — and NOT from `_emit_map_runtime`. A document can carry
+    `assert no_residue` with no host `Map` at all, and the journal is *called*
+    from the lifecycle test prologue and the residue proof, so a Map-gated
+    definition would leave those calls undefined (the failure mode that broke
+    the rust crashproof golden). `_JOURNAL_MODE` implies `_LIFECYCLE_MODE`, so
+    this placement always defines what the call sites reference.
+
+    The wording is part of the contract: py's `NotReversed` message
+    (backends/python/runtime.py:7412) reads `map key 'alpha' held 'zero'
+    before the first bracketed `insert` of it and absent when the map was
+    released: an undo did not reverse its write`. A Str renders here the way
+    this tier's own value-rendering does (double-quoted, as rust's `{:?}`
+    does), so the key and value spellings are the tier's idiom while the
+    invariant sentence is byte-identical.
+    """
+    if not _JOURNAL_MODE:
+        return []
+    return [
+        "// item 2009: the host-map write journal behind `assert no_residue`.",
+        "// The R4 and R1 arms above prove no provision still resolves and no host",
+        "// resource leaked, and neither can see an `undo` that FAILED TO REVERSE",
+        "// its write: a `Map` that is dropped is a released resource either way,",
+        "// so a bracket that inserted a key an earlier write had already put",
+        "// there and whose `undo` then removed it looks perfectly clean.",
+        "// So every bracketed write to a host `Map` is noted — the value the key",
+        "// held before the FIRST bracketed write of it, and the verb that wrote",
+        "// it — and judged at the Map's release, exactly as py's `_judge_journal`",
+        "// (backends/python/runtime.py:7428) does.",
+        "static final class RevlMapPrior<V> {",
+        "    final java.util.Optional<V> value;",
+        "    final String verb;",
+        "    RevlMapPrior(java.util.Optional<V> value, String verb) {",
+        "        this.value = value;",
+        "        this.verb = verb;",
+        "    }",
+        "}",
+        "static final class RevlMapJournal<V> {",
+        "    // py `Map._journaled`: key -> what the first bracketed write of it",
+        "    // found. `LinkedHashMap` keeps the report order stable.",
+        "    private final java.util.LinkedHashMap<String, RevlMapPrior<V>>",
+        "        journaled = new java.util.LinkedHashMap<>();",
+        "    // py `Map._reported`: a key already blamed is not blamed twice.",
+        "    private final java.util.LinkedHashSet<String> reported =",
+        "        new java.util.LinkedHashSet<>();",
+        "    // py `_journal_note` (runtime.py:7400). A write no bracket",
+        "    // journals — an operator call into a provider that writes its own",
+        "    // handle (decision D6), an `emit` — is never noted and never",
+        "    // judged, so the depth gate comes first.",
+        "    void note(String key, java.util.Optional<V> prior, String verb) {",
+        "        if (REVL_JOURNAL_DEPTH.get() <= 0) { return; }",
+        "        // First write wins, so the undo's own `remove` cannot overwrite",
+        "        // the prior the acquire recorded: the first BRACKETED write is",
+        "        // the one reported.",
+        "        if (!journaled.containsKey(key)) {",
+        "            journaled.put(key, new RevlMapPrior<>(prior, verb));",
+        "        }",
+        "    }",
+        "    // py `_judge_journal` (runtime.py:7428), run at the Map's release.",
+        "    void judge(java.util.Map<String, V> values) {",
+        "        for (java.util.Map.Entry<String, RevlMapPrior<V>> entry :",
+        "                journaled.entrySet()) {",
+        "            String key = entry.getKey();",
+        "            if (reported.contains(key)) { continue; }",
+        "            java.util.Optional<V> prior = entry.getValue().value;",
+        "            java.util.Optional<V> now =",
+        "                java.util.Optional.ofNullable(values.get(key));",
+        "            if (revlJournalSame(prior, now)) { continue; }",
+        "            reported.add(key);",
+        "            REVL_JOURNAL_MISSES.get().add(revlJournalMessage(",
+        "                key, prior, entry.getValue().verb, now));",
+        "        }",
+        "        journaled.clear();",
+        "    }",
+        "}",
+        "// py `_JOURNAL` (runtime.py:7397): the journal is live only inside a",
+        "// bracket. Thread-local because the placement runner serves each bridge",
+        "// connection on its own thread.",
+        "static final ThreadLocal<Integer> REVL_JOURNAL_DEPTH =",
+        "    ThreadLocal.withInitial(() -> 0);",
+        "// py `Frame._journal`: the un-reversed writes, read by the residue proof.",
+        "static final ThreadLocal<java.util.List<String>> REVL_JOURNAL_MISSES =",
+        "    ThreadLocal.withInitial(java.util.ArrayList::new);",
+        "static void revlJournalArm() {",
+        "    REVL_JOURNAL_DEPTH.set(REVL_JOURNAL_DEPTH.get() + 1);",
+        "}",
+        "static void revlJournalDisarm() {",
+        "    REVL_JOURNAL_DEPTH.set(REVL_JOURNAL_DEPTH.get() - 1);",
+        "}",
+        "static void revlJournalReset() {",
+        "    REVL_JOURNAL_MISSES.get().clear();",
+        "}",
+        "static java.util.List<String> revlJournalMisses() {",
+        "    return REVL_JOURNAL_MISSES.get();",
+        "}",
+        "// py `_shown` (runtime.py:7440): `absent`, else the value's rendering.",
+        "static String revlJournalShown(java.util.Optional<?> value) {",
+        "    if (value.isEmpty()) { return \"absent\"; }",
+        "    Object shown = value.get();",
+        "    if (shown instanceof String text) {",
+        "        StringBuilder built = new StringBuilder(\"\\\"\");",
+        "        for (int i = 0; i < text.length(); i++) {",
+        "            char ch = text.charAt(i);",
+        "            if (ch == '\"' || ch == '\\\\') { built.append('\\\\').append(ch); }",
+        "            else if (ch == '\\n') { built.append(\"\\\\n\"); }",
+        "            else { built.append(ch); }",
+        "        }",
+        "        return built.append('\"').toString();",
+        "    }",
+        "    return String.valueOf(shown);",
+        "}",
+        "// py `_same_value` (runtime.py:7445): presence first, then equality —",
+        "// absence and a present value are never the same.",
+        "static boolean revlJournalSame(java.util.Optional<?> left,",
+        "        java.util.Optional<?> right) {",
+        "    if (left.isEmpty() || right.isEmpty()) {",
+        "        return left.isEmpty() && right.isEmpty();",
+        "    }",
+        "    return java.util.Objects.equals(left.get(), right.get());",
+        "}",
+        "// py `NotReversed` (runtime.py:7412): the invariant sentence is part of",
+        "// the contract, so it is spelled once, here.",
+        "static String revlJournalMessage(String key, java.util.Optional<?> prior,",
+        "        String verb, java.util.Optional<?> now) {",
+        "    return \"map key \" + revlJournalShown(java.util.Optional.of(key))",
+        "        + \" held \" + revlJournalShown(prior)",
+        "        + \" before the first bracketed `\" + verb + \"` of it and \"",
+        "        + revlJournalShown(now)",
+        "        + \" when the map was released: an undo did not reverse its write\";",
+        "}",
+        "",
+    ]
+
+
 def _emit_lifecycle_no_residue_helper(provisions: str) -> list[str]:
     """The R4 + R1 proof a lifecycle `assert no_residue` runs.
 
@@ -3845,6 +3989,21 @@ def _emit_lifecycle_no_residue_helper(provisions: str) -> list[str]:
         "        throw new AssertionError(where + \": residue — \" + leaked",
         "            + \" host resource(s) never released (R1)\");",
         "    }",
+    ] + _journal_lines([
+        "    // item 2009: the host-map journal. py judges it at `Map`",
+        "    // release (`_judge_journal`, runtime.py:7428), which the",
+        "    // `unload` step above has already driven, so the misses are in",
+        "    // by now — the arm R4 and R1 above cannot see: a dropped Map is",
+        "    // a released resource either way, so an `undo` that removed a",
+        "    // key some earlier write had put there looks clean.",
+        "    java.util.List<String> journalMisses = revlJournalMisses();",
+        "    if (!journalMisses.isEmpty()) {",
+        "        throw new AssertionError(where + \": residue — \"",
+        "            + journalMisses.size()",
+        "            + \" un-reversed host-map write(s) (R4): \"",
+        "            + String.join(\"; \", journalMisses));",
+        "    }",
+    ]) + [
         "}",
         "",
         "// R1 live-resource counter: every host object acquired must be released",
@@ -3857,7 +4016,7 @@ def _emit_lifecycle_no_residue_helper(provisions: str) -> list[str]:
         "static final Class<?>[] REVL_LIFECYCLE_PROVISIONS =",
         f"    new Class<?>[] {{{provisions}}};",
         "",
-    ]
+    ] + _journal_runtime_lines()
 
 
 def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
@@ -3913,6 +4072,11 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
         out.append(f"public static void {mname}() {{")
         out.append("    // drives the composition on a live cordis4j context and")
         out.append("    // proves no residue after LIFO teardown (FR-5 / §7.1).")
+        out.extend(_journal_lines([
+            "    // item 2009: the host-map journal starts empty for this"
+            " test.",
+            "    revlJournalReset();",
+        ]))
         out.append("    final Context _revlRoot = Contexts.create();")
         out.append("    final java.util.Map<String, Disposable> _revlLoaded =")
         out.append("        new java.util.LinkedHashMap<>();")
@@ -4208,6 +4372,63 @@ def _emit_host_stubs(ir: dict) -> list[str]:
             if _document_holds_stream_event(ir):
                 out.extend(_emit_stream_event_runtime())
     return out
+
+
+# item 2009: the host-map write journal behind `assert no_residue`. These
+# are the verbs a bracketed effect can use to write a host `Map` — the same
+# set the py fold notes (`_journal_note`, backends/python/runtime.py:7400)
+# and the go and rust folds mirror.
+_MAP_JOURNAL_VERBS = ("insert", "insert_if_absent", "remove")
+
+
+def _node_writes_host_map(node: dict | None) -> bool:
+    """Whether an IR expression node is a write to a host `Map`.
+
+    The Map is reached through a receiver the emitter already resolves, so
+    the test is on the verb alone — exactly what py's `_journal_note` call
+    sites key on.
+    """
+    return (
+        isinstance(node, dict)
+        and node.get("kind") == "call"
+        and node.get("method") in _MAP_JOURNAL_VERBS
+    )
+
+
+def _bracket_writes_host_map(step: dict) -> bool:
+    """Whether a bracket's `acquire` or its `undo` writes the host Map.
+
+    Only those two arms are journalled. A bracket's `setup` runs before the
+    journal is armed on the py tier too, so noting it would report a write
+    no bracket made (decision D6).
+    """
+    if not _JOURNAL_MODE:
+        return False
+    return any(
+        _node_writes_host_map(step.get(arm)) for arm in ("acquire", "undo")
+    )
+
+
+def _journal_readable(ir: dict) -> bool:
+    """Whether some lifecycle test reads the host-map journal.
+
+    `assert no_residue` is the only step that does, and the lowerer emits it
+    as a bare `{"step": "assert_no_residue"}` (src/revl/lower.py:6150), so
+    the gate is document-level — the shape go and rust use.
+    """
+    return any(
+        step.get("step") == "assert_no_residue"
+        for test in (ir.get("tests") or [])
+        if test.get("lifecycle")
+        for step in (test.get("body") or [])
+    )
+
+
+def _journal_lines(lines: list[str]) -> list[str]:
+    """*lines* when the document's lifecycle tests read the host-map
+    journal, nothing otherwise — the posture `_r1_lines` takes for R1, so a
+    document without `assert no_residue` emits byte-identically."""
+    return list(lines) if _JOURNAL_MODE else []
 
 
 def _r1_lines(lines: list[str]) -> list[str]:
@@ -5567,6 +5788,11 @@ def _emit_map_runtime() -> list[str]:
         "    private final java.util.concurrent.ConcurrentHashMap<String, V> values =",
         "        new java.util.concurrent.ConcurrentHashMap<>();",
         "    private Map() {}",
+    ] + _journal_lines([
+        "    // item 2009: py's `Map._journaled` + `Map._reported` — what an",
+        "    // `undo` left behind, judged at `drop` (see the runtime above).",
+        "    private final RevlMapJournal<V> journal = new RevlMapJournal<>();",
+    ]) + [
     ] + _r1_lines([
         "    // R1 (item 178(b)): a Map is a live host resource until its `undo`",
         "    // drops it. `dropped` makes the release idempotent, so a double",
@@ -5581,6 +5807,11 @@ def _emit_map_runtime() -> list[str]:
         "        return new Map<>();",
         "    }",
         "    public void drop() {",
+    ] + _journal_lines([
+        "        // py judges at Map release (`_judge_journal`, runtime.py:7428),",
+        "        // before the values go: the journal is the last reader.",
+        "        journal.judge(values);",
+    ]) + [
         "        values.clear();",
     ] + _r1_lines([
         "        if (!dropped) {",
@@ -5590,6 +5821,10 @@ def _emit_map_runtime() -> list[str]:
     ]) + [
         "    }",
         "    public void insert(String key, V value) {",
+    ] + _journal_lines([
+        "        journal.note(key, java.util.Optional.ofNullable(values.get(key)),",
+        "            \"insert\");",
+    ]) + [
         "        values.put(key, value);",
         "    }",
         "    // The atomic compare-and-set (item 397): ConcurrentHashMap.putIfAbsent",
@@ -5599,9 +5834,17 @@ def _emit_map_runtime() -> list[str]:
         "    // (ConcurrentHashMap forbids null values; revl host inserts never pass",
         "    // null, and `get` already wraps absence in Optional.)",
         "    public boolean insert_if_absent(String key, V value) {",
+    ] + _journal_lines([
+        "        journal.note(key, java.util.Optional.ofNullable(values.get(key)),",
+        "            \"insert_if_absent\");",
+    ]) + [
         "        return values.putIfAbsent(key, value) == null;",
         "    }",
         "    public void remove(String key) {",
+    ] + _journal_lines([
+        "        journal.note(key, java.util.Optional.ofNullable(values.get(key)),",
+        "            \"remove\");",
+    ]) + [
         "        values.remove(key);",
         "    }",
         "    public java.util.Optional<V> get(String key) {",
@@ -7449,7 +7692,12 @@ def _method_body_lines(
                     lines, "", stmt, wit, v3_ctx, env, None, frame_expr,
                     rename=rename, frame_method=True)
             else:
+                armed = _bracket_writes_host_map(stmt)
+                if armed:
+                    lines.append("revlJournalArm();")
                 lines.append(f"{_expr(stmt['acquire'], v3_ctx, rename, env)};")
+                if armed:
+                    lines.append("revlJournalDisarm();")
                 _emit_bracket_track(
                     lines, "", stmt["acquire"], stmt["undo"], v3_ctx, env, frame_expr,
                     rename, stmt)
@@ -7468,11 +7716,22 @@ def _method_body_lines(
                 # accumulator (`fx`/`frame`) as a bare method-body effect.
                 bind = _ident(stmt["bind"], "binding")
                 acquire_expr = _expr(stmt["acquire"], v3_ctx, rename, env)
+                # item 2009: the CAS's own `insert_if_absent` is a bracketed
+                # host-map write, so the journal is armed around it and
+                # around the guarded inverse.
+                armed = _bracket_writes_host_map(stmt)
+                if armed:
+                    lines.append("revlJournalArm();")
                 lines.append(f"boolean {bind} = {acquire_expr};")
+                if armed:
+                    lines.append("revlJournalDisarm();")
                 undo_rename = _emit_inverse_pins(
                     lines, "", stmt, "undo", v3_ctx, env, rename)
                 undo_expr = _expr(stmt["undo"], v3_ctx, undo_rename, env)
                 guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
+                if armed:
+                    guarded = (f"() -> {{ revlJournalArm(); if ({bind}) {{ "
+                               f"{undo_expr}; }} revlJournalDisarm(); }}")
                 if frame_expr is None:
                     lines.append(f"fx.track(Disposables.of({guarded}));")
                 else:
@@ -7643,6 +7902,12 @@ def _emit_bracket_track(
     plain brackets (`frame_expr` is None) keeps emitting exactly as before."""
     rename = _emit_inverse_pins(out, pad, step or {}, "undo", v3_ctx, env, rename)
     undo_expr = _expr(undo, v3_ctx, rename, env)
+    # item 2009: the `undo` of a bracket that writes the host Map runs with
+    # the journal armed, so the Map's own `remove` is noted rather than
+    # mistaken for a reversal (py arms `_JOURNAL` around the inverse too).
+    if _bracket_writes_host_map(step or {}):
+        undo_expr = (f"{{ revlJournalArm(); {undo_expr}; "
+                     f"revlJournalDisarm(); }}")
     if frame_expr is None:
         out.append(f"{pad}fx.track(Disposables.of(() -> {undo_expr}));")
         return
@@ -7810,11 +8075,21 @@ def _emit_component_stmts(
                 # winner's entry. Bind `boolean` (not `var`), matching the
                 # method-body path, so a later `if (fresh)` in activation code
                 # compiles.
+                # item 2009: arm the journal around the CAS and its
+                # guarded inverse (see the method-body arm above).
+                armed = _bracket_writes_host_map(step)
+                if armed:
+                    out.append(f"{pad}revlJournalArm();")
                 out.append(
                     f"{pad}boolean {bind} = "
                     f"{_expr(step['acquire'], v3_ctx, None, env)};")
+                if armed:
+                    out.append(f"{pad}revlJournalDisarm();")
                 undo_expr = _expr(step["undo"], v3_ctx, None, env)
                 guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
+                if armed:
+                    guarded = (f"() -> {{ revlJournalArm(); if ({bind}) {{ "
+                               f"{undo_expr}; }} revlJournalDisarm(); }}")
                 if frame_expr is None:
                     out.append(f"{pad}fx.track(Disposables.of({guarded}));")
                 else:
@@ -7824,6 +8099,9 @@ def _emit_component_stmts(
                         f"{pad}fx.track({frame_expr}.bracket({crossing}, "
                         f"{attempted}, {guarded}));")
                 continue
+            armed = _bracket_writes_host_map(step)
+            if armed:
+                out.append(f"{pad}revlJournalArm();")
             if kind == "let-effect":
                 # FR-4: a host Map binding pins its value type at the
                 # declaration (`Map<...> store = Map.create();`) — `var` would
@@ -7834,6 +8112,8 @@ def _emit_component_stmts(
                 out.append(f"{pad}{decl} {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
                 out.append(f"{pad}{_expr(step['acquire'], v3_ctx, None, env)};")
+            if armed:
+                out.append(f"{pad}revlJournalDisarm();")
             _emit_bracket_track(out, pad, step["acquire"], step["undo"], v3_ctx, env,
                                 frame_expr, None, step)
         elif kind == "emit":
@@ -9188,15 +9468,18 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
     _refuse_fault_tests(ir)
 
     global _RECORD_MODE, _LIFECYCLE_MODE, _V3_DECLARED_TYPES, _SECRET_MODE
+    global _JOURNAL_MODE
     global _STREAM_ITER_COUNTER
     _STREAM_ITER_COUNTER = 0
     saved = _RECORD_MODE
     saved_lifecycle = _LIFECYCLE_MODE
+    saved_journal = _JOURNAL_MODE
     saved_types = _V3_DECLARED_TYPES
     saved_secret = _SECRET_MODE
     _RECORD_MODE = record
     _SECRET_MODE = _declares_secret(ir)
     _LIFECYCLE_MODE = any(t.get("lifecycle") for t in (ir.get("tests") or []))
+    _JOURNAL_MODE = _journal_readable(ir)
     _V3_DECLARED_TYPES = frozenset(ir.get("types") or {})
     global _UI_EXTERNS, _UI_SCOPES
     saved_ui = (_UI_EXTERNS, _UI_SCOPES)
@@ -9218,6 +9501,7 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
     finally:
         _RECORD_MODE = saved
         _LIFECYCLE_MODE = saved_lifecycle
+        _JOURNAL_MODE = saved_journal
         _V3_DECLARED_TYPES = saved_types
         _SECRET_MODE = saved_secret
         _UI_EXTERNS, _UI_SCOPES = saved_ui

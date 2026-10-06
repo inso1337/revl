@@ -1820,6 +1820,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `ref_externs.rvl`
 - `extern_compensate.rvl`
 - `lifecycle_abort.rvl`
+- `host_map_journal.rvl`
 
 `go`:
 

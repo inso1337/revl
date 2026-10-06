@@ -296,6 +296,16 @@ CORPUS = [
     # (item 429's trap). Added FAILING FIRST: the port answered
     # `<<UNSUPPORTED-LIFECYCLE-STEP:abort>>`.
     "lifecycle_abort.rvl",
+    # Issue #2009 (the py #1945 part 2 fold, ported per item 429(d)): the
+    # host-map journal. A component whose ONLY bracketed host-map write sits
+    # inside a provide-method body — `set` writes under `effect`, `put` writes
+    # unwrapped — is the one shape where the component needs a `Frame` that no
+    # activation-body bracket ever created, so it is the only shape that
+    # reaches the `provide` arm of `_has_bracket` and the whole of
+    # `_method_body_has_bracket`. No document above has it, so the arm was
+    # invisible to the oracle: `selfhost/emit_ts.rvl` emitted no `journalBegin`
+    # at all while the suite was green.
+    "host_map_journal.rvl",
     # issue #1972: the computer-use UI transaction unit (item 522 slice 3,
     # issue #1369), in the py corpus because it is the tier that carried the
     # only computer-use document before this one. It holds the `uiTransaction`
@@ -466,6 +476,13 @@ export class Frame {
   drain = undefined
   constructor(_ctx: unknown, _name: string) {}
   bracket(_crossing: unknown, _method: string, dispose: () => void) { return dispose }
+  // issue #2009: the reference emitter now arms the host-map write journal at a
+  // bracket site and wraps the bracket's inverse in `Frame.guard`, so a stub
+  // standing in for runtime.ts's `Frame` must carry both. Neither changes what
+  // this probe asserts (`removals`, `returncode`); the real methods live in
+  // backends/typescript/runtime.ts:1398 and its `guard`.
+  journalBegin() {}
+  guard(dispose: () => void) { return dispose }
 }
 export function record() {}
 """.replace("INSERT_RESULT", str(insert_result).lower())

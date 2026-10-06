@@ -2635,12 +2635,20 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
             let ur = expr(value_field(step, "undo"), ar.counter, acx)
             c = ur.counter
             out = out.push(`${pad}ctx.effect(() => {`)
+            // issue #2009: arm the host-map write journal immediately before
+            // the bracket's forward write — the method-body analog of py's
+            // `_revl_frame._journal_begin()`. The journal closes where the
+            // bracket's inverse is registered (`Frame.guard` below).
+            if (frame_var != "") { out = out.push(`${pad}  ${frame_var}.journalBegin()`) }
             if (has_bind) {
               out = out.push(`${pad}  ${bind} = ${ar.text}`)
             } else {
               out = out.push(`${pad}  ${ar.text}`)
             }
             var inverse = pinned_arrow(step, "undo", `() => ${ur.text}`)
+            // issue #2009: the inverse runs with the journal re-armed, so a key
+            // only the undo writes is judged too (py `Frame._guard`).
+            if (frame_var != "") { inverse = `${frame_var}.guard(${inverse})` }
             if (has_bind && is_map_cas(value_field(step, "acquire"))) {
               inverse = `${bind} ? ${inverse} : () => {}`
             }
@@ -2839,6 +2847,11 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
     }
     let ar = expr(value_field(step, "acquire"), counter, acquire_acx)
     var out = []
+    // issue #2009: arm the host-map write journal immediately before the
+    // bracket's forward write. Nothing is emitted to CLOSE it: the journal
+    // closes at the `Frame.bracket` yield site below, which `bracket` itself
+    // discharges (py `Frame._guard` -> `_take_journal`).
+    if (frame_var != "") { out = out.push(`${pad}${frame_var}.journalBegin()`) }
     if (kind == "let-effect") {
       let bind = ident(value_str(value_field(step, "bind")))
       out = out.push(`${pad}const ${bind} = ${ar.text}`)
@@ -3877,6 +3890,34 @@ fn body_has_bracket(steps: List[Any]) -> Bool {
     if (kind == "if") {
       if (body_has_bracket(value_list(value_field(step, "then")))) { return true }
       if (body_has_bracket(value_list(value_field(step, "else")))) { return true }
+    }
+    // issue #2009: a provide-method body's ordinary effect bracket is a bare
+    // `ctx.effect` disposer, so it never reaches `Frame.bracket` — but its
+    // `undo` IS handed to `Frame.guard`, which is what closes the journal that
+    // bracket's `journalBegin` opened. That needs the component's `Frame` to
+    // exist, exactly as an activation-body bracket does, so the same gate must
+    // see it. Mirrors `_has_bracket`'s provide arm in the reference emitter.
+    if (kind == "provide") {
+      for (method of value_list(value_field(step, "methods"))) {
+        if (method_body_has_bracket(value_list(value_field(method, "body")))) { return true }
+      }
+    }
+  }
+  return false
+}
+
+// `_method_body_has_bracket`: true iff a provide-method body contains an
+// ordinary `effect`/`let-effect` step, in any position (issue #2009).
+fn method_body_has_bracket(steps: List[Any]) -> Bool {
+  for (step of steps) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "let-effect" || kind == "effect") { return true }
+    if (kind == "if") {
+      if (method_body_has_bracket(value_list(value_field(step, "then")))) { return true }
+      if (method_body_has_bracket(value_list(value_field(step, "else")))) { return true }
+    }
+    if (kind == "while" || kind == "for") {
+      if (method_body_has_bracket(value_list(value_field(step, "body")))) { return true }
     }
   }
   return false

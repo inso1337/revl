@@ -35,6 +35,7 @@ export const PgDatabase = {
     const config = host.applyConfigDefaults("PgDatabase", rawConfig, { url: { required: true }, pool_size: { default: 10n } }) as Required<PgDatabaseConfig>
     const $revl_frame = new Frame(ctx, "PgDatabase")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       const pool = host.Pool.open(config.url, config.pool_size)
       yield $revl_frame.bracket({ key: "pool", method: "Pool.open", args: [], site: "PgDatabase.body:pool" }, "close", () => pool.close())
       yield ctx.provide("db", {
@@ -56,6 +57,7 @@ export const UserCache = {
   apply(ctx: Context) {
     const $revl_frame = new Frame(ctx, "UserCache")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       const store = host.Map.new()
       yield $revl_frame.bracket({ key: "store", method: "Map.new", args: [], site: "UserCache.body:store" }, "drop", () => store.drop())
       yield ctx.provide("cache", {
@@ -64,8 +66,9 @@ export const UserCache = {
         },
         put(key: string, value: string) {
           ctx.effect(() => {
+            $revl_frame.journalBegin()
             store.insert(key, value)
-            return () => store.remove(key)
+            return $revl_frame.guard(() => store.remove(key))
           })
           ctx.db.execute(`INSERT INTO cache_log VALUES (${key})`)
         },

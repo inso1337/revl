@@ -28,6 +28,7 @@ export const PgDatabase = {
     const config = host.applyConfigDefaults("PgDatabase", rawConfig, { url: { required: true }, pool_size: { default: 10n } }) as Required<PgDatabaseConfig>
     const $revl_frame = new Frame(ctx, "PgDatabase")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       const pool = host.Pool.open(config.url, config.pool_size)
       yield $revl_frame.bracket({ key: "pool", method: "Pool.open", args: [], site: "PgDatabase.body:pool" }, "close", () => pool.close())
       yield ctx.provide("db", {
@@ -48,6 +49,7 @@ export const Migrator = {
   apply(ctx: Context) {
     const $revl_frame = new Frame(ctx, "Migrator")
     ctx.effect(function* () {
+      $revl_frame.journalBegin()
       const lock = ctx.db.execute("SELECT pg_advisory_lock(42)")
       yield $revl_frame.bracket({ key: "lock", method: "execute", args: [], site: "Migrator.body:lock" }, "execute", () => ctx.db.execute("SELECT pg_advisory_unlock(42)"))
     }, "Migrator.body")

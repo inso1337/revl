@@ -674,10 +674,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # message, so that waiver was never needed.
 
         # issue #1911: the `abort` lifecycle STEP, on a document that is nothing
-        # but a lifecycle test. It sits LAST in this tuple, because the
-        # comparison above is order-sensitive — `diverged` is built by walking
-        # CORPUS, so a ts residual entry belongs at that document's place in the
-        # enumeration, and tests/test_selfhost_emit_ts.py appends it to CORPUS.
+        # but a lifecycle test. It sits at its own place in this tuple, because
+        # the comparison above is order-sensitive — `diverged` is built by
+        # walking CORPUS, so a ts residual entry belongs at that document's place
+        # in the enumeration, and tests/test_selfhost_emit_ts.py appends it to
+        # CORPUS.
         #
         # The emitter half of item 146 holds here in the strongest form the split
         # allows: selfhost/emit_ts.rvl fed the REFERENCE IR produces this
@@ -692,6 +693,22 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # the native chain emits the component's 1,057 bytes and no test. The
         # same pre-existing lower.rvl gap as `lifecycle_cache.rvl` above.
         "lifecycle_abort.rvl",
+        # Issue #2009: the py #1945 part 2 host-map write journal, ported into
+        # the ts lifecycle harness. The EMITTER half of item 146 holds here in
+        # its strongest form: selfhost/emit_ts.rvl fed the REFERENCE IR produces
+        # this document's bytes exactly, `journalBegin()`/`guard()` pair
+        # included, and this is the only corpus document that reaches them (its
+        # `provide`-method bracket is the one shape where no activation-body
+        # bracket ever created the `Frame`). What the fully-native chain cannot
+        # do is reach that IR: the document's payload is its `lifecycle test
+        # "a method-body write is reversed" { … assert no_residue }`, and
+        # selfhost/lower.rvl carries no `tests`/`fault_tests` section at all, so
+        # the native chain emits the component's bytes and no test — the same
+        # pre-existing lower.rvl gap as `lifecycle_cache.rvl` and
+        # `lifecycle_abort.rvl` above, NOT an emitter gap. It sits here because
+        # that is its place in tests/test_selfhost_emit_ts.py's CORPUS, which
+        # the order-sensitive comparison above walks.
+        "host_map_journal.rvl",
     ),
     "go": (
         # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the
