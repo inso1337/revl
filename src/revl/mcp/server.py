@@ -1251,6 +1251,12 @@ def _tool_source(arguments: dict) -> dict:
         result = _symbols.read(vs, symbol,
                                deps="deps" in (arguments.get("with") or []),
                                comments=arguments.get("comments", True) is not False)
+    except RevlError as error:
+        # a path that cannot be opened is a PATH error, reported by the same
+        # `report`/`classify` the check and load verbs use, so `revl_source`
+        # refuses with the same `file not found: <path>` for the same path
+        # (issue #2031) — never a missing-declaration content error.
+        return report(error)
     except (_symbols.SymbolError, _edit.EditError) as error:
         return _session_error(str(error))
     if "knowledge" in (arguments.get("with") or []):
@@ -2491,7 +2497,10 @@ def _with_candidate_knowledge(payload: dict, arguments: dict, refused) -> dict:
             vs = {"source": arguments["source"],
                   "modules": dict(arguments.get("modules") or {})}
         elif arguments.get("files"):
-            vs = _edit._files_source({"files": list(arguments["files"])})
+            # descriptive only — the refusal, if any, was already decided by
+            # `_check_as_sent`, so an unreadable path just drops out here
+            vs = _edit._files_source({"files": list(arguments["files"])},
+                                     require_all=False)
         else:
             return payload
         payload["knowledge"] = _knowledge.for_candidate(vs, refused)
