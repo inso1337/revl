@@ -128,7 +128,8 @@ LEGS = (
         "the approval edge an endorse must carry, which is an audit fact"),
     Leg("approval", "unmodelled",
         "the approval edges threaded onto the composition, which an IR carries "
-        "and a WAL does not"),
+        "and a WAL does not, and the issue-#1982 never-standing clause bounding "
+        "which capabilities one operator yes may cover standing"),
     Leg("register", "unmodelled",
         "the declared register of the token, a declaration fact"),
     Leg("evidence", "unmodelled",
@@ -319,7 +320,8 @@ def _teardown_rows(policy) -> tuple:
 
 def _approval_rows(policy, token: str) -> tuple:
     """The ONE approval rule the ordinary approval leg reads for this token, as
-    the driver computes it.
+    the driver computes it — plus the issue-#1982 never-standing clause that
+    bounds the token.
 
     `policy.py:2414` reads `policy.approval_rule_for(token)`, which is the
     FIRST rule whose glob covers the token (`policy.py:587-594`), and the gate
@@ -329,11 +331,24 @@ def _approval_rows(policy, token: str) -> tuple:
     the pair on a change the gate never sees. `_could_cover_declassify` above is
     deliberately the WIDER test because there the tokens are `declassify.<origin>`
     for origins the diff does not carry, so every rule that could be the first
-    one for some origin has to stay in."""
+    one for some origin has to stay in.
+
+    The never-standing clause is the same approval surface one step further out:
+    it is what makes a standing grant or a distilled auto-approve rule stop
+    covering this token, so a policy that gains or loses it decides this
+    crossing's consent differently while `approval_rule_for` is unchanged.
+    Dropping it is a WIDENING — one operator yes starts covering unbounded
+    crossings — and reading only the approval rule would report that as
+    `unchanged`, the one wrong answer this surface can give. `never_standing_for`
+    returns the first covering clause for the same shadowing reason."""
+    rows = []
     rule = policy.approval_rule_for(token)
-    if rule is None:
-        return ()
-    return _rows(((rule.pattern, rule.ttl_ms),))
+    if rule is not None:
+        rows.append((rule.pattern, rule.ttl_ms))
+    never = policy.never_standing_for(token)
+    if never is not None:
+        rows.append(("never-standing", never.pattern))
+    return _rows(rows)
 
 
 def _evidence_rows(policy, name: str, token: str, realms) -> tuple:

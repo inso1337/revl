@@ -1099,6 +1099,13 @@ hash is unchanged. Under the boundary-policy line `approvals require bounded
 crossings` (off by default), a call whose capability is `unbounded` is refused
 by name instead of ticketed.
 
+A standing grant is refused outright for a capability the bound policy marks
+never-standing (`capability <glob> may never be granted standing`, issue #1982),
+whether the capability is named directly or reached through the ticket's own
+capability set; the single-use `hash` form still answers such a crossing one
+call at a time, and
+`revl_apply_distillation` refuses to install a rule the clause covers.
+
 Under `revl mcp serve` (the gate is on by default since issue #1706, and
 unless it is served `--approval-policy advisory`) the identity that raised a
 ticket cannot approve it, nor mint a standing grant from
@@ -1268,6 +1275,9 @@ component later ENTERING its glob that was not in that set suspends the rule and
 re-offers, fail-closed. Gated by the `approve` operator verb.
 
 - Inputs: `offerId` (required; from `revl_distillation_offers`).
+
+A rule the bound policy marks never-standing is not offered (it appears in
+`refusals` with reason `never-standing`) and cannot be applied (issue #1982).
 
 ### `revl_revoke_distillation`
 

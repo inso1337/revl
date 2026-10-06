@@ -102,6 +102,12 @@ mcp may reach llm, kv*
 # refuse a call whose class-(c) capability has an unbounded item-260 crossing
 # ceiling, instead of ticketing it (issue #1755; off unless written)
 approvals require bounded crossings
+
+# mark a capability never-STANDING (issue #1982): the per-call class-(c) prompt
+# stays, and one operator `yes` may never be widened into a standing grant
+# (item 344) or a distilled auto-approve rule (item 251) for it
+capability mail.send  may never be granted standing
+capability shell.*    may never be granted standing
 ```
 
 The JSON form parses to the same policy:
@@ -114,7 +120,8 @@ The JSON form parses to the same policy:
   "realms": [{"realm": "billing", "allow": ["db", "ledger"]}],
   "tenants": {"neverReachEachOther": true},
   "mcp": {"allow": ["llm", "kv*"]},
-  "approvalCeilings": {"refuseUnbounded": true}
+  "approvalCeilings": {"refuseUnbounded": true},
+  "neverStanding": ["mail.send", "shell.*"]
 }
 ```
 
@@ -146,6 +153,44 @@ The JSON form parses to the same policy:
   refused before anything is spent or ticketed, and the refusal names the
   capability and the cardinality reason. Without it the call is ticketed as
   before, with the `unbounded` ceiling on the ticket.
+* **`capability <glob> may never be granted standing` (issue #1982).** The
+  class-(c) prompt is a per-call floor, and a yes can be widened over a series
+  in exactly two ways: a session-scoped standing grant (`revl_approve` with
+  `capability` + `uses`/`ttlMs`, item 344) and an applied distilled
+  auto-approve rule (item 251). Both record ONE operator yes and then cover
+  every later crossing until `uses` runs out or the TTL lapses, and `ttl`
+  bounds the grant's *lifetime*, not its shape — a large TTL with a large
+  `uses` is the same unbounded grant. This clause is what a policy could not
+  say: not *this* capability, not as a standing thing. It is a glob over the
+  capability vocabulary below, and it is **not** a deny-list — the capability
+  stays usable:
+
+  * the crossing still prompts, and the single-use exact-hash
+    `revl_approve(hash=…)` still answers it one call at a time;
+  * `revl_approve(capability=…, uses=…/ttlMs=…)` is **refused** with a
+    diagnostic naming the capability and quoting the clause — for a grant
+    named directly AND for one minted from an outstanding ticket, which is why
+    the refusal is enforced where the ticket's own capability spellings are
+    resolved rather than in the verb dispatch;
+  * `revl_distillation_offers` does not *offer* a rule whose capability set
+    intersects the clause (reported in `refusals` with reason
+    `never-standing`), and `revl_apply_distillation` **refuses to install**
+    one — a distilled rule is standing auto-approval reached by a different
+    verb, so a clause enforced only on the mint would leave it as the way
+    around;
+  * the refusal is fail-closed in both directions: every capability slot a
+    ticket carries is checked (not only the spelling the caller passed), and
+    a spelling the capability order cannot parse is compared as itself rather
+    than read as unmarked;
+  * it is enforced where a standing yes is *read*, not only where it is
+    written, so a grant or applied rule that already exists stops covering
+    the moment the clause is in force rather than outliving the policy that
+    forbids it. That includes a `may auto-approve` rule written BY HAND for a
+    marked capability: where the clause and a standing auto-approve meet in
+    one policy, the narrower statement wins and the crossing prompts again.
+
+  An unmarked capability mints and distills exactly as before, so a policy
+  written without this clause behaves byte-identically.
 
 ### What a capability token may be
 

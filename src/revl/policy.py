@@ -223,6 +223,65 @@ def _parse_quorum(require_text: str, approvers: tuple[str, ...]) -> int:
 
 
 @dataclass(frozen=True)
+class NeverStandingRule:
+    """``capability <glob> may never be granted standing`` (issue #1982).
+
+    The clause that was missing between item 246's per-call approval floor and
+    the two STANDING forms of the same yes — the item-344 session-scoped grant
+    (`revl_approve` with `capability` + `uses`/`ttlMs`) and the item-251
+    distilled `AutoApproveRule`. Both record ONE operator yes and then cover
+    every later crossing of that capability until `uses` runs out or the TTL
+    lapses, and before this clause the bound was exactly the number the operator
+    typed at mint time: `capability C requires approval` says the crossing needs
+    a yes, but nothing said the yes may not be WIDENED into a standing one.
+
+    A never-standing capability stays USABLE — this is not a deny-list. The
+    crossing still prompts, and the single-use exact-hash `revl_approve(hash)`
+    still answers it one call at a time, which is the floor Decision 3 of
+    docs/design/246-auto-approve.md keeps deliberately available. What the
+    clause forbids is the two STANDING shapes, and the direction is fail-closed:
+    a grant or distilled rule that names the capability is refused rather than
+    minted narrow.
+
+    `pattern` is a glob over capability tokens — the same closed vocabulary a
+    `may reach` rule and an `ApprovalRule` are held to (§3.3, issue #1984), so a
+    token that could never match is a `PolicyError` at parse time rather than a
+    clause that silently refuses nothing."""
+
+    pattern: str
+
+    def covers(self, token: str) -> bool:
+        """Whether this rule names `token`.
+
+        A resource-scoped spelling (`gateway.send(host="api.stripe.com")`, the
+        item-294 form a ticket renders and a grant stores) is matched on its
+        BARE token as well, so `capability gateway.send may never be granted
+        standing` is not silently inert against every parametrized spelling of
+        the same boundary. A spelling `cap_order` cannot parse matches only as
+        itself, the fail-closed direction `_cap_covers` also takes."""
+        if fnmatchcase(token, self.pattern):
+            return True
+        bare = _cap_token(token)
+        return bare != token and fnmatchcase(bare, self.pattern)
+
+    def to_dsl(self) -> str:
+        return f"capability {self.pattern} may never be granted standing"
+
+    def to_json(self) -> str:
+        return self.pattern
+
+
+def _cap_token(spelling: str) -> str:
+    """The bare capability token of a stored spelling, for matching against a
+    capability glob. A spelling `cap_order` cannot parse is returned unchanged,
+    so it matches only what it is written as."""
+    try:
+        return cap_order.parse_cap(spelling).token
+    except cap_order.CapError:
+        return spelling
+
+
+@dataclass(frozen=True)
 class TaintFlowRule:
     """item 249, Slice D (D2): ``<origin>-taint may not reach <cap>[, ...]
     [without approval]`` — the operator's power over a legitimate-but-dangerous
@@ -654,6 +713,12 @@ class Policy:
     # class-(c) capability has an `unbounded` item-260 ceiling in the crossing
     # component, instead of ticketing it. Off by default.
     approvals_bounded: bool = False
+    # issue #1982: `capability <glob> may never be granted standing` — the
+    # capabilities an operator's yes may never be WIDENED into a standing grant
+    # (item 344) or a distilled auto-approve rule (item 251). Empty by default,
+    # so every policy written before this clause parses and behaves
+    # byte-identically and nothing is refused that was not refused before.
+    never_standing_rules: tuple[NeverStandingRule, ...] = ()
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
@@ -664,6 +729,7 @@ class Policy:
             and not self.teardown_rules \
             and not self.reissue_rules \
             and not self.auto_approve_rules \
+            and not self.never_standing_rules \
             and not self.approvals_bounded \
             and not self.evidence_root_local
 
@@ -693,6 +759,17 @@ class Policy:
         crossing reads this to decide whether it needs an `Approval` and, when it
         does, the ttl its token carries."""
         for rule in self.approval_rules:
+            if rule.covers(token):
+                return rule
+        return None
+
+    def never_standing_for(self, token: str) -> NeverStandingRule | None:
+        """The first rule that marks `token` never-standing, or None (issue
+        #1982). The mint and distillation paths read this to refuse a STANDING
+        form of a yes the operator said may never stand; `None` is the ordinary
+        case and means the two standing forms keep their item-344/item-251
+        behaviour exactly."""
+        for rule in self.never_standing_rules:
             if rule.covers(token):
                 return rule
         return None
@@ -996,6 +1073,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     teardown_rules: list[TeardownRule] = []
     reissue_rules: list[ReissueRule] = []
     auto_approve_rules: list[AutoApproveRule] = []
+    never_standing_rules: list[NeverStandingRule] = []
     evidence_root_local = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -1187,6 +1265,25 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             auto_approve_rules.append(
                 _parse_auto_approve(head.strip(), tail, source, lineno))
             continue
+        # issue #1982: `capability <glob> may never be granted standing`. Checked
+        # before the generic reach loop (it shares no verb, but this keeps the
+        # standing-authority clauses together). It is NOT a reach rule and NOT a
+        # deny-list: the capability stays usable and still prompts per crossing -
+        # what it forbids is the two STANDING forms of one yes (the item-344
+        # grant and the item-251 distilled auto-approve rule).
+        if "may never be granted standing" in low:
+            idx = low.find("may never be granted standing")
+            head = line[:idx].strip()
+            parts = head.split()
+            if len(parts) != 2 or parts[0].lower() != "capability":
+                raise PolicyError(
+                    source, lineno,
+                    f"a never-standing rule names one capability glob: "
+                    f"`capability <glob> may never be granted standing`, got "
+                    f"{raw.strip()!r}")
+            _validate_cap_globs((parts[1],), parts[1], source, lineno)
+            never_standing_rules.append(NeverStandingRule(parts[1]))
+            continue
         # <head> may [not] reach <caps>
         for verb, allow in (("may not reach", False), ("may reach", True)):
             idx = low.find(verb)
@@ -1227,7 +1324,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   tuple(reissue_rules),
                   evidence_root_local,
                   tuple(auto_approve_rules),
-                  approvals_bounded=approvals_bounded)
+                  approvals_bounded=approvals_bounded,
+                  never_standing_rules=tuple(never_standing_rules))
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -1404,6 +1502,22 @@ def _parse_json(text: str, source: str | None) -> Policy:
             uses = int(uses)
         auto_approve_rules.append(
             AutoApproveRule(component, caps, realm, admitting, ttl_ms, uses))
+    # issue #1982: the `neverStanding` array, the JSON equivalent of the
+    # `capability <glob> may never be granted standing` line. Each entry is a
+    # capability glob, either bare or as `{"capability": "..."}`.
+    never_standing_rules: list[NeverStandingRule] = []
+    for entry in doc.get("neverStanding") or []:
+        if isinstance(entry, str):
+            cap = entry
+        elif isinstance(entry, dict):
+            cap = entry.get("capability") or entry.get("pattern")
+        else:
+            cap = None
+        if not cap:
+            raise PolicyError(source, 1,
+                              "a never-standing entry needs a `capability` glob")
+        _validate_cap_globs((cap,), cap, source, 1)
+        never_standing_rules.append(NeverStandingRule(cap))
     _validate_evidence_rooting(evidence_rules, evidence_root_local)
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
                   quarantine_required, tuple(approval_rules),
@@ -1413,7 +1527,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
                   tuple(reissue_rules),
                   evidence_root_local,
                   tuple(auto_approve_rules),
-                  approvals_bounded=approvals_bounded)
+                  approvals_bounded=approvals_bounded,
+                  never_standing_rules=tuple(never_standing_rules))
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:

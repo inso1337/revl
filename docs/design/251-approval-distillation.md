@@ -464,6 +464,17 @@ written by hand. Precisely:
     change. The residual (a swap that changes behavior without changing the
     crossing signature) is the standing G8 caveat, identical for a hand-written
     rule, so S1 holds: 251 is exactly as capable and no more.
+  * **S4, a standing yes is refusable in kind (issue #1982).** S2 bounds what a
+    rule may COVER but says nothing about the FORM of the yes, and that was the
+    gap: a per-call prompt is bounded by the number of crossings, while an applied
+    rule is a standing authority the policy could not withdraw. The policy clause
+    `capability <glob> may never be granted standing` marks a capability as
+    per-call-only, and both standing paths answer to it — `apply_distillation`
+    refuses such a rule, and `revl_distillation_offers` withholds it rather than
+    offering something the apply would reject. The distinction S4 draws is
+    orthogonal to S2 and does not weaken it: an unmarked capability still
+    distills, and a marked one is still approvable one crossing at a time. What
+    changes is only whether the yes may STAND.
 
 ## 6. Adversarial self-review
 
