@@ -82,6 +82,313 @@ func (p *Pool) Execute(sql string) int {
 	return 0
 }
 
+// ---- host-map write journal (issue #2009) ------------------------------
+//
+// The R1 live-resource counter above proves every host object was RELEASED. It
+// cannot see whether the release left the object's CONTENTS the way the bracket
+// found them, and neither can the fiber count: an `undo` that deletes an entry
+// some OTHER bracketed write put there returns both counters to zero and leaves
+// the map silently short. This is the go mirror of the py reference tier's
+// journal fold -- `_JOURNAL` / `_journal_note` / `_judge_journal` / `_not_reversed`
+// and `NotReversed` in backends/python/runtime.py (7393-7530), armed by
+// `Frame._journal_begin` (3620) and closed by `Frame._guard` (3690) -- so the
+// same non-reversal is observable on this tier.
+//
+// The discipline, ported:
+//
+//   * the emitter arms the journal immediately before a bracket's forward write
+//     (`Begin`, py `_journal_begin` -- emit.py:2066/2096/3103);
+//   * a host-map WRITER notes FIRST, before it mutates (`journalNote`, py
+//     `_journal_note` 7400), remembering what the key held;
+//   * the journal is CLOSED where the bracket's inverse is REGISTERED
+//     (`Guard`, py `_guard` 3690) and re-armed while that inverse RUNS, so a
+//     key only the undo writes is judged too;
+//   * the map judges its own journal as it is released (`journalJudge` as the
+//     first statement of `Drop`, py `_judge_journal` 7428) and the activation
+//     judges its frame's journal at unload (`Judge`, py `_judge_frame` 3638);
+//   * a miss is a residue, and `assert no_residue` fails on it.
+
+// revlJournalEntry is the FIRST bracketed write of one key: what the key held
+// immediately before it, and which verb wrote it (py
+// `store._journaled[key] = (prior, stack[0], verb)`, runtime.py:7400).
+type revlJournalEntry struct {
+	prior   any
+	present bool
+	verb    string
+}
+
+// revlFrameEntry is one key on the activation's own journal: the same three
+// facts, plus how to read the key back at unload (py keeps the store itself in
+// `frame._journal` and calls `store.data.get` at `_judge_frame`).
+type revlFrameEntry struct {
+	prior   any
+	present bool
+	verb    string
+	read    func() (any, bool)
+	// released reports whether the map this entry belongs to has already been
+	// dropped -- py's `if store.closed: continue` in `_judge_frame`
+	// (backends/python/runtime.py:3638): a released map is judged by its own
+	// check, so the frame must not judge it twice.
+	released func() bool
+	// reported/mark read and write the map's shared `reported` set (py
+	// `store._reported.add(key)` in `_not_reversed`, runtime.py:7412): a key
+	// this frame already named is not named a second time when the map that
+	// outlives the frame is finally released.
+	reported func(string) bool
+	mark     func(string)
+}
+
+// revlJournalKey identifies one (map, key) pair on an activation's journal --
+// py's `(id(store), key)` (runtime.py:7400).
+type revlJournalKey struct {
+	store string
+	key   string
+}
+
+// revlJournalFrame is the arming frame: the go counterpart of py's `Frame`
+// journal state (runtime.py:3620-3645). One per activation, created by
+// `revlJournalNew`; `open` is the stack depth it armed at, or -1 when closed.
+type revlJournalFrame struct {
+	open    int
+	journal map[revlJournalKey]revlFrameEntry
+}
+
+// revlJournalStack is py's `_JOURNAL` -- the stack of frames with an open
+// journal (runtime.py:7397), innermost last. revlJournalMisses is the judged
+// non-reversals: the journal half of `assert no_residue`.
+var (
+	revlJournalMu     sync.Mutex
+	revlJournalStack  []*revlJournalFrame
+	revlJournalMisses []string
+)
+
+func revlJournalNew() *revlJournalFrame { return &revlJournalFrame{open: -1} }
+
+// RevlJournalMisses returns the non-reversals judged so far.
+func RevlJournalMisses() []string {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	out := make([]string, len(revlJournalMisses))
+	copy(out, revlJournalMisses)
+	return out
+}
+
+// RevlJournalReset clears the journal between scenarios, beside HostReset.
+func RevlJournalReset() {
+	revlJournalMu.Lock()
+	revlJournalStack = nil
+	revlJournalMisses = nil
+	revlJournalMu.Unlock()
+}
+
+// revlJournalRecord appends one non-reversal (py `_not_reversed`, 7412).
+func revlJournalRecord(msg string) {
+	revlJournalMu.Lock()
+	revlJournalMisses = append(revlJournalMisses, msg)
+	revlJournalMu.Unlock()
+}
+
+// revlJournalArmed is the innermost frame with an open journal, or nil -- py's
+// `_JOURNAL.get()`, whose emptiness makes `_journal_note` a no-op (7400).
+func revlJournalArmed() *revlJournalFrame {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	if len(revlJournalStack) == 0 {
+		return nil
+	}
+	return revlJournalStack[len(revlJournalStack)-1]
+}
+
+// Begin arms the journal on f (py `Frame._journal_begin`, 3620). A forward
+// write that raised left the previous journal open, so a stale one is
+// discarded first (py: `if self._open_journal is not None: self._take_journal()`).
+func (f *revlJournalFrame) Begin() {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	if f.open >= 0 && f.open <= len(revlJournalStack) {
+		revlJournalStack = revlJournalStack[:f.open]
+	}
+	f.open = len(revlJournalStack)
+	revlJournalStack = append(revlJournalStack, f)
+}
+
+// take closes f's journal and reports whether it was open (py
+// `Frame._take_journal`, 3630). Truncating to the armed depth rather than
+// popping recovers from a raise inside a nested frame.
+func (f *revlJournalFrame) take() bool {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	if f.open < 0 {
+		return false
+	}
+	if f.open <= len(revlJournalStack) {
+		revlJournalStack = revlJournalStack[:f.open]
+	}
+	f.open = -1
+	return true
+}
+
+// Guard closes the journal and hands back an inverse that re-arms it while it
+// runs (py `Frame._guard`, 3690): a key only the undo writes is judged too, and
+// a raise out of the undo still disarms.
+func (f *revlJournalFrame) Guard(inverse func() error) func() error {
+	if !f.take() {
+		return inverse
+	}
+	return func() error {
+		revlJournalMu.Lock()
+		f.open = len(revlJournalStack)
+		revlJournalStack = append(revlJournalStack, f)
+		revlJournalMu.Unlock()
+		defer f.take()
+		return inverse()
+	}
+}
+
+// note records one key on f's own journal, first write wins (py
+// `frame._journal.setdefault((id(store), key), ...)`, 7400).
+func (f *revlJournalFrame) note(store string, k string, read func() (any, bool), released func() bool,
+	reported func(string) bool, mark func(string), prior any, present bool, verb string) {
+	revlJournalMu.Lock()
+	defer revlJournalMu.Unlock()
+	if f.journal == nil {
+		f.journal = map[revlJournalKey]revlFrameEntry{}
+	}
+	key := revlJournalKey{store: store, key: k}
+	if _, ok := f.journal[key]; !ok {
+		f.journal[key] = revlFrameEntry{prior: prior, present: present, verb: verb,
+			read: read, released: released, reported: reported, mark: mark}
+	}
+}
+
+// Judge is py `Frame._judge_frame` (3638), run at unload.
+func (f *revlJournalFrame) Judge() {
+	revlJournalMu.Lock()
+	journaled := f.journal
+	f.journal = nil
+	revlJournalMu.Unlock()
+	for key, e := range journaled {
+		if e.released() {
+			continue // released: the map's own check judged it
+		}
+		if e.reported(key.key) {
+			continue
+		}
+		now, nowPresent := e.read()
+		if revlNotReversed("map", key.key, e.prior, e.present, e.verb, now, nowPresent, "when it unloaded") {
+			e.mark(key.key)
+		}
+	}
+}
+
+// revlShown renders a journalled value for the message (py `_shown`, 7440).
+func revlShown(v any, present bool) string {
+	if !present {
+		return "absent"
+	}
+	return fmt.Sprintf("%q", fmt.Sprintf("%v", v))
+}
+
+// revlSameValue is py `_same_value` (7445): presence is compared when either
+// side is absent.
+func revlSameValue(prior any, present bool, now any, nowPresent bool) bool {
+	if !present || !nowPresent {
+		return present == nowPresent
+	}
+	return fmt.Sprintf("%v", prior) == fmt.Sprintf("%v", now)
+}
+
+// revlNotReversed is py `_not_reversed` (7412): the key is back to what it held
+// before the first bracketed write of it and no bracketed write put it there,
+// so some `undo` destroyed it.
+func revlNotReversed(tag string, k string, prior any, present bool, verb string, now any, nowPresent bool, when string) bool {
+	if revlSameValue(prior, present, now, nowPresent) {
+		return false
+	}
+	revlJournalRecord(fmt.Sprintf(
+		"%s key %q held %s before the first bracketed `%s` of it and %s %s: an undo did not reverse its write",
+		tag, k, revlShown(prior, present), verb, revlShown(now, nowPresent), when))
+	return true
+}
+
+// wasReported / markReported are py `Map._reported` (runtime.py:7449), the
+// shared set that keeps one key from being named twice -- once by the frame it
+// outlived, once by its own release.
+func (m *Map[V]) wasReported(k string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reported[k]
+}
+
+func (m *Map[V]) markReported(k string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reported == nil {
+		m.reported = map[string]bool{}
+	}
+	m.reported[k] = true
+}
+
+// journalJudge is py `_judge_journal` (7428): the map's own journal, judged as
+// the map is released.
+func (m *Map[V]) journalJudge() {
+	revlJournalMu.Lock()
+	journaled := m.journaled
+	m.journaled = nil
+	revlJournalMu.Unlock()
+	for k, e := range journaled {
+		if m.wasReported(k) {
+			continue
+		}
+		m.mu.Lock()
+		raw, present := m.m[k]
+		m.mu.Unlock()
+		if revlNotReversed("map", k, e.prior, e.present, e.verb, raw, present, "when the map was released") {
+			m.markReported(k)
+		}
+	}
+}
+
+// journalNote remembers what the key this write is about to touch held, on the
+// innermost armed frame and on the map itself (py `_journal_note`, 7400).
+// Called FIRST by every host-map writer, so the memory is of the pre-write
+// state. A no-op when no frame has armed the journal.
+func (m *Map[V]) journalNote(k string, verb string) {
+	frame := revlJournalArmed()
+	if frame == nil {
+		return
+	}
+	m.mu.Lock()
+	raw, present := m.m[k]
+	m.mu.Unlock()
+	frame.note(fmt.Sprintf("%p", m), k, func() (any, bool) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		v, ok := m.m[k]
+		if !ok {
+			return nil, false
+		}
+		return v, true
+	}, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.closed
+	}, m.wasReported, m.markReported, raw, present, verb)
+	revlJournalMu.Lock()
+	if m.journaled == nil {
+		m.journaled = map[string]revlJournalEntry{}
+	}
+	// FIRST write of the key wins: a later write of the same key would
+	// otherwise overwrite the pre-bracket state with the state some other
+	// write left, and the question this journal answers is what the map held
+	// before the FIRST bracketed write of it (py's `if key not in
+	// store._journaled`).
+	if _, ok := m.journaled[k]; !ok {
+		m.journaled[k] = revlJournalEntry{prior: raw, present: present, verb: verb}
+	}
+	revlJournalMu.Unlock()
+}
+
 // Map is a thread-safe map with Str keys. The value type is generic — each
 // site's `Map.new()` pins `V` from how the map is used (FR-4: a revl
 // `Map[Str, Int]` counter or `Map[Str, List[Msg]]` ledger, not only String),
@@ -91,6 +398,17 @@ func (p *Pool) Execute(sql string) int {
 type Map[V any] struct {
 	mu sync.Mutex
 	m  map[string]V
+	// journaled / reported are the map's own half of the write journal (issue
+	// #2009) -- py's `Map._journaled` / `Map._reported`
+	// (backends/python/runtime.py:7449). `journaled[key]` is the first
+	// bracketed write of that key: what it held before, and which verb wrote
+	// it. `Drop` judges it.
+	journaled map[string]revlJournalEntry
+	reported  map[string]bool
+	// closed is py's `Map.closed` (backends/python/runtime.py:7449): set once
+	// `Drop` has run. The frame's unload check skips a released map, because
+	// the map's own check already judged it.
+	closed bool
 }
 
 func MapNew[V any]() *Map[V] {
@@ -98,8 +416,20 @@ func MapNew[V any]() *Map[V] {
 	revlHostAcquire()
 	return &Map[V]{m: map[string]V{}}
 }
-func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
+func (m *Map[V]) Drop() {
+	hostRecord("map.drop")
+	// issue #2009: judge the journal BEFORE the entries go -- the point at
+	// which py's `Map.drop` calls `_judge_journal(self)`
+	// (backends/python/runtime.py:7473), the last moment the map can still
+	// say what it holds.
+	m.journalJudge()
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+	revlHostRelease()
+}
 func (m *Map[V]) Insert(k string, v V) {
+	m.journalNote(k, "insert")
 	m.mu.Lock()
 	m.m[k] = v
 	m.mu.Unlock()
@@ -112,6 +442,9 @@ func (m *Map[V]) Insert(k string, v V) {
 // leaves the existing value untouched. Under N concurrent callers on one map,
 // exactly one receives true.
 func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
+	// the note is taken BEFORE the membership test, as py's
+	// `insert_if_absent` does (backends/python/runtime.py:7506)
+	m.journalNote(k, "insert_if_absent")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.m[k]; ok {
@@ -121,6 +454,7 @@ func (m *Map[V]) InsertIfAbsent(k string, v V) bool {
 	return true
 }
 func (m *Map[V]) Remove(k string) {
+	m.journalNote(k, "remove")
 	m.mu.Lock()
 	delete(m.m, k)
 	m.mu.Unlock()
@@ -172,6 +506,12 @@ func Counter() stc.Component {
 		Name:    "Counter",
 		Provide: []stc.Key{_keyTally},
 		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
+			_revlJournal := revlJournalNew()
+			if err := ctx.Effect(func() stc.Inverse {
+				return func() error { _revlJournal.Judge(); return nil }
+			}); err != nil {
+				return nil, err
+			}
 			var store *Map[int]
 			if err := ctx.Effect(func() stc.Inverse {
 				store = MapNew[int]()
@@ -179,7 +519,7 @@ func Counter() stc.Component {
 			}); err != nil {
 				return nil, err
 			}
-			_implTally := &Counter_tally{ctx: ctx, store: store}
+			_implTally := &Counter_tally{ctx: ctx, revlJournal: _revlJournal, store: store}
 			if _, err := ctx.Provide(_keyTally, Tally(_implTally)); err != nil {
 				return nil, err
 			}
@@ -190,8 +530,9 @@ func Counter() stc.Component {
 }
 
 type Counter_tally struct {
-	ctx   *stc.Context
-	store *Map[int]
+	ctx         *stc.Context
+	revlJournal *revlJournalFrame
+	store       *Map[int]
 }
 
 func (revlSelf *Counter_tally) Total() int {
@@ -210,8 +551,9 @@ func (revlSelf *Counter_tally) Get(key string) int {
 
 func (revlSelf *Counter_tally) Bump(key string, amount int) {
 	revlSelf.ctx.Effect(func() stc.Inverse {
+		revlSelf.revlJournal.Begin()
 		revlSelf.store.Insert(key, amount)
-		return func() error { revlSelf.store.Remove(key); return nil }
+		return revlSelf.revlJournal.Guard(func() error { revlSelf.store.Remove(key); return nil })
 	})
 }
 
