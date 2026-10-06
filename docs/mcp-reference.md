@@ -155,6 +155,43 @@ cannot be un-emitted, a halt or an approval is recorded evidence, and
 `revl_step_back` with no arguments can still revert. A refused call changed
 nothing and carries no undo field.
 
+**Every response can say which compiler answered.** Since issue #2007, the
+`initialize` result's `serverInfo` block and every `revl_state` payload carry
+the identity of the process that answered:
+
+```json
+"serverInfo": {"name": "revl", "version": "2.0",
+               "revision": "8a2eb872b7350c004555a4290bde2d7fcf960fd8",
+               "source_digest": "c7e7f647073de315646c5007fd1d43ab54d9bf023ee35d748c6879233c181a73"}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `revision` | the commit the package was imported from (`git rev-parse HEAD`), or a build id `revl-<version>` when the server is not running from a checkout |
+| `source_digest` | sha256 over the compiler's own `*.py`, by path and by content |
+
+`revl_state` carries both fields at the top level, on the not-loaded branch too,
+so the identity is available before anything is loaded. The revision says *which
+commit*, the digest says *which bytes*: a checkout at the pinned commit whose
+working tree has been edited reports the pinned revision and a digest the pin
+does not name. `revl.mcp.identity` reads them (`identity()`) and compares them
+(`assert_identity(payload, revision=..., source_digest=...)`), the latter
+raising `IdentityMismatch`, naming both values, rather than warning, because a
+tool answering from the wrong tree is otherwise indistinguishable from one
+answering correctly.
+
+The same block rides on the other MCP wires this package serves. A
+`server/discover` result carries `serverInfo` under the reserved
+`_meta["io.modelcontextprotocol/serverInfo"]` key rather than at the top level,
+as does every result of the HTTP transport; `assert_identity` accepts that
+shape, a whole JSON-RPC response, or the block on its own. `revl mcp serve --mcp
+<composition>` serves a composition's own tools and advertises no `revl_state`,
+so its `initialize` `serverInfo` names the composition in `name` and carries the
+answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
+`serverInfo` names the proxy instead; read the compiler's identity off
+`revl_state`, whose handler is the compiler server's own, or off
+`revl_proxy_verdicts`, whose `upstream` block is the upstream's `serverInfo`.
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->
@@ -567,6 +604,10 @@ the same.
 What is loaded right now: fiber states, provided keys, whether a rollback is
 available, and the trace since the last call. No inputs.
 
+It carries the answering compiler's `revision` and `source_digest` at the top
+level, loaded or not (issue #2007; see "Every response can say which compiler
+answered").
+
 It always carries `loopAxes`, loaded or not and with or without an approval
 policy: six measures of how the session used the loop, each
 `{numerator, denominator, value}` with `value` null while the denominator is 0,
@@ -765,6 +806,18 @@ provider` for a refused cascade. A proposal and a commit (with an intent, or
 of the held proposal) also carry `blastRadius`, as `revl_edit` does; a commit
 reads it off the composition running at commit time. A change that fails
 verification commits nothing, and the running composition is unchanged.
+
+**A change lives in the session, not on disk** (issue #2032). The held source
+is the truth and disk an export, so a committed change leaves the two
+disagreeing until `revl_export` runs. The verbs of the change loop
+(`revl_change`, `revl_edit`, `revl_source`, `revl_export`) carry
+`"disk": {"inSync": bool, "stale": [path]}`, where `stale` names every loaded
+file whose held text differs from the bytes on disk. When `inSync` is false on
+a success, the answer also carries a `note` naming `revl_export`. It is a
+sibling of `sessionState`, never a field of it: `sessionState.dirty` means a
+*speculative draft* differs from what is running, so it is `false` in exactly
+the case a stale disk is easy to miss. An inline-loaded composition names no
+path and is `inSync`.
 
 - Inputs: one of `edit` / `replace` / `withdraw` / `add`; `gauntlet`; `commit`
   (default false: propose only); `discard`; with nothing loaded, `files` /
@@ -1099,6 +1152,13 @@ hash is unchanged. Under the boundary-policy line `approvals require bounded
 crossings` (off by default), a call whose capability is `unbounded` is refused
 by name instead of ticketed.
 
+A standing grant is refused outright for a capability the bound policy marks
+never-standing (`capability <glob> may never be granted standing`, issue #1982),
+whether the capability is named directly or reached through the ticket's own
+capability set; the single-use `hash` form still answers such a crossing one
+call at a time, and
+`revl_apply_distillation` refuses to install a rule the clause covers.
+
 Under `revl mcp serve` (the gate is on by default since issue #1706, and
 unless it is served `--approval-policy advisory`) the identity that raised a
 ticket cannot approve it, nor mint a standing grant from
@@ -1268,6 +1328,9 @@ component later ENTERING its glob that was not in that set suspends the rule and
 re-offers, fail-closed. Gated by the `approve` operator verb.
 
 - Inputs: `offerId` (required; from `revl_distillation_offers`).
+
+A rule the bound policy marks never-standing is not offered (it appears in
+`refusals` with reason `never-standing`) and cannot be applied (issue #1982).
 
 ### `revl_revoke_distillation`
 

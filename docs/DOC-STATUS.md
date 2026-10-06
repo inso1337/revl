@@ -94,7 +94,7 @@ was corrected by hand and had drifted back within a day.
 | backend-ir.md | needs-work | 11 |  |
 | backends-roadmap.md | needs-work | 42 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
-| boundary-policy.md | needs-work | 22 |  |
+| boundary-policy.md | needs-work | 26 |  |
 | bundle.md | needs-work | 0 |  |
 | capabilities.md | needs-work | 41 |  |
 | capability-attenuation.md | needs-work | 25 |  |
@@ -174,7 +174,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 47 | yes |
-| rejections.md | needs-work | 73 |  |
+| rejections.md | needs-work | 74 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |

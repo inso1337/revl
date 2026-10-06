@@ -221,3 +221,78 @@ def test_a_pure_unit_method_is_refused_with_the_reason():
     message = refused["diagnostics"][0]["message"]
     assert "`note` returns `Unit` and is pure" in message
     assert "--emits" in message
+
+
+# ---------------------------------- a write on the component's own resource
+
+# issue #1948: the third case of the `Unit` bullet — a `Unit` method that
+# writes the resource its own component acquired, the shape of
+# `fn seed(k) = data.insert(k, 1)` in examples/verified_effect.rvl. `Map` is
+# the one host family whose operations return nothing, so it is the resource
+# such a method writes.
+STORE = {"service": "Audit", "provides": "audit", "resource": "Map[Str, Str]",
+         "methods": ["record(msg: Str) -> Unit"]}
+
+
+def test_a_unit_method_that_writes_its_own_resource_is_scaffolded():
+    """The method is not pure: a later read sees what it wrote, and its fill is
+    a call on the resource the component acquired itself, which is in scope for
+    its own method (the way `lower.py` admits the owner's own handle)."""
+    served = _call("revl_scaffold", STORE)
+    assert served["ok"] is True, served
+    obligations = enrich(compile_source(served["source"], "audit.rvl"))
+    record = [ob for ob in obligations
+              if ob["fillSpec"]["construct"] == "provide-method"]
+    assert len(record) == 1  # one obligation on `record`, and it is not refused
+    spec = record[0]["fillSpec"]
+    # the resource is in scope for the method that writes it
+    assert {"name": "resource", "type": "Map[Str, Str]"} in spec["bindings"]
+    # and the resource's operations that return nothing are what it offers
+    assert [p["write"] for p in spec["fillable"]["producers"]] == [
+        "resource.insert(<str_0: Str>, <str_1: Str>)",
+        "resource.remove(<str_0: Str>)"]
+    # the boundary, unchanged: a `Unit` method whose spec acquires no resource
+    # has nothing in scope that returns `Unit`, so the #1857 refusal stands
+    refused = _call("revl_scaffold", {**STORE, "effect": False})
+    assert refused["ok"] is False
+    assert "`record` returns `Unit` and is pure" in \
+        refused["diagnostics"][0]["message"]
+    # the issue's own reproduction line, served: a declared resource whose type
+    # names no host family lifts the refusal too, and no producer is invented
+    # for it — nothing it offers writes it and returns nothing
+    plain = _call("revl_scaffold", {**STORE, "resource": "AuditResource"})
+    assert plain["ok"] is True, plain
+    method = next(ob["fillSpec"] for ob in
+                  enrich(compile_source(plain["source"], "plain.rvl"))
+                  if ob["fillSpec"]["construct"] == "provide-method")
+    assert {"name": "resource", "type": "AuditResource"} in method["bindings"]
+    assert method["fillable"]["producers"] == []
+    assert "resource this component acquired (`resource`)" in \
+        method["fillable"]["reason"]
+
+
+def test_the_unit_method_fills_with_a_write_on_the_resource_and_admits():
+    """Filling that obligation with the resource write it offers compiles with
+    no holes, and the filled component is admissible."""
+    served = _call("revl_scaffold", STORE)
+    assert served["ok"] is True, served
+    source = served["source"]
+    record = next(ob["fillSpec"] for ob in enrich(compile_source(source))
+                  if ob["fillSpec"]["construct"] == "provide-method")
+    fill = _concrete(record["fillable"]["producers"][0]["write"],
+                     record["bindings"])
+    assert fill == "resource.insert(msg, msg)"
+    filled = re.sub(r'hole\[Unit\] "produce record\'s Unit result[^"]*"',
+                    fill, source, count=1)
+    assert fill in filled  # the substitution landed on the method's hole
+    # the acquisition and its inverse, as `Map.new`/`Map.drop` declare them
+    filled = filled.replace(
+        'effect hole[Map[Str, Str]] "acquire the resource AuditProvider manages"',
+        "effect Map.new()", 1).replace(
+        'undo hole[Unit] "release `resource` fully (no residue): the inverse '
+        'its acquisition declares"', "undo resource.drop()", 1)
+    assert not compile_source(filled, "filled.rvl").get("holes")
+    # and the write it filled is admitted, not merely parsed: the runtime gate
+    # refuses a write on a resource the component did not acquire, and this
+    # one is the component's own
+    compile_source(filled, "candidate.rvl", manifest=compile_source(""))

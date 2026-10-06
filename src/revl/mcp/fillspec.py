@@ -114,8 +114,9 @@ import re
 from .. import idioms, source_grammar
 from ..diagnostics import GUARANTEES
 from ..holes import EMITTABLE_SECTIONS
-from ..lower import _GENERATABLE_PRIMITIVES
+from ..lower import _GENERATABLE_PRIMITIVES, _HOST_WRITE_INVERSE
 from ..resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS
+from ..typecheck import _HOST_ARG_SIG, _HOST_FAMILIES, _HOST_RESULT_SIG
 
 #: The fillSpec shape this module writes. Version 1 had no `version` key.
 FILL_SPEC_VERSION = 2
@@ -405,9 +406,115 @@ def _is_handle(expected: str, types: dict) -> bool:
     return expected not in types and expected.isidentifier()
 
 
+def _host_family(node) -> str | None:
+    """The host family an `effect` acquisition acquires, when it is a builtin
+    call: `Map` for `Map.new()`. None for anything else — a hole, an extern's
+    declared return, a `spawn`, a `subscribe` — because those name no family,
+    so no verb surface is known for the handle they produce."""
+    if not isinstance(node, dict) or node.get("kind") != "host":
+        return None
+    return str(node.get("fn") or "").partition(".")[0] or None
+
+
+def _resource_family(acquire, acquired_type) -> str | None:
+    """The operation family of the resource an `effect` statement acquires.
+
+    A builtin acquisition names it (`Map.new()` acquires a `Map`), and a typed
+    one names it too (`effect hole[Map[Str, Int]] ...`) — the shape the
+    scaffold writes before the author picks an acquisition, which the checker
+    reads the family off as well (`lower.py`, issue #1968). A type naming no
+    host family yields None, so `resource.<verb>` is offered only for verbs the
+    checker actually knows."""
+    if isinstance(acquired_type, str):
+        head = acquired_type.strip().partition("[")[0].strip()
+        if head in _HOST_FAMILIES:
+            return head
+    return _host_family(acquire)
+
+
+def _type_args(declared: str | None) -> list[str]:
+    """The type arguments a declared resource type names, in order: `Map[Int,
+    Str]` -> `["Int", "Str"]`, `Map` -> `[]`.
+
+    Split at bracket depth, so a nested argument stays whole
+    (`Map[Str, List[Int]]` -> `["Str", "List[Int]"]`)."""
+    if not isinstance(declared, str) or "[" not in declared:
+        return []
+    head, _, rest = declared.partition("[")
+    if not head.strip() or not rest.rstrip().endswith("]"):
+        return []
+    body = rest.rstrip()[:-1]
+    out, depth, current = [], 0, ""
+    for ch in body:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        out.append(current.strip())
+    return out
+
+
+def _param_name(type_name: str) -> str:
+    """A placeholder NAME for a parameter of `type_name`: the lowercased type
+    when that is an identifier (`Str` -> `str`), else a flattened one
+    (`List[Int]` -> `list_int`). A type is not always a word — the placeholder
+    is `<name: Type>`, so the name has to stay writable code."""
+    flat = re.sub(r"\W+", "_", type_name.lower()).strip("_")
+    return flat if flat.isidentifier() else "arg"
+
+
+def _resource_writes(name: str, family: str | None,
+                     declared: str | None = None) -> list[str]:
+    """The operations of the component's OWN resource `name` that write it and
+    return nothing — the calls a `Unit` fill can be.
+
+    Read off the checker's own tables rather than guessed: `_HOST_WRITE_INVERSE`
+    says which verbs WRITE the family (a read like `Map.get` or a release like
+    `Map.drop` is not a write), and `_HOST_RESULT_SIG` says which of those
+    return a value (`Map.insert_if_absent` is a `Bool`, so it is not a `Unit`).
+    An unknown family yields nothing: this offers what the checker knows, never
+    what a name suggests.
+
+    Issue #2034: the checker's `_HOST_ARG_SIG` is the family's *default*
+    instantiation (`Map` is Str-keyed there), so on its own it offers
+    `Str`/`Str` whatever the author declared. The declared type's arguments ARE
+    the family's type parameters, in order — `Map[K, V]`'s `insert` takes
+    `(k: K, v: V)` and `remove` takes `(k: K)` — so verb parameter *i* takes
+    the declared argument in its position, and the table's own type when the
+    declaration supplies none. A resource declared without type arguments
+    (`Map`) is therefore offered exactly as before.
+
+    The substitution is defined for every reachable input because `Map` is the
+    only family `_HOST_WRITE_INVERSE` offers a write for, and the checker
+    enforces `Map`'s arity at exactly 2 (`_GENERIC_ARITY`), so a declared
+    `Map[K, V]` always supplies both positions. Every other family is offered
+    nothing, with or without type arguments."""
+    if not family:
+        return []
+    args = _type_args(declared)
+    out = []
+    for key in sorted(_HOST_WRITE_INVERSE):
+        fam, _, verb = key.partition(".")
+        if fam != family or key in _HOST_RESULT_SIG:
+            continue
+        params = [args[i] if i < len(args) else p
+                  for i, p in enumerate(_HOST_ARG_SIG.get(key) or [])]
+        rendered = ", ".join(f"<{_param_name(p)}_{i}: {p}>"
+                             for i, p in enumerate(params))
+        out.append(f"{name}.{verb}({rendered})")
+    return out
+
+
 def _fillable(expected: str | None, visible: list[dict],
               reachable: list[dict], calls: list[dict], externs: dict,
-              functions: dict, types: dict, untrusted: bool) -> dict:
+              functions: dict, types: dict, untrusted: bool,
+              resources: tuple = ()) -> dict:
     """Whether this author can fill the hole, and from what."""
     if not expected:
         return {"byThisAuthor": True, "decided": False,
@@ -436,11 +543,34 @@ def _fillable(expected: str | None, visible: list[dict],
             params = ", ".join(f"<{p['name']}: {p['type']}>"
                                for p in fn.get("params", []))
             producers.append({"kind": "function", "write": f"{name}({params})"})
+    # issue #1948: a `Unit` hole can be the write a method makes on the
+    # resource its own component acquired. Only `Unit`: these calls return
+    # nothing, so they are no fill for a hole that expects a value.
+    writes = 0
+    if expected == "Unit":
+        for res in resources:
+            for write in _resource_writes(res.get("name"), res.get("family"),
+                                          res.get("type")):
+                producers.append({"kind": "resource", "write": write})
+                writes += 1
     if producers:
+        reason = f"a `{expected}` can be built from the producers listed"
+        if writes:
+            reason += (": the component acquired this resource itself, so a "
+                       "write on it is permitted in its own method (the other "
+                       "producers may not be)")
         return {"byThisAuthor": True, "decided": True, "needsHostCode": False,
                 "producers": producers,
-                "reason": f"a `{expected}` can be built from the producers "
-                          f"listed"}
+                "reason": reason}
+    if expected == "Unit" and resources:
+        names = ", ".join(f"`{r.get('name')}`" for r in resources)
+        return {"byThisAuthor": True, "decided": False,
+                "needsHostCode": False, "producers": [],
+                "reason": f"a `Unit` fill is a write, and the resource this "
+                          f"component acquired ({names}) offers no operation "
+                          f"here that writes it and returns nothing — a fill "
+                          f"must not emit, and a resource the component did "
+                          f"not acquire is out of scope"}
     if not _is_handle(expected, types):
         return {"byThisAuthor": True, "decided": False,
                 "needsHostCode": False, "producers": [],
@@ -696,7 +826,7 @@ def _collect_exprs(node, services, functions, bindings, capability,
                 "fillable": _fillable(
                     node.get("type"), visible, reachable, calls,
                     extern_block, functions, bindings.get("@types") or {},
-                    untrusted),
+                    untrusted, bindings.get("@resources") or ()),
             }))
             if bindings.get("@whole_body"):
                 parts = _split(node.get("type"), bindings.get("@method"),
@@ -738,12 +868,21 @@ def _position_context(component, services, externs,
 
 
 def _method_scope(component, method, service_decl, services, functions,
-                  externs, untrusted: bool = False, types: dict | None = None):
+                  externs, untrusted: bool = False, types: dict | None = None,
+                  resources: list | None = None):
     """The binding scope a provide-method's body opens with: the component's
     config fields and the method's parameters, each with a declared type."""
     bindings: dict = _position_context(component, services, externs, untrusted,
                                        types)
     bindings["@position"] = "method"
+    # issue #1948: the resources this component acquired before this method.
+    # Only methods see them — a setup or `undo` position writes nothing — and
+    # the binding itself is in scope there, so it is listed among the method's
+    # bindings as well as offered as a producer.
+    bindings["@resources"] = list(resources or [])
+    for res in resources or []:
+        if isinstance(res.get("type"), str):
+            bindings[res["name"]] = res["type"]
     for field in component.get("config", []) or []:
         bindings[field["name"]] = field.get("type")
     # record each injected dependency so a call on it resolves to its service.
@@ -816,6 +955,11 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
             setup_scope["@service:" + instance] = service
         pure = _capability(False, None, in_method=False,
                            reason="a component setup position — pure, no emission")
+        # issue #1948: the resources this component acquired itself, in the
+        # order it acquires them. `lower.py`'s `_ownership_walk_method` admits
+        # the owner's own handle where it would refuse another's, so a method
+        # may write what its own component acquired.
+        owned: list[dict] = []
         for stmt in component.get("body") or []:
             if stmt.get("step") == "provide":
                 svc_methods = services.get(
@@ -829,7 +973,7 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                         if not decl.get("emission") else "")
                     scope = _method_scope(
                         component, method, decl, services, functions, externs,
-                        untrusted, types)
+                        untrusted, types, owned)
                     _mark_split_body(scope, method, capability, services,
                                      externs, untrusted)
                     _walk_body(method.get("body"), services, functions,
@@ -862,6 +1006,9 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                                pure, collected)
                 if bound:
                     setup_scope[bound] = acquired
+                    owned.append({"name": bound, "type": acquired,
+                                  "family": _resource_family(
+                                      stmt.get("acquire"), acquired)})
             else:
                 _collect_exprs(stmt, services, functions, dict(setup_scope),
                                pure, collected)

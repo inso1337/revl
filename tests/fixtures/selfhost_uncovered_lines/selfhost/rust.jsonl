@@ -48,8 +48,6 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these", "mname", 1, 1]
 
-["function", "component-construction-and-provide-method-alternatives-these", "provide_let_type", 1, 1]
-
 ["function", "component-construction-and-provide-method-alternatives-these", "provide_methods", 1, 1]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "strip_spaces", 1, 1]
@@ -86,7 +84,7 @@
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "map_insert_candidates", 7, 7]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_expr_type", 75, 75]
+["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_expr_type", 60, 60]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "steps_use_timer", 2, 2]
 

@@ -128,7 +128,13 @@ def isolate(text: str, decl: Decl, name: str) -> str:
 # ---------------------------------------------------------------- buffers
 
 def buffers(vs: dict) -> list[tuple[tuple[str, str], str]]:
-    """Every buffer of a working set as ``((kind, key), text)``."""
+    """Every buffer of a working set as ``((kind, key), text)``.
+
+    The `("dependency", path)` buffers (issue #1779) are the READ-ONLY ones: a
+    file a `use` reached, holding the exact text the compile read for it. They
+    are here so `locate`, `revl_source` and fingerprints can anchor to and
+    measure a declaration in a truc reached through `use`; nothing that writes
+    reads this function."""
     out = []
     if vs.get("source") is not None:
         out.append((("source", "source"), vs["source"]))
@@ -138,6 +144,8 @@ def buffers(vs: dict) -> list[tuple[tuple[str, str], str]]:
             out.append((("file", path), text))
     for key, text in (vs.get("modules") or {}).items():
         out.append((("module", key), text))
+    for path, text in (vs.get("dependencies") or {}).items():
+        out.append((("dependency", path), text))
     return out
 
 

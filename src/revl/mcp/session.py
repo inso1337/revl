@@ -35,6 +35,7 @@ from ..taint import REDACTED_SECRET
 from ..typecheck import compatible
 from . import operator as _operator
 from . import quorum as _quorum
+from . import identity as _identity
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
@@ -6562,6 +6563,62 @@ class Session:
             for cap in ticket.get("capabilities") or [])
             if rule is not None and (rule.names_approvers() or rule.is_quorum())]
 
+    def _never_standing_rules(self, ticket: dict) -> list:
+        """THE issue-#1982 predicate: every `(capability, rule)` pair in which a
+        capability this crossing reaches is marked never-standing by the bound
+        policy, or `[]` when none is (issue #1982; `_multi_party_rules` is its
+        item-471 sibling, and this sits beside it for the same reason).
+
+        A never-standing capability is not unreachable and not unapprovable: the
+        crossing still prompts per call and the single-use exact-hash
+        `revl_approve(hash)` still answers it. What the policy refuses is the two
+        STANDING forms one yes can take — the item-344 mint and the item-251
+        distilled rule — because both record that yes ONCE and then cover every
+        later crossing until `uses`/the TTL runs out, and no clause could bound
+        that before. Fail-closed at both ends:
+
+          * the MINT path: `_mint_grant` refuses on BOTH ways of naming what is
+            granted (`ticket_hash=` and `capability=`), so no such grant can ever
+            exist;
+          * the DISTILLED path: `_auto_rule_covers` refuses to match a distilled
+            rule over such a crossing, `distillation_offers` never offers one,
+            and `apply_distillation` refuses to install one (item 251's rules are
+            standing auto-approval reached by a different verb, which is exactly
+            the way around a mint-only check);
+          * the EVAL path: `_find_standing_grant` refuses a grant that already
+            exists — minted before this rule was bound to the session, or carried
+            across a `dataclasses.replace` — so binding the clause never leaves an
+            older grant live.
+
+        The granularity is the ticket's `capabilities` fold, exactly what
+        `_multi_party_rules` reads: a capability is marked per BOUNDARY, so a
+        crossing that reaches a never-standing boundary is refused the standing
+        shape as a whole rather than partially widened. A lease mint is refused
+        too — `effect lease` IS a standing authority for the capability it leases,
+        so a policy that marks that capability never-standing refuses it, with
+        the operator's `effect lease` and their policy clause the two things that
+        contradict each other."""
+        if self.sandbox is None \
+                or getattr(self.sandbox, "never_standing_for", None) is None:
+            return []
+        # EVERY capability slot the ticket carries, not just the one the caller
+        # spelled: `capabilities` is the worst-class-over-reach fold and
+        # `classCCapabilities` the bound class-(c) spellings, and a ticket that
+        # names the capability in only one of them must still be refused - a
+        # capability context this predicate cannot see is not a capability
+        # context it may read as allowed (fail-closed).
+        seen: set[str] = set()
+        pairs = []
+        for cap in (list(ticket.get("capabilities") or ())
+                    + list(ticket.get("classCCapabilities") or ())):
+            if cap in seen:
+                continue
+            seen.add(cap)
+            rule = self.sandbox.never_standing_for(cap)
+            if rule is not None:
+                pairs.append((cap, rule))
+        return pairs
+
     def _ticket_approval_shape(self, ticket: dict):
         """The bound policy's multi-party shape for this ticket, or None when the
         covering rules are all single-approver (`roadmap item 471`).
@@ -7907,6 +7964,14 @@ class Session:
         # grant primitive: `_live_grant_for` is reached from nowhere else).
         if self._multi_party_rules(ticket):
             return None
+        # issue #1982: nor does one operator's standing grant cover a crossing
+        # whose capability the bound policy marks never-standing. Refused at
+        # mint (`_mint_grant`) so such a grant should not exist; refused here too
+        # so one minted before the clause was bound - or carried across a
+        # `dataclasses.replace` of the policy - stops covering the moment the
+        # clause is in force, rather than outliving the policy that forbids it.
+        if self._never_standing_rules(ticket):
+            return None
         now = self._now_ms()
         grants: list[dict] = []
         seen: set[int] = set()
@@ -8131,6 +8196,14 @@ class Session:
         # gates (`_multi_party_rules` is the single predicate). Checked AFTER the
         # H1 suspend above so a grown glob is still latched as suspended.
         if self._multi_party_rules(ticket):
+            return False
+        # issue #1982: nor does a distilled rule cover a crossing whose capability
+        # the policy marks never-standing - a distilled rule IS standing
+        # auto-approval, so admitting one here would be the way around a
+        # mint-only refusal. Checked at evaluation as well as at apply, so a rule
+        # that predates the clause (or arrived across a `dataclasses.replace`)
+        # stops covering rather than staying live.
+        if self._never_standing_rules(ticket):
             return False
         if entry["realm"] is not None \
                 and entry["realm"] != ticket.get("realm", ""):
@@ -8427,6 +8500,32 @@ class Session:
                 f"raised the lease ticket and its grant is minted from the "
                 f"satisfied decision itself, once the votes are in")
 
+        # issue #1982: the refusal item 246's per-call floor was missing. A
+        # `capability <glob> may never be granted standing` clause marks a
+        # capability one operator yes may never be WIDENED over, and the mint is
+        # refused HERE, at the source, for BOTH ways of naming what is granted —
+        # exactly as the item-471 block above, and for the same reason: a
+        # standing grant that cannot be minted can never be matched by a later
+        # crossing. The capability stays USABLE: the crossing still prompts and
+        # `revl_approve(hash=…)` still answers it one call at a time. Checked
+        # over the granted spelling AND the ticket's capability fold, so a
+        # resource-scoped spelling is caught by a bare-token clause.
+        never = self._never_standing_rules(
+            {"capabilities": list(shape_caps)
+             + ([capability] if capability is not None else [])})
+        if never:
+            cap, rule = never[0]
+            raise SessionError(
+                f"cannot mint a standing grant for `{component}`: the bound "
+                f"policy marks `{cap}` never-standing "
+                f"(`{rule.to_dsl()}`, issue #1982), so one operator `yes` may "
+                f"never be widened into a standing grant for it — not with "
+                f"`uses`, not with a TTL, and not from an outstanding ticket. "
+                f"The capability is still usable: re-issue the crossing and "
+                f"approve THAT call with `revl_approve(hash=…)`, one call at a "
+                f"time. To make the standing shape legal, remove or narrow the "
+                f"clause in the boundary policy.")
+
         # item 416c: a resource dimension declared `Secret[T]` binds to the
         # REDACTED placeholder (approval.bind_resource_scope), never the real
         # value — an operator can never have SEEN the value to scope a grant to
@@ -8659,7 +8758,26 @@ class Session:
                    if str(r.get("operator", "")) == me]
         result = distill(records)
         offers = []
+        never_refusals = []
         for off in result.offers:
+            # issue #1982: a distilled rule is STANDING auto-approval, so the
+            # policy's never-standing clause refuses it exactly as it refuses a
+            # mint. Filtered HERE, at the offer, so the operator is never invited
+            # to review a rule the apply gate would then refuse; the refusal is
+            # reported in the same shape as `distill`'s own, with `never-standing`
+            # as the reason.
+            blocked = self._rule_never_standing(off.rule)
+            if blocked:
+                cap, rule_ns = blocked[0]
+                never_refusals.append({
+                    "reason": "never-standing", "token": cap, "realm": "",
+                    "detail": f"the bound policy marks `{cap}` never-standing "
+                              f"(`{rule_ns.to_dsl()}`, issue #1982), so the rule "
+                              f"`{off.rule_text}` may not be applied - it would "
+                              f"stand for unbounded crossings of `{cap}`. The "
+                              f"capability is still usable: keep approving each "
+                              f"crossing per call"})
+                continue
             offers.append({
                 "offerId": "offer:" + hashlib.sha256(
                     off.rule_text.encode("utf-8")).hexdigest()[:16],
@@ -8676,7 +8794,17 @@ class Session:
                 }})
         refusals = [{"reason": r.reason.value, "token": r.token,
                      "realm": r.realm, "detail": r.detail} for r in result.refusals]
-        return {"offers": offers, "refusals": refusals}
+        return {"offers": offers, "refusals": refusals + never_refusals}
+
+    def _rule_never_standing(self, rule) -> list:
+        """`_never_standing_rules` over a distilled rule's own canonical capability
+        spellings (item 251) - the offer/apply half of the issue-#1982 predicate,
+        so the two standing paths answer to the one clause through one function.
+        `distillation_offers` filters on it and `apply_distillation` REFUSES on
+        it (the hard gate: an offer id can outlive the policy that produced it,
+        and `_offer_by_id` re-folds the ledger, so both ends must check)."""
+        return self._never_standing_rules(
+            {"capabilities": list(getattr(rule, "caps", ()) or ())})
 
     def _offer_by_id(self, offer_id: str):
         """Resolve an offer id back to its `DistilledOffer` (re-folding the ledger,
@@ -8721,6 +8849,24 @@ class Session:
                 f"({rule.to_dsl()!r}) - an offer already covered by a live rule is "
                 f"refused rather than duplicated (item 251, the apply ambiguity "
                 f"refusal)")
+        # issue #1982: the hard gate, and the reason the check lives HERE as well
+        # as at the offer. A distilled rule is STANDING auto-approval reached by a
+        # different verb than the mint, so a never-standing clause enforced only on
+        # `revl_approve(capability=…)` would leave this as the way around it; and
+        # an offer id carried from before the clause was bound must not install
+        # now. Refused fail-closed - a capability the predicate cannot resolve is
+        # not read as allowed - and BEFORE any policy mutation.
+        blocked = self._rule_never_standing(rule)
+        if blocked:
+            cap, rule_ns = blocked[0]
+            raise SessionError(
+                f"cannot apply distillation {offer_id}: the bound policy marks "
+                f"`{cap}` never-standing (`{rule_ns.to_dsl()}`, issue #1982), so "
+                f"one operator `yes` may never be widened into a standing "
+                f"auto-approve rule for it. The capability is still usable: the "
+                f"crossing still prompts and `revl_approve(hash=…)` still "
+                f"approves THAT call. To make the standing shape legal, remove "
+                f"or narrow the clause in the boundary policy.")
         # issue #1062: a distilled rule is standing auto-approval too, so the
         # same declaration bounds it. Without this the `may mint` line would
         # bound only one of the two ways an operator holding `approve` installs
@@ -9202,11 +9348,15 @@ class Session:
                 "be finalized onto a surface it did not see (design 460 §3).")
 
     def state(self, drain: bool = False) -> dict:
+        # issue #2007: the compiler's own identity — `revision` and
+        # `source_digest` — rides on BOTH branches, so a client can assert the
+        # server it drives is the revision it pinned before it loads anything.
+        identity = _identity.identity()
         if self._driver is None:
             # even with nothing loaded, the workspace's active leases (item 61)
             # are visible — an agent can survey who holds what before it loads.
             return {"loaded": False, "leases": self.leases.document(),
-                    "loopAxes": self.loop_axes()}
+                    "loopAxes": self.loop_axes(), **identity}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
         paused_now = self.slo_paused()
@@ -9253,6 +9403,9 @@ class Session:
                if self.approval_policy is not None else {}),
             # issue #1738: the six agent-loop axes, always.
             "loopAxes": self.loop_axes(),
+            # issue #2007: the compiler that answered (see the not-loaded
+            # branch above) — last, so the composition fields keep their order.
+            **identity,
             **({"trace": driver.drain_events()} if drain else {}),
         }
 

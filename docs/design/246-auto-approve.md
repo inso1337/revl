@@ -344,6 +344,18 @@ the author: a budget written in source would be the author setting their own
 limit. The policy line `approvals require bounded crossings` (off by default)
 refuses a call whose capability the analysis cannot bound.
 
+**When a yes may not stand at all (issue #1982).** A ceiling bounds a standing
+grant; only the policy file can forbid one. The line
+`capability <glob> may never be granted standing` refuses both widening shapes
+for the marked capabilities — the item-344 standing grant and the item-251
+distilled auto-approve rule — while leaving the capability usable: the
+class-(c) crossing still prompts, and the single-use exact-hash approval still
+answers it per call. Consent that one operator yes cannot extend past itself is
+a shape the policy could not previously express, so a grant minted under such a
+line was un-refusable by construction. See
+[boundary-policy.md](../boundary-policy.md#rule-semantics) for the grammar and
+the fail-closed gates.
+
 **Who owns the requirement: the operator, not the author.** This is the
 load-bearing choice. In the agent setting the component author is the
 agent, so a declaration-owned requirement ("the author writes

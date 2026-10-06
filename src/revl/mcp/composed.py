@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import sys
 
+from . import identity as _identity
 from .approval import ApprovalRequired, two_step_payload
 from .schema import tools_from_ir
 from .session import Session, SessionError
@@ -137,7 +138,12 @@ class ComposedServer:
             result = {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": f"revl:{self.composition}", "version": "2.0"},
+                # issue #2007: the name says WHICH composition; the identity
+                # says which compiler built and is answering for it. This wire
+                # serves no `revl_state`, so `serverInfo` is the only place a
+                # client can pin the revision it is talking to.
+                "serverInfo": {"name": f"revl:{self.composition}", "version": "2.0",
+                               **_identity.identity()},
                 "instructions": (
                     "These tools ARE a running revl composition "
                     f"({' -> '.join(manifest.get('loadOrder') or []) or 'empty'}). "
