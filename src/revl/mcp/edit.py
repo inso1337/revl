@@ -73,8 +73,8 @@ from ..errors import RevlError
 from . import effect_classes as _effect_classes
 from . import fillspec
 from .authoring_loop import blast_radius
-from .persist import (ORIGIN_FILES, ORIGIN_FILES_CONTENT, ORIGIN_MODULES,
-                      ORIGIN_SOURCE)
+from .persist import (ORIGIN_DEPENDENCIES, ORIGIN_FILES, ORIGIN_FILES_CONTENT,
+                      ORIGIN_MODULES, ORIGIN_SOURCE)
 
 _WORD_HOLE = re.compile(r"\bhole\b")
 
@@ -139,7 +139,15 @@ def _files_source(origin: dict, *, require_all: bool = True) -> dict:
         content[path] = text
     return {ORIGIN_SOURCE: None, ORIGIN_FILES: files,
             ORIGIN_FILES_CONTENT: content,
-            ORIGIN_MODULES: dict(origin.get(ORIGIN_MODULES) or {})}
+            ORIGIN_MODULES: dict(origin.get(ORIGIN_MODULES) or {}),
+            # issue #1779: the READ-ONLY buffers of the files this composition
+            # reached through `use`, holding the text the compile read. They are
+            # readable here (and by `symbols.buffers`) and never writable:
+            # `_resolve_buffer` refuses one by name, `file_modules` and
+            # `candidate_arguments` read `files_content` alone, so the compiler
+            # keeps reading those files from disk and no swap or export writes
+            # one.
+            ORIGIN_DEPENDENCIES: dict(origin.get(ORIGIN_DEPENDENCIES) or {})}
 
 
 def _read_disk(path: str) -> str | None:
@@ -180,6 +188,16 @@ def _editable(vs: dict) -> list[str]:
     return names + list(vs.get("files") or []) + sorted(vs.get("modules") or {})
 
 
+def _read_only_refusal(path: str) -> EditError:
+    """The refusal an edit naming a read-only dependency buffer gets (issue
+    #1779). Every write path raises this same one, so a probe cannot find a
+    path that writes one — or that crashes on one instead of refusing it."""
+    return EditError(
+        f"{path!r} is a READ-ONLY buffer: the composition reaches it through "
+        "`use`, so the session holds the text the compile read and does not "
+        "own it. Edit the file that `use`s it, or the file itself on disk")
+
+
 def _resolve_buffer(vs: dict, target: str | None) -> tuple[str, str]:
     """Which buffer an edit addresses, as ``(kind, key)``. `None`/"source" is the
     main inline source, or the one loaded file when there is exactly one; a
@@ -207,13 +225,32 @@ def _resolve_buffer(vs: dict, target: str | None) -> tuple[str, str]:
         raise EditError(
             f"`target` {target!r} names {len(suffixed)} loaded files; give "
             f"enough of the path to pick one: {', '.join(suffixed)}")
+    # issue #1779: a file the composition reaches through `use` is a buffer the
+    # session holds for READING only — the bytes the compile read, not a file
+    # the session owns. An edit naming one is refused by name, here, so the
+    # refusal names the read-only buffer rather than reporting it as unknown.
+    reached = _readonly_match(vs, target)
+    if reached is not None:
+        raise _read_only_refusal(reached)
     raise EditError(
         f"no server-side source buffer named {target!r}; "
         f"editable buffers: {', '.join(_editable(vs)) or 'none'}")
 
 
+def _readonly_match(vs: dict, target: str) -> str | None:
+    """The read-only dependency buffer `target` names, or None (issue #1779)."""
+    dependencies = list(vs.get(ORIGIN_DEPENDENCIES) or {})
+    named = _match_file(dependencies, target)
+    if named is not None:
+        return named
+    suffixed = _suffix_matches(dependencies, target)
+    return suffixed[0] if len(suffixed) == 1 else None
+
+
 def _get_text(vs: dict, buffer: tuple[str, str]) -> str:
     kind, key = buffer
+    if kind == "dependency":          # issue #1779: read-only, never patched
+        raise _read_only_refusal(key)
     if kind == "source":
         return vs["source"]
     if kind == "file":
@@ -227,6 +264,8 @@ def _get_text(vs: dict, buffer: tuple[str, str]) -> str:
 
 def _set_text(vs: dict, buffer: tuple[str, str], text: str) -> None:
     kind, key = buffer
+    if kind == "dependency":          # issue #1779: read-only, never patched
+        raise _read_only_refusal(key)
     if kind == "source":
         vs["source"] = text
     elif kind == "file":
@@ -627,20 +666,39 @@ def compile_virtual(vs: dict, *, manifest: dict | None = None,
     under: `revl_edit` is an authoring verb like `revl_swap`, and a patch that
     inserts an `extern ... = @py { ... }` has to be refused for exactly the
     reason the same text sent to `revl_swap` is. The profile is READ from the
-    server rather than passed in, so trust is decided in one place."""
+    server rather than passed in, so trust is decided in one place.
+
+    What the compile READ is recorded back onto `vs` as its READ-ONLY
+    dependency buffers (issue #1779), so the compile that decides is the
+    compile whose bytes the caller ends up holding: `_boot_draft` and
+    `_swap_server_side` both compile here and then take the origin from `vs`.
+    A refused compile records nothing — the exception leaves `vs` untouched."""
     from .server import AUTHORING  # noqa: PLC0415 — lazy, avoids an import cycle
 
+    report: dict = {}
     if vs.get("source") is not None:
-        return compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
-                              replacing=replacing, modules=vs.get("modules") or None,
-                              profile=AUTHORING.profile())
-    if vs.get("files"):
+        document = compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
+                                  replacing=replacing, modules=vs.get("modules") or None,
+                                  profile=AUTHORING.profile(), report=report)
+    elif vs.get("files"):
         from .server import compile_under_authoring  # noqa: PLC0415 — cycle
 
-        return compile_under_authoring(None, list(vs["files"]), manifest=manifest,
-                                       modules=file_modules(vs) or None,
-                                       replacing=replacing)
-    raise EditError("the working source set has no source to compile")
+        document = compile_under_authoring(None, list(vs["files"]),
+                                           manifest=manifest,
+                                           modules=file_modules(vs) or None,
+                                           replacing=replacing, report=report)
+    else:
+        raise EditError("the working source set has no source to compile")
+    from .server import _dependency_buffers  # noqa: PLC0415 — cycle
+
+    dependencies = _dependency_buffers(report)
+    if dependencies:
+        vs[ORIGIN_DEPENDENCIES] = dependencies
+    elif vs.get("source") is not None or report.get("dependencies") is not None:
+        # a compile that read no dependency file leaves none behind, so a
+        # `use`-reached truc that stops being reached stops being a buffer
+        vs[ORIGIN_DEPENDENCIES] = {}
+    return document
 
 
 def file_modules(vs: dict) -> dict:
@@ -720,6 +778,10 @@ def _origin_from(vs: dict) -> dict:
         origin[ORIGIN_FILES_CONTENT] = dict(vs.get(ORIGIN_FILES_CONTENT) or {})
     if vs.get(ORIGIN_MODULES):
         origin[ORIGIN_MODULES] = dict(vs[ORIGIN_MODULES])
+    # issue #1779: the read-only buffers ride the origin too, so a session that
+    # swapped a working set keeps serving records anchored to what it compiled
+    if vs.get(ORIGIN_DEPENDENCIES):
+        origin[ORIGIN_DEPENDENCIES] = dict(vs[ORIGIN_DEPENDENCIES])
     return origin
 
 

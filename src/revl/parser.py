@@ -9495,7 +9495,17 @@ def _dotted_path(expr) -> str | None:
 
 def parse_file(path: str) -> Program:
     with open(path, encoding="utf-8") as handle:
-        program = Parser(handle.read(), path).parse()
+        return parse_text(handle.read(), path)
+
+
+def parse_text(text: str, path: str) -> Program:
+    """Parse `text` as the module at `path`, with `parse_file`'s provenance.
+
+    The split exists so a caller that already holds a file's text can parse
+    exactly that text without re-reading the path (issue #1779: the compiler
+    reports the text it compiled, and the session anchors knowledge records to
+    it). `parse_file` is this, one read earlier, and is byte-identical."""
+    program = Parser(text, path).parse()
     # provenance is recorded relative to the invocation cwd so IR documents
     # stay machine-independent when compiled from the project root; a file on
     # another Windows drive has no relative path and keeps its absolute one

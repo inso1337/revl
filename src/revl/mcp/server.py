@@ -93,7 +93,8 @@ from . import runtime_gate as _runtime_gate
 from . import ship as _ship
 from . import undo_record as _undo_record
 from . import deploy as _mcp_deploy
-from .persist import RestoreError, admitted_name as _admitted_name
+from .persist import (ORIGIN_DEPENDENCIES, RestoreError,
+                      admitted_name as _admitted_name)
 from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
                        _canon as _approval_canon)
 from .. import query as Q
@@ -512,7 +513,8 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
                             manifest: dict | None = None,
                             modules: dict | None = None,
                             replacing: tuple = (),
-                            over_the_transport: bool = True) -> dict:
+                            over_the_transport: bool = True,
+                            report: dict | None = None) -> dict:
     """Compile inline source or paths through the same entry points the CLI
     uses, so the admission gate is literally the same code.
 
@@ -570,6 +572,11 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
 
     With no providers configured — the default — there is one compile, the
     decision compile, and its document is what loads.
+
+    `report` (issue #1779) is the caller-supplied out-parameter `compile_files`
+    and `compile_source` take: the user-origin modules this compile read from
+    the disk, mapped to the text it compiled for each. It is filled on the
+    compile whose document is returned and never enters that document.
     """
     # jailed `files` with no transport-carried text are operator-authored.
     inline = source is not None or bool(modules)
@@ -590,7 +597,7 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     # resolved for the decision failed the compile that loads).
     in_memory = {os.path.abspath(p): text for p, text in merged.items()}
 
-    def _compile_once(prof, co_roots: dict) -> dict:
+    def _compile_once(prof, co_roots: dict, into: dict | None = None) -> dict:
         if co_roots:
             virtual = dict(in_memory)
             paths = [os.path.abspath(p) for p in co_roots]
@@ -603,24 +610,27 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
             else:
                 raise ValueError("provide `source` or `files`")
             return compile_files(paths, manifest=manifest, replacing=replacing,
-                                 sources=virtual, profile=prof)
+                                 sources=virtual, profile=prof, report=into)
         if source is not None:
             return compile_source(source, "<candidate>.rvl", manifest=manifest,
                                   replacing=replacing, modules=merged or None,
-                                  profile=prof)
+                                  profile=prof, report=into)
         if files:
             return compile_files(list(files), manifest=manifest,
                                  replacing=replacing, profile=prof,
                                  sources=in_memory or None,
                                  operator_sources=(
                                      _operator_text_of(in_memory, providers)
-                                     if prof is not None else None))
+                                     if prof is not None else None),
+                                 report=into)
         raise ValueError("provide `source` or `files`")
 
     if providers and profile is not None:
         _compile_once(profile, {})              # 1. the decision
-        return _compile_once(_bound_only(None), providers)   # 2. what loads
-    return _compile_once(_bound_only(profile), providers)
+        # issue #1779: the report belongs to the compile whose document is
+        # RETURNED — the one whose `use` resolution the caller is holding.
+        return _compile_once(_bound_only(None), providers, report)
+    return _compile_once(_bound_only(profile), providers, report)
 
 
 def _bound_only(profile: AdmissionProfile | None) -> AdmissionProfile | None:
@@ -854,7 +864,7 @@ def _tool_lease(arguments: dict) -> dict:
     return payload
 
 
-def _origin(arguments: dict) -> dict:
+def _origin(arguments: dict, dependencies: dict | None = None) -> dict:
     """The admission inputs of a load/swap, kept so the composition can later
     be snapshotted for re-admission (docs/persistence.md).
 
@@ -863,7 +873,10 @@ def _origin(arguments: dict) -> dict:
     from here on the session edits, swaps by name and snapshots this text: a
     change made on disk afterwards is not picked up, and a file deleted after
     the load stops mattering. Callers take it just before the compile, so it
-    is the text that compile read."""
+    is the text that compile read.
+
+    `dependencies` (issue #1779) are the read-only buffers of the files the
+    compile reached through `use`, as `_dependency_buffers` filtered them."""
     origin = {}
     for key in ("source", "files", "modules"):
         value = arguments.get(key)
@@ -873,7 +886,25 @@ def _origin(arguments: dict) -> dict:
         held = {path: _edit._read_disk(path) for path in origin["files"]}
         origin["files_content"] = {p: text for p, text in held.items()
                                    if text is not None}
+    if dependencies:
+        origin[ORIGIN_DEPENDENCIES] = dict(dependencies)
     return origin
+
+
+def _dependency_buffers(compile_report: dict | None) -> dict:
+    """The READ-ONLY dependency buffers a compile's report carries (issue
+    #1779): every `use`-reached file under a project's `trucs/<name>/`, mapped
+    to the exact text the compile read for it.
+
+    The filter is deliberate. The report names every user-origin module the
+    compile loaded from disk, and most of those are ordinary source files that
+    happen to be `use`d; the session keeps a buffer for one only because a
+    knowledge record may be anchored to a vendored truc's declaration, so the
+    rest would enlarge every session for nothing."""
+    return {path: text
+            for path, text in
+            ((compile_report or {}).get("dependencies") or {}).items()
+            if _notes.vendored_path(path) is not None}
 
 
 # the verbs whose responses carry the knowledge entries of the symbols they
@@ -982,11 +1013,16 @@ def _tool_load(arguments: dict) -> dict:
     completed = canon if canon is not None and canon.get("completed") else None
     arguments = sent
     source, files, modules = _candidate_of(sent)
-    origin = _origin(arguments)
+    compile_report: dict = {}
     try:
-        ir = compile_under_authoring(source, files, modules=modules)
+        ir = compile_under_authoring(source, files, modules=modules,
+                                     report=compile_report)
     except RevlError as error:
         return report(error)
+    # issue #1779: the files this compile reached through `use` ride the origin
+    # as READ-ONLY buffers, so a record anchored to one is served and measured
+    # against the bytes that compiled
+    origin = _origin(arguments, _dependency_buffers(compile_report))
     if not SESSION.loaded and _draft.has_holes(ir):
         # issue #1727: a holed candidate opens a draft rather than failing.
         # Nothing boots, so nothing a lease fences happens yet: the lease is
@@ -1195,9 +1231,10 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
 
     # admitted: recompile the whole composition so the swap is a full
     # generation (the same shape `revl run --watch` reloads)
-    origin = _origin(stored)   # issue #1700: the held source is canonical
+    compile_report: dict = {}
     try:
-        full = compile_under_authoring(source, files, modules=modules)
+        full = compile_under_authoring(source, files, modules=modules,
+                                       report=compile_report)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -1206,6 +1243,10 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
                             "composition, but is not a complete composition on "
                             "its own — pass the full source set to swap")
         return rejected
+    # issue #1700: the held source is canonical
+    # issue #1779: and what this compile READ rides with it, so the swapped-in
+    # generation anchors records to the files it actually compiled
+    origin = _origin(stored, _dependency_buffers(compile_report))
     authored = _authored_host_bodies(full, source, modules)
     running = SESSION.ir
     # issue #1704: the same preflight revl_edit carries, read off the
