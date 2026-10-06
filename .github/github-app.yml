@@ -29,6 +29,43 @@ instructions: |
     (for example the generated `crates/revl-gate/src/selfhost.rs`) — never that `main`
     is broken.
 
+  ## A red check is not always yours
+
+  A `pull_request` run pins its merge ref when the **run** is created, but the checkout
+  resolves that ref wall-clock when the **job** starts. Under a deep runner queue the jobs
+  therefore test `main@before-your-fix` plus your diff, and redden on code your diff never
+  touches. Establish which world a red ran in before treating it as a regression:
+
+  - **Read the failing job's timestamps.** `gh api /repos/inso1337/revl/actions/jobs/<id>`
+    gives `created_at`/`started_at`; `gh api .../actions/runs/<id>` gives the run's
+    `created_at`; `gh api .../actions/runs/<id>/jobs` matches one to the other. If
+    `run.created_at < main's fixing commit < job.started_at`, the job predates the fix and
+    the red is an artifact.
+  - **For `census-artifact`, compare the digest, not the clock alone.** The failing log
+    names `GATE-CENSUS-1+<digest>`. Same digest as the record already on `main` ⇒ stale-ref
+    artifact: **re-run, never re-record.** A *different* digest is a genuine rotation — and
+    still only if the diff touched one of the five `CHECKER_SOURCES` in
+    `tools/census_artifact.py`, of which `selfhost/lower.rvl` is the only one under
+    `selfhost/`. `emit_py.rvl`, `emit_ts.rvl` and `emit_rust.rvl` are **not** checker
+    sources and rotate nothing.
+  - **For a root-suite "expected vs actual" diff, read the shape.** If the *actual* has more
+    keys than the *expected*, the reference on `main` has gained a key your stale ref lacks:
+    the red is an artifact, not your regression. Confirm by running that one test on a tree
+    with current `main` merged in — `pytest <the failing test>::<the failing name> -q`.
+  - **A `lint` red may be the vocabulary-mirror gate, not ruff.** If the log names a closed
+    vocabulary declared in more than one place, either resolve the copies into one
+    definition or record the reason with `tools/check_vocabulary_mirrors.py --write` plus a
+    `note`. **If the mirror is already green on `main`** —
+    `tools/check_vocabulary_mirrors.py --check` reports "all recorded and in step" — do
+    **not** run `--write`: you would record a divergence that does not exist.
+  - **The remedy for an artifact is a re-run, or a merge of `origin/main` (which produces a
+    fresh run) — never a re-lane, never a weakened check.** Re-runs are refused while the
+    run still has pending jobs ("cannot be rerun; This workflow is already running"), and
+    re-pushing does not jump the queue: `ci.yml` concurrency is per ref.
+  - **A squash merge can undo a lane's own fix.** If a head predates the record its lane
+    wrote, the default branch lands red at a digest nothing recorded. Check `main` after
+    every landing.
+
   ## Working across worktrees
 
   - **Do not run `git stash`.** The stash is shared by every worktree of this repository,
@@ -60,3 +97,10 @@ instructions: |
   - Report the pull request number, the head sha, and the narrow-test evidence. Unless
     you have been asked to land the work, do not merge the pull request and do not
     enable auto-merge; the merge-gate owner lands it.
+  - **Push the branch and open the pull request before running any long gate.** A session
+    that errors with its commits unpushed loses them: no remote ref, no pull request, and
+    the worktree goes with the session. Pushing first costs nothing and is the only thing
+    that makes a worked-on change recoverable.
+  - Two lanes must not edit the same file in parallel. `src/revl/mcp/server.py` and
+    `selfhost/lower.rvl` are the most contended paths in this repository; a lane that needs
+    one of them should say so and expect to merge `origin/main` before its final push.
