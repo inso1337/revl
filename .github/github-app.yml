@@ -47,7 +47,28 @@ instructions: |
     still only if the diff touched one of the five `CHECKER_SOURCES` in
     `tools/census_artifact.py`, of which `selfhost/lower.rvl` is the only one under
     `selfhost/`. `emit_py.rvl`, `emit_ts.rvl` and `emit_rust.rvl` are **not** checker
-    sources and rotate nothing.
+    sources and do not move that digest.
+  - **But "the digest does not move" is not "you owe no census work" — ask the predicate,
+    never read `CHECKER_SOURCES` yourself.** `tools/census_artifact.py --moved-inputs`
+    accepts five kinds of input: a file the artifact pins (`decides_verdicts` /
+    `reference` / `report_inputs`), a program it carries, a declared-list file
+    (`OWN_FILES` / `CHECKER_SOURCES` / `REPORT_INPUTS`), **a gate crate source**
+    (`GATE_CRATE_GLOBS`, i.e. `build_gate_crate.py`'s `SELFHOST_CLOSURE` — which is why
+    `selfhost/emit_rust.rvl` is one even though it rotates no digest), and a new `.rvl`
+    under a census corpus directory. So `selfhost/emit_rust.rvl` is a gate crate source
+    and the regenerated `crates/revl-gate/src/selfhost.rs` is a **pinned deciding file**:
+    a diff touching either owes `python3 tools/census_artifact.py --write`, even at an
+    unchanged digest. Only an empty answer is permission to skip the job.
+  - **`--write` does not record the crate reproduction — that is a second, separate red.**
+    `--verify --strict` also fails on `no crate reproduction is recorded at the current
+    checker version <version>`. That record is
+    `tests/fixtures/census_crate_reproduction/<version>.json`, keyed by the checker
+    VERSION (issue #1768 moved it off `DIGEST_INPUTS`), and only
+    `python3 tools/regen_generated.py --only census` (cargo, minutes) writes it. If a red
+    names exactly that line and the lane moved no `CHECKER_SOURCE`, the missing record is
+    **`main`'s debt**: merge `origin/main` forward after the lane that owns the record
+    lands — do not run the re-record yourself, and never delete a record to clear the
+    check.
   - **For a root-suite "expected vs actual" diff, read the shape.** If the *actual* has more
     keys than the *expected*, the reference on `main` has gained a key your stale ref lacks:
     the red is an artifact, not your regression. Confirm by running that one test on a tree
