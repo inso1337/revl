@@ -153,8 +153,11 @@ UNCLASSIFIED = "unclassified"
 # untouched by this table: a guarantee is a named obligation of the DESIGN
 # catalogue, and a code that enforces none must not claim one.
 #
-# The roster is not a hand-list. `revl.emitted_codes` derives it by walking the
-# emitter sources for the sites that mint a code, and
+# This table plus `GUARANTEES` is the roster `revl explain` answers for, and it
+# is closed over the emitters *except* for the reserved codes (see `ALL_CODES`
+# below), which the evolution curriculum keeps a task per code for. Neither the
+# closure nor the reservation is a hand-list: `revl.emitted_codes` derives both
+# from the reference's own raise sites, and
 # `tests/test_explain_coverage_2028.py` asserts the two sets close over each
 # other, so a new `code=` site in the compiler fails that file until it has an
 # entry here.
@@ -164,66 +167,7 @@ UNCLASSIFIED = "unclassified"
 # about the *run* rather than about the source. `fix` is the rewrite that
 # satisfies it, or `None` where no single rewrite exists.
 OTHER_CODES = {
-    # ---- the language surface an author meets first
-    "HOST-METHOD": {
-        "category": "host-boundary",
-        "guarantee": "a call names a method the receiver's declared type has",
-        "meaning": "the receiver is an opaque host object and the method is not "
-                   "on the stub surface its binding declares",
-        "fix": "call a method the hint's surface lists, or annotate the binding "
-               "(`let v: Str = ...`) so the value is a revl type and not a host "
-               "handle",
-    },
-    "HOST-ARITY": {
-        "category": "host-boundary",
-        "guarantee": "a call passes the arity the host signature declares",
-        "meaning": "the host method is on the stub surface but the call's "
-                   "argument count differs from its fixed signature",
-        "fix": "pass the arity the hint's signature names — a host signature "
-               "cannot be defaulted or overloaded",
-    },
-    "L1": {
-        "category": "termination",
-        "guarantee": "a termination reads the world and never writes it",
-        "meaning": "a `Criterion`/`Guard` body reaches a crossing — a "
-                   "termination that could cause its own satisfaction (441 C1)",
-        "fix": "move the crossing into the forward path and let the termination "
-               "observe its RESULT "
-               "(docs/design/458-termination-language-surface.md §3)",
-    },
-    "L4": {
-        "category": "termination",
-        "guarantee": "a termination marker is a return type, never a value",
-        "meaning": "`Criterion`/`Guard` is a termination marker and may appear "
-                   "ONLY as the return type of a service operation",
-        "fix": "write `Opt[Bool]` for a plain optional — a criterion has no "
-               "constructor, no alias and no first-class value "
-               "(docs/design/458-termination-language-surface.md)",
-    },
-    "lifecycle": {
-        "category": "lifecycle",
-        "guarantee": "a subscription is bracketed by the lifecycle that owns it",
-        "meaning": "a rule of the subscription/stream lifecycle (item 130): a "
-                   "stage that is not a pure arrow, a `replay` the source does "
-                   "not declare, a stream bound or stored, a bridge shared "
-                   "between consumers, a handler on an undeclared event",
-        "fix": "read the hint — it names the rule and the construct: write the "
-               "stage as a pure arrow, keep the stream where it is consumed, "
-               "and leave effects to the consumer body",
-    },
-    "R2": {
-        "category": "admission",
-        "guarantee": "an admitted turn reaches only the services its profile "
-                     "grants (item 329)",
-        "meaning": "the untrusted-author allowlist refused the reach: the "
-                   "service is not granted to this component, or is granted "
-                   "under another component's key — a grant is key-precise "
-                   "(issue #1926). The same letter is cited where an unmet "
-                   "requirement leaves a component PENDING (reactive "
-                   "resolution, docs/backend-ir.md)",
-        "fix": "grant this component's row, or provide the key inside the turn "
-               "— the hint names the rows that hold the grant",
-    },
+    # ---- the runtime's verdicts
     "R1": {
         "category": "runtime",
         "guarantee": "LIFO recovery: a teardown runs the accumulated undos in "
@@ -234,17 +178,6 @@ OTHER_CODES = {
                    "returned to baseline, which is exactly why the trace is read",
         "fix": "give the acquisition an `undo` that releases it (G4), so the "
                "derived LIFO teardown reaches the host resource",
-    },
-    "R4": {
-        "category": "runtime",
-        "guarantee": "a teardown leaves no residue: no bindings, listeners or "
-                     "effects from the composition (docs/backend-ir.md)",
-        "meaning": "the runtime's no-residue proof — in-process state gone and "
-                   "the counters back at baseline — or, on the deploy leg, the "
-                   "pinned host key; the message says which",
-        "fix": "read the report the code came with: `revl erase-report` and the "
-               "canary's revert proof name the residue that remains, and a "
-               "`via = ssh` target needs `known_hosts` to pin the host key",
     },
     "R5": {
         "category": "runtime",
@@ -375,16 +308,6 @@ OTHER_CODES = {
                "the recorded change) or the candidate reaches further than it "
                "should",
     },
-    "SYNTAX": {
-        "category": "header",
-        "guarantee": None,
-        "meaning": "the source did not parse — the message names the token the "
-                   "parser wanted. This code also covers a clause written where "
-                   "the grammar does not allow it, e.g. `requires` inside a "
-                   "component body",
-        "fix": None,
-    },
-
     # ---- the HTTP face's routed error bodies
     "method": {
         "category": "http",
@@ -476,7 +399,28 @@ OTHER_CODES = {
     },
 }
 
-# the whole roster, for a miss: the catalogue plus the emitter codes above
+# The whole roster, for a miss: the catalogue plus the emitter codes above.
+#
+# Deliberately NOT every code the compiler can stamp. The evolution curriculum
+# (roadmap item 533, docs/design/533-evolution-curriculum.md) keeps one task per
+# *reserved* code — a refusal an agent receives and cannot look up — and the
+# easy rung of that curriculum IS the proof that the code is unanswerable. A row
+# here would not close that gap, it would delete the task, so the reserved set
+# is absent from both tables above by construction.
+#
+# The reserved set is derived, not listed here: `revl.emitted_codes` scans the
+# reference's own raise sites (`reserved_codes()` = the codes it *refuses* with,
+# minus `GUARANTEES`), which is the same rule the curriculum generator runs, and
+# `tests/test_explain_coverage_2028.py` asserts the two derivations agree and
+# that this roster is exactly the emitters' complement. So a `code="X"` raise
+# site added tomorrow fails that file until `X` has an entry or the curriculum
+# has a task — the roster and the curriculum cannot drift into disagreeing about
+# what `revl explain` answers for.
+#
+# That scan is not run here: parsing this package's 200-odd modules costs ~2s,
+# and `import revl.diagnostics` + `explain()` is 0.10s without it (measured), so
+# paying it at import would tax every `revl` command 20-fold to compute a set
+# the test already proves.
 ALL_CODES = tuple(sorted(set(GUARANTEES) | set(OTHER_CODES)))
 
 
@@ -493,6 +437,51 @@ def _catalogue_code(name: str) -> str | None:
         if known.upper() == folded:
             return known
     return None
+
+
+# One code, several failure modes (issue #2029). A code is a *guarantee*, and a
+# guarantee is often refused for more than one reason, each needing a different
+# rewrite: `G1` (declared access) is raised when a `Delegate[X]` names no
+# service, when a requirement key shadows a builtin, when a body reads a key the
+# component does not require, and when a name is read before its declaration.
+# The per-code rows above are written for one mode each — `FIXES["G1"]` is the
+# *requires* rewrite — so applying them by code alone hands three of the four
+# modes a remedy that contradicts their own hint (the residual of #1652).
+#
+# The raise site already knows its mode, so the mode is the lookup key. A code
+# with no entry here keeps its per-code row; a rejection that carries its own
+# `fix` still outranks both. Category is the mode name the raise sites already
+# use for this purpose; `G1`'s four are `delegation` (lower.py/typecheck.py),
+# `wiring` (`_refuse_builtin_requirement_key`), `requirement` (a read of a key
+# the component does not require) and `binding` (a local read before its
+# declaration). A mode's remedy is only reachable if its raise site sets that
+# category explicitly, because `_PATTERNS` below is a message-shape fallback and
+# a `(G1)` tag in a hint would otherwise land the record in `guarantee`.
+FIXES_BY_CATEGORY: dict[tuple[str, str], str] = {
+    # the per-code row is written for exactly this mode, so it is reused here
+    # rather than spelled twice.
+    ("G1", "requirement"): FIXES["G1"],
+    ("G1", "binding"): "declare it with `let` (single-assignment) or `var` "
+                       "(mutable), or add it as a parameter",
+    ("G1", "delegation"): "name a `service` this composition declares: write "
+                          "`Delegate[S]` where `S` is a `service` declaration",
+    ("G1", "wiring"): "rename the key: a requirement key may not spell a builtin "
+                      "type or a host root",
+}
+
+# The same split for the guarantee one-liner. `GUARANTEES[code]` is the code's
+# headline — it is what `revl explain`, the LSP hover and three generated docs
+# render — and it is written for the code's commonest mode. A mode whose
+# headline misdescribes it says so here instead; a code/mode with no entry keeps
+# the headline.
+GUARANTEES_BY_CATEGORY: dict[tuple[str, str], str] = {
+    ("G1", "binding"): "declared names: a body reads only the names it declares "
+                       "or receives as parameters",
+    ("G1", "delegation"): "declared delegation: a `Delegate[X]` names a service "
+                          "this composition declares",
+    ("G1", "wiring"): "unshadowed requirement keys: a requirement key may not "
+                      "spell a builtin type or a host root",
+}
 
 
 def explain(code: str) -> dict:
@@ -534,7 +523,7 @@ _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"dependency cycle|import cycle"), "G3", "linking"),
     (re.compile(r"cannot reassign|already (declared|bound)"), "G6", "binding"),
     (re.compile(r"is not declared in this (function|component)"), "G1", "binding"),
-    (re.compile(r"is not a declared requirement"), "G1", "binding"),
+    (re.compile(r"is not a declared requirement"), "G1", "requirement"),
     (re.compile(r"acquisition after `provide`"), "A2", "ordering"),
     (re.compile(r"no builtin method"), "T1", "stdlib"),
     (re.compile(r"verified fn .* is not total"), "G7", "totality"),
@@ -588,20 +577,29 @@ def classify(error: RevlError) -> dict:
         record["expected"] = expected
         record["actual"] = actual
     if code in GUARANTEES:
-        record["guarantee"] = GUARANTEES[code]
+        # the code's headline guarantee, unless this failure mode has its own
+        # (issue #2029)
+        record["guarantee"] = GUARANTEES_BY_CATEGORY.get(
+            (code, record["category"]), GUARANTEES[code])
     else:
         # a code outside the guarantee catalogue declares its own obligation,
         # or `None` where it enforces none (a parse error, or a verdict about
-        # the run rather than about the source). A code nobody knows is the
-        # fallback and says `unclassified` rather than staying silent, so an
-        # agent reading the record always finds the field (issue #2028).
-        declared = OTHER_CODES.get(effective, {}).get("guarantee", UNCLASSIFIED)
+        # the run rather than about the source). A code with no row at all — a
+        # reserved code, which `explain` refuses on purpose — adds no field
+        # rather than inventing one. The fallback `REVL` carries
+        # `unclassified` in its own row, so the honest degrade is unchanged
+        # (issue #2028).
+        declared = OTHER_CODES.get(effective, {}).get("guarantee")
         if declared is not None:
             record["guarantee"] = declared
     if getattr(error, "fix", None):
         # a rewrite specific to this rejection (a corrected line) outranks the
         # per-code one: the code's fix is written for its commonest shape
         record["fix"] = error.fix
+    elif (code, record["category"]) in FIXES_BY_CATEGORY:
+        # the code covers several failure modes and this is not the one the
+        # per-code row was written for (issue #2029)
+        record["fix"] = FIXES_BY_CATEGORY[(code, record["category"])]
     elif code in FIXES:
         # the exact rewrite, beside the guarantee, so an agent gets the fix
         # without a second `explain` call or parsing the prose hint

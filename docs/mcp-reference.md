@@ -822,6 +822,13 @@ sibling of `sessionState`, never a field of it: `sessionState.dirty` means a
 the case a stale disk is easy to miss. An inline-loaded composition names no
 path and is `inSync`.
 
+The three revert verbs (`revl_undo`, `revl_rollback`, `revl_step_back`) carry
+the same block in the mirror case (issue #2037): disk *leads* the session,
+still holding the change the revert retracted, so a cold `revl_load {files}` -
+which reads disk - would resurrect it. Their `note` names `revl_export` as the
+way to write the reverted source out. A revert of a change that was never
+exported leaves disk already holding the reverted text and is `inSync`.
+
 - Inputs: one of `edit` / `replace` / `withdraw` / `add`; `gauntlet`; `commit`
   (default false: propose only); `discard`; with nothing loaded, `files` /
   `source` / `modules` / `config`.
@@ -1069,7 +1076,10 @@ lone session owner) emits the call normally.
 
 ### `revl_rollback`
 
-Restore the generation that was running before the last swap. No inputs.
+Restore the generation that was running before the last swap. No inputs. The
+answer carries the `"disk": {"inSync", "stale"}` block (issue #2037): when disk
+still holds the change the rollback retracted, `stale` names it and a `note`
+points at `revl_export`.
 
 ### `revl_undo`
 
@@ -1081,6 +1091,10 @@ gate a swap runs, so a target the current checker rejects is refused
 (`ok:false`, with the diagnostic) and the running composition is untouched. The
 dossier rides along: what unloads, what state drops, and the interim boundary
 crossings that no undo can un-emit ([generation-history.md](generation-history.md)).
+The answer carries the `"disk": {"inSync", "stale"}` block (issue #2037): a
+revert of a change that had been exported leaves disk holding the retracted
+change, so `stale` names it and a `note` points at `revl_export`; a revert of a
+change that was never exported is `inSync`.
 
 - Inputs: `to` (a retained generation number; omit for N−1).
 
@@ -1515,7 +1529,9 @@ reverts the change before it; a change that answered `undo: null` is not on the
 stack, so it is skipped rather than half-undone. The answer names the reverted
 change, the undo it ran (`via`, through the same gates as any call) and the
 `redo` call, with `undoDepth` left. With nothing left to revert it is a refusal
-with `undoDepth: 0`.
+with `undoDepth: 0`. The answer carries the `"disk": {"inSync", "stale"}` block
+(issue #2037), naming the retracted change disk still holds and pointing at
+`revl_export` when the revert is not yet durable.
 
 With `to`, unwind the accumulator to step k by running the registered inverses
 from the top down, newest first - leaving the component LIVE, not torn down.

@@ -6627,7 +6627,8 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         if stmt.name not in scope:
             _reject_foreign_name(stmt.name, filename, stmt.line)  # item 384
             raise RevlError(filename, stmt.line, f"`{stmt.name}` is not declared in this function",
-                            hint="declare it with `let` (single-assignment) or `var` (mutable)")
+                            hint="declare it with `let` (single-assignment) or `var` (mutable)",
+                            code="G1", category="binding")
         if not scope[stmt.name]:
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
@@ -7119,7 +7120,8 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         if expr.name not in scope and expr.name not in callables:
             _reject_foreign_name(expr.name, filename, expr.line)  # item 384
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
-                            hint="declare it with `let`/`var` or add it as a parameter (G1)")
+                            hint="declare it with `let`/`var` or add it as a parameter (G1)",
+                            code="G1", category="binding")
         # issue #320: an in-scope value binding that spells a host predeclared
         # name is renamed to match its (mangled) declaration; a callable
         # reference (module fn / extern / host) is left verbatim.
@@ -9251,7 +9253,8 @@ def _component_scope(env: Env) -> dict[str, str]:
 def _component_req_call(env: Env, root: str, method: str, args: list, line: int) -> dict:
     if root not in env.requires:
         raise RevlError(env.filename, line,
-                        f"`{root}` is not a declared requirement of {env.component.name}")
+                        f"`{root}` is not a declared requirement of {env.component.name}",
+                        code="G1", category="requirement")
     # item 130: a required `Stream[T]` is a requirement but not a service, so a
     # method call on it is refused by name before the service table is indexed.
     if root in env.stream_requires:
@@ -9575,12 +9578,16 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 f"`{name}` is not a declared requirement of {env.component.name}",
                 hint=f"component {env.component.name} requires {declared} — "
                      f"add `requires {name}: <Service>`?",
+                code="G1", category="requirement",
             )
         _reject_foreign_name(name, filename, line)  # item 384
         raise RevlError(filename, line,
                         f"`{name}` is not declared in this component effect block",
                         hint="declare it with `let` in the effect block, or use a "
-                             "requirement/config field (G1)")
+                             "requirement/config field (G1)",
+                        code="G1", category="binding",
+                        fix="declare it with `let` in the effect block, or use a "
+                            "requirement/config field")
     if isinstance(expr, ExprField):
         if isinstance(expr.target, ExprVar) and expr.target.name == "config":
             if expr.name not in env.config_fields:
@@ -10071,7 +10078,9 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
             _reject_foreign_name(stmt.name, filename, stmt.line)  # item 384
             raise RevlError(filename, stmt.line,
                             f"`{stmt.name}` is not declared in this effect block",
-                            hint="declare it with `let`/`var` first (G1)")
+                            hint="declare it with `let`/`var` first (G1)",
+                            code="G1", category="binding",
+                            fix="declare it with `let`/`var` in the effect block")
         if stmt.name not in mutables:
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
@@ -13426,6 +13435,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                     f"`{stmt.key}` is not a declared requirement of {comp.name}",
                     hint="`isolate ... in realms(...)` targets a key from the `requires` "
                          "clause (G1)",
+                    code="G1", category="requirement",
                 )
             # one binding per key: a key is pinned to one realm *or* routed across
             # a realm set, never both, and never two conflicting route sets.
@@ -13495,6 +13505,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                         filename, stmt.line,
                         f"`{stmt.key}` is not a declared requirement or provision of {comp.name}",
                         hint="`isolate` targets a key from the component header (G1)",
+                        code="G1", category="requirement",
                     )
                 if stmt.key in isolate:
                     raise RevlError(filename, stmt.line,
@@ -13514,6 +13525,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                         filename, stmt.line,
                         f"`{stmt.key}` is not a declared requirement of {comp.name}",
                         hint="`intercept` targets a key from the `requires` clause (G1)",
+                        code="G1", category="requirement",
                     )
                 if stmt.key in intercept:
                     raise RevlError(filename, stmt.line,
@@ -16408,6 +16420,7 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
             env.filename, expr.line,
             f"`{head}` is not a declared requirement of {comp.name}",
             hint=f"component {comp.name} requires {declared} — add `requires {head}: <Service>`?",
+            code="G1", category="requirement",
         )
 
     for op in ops:

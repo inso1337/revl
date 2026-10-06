@@ -24,7 +24,14 @@ about the source. Those live in `OTHER_CODES` in the same module, and
 `revl explain` answers for them too (issue #2028). The roster is derived, not
 hand-listed: `src/revl/emitted_codes.py` walks the emitter sources for the
 sites that mint a code, and `tests/test_explain_coverage_2028.py` holds
-`OTHER_CODES` equal to `emitted - GUARANTEES` in both directions.
+`OTHER_CODES` equal to `emitted - GUARANTEES - reserved` in both directions.
+
+One set of codes is deliberately *not* covered: those the evolution curriculum
+(`docs/design/533-evolution-curriculum.md`) reserves as the tasks an agent must
+work out from the refusal itself rather than look up. `emitted_codes.reserved_codes()`
+derives that set by the same rule the curriculum generator uses, so covering a
+reserved code — by adding it to `GUARANTEES` — removes its task and admits it
+back into the roster in one move, and the two cannot drift.
 
 The fenced examples below are compiled by `tests/test_doc_examples.py`: a
 `reject CODE` fence must be refused, and the diagnostic must classify as
@@ -90,9 +97,14 @@ g1_undeclared_access.rvl:12: `db` is not a declared requirement of Logger
 ```
 
 Fix: add the key to the component's `requires` clause, or drop the access.
-The same rule refuses an undeclared name inside a function body
-(`` `nobody` is not declared in this function ``) and an `intercept` of a
-key the component does not require.
+
+`G1` is one guarantee refused for several reasons, and the rewrite on the
+diagnostic is chosen by the reason, not by the code. An undeclared name inside
+a function body (`` `nobody` is not declared in this function ``) is not a
+requirement and is not told to add one: declare it with `let`/`var` or add it
+as a parameter. An `intercept` of a key the component does not require takes
+the `requires` rewrite above; a `Delegate[X]` that names no service names one;
+and a requirement key that spells a builtin type or a host root is renamed.
 
 ## G2 — provision disjointness
 

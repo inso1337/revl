@@ -23,6 +23,11 @@ Three emission shapes are collected, because the package uses all three:
 Non-string `code=` values are skipped: `dev.py`/`run.py` use `code=3` for a *process
 exit status*, which is not a diagnostic code. Docstrings are skipped too — they
 quote codes as documentation, which is not an emission.
+
+`refusal_codes()` below answers a second, narrower question — which codes the
+reference *refuses* with — because that is the population the evolution
+curriculum keeps a task per code for, and so the one population `revl explain`
+must deliberately NOT cover.
 """
 from __future__ import annotations
 
@@ -153,3 +158,73 @@ def dynamic_code_sites(root: str | Path | None = None) -> list:
                 continue
             out.append((f"{path.name}:{value.lineno}", ast.unparse(value)))
     return sorted(out)
+
+
+def _callee(call: ast.Call) -> str:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def refusal_codes(root: str | Path | None = None) -> dict:
+    """`{code: (file, line)}` for the first site the reference REFUSES with it.
+
+    Narrower than `emitted_codes()` on purpose: only a `RevlError(code="X")`
+    keyword literal and a `(G4)`-style tag inside a `raise` count, and a code
+    enforced only in prose, in a docstring or in a comment is not counted at
+    all. This is the rule `tools/evolve_curriculum.py` runs (`enforced_codes`)
+    to build its easy rung, which is the curriculum's record of the refusals an
+    agent receives and cannot look up.
+
+    It is repeated here rather than imported from the tool because `src/revl`
+    must not depend on `tools/`, so `test_explain_coverage_2028.py` asserts the
+    two derivations agree code-for-code: the roster's complement and the
+    curriculum's easy rung cannot drift into disagreeing about what the
+    reference stamps.
+    """
+    root = Path(root) if root is not None else _SRC
+    sites: dict = {}
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "diagnostics.py":
+            continue        # the projection of a refusal, not a refusal
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # a fixture that is not importable python
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _callee(node).endswith("RevlError"):
+                for kw in node.keywords:
+                    if (kw.arg == "code" and isinstance(kw.value, ast.Constant)
+                            and isinstance(kw.value.value, str)):
+                        sites.setdefault(kw.value.value, (path.name, node.lineno))
+            if isinstance(node, ast.Raise):
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                        for match in TAG.finditer(sub.value):
+                            sites.setdefault(match.group(1), (path.name, node.lineno))
+    return dict(sorted(sites.items()))
+
+
+def reserved_codes(root: str | Path | None = None) -> frozenset:
+    """The codes the reference refuses with that no guarantee catalogue holds.
+
+    This is the evolution curriculum's easy rung (roadmap item 533, docs/design/
+    533-evolution-curriculum.md): a refusal an agent receives and cannot look up
+    is a gap, and the curriculum keeps one task per code so the gap stays
+    visible instead of being papered over. `revl explain` therefore must NOT
+    answer these — a row in `diagnostics.OTHER_CODES` would not close the gap,
+    it would delete the task — so `diagnostics`'s roster is this set's
+    complement over the emitters (issue #2028).
+
+    Derived from the reference's own raise sites minus the guarantee catalogue,
+    which is the curriculum's own definition, so it is never a list kept by hand
+    in a third place. It is a function rather than a table `diagnostics` imports
+    because parsing this package costs ~2s against a 0.10s `revl explain`; the
+    invariant it encodes is asserted, in both directions, by
+    `tests/test_explain_coverage_2028.py`.
+    """
+    from .diagnostics import GUARANTEES   # deferred: diagnostics imports only .errors
+    return frozenset(refusal_codes(root)) - frozenset(GUARANTEES)

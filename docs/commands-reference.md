@@ -140,14 +140,19 @@ rejection can hand back has an answer, not just the catalogue ones
 ```bash
 revl explain G4
 revl explain t3 --json
-revl explain host-method
+revl explain r1
 ```
 
 The two tables cannot drift apart: `src/revl/emitted_codes.py` derives the
 emitted roster by walking the emitter sources for the sites that mint a code,
 and `tests/test_explain_coverage_2028.py` holds `OTHER_CODES` to
-`emitted - GUARANTEES` in both directions, so a new `code=` site fails that
-file until it is explained.
+`emitted - GUARANTEES - reserved` in both directions, so a new `code=` site
+fails that file until it is explained.
+
+The one exception is the codes the evolution curriculum reserves as tasks an
+agent must solve from the refusal itself; `emitted_codes.reserved_codes()`
+derives them by the same rule the curriculum uses, and `revl explain` refuses
+them on purpose (`HOST-ARITY` is one).
 
 A code that enforces no named guarantee — a parse error, or a verdict about
 the *run* rather than about the source — says so: `classify()` reports
