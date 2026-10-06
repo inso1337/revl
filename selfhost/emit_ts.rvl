@@ -1954,6 +1954,56 @@ fn extern_config_scaffold() -> List[Str] {
   return o
 }
 
+// `_ts_secret_scaffold`: the module-level bound-secret seam (item 256, issue
+// #1936), the ts mirror of the py tier's `_REVL_SECRETS` map and fail-loud
+// `_revl_secret` helper. The runner resolves each name in `_REVL_SECRET_NAMES`
+// once at plug, from `REVL_SECRET_<NAME>`, and installs the value into the map
+// before any component loads; a bound extern body reads the key as its first
+// local. The helper names the secret but never its value, and there is no
+// default. Emitted only when some extern carries a bound secret, so a
+// secret-free program is byte-identical.
+fn secret_scaffold(externs: List[Any]) -> List[Str] {
+  var names = []
+  for (ext of externs) {
+    for (sn of value_list(value_field(ext, "secrets"))) {
+      let s = value_str(sn)
+      if (!list_contains(names, s)) { names = names.push(s) }
+    }
+  }
+  var o = []
+  o = o.push(`export const _REVL_SECRET_NAMES: string[] = ${json_dumps(names)};`)
+  o = o.push("")
+  o = o.push("export const _REVL_SECRETS: Record<string, string> = {};")
+  o = o.push("")
+  o = o.push("function _revlSecret(name: string): string {")
+  o = o.push("  const value = _REVL_SECRETS[name];")
+  o = o.push("  if (value === undefined) {")
+  o = o.push("    throw new Error(")
+  o = o.push('      "capability-bound secret `" + name + "` was not " +')
+  o = o.push('      "installed before its extern body ran; the run driver " +')
+  o = o.push('      "must resolve it at plug (item 256). No default exists " +')
+  o = o.push('      "for a secret.",')
+  o = o.push("    );")
+  o = o.push("  }")
+  o = o.push("  return value;")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// `_ts_secret_binds`: the `const <name> = _revlSecret("<name>");` first body
+// locals of a bound extern, one per secret it receives (item 256, the py tier's
+// injection). A component or service method body never gets one, so the name
+// resolves only inside the bound body. Empty for an extern with no bound secret.
+fn secret_binds(ext: Any) -> List[Str] {
+  var o = []
+  for (sn of value_list(value_field(ext, "secrets"))) {
+    let s = value_str(sn)
+    o = o.push(`const ${ident(s)} = _revlSecret(${json_dumps(s)});`)
+  }
+  return o
+}
+
 // `_ts_extern_config_bind`: the `const _revl_config = ...` first body line. It
 // passes the required (non-defaulted) field names and the defaults, both as
 // JSON built with json.dumps's own separators.
@@ -2063,6 +2113,12 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     if (value_list(value_field(ext, "config")).length() > 0) { any_config = true }
   }
   if (any_config) { out = out.concat(extern_config_scaffold()) }
+  // item 256 / issue #1936: the bound-secret seam, likewise only when used.
+  var any_secret = false
+  for (ext of externs) {
+    if (value_list(value_field(ext, "secrets")).length() > 0) { any_secret = true }
+  }
+  if (any_secret) { out = out.concat(secret_scaffold(externs)) }
   for (ext of externs) {
     let name = ident(value_str(value_field(ext, "name")))
     var parts = []
@@ -2119,6 +2175,9 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
         }
         out = out.push(`${export_kw}function ${impl}(${params}): ${returns} {`)
       }
+      // item 256: a bound secret is the FIRST body local of the emission
+      // extern it is bound to, and nowhere else.
+      for (bind of secret_binds(ext)) { out = out.push("  ".concat(bind)) }
       // item 378 Stage 5: a config extern binds `_revl_config` as its first
       // body line, through the fail-loud lookup.
       let schema = value_list(value_field(ext, "config"))
