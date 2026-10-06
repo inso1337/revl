@@ -42,7 +42,9 @@ same three-way input, and you pass exactly one form:
 
 - `source` - inline `.rvl` text (use this for a generated component; it is
   never written to disk).
-- `files` - an array of `.rvl` paths.
+- `files` - an array of `.rvl` paths, absolute or relative. A relative path
+  resolves against the operator's sanctioned root(s), not the server's cwd; an
+  absolute one outside every root is refused.
 - `modules` - in-memory sources for `use` imports, keyed by the path the import
   names, so a multi-module candidate is checked without touching the
   filesystem.
@@ -806,6 +808,18 @@ provider` for a refused cascade. A proposal and a commit (with an intent, or
 of the held proposal) also carry `blastRadius`, as `revl_edit` does; a commit
 reads it off the composition running at commit time. A change that fails
 verification commits nothing, and the running composition is unchanged.
+
+**A change lives in the session, not on disk** (issue #2032). The held source
+is the truth and disk an export, so a committed change leaves the two
+disagreeing until `revl_export` runs. The verbs of the change loop
+(`revl_change`, `revl_edit`, `revl_source`, `revl_export`) carry
+`"disk": {"inSync": bool, "stale": [path]}`, where `stale` names every loaded
+file whose held text differs from the bytes on disk. When `inSync` is false on
+a success, the answer also carries a `note` naming `revl_export`. It is a
+sibling of `sessionState`, never a field of it: `sessionState.dirty` means a
+*speculative draft* differs from what is running, so it is `false` in exactly
+the case a stale disk is easy to miss. An inline-loaded composition names no
+path and is `inSync`.
 
 - Inputs: one of `edit` / `replace` / `withdraw` / `add`; `gauntlet`; `commit`
   (default false: propose only); `discard`; with nothing loaded, `files` /

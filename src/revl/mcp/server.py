@@ -93,7 +93,8 @@ from . import runtime_gate as _runtime_gate
 from . import ship as _ship
 from . import undo_record as _undo_record
 from . import deploy as _mcp_deploy
-from .persist import RestoreError, admitted_name as _admitted_name
+from .persist import (ORIGIN_DEPENDENCIES, RestoreError,
+                      admitted_name as _admitted_name)
 from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
                        _canon as _approval_canon)
 from .. import query as Q
@@ -255,12 +256,91 @@ def _within_roots(path: str, roots: tuple[str, ...]) -> bool:
     """Whether `path` resolves inside one of `roots`. Resolved with `realpath`
     BEFORE the comparison, so `../` traversal and a symlink pointing out of the
     root are both caught, and resolved without stat-ing for existence, so the
-    check itself is not the oracle it is closing."""
+    check itself is not the oracle it is closing.
+
+    This is the ABSOLUTE-path rule, and `abspath` is right for what it is:
+    `_operator_text_of` reads the path it checks with the same cwd-relative
+    `open`, so resolving against the cwd there would be a lie. A caller-supplied
+    path ARGUMENT never arrives here relative — `_jail_refusal` absolutises it
+    against the roots first (`_absolutise_path_arguments`, issue #2038)."""
     real = os.path.realpath(os.path.abspath(path))
     for root in roots:
         if real == root or real.startswith(root + os.sep):
             return True
     return False
+
+
+def _root_resolved(path: str, roots: tuple[str, ...]) -> str | None:
+    """The absolute path a caller-supplied path argument names when it lies
+    inside a sanctioned root, else `None`.
+
+    An ABSOLUTE path gets exactly `_within_roots`'s rule: `realpath`-resolved
+    before the comparison, so `../` traversal and a symlink pointing out of a
+    root are both caught, and without stat-ing for existence, so the check is
+    not the oracle it closes.
+
+    A RELATIVE path is resolved against the sanctioned ROOTS, never against the
+    server process's cwd (issue #2038): the cwd is an accident of how the
+    operator launched the process and, under `--root`, is deliberately not the
+    sanctioned tree. The path is joined to each root in the operator's declared
+    order and the FIRST join that lands inside the sanctioned set wins, so the
+    rule stays deterministic when several roots are configured; a path no root
+    admits names nothing inside them."""
+    if os.path.isabs(path):
+        real = os.path.realpath(os.path.abspath(path))
+        return real if _within_roots(real, roots) else None
+    for root in roots:
+        real = os.path.realpath(os.path.join(root, path))
+        if _within_roots(real, roots):
+            return real
+    return None
+
+
+def _absolutise_path_arguments(node, roots: tuple[str, ...]) -> list[str]:
+    """Rewrite, in place, every caller-supplied RELATIVE path argument to the
+    absolute path it names inside a sanctioned root (`_root_resolved`), so the
+    handler opens the file the caller named and not a cwd-relative namesake.
+    Returns the path arguments no root admits, left exactly as the caller wrote
+    them, so a refusal quotes the caller's own spelling.
+
+    The traversal mirrors `_collect_path_arguments` — `_PATH_ARGUMENTS` is the
+    single source of truth for which arguments are paths, applied depth-aware
+    exactly as there (issue #2033) — including the ones nested inside a
+    `revl_restore` snapshot document. A nested `meta.approval.policy` is the
+    approval-policy MODE name, not a relative path, so it is left as written."""
+    unadmitted: list[str] = []
+    _walk_path_arguments(node, roots, unadmitted)
+    return unadmitted
+
+
+def _walk_path_arguments(node, roots: tuple[str, ...], unadmitted: list,
+                         *, nested: bool = False) -> None:
+    keys = _NESTED_PATH_ARGUMENTS if nested else _PATH_ARGUMENTS
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in keys:
+                if isinstance(value, str):
+                    node[key] = _rewrite_path_argument(value, roots, unadmitted)
+                elif isinstance(value, list):
+                    node[key] = [
+                        _rewrite_path_argument(v, roots, unadmitted)
+                        if isinstance(v, str) else v for v in value]
+            elif key not in _PATH_ARGUMENTS:
+                _walk_path_arguments(value, roots, unadmitted, nested=True)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_path_arguments(item, roots, unadmitted, nested=True)
+
+
+def _rewrite_path_argument(path: str, roots: tuple[str, ...],
+                           unadmitted: list) -> str:
+    if not path or os.path.isabs(path):
+        return path
+    resolved = _root_resolved(path, roots)
+    if resolved is None:
+        unadmitted.append(path)
+        return path
+    return resolved
 
 
 def _collect_path_arguments(node, out: list, *, nested: bool = False) -> None:
@@ -404,11 +484,19 @@ def _jail_refusal(arguments: dict) -> dict | None:
 
     Two carriers, one jail: a path ARGUMENT (`files`, `traceFile`, ...) and a
     `use` path written inside transport-carried source (`_transport_use_escapes`,
-    roadmap 425 F2)."""
+    roadmap 425 F2).
+
+    A relative path argument is first resolved against the sanctioned roots
+    (`_absolutise_path_arguments`, issue #2038) — the operator sanctioned that
+    tree, so that tree is the only base a relative path in a call to this
+    server can mean. The comparison below then sees absolute paths only, and
+    every real escape (`../`, a symlink out, an absolute path outside every
+    root) is still refused with the caller's own spelling."""
+    roots = _file_roots()
+    unadmitted = _absolutise_path_arguments(arguments, roots)
     paths: list = []
     _collect_path_arguments(arguments, paths)
-    roots = _file_roots()
-    escaped = [p for p in paths if not _within_roots(p, roots)]
+    escaped = [p for p in paths if not _within_roots(p, roots)] + unadmitted
     imports = _transport_use_escapes(arguments) if not escaped else []
     if not escaped and not imports:
         return None
@@ -545,7 +633,8 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
                             manifest: dict | None = None,
                             modules: dict | None = None,
                             replacing: tuple = (),
-                            over_the_transport: bool = True) -> dict:
+                            over_the_transport: bool = True,
+                            report: dict | None = None) -> dict:
     """Compile inline source or paths through the same entry points the CLI
     uses, so the admission gate is literally the same code.
 
@@ -603,6 +692,11 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
 
     With no providers configured — the default — there is one compile, the
     decision compile, and its document is what loads.
+
+    `report` (issue #1779) is the caller-supplied out-parameter `compile_files`
+    and `compile_source` take: the user-origin modules this compile read from
+    the disk, mapped to the text it compiled for each. It is filled on the
+    compile whose document is returned and never enters that document.
     """
     # jailed `files` with no transport-carried text are operator-authored.
     inline = source is not None or bool(modules)
@@ -623,7 +717,7 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     # resolved for the decision failed the compile that loads).
     in_memory = {os.path.abspath(p): text for p, text in merged.items()}
 
-    def _compile_once(prof, co_roots: dict) -> dict:
+    def _compile_once(prof, co_roots: dict, into: dict | None = None) -> dict:
         if co_roots:
             virtual = dict(in_memory)
             paths = [os.path.abspath(p) for p in co_roots]
@@ -636,24 +730,27 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
             else:
                 raise ValueError("provide `source` or `files`")
             return compile_files(paths, manifest=manifest, replacing=replacing,
-                                 sources=virtual, profile=prof)
+                                 sources=virtual, profile=prof, report=into)
         if source is not None:
             return compile_source(source, "<candidate>.rvl", manifest=manifest,
                                   replacing=replacing, modules=merged or None,
-                                  profile=prof)
+                                  profile=prof, report=into)
         if files:
             return compile_files(list(files), manifest=manifest,
                                  replacing=replacing, profile=prof,
                                  sources=in_memory or None,
                                  operator_sources=(
                                      _operator_text_of(in_memory, providers)
-                                     if prof is not None else None))
+                                     if prof is not None else None),
+                                 report=into)
         raise ValueError("provide `source` or `files`")
 
     if providers and profile is not None:
         _compile_once(profile, {})              # 1. the decision
-        return _compile_once(_bound_only(None), providers)   # 2. what loads
-    return _compile_once(_bound_only(profile), providers)
+        # issue #1779: the report belongs to the compile whose document is
+        # RETURNED — the one whose `use` resolution the caller is holding.
+        return _compile_once(_bound_only(None), providers, report)
+    return _compile_once(_bound_only(profile), providers, report)
 
 
 def _bound_only(profile: AdmissionProfile | None) -> AdmissionProfile | None:
@@ -887,7 +984,7 @@ def _tool_lease(arguments: dict) -> dict:
     return payload
 
 
-def _origin(arguments: dict) -> dict:
+def _origin(arguments: dict, dependencies: dict | None = None) -> dict:
     """The admission inputs of a load/swap, kept so the composition can later
     be snapshotted for re-admission (docs/persistence.md).
 
@@ -896,7 +993,10 @@ def _origin(arguments: dict) -> dict:
     from here on the session edits, swaps by name and snapshots this text: a
     change made on disk afterwards is not picked up, and a file deleted after
     the load stops mattering. Callers take it just before the compile, so it
-    is the text that compile read."""
+    is the text that compile read.
+
+    `dependencies` (issue #1779) are the read-only buffers of the files the
+    compile reached through `use`, as `_dependency_buffers` filtered them."""
     origin = {}
     for key in ("source", "files", "modules"):
         value = arguments.get(key)
@@ -906,7 +1006,25 @@ def _origin(arguments: dict) -> dict:
         held = {path: _edit._read_disk(path) for path in origin["files"]}
         origin["files_content"] = {p: text for p, text in held.items()
                                    if text is not None}
+    if dependencies:
+        origin[ORIGIN_DEPENDENCIES] = dict(dependencies)
     return origin
+
+
+def _dependency_buffers(compile_report: dict | None) -> dict:
+    """The READ-ONLY dependency buffers a compile's report carries (issue
+    #1779): every `use`-reached file under a project's `trucs/<name>/`, mapped
+    to the exact text the compile read for it.
+
+    The filter is deliberate. The report names every user-origin module the
+    compile loaded from disk, and most of those are ordinary source files that
+    happen to be `use`d; the session keeps a buffer for one only because a
+    knowledge record may be anchored to a vendored truc's declaration, so the
+    rest would enlarge every session for nothing."""
+    return {path: text
+            for path, text in
+            ((compile_report or {}).get("dependencies") or {}).items()
+            if _notes.vendored_path(path) is not None}
 
 
 # the verbs whose responses carry the knowledge entries of the symbols they
@@ -1015,11 +1133,16 @@ def _tool_load(arguments: dict) -> dict:
     completed = canon if canon is not None and canon.get("completed") else None
     arguments = sent
     source, files, modules = _candidate_of(sent)
-    origin = _origin(arguments)
+    compile_report: dict = {}
     try:
-        ir = compile_under_authoring(source, files, modules=modules)
+        ir = compile_under_authoring(source, files, modules=modules,
+                                     report=compile_report)
     except RevlError as error:
         return report(error)
+    # issue #1779: the files this compile reached through `use` ride the origin
+    # as READ-ONLY buffers, so a record anchored to one is served and measured
+    # against the bytes that compiled
+    origin = _origin(arguments, _dependency_buffers(compile_report))
     if not SESSION.loaded and _draft.has_holes(ir):
         # issue #1727: a holed candidate opens a draft rather than failing.
         # Nothing boots, so nothing a lease fences happens yet: the lease is
@@ -1228,9 +1351,10 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
 
     # admitted: recompile the whole composition so the swap is a full
     # generation (the same shape `revl run --watch` reloads)
-    origin = _origin(stored)   # issue #1700: the held source is canonical
+    compile_report: dict = {}
     try:
-        full = compile_under_authoring(source, files, modules=modules)
+        full = compile_under_authoring(source, files, modules=modules,
+                                       report=compile_report)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -1239,6 +1363,10 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
                             "composition, but is not a complete composition on "
                             "its own — pass the full source set to swap")
         return rejected
+    # issue #1700: the held source is canonical
+    # issue #1779: and what this compile READ rides with it, so the swapped-in
+    # generation anchors records to the files it actually compiled
+    origin = _origin(stored, _dependency_buffers(compile_report))
     authored = _authored_host_bodies(full, source, modules)
     running = SESSION.ir
     # issue #1704: the same preflight revl_edit carries, read off the
@@ -1284,6 +1412,12 @@ def _tool_source(arguments: dict) -> dict:
         result = _symbols.read(vs, symbol,
                                deps="deps" in (arguments.get("with") or []),
                                comments=arguments.get("comments", True) is not False)
+    except RevlError as error:
+        # a path that cannot be opened is a PATH error, reported by the same
+        # `report`/`classify` the check and load verbs use, so `revl_source`
+        # refuses with the same `file not found: <path>` for the same path
+        # (issue #2031) — never a missing-declaration content error.
+        return report(error)
     except (_symbols.SymbolError, _edit.EditError) as error:
         return _session_error(str(error))
     if "knowledge" in (arguments.get("with") or []):
@@ -1487,6 +1621,73 @@ def _change_working_set() -> dict:
     return _edit.virtual_source(SESSION)
 
 
+# issue #2032: the verbs whose answer says how the held source stands against
+# disk — the change loop's own mutators, the read that verifies them, and the
+# export that reconciles them
+_DISK_RIDES = frozenset({"revl_change", "revl_edit", "revl_source",
+                         "revl_export"})
+
+_DISK_NOTE = "the held source differs from disk; call revl_export to write it"
+
+
+def _diverges(text, path) -> bool:
+    """Whether this held text differs from the bytes on disk (issue #2032).
+
+    The session-vs-disk comparison, in one place. `text is None` means the
+    session holds no text for that path at all, which is not a divergence to
+    report — there is nothing the session would be writing over."""
+    return text is not None and text != _edit._read_disk(path)
+
+
+def diverged_paths(texts: dict, paths) -> list[str]:
+    """The held files whose text does not match disk, in the order given.
+
+    The named seam three issues share, so they cannot drift apart: #2032 (this
+    change loop's payloads), #2036 (`revl_unload`'s preflight, before it
+    destroys the session's only copy) and #2037 (`revl_undo`, the mirror case
+    where disk leads the session) all ask the same question. `_export_plan`
+    filters its targets on `_diverges` to decide what an export would actually
+    write; `_disk_state` reports the same answer where the change loop can act
+    on it."""
+    return [p for p in paths if _diverges(texts.get(p), p)]
+
+
+def _disk_state() -> dict:
+    """The held source against the bytes on disk (issue #2032).
+
+    The held source is the truth and disk an export (#1696), so a change that
+    has not been exported leaves the two disagreeing — silently, because every
+    field of the success payload is session-scoped. `_export_plan` already
+    filters on exactly this predicate; this reports it where the change loop
+    can act on it instead of a bare success over an unchanged file.
+
+    `inSync` is the whole answer for a files-loaded composition: true when
+    every held file's text equals the bytes on disk, false with the differing
+    paths in `stale`. A composition loaded from inline source names no path,
+    so there is nothing on disk to be out of step with and it is `inSync` —
+    and so is a session holding no files at all.
+    """
+    held = _edit.virtual_source(SESSION)
+    stale = diverged_paths(held.get(_edit.ORIGIN_FILES_CONTENT) or {},
+                           held.get(_edit.ORIGIN_FILES) or [])
+    return {"inSync": not stale, "stale": stale}
+
+
+def _ride_disk(name: str, payload) -> None:
+    """Say whether the held source reached disk (issue #2032).
+
+    On the change loop's verbs only, because that is where the question is
+    asked; the ambient footer keeps its pinned key set (#1693). A stale answer
+    that is also a success also carries the `note` naming the one verb that
+    writes it, matching the failure path's use of `note`."""
+    if name not in _DISK_RIDES or not isinstance(payload, dict):
+        return
+    disk = _disk_state()
+    payload["disk"] = disk
+    if not disk["inSync"] and payload.get("ok") and not payload.get("note"):
+        payload["note"] = _DISK_NOTE
+
+
 def _tool_export(arguments: dict) -> dict:
     """Write the running composition's held source to disk, on request (issue
     #1696). The held source is the source of truth; this is its one way out.
@@ -1528,8 +1729,7 @@ def _export_plan(held: dict, arguments: dict) -> list[tuple[str, str]]:
                 text = _notes.render(text, path, [n for n in all_notes
                                                    if n["anchor"]["path"] == path])
             targets.append((path, text))
-        targets = [(p, t) for p, t in targets
-                   if t is not None and t != _edit._read_disk(p)]
+        targets = [(p, t) for p, t in targets if _diverges(t, p)]
         if with_knowledge:
             targets += _notes.sidecar_writes(SESSION, held)
     else:
@@ -2524,7 +2724,10 @@ def _with_candidate_knowledge(payload: dict, arguments: dict, refused) -> dict:
             vs = {"source": arguments["source"],
                   "modules": dict(arguments.get("modules") or {})}
         elif arguments.get("files"):
-            vs = _edit._files_source({"files": list(arguments["files"])})
+            # descriptive only — the refusal, if any, was already decided by
+            # `_check_as_sent`, so an unreadable path just drops out here
+            vs = _edit._files_source({"files": list(arguments["files"])},
+                                     require_all=False)
         else:
             return payload
         payload["knowledge"] = _knowledge.for_candidate(vs, refused)
@@ -3319,7 +3522,11 @@ TOOLS = [
                        "Patch the SERVER-SIDE source of the running composition and "
                        "re-admit — deltas, not documents. The response carries "
                        "`blastRadius`: the revl_query_withdraw cascade for every "
-                       "component the edit touches, so preflight comes with it. Instead of re-sending the "
+                       "component the edit touches, so preflight comes with it. "
+                       "An edit lives in the session, never on disk: the `disk` "
+                       "block says whether the loaded files still match the bytes "
+                       "on disk, and revl_export writes the held source out (issue "
+                       "#2032). Instead of re-sending the "
                        "whole composition to change one line (revl_swap's cost, which "
                        "scales with the running system), send a small structured patch "
                        "against a named buffer the server already holds. Each edit is "
@@ -3520,6 +3727,10 @@ TOOLS = [
                        "A proposal and a commit both carry `blastRadius`, as "
                        "revl_edit does: the revl_query_withdraw cascade for every "
                        "component the change touches. "
+                       "A change lives in the session, never on disk: the `disk` "
+                       "block says whether the loaded files still match the bytes "
+                       "on disk (`inSync`, `stale`), and revl_export is the one "
+                       "verb that writes the held source out (issue #2032). "
                        "A failed verification commits nothing and says why.",
         "inputSchema": {
             "type": "object",
@@ -3577,7 +3788,11 @@ TOOLS = [
                        "(its services, the functions and types it uses), and "
                        "`comments: false` returns the code alone in canonical form. "
                        "Reads the running composition, or, with nothing loaded, "
-                       "`files`/`source`. Pairs with revl_edit's {symbol, "
+                       "`files`/`source`. The `disk` block reports whether the "
+                       "held source still matches the bytes on disk, so a re-read "
+                       "is not mistaken for persistence; `revl_export` is the one "
+                       "verb that writes the held source out (issue #2032). Pairs "
+                       "with revl_edit's {symbol, "
                        "replacement} edit.",
         "inputSchema": {
             "type": "object",
@@ -5061,6 +5276,7 @@ def _run_handler(name: str, arguments: dict) -> dict:
         # issues #1745/#1754: keep the knowledge index and the notes current,
         # and attach what concerns the call's touched symbols
         _ride_knowledge(name, payload, arguments)
+        _ride_disk(name, payload)   # issue #2032: did the change reach disk?
         return payload
     except ApprovalRequired as exc:
         # item 246: a class-(c) crossing the decision inside Session.call

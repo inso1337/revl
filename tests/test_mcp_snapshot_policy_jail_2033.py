@@ -143,6 +143,36 @@ def test_the_top_level_meaning_of_policy_and_registry_is_unchanged():
     assert out == ["/in/a.rvl", "/etc/passwd", "/etc", "/etc/hosts"]
 
 
+def test_a_nested_policy_name_is_not_resolved_as_a_relative_path(tmp_path):
+    """The #2038 relative-path rule and this classification must agree.
+
+    `_absolutise_path_arguments` rewrites a RELATIVE path argument to the
+    absolute path it names inside a sanctioned root. `"auto"` is a relative
+    string, so a walker that inherited the top-level allowlist would rewrite a
+    snapshot's `meta.approval.policy` to `<root>/auto` — corrupting the document
+    it was supposed to leave alone. The nested `files` beside it is still a path
+    and is still resolved."""
+    roots = (str(tmp_path),)
+    arguments = {"snapshot": {"sources": {"files": ["a.rvl"]},
+                              "meta": {"approval": {"policy": "auto"}}}}
+    unadmitted = server._absolutise_path_arguments(arguments, roots)
+    assert arguments["snapshot"]["meta"]["approval"]["policy"] == "auto"
+    assert arguments["snapshot"]["sources"]["files"] == [
+        str(tmp_path / "a.rvl")]
+    assert unadmitted == []
+
+
+def test_a_top_level_relative_path_is_still_resolved_against_the_root(tmp_path):
+    """The #2038 intent survives: a path the tool DECLARES at the top level is
+    resolved against the sanctioned root, never the server cwd."""
+    roots = (str(tmp_path),)
+    arguments = {"files": ["a.rvl"], "policy": "p.json"}
+    unadmitted = server._absolutise_path_arguments(arguments, roots)
+    assert arguments["files"] == [str(tmp_path / "a.rvl")]
+    assert arguments["policy"] == str(tmp_path / "p.json")
+    assert unadmitted == []
+
+
 def test_a_nested_candidate_files_contributes_every_path():
     """`revl_repair`'s candidate is compiled from disk
     (`repair._compile_candidate`), so its nested `files` stays a path."""
