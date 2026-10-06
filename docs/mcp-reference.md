@@ -155,6 +155,33 @@ cannot be un-emitted, a halt or an approval is recorded evidence, and
 `revl_step_back` with no arguments can still revert. A refused call changed
 nothing and carries no undo field.
 
+**Every response can say which compiler answered.** Since issue #2007, the
+`initialize` result's `serverInfo` block and every `revl_state` payload carry
+the identity of the process that answered:
+
+```json
+"serverInfo": {"name": "revl", "version": "2.0",
+               "revision": "8a2eb872b7350c004555a4290bde2d7fcf960fd8",
+               "source_digest": "c7e7f647073de315646c5007fd1d43ab54d9bf023ee35d748c6879233c181a73"}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `revision` | the commit the package was imported from (`git rev-parse HEAD`), or a build id `revl-<version>` when the server is not running from a checkout |
+| `source_digest` | sha256 over the compiler's own `*.py`, by path and by content |
+
+`revl_state` carries both fields at the top level, on the not-loaded branch too,
+so the identity is available before anything is loaded. The revision says *which
+commit*, the digest says *which bytes*: a checkout at the pinned commit whose
+working tree has been edited reports the pinned revision and a digest the pin
+does not name. `revl.mcp.identity` reads them (`identity()`) and compares them
+(`assert_identity(payload, revision=..., source_digest=...)`), the latter
+raising `IdentityMismatch`, naming both values, rather than warning, because a
+tool answering from the wrong tree is otherwise indistinguishable from one
+answering correctly. Under `revl mcp proxy` the `initialize` `serverInfo` names
+the proxy; read the compiler's identity off `revl_state`, whose handler is the
+compiler server's own.
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->
@@ -566,6 +593,10 @@ the same.
 
 What is loaded right now: fiber states, provided keys, whether a rollback is
 available, and the trace since the last call. No inputs.
+
+It carries the answering compiler's `revision` and `source_digest` at the top
+level, loaded or not (issue #2007; see "Every response can say which compiler
+answered").
 
 It always carries `loopAxes`, loaded or not and with or without an approval
 policy: six measures of how the session used the loop, each

@@ -35,6 +35,7 @@ from ..taint import REDACTED_SECRET
 from ..typecheck import compatible
 from . import operator as _operator
 from . import quorum as _quorum
+from . import identity as _identity
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
@@ -9347,11 +9348,15 @@ class Session:
                 "be finalized onto a surface it did not see (design 460 §3).")
 
     def state(self, drain: bool = False) -> dict:
+        # issue #2007: the compiler's own identity — `revision` and
+        # `source_digest` — rides on BOTH branches, so a client can assert the
+        # server it drives is the revision it pinned before it loads anything.
+        identity = _identity.identity()
         if self._driver is None:
             # even with nothing loaded, the workspace's active leases (item 61)
             # are visible — an agent can survey who holds what before it loads.
             return {"loaded": False, "leases": self.leases.document(),
-                    "loopAxes": self.loop_axes()}
+                    "loopAxes": self.loop_axes(), **identity}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
         paused_now = self.slo_paused()
@@ -9398,6 +9403,9 @@ class Session:
                if self.approval_policy is not None else {}),
             # issue #1738: the six agent-loop axes, always.
             "loopAxes": self.loop_axes(),
+            # issue #2007: the compiler that answered (see the not-loaded
+            # branch above) — last, so the composition fields keep their order.
+            **identity,
             **({"trace": driver.drain_events()} if drain else {}),
         }
 
