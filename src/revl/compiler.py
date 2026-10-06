@@ -209,6 +209,20 @@ def escaping_use_path(path: str) -> bool:
     return normalized == ".." or normalized.startswith(".." + os.sep)
 
 
+def _read_module_text(abs_path: str) -> str:
+    """Read a `use`d module's text from disk, exactly once (issue #1779).
+
+    `_ModuleLoader.load` reads through this and parses the text it returns, so
+    the text recorded for a `use`-reached module is the text that was COMPILED
+    rather than a later re-read of a path that may have moved. A module-level
+    name, like `escaping_use_path`, so that a caller can patch the read without
+    holding a loader: `tests/test_admission_use_confinement.py` patches it to
+    prove that a confined compile consults nothing on disk, and that the
+    patched seam is on the read path at all."""
+    with open(abs_path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 class _ModuleLoader:
     """Loads modules and resolves `use` with cycle detection.
 
@@ -234,7 +248,7 @@ class _ModuleLoader:
         self._stack: list[str] = []
         # Keys are normalised to abspath ONCE here. Every lookup below is by
         # abspath (`has_source`, `load`), so a relative key would never match
-        # and the loader would fall through to `parse_file` on the SAME relative
+        # and the loader would fall through to a disk read on the SAME relative
         # path — silently admitting whatever sits on disk under that name in
         # place of the text the caller submitted (`gate_service.admit` passed
         # its keys through verbatim). A caller's in-memory source now stands in
@@ -565,9 +579,10 @@ class _ModuleLoader:
             else:
                 # issue #1779: read ONCE and parse that text, so the report
                 # below is the text that was compiled rather than a later
-                # re-read of a path that may have moved.
-                with open(abs_path, encoding="utf-8") as handle:
-                    read = handle.read()
+                # re-read of a path that may have moved. The read goes through
+                # the named `_read_module_text` seam so a confined compile can
+                # still be proved to touch nothing on disk.
+                read = _read_module_text(abs_path)
                 program = parse_text(read, abs_path)
                 self._note_dependency(abs_path, read)
             self._check_generated(abs_path, virtual)
