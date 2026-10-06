@@ -1534,6 +1534,63 @@ fn emit_step_tail(ts: List[Token], em: Stmt, i: Int, hi: Int) -> SRun {
   return mk_srun(out, j)
 }
 
+// The `effect { …setup…; acq }` BLOCK form (issue #2044). parser.py's
+// `effect_form` reads the brace block as an `EffectStmt` whose `setup` is every
+// statement but the last and whose `acquire` is the last statement's EXPRESSION
+// — and refuses a block whose final statement is not a bare expression ("an
+// effect block must end with the acquisition expression").
+//
+// The reader had no case for the form at all, so `operand_at` met the `{` and
+// read it as a RECORD literal, failed, and skipped the rest of the HEAD line.
+// The block's own lines were then read as if they were the enclosing body's:
+// `var q = "initial"` bound `q` there and the TAIL expression was read as a
+// statement of its own. That was mostly harmless until issue #2044 gave a
+// witnessed extern a verdict in value position — the tail `stash_path(q)` then
+// read as a value-position call and drew a G4 refusal for a program the
+// reference admits, because the tail IS the acquisition the reference brackets.
+//
+// The block is read to its MATCHING brace and its interior statements are read
+// out (setup first), the last becoming the statement's expression — so the tail
+// is the effect statement's `e` and `is_wit_root` can see it. The run is
+// `scoped`, exactly as a block arm is: the reference lowers `setup` with
+// `env.locals` saved and restored around it.
+//
+// A block whose last statement is not a bare expression (the one-line
+// `effect { var q = 0; stash_path(q) }`, whose `;` ends the run before the
+// tail) falls back to a `skip` — no verdict, the direction this gate may take —
+// rather than inventing an acquisition the reference would refuse to parse.
+fn p_effect_block(ts: List[Token], b: Int, bn: Str, ann: Str, hi: Int) -> SRun {
+  let ce = close_brace(ts, b)
+  if (ce == 0 - 1 || ce <= b + 1) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
+  let inner = p_stmts(ts, b + 1, ce - 1, [])
+  if (inner.length() == 0) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
+  let tail = inner[inner.length() - 1]
+  if (tail.kind != "expr" || tail.bind != "") {
+    return mk_srun([mkstmt("skip", int_lit0())], hi)
+  }
+  var run: List[Stmt] = scoped(append_stmts(drop_last(inner),
+    [mkstmt_aw("effect", tail.e, bn, false, ann)]))
+  if (atw(ts, ce, "undo")) {
+    let u = operand_at(ts, ce + 1)
+    if (!is_bad(u.e)) {
+      return mk_srun(run.push(mkstmt_aw("undo", u.e, "", u.aw, "")), u.i)
+    }
+    return mk_srun(run, hi)
+  }
+  return mk_srun(run, ce)
+}
+
+// Every statement of `ss` but the last.
+fn drop_last(ss: List[Stmt]) -> List[Stmt] {
+  var out: List[Stmt] = []
+  var i = 0
+  while (i + 1 < ss.length()) {
+    out = out.push(ss[i])
+    i += 1
+  }
+  return out
+}
+
 fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
@@ -1622,6 +1679,15 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
         return mk_srun([sp], hi)
       }
       return mk_srun([sp], sk)
+    }
+    // issue #2044: the `effect { …setup…; acq }` block form, whose acquisition
+    // is the block's LAST statement. Without this the `{` was read as a record
+    // literal and the tail became a statement of the enclosing body.
+    if (kd == "effect" && atk(ts, j, "{")) {
+      return p_effect_block(ts, j, bn, ann, hi)
+    }
+    if (kd == "effect" && at_word(ts, j, "shared") && atk(ts, j + 1, "{")) {
+      return p_effect_block(ts, j + 1, bn, ann, hi)
     }
     let r = operand_at(ts, j)
     if (is_bad(r.e)) { return mk_srun([mkstmt("skip", r.e)], hi) }
@@ -1795,6 +1861,10 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   }
   if (t.kind == "kw" && (t.text == "effect" || t.text == "undo"
                         || t.text == "compensate")) {
+    // issue #2044: a bare `effect { …setup…; acq }` (no binding).
+    if (t.text == "effect" && atk(ts, lo + 1, "{")) {
+      return p_effect_block(ts, lo + 1, "", "", hi)
+    }
     let rf = operand_at(ts, lo + 1)
     if (is_bad(rf.e)) { return mk_srun([mkstmt("skip", rf.e)], hi) }
     let out2: List[Stmt] = [mkstmt_aw(t.text, rf.e, "", rf.aw, "")]
@@ -3802,6 +3872,16 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // head's arguments then admit bare emissions, as the slot does), "args" inside
 // a marked head's argument list, "" elsewhere. The reference keeps this as
 // `env._emit_arg_mode` / `env._in_emit_args` around `_emit_head_args`.
+// `acqRoot` is true only while the walk stands on the ONE expression the
+// reference marks by identity as an `effect` bracket's own acquisition
+// (issue #2044): `walk_one_stmt` sets it for a bracket whose root call is a
+// `witnessed` extern and `ctx_args` clears it below that root. It is the
+// gate's stand-in for `expr is env._host_acquire_root`. The HOST carrier needs
+// no equivalent — `acq_root_of` lifts a host root's arguments out of the walk
+// entirely, because a host root's head is a verb the release rule judges
+// separately and carries no emission evidence, whereas a witnessed root's head
+// IS an emitting name whose label and capability must still reach the G4/G8
+// evidence, so it is walked whole and only the POSITION is marked.
 // One RUNNING service's declared surface, off the item-346 `!services` block.
 // `ops` are the operation NAMES its `:S,op,op` row spells — the A6 member
 // claim. `sigs` are the DECLARED PARAMETER LISTS of the subset of those
@@ -3834,7 +3914,7 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str], provAlias: Map[Str, Str], svcTys: List[Bind],
              localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str,
-             appr: ApprI }
+             acqRoot: Bool, appr: ApprI }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -4015,9 +4095,14 @@ fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let na = note_host_emission(s, cx, a)
   let root = acq_root_of(s)
   if (root.hit) { return walk_exprs(root.args, 0, marked, scx, na) }
+  // issue #2044: an `effect` bracket's OWN witnessed acquisition is effect
+  // position — the reference exempts that expression by identity
+  // (`_acquire_position`). Marked here rather than lifted out of the walk, so
+  // the head call's label and capability still reach the G4/G8 evidence.
+  let rcx = is_wit_root(s, scx) ? ctx_acq_root(scx, true) : scx
   // an `emit` step's marker covers its head call alone (issue #1175); a
   // compensate slot is a teardown region and stays marked throughout
-  return walk_expr(s.e, marked, s.kind == "emit" ? ctx_emit_pos(scx, "head") : scx, na)
+  return walk_expr(s.e, marked, s.kind == "emit" ? ctx_emit_pos(rcx, "head") : rcx, na)
 }
 
 // ---- the emission-crossing rules of issue #1437 ----------------------------
@@ -4063,7 +4148,7 @@ fn ctx_appr(cx: Ctx, ap: ApprI) -> Ctx {
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere,
-           emitPos: cx.emitPos, appr: ap }
+           emitPos: cx.emitPos, appr: ap, acqRoot: cx.acqRoot }
 }
 
 fn appr_info(ts: List[Token], pg: Prog) -> ApprI {
@@ -4389,7 +4474,7 @@ fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
            // "setup" there, whose host-acquire phrase is "this position"
            acqWhere: pos == "args" && cx.emitPos == "head" ? "this position"
                                                             : cx.acqWhere,
-           emitPos: pos, appr: cx.appr }
+           emitPos: pos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
 // Whether a marked head's arguments admit a bare emission: never under a
@@ -4402,11 +4487,20 @@ fn args_marked(marked: Bool, cx: Ctx) -> Bool {
 
 // The context a call's arguments walk in: past a marked head they are the
 // head's argument list, where a nested `emit` is refused.
+//
+// `acqRoot` is cleared on the way in: it names ONE expression node — the
+// bracket's own root call — so a descent into that call's ARGUMENTS has left
+// the position. This is the reference's own distinction, not an approximation
+// of it: `effect wrap(stash_path(p))` is refused on the witnessed INNER call
+// (`wrap` is the root, and `expr is env._host_acquire_root` is false for the
+// argument), while `effect stash_path(wrap(p))` is admitted — the arguments
+// lower in a fresh `_expr_mode`, exactly as the host-acquire rule's own
+// argument walk does (`acq_root_of` walks `root.args` and nothing else).
 fn ctx_args(cx: Ctx) -> Ctx {
   if (cx.emitPos == "head" || cx.emitPos == "head-bare") {
-    return ctx_emit_pos(cx, "args")
+    return ctx_acq_root(ctx_emit_pos(cx, "args"), false)
   }
-  return cx
+  return ctx_acq_root(cx, false)
 }
 
 // Walk a call's arguments (every call path below goes through here, as every
@@ -5359,6 +5453,33 @@ fn acq_root_of(s: Stmt) -> AcqRoot {
   }
 }
 
+// Whether a statement is an `effect` bracket whose OWN root call is a
+// `witnessed` extern (issue #2044) — the sibling of `acq_root_of` above, and
+// deliberately NOT a second lift.
+//
+// A host root can be lifted out of the walk because its head is a verb the
+// release rule judges separately and carries no emission evidence; a witnessed
+// extern IS an emitting name, and its head call contributes a label and a
+// capability to the G4/G8 evidence. Skipping it would silently shrink that
+// evidence, so the head is walked as usual and `walk_one_stmt` marks the
+// POSITION instead (`ctx_acq_root`), which is what `fn_call`'s refusal reads.
+//
+// The reference draws the same line by identity: `_acquire_position` sets
+// `env._host_acquire_root` to the bracket's acquisition EXPRESSION, and
+// `_refuse_unpositioned_witnessed_call` exempts exactly that object — so
+// `effect stash_path(p)` lowers, while `let r = stash_path(p)` and
+// `effect wrap(stash_path(p))` are refused.
+fn is_wit_root(s: Stmt, cx: Ctx) -> Bool {
+  if (s.kind != "effect") { return false }
+  return match s.e {
+    Call(c) => match c.target {
+      Var(v) => contains(cx.appr.wit, v),
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
 // A known host root is a host/stdlib constructor receiver (`Map.new()`,
 // `Pool.open(...)`) — the reference lowers it as a host acquisition, never a
 // G1 access. Unknown Upper-cased names remain undeclared.
@@ -5624,7 +5745,28 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
     return ac_refuse(wa, "G4", "call to emission `".concat(name)
       .concat("` must be marked `emit` (G4)"))
   }
+  // issue #2044: a `witnessed` extern is legal in ONE position — an `effect`
+  // bracket's own acquisition, which `walk_one_stmt` marks (`acqRoot`) and
+  // which the reference exempts by identity (`_acquire_position`). Everywhere
+  // else the call compiles, fires the host mutation and registers NO inverse:
+  // no `effect`/`let-effect` step is built, so `witnessed_registered` never
+  // sees the callee and the auto-approve guarantee is silently downgraded to
+  // class (c) prompt-per-call. Design 243 rule 1 states the rule ("refused
+  // outside effect position") and the reference already applies it in a
+  // `fn`/`test` body (`_refuse_effect_position_bound_externs_in_fn_body`); this
+  // is that same rule reaching the component stratum
+  // (`_refuse_unpositioned_witnessed_call`). `!marked` is the reference's
+  // `_expr_mode == "setup"`, the same proxy the marker demand above reads, so a
+  // teardown slot keeps its documented exemption.
+  if (!marked && contains(cx.appr.wit, name) && !cx.acqRoot) {
+    return ac_refuse(wa, "G4", witnessed_value_msg(name))
+  }
   return wa
+}
+
+fn witnessed_value_msg(name: Str) -> Str {
+  return "witnessed extern `".concat(name)
+    .concat("` cannot be called in a value position — a witnessed mutation is only valid in effect position (G4)")
 }
 
 // A bare `Var` in VALUE position (never a call/access head — those are routed
@@ -5685,7 +5827,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, svcTys: svc_shadow(cx.svcTys, names), localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
 // The same context carrying the host-acquire position phrase of the statement
@@ -5699,7 +5841,24 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
-           acqWhere: where, emitPos: cx.emitPos, appr: cx.appr }
+           acqWhere: where, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
+}
+
+// The same context marked as walking (or as having left) an `effect` bracket's
+// OWN root acquisition — the one position the witnessed value-position rule of
+// issue #2044 does not judge. Two callers: `walk_one_stmt`, which sets it for a
+// bracket whose root call is a witnessed extern, and `ctx_args`, which clears
+// it below that root.
+fn ctx_acq_root(cx: Ctx, on: Bool) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, acqRoot: on, appr: cx.appr }
 }
 
 // The same context carrying a body's provision-alias map.
@@ -5711,7 +5870,7 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, svcTys: cx.svcTys, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           provAlias: al, svcTys: cx.svcTys, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
 // The same context carrying the local arrows one body binds (`let f = (…) =>
@@ -5725,7 +5884,7 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -5746,7 +5905,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
            acqWhere: cx.acqWhere,
-           emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr }
+           emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -5926,7 +6085,7 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
            provAlias: Map.empty(), svcTys: [], localArrows: Map.empty(),
-           acqWhere: "this position", emitPos: "", appr: no_appr() }
+           acqWhere: "this position", emitPos: "", appr: no_appr(), acqRoot: false }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -5940,7 +6099,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
 // The RUNNING composition's service table, off the item-346 service block's
@@ -5962,7 +6121,7 @@ fn ctx_amb_ops(cx: Ctx, ops: Map[Str, AmbSvc]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -5986,7 +6145,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
            provAlias: Map.empty(), svcTys: [], localArrows: Map.empty(),
-           acqWhere: "this position", emitPos: "", appr: base.appr }
+           acqWhere: "this position", emitPos: "", appr: base.appr, acqRoot: false }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -6195,7 +6354,7 @@ fn ctx_svc(cx: Ctx, tys: List[Bind]) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, svcTys: tys, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
 // `_service_receiver_decl`: the op a call reaches through a receiver whose

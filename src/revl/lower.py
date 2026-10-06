@@ -9399,6 +9399,54 @@ def _refuse_unmarked_emission_call(node: dict, name: str, env: Env,
     )
 
 
+def _refuse_unpositioned_witnessed_call(name: str, env: Env, filename: str,
+                                        line: int) -> None:
+    """A `witnessed` extern call in VALUE position (issue #2044).
+
+    Design rule 1 (docs/design/243-witnessed-externs.md): a witnessed extern
+    "is refused outside effect position". The rule landed as
+    `_refuse_effect_position_bound_externs_in_fn_body`, which walks the two
+    strata that had a body walk then — a plain `fn`/`test` body — so the
+    component stratum was never held to it. Item 318 then made a witnessed
+    acquisition legal in a provide-method body, and this carrier was still not
+    taught the rule: `let r = stash_path(p)`, `return stash_path(p)` and
+    `let r = …; return r` all compiled, fired the host mutation, and
+    registered NOTHING (no `effect`/`let-effect` step is built, so
+    `Composition.witnessed_registered` never sees the callee) — the
+    auto-approve guarantee silently downgraded to class (c) prompt-per-call.
+    A diagnostic gap, not a soundness escape: the class report already said
+    (c); nothing told the author why, or that `effect` is one word away.
+
+    The exemption is the bracket's OWN acquisition, by identity, exactly as
+    `_refuse_unbracketed_host_acquire` reads `_host_acquire_root`: an
+    `effect`/`let-effect` root IS effect position, and it is the one place the
+    transactional accumulator entry is built. `_expr_mode == "setup"` keeps
+    the marked `emit` head out of it, as the emission-marker rule above does:
+    a marked head is the author's explicit statement that the crossing is
+    irreversible, and its arguments lower in the enclosing mode
+    (`_emit_head_args`), so a witnessed call nested in one is judged here as
+    any other value position is.
+
+    The wording parallels the `fn`-body refusal so the two agree on the rule
+    and the code; the HINT differs because it can: `effect` is not valid in a
+    plain `fn` body at all (the parser refuses it there), so only this
+    position can name the spelling that fixes it."""
+    if getattr(env, "_expr_mode", "setup") != "setup":
+        return
+    if name not in getattr(env, "witnessed_externs", ()):
+        return
+    raise RevlError(
+        filename, line,
+        f"witnessed extern `{name}` cannot be called in a value position — "
+        "a witnessed mutation is only valid in effect position (G4)",
+        hint="its declared inverse is auto-registered by the teardown "
+             "accumulator when the call IS the acquisition of an effect step, "
+             f"which a value position never builds; spell it `effect {name}(…)` "
+             "here (docs/design/243-witnessed-externs.md)",
+        code="G4", category="witnessed",
+    )
+
+
 def _check_component_call(node: dict, env: Env, filename: str, line: int) -> None:
     """Item 423: a component-body call to a declared `fn` or extern is held to
     the callee's declared arity and argument types.
@@ -9810,6 +9858,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                         "args": _coerce_async_args(name, filled, env, line)}
                 _check_component_call(node, env, filename, line)
                 _refuse_unmarked_emission_call(node, name, env, filename, line)
+                # issue #2044: the effect-position rule of design 243 (rule 1)
+                # reaches the component stratum here — the one funnel every
+                # value expression of a provide-method (and activation) body
+                # passes through. `expr` is the AST call node, so the identity
+                # guard exempts exactly the `effect`/`let-effect` root the
+                # caller bracketed with `_acquire_position`.
+                if expr is not getattr(env, "_host_acquire_root", None):
+                    _refuse_unpositioned_witnessed_call(name, env, filename, line)
                 return node
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
