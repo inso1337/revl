@@ -1454,6 +1454,73 @@ def _change_working_set() -> dict:
     return _edit.virtual_source(SESSION)
 
 
+# issue #2032: the verbs whose answer says how the held source stands against
+# disk — the change loop's own mutators, the read that verifies them, and the
+# export that reconciles them
+_DISK_RIDES = frozenset({"revl_change", "revl_edit", "revl_source",
+                         "revl_export"})
+
+_DISK_NOTE = "the held source differs from disk; call revl_export to write it"
+
+
+def _diverges(text, path) -> bool:
+    """Whether this held text differs from the bytes on disk (issue #2032).
+
+    The session-vs-disk comparison, in one place. `text is None` means the
+    session holds no text for that path at all, which is not a divergence to
+    report — there is nothing the session would be writing over."""
+    return text is not None and text != _edit._read_disk(path)
+
+
+def diverged_paths(texts: dict, paths) -> list[str]:
+    """The held files whose text does not match disk, in the order given.
+
+    The named seam three issues share, so they cannot drift apart: #2032 (this
+    change loop's payloads), #2036 (`revl_unload`'s preflight, before it
+    destroys the session's only copy) and #2037 (`revl_undo`, the mirror case
+    where disk leads the session) all ask the same question. `_export_plan`
+    filters its targets on `_diverges` to decide what an export would actually
+    write; `_disk_state` reports the same answer where the change loop can act
+    on it."""
+    return [p for p in paths if _diverges(texts.get(p), p)]
+
+
+def _disk_state() -> dict:
+    """The held source against the bytes on disk (issue #2032).
+
+    The held source is the truth and disk an export (#1696), so a change that
+    has not been exported leaves the two disagreeing — silently, because every
+    field of the success payload is session-scoped. `_export_plan` already
+    filters on exactly this predicate; this reports it where the change loop
+    can act on it instead of a bare success over an unchanged file.
+
+    `inSync` is the whole answer for a files-loaded composition: true when
+    every held file's text equals the bytes on disk, false with the differing
+    paths in `stale`. A composition loaded from inline source names no path,
+    so there is nothing on disk to be out of step with and it is `inSync` —
+    and so is a session holding no files at all.
+    """
+    held = _edit.virtual_source(SESSION)
+    stale = diverged_paths(held.get(_edit.ORIGIN_FILES_CONTENT) or {},
+                           held.get(_edit.ORIGIN_FILES) or [])
+    return {"inSync": not stale, "stale": stale}
+
+
+def _ride_disk(name: str, payload) -> None:
+    """Say whether the held source reached disk (issue #2032).
+
+    On the change loop's verbs only, because that is where the question is
+    asked; the ambient footer keeps its pinned key set (#1693). A stale answer
+    that is also a success also carries the `note` naming the one verb that
+    writes it, matching the failure path's use of `note`."""
+    if name not in _DISK_RIDES or not isinstance(payload, dict):
+        return
+    disk = _disk_state()
+    payload["disk"] = disk
+    if not disk["inSync"] and payload.get("ok") and not payload.get("note"):
+        payload["note"] = _DISK_NOTE
+
+
 def _tool_export(arguments: dict) -> dict:
     """Write the running composition's held source to disk, on request (issue
     #1696). The held source is the source of truth; this is its one way out.
@@ -1495,8 +1562,7 @@ def _export_plan(held: dict, arguments: dict) -> list[tuple[str, str]]:
                 text = _notes.render(text, path, [n for n in all_notes
                                                    if n["anchor"]["path"] == path])
             targets.append((path, text))
-        targets = [(p, t) for p, t in targets
-                   if t is not None and t != _edit._read_disk(p)]
+        targets = [(p, t) for p, t in targets if _diverges(t, p)]
         if with_knowledge:
             targets += _notes.sidecar_writes(SESSION, held)
     else:
@@ -3286,7 +3352,11 @@ TOOLS = [
                        "Patch the SERVER-SIDE source of the running composition and "
                        "re-admit — deltas, not documents. The response carries "
                        "`blastRadius`: the revl_query_withdraw cascade for every "
-                       "component the edit touches, so preflight comes with it. Instead of re-sending the "
+                       "component the edit touches, so preflight comes with it. "
+                       "An edit lives in the session, never on disk: the `disk` "
+                       "block says whether the loaded files still match the bytes "
+                       "on disk, and revl_export writes the held source out (issue "
+                       "#2032). Instead of re-sending the "
                        "whole composition to change one line (revl_swap's cost, which "
                        "scales with the running system), send a small structured patch "
                        "against a named buffer the server already holds. Each edit is "
@@ -3487,6 +3557,10 @@ TOOLS = [
                        "A proposal and a commit both carry `blastRadius`, as "
                        "revl_edit does: the revl_query_withdraw cascade for every "
                        "component the change touches. "
+                       "A change lives in the session, never on disk: the `disk` "
+                       "block says whether the loaded files still match the bytes "
+                       "on disk (`inSync`, `stale`), and revl_export is the one "
+                       "verb that writes the held source out (issue #2032). "
                        "A failed verification commits nothing and says why.",
         "inputSchema": {
             "type": "object",
@@ -3544,7 +3618,11 @@ TOOLS = [
                        "(its services, the functions and types it uses), and "
                        "`comments: false` returns the code alone in canonical form. "
                        "Reads the running composition, or, with nothing loaded, "
-                       "`files`/`source`. Pairs with revl_edit's {symbol, "
+                       "`files`/`source`. The `disk` block reports whether the "
+                       "held source still matches the bytes on disk, so a re-read "
+                       "is not mistaken for persistence; `revl_export` is the one "
+                       "verb that writes the held source out (issue #2032). Pairs "
+                       "with revl_edit's {symbol, "
                        "replacement} edit.",
         "inputSchema": {
             "type": "object",
@@ -5028,6 +5106,7 @@ def _run_handler(name: str, arguments: dict) -> dict:
         # issues #1745/#1754: keep the knowledge index and the notes current,
         # and attach what concerns the call's touched symbols
         _ride_knowledge(name, payload, arguments)
+        _ride_disk(name, payload)   # issue #2032: did the change reach disk?
         return payload
     except ApprovalRequired as exc:
         # item 246: a class-(c) crossing the decision inside Session.call
