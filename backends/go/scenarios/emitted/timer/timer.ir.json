@@ -11,7 +11,6 @@
             }
           ],
           "returns": null,
-          "doc": "Timer scenario for the cordis-go tier (item 57, docs/time-coeffect.md).\nA timer is a *revertible schedule*: `every`/`after` acquire a schedule whose\ninverse is cancellation, wired into the same effect ledger that reverts any\nother effect. Heartbeat arms a periodic + a one-shot timer; Sink provides the\nLog its firings emit to. gen_exec_test.go proves \u2014 by RUNNING on stc-go \u2014\nthat firings are deterministic under RevlClockAdvance and that unloading the\ncomponent cancels its timers residue-free (no orphaned interval).",
           "emission": true
         }
       }

@@ -7,15 +7,15 @@ root: r__parse_program_nn NL?
 r__parse_program_nn: s_1_nn r__skip_semis_nn
 s_1_nn: "" | g_29 s_1_nn
 r__skip_semis_nn: s_62_nn
-r_use_decl_nn: g_3505 g_3315
-r_service_nn: g_3504 g_3402
+r_use_decl_nn: g_3507 g_3317
+r_service_nn: g_3506 g_3404
 g_2: NL? w_commutative
-r_component_nn: g_3503 g_3308
+r_component_nn: g_3505 g_3310
 g_3: NL? w_boot
-r_type_decl_nn: g_3499 g_3410 | g_3500 g_3418 | g_3501 g_3431 | g_3502 g_3446
-r__endorse_slot_nn: s_3277_nn
-r_fn_decl_nn: g_3497 g_3468 | g_3498 g_3494
-r_extern_decl_nn: g_3496 g_3396
+r_type_decl_nn: g_3501 g_3412 | g_3502 g_3420 | g_3503 g_3433 | g_3504 g_3448
+r__endorse_slot_nn: s_3279_nn
+r_fn_decl_nn: g_3499 g_3470 | g_3500 g_3496
+r_extern_decl_nn: g_3498 g_3398
 g_4: r_fn_decl_nn | r_type_decl_nn | r_service_nn | r_extern_decl_nn
 g_6: r__endorse_slot_nn g_4
 g_7: NL? w_commutative | ""
@@ -27,18 +27,18 @@ g_12: r__endorse_slot_nn r_fn_decl_nn
 g_13: NL? w_verified
 g_14: NL? w_verified | ""
 g_15: g_14 r_fn_decl_nn
-r_test_decl_nn: g_3327 g_3275
-r_fault_test_decl_nn: g_3326 g_3269
-r_event_decl_nn: g_3325 g_3254
-r_secret_decl_nn: g_3324 g_3245
-r_retention_decl_nn: g_3323 g_3240
-r_model_role_decl_nn: g_3322 g_3234
-r_model_council_decl_nn: g_3321 g_3227
-r_prop_test_decl_nn: g_3320 g_3217
-r_composition_decl_nn: g_3319 g_3202
-r_layer_decl_nn: g_3318 g_3196
+r_test_decl_nn: g_3329 g_3277
+r_fault_test_decl_nn: g_3328 g_3271
+r_event_decl_nn: g_3327 g_3256
+r_secret_decl_nn: g_3326 g_3247
+r_retention_decl_nn: g_3325 g_3242
+r_model_role_decl_nn: g_3324 g_3236
+r_model_council_decl_nn: g_3323 g_3229
+r_prop_test_decl_nn: g_3322 g_3219
+r_composition_decl_nn: g_3321 g_3204
+r_layer_decl_nn: g_3320 g_3198
 g_19: NL? w_site
-r_test_decl__lifecycle_on_nn: g_3317 g_3275
+r_test_decl__lifecycle_on_nn: g_3319 g_3277
 g_20: NL? w_lifecycle
 g_21: r_use_decl_nn | r_service_nn | g_2 r_service_nn | r_component_nn | g_3 r_component_nn | r_type_decl_nn | g_11 g_10 | g_13 g_12 | r_extern_decl_nn | r__endorse_slot_nn g_15 | r_fn_decl_nn | r_test_decl_nn | r_fault_test_decl_nn | r_event_decl_nn | r_secret_decl_nn | r_retention_decl_nn | r_model_role_decl_nn | r_model_council_decl_nn | r_prop_test_decl_nn | r_composition_decl_nn | r_layer_decl_nn | g_19 r_layer_decl_nn | g_20 r_test_decl__lifecycle_on_nn
 g_29: r__skip_semis_nn g_21
@@ -1397,7 +1397,7 @@ g_2978: NL? "("
 g_2979: NL? "("
 g_2980: s_2914_nn g_904
 g_2981: NL? "["
-s_2982_nn: "" | g_3034 s_2982_nn
+s_2982_nn: "" | g_3035 s_2982_nn
 g_2983: NL? IDENT
 g_2984: g_2983 g_285
 g_2985: NL? w_route
@@ -1407,270 +1407,271 @@ g_2988: NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL
 g_2989: NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL? w_endorse | NL? w_validated | NL? w_retry | NL? w_witnessed
 g_2990: g_2988 g_2987 | r__endorse_slot_nn | NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL? w_endorse | NL? w_validated | NL? w_retry | NL? w_witnessed | g_2989 r__retry_budget_nn
 g_3006: NL? "->"
-r__within_clause_nn: g_3086 g_3083
+r__within_clause_nn: g_3088 g_3085
 r__doc_above_nn: ""
-g_3007: r__within_clause_nn | ""
-g_3008: g_3007 r__doc_above_nn
-g_3009: r__cache_clause_nn | ""
-g_3012: g_3009 g_3008
-g_3013: g_3006 r_type__nn | ""
-g_3018: g_3013 g_3012
-g_3019: NL? ")"
-g_3020: g_3019 g_3018
-g_3023: s_662_nn g_3020
-g_3024: NL? "("
-g_3025: g_3024 g_3023
-g_3026: NL? IDENT
-g_3027: g_3026 g_3025
-g_3028: NL? w_fn
-g_3029: g_3028 g_3027
-g_3032: s_2986_nn g_3029
-g_3033: g_2985 g_2984 | ""
-g_3034: g_3033 g_3032
-r__clause_record__within_fields_nn: g_3082 g_2266
-g_3082: NL? "{"
+g_3007: r__doc_above_nn | ""
+g_3008: r__within_clause_nn | ""
+g_3009: g_3008 g_3007
+g_3010: r__cache_clause_nn | ""
+g_3013: g_3010 g_3009
+g_3014: g_3006 r_type__nn | ""
+g_3019: g_3014 g_3013
+g_3020: NL? ")"
+g_3021: g_3020 g_3019
+g_3024: s_662_nn g_3021
+g_3025: NL? "("
+g_3026: g_3025 g_3024
+g_3027: NL? IDENT
+g_3028: g_3027 g_3026
+g_3029: NL? w_fn
+g_3030: g_3029 g_3028
+g_3033: s_2986_nn g_3030
+g_3034: g_2985 g_2984 | ""
+g_3035: g_3034 g_3033
+r__clause_record__within_fields_nn: g_3084 g_2266
+g_3084: NL? "{"
 r__interpret_within_nn: ""
-g_3083: r__clause_record__within_fields_nn r__interpret_within_nn
-g_3086: NL? w_within
-s_3097_nn: "" | g_3104 s_3097_nn
-g_3098: r_type__nn g_292
-g_3099: NL? "("
-g_3100: NL? "|"
-g_3101: g_3099 g_3098 | ""
-g_3102: g_3101 g_3100
-g_3103: NL? IDENT
+g_3085: r__clause_record__within_fields_nn r__interpret_within_nn
+g_3088: NL? w_within
+s_3099_nn: "" | g_3106 s_3099_nn
+g_3100: r_type__nn g_292
+g_3101: NL? "("
+g_3102: NL? "|"
+g_3103: g_3101 g_3100 | ""
 g_3104: g_3103 g_3102
-s_3125_nn: "" | g_3141 s_3125_nn
-g_3126: NL? "="
-g_3127: g_3126 r_pure_expr_nn | ""
-g_3130: g_3127 g_127
-g_3136: r_type__nn g_3130
-g_3137: NL? ":"
-g_3138: g_3137 g_3136
-g_3141: r__name_nn g_3138
-g_3188: s_67_nn g_1019
-g_3189: NL? "{"
-g_3190: g_3189 g_3188
-g_3191: NL? IDENT
+g_3105: NL? IDENT
+g_3106: g_3105 g_3104
+s_3127_nn: "" | g_3143 s_3127_nn
+g_3128: NL? "="
+g_3129: g_3128 r_pure_expr_nn | ""
+g_3132: g_3129 g_127
+g_3138: r_type__nn g_3132
+g_3139: NL? ":"
+g_3140: g_3139 g_3138
+g_3143: r__name_nn g_3140
+g_3190: s_67_nn g_1019
+g_3191: NL? "{"
 g_3192: g_3191 g_3190
-g_3193: NL? w_for
+g_3193: NL? IDENT
 g_3194: g_3193 g_3192
-g_3195: NL? IDENT
+g_3195: NL? w_for
 g_3196: g_3195 g_3194
-g_3198: s_360_nn g_1019
-g_3199: NL? "{"
-g_3200: g_3199 g_3198
-g_3201: NL? IDENT
+g_3197: NL? IDENT
+g_3198: g_3197 g_3196
+g_3200: s_360_nn g_1019
+g_3201: NL? "{"
 g_3202: g_3201 g_3200
-g_3204: s_679_nn g_1019 | s_679_nb g_1020
-g_3205: NL? "{"
-g_3206: g_3205 g_3204
-g_3207: NL? ")"
+g_3203: NL? IDENT
+g_3204: g_3203 g_3202
+g_3206: s_679_nn g_1019 | s_679_nb g_1020
+g_3207: NL? "{"
 g_3208: g_3207 g_3206
-g_3211: s_662_nn g_3208
-g_3212: NL? "("
-g_3213: g_3212 g_3211
-g_3214: NL? STRING
+g_3209: NL? ")"
+g_3210: g_3209 g_3208
+g_3213: s_662_nn g_3210
+g_3214: NL? "("
 g_3215: g_3214 g_3213
-g_3216: NL? w_test
+g_3216: NL? STRING
 g_3217: g_3216 g_3215
-g_3219: s_1395_nn | s_1395_nn r__skip_semis_nn
-g_3221: g_3219 g_204
-g_3222: NL? "{"
-g_3223: g_3222 g_3221
-g_3224: NL? IDENT
+g_3218: NL? w_test
+g_3219: g_3218 g_3217
+g_3221: s_1395_nn | s_1395_nn r__skip_semis_nn
+g_3223: g_3221 g_204
+g_3224: NL? "{"
 g_3225: g_3224 g_3223
-g_3226: NL? w_council
+g_3226: NL? IDENT
 g_3227: g_3226 g_3225
-g_3229: NL? IDENT
-g_3230: g_3229 s_1447_nn
+g_3228: NL? w_council
+g_3229: g_3228 g_3227
 g_3231: NL? IDENT
-g_3232: g_3231 g_3230
-g_3233: NL? w_role
+g_3232: g_3231 s_1447_nn
+g_3233: NL? IDENT
 g_3234: g_3233 g_3232
-g_3236: s_1525_nn g_204
-g_3237: NL? "{"
-g_3238: g_3237 g_3236
-g_3239: NL? IDENT
+g_3235: NL? w_role
+g_3236: g_3235 g_3234
+g_3238: s_1525_nn g_204
+g_3239: NL? "{"
 g_3240: g_3239 g_3238
-g_3242: NL? w_for
-g_3243: g_3242 g_525
-g_3244: NL? IDENT
-g_3245: g_3244 g_3243
-g_3247: s_1560_nn g_204
-g_3248: NL? "{"
-g_3249: g_3248 g_3247
-g_3252: r__event_contract_nn g_3249
-g_3253: NL? IDENT
-g_3254: g_3253 g_3252
-g_3256: NL? w_with
-g_3257: s_1583_nn g_1019
-g_3258: NL? "{"
-g_3259: g_3258 g_3257
-g_3260: g_3256 g_274 | ""
+g_3241: NL? IDENT
+g_3242: g_3241 g_3240
+g_3244: NL? w_for
+g_3245: g_3244 g_525
+g_3246: NL? IDENT
+g_3247: g_3246 g_3245
+g_3249: s_1560_nn g_204
+g_3250: NL? "{"
+g_3251: g_3250 g_3249
+g_3254: r__event_contract_nn g_3251
+g_3255: NL? IDENT
+g_3256: g_3255 g_3254
+g_3258: NL? w_with
+g_3259: s_1583_nn g_1019
+g_3260: NL? "{"
 g_3261: g_3260 g_3259
-g_3262: NL? IDENT
+g_3262: g_3258 g_274 | ""
 g_3263: g_3262 g_3261
-g_3264: NL? w_for
+g_3264: NL? IDENT
 g_3265: g_3264 g_3263
-g_3266: NL? STRING
+g_3266: NL? w_for
 g_3267: g_3266 g_3265
-g_3268: NL? w_test
+g_3268: NL? STRING
 g_3269: g_3268 g_3267
-g_3271: s_1615_nn g_1019
-g_3272: NL? "{"
-g_3273: g_3272 g_3271
-g_3274: NL? STRING
+g_3270: NL? w_test
+g_3271: g_3270 g_3269
+g_3273: s_1615_nn g_1019
+g_3274: NL? "{"
 g_3275: g_3274 g_3273
-s_3277_nn: "" | g_3284 s_3277_nn
-g_3278: s_1526_nn g_904
-g_3279: NL? IDENT
-g_3280: g_3279 g_3278
-g_3281: NL? "["
+g_3276: NL? STRING
+g_3277: g_3276 g_3275
+s_3279_nn: "" | g_3286 s_3279_nn
+g_3280: s_1526_nn g_904
+g_3281: NL? IDENT
 g_3282: g_3281 g_3280
-g_3283: NL? w_endorse
+g_3283: NL? "["
 g_3284: g_3283 g_3282
-g_3291: NL? w_liveness
-g_3292: s_1682_nn g_1019 | s_1682_nb g_1020
-g_3293: NL? "{"
-g_3294: g_3293 g_3292
-g_3295: g_3291 r__duration_literal_nn | ""
-g_3300: g_3295 g_3294
-g_3306: s_1680_nn g_3300
-g_3307: NL? IDENT
-g_3308: g_3307 g_3306
-g_3310: s_1230_nn g_204
-g_3311: NL? "{"
-g_3312: NL? w_as
-g_3313: g_3311 g_3310 | g_3312 g_136
-g_3314: NL? STRING
-g_3315: g_3314 g_3313
-g_3317: NL? w_test
-g_3318: NL? w_layer
-g_3319: NL? w_composition
-g_3320: NL? w_prop
-g_3321: NL? w_model
-g_3322: NL? w_model
-g_3323: NL? w_retention
-g_3324: NL? w_secret
-g_3325: NL? w_event
-g_3326: NL? w_fault
-g_3327: NL? w_test
-g_3328: NL? "|"
-g_3329: NL? "->"
-g_3330: NL? w_undo
-g_3331: NL? w_compensate
-g_3332: NL? w_requires
-g_3333: r_config_block_nn | ""
-g_3334: g_3333 s_2823_nn
-g_3335: g_3332 g_2821 | ""
-g_3336: g_3335 g_3334
-g_3337: g_3331 r_pure_expr_nn | ""
-g_3346: g_3337 g_3336
-g_3347: g_3330 g_2818 | ""
-g_3355: g_3347 g_3346
-g_3356: r__cache_clause_nn | ""
-g_3362: g_3356 g_3355
-g_3363: g_3329 r_type__nn | ""
-g_3368: g_3363 g_3362
-g_3369: NL? ")"
-g_3370: g_3369 g_3368
-g_3373: s_662_nn g_3370
-g_3374: NL? "("
-g_3375: g_3374 g_3373
-g_3378: r__type_param_list_nn g_3375
-g_3379: NL? IDENT
-g_3380: g_3379 g_3378
-g_3381: g_3328 g_2810 | ""
+g_3285: NL? w_endorse
+g_3286: g_3285 g_3284
+g_3293: NL? w_liveness
+g_3294: s_1682_nn g_1019 | s_1682_nb g_1020
+g_3295: NL? "{"
+g_3296: g_3295 g_3294
+g_3297: g_3293 r__duration_literal_nn | ""
+g_3302: g_3297 g_3296
+g_3308: s_1680_nn g_3302
+g_3309: NL? IDENT
+g_3310: g_3309 g_3308
+g_3312: s_1230_nn g_204
+g_3313: NL? "{"
+g_3314: NL? w_as
+g_3315: g_3313 g_3312 | g_3314 g_136
+g_3316: NL? STRING
+g_3317: g_3316 g_3315
+g_3319: NL? w_test
+g_3320: NL? w_layer
+g_3321: NL? w_composition
+g_3322: NL? w_prop
+g_3323: NL? w_model
+g_3324: NL? w_model
+g_3325: NL? w_retention
+g_3326: NL? w_secret
+g_3327: NL? w_event
+g_3328: NL? w_fault
+g_3329: NL? w_test
+g_3330: NL? "|"
+g_3331: NL? "->"
+g_3332: NL? w_undo
+g_3333: NL? w_compensate
+g_3334: NL? w_requires
+g_3335: r_config_block_nn | ""
+g_3336: g_3335 s_2823_nn
+g_3337: g_3334 g_2821 | ""
+g_3338: g_3337 g_3336
+g_3339: g_3333 r_pure_expr_nn | ""
+g_3348: g_3339 g_3338
+g_3349: g_3332 g_2818 | ""
+g_3357: g_3349 g_3348
+g_3358: r__cache_clause_nn | ""
+g_3364: g_3358 g_3357
+g_3365: g_3331 r_type__nn | ""
+g_3370: g_3365 g_3364
+g_3371: NL? ")"
+g_3372: g_3371 g_3370
+g_3375: s_662_nn g_3372
+g_3376: NL? "("
+g_3377: g_3376 g_3375
+g_3380: r__type_param_list_nn g_3377
+g_3381: NL? IDENT
 g_3382: g_3381 g_3380
-g_3383: NL? w_fn
+g_3383: g_3330 g_2810 | ""
 g_3384: g_3383 g_3382
-g_3387: s_2790_nn g_3384
-g_3388: r__reach_clause_nn | ""
-g_3390: g_3388 g_3387
-g_3391: r__capability_list_nn | ""
-g_3394: g_3391 g_3390
-g_3395: NL? w_pure | NL? w_acquire | NL? w_emission | NL? w_witnessed
-g_3396: g_3395 g_3394
-g_3398: s_2982_nn g_204
-g_3399: NL? "{"
-g_3400: g_3399 g_3398
-g_3401: NL? IDENT
+g_3385: NL? w_fn
+g_3386: g_3385 g_3384
+g_3389: s_2790_nn g_3386
+g_3390: r__reach_clause_nn | ""
+g_3392: g_3390 g_3389
+g_3393: r__capability_list_nn | ""
+g_3396: g_3393 g_3392
+g_3397: NL? w_pure | NL? w_acquire | NL? w_emission | NL? w_witnessed
+g_3398: g_3397 g_3396
+g_3400: s_2982_nn g_204
+g_3401: NL? "{"
 g_3402: g_3401 g_3400
-g_3404: NL? "["
-g_3405: NL? "="
-g_3406: g_3405 g_3249
-g_3407: g_3404 g_2974 | ""
-g_3408: g_3407 g_3406
-g_3409: NL? IDENT
+g_3403: NL? IDENT
+g_3404: g_3403 g_3402
+g_3406: NL? "["
+g_3407: NL? "="
+g_3408: g_3407 g_3251
+g_3409: g_3406 g_2974 | ""
 g_3410: g_3409 g_3408
-g_3412: NL? "["
-g_3413: NL? "="
-g_3414: g_3413 r_type__nn
-g_3415: g_3412 g_2974 | ""
-g_3416: g_3415 g_3414
-g_3417: NL? IDENT
+g_3411: NL? IDENT
+g_3412: g_3411 g_3410
+g_3414: NL? "["
+g_3415: NL? "="
+g_3416: g_3415 r_type__nn
+g_3417: g_3414 g_2974 | ""
 g_3418: g_3417 g_3416
-g_3420: NL? "["
-g_3421: NL? IDENT
-g_3422: g_3421 r__type_suffix_nn
-g_3425: s_3097_nn g_3422
-g_3426: NL? "="
-g_3427: g_3426 g_3425
-g_3428: g_3420 g_2974 | ""
+g_3419: NL? IDENT
+g_3420: g_3419 g_3418
+g_3422: NL? "["
+g_3423: NL? IDENT
+g_3424: g_3423 r__type_suffix_nn
+g_3427: s_3099_nn g_3424
+g_3428: NL? "="
 g_3429: g_3428 g_3427
-g_3430: NL? IDENT
+g_3430: g_3422 g_2974 | ""
 g_3431: g_3430 g_3429
-g_3433: NL? "["
-g_3434: NL? "("
-g_3435: g_3434 g_3098 | ""
-g_3436: NL? IDENT
-g_3437: g_3436 g_3435
-g_3440: s_3097_nn g_3437
-g_3441: NL? "="
-g_3442: g_3441 g_3440
-g_3443: g_3433 g_2974 | ""
+g_3432: NL? IDENT
+g_3433: g_3432 g_3431
+g_3435: NL? "["
+g_3436: NL? "("
+g_3437: g_3436 g_3100 | ""
+g_3438: NL? IDENT
+g_3439: g_3438 g_3437
+g_3442: s_3099_nn g_3439
+g_3443: NL? "="
 g_3444: g_3443 g_3442
-g_3445: NL? IDENT
+g_3445: g_3435 g_2974 | ""
 g_3446: g_3445 g_3444
-g_3448: NL? "->"
-g_3449: r__cache_clause_nn | ""
-g_3450: g_3449 g_1258
-g_3451: g_3448 r_type__nn | ""
-g_3456: g_3451 g_3450
-g_3457: NL? ")"
-g_3458: g_3457 g_3456
-g_3461: s_3125_nn g_3458
-g_3462: NL? "("
-g_3463: g_3462 g_3461
-g_3466: r__type_param_list_nn g_3463
-g_3467: NL? IDENT
-g_3468: g_3467 g_3466
-g_3470: NL? "->"
-g_3471: NL? "{"
-g_3472: g_3471 g_1063
-g_3473: r__cache_clause_nn | ""
-g_3476: g_3473 g_3472
-g_3477: g_3470 r_type__nn | ""
-g_3482: g_3477 g_3476
-g_3483: NL? ")"
-g_3484: g_3483 g_3482
-g_3487: s_3125_nn g_3484
-g_3488: NL? "("
-g_3489: g_3488 g_3487
-g_3492: r__type_param_list_nn g_3489
-g_3493: NL? IDENT
-g_3494: g_3493 g_3492
-g_3496: NL? w_extern
-g_3497: NL? w_fn
-g_3498: NL? w_fn
-g_3499: NL? w_type
-g_3500: NL? w_type
+g_3447: NL? IDENT
+g_3448: g_3447 g_3446
+g_3450: NL? "->"
+g_3451: r__cache_clause_nn | ""
+g_3452: g_3451 g_1258
+g_3453: g_3450 r_type__nn | ""
+g_3458: g_3453 g_3452
+g_3459: NL? ")"
+g_3460: g_3459 g_3458
+g_3463: s_3127_nn g_3460
+g_3464: NL? "("
+g_3465: g_3464 g_3463
+g_3468: r__type_param_list_nn g_3465
+g_3469: NL? IDENT
+g_3470: g_3469 g_3468
+g_3472: NL? "->"
+g_3473: NL? "{"
+g_3474: g_3473 g_1063
+g_3475: r__cache_clause_nn | ""
+g_3478: g_3475 g_3474
+g_3479: g_3472 r_type__nn | ""
+g_3484: g_3479 g_3478
+g_3485: NL? ")"
+g_3486: g_3485 g_3484
+g_3489: s_3127_nn g_3486
+g_3490: NL? "("
+g_3491: g_3490 g_3489
+g_3494: r__type_param_list_nn g_3491
+g_3495: NL? IDENT
+g_3496: g_3495 g_3494
+g_3498: NL? w_extern
+g_3499: NL? w_fn
+g_3500: NL? w_fn
 g_3501: NL? w_type
 g_3502: NL? w_type
-g_3503: NL? w_component
-g_3504: NL? w_service
-g_3505: NL? w_use
+g_3503: NL? w_type
+g_3504: NL? w_type
+g_3505: NL? w_component
+g_3506: NL? w_service
+g_3507: NL? w_use
 IDENT: /[A-Za-z_][A-Za-z0-9_]*/ & ~/(acquire|after|as|assert|async|await|break|commutative|compensate|component|config|continue|effect|else|emission|emit|every|extern|fail|false|fn|for|handoff|hole|idempotent|if|in|intercept|isolate|let|match|null|of|provide|provides|pub|pure|realm|requires|return|service|spawn|subscribe|test|true|try|type|undo|use|var|verified|while|with)/
 keyword: w_acquire | w_after | w_as | w_assert | w_async | w_await | w_break | w_commutative | w_compensate | w_component | w_config | w_continue | w_effect | w_else | w_emission | w_emit | w_every | w_extern | w_fail | w_false | w_fn | w_for | w_handoff | w_hole | w_idempotent | w_if | w_in | w_intercept | w_isolate | w_let | w_match | w_null | w_of | w_provide | w_provides | w_pub | w_pure | w_realm | w_requires | w_return | w_service | w_spawn | w_subscribe | w_test | w_true | w_try | w_type | w_undo | w_use | w_var | w_verified | w_while | w_with
 // a word literal, or a longer word that ends the parse here

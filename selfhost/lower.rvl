@@ -19595,7 +19595,14 @@ fn ltrim_ws(s: Str) -> Str {
 // the block. Leading indentation, the two slashes and ONE following space are
 // removed; the line breaks are kept. `n` rather than an empty accumulator, so a
 // block that happens to be empty still emits `"doc": ""` as the reference does.
-fn ir_doc_key(st: SrcText, line: Int) -> Str {
+//
+// `starts` is the reference's `mstarts_line`: the block belongs to the operation
+// only when the operation OPENS its line. In `service Cache { fn size() -> Int }`
+// the `fn` sits on the `service` header line, so the block above that line is the
+// SERVICE's, and reading it as `size`'s would make a comment above a `service`
+// line into a member's doc.
+fn ir_doc_key(st: SrcText, line: Int, starts: Bool) -> Str {
+  if (!starts) { return "" }
   var idx = line - 2
   if (idx < 0 || idx >= st.lines.length()) { return "" }
   var n = 0
@@ -19626,6 +19633,11 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   // the operation's first token line, captured before the modifier loop — the
   // anchor the reference reads off `self.peek().line` for the doc block above.
   let dline = tkc(ts, i).line
+  // ... and whether that token OPENS its line, the reference's `mstarts_line`:
+  // the token before it is the enclosing `{` (or the previous member's last
+  // token), so an equal line means the operation shares a line with what came
+  // before and the block above it is that declaration's, not the operation's.
+  let dstarts = i == 0 ? true : tkc(ts, i - 1).line != dline
   var j = i
   var em = false
   var scoped = false
@@ -19690,7 +19702,7 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   if (retQual != "") {
     mj = mj.concat(", \"returns_qualifier\": ").concat(jstr(retQual))
   }
-  mj = mj.concat(ir_doc_key(st, dline))
+  mj = mj.concat(ir_doc_key(st, dline, dstarts))
   if (term != "") {
     mj = mj.concat(", \"termination\": ").concat(jstr(term))
   }

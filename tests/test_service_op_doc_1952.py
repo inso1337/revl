@@ -45,9 +45,9 @@ REPRODUCER_NO_COMMENT = (
 )
 
 
-def _methods(source: str) -> dict:
+def _methods(source: str, service: str = "Foo") -> dict:
     ir = compile_source(source, "<1952>.rvl")
-    return ir["services"]["Foo"]["methods"]
+    return ir["services"][service]["methods"]
 
 
 def test_the_comment_above_an_operation_reaches_the_ir():
@@ -192,3 +192,89 @@ def test_a_doc_only_change_is_not_an_interface_change():
         _service_from_ir("Foo", plain["services"]["Foo"]),
         _service_from_ir("Foo", documented["services"]["Foo"]),
     )
+
+
+def test_a_block_above_the_service_line_is_not_an_operations_doc():
+    """The block belongs to the operation only when the operation opens its line.
+
+    In `service Cache { fn size() -> Int }` the `fn` shares the `service` header
+    line, so the block above that line is the SERVICE's — the issue's optional
+    half, not implemented — and reading it as `size`'s would silently turn any
+    comment above a `service` line into a member's doc. The damage would be
+    visible, not cosmetic: `format_source(..., comments=False)` is the
+    `revl_source` read path and drops comments, so the comment-free rendering of
+    such a program would stop compiling to the same program (issue #1714).
+    """
+    one_line = (
+        '// a doc comment\n'
+        'service Cache { fn size() -> Int }\n'
+    )
+    assert "doc" not in _methods(one_line, "Cache")["size"]
+
+    # a block INSIDE the service, directly above an operation that opens its
+    # own line, is that operation's — the rule is about the line, not about
+    # how far the block sits from the `fn`
+    own_line = (
+        'service Cache {\n'
+        '  // a doc comment\n'
+        '  fn size() -> Int\n'
+        '}\n'
+    )
+    assert _methods(own_line, "Cache")["size"]["doc"] == "a doc comment"
+
+    # a block above the `service` header is the SERVICE's block, so it is not
+    # any member's, however the body is laid out
+    above_header = (
+        '// a doc comment\n'
+        'service Cache {\n'
+        '  fn size() -> Int\n'
+        '}\n'
+    )
+    assert "doc" not in _methods(above_header, "Cache")["size"]
+
+    # ... and a block between the header and a later operation still lands on
+    # that operation, so the rule is about the LINE, not about the service
+    later = (
+        'service Cache { fn a() -> Int\n'
+        '  // doc for b\n'
+        '  fn b() -> Int }\n'
+    )
+    assert "doc" not in _methods(later, "Cache")["a"]
+    assert _methods(later, "Cache")["b"]["doc"] == "doc for b"
+
+
+def test_control_a_block_above_an_own_line_operation_is_that_operations_doc():
+    """Control (i) for the declaration bound: it must not over-suppress.
+
+    Bounding the walk at the enclosing `service` line is what keeps a block above
+    a one-line `service ... { fn ... }` off the member; the honest failure mode
+    of that bound is a bound set one line too high, which would silently lose the
+    block for an operation that DOES open its own line inside the body.
+    """
+    source = (
+        'service Cache {\n'
+        '  fn evict(k: Str) -> Bool\n'
+        '  // Size of the cache, in entries.\n'
+        '  fn size() -> Int\n'
+        '}\n'
+    )
+    methods = _methods(source, "Cache")
+    assert methods["size"]["doc"] == "Size of the cache, in entries."
+    assert "doc" not in methods["evict"]
+
+
+def test_control_a_blank_line_between_the_block_and_the_operation_means_no_doc():
+    """Control (ii) for the declaration bound: the block must be DIRECTLY above.
+
+    A blank line between the block and the `fn` line ends the block, so the
+    operation carries no `doc` — and the text does not leak onto the operation
+    below it either, which is the shape a bound set too low would produce.
+    """
+    source = (
+        'service Cache {\n'
+        '  // A note about the file, separated from the operation by a blank line.\n'
+        '\n'
+        '  fn size() -> Int\n'
+        '}\n'
+    )
+    assert "doc" not in _methods(source, "Cache")["size"]

@@ -23283,7 +23283,10 @@ fn ltrim_ws(s: &str) -> String {
     return s.revl_slice(a, s.revl_length());
 }
 
-fn ir_doc_key(st: SrcText, line: i64) -> String {
+fn ir_doc_key(st: SrcText, line: i64, starts: bool) -> String {
+    if (!starts) {
+        return String::from("");
+    }
     let mut idx = (line).checked_sub(2i64).expect("revl: Int overflow");
     if ((idx < 0i64) || (idx >= st.lines.revl_length())) {
         return String::from("");
@@ -23316,6 +23319,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
         return mk_irmethr(acc.clone(), i, v3);
     }
     let dline = tkc(&ts, i).line;
+    let dstarts = if (i == 0i64) { true } else { (tkc(&ts, (i).checked_sub(1i64).expect("revl: Int overflow")).line != dline) };
     let mut j = i;
     let mut em = false;
     let mut scoped = false;
@@ -23380,7 +23384,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     if (retQual != "") {
         mj = (mj.revl_concat(", \"returns_qualifier\": ")).revl_concat(&jstr(&retQual));
     }
-    mj.push_str(&ir_doc_key(st.clone(), dline));
+    mj.push_str(&ir_doc_key(st.clone(), dline, dstarts));
     if (term != "") {
         mj = (mj.revl_concat(", \"termination\": ")).revl_concat(&jstr(&term));
     }

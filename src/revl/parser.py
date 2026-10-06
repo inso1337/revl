@@ -2548,7 +2548,7 @@ class Parser:
     def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
         return RevlError(self.filename, line, message, hint)
 
-    def _doc_above(self, line: int) -> str | None:
+    def _doc_above(self, line: int, floor: int | None = None) -> str | None:
         """The comment block directly above `line` (issue #1952).
 
         `line` is a token line (1-based, already carrying `line_offset`), so it
@@ -2559,14 +2559,22 @@ class Parser:
         the two slashes, and one following space) is removed and the remaining
         line breaks are kept. `None` when there is no such block, so a caller
         emits no `doc` key at all.
+
+        `floor` bounds the walk at the enclosing declaration: the block may only
+        be read from lines strictly BELOW the declaration's start line, so a
+        comment above the `service` keyword is never a member's doc. It is
+        belt-and-braces with the caller's own-line rule (`mstarts_line`, which
+        also refuses a block above a PREVIOUS member sharing the operation's
+        line); the bound is what states the rule in the reader's terms.
         """
         lines = self._src_lines
         idx = line - 1 - self._line_offset
         if idx <= 0 or idx > len(lines):
             return None
+        lowest = -1 if floor is None else floor - self._line_offset - 1
         block: list[str] = []
         i = idx - 1
-        while i >= 0:
+        while i > lowest:
             stripped = lines[i].lstrip()
             if not stripped.startswith("//"):
                 break
@@ -4284,6 +4292,16 @@ class Parser:
             # scope); the parser only records the shape.
             method_route: dict | None = None
             mline = self.peek().line
+            # issue #1952: a doc block is the OPERATION's only when the
+            # operation OPENS its line. `mline` is the operation's FIRST token,
+            # so in `service Cache { fn size() -> Int }` it is the `service`
+            # header line and the block above it is the SERVICE's. Reading it
+            # as `size`'s would make any comment above a `service` line into a
+            # member's doc, and `format_source(..., comments=False)` — which
+            # drops comments and is the `revl_source` read path — would stop
+            # compiling to the same program (issue #1714).
+            mstarts_line = (self.pos == 0
+                            or self.toks[self.pos - 1].line != mline)
             if self.at("ident", "route"):
                 rline = self.next().line
                 _ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head")
@@ -4451,8 +4469,11 @@ class Parser:
                 witnessed=method_witnessed,
                 # issue #1952: the comment block directly above the operation,
                 # read from the raw source (the lexer drops comments). `None`
-                # when there is none, so the IR key is absent.
-                doc=self._doc_above(mline),
+                # when there is none — and when the operation does not open its
+                # line, since then the block above it is the enclosing
+                # declaration's — so the IR key is absent. `floor=line` bounds
+                # the walk at the `service` line itself.
+                doc=(self._doc_above(mline, floor=line) if mstarts_line else None),
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)
