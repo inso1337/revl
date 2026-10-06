@@ -280,8 +280,16 @@ CORPUS = [
     # (item 429's trap). Added FAILING FIRST: the port answered
     # `<<UNSUPPORTED-LIFECYCLE-STEP:abort>>`.
     "lifecycle_abort.rvl",
+    # Issue #1954: a capability-bound secret (`secret NAME for CAP`, item 256)
+    # on a sync extern and an async extern, with a secret-free extern beside
+    # them — the `_REVL_SECRET_NAMES`/`_REVL_SECRETS`/`_revlSecret` scaffold and
+    # `const NAME = _revlSecret("NAME");` as the first local of each bound body.
+    # It is registered from OUTSIDE `tests/fixtures/` on purpose: the native
+    # front end cannot read the statement yet (#2012), so a census directory
+    # would score it a NEW `false-reject` divergence. It is the last entry in
+    # `LOWER_GAP_DOCS["ts"]` for the same reason, in this same order.
+    "../../bound_secret_corpus/bound_secrets.rvl",
 ]
-
 def _load_reference_emit():
     """The reference TS emitter, loaded by path so we compare against the exact
     file this slice mirrors (not whatever `revl` re-exports)."""

@@ -664,6 +664,25 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # the native chain emits the component's 1,057 bytes and no test. The
         # same pre-existing lower.rvl gap as `lifecycle_cache.rvl` above.
         "lifecycle_abort.rvl",
+        # issue #1954: the ts emitter's bound-secret seam (item 256), the mirror
+        # of the py tier's item 256 injection. The EMITTER half is byte-exact:
+        # selfhost/emit_ts.rvl carries `secret_scaffold`/`secret_binds` and, fed
+        # the REFERENCE IR, produces the scaffold (`_REVL_SECRET_NAMES`,
+        # `_REVL_SECRETS`, the fail-loud `_revlSecret`) and each bound extern
+        # body's `const NAME = _revlSecret("NAME");` first local — sync and
+        # async — exactly. What the fully-native chain cannot do is reach that
+        # IR: `secret NAME for CAP` is not a statement selfhost/lower.rvl (or
+        # the self-host lexer/parser) can read at all, so the document's whole
+        # payload is native-chain unreachable. That is issue #2012, the
+        # self-host FRONT END gap, filed separately from this port.
+        #
+        # It sits LAST in this tuple, because the comparison above is
+        # order-sensitive — `diverged` is built by walking CORPUS — and
+        # tests/test_selfhost_emit_ts.py appends it to CORPUS. Its document
+        # lives in tests/bound_secret_corpus/, outside every census directory,
+        # because a census directory would read the unreadable statement as a
+        # NEW `false-reject` divergence (tests/test_gate_reference_census.py).
+        "../../bound_secret_corpus/bound_secrets.rvl",
     ),
     "go": (
         # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the
