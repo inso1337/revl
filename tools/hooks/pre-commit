@@ -58,6 +58,32 @@ step() {
     fi
 }
 
+# Run "$@" with a wall-clock ceiling, capturing combined output on stdout. Exit
+# 124 (the GNU timeout convention) means the ceiling was hit; the whole process
+# group is killed first, so a wedged pytest and the children it started cannot
+# outlive it. A portable ceiling: macOS has no `timeout`, and the interpreter is
+# already resolved.
+run_within_budget() {
+    _budget=$1
+    shift
+    "$PY" -c '
+import os, signal, subprocess, sys
+p = subprocess.Popen(sys.argv[2:], stdout=subprocess.PIPE,
+                     stderr=subprocess.STDOUT, start_new_session=True)
+try:
+    out, _ = p.communicate(timeout=float(sys.argv[1]))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except OSError:
+        p.kill()
+    p.communicate()
+    sys.exit(124)
+sys.stdout.buffer.write(out)
+sys.exit(p.returncode)
+' "$_budget" "$@"
+}
+
 echo "pre-commit:"
 
 # The frontend suite, which includes tests/test_conformance_validate.py: every
@@ -74,12 +100,23 @@ echo "pre-commit:"
 # or structural change, and `make pre-merge` still runs everything at land/CI.
 #
 # Fail safe twice over: if the selector is unavailable or says FULL, run all of
-# `tests/` exactly as before; and a --timeout backstop (when pytest-timeout is
-# present) means a single wedged cross-tier test can never hang the commit.
+# `tests/`; and a --timeout backstop (when pytest-timeout is present) means a
+# single wedged cross-tier test can never hang the commit.
 TIMEOUT_ARGS=""
 if "$PY" -P -m pytest --help 2>/dev/null | grep -q -- '--timeout'; then
     TIMEOUT_ARGS="--timeout=60 --timeout-method=thread"
 fi
+
+# The FULL fallback additionally gets a wall-clock ceiling. The root suite is
+# about an hour here and CI runs it sharded (REVL_TEST_SHARD, four jobs); an
+# unbounded local run is the machine-starvation path issue #2059 measured (one
+# commit pinned five cores above 90% and drove load to 59 while other lanes
+# worked). A per-test --timeout is a backstop, not a budget. When the ceiling is
+# hit the step SKIPS with the selector's reason and the --no-verify instruction
+# rather than charging the committer for a run that is CI's to make — a partial
+# run is not a gate, and `make pre-merge` still runs everything at land/CI.
+# Override the ceiling with REVL_HOOK_FULL_BUDGET=<seconds>.
+FULL_BUDGET=${REVL_HOOK_FULL_BUDGET:-60}
 # A commit that stages nothing (`--allow-empty`, a message-only `--amend`)
 # changes no file, so no test can be affected by it. The selector cannot tell
 # that case apart: it sees an empty change set, which it must treat as "could
@@ -117,11 +154,39 @@ if [ -n "$NOTHING_STAGED" ]; then
     echo "  frontend                           nothing staged (the commit changes no file)"
 else
     SEL_FULL=$(printf '%s\n' "$SEL" | sed -n 's/^FULL //p')
-    if [ -z "$SEL" ] || [ -z "$SEL_FULL" ]; then
-        # selector unavailable (it crashed, parse error) -> previous behavior
-        step "frontend + emitted-code validation" "$PY" -P -m pytest tests/ $TIMEOUT_ARGS -q
-    elif [ "$SEL_FULL" = "1" ]; then
-        step "frontend + emitted-code validation (full)" "$PY" -P -m pytest tests/ $TIMEOUT_ARGS -q
+    if [ -z "$SEL_FULL" ] || [ "$SEL_FULL" = "1" ]; then
+        # Bounded, not unbounded: see FULL_BUDGET above. A FULL selection is the
+        # answer for every unmapped path, so the unbounded run was the norm, not
+        # the exception; a selector that answered nothing at all (it crashed, a
+        # parse error) falls back to the same whole-suite run, and gets the same
+        # ceiling (issue #2059).
+        SEL_REASON=$(printf '%s\n' "$SEL" | sed -n 's/^REASON //p')
+        if [ -z "$SEL_FULL" ]; then
+            SEL_LINE="unavailable (${SEL_REASON:-the selector printed nothing})"
+        else
+            SEL_LINE="FULL ${SEL_REASON:-<no reason given>}"
+        fi
+        # The label is longer than the 36-column field, so each verdict below
+        # carries its own leading space to keep the line readable.
+        printf '  %s' "frontend + emitted-code validation (full)"
+        if out=$(run_within_budget "$FULL_BUDGET" "$PY" -P -m pytest tests/ $TIMEOUT_ARGS -q); then
+            echo " ok"
+        else
+            rc=$?
+            if [ "$rc" -eq 124 ]; then
+                echo " SKIPPED (FULL selection exceeded the ${FULL_BUDGET}s budget)"
+                echo "      selector: ${SEL_LINE}"
+                echo "      the root suite is ~an hour here and CI runs it sharded; a"
+                echo "      partial run is not a gate, so the hook does not charge you."
+                echo "      commit with:  git commit --no-verify"
+                echo "      and record the selector's line above in the commit message"
+                echo "      (\`make pre-merge\` still runs everything before land)."
+            else
+                echo " FAILED"
+                echo "$out" | tail -25 | sed 's/^/      /'
+                fail=1
+            fi
+        fi
     else
         SEL_PYTEST=$(printf '%s\n' "$SEL" | sed -n 's/^PYTEST //p')
         if [ -n "$SEL_PYTEST" ]; then
