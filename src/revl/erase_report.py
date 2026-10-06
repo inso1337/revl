@@ -359,6 +359,11 @@ def _crossings(index: Composition, members: list[str],
         for scope_id in index.scopes_of.get(name, []):
             scope = index.scopes[scope_id]
             facts = scope["facts"]
+            # issue #1707: the witnessed externs whose declared inverse THIS
+            # scope actually registers (effect-position acquisitions), read off
+            # the same predicate `approval.ClassMap` consults, so the two folds
+            # cannot disagree about whether a witnessed crossing is revertible.
+            registered = index.witnessed_registered(scope["nodes"])
             # the `*` first-class-value widening, off the SAME detection
             # `approval.ClassMap` raises a class-(c) crossing for
             # (`Composition.value_widens`, item 414). An emitting callable
@@ -417,7 +422,18 @@ def _crossings(index: Composition, members: list[str],
                     "token": f"emit:{name}:{fact['key']}.{fact['method']}",
                 })
             for fact in facts["externs"]:
-                if not fact.get("emission"):
+                # issue #1707: revertibility is REGISTRATION, and registration is
+                # a property of the call site (see
+                # `Composition.witnessed_registered`). A witnessed extern reached
+                # where its inverse is NOT registered — a `let`/`return` call in a
+                # provide-method body, which the checker's effect-position refusal
+                # did not cover — fires the host mutation and registers nothing,
+                # so it is a class-(c) crossing: it falls through to the
+                # irreversible `externs` bucket below, keeping this fold in step
+                # with `approval.ClassMap` (item 414).
+                unregistered_witness = (fact.get("class") == "witnessed"
+                                        and fact["name"] not in registered)
+                if not fact.get("emission") and not unregistered_witness:
                     # item 246 (closing the noted gap): a witnessed extern crosses
                     # the boundary too (item 243), but it is REVERTIBLE by its
                     # registered inverse — class (a), auto-approved silently. It is
@@ -467,6 +483,14 @@ def _crossings(index: Composition, members: list[str],
                     # offset attached, item 247). Absent = bare, as before.
                     "compensated": ext_entry.get("compensate") is not None,
                     "token": f"host:{name}:{fact['name']}",
+                    # issue #1707: a `witnessed` extern in this bucket is one
+                    # whose inverse is NOT registered at this call site, and the
+                    # class name alone would read as revertible.
+                    **({"registered": False,
+                        "note": "a witnessed extern whose declared inverse is not "
+                                "registered at this call site (the call is not an "
+                                "effect-position acquisition), so nothing can undo "
+                                "it"} if unregistered_witness else {}),
                 })
     emissions.sort(key=lambda e: (e["component"], e["label"]))
     relayed.sort(key=lambda e: (e["component"], e["label"]))
