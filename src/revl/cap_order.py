@@ -22,7 +22,15 @@ string comparison. No parameter, no behaviour change.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+
+# issue #1985: an ARGUMENT-bound capability parameter value is the enclosing
+# declaration's own parameter name - a bare ident. Unambiguous against every
+# other value form by construction: a quoted literal, an integer, and a
+# `config.<field>` path all read differently.
+_ARGUMENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\Z")
 
 
 class CapError(ValueError):
@@ -219,18 +227,21 @@ def _canon_value(name: str, value: object) -> object:
     """Canonicalize (and validate) a raw parameter value for its registered
     order. String literals are expected for resource kinds, integers for
     ceilings. The path order stores a component tuple; discrete stores the
-    string; ceiling stores the int. A `Symbol` (a per-instance `config.` value)
-    is stored as-is on a resource kind and refused on a ceiling (a ceiling is a
-    STATIC bound, item 294 Slice 2)."""
+    string; ceiling stores the int. A `Symbol` - a per-instance `config.` value
+    or the enclosing declaration's own argument (issue #1985) - is stored as-is
+    on a resource kind and refused on a ceiling (a ceiling is a STATIC bound,
+    item 294 Slice 2)."""
     kind, order = _REGISTRY[name]
     if isinstance(value, Symbol):
         if kind == _CEILING:
+            what = ("an argument-bound" if value.is_arg
+                    else f"a per-instance `{value.ref}`")
             raise CapError(
                 f"capability parameter `{name}` is a ceiling and takes a static "
-                f"integer, not a per-instance `{value.ref}` value",
+                f"integer, not {what} value",
                 hint=f"write `{name}=10` (a static bound); a per-instance "
-                     "`config.` value bounds a resource (`path`/`host`/`table`), "
-                     "not a count")
+                     "`config.` value or a caller argument bounds a destination "
+                     "(`path`/`host`/`table`), not a count")
         return value
     if order == "ceiling":
         if not isinstance(value, int) or isinstance(value, bool):
@@ -293,15 +304,42 @@ class Symbol:
     (fail closed): a child reaching `path=config.job_root` under a parent holding
     `path="/tmp"` is refused UNLESS the spawn resolves the symbol into the
     parent's cone. This is the design's first symbol rule - only a literal
-    binding substitutes; anything else leaves the parameter symbolic."""
+    binding substitutes; anything else leaves the parameter symbolic.
 
-    ref: str   # the source spelling, e.g. "config.job_root"
+    The SAME opacity carries the argument-bound destination (issue #1985):
+    `emission[network.call(host=host)] fn get(url: Str, host: Str)` binds the
+    declaration's own parameter into the token, so the declared destination is
+    the CALLER's value rather than a compile-time constant. Its `ref` is the
+    parameter name - a bare ident, never a `config.` path - and it is stored
+    identically opaque: equal only to the identical binding, incomparable to any
+    literal, hence never silently covered by a policy rule or a parent spelling
+    a CONSTANT destination (`network.call(host="api.example.test")` refuses it,
+    a bare `network.call` still covers it). Only a `config.` symbol is a spawn
+    `with { }` binding target (`substitute`), so an argument is never resolved
+    into a literal by a spawn site - there is nothing to resolve it FROM."""
+
+    ref: str   # the source spelling: "config.job_root", or the argument "host"
+
+    @property
+    def is_arg(self) -> bool:
+        """Whether the symbol names the enclosing declaration's own parameter
+        (an argument-bound destination, issue #1985) rather than a per-instance
+        `config.` field. Only a `config.` symbol is substitutable, so the two are
+        never interchangeable: the distinction is carried by the spelling the
+        parser produced, and re-read by `_parse_value`."""
+        return not self.ref.startswith("config.")
 
     @property
     def field(self) -> str:
         """The config field the symbol names (`job_root` for `config.job_root`),
-        the key a spawn-site `with { }` binds."""
+        the key a spawn-site `with { }` binds; for an argument symbol, the
+        parameter's name."""
         return self.ref.split(".", 1)[1] if "." in self.ref else self.ref
+
+    def to_str(self) -> str:
+        """The canonical source-facing spelling: unquoted, so it re-reads as the
+        symbolic binding it is and never as a discrete string."""
+        return self.ref
 
 
 @dataclass(frozen=True)
@@ -407,12 +445,20 @@ def substitute(cap: Cap, bindings: dict[str, str]) -> Cap:
 
     A cap carrying no symbol is returned unchanged (identity), so a
     parameter-free or literal-only reach is byte-identical: substitution is inert
-    unless a per-instance symbol is actually present and actually bound."""
+    unless a per-instance symbol is actually present and actually bound.
+
+    An ARGUMENT-bound symbol (issue #1985 - `host=host`) is never a binding
+    target: a spawn site's `with { }` block binds a child's `config.` FIELDS, and
+    an argument is supplied by the CALLER, not by the spawn. Substituting one
+    would let `with { host: "/tmp" }` silently narrow a declaration whose
+    destination nothing but the caller names - so only a `config.` symbol is
+    resolved here."""
     if not any(isinstance(v, Symbol) for _n, v in cap.params):
         return cap
     raw: list[tuple[str, object]] = []
     for name, value in cap.params:
-        if isinstance(value, Symbol) and value.field in bindings:
+        if (isinstance(value, Symbol) and not value.is_arg
+                and value.field in bindings):
             raw.append((name, bindings[value.field]))
         else:
             raw.append((name, value))
@@ -469,10 +515,31 @@ def _parse_value(raw: str) -> object:
     if raw.startswith("config."):
         # a per-instance symbol re-read from its canonical (unquoted) spelling
         return Symbol(raw)
+    if _ARGUMENT_RE.match(raw):
+        # an argument-bound destination (issue #1985), re-read from its canonical
+        # (unquoted) spelling: the enclosing declaration's own parameter name.
+        # Unquoted, so it can never be mistaken for a discrete literal.
+        return Symbol(raw)
     try:
         return int(raw)
     except ValueError as exc:
         raise CapError(f"malformed capability parameter value `{raw}`") from exc
+
+
+def argument_bindings(caps: "list[str] | tuple[str, ...]") -> list[tuple[str, str]]:
+    """The argument-bound destinations of a list of canonical capability
+    spellings, as `(capability, parameter-name)` pairs (issue #1985).
+
+    A declaration's own checker reads this to refuse a binding that names
+    something other than one of ITS parameters - `emission[network.call(host=dest)]
+    fn get(url: Str, host: Str)` names no destination anything enforces, so it is
+    refused rather than stored as an opaque token nothing can ever satisfy."""
+    found: list[tuple[str, str]] = []
+    for text in caps or ():
+        for _name, value in parse_cap(text).params:
+            if isinstance(value, Symbol) and value.is_arg:
+                found.append((text, value.ref))
+    return found
 
 
 # --------------------------------------------------------------- the order

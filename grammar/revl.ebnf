@@ -61,7 +61,7 @@ r__place_spec = "on" "process" string [ "backend" r__name ] ;
 r__grant_spec = "with" "{" { r__provision_key [ "," ] } "}" ;
 r__slo_block = "{" { r__name ":" r__slo_value r__slo_qualifiers r__slo_response [ "," ] } "}" ;
 r__layer_op = "add" r_row_decl | "remove" r__address | "replace" r__address "with" r_row_decl | "configure" r__address "with" r__layer_config_block | "resolve" r__address "to" r__label_address "over" r__label_address | "place" r__address r__place_spec | "grant" r__address r__grant_spec ;
-r__capability_params = [ "(" { ident "=" (string | int | "config" "." ident) [ "," ] } ")" ] ;
+r__capability_params = [ "(" { ident [ "=" (string | int | "config" "." ident | ident) ] [ "," ] } ")" ] ;
 r__type_suffix_tail = [ "?" ] ;
 r__capability_token = string | ident { "." ident } ;
 r__cache_duration = r__duration_literal ;

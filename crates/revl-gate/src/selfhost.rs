@@ -14241,11 +14241,14 @@ fn cap_param_at(ts: &[Token], i: i64) -> CapPR {
     if (!atk(ts, i, "ident")) {
         return cap_pr_bad((i).checked_add(1i64).expect("revl: Int overflow"));
     }
-    if (!atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "=")) {
-        return cap_pr_bad((i).checked_add(2i64).expect("revl: Int overflow"));
-    }
     let nm = cap_alias(tkc(ts, i).text);
     let ord_ = cap_ord(&nm);
+    if (!atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "=")) {
+        if ((ord_ == "") || (ord_ == "ceil")) {
+            return cap_pr_bad((i).checked_add(1i64).expect("revl: Int overflow"));
+        }
+        return CapPR { name: nm.clone(), rend: nm.clone(), ok: true, i: (i).checked_add(1i64).expect("revl: Int overflow") };
+    }
     if (ord_ == "") {
         return cap_pr_bad((i).checked_add(3i64).expect("revl: Int overflow"));
     }
@@ -14272,6 +14275,9 @@ fn cap_param_at(ts: &[Token], i: i64) -> CapPR {
             return CapPR { name: nm.clone(), rend: (n).to_string(), ok: true, i: (i).checked_add(3i64).expect("revl: Int overflow") };
         }
         return cap_pr_bad((i).checked_add(3i64).expect("revl: Int overflow"));
+    }
+    if (v.kind == "ident") {
+        return CapPR { name: nm.clone(), rend: v.text.clone(), ok: true, i: (i).checked_add(3i64).expect("revl: Int overflow") };
     }
     if ((v.kind != "string") || cap_forbidden(&v.text)) {
         return cap_pr_bad((i).checked_add(3i64).expect("revl: Int overflow"));
@@ -14353,6 +14359,10 @@ fn cap_list_at(ts: &[Token], i: i64, end: i64) -> CapsRd {
     return CapsRd { xs: out.clone(), i: (j).checked_add(1i64).expect("revl: Int overflow") };
 }
 
+fn cap_arg_name(v: &str) -> bool {
+    return bare_ident(v, 0i64);
+}
+
 fn cap_piece(p: &str) -> CapP {
     let eq = p.revl_index_of("=");
     if (eq == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
@@ -14365,6 +14375,9 @@ fn cap_piece(p: &str) -> CapP {
     }
     if starts_with__m2(&v, "config.") {
         return CapP { name: nm.clone(), ord: String::from("sym"), sv: v.clone(), iv: 0i64 };
+    }
+    if cap_arg_name(&v) {
+        return CapP { name: nm.clone(), ord: String::from("arg"), sv: v.clone(), iv: 0i64 };
     }
     return CapP { name: nm.clone(), ord: String::from("ceil"), sv: String::from(""), iv: dec_value(&v) };
 }
@@ -14400,7 +14413,7 @@ fn cap_parse(s: String) -> CapT {
 }
 
 fn cap_val_str(p: CapP) -> String {
-    if (p.ord == "sym") {
+    if ((p.ord == "sym") || (p.ord == "arg")) {
         return p.sv;
     }
     if (p.ord == "ceil") {
@@ -14444,7 +14457,7 @@ fn leq_path(narrow: &str, wide: &str) -> bool {
 }
 
 fn cap_param_leq(narrow: CapP, wide: CapP) -> bool {
-    if ((narrow.ord == "sym") || (wide.ord == "sym")) {
+    if ((((narrow.ord == "sym") || (wide.ord == "sym")) || (narrow.ord == "arg")) || (wide.ord == "arg")) {
         return ((narrow.ord == wide.ord) && (narrow.sv == wide.sv));
     }
     if (wide.ord == "path") {
@@ -17379,6 +17392,128 @@ fn ext_idem_verdict(cls: &str, nm: &str, mods: ExtMods, ps: &[ParamN], line: i64
     return no_verd();
 }
 
+fn arg_bind_verdict(where_: &str, xs: &[String], ps: &[ParamN], line: i64) -> Verd {
+    let mut names: Vec<String> = vec![];
+    let mut p = 0i64;
+    while (p < ps.revl_length()) {
+        names.push((ps)[(p) as usize].name.clone());
+        p = (p).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut i = 0i64;
+    while (i < xs.revl_length()) {
+        let c = cap_parse((xs)[(i) as usize].clone());
+        let mut q = 0i64;
+        while (q < c.ps.revl_length()) {
+            let v = (c.ps)[(q) as usize].clone();
+            if ((v.ord == "arg") && (!contains__m2(&names, &v.sv))) {
+                let listed = if (names.revl_length() == 0i64) { String::from("(none)") } else { join_comma(&sort_strs(&names), 0i64, String::from("")) };
+                return mk_verd(tagged("G4", &(((((((where_.revl_concat(" declares the argument-bound destination `")).revl_concat(&(xs)[(i) as usize])).revl_concat("`, but `")).revl_concat(&v.sv)).revl_concat("` is not one of its parameters (")).revl_concat(&listed)).revl_concat(")"))), line);
+            }
+            q = (q).checked_add(1i64).expect("revl: Int overflow");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn ext_arg_at(ts: Vec<Token>, i: i64) -> Verd {
+    let cl = ext_class_at(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    if (cl == "") {
+        return no_verd();
+    }
+    if (!atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "[")) {
+        return no_verd();
+    }
+    let mut j = (i).checked_add(3i64).expect("revl: Int overflow");
+    while ((j < ts.revl_length()) && (!atk(&ts, j.clone(), "]"))) {
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    j = (j).checked_add(1i64).expect("revl: Int overflow");
+    if atk(&ts, j.clone(), "(") {
+        return no_verd();
+    }
+    let mut depth = 0i64;
+    while ((j < ts.revl_length()) && ((depth > 0i64) || (!atw(&ts, j.clone(), "fn")))) {
+        if atk(&ts, j.clone(), "(") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if atk(&ts, j.clone(), ")") {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            } else {
+                if ((depth == 0i64) && (((atk(&ts, j.clone(), "{") || atk(&ts, j.clone(), "}")) || atk(&ts, j.clone(), "=")) || atk(&ts, j.clone(), ";"))) {
+                    return no_verd();
+                }
+            }
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (!atw(&ts, j.clone(), "fn")) {
+        return no_verd();
+    }
+    let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
+    let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
+    if (!ps.ok) {
+        return no_verd();
+    }
+    return arg_bind_verdict(&(((cl.revl_concat(" extern `")).revl_concat(&nm)).revl_concat("`")), &cap_list_at(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), ts.revl_length()).xs, &ps.ps, tkc(&ts, i).line);
+}
+
+fn svc_arg_at(ts: Vec<Token>, i: i64) -> Verd {
+    let mut i0 = i;
+    while (i0 < ts.revl_length()) {
+        if (!atw(&ts, i0, "service")) {
+            i0 = (i0).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if (!atk(&ts, (i0).checked_add(2i64).expect("revl: Int overflow"), "{")) {
+                return no_verd();
+            }
+            let end = close_brace(&ts, (i0).checked_add(2i64).expect("revl: Int overflow"));
+            if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return no_verd();
+            }
+            let v = svc_arg_in(ts.clone(), (i0).checked_add(3i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), &tkc(&ts, (i0).checked_add(1i64).expect("revl: Int overflow")).text);
+            if (v.v != "") {
+                return v;
+            }
+            i0 = end;
+        }
+    }
+    return no_verd();
+}
+
+fn svc_arg_in(ts: Vec<Token>, j: i64, end: i64, sn: &str) -> Verd {
+    let mut k = j;
+    let mut caps: Vec<String> = vec![];
+    let mut scoped = false;
+    while (k < end) {
+        if ((atw(&ts, k, "emission") || atw(&ts, k, "witnessed")) && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), "[")) {
+            let cl = cap_list_at(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), end);
+            caps = cl.xs;
+            scoped = true;
+            k = cl.i;
+        } else {
+            if atw(&ts, k, "fn") {
+                let ps = params_at(ts.clone(), (k).checked_add(3i64).expect("revl: Int overflow"));
+                if (!ps.ok) {
+                    return no_verd();
+                }
+                if scoped {
+                    let v = arg_bind_verdict(&((((String::from("service method `").revl_concat(&sn)).revl_concat(".")).revl_concat(&tkc(&ts, (k).checked_add(1i64).expect("revl: Int overflow")).text)).revl_concat("`")), &caps, &ps.ps, tkc(&ts, k).line);
+                    if (v.v != "") {
+                        return v;
+                    }
+                }
+                caps = vec![];
+                scoped = false;
+                k = cache_clause_end(&ts, ret_at(ts.clone(), ps.i));
+            } else {
+                k = (k).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
+    }
+    return no_verd();
+}
+
 fn ext_decl_verdict(ts: Vec<Token>, i: i64, declared: Vec<String>, gtys: Vec<Bind>, al: std::collections::HashMap<String, String>) -> Verd {
     let line = tkc(&ts, i).line;
     let cls = ext_class_at(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
@@ -17420,6 +17555,13 @@ fn ext_decl_verdict(ts: Vec<Token>, i: i64, declared: Vec<String>, gtys: Vec<Bin
     }
     if ((cls == "emission") && atw(&ts, k, "undo")) {
         return mk_verd(tagged("G4", &ext_emission_undo_msg(&nm)), line);
+    }
+    if mods.caps {
+        let w = ((cls.revl_concat(" extern `")).revl_concat(&nm)).revl_concat("`");
+        let av = arg_bind_verdict(&w, &cap_list_at(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), ts.revl_length()).xs, &ps.ps, line);
+        if (av.v != "") {
+            return av;
+        }
     }
     if mods.idem {
         let iv = ext_idem_verdict(&cls, &nm, mods.clone(), &ps.ps, line, al.clone());
@@ -17469,6 +17611,10 @@ fn extern_decl_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
                         let v = ext_decl_verdict(ts.clone(), i, declared.clone(), gtys.clone(), al.clone());
                         if (v.v != "") {
                             return v;
+                        }
+                        let av = ext_arg_at(ts.clone(), i);
+                        if (av.v != "") {
+                            return av;
                         }
                     }
                     if (nm != "") {
@@ -21832,6 +21978,10 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
     let cshv = csh_refusal(ts.clone());
     if (cshv.v != "") {
         return NoLink { done: true, refs: vec![cshv.clone()] };
+    }
+    let sav = svc_arg_at(ts.clone(), 0i64);
+    if (sav.v != "") {
+        return NoLink { done: true, refs: vec![sav.clone()] };
     }
     let fbv = fb_refusal_at(ts.clone(), 0i64, nr_binds(ts.clone(), gtys.clone()), al.clone());
     if (fbv.v != "") {
@@ -32947,6 +33097,17 @@ fn an_aggregation_that_admits_on_a_tie_is_refused_by_name() {
 #[test]
 fn an_annotated_let_pins_an_empty_list_and_marks_a_width_coercion() {
     assert!((lower_to_ir(format!("fn empty() -> List[Int] {{ let xs: List[Int] = [] return xs }}\nfn full() -> List[Int] {{ let ys: List[Int] = [1] return ys }}\nfn widened(n: Int32) -> Int {{ let w: Int = n return w }}\n")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"empty\",\"params\":[],\"returns\":\"List[Int]\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"xs\",\"value\":{\"kind\":\"list\",\"items\":[],\"expected\":\"List[Int]\"},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"xs\"}}]},{\"name\":\"full\",\"params\":[],\"returns\":\"List[Int]\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"ys\",\"value\":{\"kind\":\"list\",\"items\":[{\"kind\":\"lit\",\"value\":1}]},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"ys\"}}]},{\"name\":\"widened\",\"params\":[{\"name\": \"n\", \"type\": \"Int32\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"let\",\"name\":\"w\",\"value\":{\"kind\":\"var\",\"name\":\"n\",\"widen\":\"Int\"},\"mutable\":false},{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"w\"}}]}]}"));
+}
+
+#[test]
+fn an_argument_bound_capability_destination_admits_at_its_declaration() {
+    assert!((admit_src(String::from("service Http { emission[network.call(host=host)] fn get(url: Str, host: Str) -> Str }\ncomponent Kit provides http: Http {\n  provide http { fn get(url, host) { return \"x\" } }\n}")) == ""));
+}
+
+#[test]
+fn an_argument_bound_capability_destination_that_names_no_parameter_is_refused__g4_() {
+    let v = admit_src(String::from("service Http { emission[network.call(host=nope)] fn get(host: Str) -> Str }\ncomponent Kit provides http: Http {\n  provide http { fn get(host) { return \"x\" } }\n}"));
+    assert!((v == "G4|service method `Http.get` declares the argument-bound destination `network.call(host=nope)`, but `nope` is not one of its parameters (host)"));
 }
 
 #[test]
