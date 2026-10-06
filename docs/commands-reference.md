@@ -128,7 +128,11 @@ revl compile app.rvl --json-diagnostics    # CI: parse the rejection
 ### `revl explain`
 
 What a diagnostic code guarantees and how to satisfy it. No sources; it reads
-the built-in guarantee/fix table (`src/revl/diagnostics.py`).
+the machine table in `src/revl/diagnostics.py` — `GUARANTEES`/`FIXES` for the
+codes of the design catalogue, plus `OTHER_CODES` for every remaining code the
+compiler, the gate, the session and the MCP faces emit. So every code a
+rejection can hand back has an answer, not just the catalogue ones
+(issue #2028).
 
 - `CODE` - a diagnostic code, e.g. `G4` (case-insensitive), required.
 - `--json` - machine-readable output.
@@ -136,7 +140,19 @@ the built-in guarantee/fix table (`src/revl/diagnostics.py`).
 ```bash
 revl explain G4
 revl explain t3 --json
+revl explain host-method
 ```
+
+The two tables cannot drift apart: `src/revl/emitted_codes.py` derives the
+emitted roster by walking the emitter sources for the sites that mint a code,
+and `tests/test_explain_coverage_2028.py` holds `OTHER_CODES` to
+`emitted - GUARANTEES` in both directions, so a new `code=` site fails that
+file until it is explained.
+
+A code that enforces no named guarantee — a parse error, or a verdict about
+the *run* rather than about the source — says so: `classify()` reports
+`"guarantee": "unclassified"` rather than leaving the field out, so an agent
+reading a rejection always finds a machine-readable answer beside the code.
 
 ### `revl idiom`
 
