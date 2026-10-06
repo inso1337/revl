@@ -1455,8 +1455,8 @@ def _imported_bare_names(included: list[_LoadedModule]) -> dict[str, set[int]]:
     """{bare name: {id(module) it was imported from}} for the names the included
     modules reach OUT of their own module — what `use "./m.rvl" { name }` names,
     and every public name of a module `use`d `as` an alias, which the importing
-    module calls by bare name (`alias_fns`: `alias.fn(args)` lowers to a call of
-    the bare `fn`, item 230)."""
+    module calls by bare name in a `fn` body (`alias_fns`: `alias.fn(args)`
+    lowers to a call of the bare `fn`, item 230)."""
     reaches: dict[str, set[int]] = {}
     for module in included:
         for name, sources in module.named_from.items():
