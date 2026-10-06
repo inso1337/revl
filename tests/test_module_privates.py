@@ -149,6 +149,127 @@ def test_item201_use_then_local_same_name_no_longer_collides(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Issue #1908: the same rule for a `pub` name two modules each spend.
+#
+# 228's pass renamed only NON-public colliding decls, so two modules that each
+# declare a same-named `pub fn` were never given module qualification: both
+# flattened into the one merged document and lowering — which keys `fn_decls`
+# and its signature table by the BARE name — checked one module's body against
+# the other module's types. Measured as `a.rvl:4: 'Red' is not a case of
+# 'Size'` on a three-file document that imports NEITHER function.
+#
+# The rule is item 228's rule, extended to `pub`: a module-scoped name is
+# module-scoped whether or not it is exported. What a `pub` name keeps is the
+# bare spelling for the module that CLAIMS it — the module a `use { name }`
+# names it from, or a root document's own declaration. `pub` still means
+# importable by its bare name; it does not mean one flat document-level
+# namespace for every module that happens to declare it.
+# ---------------------------------------------------------------------------
+
+
+def _two_module_same_pub_fn(tmp_path, root_body: str, root_uses: str) -> None:
+    """The issue's fixture: `a.rvl` and `b.rvl` each declare `pub fn label`,
+    over their own distinct type. `root_body`/`root_uses` are the third file."""
+    (tmp_path / "a.rvl").write_text(
+        "pub type Color = Red | Blue\n"
+        "\n"
+        "pub fn label(c: Color) -> Str {\n"
+        "  return match c {\n"
+        '    Red => "red",\n'
+        '    Blue => "blue",\n'
+        "  }\n"
+        "}\n"
+    )
+    (tmp_path / "b.rvl").write_text(
+        "pub type Size = Small | Large\n"
+        "\n"
+        "pub fn label(s: Size) -> Str {\n"
+        "  return match s {\n"
+        '    Small => "small",\n'
+        '    Large => "large",\n'
+        "  }\n"
+        "}\n"
+    )
+    (tmp_path / "c.rvl").write_text(root_uses + root_body)
+
+
+def test_two_modules_one_pub_fn_name_each_co_compile(tmp_path):
+    """The reproducer, as filed: a third file `use`s one type from each module
+    and NEITHER `label`, so nothing in the document imports either function by
+    name. Each module's `label` gets its own module scope and the document
+    compiles AND runs — before the fix it was refused with the type error
+    `a.rvl:4: 'Red' is not a case of 'Size'`."""
+    from revl import test as revl_test
+
+    _two_module_same_pub_fn(
+        tmp_path,
+        'test "two modules, one public name each" {\n  assert 1 == 1\n}\n',
+        'use "./a.rvl" { Color }\nuse "./b.rvl" { Size }\n',
+    )
+    ir = compile_files([str(tmp_path / "c.rvl")])
+    # neither `label` stays bare: no module claims the bare spelling here, so
+    # both are renamed apart rather than one replacing the other.
+    labels = [n for n in _fn_names(ir) if n.startswith("label")]
+    assert len(labels) == 2 and len(set(labels)) == 2, _fn_names(ir)
+    # and each body kept its OWN type: the a.rvl copy matches `Red`/`Blue`,
+    # the b.rvl copy `Small`/`Large` — the swap the bug performed is gone.
+    cases = sorted(
+        arm["pattern"]
+        for fn in ir["functions"]
+        if fn["name"].startswith("label") and len(fn["body"]) == 1
+        for arm in fn["body"][0]["expr"]["arms"]
+    )
+    assert cases == ["Blue", "Large", "Red", "Small"], cases
+    status, summary = revl_test.run_py(ir)
+    assert status == "pass", (status, summary)
+
+
+def test_named_use_resolves_to_the_module_it_names(tmp_path):
+    """Adjacent behaviour (a): `use "./a.rvl" { label }` names *a.rvl*'s
+    `label`, even though `b.rvl` spends the same public name. The module the
+    name is imported FROM is the one that keeps the bare spelling; b.rvl's copy
+    is the one renamed apart."""
+    _two_module_same_pub_fn(
+        tmp_path,
+        'test "named import" {\n  assert label(Red) == "red"\n}\n',
+        'use "./a.rvl" { Color, label }\nuse "./b.rvl" { Size }\n',
+    )
+    ir = compile_files([str(tmp_path / "c.rvl")])
+    assert "label" in _fn_names(ir), _fn_names(ir)
+    # the import resolved to a.rvl's `label`: its body is the one under the
+    # bare name, and it is still checked against a.rvl's `Color`.
+    label = next(fn for fn in ir["functions"] if fn["name"] == "label")
+    cases = sorted(arm["pattern"] for arm in label["body"][0]["expr"]["arms"])
+    assert cases == ["Blue", "Red"], cases
+    # b.rvl's same-named `label` still exists, under its own module scope.
+    renamed = [n for n in _fn_names(ir) if n.startswith("label") and n != "label"]
+    assert len(renamed) == 1, _fn_names(ir)
+    assert sorted(arm["pattern"] for fn in ir["functions"]
+                  if fn["name"] == renamed[0]
+                  for arm in fn["body"][0]["expr"]["arms"]) == ["Large", "Small"]
+
+
+def test_two_same_named_pub_fns_imported_into_one_file_names_both_modules(tmp_path):
+    """Adjacent behaviour (b): a file that imports BOTH `label`s collides with
+    itself, and the diagnostic must name BOTH modules — the same report two
+    roots each declaring the name already gets, not a type error about one of
+    the two bodies."""
+    _two_module_same_pub_fn(
+        tmp_path,
+        'test "both imported" {\n  assert label(Red) == "red"\n}\n',
+        'use "./a.rvl" { Color, label }\n'
+        'use "./b.rvl" { Size, label }\n',
+    )
+    with pytest.raises(RevlError) as excinfo:
+        compile_files([str(tmp_path / "c.rvl")])
+    message = str(excinfo.value)
+    assert "duplicate function `label`" in message, message
+    assert str(tmp_path / "a.rvl") in message, message
+    assert str(tmp_path / "b.rvl") in message, message
+    assert "is not a case of" not in message, message
+
+
+# ---------------------------------------------------------------------------
 # Issue #1145: the name kind item 228's two tables never see — an ADT CASE.
 #
 # 228 builds a fn/extern table and a `type` DECLARATION table, and renames a

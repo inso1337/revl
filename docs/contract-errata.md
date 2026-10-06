@@ -501,7 +501,7 @@ This goes in the compiler spec, not the runtimes.
     the same reason as java: they are live host roots spelled as bare tokens at
     call sites.
   - **python — CLOSED, and the one case with a RUNTIME effect.**
-    `_emit_builtin_result` injects `class Ok:` / `class Err:` at module scope,
+    `_emit_builtin_result` injected `class Ok:` / `class Err:` at module scope,
     guarded only by `user_cases` — a set of user VARIANT CASE names, which a
     user *type* name does not enter. Python class redefinition is silent and the
     later class wins, so a user `type Ok` replaced the runtime's own `Ok`
@@ -514,7 +514,12 @@ This goes in the compiler spec, not the runtimes.
     `_TYPE_RESERVED` folds all four into the `_mangle` ladder at the type-name
     position, so the user's `Ok` emits and runs as `Ok_` and the runtime's `Ok`
     survives. This is the only instance in this cluster whose impact is not
-    confined to the build.
+    confined to the build. Since issue #1932 the module no longer DEFINES the
+    cases at all: `_builtin_result_imports` routes `Ok`/`Err` into the same
+    module-level `from runtime import …` seam every emitted module already
+    carries, so the hijack this errata records is now an import shadow, and
+    `_TYPE_RESERVED` is the ladder that keeps a user `type Ok` off the imported
+    name.
   - **Corrected sweep — why the earlier list was short.** The first pass
     filtered candidate names against fixtures that merely *mention* the name,
     which hid every case whose collision needs the name DECLARED in the same
