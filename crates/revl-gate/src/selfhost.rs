@@ -27102,7 +27102,7 @@ fn lir_arrow_at(a: ArrowN, env: Vec<Bind>, expected: &str, al: std::collections:
     while (i < a.params.revl_length()) {
         let p = (a.params)[(i) as usize].clone();
         let pty = if (p.ty != "") { alias_subst(p.ty.clone(), al.clone()) } else { if (i < expPs.revl_length()) { (expPs)[(i) as usize].clone() } else { String::from("") } };
-        pn = if (i == 0i64) { jstr(&p.name) } else { (pn.revl_concat(",")).revl_concat(&jstr(&p.name)) };
+        pn = if (i == 0i64) { jstr(&predeclared_mangle(p.name.clone())) } else { (pn.revl_concat(",")).revl_concat(&jstr(&predeclared_mangle(p.name.clone()))) };
         pt = if (i == 0i64) { jstr(&pty) } else { (pt.revl_concat(",")).revl_concat(&jstr(&pty)) };
         if (pty == "") {
             allTyped = false;
