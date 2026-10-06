@@ -2103,8 +2103,27 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     fns: list[dict] = []
     # name -> the file that first declared it, so a duplicate names BOTH files
     # (roadmap 394): a same-named fn reached under two `use` spellings loads as
-    # two modules, and the diagnostic must show both resolved paths.
+    # two modules, and the diagnostic must show both resolved paths. The scan
+    # runs over the whole table BEFORE any body is lowered: two same-named fns
+    # of different types share the name-keyed `_signature_table` entry, so the
+    # first body would be checked against the second's shape and the duplicate
+    # would surface as that body's type error instead (issue #1908).
     seen: dict[str, str] = {}
+    for decl in program.fn_decls:
+        decl_file = decl.source or filename
+        if decl.name in seen:
+            first_file = seen[decl.name]
+            if os.path.abspath(first_file) == os.path.abspath(decl_file):
+                # two fns of one name in ONE file: the terse message already
+                # points at the sole file, so keep it byte-identical (roadmap
+                # 394 only widens the CROSS-FILE case).
+                raise RevlError(decl_file, decl.line,
+                                f"duplicate function `{decl.name}`")
+            raise RevlError(
+                decl_file, decl.line,
+                _duplicate_symbol_message("function", decl.name,
+                                          first_file, decl_file))
+        seen[decl.name] = decl_file
     # Install the block-arm lift sink for the duration of fn-body lowering: a
     # statement-block match arm is lambda-lifted into a synthetic helper fn
     # (`_lift_block_arm`) collected here, then appended to `fns` below. `taken`
@@ -2123,19 +2142,6 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         # (paths[0]); a fn parsed from a LATER file carries its own `source`, so
         # its diagnostics must name that file, not paths[0] (roadmap 312).
         decl_file = decl.source or filename
-        if decl.name in seen:
-            first_file = seen[decl.name]
-            if os.path.abspath(first_file) == os.path.abspath(decl_file):
-                # two fns of one name in ONE file: the terse message already
-                # points at the sole file, so keep it byte-identical (roadmap
-                # 394 only widens the CROSS-FILE case).
-                raise RevlError(decl_file, decl.line,
-                                f"duplicate function `{decl.name}`")
-            raise RevlError(
-                decl_file, decl.line,
-                _duplicate_symbol_message("function", decl.name,
-                                          first_file, decl_file))
-        seen[decl.name] = decl_file
         # the body sees the *marked* signature: this fn's own type parameters
         # are wildcards inside it (they are universally quantified there), while
         # a one-letter nominal type stays checked
