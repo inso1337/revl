@@ -273,6 +273,22 @@ CORPUS = [
     # emission of an async body). Added FAILING FIRST: the port rendered the
     # forward call alone at every site.
     "extern_compensate.rvl",
+    # Issue #1954 (item 256, self-host port): a capability-bound secret read
+    # from an extern body — `secret NAME for CAP`, which makes the emitter
+    # inject the `_REVL_SECRET_NAMES` / `_REVL_SECRETS` / `_revlSecret(name)`
+    # scaffold and a `const NAME = _revlSecret("NAME");` first local in each
+    # bound extern body, sync AND async. A different feature from the declared
+    # `Secret[T]` in `secrets.rvl` above (that one stamps a RETURN qualifier).
+    # Added FAILING FIRST: the port emitted none of it, so any document that
+    # bound a secret diverged. `ping` is the secret-free control beside them.
+    #
+    # The path leaves this directory because the native chain cannot parse the
+    # declaration yet, so the gate REFUSES the document and a corpus directory
+    # would put it in the census baseline as a `false-reject` waiver. The gap is
+    # named in `LOWER_GAP_DOCS["ts"]` (issue #2012) instead; the emitter half
+    # below is byte-exact on the reference IR, which is the claim this corpus
+    # makes.
+    "../../noncensus_corpus/emit_ts_bound_secret.rvl",
     # Issue #1911 (item 377, self-host port): the `abort` lifecycle step — the
     # frame-marking LIFO teardown that reverts a witnessed mutation instead of
     # committing it, and the `frameForCtx` import the step alone needs. No

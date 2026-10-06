@@ -62,9 +62,9 @@
 
 ["function", "extern-declared-compensations-issue-1511-declared-call-rende", "_reaches_declared", 7, 7]
 
-["reason", "extern-residuals-emit-ts-externs-rejects-an-extern", "Extern residuals: `_emit_ts_externs` rejects an extern with neither a @ts body nor a @ts ref, and writes the empty-body comment for an async extern whose @ts body is empty. Verbatim bodies, `@ts ref` thunks, config scaffolding and binding, and Secret result marking are covered (issue #106) Issue #1936 (c) adds three: the statement that emits the bound-secret seam and the two that append a secret's first local (sync and async), reached only by an extern bound with `secret NAME for CAP`. No emit_ts corpus document binds a secret, because selfhost/emit_ts.rvl does not port the injection and such a document would make the byte-agreement oracle diverge; backends/typescript/test_secret_bound_ts.py runs the emitted seam under node and through the node runner."]
+["reason", "extern-residuals-emit-ts-externs-rejects-an-extern", "Extern residuals: `_emit_ts_externs` rejects an extern with neither a @ts body nor a @ts ref, and writes the empty-body comment for an async extern whose @ts body is empty. Verbatim bodies, `@ts ref` thunks, config scaffolding and binding, and Secret result marking are covered (issue #106) Issue #1936 (c) adds three: the statement that emits the bound-secret seam and the two that append a secret's first local (sync and async), reached only by an extern bound with `secret NAME for CAP`. tests/noncensus_corpus/emit_ts_bound_secret.rvl reaches all three (issue #1954 ported the injection into selfhost/emit_ts.rvl, so the byte-agreement oracle covers them), which is why this budget fell from 7 to 4."]
 
-["function", "extern-residuals-emit-ts-externs-rejects-an-extern", "_emit_ts_externs", 7, 7]
+["function", "extern-residuals-emit-ts-externs-rejects-an-extern", "_emit_ts_externs", 4, 4]
 
 ["reason", "frame-allocation-invariants-and-declared-transaction-paths-b", "Frame allocation invariants and declared transaction paths: `_bracket_yield`'s bare-arrow branch requires a bracket while `_has_bracket` reported false, which cannot occur for lowered activation effects; `_guard_frame_neutral_loop` rejects frame-owning loop steps, but G6 keeps activation effects out of source loop bodies. `_has_bracket.walk`'s recursive true return requires an effect or timer inside a component guard, which G6 rejects. `_needs_frame.walk`'s remaining true returns require a witnessed acquisition or compensation nested in such a guard; `_method_body_needs_frame`'s remaining true return requires a witnessed method acquisition. Witnessed transactions are explicitly refused by the port"]
 
@@ -83,10 +83,6 @@
 ["function", "in-file-test-pass-over-emit-ts-tests", "_emit_ts_lifecycle_tests", 1, 1]
 
 ["function", "in-file-test-pass-over-emit-ts-tests", "_emit_ts_tests", 1, 1]
-
-["reason", "issue-1936-c-the-ts-bound-secret-seam", "Issue #1936 (c): `_ts_secret_scaffold`, the ts tier's bound-secret seam (`_REVL_SECRET_NAMES`, `_REVL_SECRETS` and the fail-loud `_revlSecret`), the mirror of the py tier's item 256 injection. It is reached only by an extern bound with `secret NAME for CAP`. No emit_ts corpus document binds a secret: selfhost/emit_ts.rvl does not port the injection, so such a document would make the byte-agreement oracle diverge. backends/typescript/test_secret_bound_ts.py runs the emitted seam under node and through the node runner (placement_runner.ts)."]
-
-["function", "issue-1936-c-the-ts-bound-secret-seam", "_ts_secret_scaffold", 6, 6]
 
 ["reason", "item-130-4-5-replay-backends-typescript-emit-py-replay-count", "Item 130 §4.5 replay: backends/typescript/emit.py::_replay_count reads a last-n `replay(<n>)` declaration or request, which this tier now lowers, and refuses the durable `replay(from: …)` cursor, which it does not. Both arms are reached only by a component that holds a stream, and no ts corpus document can hold one because selfhost/emit_ts.rvl ports no stream lowering; a cursor REFUSAL document cannot stand in either, because every `.rvl` under tests/fixtures is a gate/reference census case and the native gate (selfhost/lower.rvl) false-rejects any document carrying `replay(…)`. Replaces `_refuse_unlowered_replay` (1), and `_expr` (in the expression-residuals group) rises by 2 for the `host.Stream.source({ replay: n })` and `replay: k` arms. Pinned by tests/test_stream_reactive.py and run under plain node by backends/typescript/test_stream_ts.py."]
 
