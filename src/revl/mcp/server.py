@@ -223,6 +223,24 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
 _PATH_ARGUMENTS = frozenset({"files", "candidateFiles", "baselineFiles",
                              "traceFile", "registry", "policy"})
 
+# Issue #2033: `policy` and `registry` are paths only where they are DECLARED as
+# one, and that is the top level of a tool's own arguments — the only two sites
+# that open them (`_tool_resolve`'s `arguments.get("policy")`, `_tool_repair`'s
+# `arguments.get("registry")`). Nested, the same bare names are bookkeeping: a
+# snapshot document's `meta.approval.policy` is the approval-policy MODE name
+# (`persist._approval_posture` records `"auto"` there), so inheriting the
+# top-level allowlist at every depth classified the word `auto` as an escaping
+# path and refused the very document `revl_snapshot` had just handed back.
+#
+# The `files` family stays path-bearing at EVERY depth, because its nested
+# occurrences ARE read from disk: a restore document's `sources.files`
+# (`_restore_authoring_refusal`) and a repair candidate's `candidate.files`
+# (`repair._compile_candidate`). The other three never nest in any current
+# schema; they are kept at every depth anyway, so the narrower classification
+# can only ever refuse more, never admit more.
+_NESTED_PATH_ARGUMENTS = frozenset({"files", "candidateFiles",
+                                    "baselineFiles", "traceFile"})
+
 
 def _file_roots() -> tuple[str, ...]:
     """The sanctioned roots. Explicit `--root` wins; otherwise the directory the
@@ -245,21 +263,36 @@ def _within_roots(path: str, roots: tuple[str, ...]) -> bool:
     return False
 
 
-def _collect_path_arguments(node, out: list) -> None:
+def _collect_path_arguments(node, out: list, *, nested: bool = False) -> None:
     """Every caller-supplied path anywhere in a tool's arguments, including the
-    ones nested inside a `revl_restore` snapshot document (`sources.files`)."""
+    ones nested inside a `revl_restore` snapshot document (`sources.files`).
+
+    Classification is depth-aware (issue #2033): a snapshot document is not a
+    tool's argument list, so it does not inherit the top-level allowlist whole.
+    At the top level every key in `_PATH_ARGUMENTS` names a path; nested, only
+    `_NESTED_PATH_ARGUMENTS` does — the keys whose nested occurrences are read
+    from disk. A key that is a path only because a tool declares it as one
+    (`policy`, `registry`) does not become a path again by being nested.
+
+    The descent itself is unchanged — a key that names a path is still never
+    walked into, at any depth — so this collector's output is a strict SUBSET of
+    what it collected before the fix, for every input: the jail can only ever
+    refuse less of what it should not have refused, never admit a path it
+    refused. `_NESTED_PATH_ARGUMENTS ⊆ _PATH_ARGUMENTS` is what makes that hold.
+    """
+    keys = _NESTED_PATH_ARGUMENTS if nested else _PATH_ARGUMENTS
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in _PATH_ARGUMENTS:
+            if key in keys:
                 if isinstance(value, str):
                     out.append(value)
                 elif isinstance(value, list):
                     out.extend(v for v in value if isinstance(v, str))
-            else:
-                _collect_path_arguments(value, out)
+            elif key not in _PATH_ARGUMENTS:
+                _collect_path_arguments(value, out, nested=True)
     elif isinstance(node, list):
         for item in node:
-            _collect_path_arguments(item, out)
+            _collect_path_arguments(item, out, nested=True)
 
 
 def _escaping_use(path: str) -> bool:
