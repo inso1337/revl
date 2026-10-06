@@ -1853,11 +1853,12 @@ component SessionLedger provides sessions: SessionStore {
   provide sessions {
     fn load(id) = store.get(id) ?? []
     fn append(id, msg) {
-      let prev = store.get(id) ?? []
-      // issue #1945: a provide-method insert's undo is its table inverse,
-      // `remove` on the same key; restoring `prev` is not in the table
-      effect store.insert(id, prev.push(msg))
-      undo   store.remove(id)
+      // issue #1980: `prev` is read from the same table at the same key before
+      // the effect, so restoring it IS the inverse -- in the `Opt` shape the
+      // read has (an absent key is restored by `remove`).
+      let prev = store.get(id)
+      effect store.insert(id, (prev ?? []).push(msg))
+      undo   match prev { Some(v) => store.insert(id, v), None => store.remove(id) }
     }
   }
 }

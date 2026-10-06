@@ -4781,12 +4781,23 @@ def _expr_var_names(node: object, acc: set[str]) -> None:
 def _acquire_moved_locals(node: object, ctx: "_V3Ctx", acc: set[str]) -> None:
     """Method-body locals the acquire consumes *by value without a clone*.
 
-    Only one acquire construct moves a bare local uncloned: a host-Map method
+    Two acquire constructs move a bare local uncloned. One is a host-Map method
     that takes its argument by value — `insert(key, value)` (its `get`/`remove`
     borrow the key, and service-call / record / free-fn arguments are already
-    cloned by `_by_value_arg`). Those bare-identifier arguments are the ones an
-    `undo` that re-reads them must clone ahead of (item 114)."""
+    cloned by `_by_value_arg`). The other is `??`, whose sole lowering is
+    `<left>.unwrap_or_else(..)`: the operator consumes its left operand whether
+    or not the default is taken (issue #1980 — the admitted restored-value
+    inverse appends with `(prev ?? []).push(msg)` and its `undo` is a `match
+    prev { .. }`, so the undo closure would find `prev` already moved, E0382).
+    Those bare-identifier operands are the ones an `undo` that re-reads them
+    must clone ahead of (item 114)."""
     if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("op") == "??"):
+            left = node.get("left")
+            if isinstance(left, dict) and left.get("kind") in ("var", "name"):
+                ident = left.get("id") or left.get("name")
+                if ident is not None:
+                    acc.add(ident)
         if node.get("kind") == "call" and "callee" not in node:
             target = node.get("target") or {}
             recv = target.get("id") or target.get("name") or ""

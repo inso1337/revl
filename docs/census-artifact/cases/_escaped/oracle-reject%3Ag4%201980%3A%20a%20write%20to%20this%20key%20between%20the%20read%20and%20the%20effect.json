@@ -1,0 +1,1 @@
+{"case": "oracle-reject:g4 1980: a write to this key between the read and the effect", "buckets": ["agree-refuse/G4"]}

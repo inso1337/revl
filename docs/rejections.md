@@ -247,6 +247,15 @@ the `undo` of `effect store.insert(...)` must be its inverse on the same
   handle and key: write `undo store.remove(k)`
 ```
 
+A write may also be undone by putting the old value back, when that value was
+read from the same table at the same key earlier in the same body and nothing
+wrote to `m` at `k` in between (issue #1980). The read's shape decides the
+inverse: `let prev = m.get(k)` is an `Opt`, so the key may have been absent,
+and the `undo` must restore that too — `undo match prev { Some(v) =>
+m.insert(k, v), None => m.remove(k) }`. A defaulted read
+(`let prev = m.get(k) ?? []`) erases the `Opt`, so the undo is refused,
+naming that `match` form.
+
 For an `extern acquire` or a user `effect` over a service, revl has no table
 to check the `undo` against, so a wrong inverse there is still the author's
 assertion. A provide-method step records how far the check reached as
