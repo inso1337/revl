@@ -44,6 +44,7 @@ a stage.
 """
 
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -137,6 +138,14 @@ def compile_to(compile_rvl):
 def admit(compile_rvl):
     """The native frontend admission gate (verdict only)."""
     return compile_rvl["admit"]
+
+
+@pytest.fixture(scope="module")
+def lower_to_ir(compile_rvl):
+    """The native IR PRODUCER, from the same co-compiled artifact — for the pins
+    that must read the produced IR itself rather than the bytes a tier emitted
+    from it. `compile_to` runs it internally; this exposes it directly."""
+    return compile_rvl["lower_to_ir"]
 
 
 @pytest.fixture(scope="module")
@@ -1204,3 +1213,52 @@ def test_native_go_renames_a_predeclared_parameter_in_the_signature(
         [go, "test", str(module)], capture_output=True, text=True,
         env={**os.environ, "GO111MODULE": "off"}, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _arrows(node, acc):
+    """Every ``{"kind": "arrow"}`` node in a lowered IR fragment, in document
+    order. The arrow under test is nested in a `fn` body, not at the top level."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            acc.append(node)
+        for value in node.values():
+            _arrows(value, acc)
+    elif isinstance(node, list):
+        for value in node:
+            _arrows(value, acc)
+    return acc
+
+
+def test_native_tiers_rename_a_predeclared_arrow_parameter_in_the_signature(
+        compile_to, lower_to_ir, reference_emit, tmp_path):
+    """issue #1633, the arrow half of the `fn` pin above — same defect, one level
+    up: ``lir_arrow_at`` wrote the author's spelling into the closure's ``params``
+    while its body went through ``lir_expr``'s in-scope `var` arm, which renames
+    the emitted reference. So ``(len: Int) => len + 1`` produced a closure whose
+    signature said ``len`` and whose body read ``len_`` — a binder and a use that
+    disagree, which does not build in any tier. The reference frontend renames
+    both, and now the native producer does too.
+    """
+    source = ("fn g(f: (Int) -> Int) -> Int { return f(1) }\n"
+              "fn main() -> Int { return g((len: Int) => len + 1) }\n")
+    doc = tmp_path / "predeclared_arrow_param.rvl"
+    doc.write_text(source, encoding="utf-8")
+
+    # the produced IR: the arrow's SIGNATURE and its BODY agree on `len_`
+    arrow = _arrows(json.loads(lower_to_ir(source)), [])[0]
+    assert arrow["params"] == ["len_"]
+    assert arrow["body"]["left"] == {"kind": "var", "name": "len_"}
+
+    # and every tier's bytes equal the reference's, so the disagreement is not
+    # merely relocated: the go/python tiers escape the renamed `len_` once more
+    # (`len__`) and rust keeps it (`len_`), in the declaration AND the use
+    tiers = {"go": ("func(len__ int64)", "len__"),
+             "py": ("lambda len__:", "len__"),
+             "rust": ("|len_: i64|", "len_")}
+    for tier, (declared, renamed) in tiers.items():
+        got = compile_to(source, tier)
+        assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), got[:80]
+        want = reference_emit[tier](compile_files([str(doc)]))
+        assert got == want, "native %s diverged from the reference" % tier
+        line = next(l for l in got.splitlines() if declared in l)
+        assert line.count(renamed) >= 2, (tier, line)

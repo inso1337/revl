@@ -23571,7 +23571,14 @@ fn lir_arrow_at(a: ArrowN, env: List[Bind], expected: Str, al: Map[Str, Str]) ->
     // unannotated arrow's return is inferred in this environment.
     let pty = p.ty != "" ? alias_subst(p.ty, al)
                          : (i < expPs.length() ? expPs[i] : "")
-    pn = i == 0 ? jstr(p.name) : pn.concat(",").concat(jstr(p.name))
+    // issue #1633, the arrow half of the `fn` repair below: the SIGNATURE must
+    // carry the same mangled spelling the body reads, because `lir_expr`'s
+    // in-scope `var` arm mangles a reference and a signature written from the
+    // raw `p.name` then declares a name its own body never mentions. The scope
+    // binding stays the author's spelling, exactly as at a declaration site —
+    // only the emitted name is escaped. `captures` already did this.
+    pn = i == 0 ? jstr(predeclared_mangle(p.name))
+                : pn.concat(",").concat(jstr(predeclared_mangle(p.name)))
     pt = i == 0 ? jstr(pty) : pt.concat(",").concat(jstr(pty))
     if (pty == "") { allTyped = false } else { inner = tenv_put(inner, p.name, pty) }
     i += 1

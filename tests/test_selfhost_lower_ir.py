@@ -1086,6 +1086,44 @@ def test_native_ir_lowers_a_generic_module_fn(lower_to_ir):
     assert native == reference
 
 
+def _arrows(node, acc):
+    """Every ``{"kind": "arrow"}`` node in a lowered IR fragment, in document
+    order. The arrow under test is nested in a `fn` body, not at the top level."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            acc.append(node)
+        for value in node.values():
+            _arrows(value, acc)
+    elif isinstance(node, list):
+        for value in node:
+            _arrows(value, acc)
+    return acc
+
+
+def test_native_ir_renames_a_predeclared_arrow_parameter_in_the_signature(
+        lower_to_ir):
+    """issue #1633, the arrow half of the `fn` case below: the same rename, one
+    level up. An ARROW parameter that shadows a host-predeclared name must be
+    renamed in the arrow's SIGNATURE, not only in the body that reads it.
+
+    ``lir_arrow_at`` wrote the author's spelling into the closure's ``params``
+    while the body went through ``lir_expr``'s in-scope `var` arm, which renames
+    the emitted reference. So ``(len: Int) => len + 1`` lowered to a closure whose
+    signature said `len` and whose body read `len_` — a binder and a use that
+    disagree, which does not build in any tier. The reference frontend renames
+    both, so the two halves agree; the native producer does now too.
+    """
+    source = ("fn g(f: (Int) -> Int) -> Int { return f(1) }\n"
+              "fn main() -> Int { return g((len: Int) => len + 1) }\n")
+    reference = _arrows(compile_source(source)["functions"], [])[0]
+    native = _arrows(json.loads(lower_to_ir(source))["functions"], [])[0]
+
+    assert reference["params"] == ["len_"]
+    assert native["params"] == ["len_"]
+    assert native["body"]["left"] == {"kind": "var", "name": "len_"}
+    assert native == reference
+
+
 def test_native_ir_renames_a_predeclared_parameter_in_the_signature(lower_to_ir):
     """issue #1633: a parameter that shadows a host-predeclared name is renamed
     in the SIGNATURE, not only in the body.
