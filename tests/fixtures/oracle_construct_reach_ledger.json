@@ -172,8 +172,10 @@
   ],
   "emit_wasm": [
     "async=<true>",
+    "class=emission",
     "class=witnessed",
     "fn=Job.run",
+    "key=<activation>",
     "kind=__wat",
     "kind=arrow",
     "kind=bracket",

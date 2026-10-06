@@ -61,27 +61,26 @@ def _backend():
 # a bracket inverse that RAISES. `undo` is declared as an ordinary pure call,
 # so the extern is exactly how an author writes a fallible inverse by accident.
 #
-# The raising bracket acquires through an `extern acquire` (`open_b`), not a
-# host `Pool.open`: since issue #1859 a host acquisition's `undo` must be its
-# release on the bound handle (`b.close()`), so `Pool.open(...) undo blow(..)`
-# is refused before it can run. An extern acquire's site inverse is the shape
-# that can still raise at teardown, and the runtime property under test, that
-# one Phase-1 raise does not starve the inverses below it, is about the
-# disposal chain, not about which bracket faults.
-_BLOW = ('extern pure fn blow(x: Str) -> Int = '
-         '@py { raise RuntimeError("undo exploded") }\n'
-         'type BH = { id: Int }\n'
-         'extern pure fn close_b(h: BH) -> Unit = @py { return None }\n'
-         'extern acquire fn open_b(tag: Str) -> BH undo close_b(result) = '
-         '@py { return {"id": 1} }\n')
+# The raising bracket acquires through an `extern acquire` (`open_b`) and its
+# site `undo` is that acquire's DECLARED inverse on the bound handle
+# (`close_b(b)`), which is what issue #1859 requires of every acquisition,
+# host (`b.close()`) or extern alike. The fault therefore lives in the
+# declared inverse's own body: the runtime property under test, that one
+# Phase-1 raise does not starve the inverses below it, is about the disposal
+# chain, not about which bracket faults.
+_RAISING_INVERSE = ('type BH = { id: Int }\n'
+                    'extern pure fn close_b(h: BH) -> Unit = '
+                    '@py { raise RuntimeError("undo exploded") }\n'
+                    'extern acquire fn open_b(tag: Str) -> BH undo close_b(result) = '
+                    '@py { return {"id": 1} }\n')
 
 # the audit's synchronous reproducer: three brackets, the MIDDLE one's inverse
 # raises. LIFO disposal is C, B, A — so a broken chain starves A, the OLDEST
 # and most valuable acquisition.
-_SYNC = _BLOW + """
+_SYNC = _RAISING_INVERSE + """
 component C {
   let a = effect Pool.open("A", 1) undo a.close()
-  let b = effect open_b("B") undo blow("x")
+  let b = effect open_b("B") undo close_b(b)
   let c = effect Pool.open("C", 1) undo c.close()
 }
 """
@@ -99,11 +98,11 @@ component C {
 # between the source and the subscription, where it still disposes after
 # `sub.close()` and still stands between the fault and both `src.close()` and
 # `a.close()`.
-_STREAM = _BLOW + """
+_STREAM = _RAISING_INVERSE + """
 component C {
   let a = effect Pool.open("A", 1) undo a.close()
   let src = effect Stream.source() undo src.close()
-  let b = effect open_b("B") undo blow("x")
+  let b = effect open_b("B") undo close_b(b)
   let sub = subscribe src undo sub.close()
   await sub.next()
 }
@@ -212,7 +211,7 @@ async def test_a_raising_bracket_inverse_does_not_skip_the_remaining_inverses():
     assert record["kind"] == "bracket-fault"
     assert record["state"] == "unresolved"
     assert record["component"] == "C"
-    assert record["method"] == "blow"
+    assert record["method"] == "close_b"
     assert record["attemptedFlag"] is True
     assert record["attempted"] == {"phase": 1}
     assert record["outcome"] == "failed"
@@ -242,11 +241,11 @@ async def test_the_fault_test_judge_calls_the_reproducer_residue(tmp_path):
     outcome.settled = dict(clean)
     outcome.residue = [{
         "kind": "bracket-fault", "state": "unresolved", "component": "C",
-        "method": "blow", "seq": None, "attemptedFlag": True,
+        "method": "close_b", "seq": None, "attemptedFlag": True,
         "attempted": {"phase": 1}, "outcome": "failed",
         "error": {"type": "RuntimeError", "message": "undo exploded"}}]
     failures = fault_mod._judge({"assert": ["no-residue"], "step": 2}, outcome, None)
-    assert any("bracket-fault" in line and "blow" in line for line in failures)
+    assert any("bracket-fault" in line and "close_b" in line for line in failures)
     assert any("bracket-fault" in note for note in fault_mod._notes(outcome))
 
 
@@ -271,7 +270,7 @@ async def test_a_raising_inverse_in_a_stream_body_does_not_strand_the_source_and
 
     [record] = run.residue
     assert record["kind"] == "bracket-fault"
-    assert record["method"] == "blow"
+    assert record["method"] == "close_b"
     assert record["error"]["message"] == "undo exploded"
 
 
@@ -299,5 +298,5 @@ async def test_the_guard_is_runtime_side_so_the_emission_is_unchanged():
     emit, _runtime = _backend()
     body = emit.emit(compile_source(_SYNC, "phase1.rvl"))
     assert "yield lambda: a.close()" in body
-    assert "yield lambda: blow('x')" in body
+    assert "yield lambda: close_b(b)" in body
     assert "yield lambda: c.close()" in body

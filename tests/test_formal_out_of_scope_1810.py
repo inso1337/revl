@@ -45,6 +45,9 @@ OUT_OF_SCOPE = (
     # to a non-builtin method on a value `Map`
     *(f"tests/fixtures/value_method_call/t1_{n}.rvl" for n in (
         "inplace_map", "named_map", "record_map_field")),
+    # issue #1967: the same kind of T1 refusal of the type checker, reached
+    # through a `try e` operand inside a provide method
+    "tests/fixtures/try_expr/t1_provide_method.rvl",
 )
 
 #: Out of fragment, NOT out of scope: a guarantee-coded refusal the model

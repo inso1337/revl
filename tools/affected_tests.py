@@ -244,16 +244,33 @@ REFERENCE_EMITTER_ORACLE = {
     "wasm": "emit_wasm",
 }
 
-# The self-host oracles that load EVERY tier's reference emitter and compare it
-# with its port, so any tier's `backends/*/emit.py` can break them. They name the
-# reference only in prose (tools/selfhost_differential_survey.py builds
-# `backends/<tier>/emit.py` paths programmatically and the test module never
-# spells out a tier name), so the text heuristic in `_tier_tests` cannot see
+# The self-host gates that reach EVERY tier's reference emitter: the survey
+# loads `backends/<tier>/emit.py` and compares it with its port, and
+# tools/oracle_construct_reach.py AST-reads the same file's dispatch table, so
+# any tier's emitter can break them. They name the reference only in prose or
+# through a path built at runtime (the survey assembles `backends/<tier>/emit.py`
+# programmatically, the construct-reach oracle hands the tier to
+# tools/selfhost_coverage.py), so the text heuristic in `_tier_tests` cannot see
 # them. This is the other half of the #850 hole: that PR changed
 # `backends/python/emit.py` alone and the matrix was skipped, but even the
 # inner-loop selector would not have selected
 # tests/test_selfhost_differential_survey.py.
-REFERENCE_EMITTER_ALWAYS = ("tests/test_selfhost_differential_survey.py",)
+REFERENCE_EMITTER_ALWAYS = (
+    "tests/test_selfhost_differential_survey.py",
+    # issue #1203: the `emit_<tier>` rows of tests/test_oracle_construct_reach.py
+    # ratchet every DISPATCH ARM of every tier's reference emitter against the
+    # corpus documents that must spell it, so an arm added to `backends/*/emit.py`
+    # with no document behind it is this test's RED -- and #2001 landed green
+    # having added exactly two such arms to the wasm emitter, because a
+    # `backends/wasm/emit.py` change selected 129 tests and not this one. The
+    # tier word is not in the test either: `wasm` occurs in it only inside
+    # `emit_wasm`, which `\bwasm\b` does not match, so the heuristic that covers
+    # `backends/python/emit.py` by the word `python` does not generalise. It is
+    # the expensive member of this tuple (it compiles the whole corpus), and it
+    # is here anyway: the alternative is a ratchet that cannot fire for the
+    # change most likely to trip it, which is the defect this tuple closes.
+    "tests/test_oracle_construct_reach.py",
+)
 
 # Files `tools/evolution_progress.py` reads a counter out of WITHOUT importing
 # them, so no import graph reaches them (issue #1224). Each one is a repository
