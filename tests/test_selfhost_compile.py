@@ -44,6 +44,9 @@ a stage.
 """
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -1142,3 +1145,44 @@ def test_compile_rvl_in_file_tests_pass(compile_rvl):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+# --------------------------------------------------- issue #1633: predeclared
+
+def test_native_go_renames_a_predeclared_parameter_in_the_signature(
+        compile_to, reference_emit, tmp_path):
+    """issue #1633, end to end. A parameter that shadows a host-predeclared name
+    is renamed in the SIGNATURE, so the emitted Go declares and reads the same
+    identifier.
+
+    ``selfhost/lower.rvl`` renamed the BODY reference (``lir_expr``'s in-scope
+    `var` arm) but wrote the source spelling into the parameter list, so the
+    fully-native Go chain emitted ``func f(len int64, ...) { return
+    revlAdd(len_, ...) }`` — a body naming a variable its signature never
+    declared, which does not build. The reference frontend renames the binder
+    where it is introduced; the native producer does now too.
+    """
+    source = "fn f(len: Int, error: Int) -> Int { return len + error }\n"
+    doc = tmp_path / "predeclared_param.rvl"
+    doc.write_text(source, encoding="utf-8")
+
+    got = compile_to(source, "go")
+    assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), got[:80]
+
+    want = reference_emit["go"](compile_files([str(doc)]))
+    assert got == want, "native compile diverged from the reference"
+
+    # the go tier escapes the already-renamed `len_` once more (`len__`), and
+    # the signature and the body agree on it
+    assert "func f(len__ int64, error_ int64) int64 {" in got
+    assert "revlAdd(len__, error_)" in got
+
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    module = tmp_path / "predeclared_param.go"
+    module.write_text(got, encoding="utf-8")
+    result = subprocess.run(
+        [go, "test", str(module)], capture_output=True, text=True,
+        env={**os.environ, "GO111MODULE": "off"}, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr

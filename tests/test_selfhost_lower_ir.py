@@ -1086,6 +1086,25 @@ def test_native_ir_lowers_a_generic_module_fn(lower_to_ir):
     assert native == reference
 
 
+def test_native_ir_renames_a_predeclared_parameter_in_the_signature(lower_to_ir):
+    """issue #1633: a parameter that shadows a host-predeclared name is renamed
+    in the SIGNATURE, not only in the body.
+
+    The reference frontend renames a predeclared-shadowing binder wherever it
+    introduces it, so a `fn` taking `len` declares `len_` and reads `len_`.
+    ``lir_expr``'s in-scope `var` arm already renamed the BODY reference, but the
+    parameter list was built by ``ir_params_json``, which writes the source
+    spelling verbatim. The two halves then disagreed — the signature declared
+    `len` while the body read `len_` — and the emitted Go did not build.
+    """
+    source = "fn f(len: Int, error: Int) -> Int { return len + error }\n"
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+
+    assert [p["name"] for p in reference[0]["params"]] == ["len_", "error"]
+    assert native == reference
+
+
 def test_native_ir_reads_a_variant_declared_over_several_lines(lower_to_ir):
     """A `type` declaration is not bounded by its first line.
 
