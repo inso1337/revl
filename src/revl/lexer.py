@@ -37,6 +37,9 @@ KEYWORDS = {
     "hole",
     # reserved for later tiers
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
+    # Result propagation (issue #1900): `let x = try e` / `return try e` in a
+    # `fn` body returns the `Err` of `e` from the enclosing fn.
+    "try",
     # delivery semantics (docs/delivery-semantics.md, roadmap item 44): an
     # `idempotent` emission may be safely re-delivered, so the runtime earns
     # the right to auto-retry it on transient failure.

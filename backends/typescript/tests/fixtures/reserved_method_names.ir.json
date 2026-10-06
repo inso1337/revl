@@ -203,16 +203,6 @@
           "returns": "Int",
           "emission": false
         },
-        "try": {
-          "params": [
-            {
-              "name": "x",
-              "type": "Int"
-            }
-          ],
-          "returns": "Int",
-          "emission": false
-        },
         "typeof": {
           "params": [
             {
@@ -1356,16 +1346,6 @@
           ],
           "returns": "Int",
           "emission": false
-        },
-        "run67": {
-          "params": [
-            {
-              "name": "x",
-              "type": "Int"
-            }
-          ],
-          "returns": "Int",
-          "emission": false
         }
       }
     }
@@ -1824,29 +1804,6 @@
             },
             {
               "name": "throw",
-              "params": [
-                "x"
-              ],
-              "body": [
-                {
-                  "step": "return",
-                  "expr": {
-                    "kind": "bin",
-                    "op": "+",
-                    "left": {
-                      "kind": "name",
-                      "id": "x"
-                    },
-                    "right": {
-                      "kind": "lit",
-                      "value": 1
-                    }
-                  }
-                }
-              ]
-            },
-            {
-              "name": "try",
               "params": [
                 "x"
               ],
@@ -3646,7 +3603,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "try",
+                      "method": "typeof",
                       "args": [
                         {
                           "kind": "name",
@@ -3679,7 +3636,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "typeof",
+                      "method": "void",
                       "args": [
                         {
                           "kind": "name",
@@ -3712,7 +3669,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "void",
+                      "method": "implements",
                       "args": [
                         {
                           "kind": "name",
@@ -3745,7 +3702,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "implements",
+                      "method": "interface",
                       "args": [
                         {
                           "kind": "name",
@@ -3778,7 +3735,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "interface",
+                      "method": "package",
                       "args": [
                         {
                           "kind": "name",
@@ -3811,7 +3768,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "package",
+                      "method": "private",
                       "args": [
                         {
                           "kind": "name",
@@ -3844,7 +3801,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "private",
+                      "method": "protected",
                       "args": [
                         {
                           "kind": "name",
@@ -3877,7 +3834,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "protected",
+                      "method": "public",
                       "args": [
                         {
                           "kind": "name",
@@ -3910,7 +3867,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "public",
+                      "method": "static",
                       "args": [
                         {
                           "kind": "name",
@@ -3943,7 +3900,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "static",
+                      "method": "yield",
                       "args": [
                         {
                           "kind": "name",
@@ -3976,7 +3933,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "yield",
+                      "method": "abstract",
                       "args": [
                         {
                           "kind": "name",
@@ -4009,7 +3966,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "abstract",
+                      "method": "accessor",
                       "args": [
                         {
                           "kind": "name",
@@ -4042,7 +3999,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "accessor",
+                      "method": "asserts",
                       "args": [
                         {
                           "kind": "name",
@@ -4075,7 +4032,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "asserts",
+                      "method": "any",
                       "args": [
                         {
                           "kind": "name",
@@ -4108,7 +4065,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "any",
+                      "method": "boolean",
                       "args": [
                         {
                           "kind": "name",
@@ -4141,7 +4098,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "boolean",
+                      "method": "constructor",
                       "args": [
                         {
                           "kind": "name",
@@ -4174,7 +4131,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "constructor",
+                      "method": "declare",
                       "args": [
                         {
                           "kind": "name",
@@ -4207,7 +4164,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "declare",
+                      "method": "get",
                       "args": [
                         {
                           "kind": "name",
@@ -4240,7 +4197,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "get",
+                      "method": "infer",
                       "args": [
                         {
                           "kind": "name",
@@ -4273,7 +4230,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "infer",
+                      "method": "intrinsic",
                       "args": [
                         {
                           "kind": "name",
@@ -4306,7 +4263,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "intrinsic",
+                      "method": "is",
                       "args": [
                         {
                           "kind": "name",
@@ -4339,7 +4296,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "is",
+                      "method": "keyof",
                       "args": [
                         {
                           "kind": "name",
@@ -4372,7 +4329,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "keyof",
+                      "method": "module",
                       "args": [
                         {
                           "kind": "name",
@@ -4405,7 +4362,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "module",
+                      "method": "namespace",
                       "args": [
                         {
                           "kind": "name",
@@ -4438,7 +4395,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "namespace",
+                      "method": "never",
                       "args": [
                         {
                           "kind": "name",
@@ -4471,7 +4428,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "never",
+                      "method": "out",
                       "args": [
                         {
                           "kind": "name",
@@ -4504,7 +4461,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "out",
+                      "method": "readonly",
                       "args": [
                         {
                           "kind": "name",
@@ -4537,7 +4494,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "readonly",
+                      "method": "require",
                       "args": [
                         {
                           "kind": "name",
@@ -4570,7 +4527,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "require",
+                      "method": "number",
                       "args": [
                         {
                           "kind": "name",
@@ -4603,7 +4560,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "number",
+                      "method": "object",
                       "args": [
                         {
                           "kind": "name",
@@ -4636,7 +4593,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "object",
+                      "method": "satisfies",
                       "args": [
                         {
                           "kind": "name",
@@ -4669,7 +4626,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "satisfies",
+                      "method": "set",
                       "args": [
                         {
                           "kind": "name",
@@ -4702,7 +4659,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "set",
+                      "method": "string",
                       "args": [
                         {
                           "kind": "name",
@@ -4735,7 +4692,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "string",
+                      "method": "symbol",
                       "args": [
                         {
                           "kind": "name",
@@ -4768,7 +4725,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "symbol",
+                      "method": "undefined",
                       "args": [
                         {
                           "kind": "name",
@@ -4801,7 +4758,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "undefined",
+                      "method": "unique",
                       "args": [
                         {
                           "kind": "name",
@@ -4834,7 +4791,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "unique",
+                      "method": "unknown",
                       "args": [
                         {
                           "kind": "name",
@@ -4867,7 +4824,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "unknown",
+                      "method": "using",
                       "args": [
                         {
                           "kind": "name",
@@ -4900,7 +4857,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "using",
+                      "method": "from",
                       "args": [
                         {
                           "kind": "name",
@@ -4933,7 +4890,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "from",
+                      "method": "global",
                       "args": [
                         {
                           "kind": "name",
@@ -4966,7 +4923,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "global",
+                      "method": "bigint",
                       "args": [
                         {
                           "kind": "name",
@@ -4999,7 +4956,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "bigint",
+                      "method": "override",
                       "args": [
                         {
                           "kind": "name",
@@ -5032,7 +4989,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "override",
+                      "method": "defer",
                       "args": [
                         {
                           "kind": "name",
@@ -5065,7 +5022,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "defer",
+                      "method": "class_",
                       "args": [
                         {
                           "kind": "name",
@@ -5098,7 +5055,7 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "class_",
+                      "method": "delete_",
                       "args": [
                         {
                           "kind": "name",
@@ -5131,39 +5088,6 @@
                         "kind": "req",
                         "name": "s"
                       },
-                      "method": "delete_",
-                      "args": [
-                        {
-                          "kind": "name",
-                          "id": "x"
-                        }
-                      ]
-                    },
-                    "right": {
-                      "kind": "lit",
-                      "value": 10
-                    }
-                  }
-                }
-              ]
-            },
-            {
-              "name": "run66",
-              "params": [
-                "x"
-              ],
-              "body": [
-                {
-                  "step": "return",
-                  "expr": {
-                    "kind": "bin",
-                    "op": "*",
-                    "left": {
-                      "kind": "call",
-                      "target": {
-                        "kind": "req",
-                        "name": "s"
-                      },
                       "method": "let_",
                       "args": [
                         {
@@ -5181,7 +5105,7 @@
               ]
             },
             {
-              "name": "run67",
+              "name": "run66",
               "params": [
                 "x"
               ],

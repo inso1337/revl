@@ -1,0 +1,26 @@
+// issue #1900: the checked list parser from the issue, with no placeholder arm
+type Field = { name: Str, size: Int }
+
+fn parse_field(n: Int, path: Str) -> Result[Field, Str] {
+  return n > 0 ? Ok({ name: path, size: n }) : Err(`${path}: size must be positive`)
+}
+
+fn parse_fields(ns: List[Int], path: Str) -> Result[List[Field], Str] {
+  var out: List[Field] = []
+  var i = 0
+  for (n of ns) {
+    let f = try parse_field(n, `${path}[${i}]`)
+    out = out.push(f)
+    i += 1
+  }
+  return Ok(out)
+}
+
+fn count(r: Result[List[Field], Str]) -> Int {
+  return match r { Ok(xs) => xs.length, Err(e) => 0 - e.length }
+}
+
+test "the list parser stops at the first Err" {
+  assert count(parse_fields([1, 2, 3], "f")) == 3
+  assert count(parse_fields([1, 0, 3], "f")) == 0 - 27
+}

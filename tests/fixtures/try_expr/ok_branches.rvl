@@ -1,0 +1,32 @@
+// `try` inside `if`, `else` and `while` bodies returns from the fn
+fn parse(n: Int) -> Result[Int, Str] {
+  return n > 0 ? Ok(n) : Err("neg")
+}
+
+fn walk(n: Int) -> Result[Int, Str] {
+  var acc = 0
+  if (n > 5) {
+    let a = try parse(n - 5)
+    acc = a
+  } else {
+    let b = try parse(n)
+    acc = b
+  }
+  while (acc > 100) {
+    let c = try parse(acc - 200)
+    acc = c
+  }
+  return Ok(acc)
+}
+
+fn code(r: Result[Int, Str]) -> Int {
+  return match r { Ok(v) => v, Err(e) => 0 - e.length }
+}
+
+test "try returns from inside a block" {
+  assert code(walk(7)) == 2
+  assert code(walk(3)) == 3
+  assert code(walk(0)) == 0 - 3
+  assert code(walk(305)) == 100
+  assert code(walk(150)) == 0 - 3
+}

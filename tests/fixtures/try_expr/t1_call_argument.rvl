@@ -1,0 +1,6 @@
+fn parse(n: Int) -> Result[Int, Str] { return n > 0 ? Ok(n) : Err("neg") }
+fn g(n: Int) -> Int { return n }
+fn f(n: Int) -> Result[Int, Str] {
+  let y = g(try parse(n))
+  return Ok(y)
+}

@@ -49,7 +49,7 @@ NAMES = sorted(set(keyword.kwlist) | set(keyword.softkwlist) | {"self"})
 #: the rest, and a frontend change that admits one of them fails here.
 FRONTEND_KEYWORDS = {
     "as", "assert", "async", "await", "break", "continue", "else", "for",
-    "if", "in", "match", "return", "type", "while", "with",
+    "if", "in", "match", "return", "try", "type", "while", "with",
 }
 
 ADMITTED = [n for n in NAMES if n not in FRONTEND_KEYWORDS]

@@ -417,6 +417,7 @@
         "subscribe",
         "test",
         "true",
+        "try",
         "type",
         "undo",
         "use",
@@ -425,7 +426,7 @@
         "while",
         "with"
       ],
-      "note": "DELIBERATE COPY, with the reason written at the declaration and a test holding it. `tools/heldout_scoring.py` generates the held-out programs, and `draw()` is required to be a pure function of `(seed, count)` that reads no file: `src/revl/lexer.py` is SUBJECT under item 537, so a candidate that could make the draw depend on it could narrow the draw by editing it. `from revl.lexer import KEYWORDS` is therefore the thing this copy exists to avoid, not an oversight. What holds the two sides together is `tests/test_heldout_scoring.py::test_the_reserved_set_covers_every_lexer_keyword`, which issue #1332 made two-directional: it was `KEYWORDS - _RESERVED` only, so a keyword the lexer DROPPED could sit in the frozen copy and narrow the draw silently. It now asserts set equality, so a one-sided edit on either side reds that test before it reaches this entry."
+      "note": "DELIBERATE COPY, with the reason written at the declaration and a test holding it. `tools/heldout_scoring.py` generates the held-out programs, and `draw()` is required to be a pure function of `(seed, count)` that reads no file: `src/revl/lexer.py` is SUBJECT under item 537, so a candidate that could make the draw depend on it could narrow the draw by editing it. `from revl.lexer import KEYWORDS` is therefore the thing this copy exists to avoid, not an oversight. What holds the two sides together is `tests/test_heldout_scoring.py::test_the_reserved_set_covers_every_lexer_keyword`, which issue #1332 made two-directional: it was `KEYWORDS - _RESERVED` only, so a keyword the lexer DROPPED could sit in the frozen copy and narrow the draw silently. It now asserts set equality, so a one-sided edit on either side reds that test before it reaches this entry. Re-recorded for `try` (#1900): BOTH copies gained it in one commit, which is the vocabulary moving and not a drift. `try` is a prefix unary the frontend refuses as an identifier (parser.py, the generic reserved-keyword refusal), so it also leaves every backend's admitted method-name list -- see `tests/test_keyword_method_names_1474.py` and the three backend mirrors beside it."
     },
     {
       "sites": [

@@ -584,6 +584,13 @@ fn p_unary(ts: List[Token], i: Int, d: Int) -> PR {
     if (is_bad(em.e)) { return em }
     return { i: em.i, e: Emit({ op: "emit", e: em.e }) }
   }
+  // Result propagation (issue #1900): a prefix unary like `!`/`-`, so its
+  // operand is a postfix expression. Where it may stand is decided in lower.
+  if (at_kw(ts, i, "try")) {
+    let r = p_unary(ts, i + 1, d + 1)
+    if (is_bad(r.e)) { return r }
+    return { i: r.i, e: Un({ op: "try", e: r.e }) }
+  }
   return p_postfix(ts, i, d)
 }
 
@@ -915,7 +922,7 @@ fn p_inits(ts: List[Token], i: Int, d: Int) -> Inits {
 
 // Inverse of the lexer's `esc`: a left-to-right scan, so "%%p" reads back
 // as "%p" rather than as "|".
-fn unesc(s: Str) -> Str {
+pub fn unesc(s: Str) -> Str {
   var out = ""
   var i = 0
   let n = s.length()

@@ -29,8 +29,8 @@ const NAMES: string[] = Object.keys(fixture.services.S.methods)
 // identifiers, so no emitter ever sees one. Pinned in the generator as well.
 const FRONTEND_KEYWORDS = new Set([
   'break', 'continue', 'else', 'false', 'for', 'if', 'in', 'null', 'return',
-  'true', 'var', 'while', 'with', 'let', 'as', 'assert', 'async', 'await',
-  'type', 'of',
+  'true', 'try', 'var', 'while', 'with', 'let', 'as', 'assert', 'async',
+  'await', 'type', 'of',
 ])
 
 function typescriptKeywords(): string[] {

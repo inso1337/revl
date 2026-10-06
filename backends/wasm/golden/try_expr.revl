@@ -1,0 +1,23 @@
+// issue #1900: `try` over the wasm tier. The desugar's two one-armed matches
+// render with an `unreachable` fall-through the `if` before them never reaches.
+type Field = { name: Str, size: Int }
+
+fn parse_field(n: Int, path: Str) -> Result[Field, Str] {
+  return n > 0 ? Ok({ name: path, size: n }) : Err(`${path}: size must be positive`)
+}
+
+fn parse_fields(ns: List[Int], path: Str) -> Result[List[Field], Str] {
+  var out: List[Field] = []
+  for (n of ns) {
+    let f = try parse_field(n, path)
+    out = out.push(f)
+  }
+  return Ok(out)
+}
+
+fn total(ns: List[Int]) -> Result[Int, Str] {
+  let fields = try parse_fields(ns, "f")
+  var sum = 0
+  for (f of fields) { sum += f.size }
+  return Ok(sum)
+}

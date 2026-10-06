@@ -529,6 +529,29 @@ def test_every_verified_method_document_is_decided_alike_by_both(measured):
     assert not wrong, "\n  ".join(["verified-method documents moved:"] + wrong)
 
 
+# --- `try e`, Result propagation in a `fn` body (issue #1900) ---------------
+#
+# `ok_` both admit; `t1_` both refuse T1 with the same message: an operand that
+# is no `Result`, an enclosing return that is not `Result[_, E]` for its `E`, a
+# `try` in any position but a whole `let` initializer or `return` operand, an
+# `emit` operand, and a `try` in a provide method.
+TRY_EXPR = ROOT / "tests" / "fixtures" / "try_expr"
+
+
+def test_every_try_expr_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(TRY_EXPR.glob("*.rvl"))
+    assert len(docs) == 17, f"the try-expr corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["try-expr documents moved:"] + wrong)
+
+
 # --- a non-builtin method on a stdlib value in a component (issues #1942,
 # #1968) ---------------------------------------------------------------------
 #

@@ -48,8 +48,8 @@ KEYWORDS = [
 #: an identifier, so they never reach an emitter.
 FRONTEND_KEYWORDS = [
     "break", "continue", "else", "false", "for", "if", "in", "null", "return",
-    "true", "var", "while", "with", "let", "as", "assert", "async", "await",
-    "type", "of",
+    "true", "try", "var", "while", "with", "let", "as", "assert", "async",
+    "await", "type", "of",
 ]
 
 #: Names on the append-`_` ladder: `_mangle` shifted these too (`delete_` ->

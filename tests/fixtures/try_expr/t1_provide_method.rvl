@@ -1,0 +1,10 @@
+fn parse(n: Int) -> Result[Int, Str] { return n > 0 ? Ok(n) : Err("neg") }
+service S { fn go(n: Int) -> Result[Int, Str] }
+component C provides s: S {
+  provide s {
+    fn go(n) {
+      let x = try parse(n)
+      return Ok(x)
+    }
+  }
+}

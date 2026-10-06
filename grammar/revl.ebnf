@@ -157,7 +157,7 @@ r__add = r__bin__mul__ops5ae68b ;
 r__bin__mul__ops5ae68b = r__mul { ("+" | "-") r__mul [ r__reject_nullish_mix r__reject_nullish_mix ] } ;
 r__mul = r__bin__unary__ops816fbf ;
 r__bin__unary__ops816fbf = r__unary { ("*" | "/" | "%") r__unary [ r__reject_nullish_mix r__reject_nullish_mix ] } ;
-r__unary = ("!" | "-" | "~") r__unary | "emit" r__unary | r__postfix ;
+r__unary = ("!" | "-" | "~") r__unary | "emit" r__unary | "try" r__unary | r__postfix ;
 r__postfix = r__primary { ("." r__record_key_name | "?." r__record_key_name [ "(" { r_pure_expr [ "," ] } ")" ] | "(" { r_pure_expr [ "," ] } ")" | "[" r_pure_expr "]") } ;
 r__primary = int | float | string | template r__parse_template_parts | "true" | "false" | "null" | r__endorse_expr | r__asset_expr | (ident | "in" | "intercept" | "isolate" | "realm" | "with") "=>" r__arrow_body | ident | "in" | "intercept" | "isolate" | "realm" | "with" | r__hole_expr | "config" | "(" { r__name [ ":" r_type_ ] [ "," ] } ")" [ ":" r_type_ ] "=>" r__arrow_body | "(" r_pure_expr ")" | "{" r_pure_expr "|" { r__record_key_name "=" r_pure_expr [ "," ] } "}" | "{" { r__record_key_name ":" r_pure_expr [ "," ] } "}" | "[" { r_pure_expr [ "," ] } "]" | r__match_expr | r__if_expr ;
 r__parse_template_parts = "" ;
@@ -171,4 +171,4 @@ r__match_pattern = ident | ident "(" ident ")" ;
 r__match_block_arm = "{" { r__skip_semis r_fn_stmt } r__skip_semis "}" ;
 r__if_branch_expr = "{" r__skip_semis r_pure_expr r__skip_semis "}" ;
 (* IDENT: an identifier that is not a keyword; INT, FLOAT, STRING, template and host_body: the lexer's token classes *)
-keyword = "acquire" | "after" | "as" | "assert" | "async" | "await" | "break" | "commutative" | "compensate" | "component" | "config" | "continue" | "effect" | "else" | "emission" | "emit" | "every" | "extern" | "fail" | "false" | "fn" | "for" | "handoff" | "hole" | "idempotent" | "if" | "in" | "intercept" | "isolate" | "let" | "match" | "null" | "of" | "provide" | "provides" | "pub" | "pure" | "realm" | "requires" | "return" | "service" | "spawn" | "subscribe" | "test" | "true" | "type" | "undo" | "use" | "var" | "verified" | "while" | "with" ;
+keyword = "acquire" | "after" | "as" | "assert" | "async" | "await" | "break" | "commutative" | "compensate" | "component" | "config" | "continue" | "effect" | "else" | "emission" | "emit" | "every" | "extern" | "fail" | "false" | "fn" | "for" | "handoff" | "hole" | "idempotent" | "if" | "in" | "intercept" | "isolate" | "let" | "match" | "null" | "of" | "provide" | "provides" | "pub" | "pure" | "realm" | "requires" | "return" | "service" | "spawn" | "subscribe" | "test" | "true" | "try" | "type" | "undo" | "use" | "var" | "verified" | "while" | "with" ;

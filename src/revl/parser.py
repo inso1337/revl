@@ -1741,6 +1741,26 @@ class FnParam:
     default: object | None = None
 
 
+# an identifier-shaped word, for `FnDecl.idents` over template interpolations
+_IDENT_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _idents_between(toks: list, start: int, end: int) -> frozenset:
+    """`FnDecl.idents` (issue #1900): the identifier spellings of tokens
+    `start` to `end`, every identifier token and every identifier-shaped word
+    of a template's interpolations (a template is one token holding its
+    `${...}` raw text)."""
+    names: set[str] = set()
+    for t in toks[start:end]:
+        if t.kind == "ident":
+            names.add(t.value)
+        elif t.kind == "template":
+            for kind, text in t.value:
+                if kind == "expr":
+                    names.update(_IDENT_WORD.findall(text))
+    return frozenset(names)
+
+
 @dataclass
 class FnDecl:
     name: str
@@ -1766,6 +1786,10 @@ class FnDecl:
     # pointing at the emission that should carry the declaration). `None` unless
     # written, so every existing fn's IR is byte-identical.
     cache: "CacheClause | None" = None
+    # issue #1900: every identifier spelled between `fn` and the end of the
+    # body. `try` desugars through fresh locals (`try_<k>`), and a fresh name
+    # must be one this fn does not spell anywhere, read, bound or called.
+    idents: frozenset = field(default_factory=frozenset)
 
 
 # pure-expression AST (§3.2 — the TS-subset stratum)
@@ -7657,6 +7681,7 @@ class Parser:
 
     def fn_decl(self, public: bool, verified: bool = False,
                 endorse_origins: frozenset = frozenset()) -> FnDecl:
+        start = self.pos
         line = self.expect("kw", "fn").line
         name = self.expect("ident").value
         type_params = self._type_param_list()
@@ -7717,7 +7742,8 @@ class Parser:
             body = [ReturnStmt(self.pure_expr(), line)]
             return FnDecl(name, params, returns, body, public, line, verified,
                           source=self.filename, type_params=type_params,
-                          endorse_origins=endorse_origins, cache=cache)
+                          endorse_origins=endorse_origins, cache=cache,
+                          idents=_idents_between(self.toks, start, self.pos))
         self.expect("{")
         body = []
         while True:
@@ -7728,7 +7754,9 @@ class Parser:
         self.expect("}")
         return FnDecl(name, params, returns, body, public, line, verified,
                       source=self.filename, type_params=type_params,
-                      endorse_origins=endorse_origins, cache=cache)
+                      endorse_origins=endorse_origins, cache=cache,
+                      idents=_idents_between(self.toks, start, self.pos))
+
 
     def test_decl(self, lifecycle: bool = False) -> TestDecl:
         line = self.expect("kw", "test").line
@@ -8567,6 +8595,13 @@ class Parser:
         if tok.kind == "kw" and tok.value == "emit":
             self.next()
             return EmitExpr(self._unary(), tok.line)
+        if tok.kind == "kw" and tok.value == "try":
+            # Result propagation (issue #1900): a prefix unary, so it binds as
+            # tightly as `!`/`-` and its operand is a postfix expression
+            # (`try parse(s)`). Where it may stand is decided in lower: only as
+            # a whole `let` initializer or `return` operand of a `fn` body.
+            self.next()
+            return ExprUn("try", self._unary(), tok.line)
         return self._postfix()
 
     def _await_approval_expr(self) -> ApprovalExpr:

@@ -284,6 +284,62 @@ fn first_gap(xs: List[Int]) -> Int {
 }
 ```
 
+### 3.6 Result propagation: `try` (issue #1900)
+
+`try e` reads the `Ok` payload of a `Result` and, when `e` is an `Err`,
+returns that `Err` from the enclosing fn on the spot. It is the one early exit
+a checked parser needs, written where the value is bound:
+
+```revl
+type Field = { name: Str, size: Int }
+
+fn parse_field(n: Int, path: Str) -> Result[Field, Str] {
+  return n > 0 ? Ok({ name: path, size: n }) : Err(`${path}: size must be positive`)
+}
+
+fn parse_fields(ns: List[Int], path: Str) -> Result[List[Field], Str] {
+  var out: List[Field] = []
+  var i = 0
+  for (n of ns) {
+    let f = try parse_field(n, `${path}[${i}]`)
+    out = out.push(f)
+    i += 1
+  }
+  return Ok(out)
+}
+```
+
+The rules:
+
+- `try` stands only as a whole `let` (or `var`) initializer, `let x = try e`,
+  or a whole `return` operand, `return try e`, in a `fn` or `verified fn`
+  body. Anywhere else, inside a call, an operator, a condition or a match
+  block arm, it is refused: bind it first and use the name.
+- `e` must be a `Result[T, E]`, and `try e` has type `T`.
+- The enclosing fn must return `Result[_, E]` with the operand's own `E`. A
+  different error type is refused naming both, and so is a fn that returns no
+  `Result`: `try` never converts one error type into another.
+- An `emit` operand is refused.
+- `try` is not allowed in a provide method or a component body yet. There a
+  returned `Err` does not settle the UI unit (only a raise does), and that
+  interaction will be decided separately.
+
+`try` is not a new IR construct. `let x = try e` lowers to steps every tier
+already emits:
+
+```revl fragment
+let try_0 = e
+if (match try_0 { Ok(try_0_ok) => false, Err(try_0_err) => true }) {
+  return match try_0 { Err(try_0_err) => Err(try_0_err) }
+}
+let x = match try_0 { Ok(try_0_ok) => try_0_ok }
+```
+
+The two one-armed matches never fall through: the `if` has already decided
+which case `try_0` holds. The locals are fresh: `try_<k>` skips any `k` whose
+names the fn already spells, so the desugar never reads or shadows an author's
+binding.
+
 ## 4. Components and effects (unchanged core, new block forms)
 
 Stratum 3 is revl 1.x, deliberately untouched. These keywords are the
@@ -980,6 +1036,8 @@ hostbody    := '=' '@' IDENT '{' <verbatim host text, brace-balanced> '}'
                  -- comment (bodies may be a single line: `@ts { // ... }`).
 expr        := TS-expression-subset  (see §3.2/§3.3)  + 'match' + block-expr
 stmt        := let | var | assign(var-only) | if | for-of | while | return | expr-stmt(calls)
+let, var    := ('let' | 'var') IDENT [':' type] '=' ['try'] expr      -- `try`: §3.6
+return      := 'return' ['try' expr | expr]
 lcstmt      := load | unload | call | 'assert' ('no_residue' | expr)   (§7.1)
 ```
 

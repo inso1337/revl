@@ -1,0 +1,22 @@
+// `return try e`: the Ok payload is itself the fn's Result
+fn parse(n: Int) -> Result[Int, Str] {
+  return n > 0 ? Ok(n) : Err("neg")
+}
+
+fn wrap(n: Int) -> Result[Result[Int, Str], Str] {
+  return n > 9 ? Err("big") : Ok(parse(n))
+}
+
+fn unwrap(n: Int) -> Result[Int, Str] {
+  return try wrap(n)
+}
+
+fn code(r: Result[Int, Str]) -> Int {
+  return match r { Ok(v) => v, Err(e) => 0 - e.length }
+}
+
+test "return try passes the inner Result through" {
+  assert code(unwrap(4)) == 4
+  assert code(unwrap(0 - 4)) == 0 - 3
+  assert code(unwrap(40)) == 0 - 3
+}

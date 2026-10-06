@@ -1,0 +1,20 @@
+// two `try`s in sequence: the second runs only when the first was `Ok`
+fn parse(n: Int) -> Result[Int, Str] {
+  return n > 0 ? Ok(n) : Err("neg")
+}
+
+fn sum2(a: Int, b: Int) -> Result[Int, Str] {
+  let x = try parse(a)
+  let y = try parse(b)
+  return Ok(x + y)
+}
+
+fn code(r: Result[Int, Str]) -> Int {
+  return match r { Ok(v) => v, Err(e) => 0 - e.length }
+}
+
+test "each try returns its own Err" {
+  assert code(sum2(1, 2)) == 3
+  assert code(sum2(0 - 1, 2)) == 0 - 3
+  assert code(sum2(1, 0 - 2)) == 0 - 3
+}
