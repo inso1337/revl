@@ -154,6 +154,13 @@ the *run* rather than about the source — says so: `classify()` reports
 `"guarantee": "unclassified"` rather than leaving the field out, so an agent
 reading a rejection always finds a machine-readable answer beside the code.
 
+The text renderer re-spells the same envelope field by field, and
+`tests/fixtures/vocabulary_mirror_ledger.json` records the pair, so
+`tools/check_vocabulary_mirrors.py` reds if a field the producer emits stops
+reaching the terminal — a field the producer emits and the renderer never
+reads is invisible to the human. `tests/test_explain_coverage_2028.py` holds
+the same edge behaviourally, per entry.
+
 ### `revl idiom`
 
 Print the minimal admitted example of one construct and the one or two rules

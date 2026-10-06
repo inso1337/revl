@@ -185,6 +185,7 @@ def test_the_cli_explains_an_emitted_code(capsys):
     out = capsys.readouterr().out
     assert out.startswith("HOST-METHOD  ")
     assert "fix:" in out
+    assert "category: host-boundary" in out
 
     assert main(["explain", "lifecycle", "--json"]) == 0
     payload = capsys.readouterr().out
@@ -192,6 +193,25 @@ def test_the_cli_explains_an_emitted_code(capsys):
     assert json.loads(payload)["ok"] is True
 
     assert main(["explain", "no-such-code"]) == 1
+
+
+def test_the_cli_renders_every_field_the_producer_emits(capsys):
+    """The renderer re-spells the `explain` envelope, and the vocabulary ledger
+    (`tests/fixtures/vocabulary_mirror_ledger.json`, checked by
+    `tools/check_vocabulary_mirrors.py`) holds the two in step. `category` was
+    the field the producer emitted and the renderer never read — invisible to
+    the human, which is what the lint step reds on. Every field an entry
+    carries must reach the terminal."""
+    from revl.__main__ import main
+
+    for code, entry in sorted(dg.OTHER_CODES.items()):
+        assert main(["explain", code]) == 0
+        out = capsys.readouterr().out
+        assert f"category: {entry['category']}" in out
+        if entry["guarantee"]:
+            assert entry["guarantee"] in out
+        if entry["fix"]:
+            assert f"fix: {entry['fix']}" in out
 
 
 def test_the_mcp_tool_explains_an_emitted_code():

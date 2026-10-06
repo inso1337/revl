@@ -29,6 +29,8 @@ def _run_explain(args) -> int:
         return 1
     headline = record.get("guarantee") or record.get("meaning", "")
     print(f"{record['code']}  {headline}")
+    if record.get("category"):
+        print(f"  category: {record['category']}")
     if record.get("guarantee") and record.get("meaning"):
         print(f"  {record['meaning']}")
     if record.get("fix"):

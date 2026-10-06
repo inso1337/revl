@@ -102,7 +102,7 @@ was corrected by hand and had drifted back within a day.
 | census-artifact.md | current | 0 |  |
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 8 |  |
+| commands-reference.md | current | 12 |  |
 | component-leases.md | needs-work | 33 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 20 |  |
@@ -151,7 +151,7 @@ was corrected by hand and had drifted back within a day.
 | mcp-bridge.md | needs-work | 77 |  |
 | mcp-http-transport.md | current | 0 |  |
 | mcp-proxy.md | current | 0 |  |
-| mcp-reference.md | current | 6 |  |
+| mcp-reference.md | current | 8 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
 | model-scheduling.md | needs-work | 0 |  |
 | namespacing.md | needs-work | 16 |  |
@@ -174,7 +174,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 47 | yes |
-| rejections.md | needs-work | 74 |  |
+| rejections.md | needs-work | 75 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |
