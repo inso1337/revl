@@ -151,7 +151,7 @@ the same code (`import cycle:`, v2_use_cycle.rvl).
 ## G4 — inverse or emit
 
 Every mutation carries an inverse, or admits irreversibility with `emit`.
-Six distinct shapes violate it, all in `examples/rejections/`.
+Seven distinct shapes violate it, all in `examples/rejections/`.
 
 **A bare acquisition** — `effect` without `undo` where the callee is not
 pure (g4_missing_undo.rvl):
@@ -189,9 +189,69 @@ the `undo` of `let store = effect Map.new(...)` must release THAT handle:
   write `undo store.drop()`
 ```
 
+**An `extern acquire` whose site `undo` is not its declared inverse** — the
+declaration names the one call that releases what it acquires, `undo
+close_h(result)`, with `result` for the handle. A site `undo` of that
+acquisition must call the declared inverse with the same arity and pass the
+handle the bracket bound wherever the declaration passes `result`; the other
+arguments are the author's. Anything else runs at teardown and leaves the
+handle open while the teardown reports a clean release, so it is refused, and
+so is an unbound acquisition whose inverse takes the handle. In a provide
+method, where only `spawn` may be bound, the refusal names the spelling that
+does release each acquisition: declare the extern `witnessed`. Closing a
+sibling bracket's handle stays the O1 double-close (G7). What this proves is
+the choice of inverse; that the host body reverts is still the declaration's
+assertion (issue #1859, g4_extern_undo_not_declared.rvl):
+
+```revl reject G4
+type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+component Keeper {
+  let h = effect open_h() undo noop()
+}
+```
+
+```
+the `undo` of `let h = effect open_h(...)` must be the inverse `open_h`
+  declares, on THAT handle: write `undo close_h(h)`
+```
+
+For a user `effect` over a service, revl has no declaration to check the
+`undo` against, so a wrong inverse there is still the author's assertion, and
+nothing checks it yet.
+**A provide-method write whose `undo` is not its inverse** — a host Map
+write has one inverse on the same handle and key: `insert(k, v)` and
+`insert_if_absent(k, v)` are undone by `remove(k)`, and `remove(k)` by
+`insert(k, e)`. Any other `undo` leaves the write in place while the
+enclosing bracket's `drop()` releases the map and masks it, so it is refused
+(issue #1945, g4_method_write_not_inverse.rvl):
+
+```revl reject G4
+service Kv { fn set(k: Str, v: Str) -> Str }
+component Store provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove("not-the-key")
+      return v
+    }
+  }
+}
+```
+
+```
+the `undo` of `effect store.insert(...)` must be its inverse on the same
+  handle and key: write `undo store.remove(k)`
+```
+
 For an `extern acquire` or a user `effect` over a service, revl has no table
 to check the `undo` against, so a wrong inverse there is still the author's
-assertion, and nothing checks it yet (issue #1859 tracks the extern half).
+assertion. A provide-method step records how far the check reached as
+`inverse: table | declared | asserted` (see
+[verified effect](verified-effect.md#which-positions-carry-an-inverse-guarantee)).
 
 **An unmarked emission call** — the operation is declared `emission fn`,
 so the call site must say `emit` (g4_unmarked_emission.rvl):

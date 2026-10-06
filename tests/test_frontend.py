@@ -387,6 +387,16 @@ REJECTIONS = {
     "g4_undo_not_release.rvl":
         "the `undo` of `let store = effect Map.new(...)` must release THAT "
         "handle: write `undo store.drop()`",
+    # issue #1859 slice 3: an `extern acquire`'s site `undo` must be the
+    # inverse its declaration names, on the handle the bracket bound
+    "g4_extern_undo_not_declared.rvl":
+        "the `undo` of `let log = effect log_open(...)` must be the inverse "
+        "`log_open` declares, on THAT handle: write `undo log_close(log)`",
+    # issue #1945: a provide-method host write's `undo` must be its table
+    # inverse on the same handle and key
+    "g4_method_write_not_inverse.rvl":
+        "the `undo` of `effect store.insert(...)` must be its inverse on the "
+        "same handle and key: write `undo store.remove(k)`",
     # G5's teardown bound, reached through the three indirections that hid it:
     # a spawn handle, a locally-bound arrow (followed into its body, so a PURE
     # local arrow still compiles), and an emitting callable passed as a value.

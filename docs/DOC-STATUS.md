@@ -96,7 +96,7 @@ was corrected by hand and had drifted back within a day.
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 22 |  |
 | bundle.md | needs-work | 0 |  |
-| capabilities.md | needs-work | 28 |  |
+| capabilities.md | needs-work | 41 |  |
 | capability-attenuation.md | needs-work | 25 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
 | census-artifact.md | current | 0 |  |
@@ -148,7 +148,7 @@ was corrected by hand and had drifted back within a day.
 | interchange-format.md | needs-work | 10 |  |
 | interop-bridge.md | needs-work | 51 |  |
 | lifecycle-contract.md | needs-work | 0 |  |
-| mcp-bridge.md | needs-work | 76 |  |
+| mcp-bridge.md | needs-work | 77 |  |
 | mcp-http-transport.md | current | 0 |  |
 | mcp-proxy.md | current | 0 |  |
 | mcp-reference.md | current | 6 |  |
@@ -174,7 +174,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 47 | yes |
-| rejections.md | needs-work | 71 |  |
+| rejections.md | needs-work | 73 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |
@@ -199,7 +199,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
 | swap.md | needs-work | 19 |  |
-| syntax-2.0.md | needs-work | 10 |  |
+| syntax-2.0.md | needs-work | 12 |  |
 | tee-attestation-root.md | current | 0 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |

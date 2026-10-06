@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import json
 import keyword
 import os
 import re
@@ -826,6 +827,11 @@ class Env:
         # one is still refused, but the refusal must say the inverse was
         # discarded and by which rule rather than claim there is none.
         self.extern_undo: dict[str, str] = {}
+        # `extern acquire` name -> its DECLARED inverse expression, the
+        # `undo <inverse>(result)` the declaration wrote. Read by
+        # `_check_site_release` (issue #1859 slice 3): a site-spelled `undo`
+        # of such an acquisition must be that inverse on the bound handle.
+        self.extern_inverse: dict[str, dict] = {}
         # roadmap item 470 (docs/design/470-intent-refinement.md §4 stage 1):
         # the intent the service operation whose provide-method body is being
         # lowered DECLARES, as `(WithinClause, service_name, method_name)`.
@@ -8540,6 +8546,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     emission_evidence = _EmissionEvidence(program)
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
+    # issue #1912: the same closure under the `emission` seed ALONE — the names
+    # whose reach includes a crossing that cannot be reverted, as against
+    # `emitting_fns`, which counts a `witnessed` extern's reach too (item 243).
+    # The provider bound is the consumer: a `witnessed[...]` service operation
+    # promises its providers reach only reversible code, and that promise is
+    # checked against this set. A subset of `emitting_fns` by construction, so
+    # a program with no `witnessed` extern has the two identical.
+    irreversible_fns = set(_emitting_capabilities(fns, externs,
+                                                 classes=("emission",)))
 
     # item 310: the capability-aware caching admission checks, run here once the
     # emission fixed point and the type/extern tables are known (a `cache pure`
@@ -8696,6 +8711,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                                 e["name"]: _callee_name(e.get("undo"))
                                                 for e in externs
                                                 if _callee_name(e.get("undo"))},
+                                            extern_inverse={
+                                                e["name"]: e["undo"]
+                                                for e in externs
+                                                if e.get("class") == "acquire"
+                                                and _callee_name(e.get("undo"))},
+                                            irreversible_fns=irreversible_fns,
                                             errors=errors, untrusted=untrusted)
             if comp.source:
                 _retarget_holes(lowered_comp, comp.source)
@@ -8995,6 +9016,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # is exactly that (so no pre-capability IR changes)
                         **({"capabilities": list(m.capabilities)}
                            if m.capabilities is not None else {}),
+                        # issue #1912: the OTHER bound, a `witnessed[caps]` (or
+                        # bare `witnessed`) operation. `emission` above stays
+                        # False for it — a witnessed crossing is reversible, so
+                        # every existing reader keeps its sound answer — and the
+                        # declaration rides this key so admission compares the
+                        # bound it was admitted with. ABSENT unless declared, so
+                        # every existing service's IR is byte-identical.
+                        **({"witnessed": list(m.witnessed)}
+                           if getattr(m, "witnessed", None) is not None
+                           else {}),
                         **({"async": True} if m.async_ else {}),
                         **({"commutative": True} if m.commutative else {}),
                         # delivery semantics (roadmap item 44): the checked
@@ -10046,6 +10077,7 @@ from .emission_analysis import (  # noqa: E402,F401
     _emitting_fns,
     _method_emissions,
     _witness_depth,
+    _witnessed_hint,
     cap_scope_enumerated_not_run,
 )
 
@@ -11572,6 +11604,133 @@ def _check_host_release(step: dict, env: "Env", filename: str, line: int, *,
         code="G4", category="inverse")
 
 
+def _check_site_release(step: dict, env: "Env", filename: str, line: int, *,
+                        bind: str | None, safe: str | None,
+                        seam: bool = False) -> None:
+    """A bracket's site `undo` is the inverse its acquisition owns.
+
+    The one entry for both rules of issue #1859, at every bracket site (a bound
+    and an unbound activation bracket, and an unbound provide-method bracket):
+    a host acquisition's `undo` is its family's release (`_check_host_release`,
+    provable, revl owns the stubs), and an `extern acquire`'s is the inverse
+    its declaration names (`_check_extern_release`, as provable as that
+    declaration: that the host body reverts is the author's assertion). Runs
+    after G5 and O1/B1, so a program those refuse keeps its message."""
+    _check_host_release(step, env, filename, line, bind=bind, safe=safe)
+    _check_extern_release(step, env, filename, line, bind=bind, safe=safe,
+                          seam=seam)
+
+
+#: The lowered-IR node kinds that name a callable by their `name` field: a
+#: `fn` call target and a `var` reference. The gate's reach walk
+#: (`gate._ir_referenced_names`) reads the same two spellings; it keeps its own
+#: literal so the gate stays off the frontend's compile graph and the frontend
+#: off the gate's.
+_IR_NAMING_KINDS = ("fn", "var")
+
+
+def _extern_acquire_of(acquire, env: "Env") -> tuple | None:
+    """`(extern name, declared inverse)` for an acquisition of an `extern
+    acquire` that declares one, else None. Both spellings count: the call
+    (`effect open_h()`, a `fn` node) and the bare name (`effect open_h`, a
+    `var` node), which name the same declaration."""
+    if not isinstance(acquire, dict) or acquire.get("kind") not in _IR_NAMING_KINDS:
+        return None
+    name = acquire.get("name")
+    if env.extern_class.get(name) != "acquire":
+        return None
+    declared = env.extern_inverse.get(name)
+    return (name, declared) if isinstance(declared, dict) else None
+
+
+def _is_result_var(arg) -> bool:
+    return (isinstance(arg, dict) and arg.get("kind") == "var"
+            and arg.get("name") == "result")
+
+
+def _extern_release_form(inv: str, slots: list, who: str) -> str:
+    """How the site `undo` is written, for the diagnostic: the exact call when
+    the declaration is `undo <inv>(result)`, else the rule in words."""
+    if slots == [True]:
+        return f"`undo {inv}({who})`"
+    if any(slots):
+        return f"`undo {inv}(...)` with `{who}` where the declaration passes `result`"
+    return f"`undo {inv}(...)` as the declaration calls it"
+
+
+def _check_extern_release(step: dict, env: "Env", filename: str, line: int, *,
+                          bind: str | None, safe: str | None,
+                          seam: bool = False) -> None:
+    """An `extern acquire`'s site `undo` is its DECLARED inverse on THAT handle.
+
+    Issue #1859 slice 3. `extern acquire fn open_h() -> H undo close_h(result)`
+    names the one call that releases what it acquires, with `result` standing
+    for the handle. A site `undo` that calls something else (`undo noop()`, a
+    helper, a literal) compiled, ran at teardown, and left the handle open while
+    the teardown reported a clean release. So the site `undo` must call the
+    declared inverse, with the same arity, and pass the handle the bracket bound
+    wherever the declaration passes `result`; the other arguments are the
+    author's, and `_lower_site_inverse` has already checked their types. An
+    acquisition whose declared inverse takes `result` must be bound, since an
+    unbound one leaves nothing to pass. In a provide method (`seam`) only
+    `spawn` may be bound, so there the refusal names the spelling that does
+    release exactly what a seam acquires: a `witnessed` extern, whose declared
+    inverse registers once per acquisition.
+
+    What this proves is the CHOICE of inverse, not that the host body reverts:
+    that half stays the declaration author's assertion."""
+    found = _extern_acquire_of(step.get("acquire"), env)
+    if found is None:
+        return
+    fn, declared = found
+    inv = _callee_name(declared)
+    slots = [_is_result_var(a) for a in declared.get("args") or []]
+    hint = (f"`extern acquire fn {fn}` declares its inverse, `undo {inv}(...)` "
+            f"with `result` for the acquired handle, and a site `undo` of that "
+            f"acquisition must be that call on the handle it bound. Anything "
+            f"else runs at teardown and leaves the handle open while the "
+            f"teardown reports a clean release. That `{inv}` reverts the "
+            f"acquisition is what the declaration asserts (issue #1859)")
+    if bind is None and any(slots) and seam:
+        raise RevlError(
+            filename, line,
+            f"`effect {fn}(...)` in a provide method cannot name its handle, so "
+            f"no site `undo` can release it: declare `{fn}` `witnessed` and drop "
+            f"the site `undo`, and its declared `undo {inv}(...)` releases each "
+            f"acquisition",
+            hint=hint + ". A provide method may bind only `spawn`; a witnessed "
+                 "extern's declared inverse registers on the activation's "
+                 "accumulator with `result` bound to what the acquisition "
+                 "returned (docs/design/243-witnessed-externs.md)",
+            code="G4", category="inverse")
+    if bind is None and any(slots):
+        raise RevlError(
+            filename, line,
+            f"`effect {fn}(...)` must bind its handle so its `undo` can release "
+            f"it: write `let <name> = effect {fn}(...)` with "
+            + _extern_release_form(inv, slots, "<name>"),
+            hint=hint, code="G4", category="inverse")
+    undo = step.get("undo")
+    if isinstance(undo, dict) and undo.get("kind") == "hole":
+        # an unfilled obligation, judged by this rule once it is filled (the
+        # host half's typed-hole exemption)
+        return
+    args = undo.get("args") or [] if isinstance(undo, dict) else []
+    if (isinstance(undo, dict) and undo.get("kind") == "fn"
+            and undo.get("name") == inv and len(args) == len(slots)
+            and all(not want or (isinstance(a, dict) and a.get("kind") == "name"
+                                 and a.get("id") == safe)
+                    for a, want in zip(args, slots))):
+        return
+    head = f"let {bind} = effect {fn}(...)" if bind is not None else f"effect {fn}(...)"
+    raise RevlError(
+        filename, line,
+        f"the `undo` of `{head}` must be the inverse `{fn}` declares"
+        + (", on THAT handle" if any(slots) else "")
+        + ": write " + _extern_release_form(inv, slots, bind or "<name>"),
+        hint=hint, code="G4", category="inverse")
+
+
 def _bare_callee_name(raw_acquire) -> str | None:
     """The extern name an acquisition AST names by bare spelling, or None.
 
@@ -12042,6 +12201,101 @@ def _ownership_check_expr(node, env: "Env", filename: str, line: int,
     _d4_delegate_no_recrossing(node, env, filename, line)
 
 
+#: issue #1945: the declared inverse of each host WRITE verb, the method-body
+#: twin of `_HOST_ACQUIRE_VERBS`. `(verb, provenance)`: the `undo` must call
+#: `verb` on the same receiver with the same key expression (the first
+#: argument). `table` means revl owns the stub and the pair is the inverse:
+#: `insert` -> `remove` holds when the key was absent before the insert, which
+#: the runtime checks (it records an overwrite; part 2 of #1945), and the
+#: result-guarded `insert_if_absent` -> `remove` is exact (item 397). `asserted`
+#: means the shape is checked and the restored value is the author's word:
+#: `remove(k)` undone by `insert(k, e)` cannot prove `e` was the value removed.
+#: A write with no entry (`Pool.execute`) has no provable inverse and is
+#: `asserted` without a shape check.
+_HOST_WRITE_INVERSE: dict[str, tuple[str, str]] = {
+    "Map.insert": ("remove", "table"),
+    "Map.insert_if_absent": ("remove", "table"),
+    "Map.remove": ("insert", "asserted"),
+}
+
+
+def _host_write(acquire, env: "Env"):
+    """`(receiver, family, verb)` when *acquire* is a write verb on a host
+    local (`store.insert(k, v)` on a `Map.new()` handle), else None."""
+    if not isinstance(acquire, dict) or acquire.get("kind") != "call":
+        return None
+    target = acquire.get("target")
+    if not isinstance(target, dict) or target.get("kind") != "name":
+        return None
+    family = env.host_locals.get(target.get("id"))
+    verb = acquire.get("method")
+    if family is None or f"{family}.{verb}" not in _HOST_WRITE_INVERSE:
+        return None
+    return target.get("id"), family, verb
+
+
+def _method_effect_inverse(st: dict, env: "Env", filename: str, line: int) -> str:
+    """The inverse provenance of one provide-method effect (issue #1945):
+    `table` (a host write undone by its table inverse), `declared` (an
+    extern's declared inverse), or `asserted` (everything revl cannot prove:
+    a service or extern reversal, a SQL write). A host write whose `undo` is
+    not its table inverse is refused, naming the inverse it needs."""
+    acquire, undo = st.get("acquire"), st.get("undo")
+    write = _host_write(acquire, env)
+    if write is not None:
+        receiver, family, verb = write
+        inverse, provenance = _HOST_WRITE_INVERSE[f"{family}.{verb}"]
+        key = (acquire.get("args") or [None])[0]
+        target = undo.get("target") if isinstance(undo, dict) else None
+        if (isinstance(undo, dict) and undo.get("kind") == "call"
+                and undo.get("method") == inverse
+                and isinstance(target, dict) and target.get("kind") == "name"
+                and target.get("id") == receiver
+                and (undo.get("args") or [None])[0] == key):
+            return provenance
+        name = _source_spelling(receiver, env)
+        k = _key_spelling(key, env)
+        spelled = f"{name}.{inverse}({k})" if inverse == "remove" \
+            else f"{name}.{inverse}({k}, <the value it held>)"
+        raise RevlError(
+            filename, line,
+            f"the `undo` of `effect {name}.{verb}(...)` must be its inverse on "
+            f"the same handle and key: write `undo {spelled}`",
+            hint=f"a host write has one inverse, its table entry on the same "
+                 f"receiver with the same key expression ({family}.insert -> "
+                 f"remove, {family}.insert_if_absent -> remove, {family}.remove "
+                 f"-> insert). Any other `undo` (a read, `drop`, the same verb, "
+                 f"another handle or another key) runs at teardown and leaves "
+                 f"the write in place while the teardown reports a clean "
+                 f"release (issue #1945)",
+            code="G4", category="inverse")
+    if (isinstance(acquire, dict) and acquire.get("kind") == "fn"
+            and acquire.get("name") in env.extern_undo
+            and isinstance(undo, dict) and undo.get("kind") == "fn"
+            and undo.get("name") == env.extern_undo[acquire.get("name")]):
+        return "declared"
+    return "asserted"
+
+
+def _key_spelling(key, env: "Env") -> str:
+    """The key argument as the author wrote it, when it is a name or a literal;
+    otherwise a placeholder for the same expression."""
+    if isinstance(key, dict) and key.get("kind") == "name":
+        return _source_spelling(key.get("id"), env)
+    if isinstance(key, dict) and key.get("kind") == "lit" \
+            and isinstance(key.get("value"), str):
+        return json.dumps(key["value"])
+    return "<the same key>"
+
+
+def _source_spelling(safe: str, env: "Env") -> str:
+    """The source name a lowered (safe) local name was written as."""
+    for source, lowered in (getattr(env, "locals", None) or {}).items():
+        if lowered == safe:
+            return source
+    return safe
+
+
 def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
     """Apply the body-position O1/B1 checks over a lowered provide-METHOD body.
     A handle a service method parameter carries is a BORROW; an acquire bound
@@ -12073,7 +12327,15 @@ def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
             # program they refuse keeps its message. (A host acquisition BOUND
             # in a method is refused earlier: only `spawn` may be.)
             if stp == "effect":
-                _check_host_release(st, env, filename, line, bind=None, safe=None)
+                _check_site_release(st, env, filename, line, bind=None, safe=None,
+                                    seam=True)
+            # issue #1945: the provide-method bracket's inverse rule, and its
+            # provenance on the step. Judged after every check above, so a
+            # program they refuse keeps its message. A hole is an unfilled
+            # obligation, judged when it is filled.
+            if undo is not None and not (isinstance(undo, dict)
+                                         and undo.get("kind") == "hole"):
+                st["inverse"] = _method_effect_inverse(st, env, filename, line)
             if acq_res and bind:
                 method_owned.add(bind)
         elif stp == "emit":
@@ -12426,6 +12688,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      extern_colour_instances: dict | None = None,
                      extern_class: dict | None = None,
                      extern_undo: dict | None = None,
+                     extern_inverse: dict | None = None,
+                     irreversible_fns: set | None = None,
                      errors: list | None = None,
                      untrusted: bool = False) -> dict:
     env = Env(comp, services, filename, types)
@@ -12433,7 +12697,13 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     env.emitting_fns = emitting_fns or set()
     env.extern_class = extern_class or {}
     env.extern_undo = extern_undo or {}
+    env.extern_inverse = extern_inverse or {}
     env.emitting_caps = emitting_caps or {}
+    # issue #1912: the same fixed point seeded from the IRREVERSIBLE externs
+    # alone, so the provider bound can ask "does this reach an emission" apart
+    # from "does this reach a boundary at all". Absent (an older caller) is the
+    # full set, which filters nothing.
+    env.irreversible_fns = irreversible_fns
     env.emission_evidence = emission_evidence
     env.witnessed_externs = witnessed_externs or set()
     env.async_externs = dict(emission_evidence.async_externs) if emission_evidence else {}
@@ -12639,7 +12909,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                           position="undo", exempt_handle=safe)
                 _b1_no_resource(step["undo"], env, filename, stmt.line,
                                 clause="undo", borrows_only=True)
-            _check_host_release(step, env, filename, stmt.line,
+            _check_site_release(step, env, filename, stmt.line,
                                 bind=stmt.bind, safe=safe)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
@@ -12701,7 +12971,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 _o1_check(step["undo"], env, filename, stmt.line, position="undo")
                 _b1_no_resource(step["undo"], env, filename, stmt.line,
                                 clause="undo", borrows_only=True)
-            _check_host_release(step, env, filename, stmt.line, bind=None, safe=None)
+            _check_site_release(step, env, filename, stmt.line, bind=None, safe=None)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
             body.append(step)
@@ -13775,7 +14045,55 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # declaration hides an irreversible call from every consumer — and from
         # the G8 audit, which enumerates a caller's emissions by reading the
         # declarations of the methods it calls.
-        if not decl.emission:
+        if decl.witnessed is not None:
+            # issue #1912: `witnessed[caps] fn op` states the OTHER, narrower
+            # bound. An `emission` declaration says a provider MAY cross a
+            # boundary that cannot be reverted; a `witnessed` one says the
+            # provider may perform the reversible class only — a record write
+            # that persists on commit and reverts on abort (design 243) — so a
+            # store can offer a plain-looking `create` whose provider really
+            # writes. The bound is a ceiling in the same direction as every
+            # other declaration: a provider may be purer than declared, never
+            # less, so a body that reaches a TRUE emission is still refused
+            # (`irreversible_only`), and a scoped `witnessed[caps]` is held to
+            # its capability list exactly as `emission[caps]` is. A bare
+            # `witnessed` (no list) promises no scope, as a bare `emission`
+            # does. The two modifiers are mutually exclusive (the parser
+            # refuses both on one operation), so this arm is the only one a
+            # witnessed operation reaches.
+            spoken = "witnessed" if not decl.witnessed else (
+                f"witnessed[{', '.join(decl.witnessed)}]")
+            caused, used = _method_emissions(mbody, env)
+            true_caused, _true_used = _method_emissions(mbody, env,
+                                                        irreversible_only=True)
+            if true_caused:
+                evidence = ", ".join(f"`{item}`" for item in true_caused)
+                raise RevlError(
+                    comp.source or filename, method.line,
+                    f"`{svc.name}.{method.name}` is declared `{spoken}`, but "
+                    f"this implementation reaches {evidence}",
+                    hint=_witnessed_hint(svc.name, method.name),
+                    code="G4", category="emission-propagation",
+                )
+            if decl.witnessed:
+                extra = sorted(cap for cap in used
+                               if cap not in decl.witnessed)
+                if extra:
+                    offending = ", ".join(
+                        "an unnameable boundary" if cap == "*" else f"`{cap}`"
+                        for cap in extra)
+                    evidence = ", ".join(f"`{item}`" for item in caused)
+                    raise RevlError(
+                        comp.source or filename, method.line,
+                        f"`{svc.name}.{method.name}` is declared `{spoken}`, "
+                        f"but this implementation reaches {offending}"
+                        + (f" (reaching {evidence})" if evidence else ""),
+                        hint=_capability_hint(svc.name, method.name,
+                                              decl.witnessed, extra,
+                                              modifier="witnessed"),
+                        code="G4", category="emission-capability",
+                    )
+        elif not decl.emission:
             caused_steps: dict[str, list] = {}
             caused, caps_used = _method_emissions(mbody, env, caused_steps)
             if caused:
@@ -15165,8 +15483,8 @@ def _receiver_names_decided(recv, env: Env) -> bool:
 
 def _resolved_crossings(body, env: Env) -> dict:
     """Every emission crossing a provide-method body makes through a resolved
-    receiver, by IR node: `id(node) -> (label, capabilities)`. Issues #1682 and
-    #1508.
+    receiver, by IR node: `id(node) -> (label, capabilities, irreversible)`.
+    Issues #1682, #1508 and #1912.
 
     A resolved receiver is one the shared resolver names (`_instance_get_call`,
     `_service_receiver_decl`): a provision call off a spawn handle, the same
@@ -15175,6 +15493,11 @@ def _resolved_crossings(body, env: Env) -> dict:
     `<Service>.<op>` and the capabilities are the op's declared scope,
     `{"*"}` when bare. The declared scope is a fact the provider is held to by
     its own G4 provider bound, which is why the crossing can be read at it.
+
+    The third element is the operation's CLASS (issue #1912): a `witnessed[...]
+    fn` is reachable this way too, and its crossing is reversible, so the
+    provider bound's irreversible-only walk drops it while the default walk
+    counts it exactly as it counts an `emission fn`.
 
     Read by the provider upper bound (`_method_emissions`), which runs after
     the method's type environment is restored and so cannot resolve them
@@ -15198,9 +15521,12 @@ def _resolved_crossings(body, env: Env) -> dict:
                         ty = infer_ir(recv, env.type_env, env.types,
                                       env.services)
                         head, _ = parse_type(ty or "")
-                if decl is not None and decl.emission and head:
+                if decl is not None and head and (decl.emission or
+                                                  getattr(decl, "witnessed",
+                                                          None) is not None):
                     caps = set(getattr(decl, "capabilities", None) or ())
-                    out[id(n)] = (f"{head}.{decl.name}", caps or {"*"})
+                    out[id(n)] = (f"{head}.{decl.name}", caps or {"*"},
+                                  bool(decl.emission))
             for v in n.values():
                 walk(v)
         elif isinstance(n, list):

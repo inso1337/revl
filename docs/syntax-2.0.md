@@ -420,6 +420,15 @@ The bound refines from a flag to a **set** with `emission[db, bus] fn …`,
 which says *where* a provider may cross rather than only that it does; bare
 `emission` stays "any capability". See docs/capabilities.md.
 
+The bound also distinguishes the *kind* of effect, with `witnessed[store] fn
+create(…)` — the item-243 reversible class, a write a commit settles and an
+abort reverts. It is the same one-directional ceiling over a narrower class: a
+provider that reaches only witnessed effects is admitted under a `witnessed`
+declaration, and one that reaches a true `emission` is refused exactly as it is
+under a plain `fn` — *a provider may be purer, never less pure.* The two
+modifiers are mutually exclusive on one operation (item 562,
+docs/capabilities.md §3).
+
 ### 4b.2 `emit` is also an expression
 
 `emit` began as a statement, which discarded its value. That was fatal for the
@@ -905,7 +914,8 @@ Together the two halves catch the two ways a composition leaks:
 For a HOST acquisition (`Map.new`, `Pool.open`, `Stream.source`) the checker
 now proves the inverse statically: the `undo` must be the family's release
 on the bound handle (issue #1859), so a wrong host `undo` never reaches this
-assertion. What R1 still catches at runtime is a release that did not happen
+assertion. An `extern acquire`'s site `undo` is held to the inverse its
+declaration names the same way. What R1 still catches at runtime is a release that did not happen
 for another reason. `examples/lifecycle_leak.rvl` is a component that passes
 every static check and whose test never unloads it, so the pool it opened is
 still live; the assertion catches both halves.

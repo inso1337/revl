@@ -106,6 +106,20 @@ class MethodDecl:
     # capability" — which is what every pre-capability source means, so
     # existing programs keep their meaning.
     capabilities: tuple[str, ...] | None = None
+    # issue #1912: the capability-scoped WITNESSED bound, `witnessed[store] fn
+    # op`. The weaker sibling of `capabilities`: `emission[X]` claims the
+    # provider may cross X IRREVERSIBLY (and makes every call site spell
+    # `emit`), while `witnessed[X]` claims it may only perform the witnessed
+    # (reversible, auto-registered) effects X names — so a record store whose
+    # writes persist on commit and revert on abort can offer an ordinary
+    # `create` instead of a service of nothing but emissions, and a call site
+    # needs no `emit` marker. Still a BOUND, in the documented direction: a
+    # provider may be purer, never less pure (G4 refuses a body that reaches a
+    # true `emission`, and one that reaches outside the named capabilities).
+    # `None` = no witnessed promise (a plain `fn`: pure; an `emission[...]`:
+    # the stronger bound); `()` = bare `witnessed`, any capability. `None` for
+    # every existing method, so their IR is byte-identical.
+    witnessed: tuple[str, ...] | None = None
     # taint declassification slot (roadmap item 249, Slice C): the origins a
     # provider of this operation may `endorse[<origin>]` in its body. Declared on
     # the service operation because a provide method is a plain `fn` that inherits
@@ -4175,6 +4189,10 @@ class Parser:
         while not self.at("}"):
             emission = False
             capabilities: tuple[str, ...] | None = None
+            # issue #1912: the `witnessed[caps]` modifier's target. `None` = the
+            # operation makes no witnessed promise (byte-identical for every
+            # existing method); `()` = bare `witnessed`; a tuple = `witnessed[caps]`.
+            method_witnessed: tuple[str, ...] | None = None
             endorse_origins: frozenset = frozenset()
             async_ = False
             method_commutative = False
@@ -4220,7 +4238,7 @@ class Parser:
                                 "line": rline}
             while (self.at("kw") and self.peek().value in ("emission", "async", "commutative", "idempotent")) \
                     or self.at("ident", "endorse") or self.at("ident", "validated") \
-                    or self.at("ident", "retry"):
+                    or self.at("ident", "retry") or self.at("ident", "witnessed"):
                 if self.at("ident", "endorse"):
                     endorse_origins = endorse_origins | self._endorse_slot()
                     continue
@@ -4231,6 +4249,21 @@ class Parser:
                 if self.at("ident", "retry"):
                     self.next()
                     method_retry = self._retry_budget()
+                    continue
+                if self.at("ident", "witnessed"):
+                    # issue #1912. `witnessed` is a CONTEXTUAL keyword here as
+                    # it is in the extern classification slot, so the lexer's
+                    # KEYWORDS set is untouched and a service using `witnessed`
+                    # as an ordinary name stays readable. Bare `witnessed` (no
+                    # bracket) is the unwidest spelling the extern slot has, so
+                    # it means "any witnessed capability" exactly as bare
+                    # `emission` means "any capability".
+                    self.next()
+                    if method_witnessed is None:
+                        method_witnessed = ()
+                    if self.at("["):
+                        method_witnessed = self._capability_list(
+                            kind="witnessed")
                     continue
                 modifier = self.next().value
                 if modifier == "emission":
@@ -4263,6 +4296,23 @@ class Parser:
                     "is only meaningful on an `emission` operation",
                     hint="write `emission idempotent fn ...`; a plain `fn` is not "
                          "delivered, so there is nothing to re-deliver",
+                )
+            # issue #1912: `witnessed[caps]` and `emission[caps]` are two
+            # DIFFERENT bounds, not two halves of one. `emission[X]` already
+            # admits a witnessed reach under X (it is the wider promise, and a
+            # provider may be purer than it declares), so a spelling that names
+            # both is redundant at best and reads as a contradiction ("may
+            # cross X irreversibly, and may only cross X reversibly"). Refuse
+            # it rather than silently picking one.
+            if method_witnessed is not None and emission:
+                raise self.err(
+                    mline,
+                    "an operation cannot be declared both `emission` and "
+                    "`witnessed`",
+                    hint="the two are different bounds: `emission[caps]` already "
+                         "admits a provider that only performs witnessed effects "
+                         "under `caps`, so write whichever one you mean "
+                         "(issue #1912)",
                 )
             self.expect("kw", "fn")
             mname = self.expect("ident").value
@@ -4330,6 +4380,7 @@ class Parser:
                 capabilities=capabilities, endorse_origins=endorse_origins,
                 cache=cache, validated=method_validated, retry=method_retry,
                 termination=termination, route=method_route, within=within,
+                witnessed=method_witnessed,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)

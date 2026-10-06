@@ -279,9 +279,13 @@ use "./types.rvl" { WfR, check_type_wellformed }
 // `extern emission[db] fn pg_write` was refused as emitting through `pg_write`,
 // and the repair widened a declaration that was already correct toward a token
 // no `capability <glob>` rule can select.
+// `inv` is an `extern acquire`'s DECLARED inverse, encoded `<callee>|<slots>`
+// with one slot letter per argument, `R` where the declaration passes
+// `result` and `_` elsewhere ("" for every other declaration; issue #1859).
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
              callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
-             body: List[Stmt], cachePure: Bool, line: Int, caps: List[Str] }
+             body: List[Stmt], cachePure: Bool, line: Int, caps: List[Str],
+             inv: Str }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -1223,7 +1227,14 @@ fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
           aps: List[Str], bd: List[Stmt], ln: Int, cps: List[Str]) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
            asyncSlots: slots, asyncParams: aps, body: bd, cachePure: false,
-           line: ln, caps: cps }
+           line: ln, caps: cps, inv: "" }
+}
+
+fn fnd_with_inv(f: FnD, inv: Str) -> FnD {
+  return { name: f.name, isEmExtern: f.isEmExtern, isAsyncExtern: f.isAsyncExtern,
+           callees: f.callees, asyncSlots: f.asyncSlots,
+           asyncParams: f.asyncParams, body: f.body, cachePure: f.cachePure,
+           line: f.line, caps: f.caps, inv: inv }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool,
@@ -2509,6 +2520,7 @@ fn fn_params_i(ts: List[Token], i: Int) -> Int {
 // bracket sits after `fn <name>`, never here.
 fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   var j = i + 1
+  var isAcq = false
   var isEm = false
   var isAsync = false
   var isWit = false
@@ -2521,6 +2533,7 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
          || atw(ts, j, "async") || ati(ts, j, "witnessed") || ati(ts, j, "deferred")
          || atw(ts, j, "idempotent") || atk(ts, j, "[") || atk(ts, j, "(")) {
     if (atw(ts, j, "emission")) { isEm = true }
+    if (atw(ts, j, "acquire")) { isAcq = true }
     if (ati(ts, j, "witnessed")) { isWit = true }
     if (atw(ts, j, "async")) { isAsync = true }
     if (atk(ts, j, "[")) {
@@ -2548,6 +2561,7 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
   var k = ret_at(ts, ps.i)
+  let inv = isAcq ? declared_inverse_at(ts, k) : ""
   // skip any `= @host { ... }` bodies without letting a brace end the decl early.
   //
   // The stop set has to name every declaration head, not just the ones the
@@ -2569,10 +2583,42 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   // the scope is carried only for a crossing class. `pure`/`acquire` take no
   // capability scope at all (the reference refuses the bracket on them), so
   // this is the declaration's own set for every extern that can seed.
-  return mk_step(push_fn(pg, mk_fnd(nm, isEm || isWit, isAsync, [],
+  return mk_step(push_fn(pg, fnd_with_inv(mk_fnd(nm, isEm || isWit, isAsync, [],
                                     async_slots_of(ps.ps),
                                     async_params_of(ps.ps), [], tkc(ts, i).line,
-                                    isEm || isWit ? caps : [])), k)
+                                    isEm || isWit ? caps : []), inv)), k)
+}
+
+// An `extern acquire`'s declared inverse, read from its header after the
+// return type: `undo <callee>(<args>)`, encoded `<callee>|<slots>` (see
+// `FnD.inv`). The reference keeps the inverse only when it is a call
+// (`_callee_name`), so a bare `undo name` or no `undo` at all is "".
+fn declared_inverse_at(ts: List[Token], k: Int) -> Str {
+  var u = k
+  while (u < ts.length() && !atw(ts, u, "undo") && !atk(ts, u, "=")
+         && !atk(ts, u, "{") && !atk(ts, u, "eof")) { u += 1 }
+  if (!atw(ts, u, "undo") || !atk(ts, u + 1, "ident") || !atk(ts, u + 2, "(")) {
+    return ""
+  }
+  return tkc(ts, u + 1).text.concat("|").concat(inverse_slots(ts, u + 3, 0, "", true))
+}
+
+// One letter per top-level argument from `i` to the closing `)`: `R` for an
+// argument that is exactly `result`, `_` for any other. `fresh` is true at the
+// start of an argument; `cur` is the letter of the argument being read.
+fn inverse_slots(ts: List[Token], i: Int, depth: Int, acc: Str, fresh: Bool) -> Str {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+  if (depth == 0 && atk(ts, i, ")")) { return acc }
+  if (depth == 0 && atk(ts, i, ",")) { return inverse_slots(ts, i + 1, 0, acc, true) }
+  if (fresh) {
+    let lone = ati(ts, i, "result")
+      && (atk(ts, i + 1, ",") || atk(ts, i + 1, ")"))
+    let d = atk(ts, i, "(") || atk(ts, i, "[") || atk(ts, i, "{") ? 1 : 0
+    return inverse_slots(ts, i + 1, depth + d, acc.concat(lone ? "R" : "_"), false)
+  }
+  let up = atk(ts, i, "(") || atk(ts, i, "[") || atk(ts, i, "{") ? 1 : 0
+  let down = atk(ts, i, ")") || atk(ts, i, "]") || atk(ts, i, "}") ? 1 : 0
+  return inverse_slots(ts, i + 1, depth + up - down, acc, false)
 }
 
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -2595,7 +2641,7 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
                               asyncSlots: async_slots_of(ps.ps),
                               asyncParams: async_params_of(ps.ps),
                               body: body, cachePure: cachePure,
-                              line: tkc(ts, i).line, caps: [] }), bend)
+                              line: tkc(ts, i).line, caps: [], inv: "" }), bend)
 }
 
 type MethsR = { xs: List[MSig], i: Int, ok: Bool }
@@ -4303,7 +4349,7 @@ fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (i >= ss.length() || a.msg != "") { return a }
   let j = group_end(ss, i)
   return walk_stmts(ss, j, cx,
-    release_group(ss, i, appr_group(ss, i, cx, walk_span(ss, i, j, cx, a))))
+    release_group(ss, i, cx, appr_group(ss, i, cx, walk_span(ss, i, j, cx, a))))
 }
 
 // ---- a host acquisition's inverse is its release (issue #1859) ------------
@@ -4393,11 +4439,12 @@ fn host_release_msg(bind: Str, hf: Str, release: Str) -> Str {
     .concat(".").concat(release).concat("()`")
 }
 
-// The verdict for the group at i, when it is the `undo` of a host acquisition.
-fn release_msg_at(ss: List[Stmt], i: Int) -> Str {
+// The verdict for the group at i, when it is the `undo` of a host acquisition
+// or of an `extern acquire` (`seam`: a provide-method body).
+fn release_msg_at(ss: List[Stmt], i: Int, cx: Ctx, seam: Bool) -> Str {
   if (i == 0 || ss[i].kind != "undo") { return "" }
   let hf = host_acq_fn(ss[i - 1])
-  if (hf == "") { return "" }
+  if (hf == "") { return extern_release_msg(ss[i - 1], ss[i].e, cx, seam) }
   let release = release_of_fn(hf)
   let bind = ss[i - 1].bind
   if (bind == "") { return host_unbound_msg(hf, release) }
@@ -4412,20 +4459,233 @@ fn release_msg_at(ss: List[Stmt], i: Int) -> Str {
   return host_release_msg(bind, hf, release)
 }
 
-// The first release refusal over a provide-method body.
-fn method_release_msg(ss: List[Stmt], i: Int) -> Str {
+// The first release refusal over a provide-method body. `cx` is the component
+// context, so the release rule sees the site and seam the reference does
+// (issue #1859), and `maps` names the component's host `Map` handles, so a
+// write on one is held to its table inverse at the same statement (issue
+// #1945). The reference judges both in `_ownership_walk_method`, the release
+// rule first and the write inverse after, in that order.
+fn method_release_msg(ss: List[Stmt], i: Int, cx: Ctx, maps: List[Str]) -> Str {
   if (i >= ss.length()) { return "" }
   // only the UNBOUND form: a host acquisition bound in a method is the
   // reference's "only `spawn` may be acquired" refusal, raised earlier
-  let m = ss[i - 1].bind == "" ? release_msg_at(ss, i) : ""
+  let m = ss[i - 1].bind == "" ? release_msg_at(ss, i, cx, true) : ""
   if (m != "") { return m }
-  return method_release_msg(ss, i + 1)
+  let w = ss[i].kind == "undo" && ss[i - 1].kind == "effect"
+    ? write_inverse_msg(ss[i - 1].e, ss[i].e, maps) : ""
+  if (w != "") { return w }
+  return method_release_msg(ss, i + 1, cx, maps)
 }
 
-fn release_group(ss: List[Stmt], i: Int, a: Ac) -> Ac {
+// issue #1945: the component's host `Map` handles, each an activation-body
+// `let <name> = effect Map.new() undo ...` (the `Map` entries of the
+// reference's `env.host_locals`).
+fn map_handles(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  let s = ss[i]
+  let hit = s.bind != "" && host_acq_fn(s) == "Map.new"
+  return map_handles(ss, i + 1, hit ? acc.push(s.bind) : acc)
+}
+
+// The write verb `e` calls on one of `names`, when it is a host Map write
+// with a table inverse (`insert`, `insert_if_absent`, `remove`), else "".
+fn host_write_verb(e: Expr, names: List[Str]) -> Str {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        Var(v) => contains(names, v)
+          && (fl.name == "insert" || fl.name == "insert_if_absent"
+              || fl.name == "remove") ? fl.name : "",
+        _ => "",
+      },
+      _ => "",
+    },
+    _ => "",
+  }
+}
+
+// The reference's `_method_effect_inverse` refusal: a host Map write's `undo`
+// is its table inverse on the same handle with the same key expression.
+fn write_inverse_msg(acq: Expr, und: Expr, maps: List[Str]) -> Str {
+  let verb = host_write_verb(acq, maps)
+  if (verb == "" || is_hole_expr(und)) { return "" }
+  let inverse = verb == "remove" ? "insert" : "remove"
+  let recv = call_recv(acq)
+  let key = first_arg(acq)
+  if (call_recv(und) == recv && call_verb(und) == inverse
+      && key_expr_same(key, first_arg(und))) { return "" }
+  let k = key_spelling(key)
+  let spelled = inverse == "remove"
+    ? recv.concat(".remove(").concat(k).concat(")")
+    : recv.concat(".insert(").concat(k).concat(", <the value it held>)")
+  return "the `undo` of `effect ".concat(recv).concat(".").concat(verb)
+    .concat("(...)` must be its inverse on the same handle and key: write `undo ")
+    .concat(spelled).concat("`")
+}
+
+fn call_recv(e: Expr) -> Str {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target { Var(v) => v, _ => "", },
+      _ => "",
+    },
+    _ => "",
+  }
+}
+
+fn call_verb(e: Expr) -> Str {
+  return match e {
+    Call(c) => match c.target { Field(fl) => fl.name, _ => "", },
+    _ => "",
+  }
+}
+
+fn first_arg(e: Expr) -> Expr {
+  return match e {
+    Call(c) => c.args.length() > 0 ? c.args[0] : NullLit,
+    _ => NullLit,
+  }
+}
+
+// The key as the author wrote it: a name or a string literal, otherwise a
+// placeholder for the same expression (the reference's `_key_spelling`).
+fn key_spelling(e: Expr) -> Str {
+  return match e {
+    Var(v) => v,
+    StrLit(s) => jstr(s),
+    _ => "<the same key>",
+  }
+}
+
+// Whether two key expressions are the same, as the reference compares their
+// lowered nodes. Only the shapes a key takes are judged; any other shape is
+// answered `true`, so the gate under-refuses rather than refusing a program
+// the reference admits.
+fn key_expr_same(a: Expr, b: Expr) -> Bool {
+  if (!key_shape(a) || !key_shape(b)) { return true }
+  return match a {
+    Var(x) => match b { Var(y) => x == y, _ => false, },
+    StrLit(x) => match b { StrLit(y) => x == y, _ => false, },
+    IntLit(x) => match b { IntLit(y) => x == y, _ => false, },
+    BoolLit(x) => match b { BoolLit(y) => x == y, _ => false, },
+    Field(f) => match b {
+      Field(g) => f.name == g.name && key_expr_same(f.target, g.target),
+      _ => false,
+    },
+    Call(c) => match b {
+      Call(d) => key_expr_same(c.target, d.target)
+        && key_args_same(c.args, d.args, 0),
+      _ => false,
+    },
+    _ => true,
+  }
+}
+
+fn key_args_same(xs: List[Expr], ys: List[Expr], i: Int) -> Bool {
+  if (xs.length() != ys.length()) { return false }
+  if (i >= xs.length()) { return true }
+  return key_expr_same(xs[i], ys[i]) && key_args_same(xs, ys, i + 1)
+}
+
+fn key_shape(e: Expr) -> Bool {
+  return match e {
+    Var(v) => true, StrLit(s) => true, IntLit(n) => true, BoolLit(b) => true,
+    Field(f) => true, Call(c) => true,
+    _ => false,
+  }
+}
+
+fn release_group(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (a.msg != "") { return a }
-  let m = release_msg_at(ss, i)
+  let m = release_msg_at(ss, i, cx, false)
   return m == "" ? a : ac_refuse(a, "G4", m)
+}
+
+// ---- an `extern acquire`'s inverse is its declared one (issue #1859) -------
+//
+// lower.py `_check_extern_release`: the site `undo` of an acquisition of an
+// `extern acquire` that declares `undo <inv>(...)` must call `<inv>` with the
+// same arity and pass the bound handle wherever the declaration passes
+// `result`. An unbound acquisition whose inverse takes `result` is refused,
+// with the `witnessed` spelling named in a provide method, where only `spawn`
+// may be bound.
+//
+// A site `undo` that calls the declared inverse with the right arity but
+// another value in a `result` slot is left alone here: the reference reports
+// a sibling handle there as the O1 double-close (G7), which this gate does not
+// judge, so refusing with the G4 wording would contradict it.
+fn ext_acq_name(s: Stmt) -> Str {
+  if (s.kind != "effect") { return "" }
+  return match s.e {
+    Call(c) => match c.target { Var(v) => v, _ => "" },
+    Var(v) => v,
+    _ => "",
+  }
+}
+
+fn inv_has_result(slots: Str) -> Bool { return slots.indexOf("R") >= 0 }
+
+fn ext_release_form(inv: Str, slots: Str, who: Str) -> Str {
+  if (slots == "R") { return "`undo ".concat(inv).concat("(").concat(who).concat(")`") }
+  if (inv_has_result(slots)) {
+    return "`undo ".concat(inv).concat("(...)` with `").concat(who)
+      .concat("` where the declaration passes `result`")
+  }
+  return "`undo ".concat(inv).concat("(...)` as the declaration calls it")
+}
+
+fn undo_calls_inverse(u: Expr, inv: Str, slots: Str, bind: Str) -> Bool {
+  return match u {
+    Call(c) => is_var_named(c.target, inv) && c.args.length() == slots.length()
+      && result_slots_hold(c.args, slots, bind, 0),
+    _ => false,
+  }
+}
+
+fn calls_inverse_by_arity(u: Expr, inv: Str, slots: Str) -> Bool {
+  return match u {
+    Call(c) => is_var_named(c.target, inv) && c.args.length() == slots.length(),
+    _ => false,
+  }
+}
+
+fn result_slots_hold(args: List[Expr], slots: Str, bind: Str, i: Int) -> Bool {
+  if (i >= args.length()) { return true }
+  if (slots.slice(i, i + 1) == "R" && !is_var_named(args[i], bind)) { return false }
+  return result_slots_hold(args, slots, bind, i + 1)
+}
+
+fn extern_release_msg(acq: Stmt, u: Expr, cx: Ctx, seam: Bool) -> Str {
+  let fnm = ext_acq_name(acq)
+  if (fnm == "") { return "" }
+  let enc = match cx.provKeySvc.lookup(ext_inv_key(fnm)) { Some(v) => v, None => "" }
+  if (enc == "") { return "" }
+  let bar = enc.indexOf("|")
+  let inv = enc.slice(0, bar)
+  let slots = enc.slice(bar + 1, enc.length())
+  let bind = acq.bind
+  if (bind == "" && inv_has_result(slots) && seam) {
+    return "`effect ".concat(fnm)
+      .concat("(...)` in a provide method cannot name its handle, so no site `undo` can release it: declare `")
+      .concat(fnm).concat("` `witnessed` and drop the site `undo`, and its declared `undo ")
+      .concat(inv).concat("(...)` releases each acquisition")
+  }
+  if (bind == "" && inv_has_result(slots)) {
+    return "`effect ".concat(fnm)
+      .concat("(...)` must bind its handle so its `undo` can release it: write `let <name> = effect ")
+      .concat(fnm).concat("(...)` with ").concat(ext_release_form(inv, slots, "<name>"))
+  }
+  if (undo_calls_inverse(u, inv, slots, bind)) { return "" }
+  // a typed hole is an unfilled obligation, judged when it is filled
+  if (is_hole_expr(u)) { return "" }
+  // the declared callee at its arity with another value in a `result` slot:
+  // the reference's O1 territory (see above)
+  if (inv_has_result(slots) && calls_inverse_by_arity(u, inv, slots)) { return "" }
+  let head = bind != "" ? "let ".concat(bind).concat(" = effect ").concat(fnm).concat("(...)")
+                        : "effect ".concat(fnm).concat("(...)")
+  return "the `undo` of `".concat(head).concat("` must be the inverse `").concat(fnm)
+    .concat("` declares").concat(inv_has_result(slots) ? ", on THAT handle" : "")
+    .concat(": write ").concat(ext_release_form(inv, slots, bind != "" ? bind : "<name>"))
 }
 
 // ---- one statement's evidence, in the reference's order (issue #1261) ------
@@ -5349,16 +5609,26 @@ fn build_maps(pg: Prog) -> Ctx {
   let colored = async_colored(pg.fns, slots)
   var emitting: List[Str] = []
   var ai: List[Str] = []
+  var pks = prov_key_svc(pg)
   var fi = 0
   while (fi < pg.fns.length()) {
     let f = pg.fns[fi]
     if (caps_of(caps, f.name).length() > 0) { emitting = emitting.push(f.name) }
     if (f.isAsyncExtern) { ai = ai.push(f.name) }
+    if (f.inv != "") { pks = pks.set(ext_inv_key(f.name), f.inv) }
     fi += 1
   }
   return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai,
-                [], fn_names_of(pg.fns), "", slots, prov_key_svc(pg))
+                [], fn_names_of(pg.fns), "", slots, pks)
 }
+
+// An `extern acquire`'s declared inverse rides in the same global table, under
+// `extern#<name>` (issue #1859). `extern` is a keyword, so no component can be
+// named it and the two key spaces are disjoint. It is not a field of its own
+// because `Ctx` is passed by value through the per-item descent, and one more
+// map in it overflowed the gate crate's at-the-bound stack test
+// (crates/revl-gate/tests/admit.rs `a_source_at_the_level_bound_is_still_decided`).
+fn ext_inv_key(name: Str) -> Str { return "extern#".concat(name) }
 
 // The global (component `#` key -> service) table: every component's provided
 // keys mapped to the service each supplies. A spawn-handle read `h.<key>.<op>`
@@ -6042,7 +6312,7 @@ fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   if (na.msg != "") { return ss[i].line }
   // a host release refusal is reported at the bracket's own line, the
   // acquisition's, as the reference reports it (`_check_host_release`)
-  na = release_group(ss, i, na)
+  na = release_group(ss, i, cx, na)
   if (na.msg != "") { return ss[i - 1].line }
   return refusal_line(ss, j, cx, na)
 }
@@ -7643,7 +7913,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // method. The reference judges it in `_ownership_walk_method`, after the
       // whole body is lowered and the missing-return rule has run, at the
       // method's line.
-      let mrel = method_release_msg(pm.body, 1)
+      let mrel = method_release_msg(pm.body, 1, cx, map_handles(comp.setup, 0, []))
       if (mrel != "") { return mk_verd(tagged("G4", mrel), pm.line) }
       // rule C1 on the component lowering path (`_assert_colour_is_positional`,
       // restated because stratum 3 never runs the checker over arrows): a
@@ -19197,13 +19467,13 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 type CCtx = { reqs: List[Str], cases: List[Bind], fns: List[Bind],
               fnps: List[Bind], wit: List[Str], al: Map[Str, Str],
               cprovs: List[Bind], cfg: Str, ln: Int, reqops: List[Bind],
-              handles: Bool }
+              handles: Bool, xundo: Map[Str, Str] }
 
 // `cx` re-stamped with the line of the statement now being lowered.
 fn cx_at(cx: CCtx, n: Int) -> CCtx {
   return { reqs: cx.reqs, cases: cx.cases, fns: cx.fns, fnps: cx.fnps,
            wit: cx.wit, al: cx.al, cprovs: cx.cprovs, cfg: cx.cfg, ln: n,
-           reqops: cx.reqops, handles: cx.handles }
+           reqops: cx.reqops, handles: cx.handles, xundo: cx.xundo }
 }
 
 // Membership in a lexical scope, INDEPENDENT of whether the name's type is
@@ -19589,6 +19859,27 @@ fn witnessed_extern_names(ts: List[Token]) -> List[Str] {
   return out
 }
 
+// issue #1945: extern name -> the bare callee of its DECLARED inverse, for
+// every extern that declares `undo` (the reference's `env.extern_undo`). A
+// provide-method effect whose site `undo` calls it is `declared`.
+fn extern_undo_names(ts: List[Token]) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "extern")) {
+      var j = i + 1
+      while (j < ts.length() && !atw(ts, j, "fn") && !atk(ts, j, "eof")) { j += 1 }
+      if (atw(ts, j, "fn")) {
+        let ps = params_at(ts, j + 3)
+        let k = ret_at(ts, ps.i)
+        if (atw(ts, k, "undo")) { m = m.set(tkc(ts, j + 1).text, tkc(ts, k + 1).text) }
+      }
+      i = j + 1
+    } else { i += 1 }
+  }
+  return m
+}
+
 // The module callables a component body may call by bare name, each bound to
 // its declared ARITY as decimal digits — the top-level `fn`s and externs, read
 // through the same top-level walk the admission gate uses (`parse_prog_ts`), so
@@ -19699,6 +19990,28 @@ fn svc_method_params(ts: List[Token], svc: Str, meth: Str) -> List[ParamN] {
 // undo-less acquisition keeps refusing — the fail-closed direction, since the
 // alternative is an acquisition lowered to a step that registers no teardown
 // at all.
+// issue #1945: the provenance of a provide-method effect, as the reference's
+// `_method_effect_inverse` stamps it: `table` for a host Map write undone by
+// its table inverse, `declared` for an extern's declared inverse, `asserted`
+// for everything else. A host write whose `undo` is not its table inverse is
+// refused (`write_inverse_msg`), so only an admitted shape is stamped here.
+fn method_inverse(acq: Expr, und: Expr, hostSc: List[Str], cx: CCtx) -> Str {
+  let w = host_write_verb(acq, hostSc)
+  if (w != "") { return w == "remove" ? "asserted" : "table" }
+  let x = bare_callee(acq)
+  let u = bare_callee(und)
+  let inv = match cx.xundo.lookup(x) { Some(v) => v, None => "" }
+  if (x != "" && inv != "" && inv == u) { return "declared" }
+  return "asserted"
+}
+
+fn bare_callee(e: Expr) -> Str {
+  return match e {
+    Call(c) => match c.target { Var(nm) => nm, _ => "", },
+    _ => "",
+  }
+}
+
 fn is_witnessed_acq(e: Expr, cx: CCtx) -> Bool {
   return match e {
     Call(c) => match c.target { Var(nm) => contains(cx.wit, nm), _ => false, },
@@ -20773,8 +21086,13 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (is_bad(und.e)) { return mk_irres(false, "") }
     let ue = cir_expr(und.e, sc, hostSc, cx_at(cx, tkc(ts, acq.i + 1).line))
     if (!ue.ok) { return mk_irres(false, "") }
+    // issue #1945: the inverse provenance the reference stamps on every
+    // provide-method effect whose `undo` is written (a hole is judged when
+    // it is filled, so it carries none)
+    let inv = is_hole_expr(und.e) ? ""
+      : ", \"inverse\": ".concat(jstr(method_inverse(acq.e, und.e, hostSc, cx)))
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
-      .concat(", \"undo\": ").concat(ue.js).concat("}")
+      .concat(", \"undo\": ").concat(ue.js).concat(inv).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_method_stmts(ts, und.i, hi, cx, sc, hostSc, nacc)
   }
@@ -21629,7 +21947,8 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
              wit: witnessed_extern_names(ts), al: al,
              cprovs: program_provisions(ts),
              cfg: comp_config_struct(ts, lo, hi, al), ln: 0,
-             handles: program_names_handles(ts) }
+             handles: program_names_handles(ts),
+             xundo: extern_undo_names(ts) }
   let sc0: List[Bind] = []
   let bodyRes = cir_body(ts, lo, hi, cx, provs, sc0, [], "")
   let isoJs = ir_isolate(ts, lo, hi, "")
@@ -25843,6 +26162,19 @@ test "a declaration AFTER a named test block is still reached" {
   assert admit_src("""test "first" { let a = 1  assert a == 1 } fn id(x: Int) -> Int { return x }""") == ""
 }
 
+test "a declared inverse that takes no handle pins only the callee" {
+  let v = admit_src("""type H = Opaque
+extern pure fn unlock() -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn lock() -> H undo unlock() = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  effect lock() undo noop()
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == "G4|the `undo` of `effect lock(...)` must be the inverse `lock` declares: write `undo unlock(...)` as the declaration calls it"
+}
+
 test "a declared local receiver is not a G1 access" {
   let v = admit_src("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { let store = effect Map.new() undo store.drop() provide cache { fn put(key, value) { effect store.insert(key, value) undo store.remove(key) } } }")
   assert v == ""
@@ -27080,6 +27412,18 @@ component C provides s: S {
   assert v == ""
 }
 
+test "a typed hole in an extern acquire's undo is not refused" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let h = effect open_h() undo hole[Unit] "release"
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == ""
+}
+
 test "a verified method effect with a site undo is refused (T1)" {
   let v = admit_src("""service W { fn put(k: Str) }
 component Widget provides w: W {
@@ -27546,6 +27890,48 @@ test "an explicit withdrawal row strands the same consumer" {
     == "G2|this admission withdraws the running provider of `db` (`Old`) and nothing provides it again, but the running component `Store` still requires it (G2)"
 }
 
+test "an extern acquire in a provide method names the witnessed spelling" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n) {
+      effect open_h() undo noop()
+      return n
+    }
+  }
+}""")
+  assert v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so no site `undo` can release it: declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"
+}
+
+test "an extern acquire released by its declared inverse is admitted" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let h = effect open_h() undo close_h(h)
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == ""
+}
+
+test "an extern acquire's site undo that is not its declared inverse is refused" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  let h = effect open_h() undo noop()
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == "G4|the `undo` of `let h = effect open_h(...)` must be the inverse `open_h` declares, on THAT handle: write `undo close_h(h)`"
+}
+
 test "an extern config field of an arrow type is refused (G4)" {
   assert admit_src("extern pure fn thing(x: Str) -> Str config { handler: (Str) -> Str } = @py { return x }")
     == "G4|config field `handler` of extern `thing` has type `(Str) -> Str`, which reaches an arrow (function) type; a config field must be static data"
@@ -27637,6 +28023,19 @@ component Classifier provides out: Answer {
   route model on classify { }
   provide out { fn classify(text) = text }
 }""") == "MODEL|`route model on classify` in Classifier names no role"
+}
+
+test "an unbound extern acquire whose inverse takes the handle is refused" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn noop() -> Unit = @py { return None }
+extern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }
+service S { fn go(k: Str) -> Int }
+component C provides s: S {
+  effect open_h() undo noop()
+  provide s { fn go(k) = 1 }
+}""")
+  assert v == "G4|`effect open_h(...)` must bind its handle so its `undo` can release it: write `let <name> = effect open_h(...)` with `undo close_h(<name>)`"
 }
 
 test "an unbound host acquisition is refused" {

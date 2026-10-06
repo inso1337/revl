@@ -68,6 +68,18 @@ class InertTaintPolicyWarning(UserWarning):
     inert, so a taint rule silently matches nothing — an operator must not mistake
     an inert rule for a protecting one. This warns loudly rather than passing clean."""
 
+
+class InertDenyPolicyWarning(UserWarning):
+    """A `may not reach` rule selected a component in this audit, but no reach
+    of that component matched any of its patterns — so the rule denies nothing
+    (issue #1984, the enforce-time half of the fail-open).
+
+    A deny token that cannot match at all is a `PolicyError` at parse time; a
+    WELL-FORMED glob that matches nothing (`mail.sedn` where the boundary is
+    `mail.send`) is still a deny-list that protects nothing, and enforcing it
+    reads exactly like a clean pass. This warns loudly rather than passing
+    clean."""
+
 # a reach of `*` is an unbounded emission or a first-class dispatch — a
 # boundary the analysis cannot name (docs/capabilities.md). It is the token no
 # allow-list can bound implicitly, exactly as G4 treats it.
@@ -697,6 +709,69 @@ def _split_caps(text: str) -> tuple[str, ...]:
     return caps
 
 
+# The capability vocabulary is CLOSED. A capability token names a boundary in
+# the wiring namespace — a dotted identifier path (`mail.send`, `fs.write`;
+# docs/capabilities.md §2) — widened by the glob metacharacters a pattern may
+# carry. Anything else can never match a capability: whitespace from prose, a
+# space-separated list written where a comma belongs, an `except` clause. Those
+# are a `PolicyError` AT PARSE TIME, exactly as an unknown evidence facet is
+# (§3.3), because a token that cannot match makes the rule carrying it silently
+# inert — and for a `may not reach` deny-list that is the fail-open direction
+# (issue #1984: the policy is silently a no-op).
+_CAP_SEGMENT = re.compile(r"[A-Za-z0-9_*?\[\]!-]+")
+_EXCEPT_WORD = re.compile(r"(?:^|\s)except(?:\s|$)", re.IGNORECASE)
+
+
+def _is_cap_glob(token) -> bool:
+    """Whether `token` has the shape of a capability pattern: non-empty
+    dot-separated segments over identifier characters and glob metacharacters."""
+    if not isinstance(token, str) or not token or token != token.strip():
+        return False
+    return all(_CAP_SEGMENT.fullmatch(seg) for seg in token.split("."))
+
+
+def _cap_token_error(token, text: str) -> str:
+    """The diagnostic for a token that cannot be a capability pattern.
+
+    An `except` clause gets its own message: it is the prose an operator
+    naturally writes, and the reach grammar has nowhere to put a carve-out, so
+    the message names the mechanism that does (`requires approval`)."""
+    if isinstance(token, str) and _EXCEPT_WORD.search(token):
+        names = (f"the rule names {token!r}" if token == text.strip()
+                 else f"{text.strip()!r} names {token!r}")
+        return (f"`except` is not part of the reach grammar: {names}, "
+                f"which is prose, not a capability. A reach "
+                f"rule (`component <glob> may [not] reach <cap>[, ...]`) takes "
+                f"capability patterns separated by commas and carries no "
+                f"carve-out, so an exception cannot be expressed there. Name "
+                f"the components the rule applies to instead, or gate the "
+                f"crossing with `capability <glob> requires approval [ttl <D>] "
+                f"[require <N> of {{a, b}}]` — the item-246 exception "
+                f"mechanism, which refuses the reach until it is approved")
+    return (f"{token!r} is not a capability glob: {text.strip()!r} names a token "
+            f"that can never match a capability. A reach rule takes capability "
+            f"patterns separated by commas (`component <glob> may [not] reach "
+            f"<cap>[, ...]`, `realm <name> may [not] reach ...`, `mcp may reach "
+            f"...`, `<origin>-taint may not reach ...`), and a capability is a "
+            f"dotted identifier path such as `mail.send`, optionally globbed "
+            f"with `*`, `?` or a character set (docs/capabilities.md §2). It is "
+            f"refused at parse time because a rule carrying it would silently "
+            f"require or deny nothing (the closed vocabulary of §3.3)")
+
+
+def _validate_cap_globs(caps: tuple[str, ...], text: str, source,
+                        lineno) -> None:
+    for token in caps:
+        if not _is_cap_glob(token):
+            raise PolicyError(source, lineno, _cap_token_error(token, text))
+
+
+def _json_caps(values, source) -> tuple[str, ...]:
+    caps = tuple(values)
+    _validate_cap_globs(caps, json.dumps(list(caps)), source, 1)
+    return caps
+
+
 # ------------------------------------------------ item 290: evidence parsing
 
 def _parse_facet_clause(clause: str, source, lineno) -> tuple[str, str]:
@@ -1019,6 +1094,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                                   f"a taint-flow rule is `<origin>-taint may not "
                                   f"reach <cap>[, ...] [without approval]`, got "
                                   f"{raw.strip()!r}")
+            _validate_cap_globs(caps, tail, source, lineno)
             taint_flow_rules.append(
                 TaintFlowRule(origin, caps, without_approval))
             continue
@@ -1117,10 +1193,12 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             if idx == -1:
                 continue
             head = line[:idx].strip()
-            caps = _split_caps(line[idx + len(verb):])
+            raw_caps = line[idx + len(verb):]
+            caps = _split_caps(raw_caps)
             if not caps:
                 raise PolicyError(source, lineno,
                                   f"policy line names no capability: {raw.strip()!r}")
+            _validate_cap_globs(caps, raw_caps, source, lineno)
             parts = head.split()
             if len(parts) == 2 and parts[0].lower() == "component":
                 rules.append(Rule("component", parts[1], allow, caps))
@@ -1170,20 +1248,25 @@ def _parse_json(text: str, source: str | None) -> Policy:
     for entry in doc.get("components") or []:
         pat = entry.get("pattern") or entry.get("component") or "*"
         if entry.get("allow") is not None:
-            rules.append(Rule("component", pat, True, tuple(entry["allow"])))
+            rules.append(Rule("component", pat, True,
+                              _json_caps(entry["allow"], source)))
         if entry.get("deny"):
-            rules.append(Rule("component", pat, False, tuple(entry["deny"])))
+            rules.append(Rule("component", pat, False,
+                              _json_caps(entry["deny"], source)))
     for entry in doc.get("realms") or []:
         realm = entry.get("realm")
         if realm is None:
             raise PolicyError(source, 1, "a realm rule needs a `realm` name")
         if entry.get("allow") is not None:
-            rules.append(Rule("realm", realm, True, tuple(entry["allow"])))
+            rules.append(Rule("realm", realm, True,
+                              _json_caps(entry["allow"], source)))
         if entry.get("deny"):
-            rules.append(Rule("realm", realm, False, tuple(entry["deny"])))
+            rules.append(Rule("realm", realm, False,
+                              _json_caps(entry["deny"], source)))
     tenants = bool((doc.get("tenants") or {}).get("neverReachEachOther"))
     mcp = doc.get("mcp") or {}
-    mcp_allow = tuple(mcp["allow"]) if mcp.get("allow") is not None else None
+    mcp_allow = (_json_caps(mcp["allow"], source)
+                 if mcp.get("allow") is not None else None)
     leases_enforced = bool((doc.get("leases") or {}).get("enforced"))
     quarantine_required = bool((doc.get("quarantine") or {}).get("required"))
     approvals_bounded = bool(
@@ -1242,7 +1325,7 @@ def _parse_json(text: str, source: str | None) -> Policy:
                               "a taint-flow rule needs an `origin` and a "
                               "`reach`/`deny` capability list")
         taint_flow_rules.append(
-            TaintFlowRule(origin, tuple(caps),
+            TaintFlowRule(origin, _json_caps(caps, source),
                           bool(entry.get("withoutApproval")
                                or entry.get("without_approval"))))
     evidence_root_local = str(doc.get("evidenceRoot") or "").lower() == "local"
@@ -2144,6 +2227,7 @@ def evaluate(policy: Policy, audit: dict,
     # program), so the rule mints nothing and matches nothing. Warn loudly so an
     # operator is not lulled by a rule that protects nothing.
     _warn_if_taint_rules_are_inert(policy, audit)
+    _warn_if_deny_rules_are_inert(policy, audit)
     return violations
 
 
@@ -2166,6 +2250,41 @@ def _warn_if_taint_rules_are_inert(policy: Policy, audit: dict) -> None:
           "(the untrusted-author profile turns it on). An inert rule is not a "
           "protecting one (item 249).",
         InertTaintPolicyWarning, stacklevel=2)
+
+
+def _warn_if_deny_rules_are_inert(policy: Policy, audit: dict) -> None:
+    """Issue #1984, the enforce-time half. A deny token that cannot match is
+    refused at parse time; a WELL-FORMED glob that matches nothing is still a
+    deny-list that protects nothing, and it is indistinguishable from a clean
+    pass. Warn when a rule selected a component in THIS audit and no reach of
+    that component matched any of its patterns.
+
+    A rule that selects no component here says nothing — that is a policy
+    written for other compositions, not an inert one."""
+    denies = [rule for rule in policy.rules if not rule.allow]
+    if not denies:
+        return
+    manifest = audit.get("manifest") or {}
+    names = _components(audit)
+    reaches = {name: component_reach(audit, name) for name in names}
+    for rule in denies:
+        selected = [name for name in names
+                    if rule.selects(name, component_realms(manifest, name))]
+        if not selected:
+            continue
+        if any(_deny_matches(reach.token, rule.patterns)
+               for name in selected for reach in reaches[name]):
+            continue
+        subject = (f"component {rule.selector}" if rule.scope == "component"
+                   else f"realm {rule.selector}")
+        warnings.warn(
+            f"`{subject} may not reach {', '.join(rule.patterns)}` denies "
+            f"nothing: it selected [{', '.join(selected)}], and no reach of "
+            f"that component matches. Check the pattern against the reach "
+            f"surface (`revl audit`), or write the bound as a closed "
+            f"allow-list (`may reach ...`), which fails closed. An inert "
+            f"deny-list is not a protecting one (issue #1984).",
+            InertDenyPolicyWarning, stacklevel=2)
 
 
 def _allow_violation(manifest: dict, name: str, reach: Reach,

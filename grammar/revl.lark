@@ -1403,9 +1403,9 @@ g_2984: g_2983 g_285
 g_2985: NL? w_route
 s_2986_nn: "" | g_2990 s_2986_nn
 g_2987: r__capability_list_nn | ""
-g_2988: NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL? w_endorse | NL? w_validated | NL? w_retry
-g_2989: NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL? w_endorse | NL? w_validated | NL? w_retry
-g_2990: g_2988 g_2987 | r__endorse_slot_nn | NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL? w_endorse | NL? w_validated | NL? w_retry | g_2989 r__retry_budget_nn
+g_2988: NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL? w_endorse | NL? w_validated | NL? w_retry | NL? w_witnessed
+g_2989: NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL? w_endorse | NL? w_validated | NL? w_retry | NL? w_witnessed
+g_2990: g_2988 g_2987 | r__endorse_slot_nn | NL? w_emission | NL? w_async | NL? w_commutative | NL? w_idempotent | NL? w_endorse | NL? w_validated | NL? w_retry | NL? w_witnessed | g_2989 r__retry_budget_nn
 g_3006: NL? "->"
 r__within_clause_nn: g_3080 g_3078
 g_3007: r__within_clause_nn | ""
