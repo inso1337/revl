@@ -2098,13 +2098,168 @@ fn ref_thunk(ext: Any, name: Str, params: Str, arg_list: Str, returns: Str, ref:
   return out
 }
 
+// ============================================================== UI UNITS
+// issue #1972 (item 522 slice 3 / issue #1369): the UI TRANSACTION UNIT. A
+// computer-use extern is a CROSSING, and the reference wraps it twice — the
+// extern's exported binding runs through `uiCrossing`, which declares the
+// crossing and registers the extern's own declared `compensate`, and every
+// provide method that reaches one runs its whole body inside
+// `Frame.uiTransaction` / `uiTransactionAsync`, so the body is ONE unit and a
+// failed call settles what it registered. This tier emitted none of that, so a
+// computer-use document diverged byte for byte from the reference.
+
+// `ui_family.REVERSIBILITY`'s keys: the admissible `root.verb` tokens. Which
+// class each maps to (reversible / compensatable / confirm-required /
+// irreversible / unknown) is not rendered by this backend, so membership is the
+// whole of what the derivation reads. `ui.click` and `ui.download` have NO
+// inverse and are still crossings the unit covers — the wrapper is what records
+// that fact.
+fn ui_verb_known(bare: Str) -> Bool {
+  return bare == "screen.observe" || bare == "ui.find" || bare == "ui.text"
+      || bare == "ui.click" || bare == "ui.download"
+}
+
+// `ui_family.reversibility(token) is not None`: the token names a computer-use
+// verb, spelled exactly (`ui.click`) or reached through a ladder rung
+// (`ui.click.pixel`). A rung is the SAME operation under a weaker naming, so
+// `verb_of` resolves it to its verb — a rung cannot escape the unit by being
+// spelled differently, and an exact-match lookup here would let it.
+fn is_computer_use_token(token: Str) -> Bool {
+  let bare = token.split("(")[0]
+  if (ui_verb_known(bare)) { return true }
+  let segs = bare.split(".")
+  if (segs.length() < 2) { return false }
+  return ui_verb_known(`${segs[0]}.${segs[1]}`)
+}
+
+// `ui_transaction._extern_index`: is THIS extern a computer-use crossing? The
+// index is keyed on the emission class, and the token falls back to the extern's
+// own name when it declares no capability — never a computer-use verb — so the
+// two cases are the same test.
+fn extern_is_computer_use(ext: Any) -> Bool {
+  if (value_str(value_field(ext, "class")) != "emission") { return false }
+  let caps = value_list(value_field(ext, "capabilities"))
+  if (caps.length() == 0) { return false }
+  return is_computer_use_token(value_str(caps[0]))
+}
+
+// `_ui_transaction_facts`'s `ui_externs`: the document's computer-use extern
+// names, in declaration order.
+fn ui_extern_names(externs: List[Any]) -> List[Str] {
+  var out = []
+  for (ext of externs) {
+    if (extern_is_computer_use(ext)) { out = out.push(value_str(value_field(ext, "name"))) }
+  }
+  return out
+}
+
+// Is any computer-use extern async (or, with `want` false, sync)? `_runtime_imports`
+// adds `uiCrossingAsync` / `uiCrossing` on exactly this pair of tests.
+fn ui_externs_any_async(externs: List[Any], want: Bool) -> Bool {
+  for (ext of externs) {
+    if (extern_is_computer_use(ext) && value_bool(value_field(ext, "async")) == want) { return true }
+  }
+  return false
+}
+
+// `ui_transaction._walk_calls` / the `_reaches` half of `_crossing_facts`:
+// whether `node` calls one of `names`, at any depth and in any position — a
+// statement, a `let`, a `return`, an argument, either `if` arm, a loop body.
+// BOTH lowered call shapes count (a component body lowers `{kind: fn, name}`, a
+// pure fn body `{kind: call, callee: {kind: var, name}}`); a walk that knew only
+// the first would miss a call made through a helper. The two keys it does NOT
+// descend are named: a `compensate`/`undo` slot naming a crossing is the INVERSE
+// of a crossing, not a crossing (`_REGISTERED_INVERSE`).
+fn reaches_computer_use(node: Any, names: List[Str]) -> Bool {
+  let kind = value_str(value_field(node, "kind"))
+  if (kind == "fn" && list_contains(names, value_str(value_field(node, "name")))) { return true }
+  if (kind == "call") {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var" && list_contains(names, value_str(value_field(callee, "name")))) {
+      return true
+    }
+  }
+  for (item of value_list(node)) {
+    if (reaches_computer_use(item, names)) { return true }
+  }
+  for (k of value_keys(node)) {
+    if (k == "compensate" || k == "undo") { continue }
+    if (reaches_computer_use(value_field(node, k), names)) { return true }
+  }
+  return false
+}
+
+// `ui_transaction.plans(ir)`: every provide method whose body reaches a
+// computer-use extern, as `<component>|<provide key>.<method>`. The reference
+// derives the set from `_calls`, which accepts the same two call shapes and
+// skips the same `compensate`/`undo` slots as `_reaches` above, so "this method
+// is a unit" and "this body reaches a crossing" are the SAME predicate — the
+// second needs no extra machinery. A component ACTIVATION body is never a unit
+// (the reference skips `key=<activation>`), and this walk only ever visits
+// `provide` steps, so that case cannot arise here.
+//
+// The component is part of the key because the `Frame` gate is per component: a
+// document with two components both providing `desk` must not have one
+// component's unit scope the other's method.
+fn ui_units(ir: Any) -> List[Str] {
+  var out = []
+  let names = ui_extern_names(value_list(value_field(ir, "externs")))
+  if (names.length() == 0) { return out }
+  for (comp of value_list(value_field(ir, "components"))) {
+    let cname = value_str(value_field(comp, "name"))
+    for (step of value_list(value_field(comp, "body"))) {
+      if (value_str(value_field(step, "step")) != "provide") { continue }
+      let pkey = value_str(value_field(step, "name"))
+      for (method of value_list(value_field(step, "methods"))) {
+        if (reaches_computer_use(value_field(method, "body"), names)) {
+          out = out.push(`${cname}|${pkey}.${value_str(value_field(method, "name"))}`)
+        }
+      }
+    }
+  }
+  return out
+}
+
+fn ui_unit_scoped(units: List[Str], comp_name: Str, unit: Str) -> Bool {
+  return list_contains(units, `${comp_name}|${unit}`)
+}
+
+// `_ui_crossing_wrapper`: the exported binding a computer-use extern is reached
+// through. Its 4th argument is the CROSSING the wrapper declares — keyed on the
+// extern's own declared `compensate` when it has one (the method name is read
+// off the compensate call, exactly as `_call_method_name` reads it), and an
+// empty literal when it has none — and its 5th is the method the frame records,
+// that same name or `""`. Registering the declared compensation HERE is what
+// makes the statement-site registration redundant, which is why the provide-method
+// body suppresses it (issue #1369).
+fn ui_crossing_wrapper(ext: Any, name: Str, impl: Str, params: Str, arg_list: Str, returns: Str) -> List[Str] {
+  var thunk = "null"
+  var crossing = `{ key: "", method: "?", args: [], site: "" }`
+  var method = ""
+  let comp = value_field(ext, "compensate")
+  if (!value_is_null(comp)) {
+    method = call_method_name(comp)
+    thunk = `() => ${expr(comp, 0, sync_acx()).text}`
+    crossing = `{ key: ${json_dumps(method)}, method: ${json_dumps(method)}, args: [], site: ${json_dumps(value_str(value_field(ext, "name")))} }`
+  }
+  let label = json_dumps(value_str(value_field(ext, "name")))
+  if (value_bool(value_field(ext, "async"))) {
+    return [`export async function ${name}(${params}): Promise<${returns}> {`,
+            `  return uiCrossingAsync(${label}, () => ${impl}(${arg_list}), ${thunk}, ${crossing}, ${json_dumps(method)})`,
+            "}", ""]
+  }
+  return [`export function ${name}(${params}): ${returns} {`,
+          `  return uiCrossing(${label}, () => ${impl}(${arg_list}), ${thunk}, ${crossing}, ${json_dumps(method)})`,
+          "}", ""]
+}
+
 // `_emit_ts_externs`: each `extern fn` as an exported TS `function` carrying its
 // verbatim `@ts` body (dedented, each line re-indented two spaces). An `async`
 // extern (item 80) emits `export async function …: Promise<T>` — its body may
 // `await`, and every admitted call site awaits it (see `render_call`). A missing
 // `@ts` body is refused, matching the reference; VARIANT/non-ts externs are not
 // in the covered corpus.
-fn emit_externs(externs: List[Any]) -> List[Str] {
+fn emit_externs(externs: List[Any], ui_externs: List[Str]) -> List[Str] {
   var out = []
   // item 378 Stage 5: the plug-time config seam, once, before the externs,
   // when any extern carries a config schema (byte-identical when none do).
@@ -2142,11 +2297,20 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     // Absent unless the author declared it, so every other module stays
     // byte-identical.
     let secret_return = value_bool(value_field(ext, "secret_return"))
-    var impl = name
+    // issue #1369: a computer-use extern's EXPORTED name is its `uiCrossing`
+    // wrapper; everything below renders the implementation that wrapper wraps,
+    // and that implementation is not exported (the wrapper is).
+    var public = name
+    if (list_contains(ui_externs, value_str(value_field(ext, "name")))) {
+      public = "_revl_ui_".concat(name)
+    }
+    var impl = public
     var export_kw = "export "
     if (secret_return) {
       impl = "_revl_secret_".concat(name)
       export_kw = ""
+    } else {
+      if (public != name) { export_kw = "" }
     }
     // item 396 option B: a `@ts ref` extern (a ts ref and no verbatim ts body)
     // emits a lazy import thunk that resolves the ref'd module at CALL time.
@@ -2158,9 +2322,14 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     if (!value_has(bodies, "ts")) {
       out = out.push(`<<EXTERN-NO-TS-BODY:${name}>>`)
     } else {
+      // issue #1369: the wrapper is emitted only for an extern that HAS a body,
+      // matching the reference (which refuses a bodyless one outright).
+      if (public != name) {
+        out = out.concat(ui_crossing_wrapper(ext, name, public, params, arg_list, returns))
+      }
       if (value_bool(value_field(ext, "async"))) {
         if (secret_return) {
-          out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
+          out = out.push(`${public == name ? "export " : ""}async function ${public}(${params}): Promise<${returns}> {`)
           out = out.push(`  return host.secretResult(await ${impl}(${arg_list}))`)
           out = out.push("}")
           out = out.push("")
@@ -2168,7 +2337,7 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
         out = out.push(`${export_kw}async function ${impl}(${params}): Promise<${returns}> {`)
       } else {
         if (secret_return) {
-          out = out.push(`export function ${name}(${params}): ${returns} {`)
+          out = out.push(`${public == name ? "export " : ""}function ${public}(${params}): ${returns} {`)
           out = out.push(`  return host.secretResult(${impl}(${arg_list}))`)
           out = out.push("}")
           out = out.push("")
@@ -2413,7 +2582,7 @@ fn pinned_arrow(step: Any, slot: Str, arrow: Str) -> Str {
 // (services 2.0 §5) renders its body with `in_async` set (via `acx`), so the
 // item-141 await-seed fires on a req-keyed async-op call, and an explicit
 // `await` step lands (A1). A sync method's `acx` is `sync_acx()`.
-fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str) -> StmtOut {
+fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str, in_method: Bool) -> StmtOut {
   let pad = ind(level)
   var out = []
   var c = counter
@@ -2479,7 +2648,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
             out = out.push(`${pad}})`)
           } else {
             if (kind == "emit") {
-              let er = emit_compensated(step, level, c, acx, `${provide_name}.${method_name}`, provide_name, `${frame_var}.compensationMethod`)
+              let er = emit_compensated(step, level, c, acx, `${provide_name}.${method_name}`, provide_name, `${frame_var}.compensationMethod`, in_method)
               out = out.concat(er.lines)
               c = er.counter
             } else {
@@ -2497,7 +2666,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
               // indent — byte-for-byte the fn-grammar shape. The condition /
               // iterable expression is rendered BEFORE the arms so the
               // await-seed counter advances in the reference's order.
-              let cr = method_control(step, level, c, acx, frame_var, provide_name, method_name)
+              let cr = method_control(step, level, c, acx, frame_var, provide_name, method_name, in_method)
               out = out.concat(cr.lines)
               c = cr.counter
             } else {
@@ -2519,13 +2688,13 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
 // (issue #548, ported for issue #721 / item 458). `else` is rendered only for a
 // NON-EMPTY else arm — the reference tests the arm for truth, not for presence,
 // so an `if` whose else arm lowered to nothing emits no `} else {` at all.
-fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str) -> StmtOut {
+fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str, in_method: Bool) -> StmtOut {
   let pad = ind(level)
   let kind = value_str(value_field(step, "step"))
   if (kind == "while") {
     let r = expr(value_field(step, "cond"), counter, acx)
     var out = [`${pad}while (${r.text}) {`]
-    let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
+    let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name, in_method)
     out = out.concat(b.lines)
     out = out.push(`${pad}}`)
     return { lines: out, counter: b.counter }
@@ -2533,20 +2702,20 @@ fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str,
   if (kind == "for") {
     let r = expr(value_field(step, "iterable"), counter, acx)
     var out = [`${pad}for (const ${ident(value_str(value_field(step, "bind")))} of ${r.text}) {`]
-    let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
+    let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name, in_method)
     out = out.concat(b.lines)
     out = out.push(`${pad}}`)
     return { lines: out, counter: b.counter }
   }
   let r = expr(value_field(step, "cond"), counter, acx)
   var out = [`${pad}if (${r.text}) {`]
-  let t = method_body(value_list(value_field(step, "then")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
+  let t = method_body(value_list(value_field(step, "then")), level + 1, r.counter, acx, frame_var, provide_name, method_name, in_method)
   out = out.concat(t.lines)
   var c = t.counter
   let els = value_list(value_field(step, "else"))
   if (els.length() > 0) {
     out = out.push(`${pad}} else {`)
-    let e = method_body(els, level + 1, c, acx, frame_var, provide_name, method_name)
+    let e = method_body(els, level + 1, c, acx, frame_var, provide_name, method_name, in_method)
     out = out.concat(e.lines)
     c = e.counter
   }
@@ -2558,7 +2727,7 @@ fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str,
 // bind the body; the param TYPES come from the service declaration (arity must
 // agree). An operation the service declares `async` lowers to an `async` method
 // whose body renders in an async context (the await-seed's `ops`, item 219).
-fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], frame_var: Str, level: Int, counter: Int) -> StmtOut {
+fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], comp_name: Str, units: List[Str], frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let svc_name = value_str(value_field(step, "service"))
   let declared = value_field(value_field(services, svc_name), "methods")
@@ -2610,9 +2779,28 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], kno
     if (secret_params.length() > 0) {
       out = out.push(`${pad}  host.markSecret(${secret_params.join(", ")})`)
     }
-    let br = method_body(value_list(value_field(method, "body")), level + 1, c, body_acx, frame_var, svc_name, name)
+    // issue #1369: a method whose body crosses a computer-use verb runs that
+    // whole body inside ONE unit, so a call that fails part-way settles what the
+    // body registered instead of leaving it half-applied. The unit is named
+    // `<provide key>.<method>` — the RAW method name, which is what the frame
+    // reports to an operator — the body is indented one level further, and the
+    // arrow is closed after it.
+    let unit = `${value_str(value_field(step, "name"))}.${name}`
+    var body_level = level + 1
+    var scoped = false
+    if (frame_var != "" && ui_unit_scoped(units, comp_name, unit)) {
+      scoped = true
+      if (is_async) {
+        out = out.push(`${pad}  return await ${frame_var}.uiTransactionAsync(${json_dumps(unit)}, async () => {`)
+      } else {
+        out = out.push(`${pad}  return ${frame_var}.uiTransaction(${json_dumps(unit)}, () => {`)
+      }
+      body_level = level + 2
+    }
+    let br = method_body(value_list(value_field(method, "body")), body_level, c, body_acx, frame_var, svc_name, name, true)
     out = out.concat(br.lines)
     c = br.counter
+    if (scoped) { out = out.push(`${pad}  })`) }
     out = out.push(`${pad}},`)
   }
   return { lines: out, counter: c }
@@ -2638,7 +2826,7 @@ fn crossing_key_name(target: Any) -> Str {
 // this component's RAW name (for a compensation entry's `site`); `frame_var` is
 // the emitted `Frame` local (`$revl_frame`, "" when the component needs none) —
 // a compensation entry registers through it (item 243 Slice 2b).
-fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
+fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], comp_name: Str, units: List[Str], frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let sync_base = sync_acx()
   let a = { sync_base | routes = routes, comps = comps }
@@ -2691,12 +2879,12 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
     return { lines: out, counter: er.counter }
   }
   if (kind == "emit") {
-    return emit_compensated(step, level, counter, a, `${comp_name}.body`, comp_name, `yield ${frame_var}.compensation`)
+    return emit_compensated(step, level, counter, a, `${comp_name}.body`, comp_name, `yield ${frame_var}.compensation`, false)
   }
   if (kind == "provide") {
     let name = value_str(value_field(step, "name"))
     var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
-    let pr = provide_impl(step, services, ops, routes, known_types, async_names, comps, frame_var, level + 1, counter)
+    let pr = provide_impl(step, services, ops, routes, known_types, async_names, comps, comp_name, units, frame_var, level + 1, counter)
     out = out.concat(pr.lines)
     out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
     return { lines: out, counter: pr.counter }
@@ -2706,7 +2894,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
     var out = [`${pad}if (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(step, "then"))) {
-      let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
+      let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, units, frame_var, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -2714,7 +2902,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
     if (els.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (s of els) {
-        let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
+        let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, units, frame_var, level + 1, c)
         out = out.concat(r.lines)
         c = r.counter
       }
@@ -2754,7 +2942,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
     out = out.push(`${pad}  if (host.Stream.isClosed(${item})) break`)
     if (gate != "") { out = out.push(`${pad}  if (!${gate}.admit(${item}, ${json_dumps(where)})) continue`) }
     for (inner of value_list(value_field(step, "body"))) {
-      let r = component_step(inner, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
+      let r = component_step(inner, services, ops, routes, known_types, async_names, comps, comp_name, units, frame_var, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -2847,7 +3035,7 @@ fn timer_compensation(em: Any, n: Int, comp_name: Str, frame_var: Str, level: In
 }
 
 // Both activation and method compensation snapshot arguments at registration.
-fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: Str, scope_name: Str, register: Str) -> StmtOut {
+fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: Str, scope_name: Str, register: Str, in_method: Bool) -> StmtOut {
     let pad = ind(level)
     let er = expr(value_field(step, "expr"), counter, a)
     var emitted = er.text
@@ -2867,6 +3055,16 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
     }
     let idx = value_is_null(comp) ? compensated_extern_index(value_field(step, "expr"), a.comps) : -1
     if (idx >= 0) {
+      // issue #1369: inside a provide method a computer-use extern is reached
+      // through its `uiCrossing` wrapper, and THAT is where the extern's own
+      // declared compensation is registered — once per crossing, with the
+      // crossing it belongs to. Registering it again here would register the
+      // same inverse twice and name the wrong site, so the statement site
+      // stands down. (A `compensate` the STEP spells is unaffected: the clause
+      // above has already emitted it, exactly as the reference does.)
+      if (in_method && extern_is_computer_use(a.comps[idx])) {
+        return { lines: out, counter: c }
+      }
       let r = register_compensation(value_field(a.comps[idx], "compensate"), true, level, c, a, site_prefix, scope_name, register)
       out = out.concat(r.lines)
       c = r.counter
@@ -2999,7 +3197,7 @@ fn config_interface(comp: Any) -> List[Str] {
 }
 
 // `_component`: one component's config interface + plugin object.
-fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], comps: List[Any], counter: Int) -> StmtOut {
+fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], comps: List[Any], units: List[Str], counter: Int) -> StmtOut {
   let name = ident(value_str(value_field(comp, "name")))
   var out = config_interface(comp)
   out = out.push(`export const ${name} = {`)
@@ -3090,7 +3288,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   // byte-identical to before this slice. `frame_var` is threaded to
   // `component_step`, where a compensation registers through it; "" otherwise.
   let raw_name = value_str(value_field(comp, "name"))
-  let needs_frame = component_needs_frame(comp, comps)
+  let needs_frame = component_needs_frame(comp, comps, units)
   var frame_var = ""
   if (needs_frame || component_has_bracket(comp)) {
     frame_var = "$revl_frame"
@@ -3130,7 +3328,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   let ops = async_ops_of(value_field(comp, "requires"), services)
   var c = counter
   for (step of body) {
-    let r = component_step(step, services, ops, route_keys, known_types, async_names, comps, raw_name, frame_var, 3, c)
+    let r = component_step(step, services, ops, route_keys, known_types, async_names, comps, raw_name, units, frame_var, 3, c)
     out = out.concat(r.lines)
     c = r.counter
   }
@@ -3232,7 +3430,7 @@ fn emit_component_tail(ir: Any, async_names: List[Str]) -> List[Str] {
   out = out.concat(context_augmentation(components))
   var c = 0
   for (comp of components) {
-    let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, compensated_externs(ir), c)
+    let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, compensated_externs(ir), ui_units(ir), c)
     out = out.concat(r.lines)
     out = out.push("")
     c = r.counter
@@ -3596,7 +3794,7 @@ fn uses_spawn(n: Any) -> Bool {
 // before this slice. (The witnessed/transactional entry kind is Slice-2b too but
 // no covered document declares a witnessed extern, so it is out of this port —
 // see item 324; a re-enabled witnessed fixture would extend this walk.)
-fn body_needs_frame(steps: List[Any], comps: List[Any]) -> Bool {
+fn body_needs_frame(steps: List[Any], comps: List[Any], units: List[Str], comp_name: Str) -> Bool {
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "emit" && emit_registers(step, comps)) { return true }
@@ -3609,19 +3807,27 @@ fn body_needs_frame(steps: List[Any], comps: List[Any]) -> Bool {
     }
     if (kind == "provide") {
       for (method of value_list(value_field(step, "methods"))) {
-        if (body_needs_frame(value_list(value_field(method, "body")), comps)) { return true }
+        // issue #1369: the scope itself is a use of the frame. It has to be
+        // asked for HERE and not merely inferred from the body, because the
+        // wrapper owns the declared compensation (so a body whose only
+        // frame-need was a compensatable extern no longer asks for one) and a
+        // crossing that declares no `compensate` at all never did.
+        if (ui_unit_scoped(units, comp_name, `${value_str(value_field(step, "name"))}.${value_str(value_field(method, "name"))}`)) {
+          return true
+        }
+        if (body_needs_frame(value_list(value_field(method, "body")), comps, units, comp_name)) { return true }
       }
     }
     if (kind == "if") {
-      if (body_needs_frame(value_list(value_field(step, "then")), comps)) { return true }
-      if (body_needs_frame(value_list(value_field(step, "else")), comps)) { return true }
+      if (body_needs_frame(value_list(value_field(step, "then")), comps, units, comp_name)) { return true }
+      if (body_needs_frame(value_list(value_field(step, "else")), comps, units, comp_name)) { return true }
     }
   }
   return false
 }
 
-fn component_needs_frame(comp: Any, comps: List[Any]) -> Bool {
-  return body_needs_frame(value_list(value_field(comp, "body")), comps)
+fn component_needs_frame(comp: Any, comps: List[Any], units: List[Str]) -> Bool {
+  return body_needs_frame(value_list(value_field(comp, "body")), comps, units, value_str(value_field(comp, "name")))
 }
 
 // `_ComponentEmitter.compensated` / `_Ctx.compensated` (item 254, issue #1592):
@@ -3738,7 +3944,7 @@ fn acquire_method_name(node: Any) -> Str {
 // registers a compensation entry.
 fn uses_frame(ir: Any) -> Bool {
   for (comp of value_list(value_field(ir, "components"))) {
-    if (component_needs_frame(comp, compensated_externs(ir))) { return true }
+    if (component_needs_frame(comp, compensated_externs(ir), ui_units(ir))) { return true }
   }
   return false
 }
@@ -3767,6 +3973,12 @@ fn runtime_imports(ir: Any) -> Str {
     // witnessed/compensating extern's `@ts` body, so `record` stays out.
     if (uses_bracket_frame(ir)) { names = names.push("Frame") }
   }
+  // issue #1369: a computer-use extern's wrapper is `uiCrossing`, or
+  // `uiCrossingAsync` when the extern itself is async. Each is imported only
+  // when an extern of that shape is actually declared.
+  let exts = value_list(value_field(ir, "externs"))
+  if (ui_externs_any_async(exts, false)) { names = names.push("uiCrossing") }
+  if (ui_externs_any_async(exts, true)) { names = names.push("uiCrossingAsync") }
   if (uses_routes(ir)) { names = names.push("realmLabel") }
   if (uses_spawn(value_field(ir, "components"))) { names = names.push("spawn") }
   if (uses_lifecycle_tests(ir)) {
@@ -4213,7 +4425,7 @@ pub fn emit_ts_src(ir: Any) -> Str {
   }
   // Externs emit before functions (mirroring `_emit_v3`) so a colored fn's
   // awaited callee is already declared above it.
-  if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
+  if (externs.length() > 0) { out = out.concat(emit_externs(externs, ui_extern_names(externs))) }
   if (functions.length() > 0) { out = out.concat(emit_functions(functions, async_names)) }
   // The in-file test section: plain tests, then lifecycle drivers. A `fault
   // test` keeps its named marker (issue #1123).
