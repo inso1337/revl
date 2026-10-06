@@ -910,6 +910,65 @@ class ClassMap:
                 return frozenset(reaches) & TAINT_FOLD_ORIGINS
         return frozenset()
 
+    def declared_untrusted_args(self, component: str, key: str | None,
+                                method: str | None) -> list[dict]:
+        """The argument positions this call passes whose DECLARED parameter is
+        `Untrusted[T]` (issue #1981) - the argument-level fact `taintOrigins`
+        cannot state.
+
+        `static_taint` is a property of the COMPONENT, so a call handing the
+        capability a page-derived value and a call handing it nothing but
+        author-typed literals report the SAME `taintOrigins`, and an operator
+        answering the class-(c) prompt cannot tell which argument in front of
+        them is untrusted. The declared signature already separates them -
+        `shout(sink: Trusted[Str], msg: Untrusted[Str])` versus
+        `quiet(sink: Trusted[Str], msg: Trusted[Str])` - and issue #1937's IR
+        keys keep that qualifier beside the stripped type precisely so it
+        crosses a boundary (`services.<Svc>.methods.<m>.params[i].untrusted`,
+        written by `_ir_params` and read back the same way by `admission.py`).
+        This reads that statement rather than re-deriving it, so the cost is one
+        dict walk and no new analysis.
+
+        `index` is the 0-based position in the operation's declared parameter
+        list - the same index `services.<Svc>.methods.<m>.params` uses, so it
+        reads straight off the IR - and `name` is carried so a reader never has
+        to count. Absent when nothing is declared untrusted, matching the IR's
+        own "absent unless declared" rule, so a composition that writes no
+        qualifier keeps byte-identical tickets.
+
+        What this deliberately does NOT name is the flow ORIGIN (`web`, from
+        `fetch`'s emission domain). That is a fact about flow rather than about
+        the signature: the checker computes it while walking a body and raises
+        it in its own G9 refusal, and no IR key records it per argument - a
+        program the checker ADMITS (this issue's own repro) never runs that walk
+        at all. Naming it here would mean recording the flow, which is what
+        Slice E's runtime tag is for. Until then `taintOrigins` stays the honest
+        component-level answer and this field says which POSITION the
+        declaration calls untrusted, never an origin it did not verify."""
+        if key is None or method is None:
+            return []  # an activation passes no arguments
+        provides = None
+        for comp in self.ir.get("components") or []:
+            if comp.get("name") == component:
+                provides = comp.get("provides") or {}
+                break
+        service = (provides or {}).get(key)
+        if service is None:
+            # the IR carries the QUALIFIED wiring key (docs/namespacing.md)
+            # while the ticket records the key the caller wrote, so match on the
+            # final segment - and only when it names one service, so an
+            # ambiguous alias reports nothing rather than the wrong signature
+            tail = {svc for k, svc in (provides or {}).items()
+                    if k.rsplit("::", 1)[-1] == key}
+            service = tail.pop() if len(tail) == 1 else None
+        if service is None:
+            return []
+        spec = (self.ir.get("services") or {}).get(service) or {}
+        params = ((spec.get("methods") or {}).get(method) or {}).get("params")
+        return [{"index": i, "name": p.get("name")}
+                for i, p in enumerate(params or ())
+                if p.get("untrusted")]
+
     # -- the ticket ---------------------------------------------------------
 
     def ceilings(self, reach: dict, tokens) -> dict:
@@ -1036,6 +1095,17 @@ class ClassMap:
             taint = self.static_taint(component)
             if taint:
                 body["taintOrigins"] = sorted(taint)
+            # issue #1981: the argument-level half of the disclosure a
+            # component-level taint set cannot carry - which of the arguments
+            # this call passes sits in a parameter the operation declares
+            # `Untrusted[T]`. Read from the declaration (see
+            # `declared_untrusted_args`). After the hash, and omitted when
+            # empty, so a composition with no qualifier keeps byte-identical
+            # ticket identities.
+            untrusted_args = self.declared_untrusted_args(
+                component, reach.get("key"), reach.get("method"))
+            if untrusted_args:
+                body["untrustedArguments"] = untrusted_args
         return body
 
 
