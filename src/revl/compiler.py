@@ -1877,10 +1877,21 @@ def _included_host_externs(included: list[_LoadedModule]) -> dict:
     return result
 
 
+def file_not_found(path: str) -> RevlError:
+    """The refusal for a root path that cannot be opened.
+
+    One constructor, so every verb that resolves a path by name — `revl_check`
+    and `revl_load` through `_load_root`, `revl_source` through
+    `mcp.edit._files_source` — reports the SAME cause for the same path
+    (issue #2031). A path error must never be reattributed as a content error,
+    and a multi-file caller must be able to tell which path failed."""
+    return RevlError(path, 1, f"file not found: {path}")
+
+
 def _load_root(loader: _ModuleLoader, path: str) -> _LoadedModule:
     # a virtual source stands in for the file it names (in-memory compilation)
     if not loader.has_source(path) and not os.path.exists(path):
-        raise RevlError(path, 1, f"file not found: {path}")
+        raise file_not_found(path)
     return loader.load(path)
 
 

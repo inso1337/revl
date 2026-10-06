@@ -67,7 +67,7 @@ import copy
 import os
 import re
 
-from ..compiler import compile_source
+from ..compiler import compile_source, file_not_found
 from ..diagnostics import report
 from ..errors import RevlError
 from . import effect_classes as _effect_classes
@@ -113,12 +113,32 @@ def virtual_source(session) -> dict:
             "modules": dict(origin.get("modules") or {})}
 
 
-def _files_source(origin: dict) -> dict:
+def _files_source(origin: dict, *, require_all: bool = True) -> dict:
+    """The working set for a `files` source.
+
+    Every listed path must be readable: a file that cannot be opened is
+    reported where it is detected, with the same `file not found` refusal
+    `revl_check`/`revl_load` give (issue #2031). The alternative — carrying a
+    `None` buffer and letting `symbols.buffers` drop it — turned a wrong path
+    into a missing-declaration error with one file, and a silent partial
+    success (`ok: true`) with two.
+
+    `require_all=False` is for the one caller that reads a candidate only to
+    describe it, after the decision was already taken elsewhere
+    (`server._with_candidate_knowledge`): there an unreadable path drops out of
+    the description instead of refusing, so a check's payload is unchanged."""
     files = list(origin[ORIGIN_FILES])
     held = origin.get(ORIGIN_FILES_CONTENT) or {}
+    content = {}
+    for path in files:
+        text = held[path] if path in held else _read_disk(path)
+        if text is None:
+            if require_all:
+                raise file_not_found(path)
+            continue
+        content[path] = text
     return {ORIGIN_SOURCE: None, ORIGIN_FILES: files,
-            ORIGIN_FILES_CONTENT: {path: held[path] if path in held else _read_disk(path)
-                              for path in files},
+            ORIGIN_FILES_CONTENT: content,
             ORIGIN_MODULES: dict(origin.get(ORIGIN_MODULES) or {})}
 
 
