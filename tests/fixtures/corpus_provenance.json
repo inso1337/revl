@@ -1299,6 +1299,7 @@
    "tests/fixtures/emit_java_refusals/host_identifier_collision.rvl",
    "tests/fixtures/emit_py_refusals/host_identifier_collision.rvl",
    "tests/fixtures/emit_rust_refusals/host_identifier_collision.rvl",
+   "tests/fixtures/emit_ts_corpus/host_map_journal.rvl",
    "tests/fixtures/emit_ts_refusals/host_identifier_collision.rvl",
    "tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl"
   ]

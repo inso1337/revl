@@ -280,6 +280,16 @@ CORPUS = [
     # (item 429's trap). Added FAILING FIRST: the port answered
     # `<<UNSUPPORTED-LIFECYCLE-STEP:abort>>`.
     "lifecycle_abort.rvl",
+    # Issue #2009 (the py #1945 part 2 fold, ported per item 429(d)): the
+    # host-map journal. A component whose ONLY bracketed host-map write sits
+    # inside a provide-method body — `set` writes under `effect`, `put` writes
+    # unwrapped — is the one shape where the component needs a `Frame` that no
+    # activation-body bracket ever created, so it is the only shape that
+    # reaches the `provide` arm of `_has_bracket` and the whole of
+    # `_method_body_has_bracket`. No document above has it, so the arm was
+    # invisible to the oracle: `selfhost/emit_ts.rvl` emitted no `journalBegin`
+    # at all while the suite was green.
+    "host_map_journal.rvl",
 ]
 
 def _load_reference_emit():

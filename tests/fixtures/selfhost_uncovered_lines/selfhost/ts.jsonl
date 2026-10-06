@@ -42,6 +42,10 @@
 
 ["function", "extern-body-and-context-empty-cases-emit-externs", "emit_externs", 1, 1]
 
+["reason", "issue-2009-the-frontend-refuses-a-bracketed-effect-inside-a-provide-method-if-while-for-body", "Issue #2009: the `if`/`while`/`for` arms of `_method_body_has_bracket`. They recurse into a provide method's control-flow bodies looking for a `bracket`, and the frontend makes that impossible: `src/revl/lower.py` refuses a teardown-registering step (`effect`/`let-effect`/`await`) inside a provide-method `if`/`while`/`for` body, because the activation frame owns every inverse and registers it at the method's top level (issue #548, docs/design/478-component-author-ergonomics.md Group 3). So the two `return True` bodies can only ever see a document the frontend rejects, which never reaches the emitter at all. The arms are kept so the walk mirrors `_has_bracket`'s recursion shape, exactly as that function's own `bracket`-outside-`provide` arms are kept (this file already budgets them). The bare `provide`-method arm IS reached: tests/fixtures/emit_ts_corpus/host_map_journal.rvl carries a component whose only bracket is inside `provide kv2 { fn set ... }`."]
+
+["function", "issue-2009-the-frontend-refuses-a-bracketed-effect-inside-a-provide-method-if-while-for-body", "method_body_has_bracket", 3, 3]
+
 ["reason", "legacy-expression-type-inference-is-float-expr-handles", "Legacy expression-type inference: `is_float_expr` handles unstamped literal Float and returns false for non-minus unary expressions; `surface_type` retains widen-Int, legacy name-id, Float/Str/Int/Bool literals, and unknown literal/list element (the `index` arm, the #957 `Map` value type included, is covered). Current typed IR carries operand/expected stamps on the covered forms"]
 
 ["function", "legacy-expression-type-inference-is-float-expr-handles", "is_float_expr", 2, 2]

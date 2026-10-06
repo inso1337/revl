@@ -1,0 +1,56 @@
+// Issue #2009 — the host-map journal arm (the py #1945 part 2 fold), on the
+// shape no other document has: a component whose ONLY bracket sits inside a
+// provide-method body, so `_has_bracket`'s `provide` arm and the whole of
+// `_method_body_has_bracket` are reached and the component still needs a
+// `Frame` for the journal `guard` closes.
+
+service Kv {
+  fn set(k: Str, v: Str) -> Str
+  fn put(k: Str, v: Str) -> Bool
+}
+
+service Db {
+  fn insert(k: Str, v: Str) -> Bool
+  fn remove(k: Str) -> Bool
+}
+
+service Kv2 {
+  fn set(k: Str, v: Str) -> Str
+}
+
+// The issue's D1 program: the bracket is the activation body's `let-effect`.
+component Store provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+      return v
+    }
+    fn put(k, v) = store.insert_if_absent(k, v)
+  }
+}
+
+// ...and the shape that reaches the provide arm: no activation-body bracket at
+// all, the only `effect`/`undo` inside a provide method.
+component Proxy requires db: Db provides kv2: Kv2 {
+  provide kv2 {
+    // The bracket arm of `_method_body_has_bracket`. Its `if`/`while` arms are
+    // NOT exercised here: the frontend refuses a teardown-registering step
+    // inside a provide-method `if`/`while`/`for` body (issue #548), so those
+    // arms can only ever see a document the frontend rejects.
+    fn set(k, v) {
+      effect db.insert(k, v)
+      undo   db.remove(k)
+      return v
+    }
+  }
+}
+
+lifecycle test "a method-body write is reversed" {
+  load Store
+  call kv.put("alpha", "zero")
+  call kv.set("alpha", "one")
+  unload Store
+  assert no_residue
+}

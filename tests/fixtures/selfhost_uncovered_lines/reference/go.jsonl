@@ -30,13 +30,13 @@
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_stream_stage_arrow", 16, 16]
 
-["reason", "component-effect-undo-frame-and-witnessed-wal-emission", "Component effect/undo frame and witnessed-WAL emission: activation/provide methods register inverses, pin captures and encode residue/teardown descriptors. None is a pure-function step in the accepted selfhost corpus; witnessed runtime support, including secret-witness redaction, remains outside this port. Issue #106, fifth slice: the combined path's method-emit documents (comp_provide_emit.rvl and four tree documents) run more of this; the counts are lowered in place."]
+["reason", "component-effect-undo-frame-and-witnessed-wal-emission", "Component effect/undo frame and witnessed-WAL emission: activation/provide methods register inverses, pin captures and encode residue/teardown descriptors. None is a pure-function step in the accepted selfhost corpus; witnessed runtime support, including secret-witness redaction, remains outside this port. Issue #106, fifth slice: the combined path's method-emit documents (comp_provide_emit.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #2009 adds six statements here: a bracket's forward write to the host Map is wrapped in `revlJournalNote(...)` before it runs and its `undo` in `revlJournalGuard(...)`, so the undo is judged with the journal re-armed (py `Frame._guard`, backends/python/runtime.py:3690)."]
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_body_needs_frame", 5, 5]
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_call_descriptor", 9, 9]
 
-["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_effect_step", 11, 11]
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_effect_step", 17, 17]
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_method_witnessed_step", 47, 47]
 
@@ -136,6 +136,20 @@
 
 ["function", "issue-1631-the-arity-guard-in-v3-fill", "_v3_fill_erased", 1, 1]
 
+["reason", "issue-2009-host-map-journal-arm-lines-inside-shared-helpers-go", "Issue #2009: the statements the host-map journal arm adds inside helpers the go corpus already calls. `_body_needs_journal` asks whether a provide-method body needs a frame at all, and `_steps_have_bracket` asks whether any step of a body carries a `bracket`. Both answer about a document the corpus does not have, for the reason recorded on the arm's own helpers, and both sit behind the same `_JOURNAL_MODE` gate."]
+
+["function", "issue-2009-host-map-journal-arm-lines-inside-shared-helpers-go", "_body_needs_journal", 6, 6]
+
+["function", "issue-2009-host-map-journal-arm-lines-inside-shared-helpers-go", "_steps_have_bracket", 7, 7]
+
+["reason", "issue-2009-host-map-journal-arm-no-go-corpus-document", "Issue #2009: the host-map journal arm's own helpers. `_bracket_writes_host_map` and `_node_writes_host_map` decide whether a document's host Map writes are journalled at all, and `_journal_ref` renders the `revlJournalNote`/`revlJournalJudge` call. No emit_go_corpus document has a host `Map` written under a `bracket` in a document that ALSO carries a lifecycle `assert no_residue`, so `_journal_readable(ir)` is False for every corpus document, `_JOURNAL_MODE` stays off and none of these three is called. Reaching them with a corpus document is not available at this tier: the document would first have to be ported into `selfhost/emit_go.rvl`, which carries no journal arm at all (`grep -c journal selfhost/emit_go.rvl` is 0), so the byte-agreement oracle in tests/test_selfhost_emit_go.py would go RED before this ledger could be satisfied. The arm is exercised on all five tiers by tests/test_host_map_journal_2009.py, which drives the runtime path; the frontend refuses the untyped `store.insert(k, v)` form of that program (it is refused on go and rust outright), so it cannot be a compile-side corpus case on any tier."]
+
+["function", "issue-2009-host-map-journal-arm-no-go-corpus-document", "_bracket_writes_host_map", 10, 10]
+
+["function", "issue-2009-host-map-journal-arm-no-go-corpus-document", "_journal_ref", 3, 3]
+
+["function", "issue-2009-host-map-journal-arm-no-go-corpus-document", "_node_writes_host_map", 13, 13]
+
 ["reason", "issue-721-issue-1321-component-is-observable-decides", "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them."]
 
 ["function", "issue-721-issue-1321-component-is-observable-decides", "_component_is_observable", 4, 4]
@@ -146,9 +160,9 @@
 
 ["function", "json-file-command-line-entry-and-output-writing", "main", 10, 10]
 
-["reason", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "Lifecycle test harness acquires/loads/unloads component instances and checks tuple-return service results. The selfhost oracle emits pure modules and explicitly defers lifecycle/in-file harness generation. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py."]
+["reason", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "Lifecycle test harness acquires/loads/unloads component instances and checks tuple-return service results. The selfhost oracle emits pure modules and explicitly defers lifecycle/in-file harness generation. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py. Issue #2009 adds five: the generated harness arms the frame's journal before each bracketed host-Map write and closes it at the frame's disposer."]
 
-["function", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "_emit_stc_lifecycle_tests", 130, 130]
+["function", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "_emit_stc_lifecycle_tests", 135, 135]
 
 ["function", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "_go_lifecycle_arg", 7, 7]
 
@@ -312,21 +326,21 @@
 
 ["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_spawn_targets", 5, 5]
 
-["reason", "stc-go-component-activation-and-provided-service-implementat", "stc-go component activation and provided-service implementation, including host acquisition/stubs and runtime imports. emit returns through _emit_v3_go for corpus modules before constructing these runtime sections; emit_go.rvl explicitly excludes components/services/provide/host effects. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path. Issue #1321 adds four statements to `_emit_method_body`: the item-280 twin that pins a user-variant `let` to its INTERFACE type rather than the concrete case struct `:=` infers, without which a later `match` type-switch is a Go compile error. `_go_v3_stmt` has carried the same rule on the pure tier since item 280; the method body only reached the shape once the combined renderer started carrying documents that declare a type beside a component. Issue #1356 adds two statements: the `global` declaration and the population of `_CONFIG_TYPES` and `_SERVICES`, the two registries `_comp_infer`'s new `call` and `config` arms read. They are per-component state, so they are written here, on this same unentered path. Issue #106: the go corpus carries the v3 combined path's first self-host slice now (tests/fixtures/emit_go_corpus/comp_provide_pure.rvl and four provide-only component documents), which runs part of this; the counts are lowered in place. Issue #106, second slice: the combined path's record, variant, field and `match` documents (comp_provide_records.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #106, fourth slice: the combined path's config documents (comp_provide_config.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #106, fifth slice: the combined path's method-emit documents (comp_provide_emit.rvl and four tree documents) run more of this; the counts are lowered in place."]
+["reason", "stc-go-component-activation-and-provided-service-implementat", "stc-go component activation and provided-service implementation, including host acquisition/stubs and runtime imports. emit returns through _emit_v3_go for corpus modules before constructing these runtime sections; emit_go.rvl explicitly excludes components/services/provide/host effects. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path. Issue #1321 adds four statements to `_emit_method_body`: the item-280 twin that pins a user-variant `let` to its INTERFACE type rather than the concrete case struct `:=` infers, without which a later `match` type-switch is a Go compile error. `_go_v3_stmt` has carried the same rule on the pure tier since item 280; the method body only reached the shape once the combined renderer started carrying documents that declare a type beside a component. Issue #1356 adds two statements: the `global` declaration and the population of `_CONFIG_TYPES` and `_SERVICES`, the two registries `_comp_infer`'s new `call` and `config` arms read. They are per-component state, so they are written here, on this same unentered path. Issue #106: the go corpus carries the v3 combined path's first self-host slice now (tests/fixtures/emit_go_corpus/comp_provide_pure.rvl and four provide-only component documents), which runs part of this; the counts are lowered in place. Issue #106, second slice: the combined path's record, variant, field and `match` documents (comp_provide_records.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #106, fourth slice: the combined path's config documents (comp_provide_config.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #106, fifth slice: the combined path's method-emit documents (comp_provide_emit.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #2009 adds three to `_emit_component`, fifteen to `_emit_component_step`, six to `_emit_method_body` and one to `_emit_provide_impl`: the arm's document-level gate (`_journal_readable(ir)`), the `revlJournalFrame` slot on the generated provider, and the `journalBegin`/`journalGuard` wrapping of every bracketed host-Map write."]
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_acquire_value_go_type", 17, 17]
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_collect_host_calls", 3, 3]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component", 23, 23]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component", 26, 26]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component_step", 150, 150]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component_step", 165, 165]
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_host_stubs", 22, 22]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_method_body", 67, 67]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_method_body", 73, 73]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_provide_impl", 2, 2]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_provide_impl", 3, 3]
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_host_runtime", 1, 1]
 
