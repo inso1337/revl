@@ -293,11 +293,31 @@ default and never returning `None`. There is no defaults path for a secret. The
 helper is emitted only when some emission extern has a bound secret, so a
 secret-free program is byte-identical.
 
-**Bind side.** The driver resolves each secret's value once at plug (`run.py`, a
-`_resolve_secrets(ir, secret_source)` sibling of `_resolve_extern_config`),
-sourcing from the environment or a secret store keyed by the secret name, and
-installs `module._REVL_SECRETS.update(...)`. The value is fixed at plug and lives
-only in the module global.
+**Bind side.** The driver resolves each secret's value at plug (`run.py`, a
+`_resolve_secrets(ir, secret_source, allow_absent=...)` sibling of
+`_resolve_extern_config`), sourcing from the environment or a secret store keyed
+by the secret name, and installs `module._REVL_SECRETS.update(...)`. The value
+lives only in the module global.
+
+That is the DEFAULT, and it is strict: a declared secret with no resolvable value
+refuses the plug, naming the secret and never a value. Issue #1936's second
+defect is the operator who configures a mailbox *after* start, or rotates a
+password: under a strict plug their composition cannot start at all, and the
+workaround the issue calls out — binding a keyring *locator* as the "secret" and
+reading the real credential inside the body — makes the audit token name a
+binding that is not the credential. So the plug has an explicit per-document
+opt-in, `secrets_may_be_absent`, which leaves an unresolvable name UNSET instead
+of refusing, and `_Driver.set_secret(name, value)` is the sanctioned seam that
+installs or ROTATES it afterwards. It writes the same name-keyed map plug-time
+resolution writes, so the audit token still names the real binding — never a
+locator, never a value (§5a) — and the emitted body's `_revl_secret` reads that
+map on every call, which is what makes an install-after-start and a later
+rotation visible to the NEXT call with no re-plug. What the opt-in changes is
+only WHEN a missing value is reported, never WHETHER: the miss is still
+fail-loud, now at the call that needed it. The seam is strict on the NAME (a name
+the running composition does not declare is refused, so a typo cannot become a
+silently-installed key) and records only `{name, capability, action, generation}`
+in `_Driver.secret_events`.
 
 **The "nowhere else" property, mechanically.** The binding is emitted *only*
 inside the `def` of an emission extern whose declared capability matches the

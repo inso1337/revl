@@ -143,6 +143,50 @@ FIXES = {
                     "declares it in the same `revl compile` invocation",
 }
 
+# One code, several failure modes (issue #2029). A code is a *guarantee*, and a
+# guarantee is often refused for more than one reason, each needing a different
+# rewrite: `G1` (declared access) is raised when a `Delegate[X]` names no
+# service, when a requirement key shadows a builtin, when a body reads a key the
+# component does not require, and when a name is read before its declaration.
+# The per-code rows above are written for one mode each — `FIXES["G1"]` is the
+# *requires* rewrite — so applying them by code alone hands three of the four
+# modes a remedy that contradicts their own hint (the residual of #1652).
+#
+# The raise site already knows its mode, so the mode is the lookup key. A code
+# with no entry here keeps its per-code row; a rejection that carries its own
+# `fix` still outranks both. Category is the mode name the raise sites already
+# use for this purpose; `G1`'s four are `delegation` (lower.py/typecheck.py),
+# `wiring` (`_refuse_builtin_requirement_key`), `requirement` (a read of a key
+# the component does not require) and `binding` (a local read before its
+# declaration). A mode's remedy is only reachable if its raise site sets that
+# category explicitly, because `_PATTERNS` below is a message-shape fallback and
+# a `(G1)` tag in a hint would otherwise land the record in `guarantee`.
+FIXES_BY_CATEGORY: dict[tuple[str, str], str] = {
+    # the per-code row is written for exactly this mode, so it is reused here
+    # rather than spelled twice.
+    ("G1", "requirement"): FIXES["G1"],
+    ("G1", "binding"): "declare it with `let` (single-assignment) or `var` "
+                       "(mutable), or add it as a parameter",
+    ("G1", "delegation"): "name a `service` this composition declares: write "
+                          "`Delegate[S]` where `S` is a `service` declaration",
+    ("G1", "wiring"): "rename the key: a requirement key may not spell a builtin "
+                      "type or a host root",
+}
+
+# The same split for the guarantee one-liner. `GUARANTEES[code]` is the code's
+# headline — it is what `revl explain`, the LSP hover and three generated docs
+# render — and it is written for the code's commonest mode. A mode whose
+# headline misdescribes it says so here instead; a code/mode with no entry keeps
+# the headline.
+GUARANTEES_BY_CATEGORY: dict[tuple[str, str], str] = {
+    ("G1", "binding"): "declared names: a body reads only the names it declares "
+                       "or receives as parameters",
+    ("G1", "delegation"): "declared delegation: a `Delegate[X]` names a service "
+                          "this composition declares",
+    ("G1", "wiring"): "unshadowed requirement keys: a requirement key may not "
+                      "spell a builtin type or a host root",
+}
+
 
 def explain(code: str) -> dict:
     """What a diagnostic code means and how to fix it — the `revl explain`
@@ -172,7 +216,7 @@ _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"dependency cycle|import cycle"), "G3", "linking"),
     (re.compile(r"cannot reassign|already (declared|bound)"), "G6", "binding"),
     (re.compile(r"is not declared in this (function|component)"), "G1", "binding"),
-    (re.compile(r"is not a declared requirement"), "G1", "binding"),
+    (re.compile(r"is not a declared requirement"), "G1", "requirement"),
     (re.compile(r"acquisition after `provide`"), "A2", "ordering"),
     (re.compile(r"no builtin method"), "T1", "stdlib"),
     (re.compile(r"verified fn .* is not total"), "G7", "totality"),
@@ -223,11 +267,17 @@ def classify(error: RevlError) -> dict:
         record["expected"] = expected
         record["actual"] = actual
     if code in GUARANTEES:
-        record["guarantee"] = GUARANTEES[code]
+        # the code's headline guarantee, unless this failure mode has its own
+        record["guarantee"] = GUARANTEES_BY_CATEGORY.get(
+            (code, record["category"]), GUARANTEES[code])
     if getattr(error, "fix", None):
         # a rewrite specific to this rejection (a corrected line) outranks the
         # per-code one: the code's fix is written for its commonest shape
         record["fix"] = error.fix
+    elif (code, record["category"]) in FIXES_BY_CATEGORY:
+        # the code covers several failure modes and this is not the one the
+        # per-code row was written for (issue #2029)
+        record["fix"] = FIXES_BY_CATEGORY[(code, record["category"])]
     elif code in FIXES:
         # the exact rewrite, beside the guarantee, so an agent gets the fix
         # without a second `explain` call or parsing the prose hint

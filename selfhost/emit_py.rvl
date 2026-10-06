@@ -1565,7 +1565,7 @@ fn secrets_block() -> List[Str] {
     "        raise RuntimeError(",
     "            \"capability-bound secret `\" + _name + \"` was not \"",
     "            \"installed before its extern body ran; the run driver \"",
-    "            \"must resolve it at plug (item 256). No default exists \"",
+    "            \"has not resolved it (item 256). No default exists \"",
     "            \"for a secret.\")",
     "    return _REVL_SECRETS[_name]", ""]
   return o
