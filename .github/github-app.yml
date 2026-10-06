@@ -139,8 +139,31 @@ instructions: |
   - Never hand-edit `docs/census-artifact/**` or
     `tests/fixtures/census_crate_reproduction/**`; they are generator-owned.
   - The census digest covers the checker sources, so **merge `origin/main` first and
-    record once**, immediately before the final push. Recording before merging produces
-    a record for a mixed tree and fails the `census-artifact` check.
+    record last**, immediately before the final push. The record is keyed by the digest of
+    the **merge ref** CI checks out (`refs/pull/<n>/merge` — your tip merged with its
+    base), so recording on an un-merged tip leaves the merge ref uncovered and goes red
+    even though your own tree is self-consistent. A record for the **merged** tree is the
+    one that is needed; it is the record for the un-merged tree that fails.
+  - **Every digest-mover owes its own record — "only the last mover re-records" is false.**
+    `checker_version()` hashes the five `CHECKER_SOURCES`' **bytes**, so it is
+    branch-independent and a record can never change the digest it is filed under. Two
+    lanes that each rotate the digest therefore need **two** records, and the digest of the
+    tree they produce **together** is a third value that neither can compute from its own
+    branch. Measured on the pair #2044/#2054: base == `main` == `7c9d31bc9d9c`, #2044 alone
+    == `c16c68948df2`, #2054 alone == `ce305ffcef90`, both together == `36d25a4bd658`
+    (`git merge-tree --write-tree A B` merges clean; merged `selfhost/lower.rvl` blob
+    `09caad12ade7`). Four of the five `CHECKER_SOURCES` were byte-identical across all four
+    trees, so `selfhost/lower.rvl` alone moved every one of those digests.
+  - **Because that digest is branch-independent it is computable without cargo** — hash the
+    merged blobs exactly as `checker_version()` does — so the *order* of two movers can be
+    decided before either lands. Prefer the order that owes one record to the order that
+    owes two: a mover whose record already matches its merge ref owes nothing, so landing
+    it first leaves only the other's `--only census` run. Merging `origin/main` is likewise
+    **free** while `main` has not landed a rotation — `main`'s `selfhost/lower.rvl` equals
+    the merge base's, so a merge-forward cannot invalidate a lane's existing record.
+    Confirm with `git diff --name-only origin/main...HEAD -- selfhost/lower.rvl
+    tools/gate_reference_census.py tools/corpus_provenance.py tools/build_gate_crate.py
+    tests/test_gate_reference_census.py`. Never `M`/`D` a record another lane authored.
   - A **squash** merge can undo that: it may land a head that predates the lane's own
     record commit, leaving the default branch red at a digest nothing recorded. The
     correction is to restore the record that was written for that tree and prove it with
