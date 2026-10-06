@@ -4602,7 +4602,12 @@ TOOLS.extend([
                                           "`name:Type`"},
                 "resource": {"type": "string",
                              "description": "the effect-acquired resource's "
-                                            "type (default: <Service>Resource)"},
+                                            "type (default: <Service>Resource); "
+                                            "a type application like "
+                                            "'Map[Str, Str]' names a host "
+                                            "family whose Unit-returning "
+                                            "operations a Unit method's fill "
+                                            "spec lists"},
                 "effect": {"type": "boolean",
                            "description": "include the acquire/undo effect "
                                           "block (default true)"},
