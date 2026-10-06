@@ -17,6 +17,7 @@ import RevL.Theorems.Prelude_InterceptMethod
 import RevL.Theorems.ModelPlacement
 import RevL.Theorems.ModelCouncil
 import RevL.Theorems.G9Flow
+import RevL.Theorems.GRetain
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -2261,6 +2262,97 @@ def g9Verdicts (p : String) (rs : G9Rows) : String := Id.run do
 
 end G9Flow
 
+/-! ### The `RETAIN` row — G-RETAIN on the corpus (issue #1811 group 3)
+
+`RETAIN` carries the persistence scope and the sink the shipped checker itself
+DISCOVERED, the naming chain it walked to it, and the two instants it
+COMPARED: the policy's deadline (`until`) and the evaluation instant (`now`),
+both as whole seconds since the Unix epoch — the checker normalizes every
+instant to UTC before comparing (`retention.parse_instant`), so an integer is
+a faithful encoding of what it compared and one the kernel can reduce, which
+ISO text is not. The row decides `RevL.GRetain.rowB` at those columns. It is
+**the rule on the corpus, not the coverage of the checker's walk** (see
+`RevL/Theorems/GRetain.lean`): the row's premises ARE the checker's own
+refusal, so a checker that stops reporting its discovered sink produces no row
+at all, and `diff_corpus.py` files that refusal under the fatal
+`missed-G-RETAIN` rather than reading it as an agreement. A scope
+`RevL.GRetain` does not carry, or an instant that does not parse, yields
+`false` here — never a vacuous `ok`. -/
+
+section GRetain
+
+/-- One `RETAIN` row. `scope`, `sink`, `chain`, `deadline` and `now` are the
+columns the rule reads; `code`, `category`, `policy` and `hops` are carried so
+the row's own output shows what the checker discovered and how far it walked. -/
+structure GRetainRow where
+  path : String
+  code : String
+  category : String
+  scope : String
+  sink : String
+  policy : String
+  deadline : String
+  now : String
+  chain : String
+  hops : String
+
+def parseGRetain (f : List String) : Option GRetainRow :=
+  match f with
+  | ["RETAIN", path, code, category, scope, sink, policy, deadline, now,
+     chain, hops] =>
+      some ⟨path, code, category, scope, sink, policy, deadline, now, chain,
+            hops⟩
+  | _ => none
+
+/-- The row's verdict: the rule at the scope, the sink, the chain and the two
+instants the checker reported. `false` for a scope the model does not carry or
+an instant that does not parse, so an unreadable row can never print `ok`. -/
+def retainRowB (r : GRetainRow) : Bool :=
+  match r.deadline.toNat?, r.now.toNat? with
+  | some dl, some nw => RevL.GRetain.rowB r.scope r.sink r.chain dl nw
+  | _, _ => false
+
+/-- `retainRowB` is exactly the rule at the carried columns, and `false` —
+never vacuously `true` — when an instant does not parse. -/
+theorem retainRowB_iff (r : GRetainRow) :
+    retainRowB r = true ↔ ∃ dl nw, r.deadline.toNat? = some dl ∧
+      r.now.toNat? = some nw ∧
+        RevL.GRetain.rowB r.scope r.sink r.chain dl nw = true := by
+  unfold retainRowB
+  cases hd : r.deadline.toNat? with
+  | none => simp
+  | some dl =>
+      cases hn : r.now.toNat? with
+      | none => simp
+      | some nw => simp
+
+def gretainRowB (rows : List GRetainRow) : Bool := rows.all retainRowB
+
+theorem gretainRowB_iff (rows : List GRetainRow) :
+    gretainRowB rows = true ↔ ∀ r ∈ rows, ∃ dl nw,
+      r.deadline.toNat? = some dl ∧ r.now.toNat? = some nw ∧
+        RevL.GRetain.rowB r.scope r.sink r.chain dl nw = true := by
+  unfold gretainRowB
+  rw [List.all_eq_true]
+  exact forall_congr' fun r => imp_congr_right fun _ => retainRowB_iff r
+
+/-- The `RETAIN` rows of one file. Kept out of `main` so its elaboration stays
+within the default heartbeat budget. -/
+structure GRetainRows where
+  rows : List GRetainRow
+
+def parseGRetainRows (fields : List (List String)) : GRetainRows :=
+  { rows := fields.filterMap parseGRetain }
+
+def gretainVerdicts (p : String) (rs : GRetainRows) : String := Id.run do
+  let mut out := ""
+  for r in rs.rows.filter (fun r => r.path == p) do
+    let v := if retainRowB r then "ok" else "fail"
+    out := out ++ s!"RETAIN\t{p}\t{r.scope}\t{r.sink}\tpolicy={r.policy}\tuntil={r.deadline}\tnow={r.now}\tchain={r.chain}\thops={r.hops}\t{v}\n"
+  return out
+
+end GRetain
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -2390,6 +2482,7 @@ def main (args : List String) : IO UInt32 := do
     let mrows' := parseModelRows fields
     let crows := parseCouncilRows fields
     let g9rows := parseG9Rows fields
+    let retainrows := parseGRetainRows fields
     let itrows := fields.filterMap parseIT
     let mcrows := fields.filterMap parseMC
     let aerows := fields.filterMap parseAE
@@ -2556,6 +2649,8 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ councilVerdicts p crows
       -- TAINT verdicts (G9 / G-SECRET-FLOW on the corpus, issue #1811 group 2)
       out := out ++ g9Verdicts p g9rows
+      -- RETAIN verdicts (G-RETAIN on the corpus, issue #1811 group 3)
+      out := out ++ gretainVerdicts p retainrows
       -- W verdicts (spawn attenuation) per edge
       for e in edges do
         let childCaps := (lookupCaps closed e.2).filterMap (capOf capTable)
@@ -2717,3 +2812,5 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.modelReachB_iff
 #print axioms RevLOracle.councilRowB_iff
 #print axioms RevLOracle.g9RowB_iff
+#print axioms RevLOracle.retainRowB_iff
+#print axioms RevLOracle.gretainRowB_iff

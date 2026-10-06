@@ -321,7 +321,16 @@ python3 scripts/axioms_gate.py \
   RevL.G9Flow.labelOfString_is_the_label \
   RevL.G9Flow.corpus_rows_decided \
   RevL.G9Flow.escape_moves_the_label \
-  RevL.G9Flow.g9_not_vacuous < .axioms.out
+  RevL.G9Flow.g9_not_vacuous \
+  RevL.GRetain.holdsB_iff \
+  RevL.GRetain.rowB_iff \
+  RevL.GRetain.hold_clears_the_deadline \
+  RevL.GRetain.reaches_iff \
+  RevL.GRetain.corpus_sink_scope_is_modelled \
+  RevL.GRetain.unmodelled_sink_scope_has_no_sink \
+  RevL.GRetain.corpus_walk_does_not_reach_another_sink \
+  RevL.GRetain.corpus_row_decided \
+  RevL.GRetain.retain_not_vacuous < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -377,6 +386,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.placeRowB_iff \
   RevLOracle.modelReachB_iff \
   RevLOracle.councilRowB_iff \
-  RevLOracle.g9RowB_iff < .oracle-axioms.out
+  RevLOracle.g9RowB_iff \
+  RevLOracle.retainRowB_iff RevLOracle.gretainRowB_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py

@@ -93,6 +93,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
@@ -1727,6 +1728,183 @@ def g9_rows(rel: str) -> list[str]:
                        str(steps.count(G9_STEP_SEP))])]
 
 
+# ---------------------------------------- G-RETAIN (issue #1811 group 3)
+#
+# THE RULE ON THE CORPUS, NOT COVERAGE OF THE WALK.
+#
+# `formal/RevL/Theorems/GRetain.lean` states G-RETAIN: a `Retained[T, P]` value
+# may not reach a persistence sink after `P`'s deadline. Unlike every other row
+# in this file the verdict is not a function of the file's TEXT alone. It
+# depends on WHEN the program is admitted, because `retention.RetentionPolicy.
+# expired` compares the policy's `until` against one evaluation instant for the
+# whole compile. So the row takes that instant as an EXPLICIT INPUT: this
+# module PINS it (`retention.AS_OF_ENV`, set from `RETENTION_AS_OF` below
+# before any checker call) and then carries the two instants the checker itself
+# compared, as whole seconds since the Unix epoch:
+#
+#   RETAIN  <file>  <code>  <category>  <scope>  <sink>  <policy>  <until>  <now>  <chain>  <hops>
+#
+# `until` is the policy's own deadline and `now` is the instant the checker
+# evaluated at, both read out of the checker's message and hint — never
+# invented here. The oracle decides `RevL.GRetain.rowB` at those columns
+# (`Oracle.retainVerdicts`), the same polarity as every other row, so a `fail`
+# is the rule VIOLATED at a scope, a sink, a walk and a deadline the checker
+# itself reported — the refusal the checker raised, explained rather than
+# contradicted — and an `ok` where the checker refused is the fatal
+# `missed-G-RETAIN`.
+#
+# WHAT THIS ROW IS NOT. It decides the rule on the persistence sink the checker
+# DISCOVERED, on the walk the checker FOLLOWED to it, at the instant the
+# checker COMPARED. It is NOT a proof, and not a test, that the checker's walk
+# COVERS every retained path in the file: a path `taint.py`'s propagation never
+# reaches is a path this row never sees, and no row assembled from the
+# checker's own output can report that. Proving the search itself — growing the
+# L0 bodies so the checker's coverage of the walk is proved — is roadmap item
+# 418 step 9 and is out of this row's reach. `retain_coverage` prints the
+# distinction, `formal/STATUS.md` states it, and the PR that added the row
+# repeats it.
+#
+# REPRODUCIBILITY. Because the instant is pinned, the verdict is a function of
+# the file plus the pin and not of the wall clock: `retain_coverage` re-decides
+# each row at instants it chooses (`now`, the deadline itself, a year before
+# it) and requires the verdict to MOVE — that is what makes the row
+# non-vacuous — and requires the instant the checker reported to be the one
+# this module pinned, so a pin that stopped taking effect is a gate finding
+# rather than a silent change of verdict.
+
+#: The evaluation instant the harness pins for every checker call in this
+#: process. Fixed, not the wall clock, so the `RETAIN` verdicts below are
+#: reproducible byte-for-byte. The deadline the corpus document declares
+#: (`2020-01-01T00:00:00Z`) is in the past at this instant, which is the state
+#: that document exists to exercise.
+RETENTION_AS_OF = "2026-01-01T00:00:00Z"
+
+#: Set at import, BEFORE the first `compile_files`, so every checker call this
+#: module makes — the exporter, `checker_refusal`, `checker_message`,
+#: `checker_code` — evaluates retention at the same instant.
+os.environ["REVL_RETENTION_AS_OF"] = RETENTION_AS_OF
+
+#: The one refusal the `RETAIN` row decides, as `code -> category`. The
+#: declaration-level sibling (`taint._refuse_retention_declaration`) carries the
+#: same code and the same category and is a DIFFERENT judgment — it needs no
+#: flow at all — so it is kept out by `GRETAIN_FLOW_RE`, which matches the
+#: flow-level sentence only. That shape is modelled nowhere, so it falls
+#: through to `out-of-fragment` exactly as the two taint refusals G9 excludes
+#: fall through.
+GRETAIN_CODES = {"G-RETAIN": "retention"}
+
+#: The persistence scopes `RevL.GRetain.sinkOfScope` carries, spelled HERE
+#: rather than imported from the model, so renaming one on either side is a
+#: diff and not a silent agreement. The same ten as
+#: `retention.PERSISTENCE_SINK_SCOPES`.
+GRETAIN_SCOPES = ("db", "fs", "store", "kv", "blob", "archive", "index",
+                  "cache", "queue", "wal")
+
+#: The checker's own sentences, split into the facts the row carries.
+#: `GRETAIN_FLOW_RE` is also the gate that keeps the declaration-level refusal
+#: out: that one says "declares a persistence sink (`db`) whose argument 1
+#: (`row`) is ..." and does not match.
+GRETAIN_FLOW_RE = re.compile(
+    r"flows into the persistence sink `(.+?)` \(a `(.+?)` crossing\)")
+GRETAIN_POLICY_RE = re.compile(r"`Retained\[[^,]+, ([^\]`]+)\]`")
+GRETAIN_NOW_RE = re.compile(
+    r"deadline passed at (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)")
+GRETAIN_UNTIL_RE = re.compile(
+    r"may be kept until (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)")
+GRETAIN_PATH_RE = re.compile(r"The retaining path is (.+)")
+GRETAIN_STEP_SEP = " -> "
+
+#: `rel -> why` for every retention refusal the row could NOT read. A gate
+#: finding, not a silent `fail`: a row that decided an unreadable refusal
+#: would be agreeing vacuously, and a checker that began reporting a new
+#: persistence scope should be made to say so here rather than pass.
+_GRETAIN_UNREADABLE: dict[str, str] = {}
+
+
+def _gretain_epoch(text: str) -> int | None:
+    """An RFC-3339 UTC instant as whole seconds since the Unix epoch, or `None`.
+
+    Whole seconds because the checker normalizes every deadline to UTC before
+    comparing (`retention.parse_instant`) and prints the normalized form, so
+    the comparison the rule makes is a comparison of two integers; the model
+    (`RevL.GRetain.Instant`) carries the same two integers, which is what lets
+    the kernel decide the row. Strict `Z` because that is the only spelling the
+    checker's own messages emit."""
+    try:
+        dt = datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
+
+
+def _gretain_reaches(chain: str, sink: str) -> bool:
+    """`RevL.GRetain.reaches`, respelled in Python so the reference's verdict is
+    an INDEPENDENT recomputation: changing the model alone surfaces as a
+    mismatch. A single-hop chain IS the sink; a longer one must END at it."""
+    return chain == sink or chain.endswith(GRETAIN_STEP_SEP + sink)
+
+
+def _gretain_holds(scope: str, sink: str, chain: str, until: int,
+                   now: int) -> bool:
+    """`RevL.GRetain.rowB` at the exported columns, respelled. The rule HOLDS
+    when the scope is one the model carries, the walk reaches the reported
+    sink, and the deadline has NOT passed — `now <= until` is exactly the
+    negation of the checker's strict `as_of > until`."""
+    if scope not in GRETAIN_SCOPES:
+        return False
+    return _gretain_reaches(chain, sink) and now <= until
+
+
+def retain_rows(rel: str) -> list[str]:
+    """The `RETAIN` rows of one modeled file (issue #1811, group 3).
+
+    See the section note above for what the row decides and, at length, what it
+    does not. A file the checker accepts, a refusal outside the code, the
+    declaration-level sibling refusal, or a refusal the row cannot read emits
+    no row — the last of those records a finding in `_GRETAIN_UNREADABLE`
+    instead of deciding the unreadable."""
+    err = checker_refusal(rel)
+    if err is None or err.code not in GRETAIN_CODES:
+        return []
+    if GRETAIN_CODES[err.code] != err.category:
+        return []
+    flow = GRETAIN_FLOW_RE.search(err.message or "")
+    if flow is None:
+        return []                    # the declaration-level sibling
+    sink, scope = flow.group(1), flow.group(2)
+    policy = GRETAIN_POLICY_RE.search(err.message or "")
+    now_s = GRETAIN_NOW_RE.search(err.message or "")
+    until_s = GRETAIN_UNTIL_RE.search(err.hint or "")
+    path = GRETAIN_PATH_RE.search(err.message or "")
+    if policy is None or now_s is None or until_s is None or path is None:
+        missing = ("policy" if policy is None else
+                   "the evaluation instant" if now_s is None else
+                   "the deadline" if until_s is None else "the walk")
+        _GRETAIN_UNREADABLE[rel] = f"the {err.code} refusal names no {missing}"
+        return []
+    now = _gretain_epoch(now_s.group(1))
+    until = _gretain_epoch(until_s.group(1))
+    if now is None or until is None:
+        _GRETAIN_UNREADABLE[rel] = (
+            f"the {err.code} refusal carries an instant the row cannot read as "
+            "UTC seconds")
+        return []
+    if scope not in GRETAIN_SCOPES:
+        _GRETAIN_UNREADABLE[rel] = (
+            f"the {err.code} refusal reaches persistence scope {scope!r}, "
+            "which the row does not carry")
+        return []
+    chain = path.group(1).strip()
+    if not _gretain_reaches(chain, sink):
+        _GRETAIN_UNREADABLE[rel] = (
+            f"the {err.code} refusal reports the walk {chain!r}, which does "
+            f"not reach the sink {sink!r} it names")
+        return []
+    return ["\t".join(["RETAIN", rel, err.code, err.category, scope, sink,
+                       policy.group(1), str(until), str(now), chain,
+                       str(chain.count(GRETAIN_STEP_SEP))])]
+
+
 # ------------------------------- out of scope by kind (issue #1810)
 #
 # `out-of-fragment` collects refusals under a rule the model states no row
@@ -2868,6 +3046,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         tsv.extend(model_role_reach_rows(rel, model_roles, caps_seen))
         tsv.extend(council_rows(rel, prog))
         tsv.extend(g9_rows(rel))
+        tsv.extend(retain_rows(rel))
         # async names (AN, issue #1808), file-wide
         for name in async_names(prog):
             tsv.append("\t".join(["AN", rel, name]))
@@ -4260,6 +4439,88 @@ def g9_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided for each `RETAIN` row (issue #1811 group 3):
+#: `file -> (scope, sink, policy, until, now, chain, hops, holds)`. Read by
+#: `retain_coverage`.
+_GRETAIN_ROWS: dict = {}
+
+#: One year, in the whole seconds the row carries. `retain_coverage` moves an
+#: instant by this to prove the row reads it.
+_YEAR_S = 365 * 24 * 60 * 60
+
+
+def retain_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `RETAIN` row (issue #1811 group 3).
+
+    THE RULE ON THE CORPUS, NOT COVERAGE OF THE WALK — and this ratchet can
+    only enforce the first half. Every retention refusal in the corpus IS a
+    refusal, so a ratchet shaped like `council_coverage`'s (one row admitted
+    and one refused) could never be satisfied: an admitted corpus row is a
+    `missed-G-RETAIN`, which is fatal. What is enforced instead is that the
+    rule BITES on every row, on the one input the row carries that the file's
+    TEXT does not fix — the instant:
+
+      * the instant the checker REPORTED must be the instant this module
+        pinned, so a pin that stopped taking effect is a finding and not a
+        silent change of verdict;
+      * the verdict must FLIP when that instant moves: `fail` past the
+        deadline, `ok` AT the deadline and `ok` a year before it. `ok` at the
+        deadline is the boundary the checker's own strict `as_of > until`
+        draws, so a row that flipped a second either side of it would be
+        deciding a rule the checker does not have.
+
+    A rule that returned a constant, or a row whose deadline had not passed,
+    fails both. The other half, that the checker's walk COVERS every retained
+    path, is roadmap item 418 step 9 and is deliberately not claimed here or
+    anywhere in this row. Returns findings, treated as gate failures."""
+    findings = [f"retain coverage: {rel}: {why}"
+                for rel, why in sorted(_GRETAIN_UNREADABLE.items())]
+    if not _GRETAIN_ROWS:
+        findings.append("retain coverage: no RETAIN rows at all — the row "
+                        "would decide nothing and agree vacuously")
+        return findings
+    pinned = _gretain_epoch(RETENTION_AS_OF)
+    for rel, (scope, sink, policy, until, now, chain, hops,
+              holds) in sorted(_GRETAIN_ROWS.items()):
+        if now != pinned:
+            findings.append(
+                f"retain coverage: {rel}: the checker evaluated at {now} but "
+                f"this harness pinned {pinned} ({RETENTION_AS_OF}) — the row "
+                "is deciding a verdict the wall clock chose")
+        if not policy:
+            findings.append(f"retain coverage: {rel}: the row names no policy")
+        if not sink:
+            findings.append(f"retain coverage: {rel}: the row names no sink")
+        if not chain:
+            findings.append(f"retain coverage: {rel}: the row reports no walk")
+        elif str(chain.count(GRETAIN_STEP_SEP)) != hops:
+            findings.append(
+                f"retain coverage: {rel}: the row reports {hops} hops over the "
+                f"{chain.count(GRETAIN_STEP_SEP)}-hop walk {chain!r}")
+        at_deadline = _gretain_holds(scope, sink, chain, until, until)
+        before = _gretain_holds(scope, sink, chain, until, until - _YEAR_S)
+        after = _gretain_holds(scope, sink, chain, until, until + 1)
+        if holds != after:
+            findings.append(
+                f"retain coverage: {rel}: the reference decided "
+                f"{'holds' if holds else 'violated'} at the reported instant "
+                f"but {'holds' if after else 'violated'} one second past the "
+                "deadline")
+        if not (not holds and at_deadline and before):
+            findings.append(
+                f"retain coverage: {rel}: the verdict does not read the "
+                f"instant — past the deadline {holds}, at it {at_deadline}, "
+                f"a year before it {before}")
+    if not findings:
+        print(f"retain coverage: {len(_GRETAIN_ROWS)} RETAIN rows over "
+              f"scopes={','.join(sorted({s for s, *_ in _GRETAIN_ROWS.values()}))} "
+              f"at the pinned instant {RETENTION_AS_OF}, each flipping when "
+              "the instant moves past the deadline — the rule ON THE CORPUS "
+              "(the sink and walk the checker DISCOVERED), NOT coverage of "
+              "the checker's walk")
+    return findings
+
+
 #: What the REFERENCE read for each component's declaration rules: (steps,
 #: intercept targets, provides, operations). Read by `prelude_coverage`.
 _PRELUDE_ROWS: dict = {}
@@ -4475,6 +4736,7 @@ class Verdicts(NamedTuple):
     model_reach: dict[tuple[str, str, str], str]
     councils: dict[tuple[str, str], str]
     g9: dict[str, str]
+    retain: dict[str, str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -4489,7 +4751,7 @@ class Verdicts(NamedTuple):
                 + len(self.async_sigs) + len(self.preludes)
                 + len(self.intercepts) + len(self.methods)
                 + len(self.places) + len(self.model_reach)
-                + len(self.councils) + len(self.g9))
+                + len(self.councils) + len(self.g9) + len(self.retain))
 
 
 
@@ -4528,6 +4790,7 @@ def parse_verdicts(text: str) -> Verdicts:
     model_reach: dict[tuple[str, str, str], str] = {}
     councils: dict[tuple[str, str], str] = {}
     g9: dict[str, str] = {}
+    retain: dict[str, str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -4626,6 +4889,15 @@ def parse_verdicts(text: str) -> Verdicts:
             # compile stops at its first refusal and so exports at most one
             # taint row per file.
             g9[parts[1]] = parts[5]
+        elif parts[0] == "RETAIN" and len(parts) == 10:
+            # G-RETAIN: file -> ok|fail. The scope, sink, policy and the TWO
+            # INSTANTS the rule compares ride in the middle columns so the
+            # row's own output shows the deadline and the instant the checker
+            # evaluated at — the whole point of the row, since the verdict is
+            # a function of the file PLUS that instant. The KEY is the file,
+            # because a compile stops at its first refusal and so exports at
+            # most one retention row per file.
+            retain[parts[1]] = parts[9]
         elif parts[0] in ("PL", "IC", "MS") and len(parts) == 4:
             # the three declaration rules: (file, comp) -> ok|fail.
             {"PL": preludes, "IC": intercepts, "MS": methods}[parts[0]][
@@ -4643,7 +4915,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach, councils, g9)
+                    places, model_reach, councils, g9, retain)
 
 
 
@@ -4899,6 +5171,32 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             admits = _g9_admits(r[4], [] if label is None else label)
             g9[r[1]] = "ok" if admits else "fail"
             _G9_ROWS[r[1]] = (r[4], label or [], admits, r[7], r[8])
+
+    # RETAIN verdicts (G-RETAIN, issue #1811 group 3): the rule at the scope,
+    # sink, walk and TWO INSTANTS the checker's OWN refusal reported,
+    # recomputed here from the exported columns. `_gretain_holds` and
+    # `GRETAIN_SCOPES` are harness-spelled, not imported from
+    # `RevL.GRetain.rowB` or `sinkOfScope`, so changing the model alone moves
+    # the model and the reference's `fail` becomes the harness's
+    # `missed-G-RETAIN`. The instant is an INPUT here rather than a fact read
+    # off the clock, which is the whole reason the row carries it: the harness
+    # pinned it (above) and the checker compared against that pin. THE RULE ON
+    # THE CORPUS: the sink and the walk are the ones the checker reported, so
+    # this recomputes the RULE and says nothing about the checker's coverage of
+    # the walk (roadmap item 418 step 9).
+    #
+    # Polarity as for every other row: `ok` is the rule HOLDING (the deadline
+    # had not passed at the reported instant) and `fail` is the rule VIOLATED
+    # (it had). So a `fail` is what explains a checker refusal, and `ok` is the
+    # fatal `missed-G-RETAIN`.
+    retain: dict[str, str] = {}
+    _GRETAIN_ROWS.clear()
+    for r in rows:
+        if r and r[0] == "RETAIN" and len(r) == 11:
+            holds = _gretain_holds(r[4], r[5], r[9], int(r[7]), int(r[8]))
+            retain[r[1]] = "ok" if holds else "fail"
+            _GRETAIN_ROWS[r[1]] = (r[4], r[5], r[6], int(r[7]), int(r[8]),
+                                   r[9], r[10], holds)
 
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
@@ -5234,7 +5532,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach, councils, g9)
+                    places, model_reach, councils, g9, retain)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -5357,6 +5655,7 @@ FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
                  "missed-G6", "missed-A1", "missed-A6", "missed-A9",
                  "missed-A2", "missed-prelude", "missed-intercept",
                  "missed-G-MODEL-PLACE", "missed-G-COUNCIL-SPLIT", "missed-G9",
+                 "missed-G-RETAIN",
                  "formal-strict", "formal-found-other")
 
 
@@ -5522,6 +5821,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # file alone: a compile stops at its first refusal, so at most one
         # taint row per file is ever exported.
         g9_fail = v.g9.get(rel) == "fail"
+        # The RETAIN row (G-RETAIN, issue #1811 group 3), keyed by the file
+        # alone for the same reason: at most one retention row per file.
+        rt_fail = v.retain.get(rel) == "fail"
         a1_fail = any(x == "fail" for k, x in v.async_sites.items()
                       if k[0] == rel) or any(
             x == "fail" for k, x in v.async_sigs.items() if k[0] == rel)
@@ -5540,7 +5842,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
             and not df_fail and not bu_fail and not g1_fail and not a1_fail \
             and not pl_fail and not ic_fail and not ms_fail \
-            and not mp_fail and not ma_fail and not cv_fail and not g9_fail
+            and not mp_fail and not ma_fail and not cv_fail and not g9_fail \
+            and not rt_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -5661,6 +5964,21 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # this row does not state, both of which fall through to
             # `out-of-fragment`.
             record("agree-G9" if g9_fail else "missed-G9", rel)
+        elif code in GRETAIN_CODES and category == GRETAIN_CODES[code] \
+                and GRETAIN_FLOW_RE.search(checker_message(rel)):
+            # G-RETAIN (issue #1811 group 3), decided by the `RETAIN` row: the
+            # rule at the persistence scope, the sink and the walk the checker
+            # DISCOVERED, at the instant the checker COMPARED. The row is the
+            # rule on the corpus, NOT a statement about the checker's coverage
+            # of the walk — a retained path `taint.py` never propagates to is a
+            # path no row assembled from the checker's output can see — and NOT
+            # a statement that the checker's walk is proved: roadmap item 418
+            # step 9 is out of this row's reach. Matched on the CATEGORY as
+            # well as the code, and on the FLOW-LEVEL sentence, because
+            # `G-RETAIN` also carries the declaration-level refusal
+            # (`taint._refuse_retention_declaration`), a different judgment
+            # needing no flow at all, which falls through to `out-of-fragment`.
+            record("agree-G-RETAIN" if rt_fail else "missed-G-RETAIN", rel)
         elif code == "A6" and METHOD_MESSAGE in checker_message(rel):
             # Method in service (issue #1809), the call-site half of A6.
             record("agree-A6" if ms_fail else "missed-A6", rel)
@@ -6256,7 +6574,8 @@ def main() -> int:
             ("model_place", ref.places, formal.places),
             ("model_reach", ref.model_reach, formal.model_reach),
             ("council", ref.councils, formal.councils),
-            ("g9", ref.g9, formal.g9)):
+            ("g9", ref.g9, formal.g9),
+            ("retain", ref.retain, formal.retain)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -6288,7 +6607,8 @@ def main() -> int:
         f"{len(ref.places)} model placements + "
         f"{len(ref.model_reach)} model reach edges + "
         f"{len(ref.councils)} council tie policies + "
-        f"{len(ref.g9)} taint walks) — "
+        f"{len(ref.g9)} taint walks + "
+        f"{len(ref.retain)} retention refusals) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -6310,6 +6630,7 @@ def main() -> int:
     mismatches.extend(model_coverage())
     mismatches.extend(council_coverage())
     mismatches.extend(g9_coverage())
+    mismatches.extend(retain_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
