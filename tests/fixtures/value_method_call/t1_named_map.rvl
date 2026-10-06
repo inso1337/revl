@@ -1,0 +1,12 @@
+// a value `Map` is not a host handle (issue #1968): its static type cannot
+// tell it from an `effect`-acquired handle, but the BINDING can, and this one
+// is a plain `let` — so a method outside the builtin table is refused
+service Math { fn go(n: Int) -> Int }
+component C provides math: Math {
+  provide math {
+    fn go(n) {
+      let m: Map[Str, Int] = Map.empty()
+      return m.frob()
+    }
+  }
+}

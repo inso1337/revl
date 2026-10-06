@@ -308,6 +308,45 @@ def _ident(name: Any, what: str) -> str:
     return name
 
 
+#: The namespace separator of a qualified provision key (docs/namespacing.md):
+#: `acme::greeter` is the key `greeter` provided by the `acme` namespace. It is
+#: the *wiring* identity — the IR, G2's one-provider rule, `revl audit` and the
+#: dependency queries all compare the qualified string — and this module is the
+#: only place that has to spell it in a host namespace.
+KEY_NAMESPACE_SEP = "::"
+
+
+def _key_binding(key: str) -> str:
+    """The local binding of a provision key: the part after the last `::`.
+
+    `acme::greeter` binds as `greeter`, which is how the IR spells a call on a
+    *required* key inside a body (`{"kind": "req", "name": "greeter"}`) while
+    `requires` itself is keyed by `acme::greeter`.
+    """
+    return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1]
+
+
+def _provision_key(name: Any, what: str) -> str:
+    """Validate a qualified provision key, part by part.
+
+    A qualified key is *already* a legal identifier on this tier, so unlike the
+    hosted emitters (py/ts/rust/java/go, which mangle it to a host identifier —
+    see docs/namespacing.md "Host identifiers") this tier neither mangles nor
+    refuses it: a WAT identifier may contain `:` (`wat2wasm` accepts `$a::b`),
+    and the emitter's identifiers are `_uid`-joined with `.`, so
+    `$req.acme::greeter.hello` names exactly one key. Nothing here is repaired or
+    rewritten — every `::`-part is held to the same identifier grammar an
+    unqualified key was always held to (as is the binding of a required key), so
+    a key may not smuggle a `.` or a `/` into an address. The grammar itself
+    lives in `_ident`, so this tier keeps ONE identifier refusal rather than a
+    second copy of it.
+    """
+    parts = name.split(KEY_NAMESPACE_SEP) if isinstance(name, str) else [name]
+    for part in parts:
+        _ident(part, what)
+    return name
+
+
 class _ComponentEmitter:
     """A component document -> one WAT module.
 
@@ -383,6 +422,20 @@ class _ComponentEmitter:
         self.instance_imports: dict[tuple[str, str, str], tuple[list[str | None], str | None]] = {}
         self.uses_dispose = False
         self.requires = component.get("requires") or {}
+        # local binding -> qualified key. A `req` node carries only the BINDING
+        # (`acme::greeter` is written `greeter.hello(..)` in a body), while
+        # `requires`/`routes`/`isolate`/`intercept`, the import address
+        # (`coeffect:<key>`) and the provider's export (`provide:<key>.<op>`) are
+        # all keyed by the QUALIFIED key. Resolving the binding here is what
+        # makes a consumer name the same key its provider exports, instead of
+        # silently importing `coeffect:greeter` and never resolving. Unqualified
+        # keys map to themselves, so such a module is byte-identical to before.
+        # Two distinct required keys that bind to the same name cannot reach
+        # here: the frontend already refuses a duplicate requirement binding
+        # (`src/revl/lower.py`, "duplicate requirement name"), so this is a map
+        # and not a table plus a collision check.
+        self.req_keys: dict[str, str] = {
+            _key_binding(_key): _key for _key in self.requires}
         _refuse_required_stream(component, "wasm")
         self.provides = component.get("provides") or {}
         self.isolate = component.get("isolate") or {}
@@ -871,7 +924,12 @@ class _ComponentEmitter:
                     f"{where}: scalar values have no methods — only calls on "
                     f"required services are lowerable on this tier"
                 )
-            key = _ident(target.get("name"), f"{where}: req")
+            # a required call names the key by its local BINDING (`acme::greeter`
+            # is called `greeter.hello(..)`); the import address, the WAT
+            # identifier and the provider's export all name the QUALIFIED key,
+            # so resolve the binding to it here and nowhere else.
+            binding = _ident(target.get("name"), f"{where}: req")
+            key = self.req_keys.get(binding, binding)
             op = _ident(node.get("method"), f"{where}: method")
             # item 173: a routed require resolves per named realm through the
             # generated selector + `route:<key>` dispatch, never a single
@@ -1041,9 +1099,7 @@ class _ComponentEmitter:
         component = get.get("component")
         if not isinstance(component, str) or not component.isidentifier():
             raise EmitError(f"{where}: bad instance-get component {component!r}")
-        key = get.get("key")
-        if not isinstance(key, str) or not key.isidentifier():
-            raise EmitError(f"{where}: bad instance-get key {key!r}")
+        key = _provision_key(get.get("key"), f"{where}: instance-get key")
         service_name = get.get("service")
         op = _ident(node.get("method"), f"{where}: method")
         # The service type is frozen inline on the node (the typing rule's
@@ -1839,7 +1895,10 @@ class _ComponentEmitter:
         return out
 
     def _provide(self, step: dict, scope: dict[str, str], where: str) -> list[str]:
-        key = _ident(step.get("name"), f"{where}: provide key")
+        # a provision key may be namespaced (`acme::greeter`); the qualified
+        # string is the wiring identity and the WAT address, so it is carried
+        # through verbatim (`_provision_key`, above).
+        key = _provision_key(step.get("name"), f"{where}: provide key")
         service_name = step.get("service")
         service = self.services.get(service_name)
         if service is None or self.provides.get(key) != service_name:

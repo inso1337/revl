@@ -20,9 +20,9 @@ emitter is precisely the event that opens a fresh uncovered region:
 Both halves are also driven over `tests/fixtures/emit_<tier>_refusals/`, the
 documents a tier's reference REFUSES BY NAME (issue #1419). A refusal is logic
 both halves carry and no `CORPUS` document can reach, because a corpus document
-is one the reference emits. Five tiers have one: `emit_ts_refusals/`,
-`emit_go_refusals/`, `emit_java_refusals/`, `emit_rust_refusals/` and
-`emit_wasm_refusals/`.
+is one the reference emits. Every tier has one: `emit_py_refusals/`,
+`emit_ts_refusals/`, `emit_go_refusals/`, `emit_java_refusals/`,
+`emit_rust_refusals/` and `emit_wasm_refusals/`.
 """
 
 import importlib.util

@@ -115,6 +115,83 @@ EXPR_REFUSED_DOCUMENT: frozenset[str] = frozenset({"hole"})
 # identifiers / types
 # --------------------------------------------------------------------------
 
+# -- namespaced provision keys (issue #1914, docs/namespacing.md) ------------
+#
+# A provision key may be QUALIFIED (`acme::greeter`). The qualified string is
+# the wiring identity the *compiler* compares (G2 conflict checks, injection
+# resolution, `revl audit`) and every tier keeps it in the IR (and in the
+# emitted `stc.NewKey[T]("<qualified>")` value, so two realms still agree on
+# it); a host identifier cannot contain `:`, so every site that turns a key
+# into a Go identifier goes through `_host_key`.
+#
+#   _host_key(k) = k                                       if k is unqualified
+#                = "__".join(_esc(p) for p in k.split("::"))   otherwise
+#   _esc(p)      = p.replace("_", "_u")
+#
+# so `acme::greeter` mangles to `acme__greeter` (docs/namespacing.md).
+# INJECTIVITY, in three steps:
+#  1. `_esc` is injective: every `_` in its image is followed by the `u` it was
+#     emitted with, so decoding is forced (`_u` -> `_`, everything else
+#     literal) and two distinct parts cannot share a spelling.
+#  2. `_esc(p)` never ends in `_` (every `_` is paired) and never contains
+#     `__`, so splitting the joined form on `__` recovers the part list
+#     exactly. 1 + 2 => `_host_key` is injective ON QUALIFIED KEYS: `a::b__c`
+#     and `a__b::c` stay distinct (`a__b_u_uc` vs `a_u_ub__c`).
+#  3. An unqualified key is returned unchanged and a qualified key's image
+#     ALWAYS contains `__`, so an unqualified key can only be captured by a
+#     qualified one when it already spells a mangled qualified key (`a__b`
+#     beside `a::b`). That single residual is refused loudly by
+#     `_check_host_keys` instead of being silently aliased.
+KEY_NAMESPACE_SEP = "::"
+
+
+def _host_key(key):
+    """Mangle a qualified provision key into a host identifier; an unqualified
+    key is returned unchanged, so a document that uses no namespacing emits
+    byte-for-byte what it emitted before."""
+    if not isinstance(key, str) or KEY_NAMESPACE_SEP not in key:
+        return key
+    return "__".join(part.replace("_", "_u") for part in key.split(KEY_NAMESPACE_SEP))
+
+
+def _key_binding(key: str) -> str:
+    """The local binding a qualified key introduces: its trailing segment
+    (`acme::greeter` -> `greeter`), which is what an IR `req` node and the
+    isolate/intercept/route tables carry (mirrors `src/revl/lower.py`)."""
+    return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1]
+
+
+def _key_ident(key) -> str:
+    """The identifier fragment a provision key contributes to a Go name. One
+    helper for every such site (the router struct and ctor, the provide-impl
+    struct and its value, the key var) so they cannot disagree, and so the
+    collision check below sees exactly the identifiers that get emitted."""
+    return _camel(_host_key(key))
+
+
+def _check_host_keys(ir) -> None:
+    """Refuse the residual collisions a mangled key cannot escape. Go's own
+    `_camel` collapses `_`, so the comparison is on the IDENTIFIER a key emits
+    (`_keyAcmeGreeter` for both `acme::greeter` and the flat `acme_greeter`),
+    not on `_host_key(k)`: two distinct keys landing on one identifier would
+    otherwise be a duplicate `var` or a duplicate type, never a silent
+    aliasing. Empty (and so a no-op) for every document that uses neither
+    namespacing nor a doubly-underscored key."""
+    seen: dict = {}
+    for comp in ir.get("components") or []:
+        for table in ("provides", "requires", "routes", "isolate", "intercept"):
+            for key in (comp.get(table) or {}):
+                ident = _key_ident(key)
+                first = seen.setdefault(ident, key)
+                if first != key:
+                    raise EmitError(
+                        "provision keys %r and %r both mangle to the Go "
+                        "identifier %r: rename one of them (Go identifiers "
+                        "drop '_', so a key containing '__' collides with a "
+                        "namespaced key's mangled spelling)"
+                        % (first, key, ident))
+
+
 def _camel(name: str) -> str:
     """snake_or_lower -> UpperCamel (exported Go identifier)."""
     parts = str(name).replace("-", "_").split("_")
@@ -127,7 +204,7 @@ def _lower_camel(name: str) -> str:
 
 
 def _key_var(name: str) -> str:
-    return "_key" + _camel(name)
+    return "_key" + _key_ident(name)
 
 
 def _realm_helper_name() -> str:
@@ -417,7 +494,11 @@ def _bind_field(name: str) -> str:
 
 
 def _req_field(name: str) -> str:
-    return _lower_camel(name)
+    """The struct field / local a `requires` key introduces. Keyed off the
+    BINDING, which is a pure function of the key, so the declaring site (which
+    iterates the raw keys) and every use site (an IR `req` node carries the
+    binding) spell it identically without a table."""
+    return _lower_camel(_key_binding(name))
 
 
 def _expr(node, env: _Env, expected=None) -> str:
@@ -1115,7 +1196,8 @@ def _instance_get_expr(node, env: _Env) -> str:
     if not isinstance(service, str) or not service:
         raise EmitError("instance-get: bad frozen service type %r" % (service,))
     key = node.get("key")
-    if not isinstance(key, str) or not key.isidentifier():
+    if not isinstance(key, str) or not all(
+            p.isidentifier() for p in key.split(KEY_NAMESPACE_SEP)):
         raise EmitError("instance-get: bad key %r" % (key,))
     svc = _camel(service)
     return ("func() %s { _svc, _ := stc.Service[%s](%s.Ctx(), %s); return _svc }()"
@@ -1680,7 +1762,7 @@ def _method_ret(m):
 def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
                        binds, reqs, has_config, out):
     """Emit the impl struct + methods for one `provide` block."""
-    struct = "%s_%s" % (comp_name, prov_name)
+    struct = "%s_%s" % (comp_name, _host_key(prov_name))
     svc = services.get(service_name, {})
     svc_methods = svc.get("methods", {})
 
@@ -1788,8 +1870,8 @@ def _emit_go_router_struct(cname, key, service_name, route, services, out):
     the component's handle for the routed key, so a provide-method's
     `<key>.<op>(..)` forwards straight through it (G2: one provider downstream).
     """
-    struct = "revlRouter%s%s" % (cname, _camel(key))
-    ctor = "newRevlRouter%s%s" % (cname, _camel(key))
+    struct = "revlRouter%s%s" % (cname, _key_ident(key))
+    ctor = "newRevlRouter%s%s" % (cname, _key_ident(key))
     svc = _camel(service_name)
     realms = list(route.get("realms") or [])
     strategy = route.get("strategy") or "round_robin"
@@ -2418,7 +2500,11 @@ def _emit_component(comp, services, out):
     body = comp.get("body", []) or []
 
     # per-component maps
+    # Keyed by the raw key AND by its binding: the tables are raw-keyed (the
+    # compiler's wiring identity is the qualified string) while an IR `req`
+    # node carries only the binding, and `_service_of_req` answers both.
     _REQ_SERVICE = dict(requires)
+    _REQ_SERVICE.update({_key_binding(k): v for k, v in requires.items()})
     # the declared surface type of each config field, and the document's
     # service table. `_comp_infer` reads both to type a method-body receiver
     # (`config.label.length`, `svc.begin(x) + ":"`); without them the receiver
@@ -2463,7 +2549,9 @@ def _emit_component(comp, services, out):
                     host = "%s[%s]" % (host, gv)
                 _BIND_IS_PTR[bind] = True
             else:
-                host = _acquire_value_go_type(acquire, services, requires)
+                # `_REQ_SERVICE` is this component's `requires` keyed by raw
+                # key AND by binding -- the same table `_by_binding` rebuilt.
+                host = _acquire_value_go_type(acquire, services, _REQ_SERVICE)
                 _BIND_IS_PTR[bind] = False
             _BIND_HOST[bind] = host
 
@@ -2522,7 +2610,7 @@ def _emit_component(comp, services, out):
     for rname, svc in requires.items():
         if rname in routes:
             out.append("\t\t\t%s := newRevlRouter%s%s(ctx)" %
-                        (_req_field(rname), cname, _camel(rname)))
+                        (_req_field(rname), cname, _key_ident(rname)))
             continue
         out.append("\t\t\t%s, err := stc.Service[%s](ctx, %s)" %
                     (_req_field(rname), _camel(svc), _key_var(rname)))
@@ -3924,7 +4012,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
     elif s == "provide":
         pname = step["name"]
         svc = step["service"]
-        struct = "%s_%s" % (cname, pname)
+        struct = "%s_%s" % (cname, _host_key(pname))
         # resolve method return types from service decl for the impl emit
         for m in step.get("methods", []):
             decl = services.get(svc, {}).get("methods", {}).get(m["name"], {})
@@ -3942,9 +4030,9 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             fields.append("%s: %s" % (_bind_field(b), _bind_field(b)))
         for r in (comp.get("requires", {}) or {}).keys():
             fields.append("%s: %s" % (_req_field(r), _req_field(r)))
-        out.append("%s_impl%s := &%s{%s}" % (pad, _camel(pname), struct, ", ".join(fields)))
+        out.append("%s_impl%s := &%s{%s}" % (pad, _key_ident(pname), struct, ", ".join(fields)))
         out.append("%sif _, err := ctx.Provide(%s, %s(_impl%s)); err != nil {" %
-                   (pad, _key_var(pname), _camel(svc), _camel(pname)))
+                   (pad, _key_var(pname), _camel(svc), _key_ident(pname)))
         out.append("%sreturn nil, err" % inner)
         out.append("%s}" % pad)
     elif s == "stream-iter":
@@ -10580,6 +10668,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
     _refuse_inadmissible_document(ir)
+    _check_host_keys(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old

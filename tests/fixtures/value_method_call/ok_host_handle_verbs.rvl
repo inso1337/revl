@@ -1,0 +1,9 @@
+// THE OVER-CORRECTION GUARD of issue #1968. A handle whose acquisition is a
+// typed hole is typed `Map[Str, Int]` with no host provenance, and its host
+// verbs are NOT in the builtin table — so refusing every `Map` receiver would
+// break this idiom. It stays admitted: the handle is told apart from a value
+// `Map` by its BINDING, not by its type
+component Counter {
+  let store = effect hole[Map[Str, Int]] "effect-acquire" undo store.drop()
+  effect store.insert("k", 1) undo store.remove("k")
+}
