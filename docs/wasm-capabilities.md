@@ -172,7 +172,7 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 | `config` blocks (component tier) | no instantiation-config channel yet — hosted backends |
 | host builtins (`Map.new()`, `Pool.open(...)`) | `` host builtin 'Map' is not available on the cordis-wasm tier — express state through coeffects instead `` |
 | method-time effects (`effect … undo …` in a method body) | the accumulator is fixed at activation (state machine) |
-| method-time compensation (`undo` after an `emit`) | same |
+| method-time compensation (`compensate` spelled at an `emit` site in a method body) | the accumulator is fixed at activation (state machine) — but an extern's DECLARED `compensate` DOES register, per call, into a runtime method accumulator (#1979/item 564), see below |
 | `await` outside `Job.run(name)` | `` `await` on this tier supports only `Job.run(name)` `` — the runtime's async host op (A1) |
 | `match`/variants | ✅ now supported (tagged-union cells); the old "no tagged unions in core Wasm" README row is stale |
 | non-scalar config *fields* | scalar-only, same reason as the boundary |
@@ -239,11 +239,18 @@ carries THREE entry kinds, per docs/design/teardown-contract.md: `bracket`
 declared inverse), and `compensation` (an `emit ... compensate ...`). Two
 qualifications are specific to this tier and do not lift with this slice:
 
-- **Over ACTIVATION-REGISTERED entries only.** The accumulator is fixed at
-  activation (the state-machine row above: method-time effects and
-  method-time compensation are both still hard `EmitError`s). The contract's
-  "mixed-entry LIFO in both phases" therefore reads, on wasm, over the
-  entries a component's top-level body registers — never a provide-method's.
+- **Over ACTIVATION-REGISTERED entries, plus per-call method registrations.**
+  The static accumulator is fixed at activation: a `compensate` SITE-SPELLED
+  inside a provide method is still a hard `EmitError` (the state-machine row
+  above; method-time effects stay refused too). Since #1979/item 564 the
+  declared form is not: an extern's own `compensate` registers once per
+  emission *at runtime*, into the linked-list method accumulator below, and
+  drains in the same Phase 2. The contract's "mixed-entry LIFO in both phases"
+  therefore reads, on wasm, over the entries a component's top-level body
+  registers *and* the per-call entries its method bodies registered — with the
+  method entries (the newer ones) replaying ahead of the activation chain, and
+  a site-spelled method clause still refused because the tier cannot see how
+  many times the site ran.
 - **Epoch/fuel is a wasmtime CAPABILITY the first-party driver wires, not a
   property of the compiled module.** The compiled WAT needs no special code
   for this — a Phase-2 `compensate` expression is an ordinary `call`, and
@@ -327,11 +334,47 @@ non-method-witnessed program's output is byte-identical):
 | `abort()` | flips an already-cleanly-activated component back to not-committed, so its next `deactivate` reverts the per-tool-call mutations instead of committing them — item 245's session-reject seam (py's `Frame.abort()`) |
 | `mw_live() -> i32` | the count of outstanding per-tool-call crossings — the wasm analogue of reading the WAL discharge descriptors; rises as calls register, falls to 0 as an abort drain replays them |
 
-Only the witnessed position is lifted. A non-witnessed method effect, a method
-`let-effect`, and method-time compensation all stay the hard `EmitError`s they
-were. Cross-tier design lives in the shared docs/design/243-witnessed-externs.md
+Only the witnessed position (item 318) and, for an extern's DECLARED
+`compensate`, the compensation position (#1979/item 564, below) are lifted. A
+non-witnessed method effect, a method `let-effect`, a compensation SITE-SPELLED
+in a method body, and a provide method that is a UI transaction unit stay the
+hard `EmitError`s they were. Cross-tier design lives in the shared
+docs/design/243-witnessed-externs.md
 (item 318) and docs/design/teardown-contract.md; this section is the wasm-tier
 realization, proven by `backends/wasm/test_provide_method_witnessed.py`.
+
+### Per-call declared compensation (item 564, issue #1979)
+
+An `emit` step carries a declared compensation when the extern it crosses
+declares one (`extern emission fn put(v: Int) -> Unit compensate restore()`).
+On ts/go/rust/java the register-what-you-declare path has always run; on wasm
+it did not — the declared slot registered nowhere, so an abort never replayed
+it and the program still emitted, with no refusal and no diagnostic. Two
+halves now close that, in the order the issue demands:
+
+- **Refuse by name what the tier still cannot register**, citing #1979: a
+  `compensate` SITE-SPELLED in a method body (arithmetic on a runtime count the
+  emitter cannot see), and a provide method that is a UI transaction unit
+  (item 522 — the tier has no per-transaction scope; method registrations drain
+  at session granularity through `deactivate`, never at the unit boundary the
+  frontend computes). Nothing is dropped silently.
+- **Register the declared form** into a runtime method accumulator mirroring
+  the item-324 witnessed one: each emission in a method body `$alloc`s a
+  16-byte cell `[comp_id:8][next:4]` and pushes it onto `$__mc_head`
+  (newest-first), incrementing `$__mc_count`. One cell per *emission*, so N
+  calls with one declared compensation replay N times on abort — the count a
+  compile-time registration cannot express and a method body cannot either.
+
+| export | purpose |
+|---|---|
+| `mc_live() -> i32` | the count of outstanding per-call declarations — rises as method emissions register, 0 after an abort drain; emitted only when a method-position declared compensation exists |
+| `abort()` | unchanged (item 324) and now also the seam that leaves `$__mc_count` for the Phase-2 drain to walk |
+
+Drain order inside `deactivate_step`'s abort branch is newest-first across
+scopes: `$__mc_*` (method emissions) → `$__mw_*` (method witnesses) → the
+static activation chain. A clean unload never walks either list
+(discharge — the emission is the deliverable). The paired activation-body form
+registers statically, exactly as a site-spelled one always did.
 
 ## Lifecycle tests on the substrate (item 142)
 

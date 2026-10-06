@@ -308,6 +308,32 @@ def _ident(name: Any, what: str) -> str:
     return name
 
 
+def _as_fn_call(node: Any) -> Any:
+    """Re-spell a component-site call node (`{kind: call, callee: {kind: var,
+    name: N}, args: [...]}`) as the IR `fn` node the renderer emits for it
+    (issue #1979, and the same helper every other tier keeps: rust's
+    `_Emitter._as_fn_call`, typescript's, go's).
+
+    An extern's declared `compensate` slot is stored in the *pure* dialect —
+    it is a declaration, not a site, so it carries a component-style call node
+    — while the emitter's `kind == "fn"` branch is what renders a call to a
+    top-level `fn`/extern into `(call $fn.<name>)`. Normalising the slot here
+    is what makes a declared compensation render through exactly the same path
+    as the equivalent SITE-spelled one, so the two are indistinguishable in
+    the emitted wat (which is the whole point of the fix: one mechanism, two
+    spellings).
+
+    A `fn` node is returned unchanged, so a slot already in that dialect (or a
+    non-call expression) passes through."""
+    if isinstance(node, dict) and node.get("kind") == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var" \
+                and isinstance(callee.get("name"), str):
+            return {"kind": "fn", "name": callee["name"],
+                    "args": node.get("args") or []}
+    return node
+
+
 #: The namespace separator of a qualified provision key (docs/namespacing.md):
 #: `acme::greeter` is the key `greeter` provided by the `acme` namespace. It is
 #: the *wiring* identity — the IR, G2's one-provider rule, `revl audit` and the
@@ -519,6 +545,36 @@ class _ComponentEmitter:
         # accumulator (global, `abort`/`mw_live` exports, drain code) is gated
         # off and such a program emits BYTE-IDENTICALLY to before this slice.
         self.method_witnessed_externs: list[dict] = []
+        # issue #1979 (item 254's emission slot, the last tier to get it):
+        # emission externs that DECLARE their own `compensate`, by name — the
+        # wasm half of the `compensated` table every other tier already keeps
+        # (backends/rust/emit.py's `_compensated_table`, backends/typescript/
+        # emit.py's `self.compensated`, backends/python/emit.py's). #1511 and
+        # #1592 landed that table for ts/go/rust/java; this tier registered
+        # NEITHER the declared compensation NOR a refusal for it, so an
+        # `emit` crossing one of these dropped it silently. Absent/empty for
+        # every program with no such extern, so their emission is unaffected
+        # by this table's existence.
+        self.compensated = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("class") == "emission" and ext.get("compensate") is not None
+        }
+        # issue #1979 (the runtime half, mirroring item 324 above): the
+        # distinct compensated externs this component's PROVIDE-METHOD bodies
+        # cross per tool call, in first-seen order. A method-body `emit` fires
+        # per request, an unbounded number of times, so — unlike the activation
+        # body's fixed, compile-time-static accumulator — its compensations
+        # live in a RUNTIME accumulator (`$__mc_head`, a linked list in linear
+        # memory) and each entry carries a `comp_id` index into this list so
+        # the abort drain dispatches to the right declared compensation. Empty
+        # for every program with no method-body `emit` of a compensated
+        # extern, so the whole runtime accumulator (globals, the drain code,
+        # the `$__mc_dcell` scratch local) is gated off and such a program
+        # emits BYTE-IDENTICALLY to before this fix.
+        self.method_compensated_externs: list[dict] = []
+        #: the v3-dialect node of each participant's declared compensation, by
+        #: extern name (`_method_comp_id` fills this in; the drain renders them)
+        self.method_comp_nodes: dict[str, Any] = {}
         self.fn_by_name = {fn.get("name"): fn for fn in (functions or [])}
         self.needed_fns: list[str] = []   # top-level fns this component calls
         self.needed_externs: list[str] = []  # @wasm externs this component calls
@@ -1408,13 +1464,20 @@ class _ComponentEmitter:
             return None
         return self.witnessed.get(acquire.get("name"))
 
-    def _register_witnessed_calls(self, expr: Any) -> None:
+    def _register_witnessed_calls(self, expr: Any,
+                                  subject: str = "a witnessed extern's `undo`",
+                                  ) -> None:
         """Plan every top-level `fn`/@wasm-extern this witnessed extern's
         DECLARED `undo` reaches, exactly as `_to_v3`'s `kind == "fn"` branch
         does for an ordinary body call — the undo lives on the extern
         declaration, not in this component's own body, so `_plan`'s body walk
         never finds it on its own; every witnessed acquisition site calls this
-        before anything renders."""
+        before anything renders.
+
+        `subject` re-spells the two mentions of `undo` for the caller that
+        walks an emission extern's DECLARED `compensate` instead (issue #1979):
+        the closure rule is identical, but a bodyless extern it reaches is a
+        dropped COMPENSATION, and the refusal has to say so."""
         for name in sorted(self._called_names(expr, set())):
             if name in self.fn_by_name:
                 self._need_fn(name)
@@ -1423,12 +1486,83 @@ class _ComponentEmitter:
                 if _extern_wasm_body(ext) is None:
                     available = ", ".join(sorted((ext.get("bodies") or {}))) or "none"
                     raise EmitError(
-                        f"{self.name}: a witnessed extern's `undo` calls "
+                        f"{self.name}: {subject} calls "
                         f"`{name}`, which has no @wasm body — not portable to "
                         f"this backend (available: {available})"
                     )
                 if name not in self.needed_externs:
                     self.needed_externs.append(name)
+
+    def _compensated_extern(self, expr: Any) -> dict | None:
+        """The emission extern an `emit`'s expression crosses when that extern
+        DECLARES its own `compensate` (item 254 / issue #1979), or None. An
+        emission call renders as an IR `fn` node, so matching its name against
+        the `compensated` table is how this tier tells a compensated crossing
+        from an ordinary one — the same test the python and rust reference
+        tiers use, so all of them recognise the same programs. Absent/no-match
+        for every other emission, so a program with no declared compensation
+        emits byte-identically to before."""
+        if not self.compensated or not isinstance(expr, dict):
+            return None
+        if expr.get("kind") != "fn":
+            return None
+        return self.compensated.get(expr.get("name"))
+
+    def _declared_compensation(self, step: dict) -> Any | None:
+        """The compensation one `emit` step registers, as an IR node — or None
+        when the crossing compensates nothing (issue #1979, honouring issue
+        #1902's ONE-compensation-per-crossing rule): a SITE-SPELLED
+        `compensate` clause REPLACES the emitted extern's own declared one, and
+        the declared one is the default only when the site spells none. The
+        python reference tier states the same precedence, and ts/rust/go
+        mirror it — so a program that spells both still gets exactly ONE
+        crossing registered, never two.
+
+        Both spellings render through the same component-site renderer, so a
+        declared compensation and the equivalent site-spelled one emit the same
+        WAT: registering the declared form is a registration, not a new
+        mechanism."""
+        if step.get("compensate") is not None:
+            return step["compensate"]
+        ext = self._compensated_extern(step.get("expr"))
+        if ext is None:
+            return None
+        # the declaration's slot is lowered in the pure dialect; `_as_fn_call`
+        # re-spells it as the component-site call node the renderer expects
+        return _as_fn_call(ext["compensate"])
+
+    def _plan_declared_compensations(self, steps: Any, roots: list[Any]) -> None:
+        """Plan every DECLARED compensation reachable from these body steps
+        (issue #1979), recursing into the arms of a method-body `if` — the only
+        nesting an `emit` can sit in, since the frontend refuses an `emit`
+        inside a method `while`/`for` body and an activation body's steps are
+        flat.
+
+        A declared compensation lives on the EXTERN's own declaration, not in
+        this component's body, so `_plan`'s body walk never finds its call
+        closure or its string literals on its own; every `emit` of a compensated
+        extern plans it here, before `_collect_string_literals` runs. The
+        closure rule is the witnessed `undo`'s — a compensation reaches its own
+        top-level `fn`s and @wasm externs, and a bodyless extern it reaches is a
+        refusal, never a silently dropped compensation."""
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            if step.get("step") == "emit":
+                comp = self._declared_compensation(step)
+                if comp is not None:
+                    self._register_witnessed_calls(
+                        comp,
+                        subject="an emission extern's declared `compensate`")
+                    # re-planning the same node is harmless: `_need_fn` and
+                    # `needed_externs` are set-guarded, and the literal pool is
+                    # keyed by value.
+                    roots.append(comp)
+            self._plan_declared_compensations(
+                list(step.get("then") or []) + list(step.get("else") or []),
+                roots)
+            for method in step.get("methods") or []:
+                self._plan_declared_compensations(method.get("body") or [], roots)
 
     def _plan(self) -> None:
         """Compute the call closure and pool the string literals it can reach.
@@ -1481,6 +1615,11 @@ class _ComponentEmitter:
                         if wit is not None and wit.get("undo") is not None:
                             self._register_witnessed_calls(wit["undo"])
                             roots.append(wit["undo"])
+        # issue #1979: the same reasoning for an emission extern's DECLARED
+        # `compensate` — the slot lives on the declaration, so both the
+        # activation-body and the provide-method positions plan it here (the
+        # walk above is the witnessed one and covers only `undo`).
+        self._plan_declared_compensations(body, roots)
         self.v3._collect_string_literals(roots, extra=record_strings)
 
     @staticmethod
@@ -1582,9 +1721,19 @@ class _ComponentEmitter:
             elif kind == "emit":
                 seg = [self._statement(step["expr"], scope, where)]
                 index = len(segments) + 1
-                if step.get("compensate") is not None:
+                # issue #1979: the crossing's compensation is either the
+                # SITE-spelled clause (unchanged) or the emitted extern's own
+                # DECLARED `compensate` (item 254), which this tier used to
+                # drop silently — `restore` appeared in NO entry of the emitted
+                # module, and nothing said so. `_declared_compensation` applies
+                # issue #1902's precedence (site spelling REPLACES the declared
+                # default), so exactly ONE entry registers per crossing, and
+                # the declared form renders through the very same renderer as
+                # the spelled one.
+                comp = self._declared_compensation(step)
+                if comp is not None:
                     entries.append({"index": index, "kind": "compensation",
-                                    "wat": self._statement(step["compensate"], scope, where)})
+                                    "wat": self._statement(comp, scope, where)})
                 segments.append("\n      ".join(seg))
             elif kind == "await":
                 # A1 on the substrate: the segment launches an async host op;
@@ -1635,6 +1784,11 @@ class _ComponentEmitter:
             # inverse (i32, the default `_local_decl` width). Only present when
             # the component actually has a method-body witnessed effect.
             self.activation_locals.append("__mw_dcell")
+        if self.method_compensated_externs:
+            # issue #1979: the same scratch cell for the METHOD-COMPENSATION
+            # accumulator's own drain. Only present when the component actually
+            # has a method-body `emit` of a compensated extern.
+            self.activation_locals.append("__mc_dcell")
         # item 173: the routed-require selector + dispatch helpers, appended as
         # ordinary internal funcs. Populates `self.globals` (route cursor /
         # served counts), which `_module` renders below — so it must run before
@@ -1894,6 +2048,119 @@ class _ComponentEmitter:
         out.append("        (return (i32.const 1))))")
         return out
 
+    def _method_comp_id(self, ext: dict) -> int:
+        """The dispatch index this component assigns the compensated extern
+        `ext`, registering it (first-seen order) as a method-compensation drain
+        participant (issue #1979). One id per distinct extern, so N tool calls
+        to the SAME compensated method share one compensation, and two
+        different ones each get their own — the abort drain reads the id off
+        each runtime cell and replays that extern's declared compensation. The
+        exact compensation twin of `_method_undo_id` above."""
+        name = ext.get("name")
+        for i, seen in enumerate(self.method_compensated_externs):
+            if seen.get("name") == name:
+                return i
+        self.method_compensated_externs.append(ext)
+        # The v3-dialect form of the extern's DECLARED compensation, converted
+        # ONCE here — while this component's function state is still being
+        # built — so the abort drain can render it with the same value engine
+        # the SITE-spelled compensation goes through (`_to_v3` is exactly what
+        # `_lower`'s `fn` branch calls, so the two spellings render
+        # identically). Converting here rather than at drain time also means
+        # the extern/fn this compensation calls is registered as needed before
+        # `_module` builds the module's function list.
+        self.method_comp_nodes[name] = self._to_v3(
+            _as_fn_call(ext["compensate"]), {}, {},
+            f"{self.name}: declared compensation of emission extern `{name}`")
+        return len(self.method_compensated_externs) - 1
+
+    def _method_compensation_step(self, ext: dict, where: str) -> str:
+        """Register ONE provide-method compensation into the component's RUNTIME
+        teardown accumulator `$__mc_head` (issue #1979 — the wasm half of item
+        254's emission slot, and the compensation twin of item 324's
+        `_method_witnessed_step` above).
+
+        The emission itself is one-way: it CROSSED the moment the host body ran,
+        and an emission carries no Result, so there is no Ok-conditional here —
+        the activation-body path registers its compensation unconditionally too.
+        What is parked is therefore not a captured value but the IDENTITY of the
+        declared compensation to replay: a `comp_id` index into
+        `self.method_compensated_externs`, plus the list link. Nothing else needs
+        capturing, because a declared `compensate` runs with no variables in
+        scope (the frontend refuses one that names any), so its wat is the same
+        at drain time as it would have been at crossing time.
+
+        Disposal ordering (the soundness hazard item 318 found on py, restated
+        for item 324 and again here): the entry is NEVER drained at method
+        return — a per-call disposal would observe `$__committed == 0` while the
+        session is still live and WRONGLY replay the compensation. It is parked
+        in the linked list and drained ONLY by `deactivate`/`deactivate_step`,
+        gated on `$__committed`, where the commit-vs-abort bit is settled."""
+        comp_id = self._method_comp_id(ext)
+        # one method-scoped scratch pointer for the freshly allocated cell
+        # (i32, the default `_local_decl` width). The compensation's own call
+        # closure + string literals were planned in `_plan`, which walks
+        # provide-method bodies for exactly this reason.
+        self.extra_locals.add("__revl_mc_cell")
+        self.func_uses_v3 = True  # this body reaches linear memory ($alloc)
+        # cell layout, two 8-byte slots (`$alloc(16)` keeps it 8-aligned):
+        #   +0  comp_id (i64) — which declared compensation the drain replays
+        #   +8  next    (i32) — the previous head, so the list is newest-first
+        return (
+            f"(local.set $__revl_mc_cell (call $alloc (i32.const 16)))\n    "
+            f"(i64.store (local.get $__revl_mc_cell) (i64.const {comp_id}))\n    "
+            f"(i32.store (i32.add (local.get $__revl_mc_cell) (i32.const 8))"
+            f" (global.get $__mc_head))\n    "
+            f"(global.set $__mc_head (local.get $__revl_mc_cell))\n    "
+            f"(global.set $__mc_count"
+            f" (i32.add (global.get $__mc_count) (i32.const 1)))"
+        )
+
+    def _method_comp_drain(self, where: str) -> list[str]:
+        """The abort-only drain of the runtime method-compensation accumulator
+        (issue #1979), one cell per `deactivate_step` call — the same
+        one-entry-per-call idiom the static chain and item 324's drain use, so a
+        host can bound each replay individually. Pops the newest cell, replays
+        the DECLARED compensation of the extern its `comp_id` names, decrements
+        the live count, and reports more-work; only once the list empties does
+        control fall through to item 324's witnessed drain and then the static
+        abort chain.
+
+        These cells are the newest compensations of all (registered per tool
+        call, after activation), and a compensation is a Phase-2 entry, so
+        draining them ahead of everything else is the component-level LIFO the
+        contract asks for: method compensations, then method inverses, then the
+        activation-body chain.
+
+        Never reached on a clean unload: the whole block is emitted inside the
+        `$__committed == 0` branch, so a commit discharges every method entry by
+        simply never walking the list (the cells go out of scope with the
+        instance when the fiber is unplugged)."""
+        # Guard on the live COUNT, not on `$__mc_head != 0`: the bump heap can
+        # legitimately hand out address 0 as a cell, so 0 is a valid list node,
+        # not a reliable empty sentinel (the same reason item 324's drain counts).
+        out: list[str] = [
+            "      (if (global.get $__mc_count)",
+            "        (then",
+            "        (local.set $__mc_dcell (global.get $__mc_head))",
+            "        (global.set $__mc_head"
+            " (i32.load (i32.add (local.get $__mc_dcell) (i32.const 8))))",
+            "        (global.set $__mc_count"
+            " (i32.sub (global.get $__mc_count) (i32.const 1)))",
+        ]
+        for comp_id, ext in enumerate(self.method_compensated_externs):
+            comp_node = self.method_comp_nodes[ext["name"]]
+            comp_value = self.v3._expr(comp_node, _Scope({}, {}), where)
+            comp_wat = (comp_value.wat if _is_unit_type(comp_value.ty)
+                        else f"(drop {comp_value.wat})")
+            out.append(
+                f"        (if (i64.eq (i64.load (local.get $__mc_dcell))"
+                f" (i64.const {comp_id}))\n"
+                f"          (then\n"
+                f"          {comp_wat}))")
+        out.append("        (return (i32.const 1))))")
+        return out
+
     def _provide(self, step: dict, scope: dict[str, str], where: str) -> list[str]:
         # a provision key may be namespaced (`acme::greeter`); the qualified
         # string is the wiring identity and the WAT address, so it is carried
@@ -1998,10 +2265,31 @@ class _ComponentEmitter:
                 elif mkind == "emit":
                     out_lines.append(self._statement(mstep["expr"], mscope, mwhere, mtypes))
                     if mstep.get("compensate") is not None:
+                        # issue #1979: a compensation SPELLED at this site is
+                        # still refused — it is an arbitrary expression that may
+                        # name method locals (which a runtime cell would have to
+                        # capture), whereas the RUNTIME accumulator below parks
+                        # the IDENTITY of an extern's DECLARED compensation,
+                        # which by construction runs with no variables in scope.
+                        # The refusal names the tier limit and the one spelling
+                        # that IS registered here, so nothing is dropped
+                        # silently — which is the whole point of this fix.
                         raise EmitError(
                             f"{mwhere}: method-time compensation is not lowerable — "
-                            f"the wasm accumulator is the activation state machine"
+                            f"the wasm accumulator is the activation state machine "
+                            f"(plus the runtime method-compensation accumulator, "
+                            f"which registers only an extern's DECLARED "
+                            f"`compensate`); declare `compensate` on the extern "
+                            f"itself (#1979) or use a hosted backend for "
+                            f"method-time compensation"
                         )
+                    ext = self._compensated_extern(mstep.get("expr"))
+                    if ext is not None:
+                        # the extern DECLARES a compensation and this site
+                        # spells none, so the declared default applies — parked
+                        # in the runtime accumulator, which `deactivate_step`
+                        # drains on abort (issue #1979).
+                        out_lines.append(self._method_compensation_step(ext, mwhere))
                 elif mkind in ("let", "assign"):
                     # a plain value binding: a wasm local, since a method body
                     # is a function and locals are exactly what it has
@@ -2260,6 +2548,9 @@ class _ComponentEmitter:
                         # per-tool-call witnessed mutation, so it always needs
                         # linear memory even if nothing else in the module does.
                         or bool(self.method_witnessed_externs)
+                        # issue #1979: the same for the method-compensation
+                        # accumulator (a cell per compensated tool call).
+                        or bool(self.method_compensated_externs)
                         # item 322 Slice 2: the record channel passes the
                         # receiver/method names as pointers into the pooled data,
                         # so the module needs a memory to export even if its own
@@ -2320,7 +2611,15 @@ class _ComponentEmitter:
         # strictly on this component actually having a method-body witnessed
         # effect: a program without one emits byte-identically to before.
         needs_method_drain = bool(self.method_witnessed_externs)
-        needs_teardown_scaffold = needs_teardown_scaffold or needs_method_drain
+        # issue #1979: a component whose provide methods register per-tool-call
+        # COMPENSATIONS needs its own runtime accumulator (`$__mc_head`), which
+        # rides the same `$__committed` discriminator and the same teardown
+        # scaffold. Gated strictly on this component actually having a
+        # method-body `emit` of a compensated extern: a program without one
+        # emits byte-identically to before.
+        needs_method_comp_drain = bool(self.method_compensated_externs)
+        needs_teardown_scaffold = (needs_teardown_scaffold or needs_method_drain
+                                   or needs_method_comp_drain)
 
         lines = [f";; Generated by the revl cordis-wasm backend (ir_version {self.ir_version}) — do not edit.",
                  f";; component {self.name}",
@@ -2446,6 +2745,18 @@ class _ComponentEmitter:
             # with the instance, never shared across activations.
             lines.append("  (global $__mw_head (mut i32) (i32.const 0))")
             lines.append("  (global $__mw_count (mut i32) (i32.const 0))")
+        if needs_method_comp_drain:
+            # issue #1979: the per-tool-call COMPENSATION accumulator — the
+            # same two-global shape as item 324's witnessed one above, for the
+            # same reason: a provide method fires per request, so its
+            # compensations cannot live in the activation-static `entries`
+            # list. `$__mc_head` is the newest-first linked list of parked
+            # compensations (0 == empty); `$__mc_count` is the live count,
+            # exported as `mc_live` so a host can enumerate the outstanding
+            # crossings. Component-instance state: it comes up empty and is
+            # torn down with the instance.
+            lines.append("  (global $__mc_head (mut i32) (i32.const 0))")
+            lines.append("  (global $__mc_count (mut i32) (i32.const 0))")
         for glob, glob_ty in self.globals:
             zero = "i64.const 0" if glob_ty == "i64" else "i32.const 0"
             lines.append(f"  (global {glob} (mut {glob_ty}) ({zero}))")
@@ -2500,7 +2811,7 @@ class _ComponentEmitter:
         # against the segment count it would otherwise have to track itself.
         lines.append('  (func (export "committed") (result i32) (global.get $__committed))')
 
-        if needs_method_drain:
+        if needs_method_drain or needs_method_comp_drain:
             # item 324: the abort seam (py's `Frame.abort()`) and the
             # enumeration surface (py's WAL discharge descriptors).
             #
@@ -2514,14 +2825,28 @@ class _ComponentEmitter:
             # is the eventual driver) calls `abort` first; the same flip also
             # replays any activation-body transactional entries, so the whole
             # activation reverts all-or-nothing. Idempotent.
+            #
+            # issue #1979: the seam is needed by the method-compensation
+            # accumulator for exactly the same reason — a compensation parked
+            # by a per-request `emit` is only replayed when `$__committed` is
+            # flipped back, so a component that has one but no item-324
+            # mutation gets the seam too.
             lines.append('  (func (export "abort") (global.set $__committed (i32.const 0)))')
-            # `mw_live` is how a host enumerates the outstanding per-tool-call
-            # crossings — one per registered inverse still parked, the wasm
-            # analogue of reading the WAL discharge descriptors. It counts UP as
-            # calls register and back DOWN as the abort drain replays them, so
-            # after a clean abort it reads 0 (no rollback residue) and after a
-            # commit it holds the count of discharged deliverables.
-            lines.append('  (func (export "mw_live") (result i32) (global.get $__mw_count))')
+            if needs_method_drain:
+                # `mw_live` is how a host enumerates the outstanding per-tool-call
+                # crossings — one per registered inverse still parked, the wasm
+                # analogue of reading the WAL discharge descriptors. It counts UP as
+                # calls register and back DOWN as the abort drain replays them, so
+                # after a clean abort it reads 0 (no rollback residue) and after a
+                # commit it holds the count of discharged deliverables.
+                lines.append('  (func (export "mw_live") (result i32) (global.get $__mw_count))')
+            if needs_method_comp_drain:
+                # issue #1979: the same enumeration surface for the compensation
+                # accumulator — one per compensated per-tool-call `emit` still
+                # parked. The issued demonstration reads it to show a compensation
+                # registered as side-effect-free (the emit still fires) and that
+                # the abort drain brings it back to 0.
+                lines.append('  (func (export "mc_live") (result i32) (global.get $__mc_count))')
 
         # deactivate_step / deactivate: the two-phase accumulator (docs/
         # design/teardown-contract.md). One LIFO stack, three entry kinds
@@ -2570,6 +2895,14 @@ class _ComponentEmitter:
         lines.append("    ))")
         lines.append("    (if (i32.eqz (global.get $__committed))")
         lines.append("      (then")
+        if needs_method_comp_drain:
+            # issue #1979: drain the RUNTIME method-compensation accumulator
+            # first — these are the newest entries of all (registered per tool
+            # call, after activation) and a compensation is a Phase-2 kind, so
+            # component-level LIFO replays them ahead of item 324's method
+            # inverses and ahead of the static activation-body chain. One cell
+            # per call; only when the list empties does control fall through.
+            lines.extend(self._method_comp_drain(self.name))
         if needs_method_drain:
             # item 324: drain the RUNTIME method-witnessed accumulator first —
             # these are the newest inverses (registered per tool call, after
@@ -6430,6 +6763,55 @@ def _refuse_validated_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
+def _refuse_ui_transaction_units(ir: dict) -> None:
+    """Item 522 slice 3 (issues #1369, #1979): a computer-use provider method the
+    frontend marks as a UI TRANSACTION UNIT is refused by name on this tier.
+
+    The unit is a PER-TRANSACTION scope: the runtime settles a unit's
+    compensations at the unit's own boundary. This tier has no such scope — a
+    method-time registration (item 324's `$__mw_*`, and the `$__mc_*`
+    compensation accumulator added for #1979) is component-instance state drained
+    by `deactivate`, i.e. at SESSION granularity — so the unit is not
+    representable, and a unit's `compensate` would be registered and drained at a
+    boundary the frontend did not compute. Before #1979 the declared form was
+    dropped entirely and silently, which is the bug this fix closes; emitting a
+    wrong boundary instead would be no better, so the tier refuses by name. The
+    hosted tiers model the unit (`backends/typescript/emit.py` gives each
+    computer-use method a `uiTransaction` scope), so a hosted backend is the
+    answer here, not a silent narrowing.
+
+    FAIL-CLOSED on the frontend, exactly as `backends/python/emit.py`'s
+    `_ui_transaction_facts` is: without `revl.ui_transaction` the unit cannot be
+    found at all, so a document that declares a computer-use capability is
+    refused rather than emitted with no unit. A document that declares none is
+    untouched (byte-identically)."""
+    roots = {str(cap).split(".", 1)[0]
+             for ext in ir.get("externs") or []
+             for cap in ext.get("capabilities") or []}
+    if not roots & {"ui", "screen"}:
+        return
+    try:
+        from revl import ui_transaction  # noqa: PLC0415
+    except Exception as error:  # noqa: BLE001 - frontend absent: fail closed
+        raise EmitError(
+            "a computer-use extern needs the revl frontend to find its "
+            f"transaction unit (item 522), and it is not importable here: {error}"
+            " (#1979: this tier cannot scope a compensation to a transaction "
+            "unit, so it cannot emit a document that has one without knowing "
+            "where the unit ends)") from error
+    units = [f"{plan.get('component')}:provide {plan.get('key')}.{plan.get('method')}"
+             for plan in ui_transaction.plans(ir)
+             if plan.get("key") != "<activation>"]
+    if units:
+        raise EmitError(
+            f"{', '.join(units)}: a provide method that is a UI transaction unit "
+            "is not lowerable on the wasm tier — method-time compensation here is "
+            "component-instance state drained by `deactivate` (session "
+            "granularity), never at the unit boundary the frontend computes "
+            "(item 522, issue #1369 item 3); use a hosted backend for a "
+            "computer-use method (#1979)")
+
+
 def _refuse_unscrubbed_secret_referent(ext: dict, where: str) -> None:
     """Issue #1577: refuse an activation-registered witnessed extern whose
     durable-WAL frame could carry a declared secret verbatim.
@@ -6713,6 +7095,7 @@ def emit(ir: dict, record: bool = False, prune: bool = True) -> dict[str, str]:
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
     _refuse_validated_emissions(ir)
+    _refuse_ui_transaction_units(ir)
 
     _refuse_fault_tests(ir)
 

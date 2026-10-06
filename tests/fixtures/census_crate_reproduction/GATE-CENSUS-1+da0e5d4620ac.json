@@ -1081,6 +1081,7 @@
   "tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl",
   "tests/fixtures/emit_wasm_refusals/fn_named_memory.rvl",
   "tests/fixtures/emit_wasm_refusals/secret_fed_plain_witness.rvl",
+  "tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl",
   "tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl",
   "tests/fixtures/erase_net.rvl",
   "tests/fixtures/erase_realms.rvl",

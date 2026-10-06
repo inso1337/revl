@@ -1,0 +1,41 @@
+// A computer-use provider (issue #1369 item 3) whose bodies are `@wasm`, so the
+// ONE thing this tier refuses about it is the UI transaction unit itself: the
+// frontend marks each method that crosses a computer-use verb with
+// `"unit": "ui"`, and this tier has no per-transaction scope to register a
+// compensation into (issue #1979). `desk.act` crosses three verbs directly and
+// is the unit; `desk.count` crosses none.
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
+extern emission[screen.observe] fn read_pane(region: Str) -> Str
+  = @wasm { (i32.const 0) }
+extern emission[ui.find] fn locate(pane: Str, name: Str) -> UiTarget
+  = @wasm { (i32.const 0) }
+extern emission[ui.click] fn actuate(target: UiTarget) = @wasm { (nop) }
+
+service Desk {
+  emission fn act(region: Str) -> Int
+  fn count(n: Int) -> Int
+}
+
+component Agent provides desk: Desk {
+  provide desk {
+    fn act(region) {
+      let pane = emit read_pane(region)
+      let ok = emit locate(pane, "Approve")
+      emit actuate(ok)
+      return 1
+    }
+    fn count(n) = n + 1
+  }
+}

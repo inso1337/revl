@@ -436,6 +436,41 @@ def test_the_component_marker_is_text_only_the_port_emits(emitted, reference,
                             "<<UNSUPPORTED-COMPONENT:C>>")
 
 
+UI_TRANSACTION_UNIT = (
+    ROOT / "tests" / "fixtures" / "emit_wasm_refusals" / "ui_transaction_unit.rvl")
+
+
+def test_a_ui_transaction_unit_is_refused_by_name_on_both_sides(emitted, reference):
+    """issue #1979 / #1369 item 3: a UI transaction unit has no representation
+    on this tier, and BOTH sides have to say so.
+
+    The frontend groups a computer-use provider's crossings into per-method
+    transaction units (item 522), so `desk.act` is one. This tier has no
+    per-transaction scope: the only thing it can drain at a boundary is
+    component-instance state, and it drains that at SESSION granularity through
+    `deactivate`, never at the unit the frontend computed. The reference states
+    that by name and points at a hosted backend; the port answers the same
+    document with its `functions` module and a named unsupported-component
+    marker, so neither side drops it silently.
+
+    Why the case lives in `emit_wasm_refusals/` rather than `CORPUS`: a document
+    the reference REFUSES has no bytes for the byte-agreement oracle to agree
+    with, so no corpus entry can reach this path at all.
+    """
+    ir = compile_files([str(UI_TRANSACTION_UNIT)])
+    with pytest.raises(reference.EmitError) as exc:
+        reference.emit(ir)
+    assert "desk.act" in str(exc.value), (
+        "the reference names the unit: this case no longer exercises it"
+    )
+    assert "UI transaction unit" in str(exc.value)
+    assert "#1369 item 3" in str(exc.value) and "#1979" in str(exc.value)
+    got = emitted["emit_wasm_src"](ir)
+    assert [line.strip() for line in got.splitlines() if "<<" in line] == [
+        ";; <<UNSUPPORTED-COMPONENT:Agent>>",
+    ], "the port names what it cannot lower rather than answering with a module"
+
+
 @pytest.mark.parametrize("source, reason", [
     ("fn f(x: Float) -> Float { return x }", "Float"),
     ("fn f(x: Map[Str, Int]) -> Map[Str, Int] { return x }", "Map"),

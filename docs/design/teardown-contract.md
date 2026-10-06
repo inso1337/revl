@@ -252,11 +252,15 @@ each is a sentence the tier's loop is built against, not a new decision):
   helper thread to run or wait on it under a timer at all, so even the
   abandon-the-wait shape is unavailable. Between-compensation check only.
 - **wasm.** Two qualifications. First, the wasm accumulator is fixed at
-  ACTIVATION TIME; a method-time compensation is a hard `EmitError` on this
-  tier today. Exit test 3's "mixed-entry LIFO in both phases" therefore
-  reads, on wasm, over activation-registered entries only; the method-time
-  half of the contract is not owed until that restriction lifts (its own
-  item, not Slice 2b). Second, the table's "guest code yes" is a wasmtime
+  ACTIVATION TIME; a `compensate` SITE-SPELLED inside a method body is a hard
+  `EmitError` on this tier today. Exit test 3's "mixed-entry LIFO in both
+  phases" therefore reads, on wasm, over activation-registered entries — plus,
+  since issue #1979 (item 564), the per-call entries a method body registers for
+  an extern's DECLARED `compensate` (a runtime linked list, `mc_live`), which
+  replay ahead of the activation chain in the same Phase 2. The method-time half
+  of the contract is therefore owed for the declared shape only; a site-spelled
+  clause stays refused until its own item lifts that, because the tier cannot
+  see how many times the site ran. Second, the table's "guest code yes" is a wasmtime
   CAPABILITY, not an existing feature: the first-party runtime has no
   epoch/fuel wiring today. Slice 2b must WIRE it first-party (an epoch
   deadline or fuel meter armed around guest execution in Phase 2) before
@@ -330,7 +334,9 @@ Landed in `backends/wasm/emit.py` (the compiled accumulator) and
 7. **Not done in this slice, scoped elsewhere:** the cross-tier a5
    respec/exit-test sweep (exit tests 1-2 above) is sequenced with the py
    tier and the other Slice-2b tiers, not owned by the wasm landing alone;
-   method-time compensation stays refused (its own item, not Slice 2b); the
+   method-time compensation stays refused unless it is the extern's DECLARED
+   `compensate`, which issue #1979/item 564 now registers per call (a
+   site-spelled method clause is still refused); the
    `revl:teardown` section carries no witness/argument VALUES, by design (6).
 
 Budget values (Phase-2 total and per-call) are host configuration with
