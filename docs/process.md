@@ -278,6 +278,34 @@ The seven required checks (`lint` and the six `backend-*` jobs) are among
 them, and on a pull request `root-suite-affected` is the job that collects the
 root suite.
 
+`census-artifact` is intended to become an eighth required check (issue #1987):
+the committed census artifact had gone stale on `main` three times (#1986, the
+826 red, and again) with no status context able to block the merge, so the red
+was durable. It is safe to require because it always reports a context: on a
+pull request its `decide` step still runs and publishes `run`, skipping only the
+substantive steps when the diff moved no input, and its `if:` carries
+`merge_group` alongside `pull_request`, `push`, `schedule` and
+`workflow_dispatch`, so a queued candidate reports too. A required context that
+reports on no queued candidate is exactly what hangs the merge queue.
+
+The promotion is a branch-protection change, made outside this tree. Read the
+live shape first with `gh api repos/inso1337/revl/branches/main/protection`,
+then (as of the 2026-09-10 reading, `strict=false` and seven contexts):
+
+```
+gh api -X PATCH repos/inso1337/revl/branches/main/protection/required_status_checks \
+  -f 'strict=false' \
+  -F 'contexts[]=lint' -F 'contexts[]=backend-python' \
+  -F 'contexts[]=backend-typescript' -F 'contexts[]=backend-wasm' \
+  -F 'contexts[]=backend-rust' -F 'contexts[]=backend-java' \
+  -F 'contexts[]=backend-go' -F 'contexts[]=census-artifact'
+```
+
+`tests/test_required_checks_pinned.py` is the in-tree pin of the required /
+non-required partition; a promotion or demotion is updated there in the same
+change, and `tests/test_ci_pr_queue_split_1678.py` evaluates each job's `if:`
+per event so a required job that stops reporting on `merge_group` reds.
+
 `root-suite-affected` runs as four shards (issue #1774). Each shard computes
 the same `tools/affected_tests.py` selection. When it is the full root suite
 (about 70 minutes as one job), or 40 or more files, the shards split it by test
