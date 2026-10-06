@@ -1022,6 +1022,12 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                         carried.append((used, index))
     _apply_module_privacy(included, carried)
 
+    # Which modules are the composition's own (`root_modules`) and which are
+    # merely reached through a `use`. The tests merge below needs the
+    # distinction: a test that NAMES a component rides with the composition,
+    # not with the declaration closure (issue #1904).
+    root_ids = {id(module) for module in root_modules}
+
     for module in included:
         for index, decl in enumerate(module.program.type_decls):
             if declaration_key(module, "type", index) not in emitted_keys:
@@ -1079,7 +1085,20 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if declaration_key(module, "model_council", index) not in emitted_keys:
                 merged.model_councils.append(decl)
                 emitted_keys.add(declaration_key(module, "model_council", index))
+        # issue #1904: a `lifecycle test` names the components it `load`s, and
+        # components are never imported (`merged.components` above is built from
+        # the root modules only). Collecting an imported module's lifecycle test
+        # therefore put a `load` of a component this program does not declare
+        # into the merged program, and the importer stopped compiling with
+        # `unknown component`. A test that names a component rides with the
+        # composition's own modules, exactly as a `fault test` does above; it
+        # belongs to that module's own `revl test <module>` run, and
+        # `revl test a.rvl b.rvl` still collects it, because then both files are
+        # roots. A plain `test` (and a `prop test`) needs only pure
+        # declarations, so it keeps riding this closure unchanged.
         for index, decl in enumerate(module.program.tests):
+            if decl.lifecycle and id(module) not in root_ids:
+                continue
             if declaration_key(module, "test", index) not in emitted_keys:
                 merged.tests.append(decl)
                 emitted_keys.add(declaration_key(module, "test", index))
@@ -1199,7 +1218,6 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                                   included_host, profile)
     # ...and an imported module's placeholders with the compile's own profile, so
     # no `?<name>` realm ever reaches lowering unbound.
-    root_ids = {id(module) for module in root_modules}
     for module in included:
         if id(module) not in root_ids:
             _bind_realm_placeholders(module.program,
@@ -1655,10 +1673,17 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
             arm = bound | ({bind} if bind is not None else set())
             recur(body, arm)
             if isinstance(body, _ast.ExprBlockArm):
+                # issue #1913: a block arm accepts the same statement set a fn
+                # body does (`let`, `var`, `while`, `if`, `for`, assignments,
+                # ...), so walk it with the same statement walk and take the
+                # binders it threads out of the tail. Reading `s.value`/`s.name`
+                # assumed every statement was a `let`, so the first `ForStmt`,
+                # `WhileStmt` or `IfStmt` in an arm raised `AttributeError`; a
+                # statement the let-shaped walk happened to accept (an
+                # assignment) was also only half-walked.
                 inner = set(arm)
                 for s in body.stmts:
-                    recur(s.value, inner)
-                    inner.add(s.name)
+                    _rewrite_stmt(s, val_renames, type_renames, inner)
                 recur(body.tail, inner)
     elif isinstance(expr, _ast.ExprHole):
         expr.type = _subst_type(expr.type, type_renames)

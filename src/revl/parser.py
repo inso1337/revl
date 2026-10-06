@@ -9454,6 +9454,14 @@ def parse_file(path: str) -> Program:
         layer.source = source
     for decl in (*program.fn_decls, *program.externs, *program.services):
         program.decl_files[id(decl)] = source
+    # issue #1904: a `test`/`prop test`/`fault test` block carries no `.source`
+    # of its own, so it records its declaring file here as an extern does. A
+    # test block reached through a `use` is lowered inside the IMPORTER's
+    # merged program, whose `filename` is the importer's; without this entry
+    # every diagnostic raised in the imported block named the importer's file
+    # with the imported file's line number.
+    for decl in (*program.tests, *program.prop_tests, *program.fault_tests):
+        program.decl_files[id(decl)] = source
     for fn in program.fn_decls:
         fn.source = source
     return program

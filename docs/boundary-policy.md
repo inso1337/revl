@@ -147,6 +147,43 @@ The JSON form parses to the same policy:
   capability and the cardinality reason. Without it the call is ticketed as
   before, with the `unbounded` ceiling on the ticket.
 
+### What a capability token may be
+
+The capability vocabulary is CLOSED. A token in a reach rule is a capability
+pattern: dot-separated identifier segments naming a boundary in the wiring
+namespace (`mail.send`, `fs.write`), optionally widened with the glob
+metacharacters `*`, `?` and a character set (`llm*`, `mail.*`, `[mn]ail.send`).
+Several tokens are separated by **commas**, never spaces. The JSON form's
+`allow` / `deny` / `mcp.allow` arrays and the taint-flow lists are held to the
+same shape.
+
+A token that cannot be a capability pattern is a `PolicyError` **at parse
+time**, naming the token and its `file:line`, so a typo can never become a rule
+that silently requires or denies nothing (issue #1984). This is the same
+closed-vocabulary rule an unknown evidence facet already follows. In
+particular:
+
+* `component * may not reach mail.send shell.run` is refused: two patterns need
+  a comma, and one whitespace-bearing token denies neither.
+* `component Agent* may reach llm kv*` is refused for the same reason. It used
+  to parse and then grant nothing: the fail-closed direction, but still a
+  no-op nobody was told about.
+* `except` is **not** part of the reach grammar, and `component * may not reach
+  mail.send except the send kit` is refused with a diagnostic saying so. A
+  reach rule carries no carve-out slot: the supported way to say "this crossing
+  must be asked about" is
+  `capability <glob> requires approval [ttl <D>] [require <N> of {a, b}]`
+  (item 246), which refuses the reach until it is approved. To narrow a rule,
+  name the components it applies to with a `component <glob>` selector instead
+  of carving an exception out of a wildcard.
+
+A token can also be capability-shaped and still wrong (`mail.sedn` where the
+boundary is `mail.send`). Nothing at parse time can tell those apart, so
+`evaluate` warns (`InertDenyPolicyWarning`) when a `may not reach` rule selected
+a component in the audit and no reach of that component matched any of its
+patterns. Such a rule is not protecting anything, and without the warning
+enforcing it reads exactly like a clean pass.
+
 ## The refusal
 
 A violation refuses admission and carries a why-trace naming the violating
