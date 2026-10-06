@@ -5025,10 +5025,23 @@ fn expr_var_names(node: Any, acc: Map[Str, Str]) -> Map[Str, Str] {
 }
 // `_acquire_moved_locals`: the bare-identifier arguments a host-Map method
 // takes by value (`insert(key, value)`; `get`/`remove` borrow the key). Every
-// other acquire argument is already cloned at the call site.
+// other acquire argument is already cloned at the call site. The `??` operator
+// is the other such construct: its sole lowering consumes its left operand
+// (`<left>.unwrap_or_else(..)`), so the bare identifier there is flagged too
+// (issue #1980 -- the admitted restored-value inverse appends with
+// `(prev ?? []).push(msg)` and its `undo` is a `match prev { .. }`, so the undo
+// closure would otherwise find `prev` already moved, E0382).
 fn acquire_moved_locals(node: Any, vt: Map[Str, Str], acc: Map[Str, Str]) -> Map[Str, Str] {
   var m = acc
   if (value_kind(node) == "record") {
+    if (node_kind(node) == "bin" && value_str(value_field(node, "op")) == "??") {
+      let left = value_field(node, "left")
+      let lk = node_kind(left)
+      if (lk == "var" || lk == "name") {
+        let ident = ref_ident(left)
+        if (ident != "") { m = m.set(ident, "1") }
+      }
+    }
     if (node_kind(node) == "call" && value_is_null(value_field(node, "callee"))) {
       let recv = ref_ident(value_field(node, "target"))
       let mth = value_str(value_field(node, "method"))

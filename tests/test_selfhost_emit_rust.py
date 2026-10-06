@@ -246,6 +246,12 @@ CORPUS = [
                              #   `effect ... undo` clones the parameter
                              #   (`let key = k.clone();`), as does `slot = v`;
                              #   a `let` of a body local stays a move
+    "comp_opt_restore_undo_local.rvl",  # issue #1980: the admitted
+                             #   restored-value inverse appends with `??`,
+                             #   whose lowering consumes its left operand, and
+                             #   its `undo` is a `match` that re-reads that
+                             #   local (`let prev_undo = prev.clone();`,
+                             #   `_acquire_moved_locals`)
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm

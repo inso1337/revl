@@ -759,6 +759,47 @@ extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
 }
 """
 
+# issue #1980: a provide-method `insert` undone by the value the body read.
+# `store.get(k)` is `Opt`, so `match prev { Some(x) => insert(k, x), None =>
+# remove(k) }` restores an existing key's old value AND removes the key an
+# insert created — EXACT, hence PROVEN `table`, not the author's word. The
+# restored name has to be bound by a read of the SAME table at the SAME key,
+# earlier in the same body, with no write to that table at that key in
+# between; a defaulted read (`??`) erases the `Opt` and keeps the refusal,
+# which then names the `match` form. `p` is a third parameter so a program
+# restoring a name no read bound still names something in scope.
+_RESTORE_SERVICE = """service Kv {
+  fn get(k: Str) -> Str
+  fn set(k: Str, v: Str, p: Str) -> Str
+}
+"""
+
+
+def _restoring(read: str | None = "let prev = store.get(k)",
+               effect: str = "store.insert(k, v)",
+               undo: str = ("match prev { Some(x) => store.insert(k, x), "
+                            "None => store.remove(k) }"),
+               between: str = "",
+               after: str = "") -> str:
+    lines = [f"      {read}"] if read is not None else []
+    lines += [f"      {extra}" for extra in between.splitlines()]
+    lines += [f"      effect {effect}", f"      undo   {undo}"]
+    if after:
+        lines.append(f"      {after}")
+    lines.append("      return v")
+    return (_RESTORE_SERVICE
+            + "component Store provides kv: Kv {\n"
+            "  let store = effect Map.new() undo store.drop()\n"
+            "  let other = effect Map.new() undo other.drop()\n"
+            "  provide kv {\n"
+            "    fn get(k) = store.get(k)\n"
+            "    fn set(k, v, p) {\n"
+            + "\n".join(lines) + "\n"
+            "    }\n"
+            "  }\n"
+            "}\n")
+
+
 ACCEPTED_PROGRAMS = [
     # Issue #1897: a provide method may mark a WITNESSED effect `verified`.
     ("a verified witnessed effect in a provide method", _VERIFIED_WIT + """service W { emission fn put(k: Str) }
@@ -1833,6 +1874,20 @@ component Supervisor requires net: Kv provides sup: Sup {
      .format(mods="idempotent(key: id)")),
     ("item 309: a key typed by an alias of Str", "type Id = Str\n"
      + _IDEM.replace("id: Str", "id: Id").format(mods="idempotent(key: id)")),
+    # ---- issue #1980: the undo restores the value the body read ------------
+    # These are the ACCEPTING twins of the `g4 1980:` rows in REJECTED_PROGRAMS.
+    # Before the gate learned the read-before-the-effect walk it refused every
+    # one of them (the #1945 "must be its inverse" message), so the reference's
+    # `inverse: table` and the gate's provenance had to be brought together.
+    ("issue 1980: a match restoring the value the body read", _restoring()),
+    ("issue 1980: a literal key read restored the same way",
+     _restoring(read='let prev = store.get("a")',
+                effect='store.insert("a", v)',
+                undo=('match prev { Some(x) => store.insert("a", x), '
+                      'None => store.remove("a") }'))),
+    ("issue 1980: a write at another key between the read and the effect",
+     _restoring(between='effect store.insert("j", "mid")\n'
+                        'undo   store.remove("j")')),
 ]
 
 
@@ -2559,6 +2614,29 @@ component C requires kv: Kv {
     # issue #1945: a provide-method host write's undo is not its inverse
     ("g4 method write whose undo is not its inverse",
      _fixture("g4_method_write_not_inverse"), "G4"),
+    # issue #1980: restoring the read is admitted, but only when the read IS
+    # the one the rule asks for. Each of these keeps the #1945 refusal and the
+    # refusal names the `match` form that would be admitted — so the two
+    # engines have to agree on the clause, not merely on the tag.
+    ("g4 1980: a defaulted read erases the Opt",
+     _restoring(read="let prev = store.get(k) ?? []",
+                undo="store.insert(k, prev)"), "G4"),
+    ("g4 1980: a defaulted read under the match form",
+     _restoring(read="let prev = store.get(k) ?? []"), "G4"),
+    ("g4 1980: a plain restore of the Opt read",
+     _restoring(undo="store.insert(k, prev)"), "G4"),
+    ("g4 1980: a read from another handle",
+     _restoring(read="let prev = other.get(k)"), "G4"),
+    ("g4 1980: a read from another key",
+     _restoring(read='let prev = store.get("j")'), "G4"),
+    ("g4 1980: a write to this key between the read and the effect",
+     _restoring(between='effect store.insert(k, "mid")\n'
+                        'undo   store.remove(k)'), "G4"),
+    ("g4 1980: a restore of a name no read bound",
+     _restoring(read=None, undo="store.insert(k, p)"), "G4"),
+    ("g4 1980: a read AFTER the effect",
+     _restoring(read=None, undo="store.insert(k, p)",
+                after="let later = store.get(k)"), "G4"),
     ("g4 host acquire in a component-reachable fn body",
      _fixture("g4_fn_body_host_acquire"), "G4"),
     # the same rule at the two positions no checked-in fixture occupies

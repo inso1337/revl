@@ -6500,6 +6500,16 @@ fn expr_var_names(node: Value, acc: std::collections::HashMap<String, String>) -
 fn acquire_moved_locals(node: Value, vt: std::collections::HashMap<String, String>, acc: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
     let mut m = acc;
     if (value_kind(node.clone()) == "record") {
+        if ((node_kind(node.clone()) == "bin") && (value_str(value_field(node.clone(), String::from("op"))) == "??")) {
+            let left = value_field(node.clone(), String::from("left"));
+            let lk = node_kind(left.clone());
+            if ((lk == "var") || (lk == "name")) {
+                let ident = ref_ident(left.clone());
+                if (ident != "") {
+                    m.insert(ident.clone(), String::from("1"));
+                }
+            }
+        }
         if ((node_kind(node.clone()) == "call") && value_is_null(value_field(node.clone(), String::from("callee")))) {
             let recv = ref_ident(value_field(node.clone(), String::from("target")));
             let mth = value_str(value_field(node.clone(), String::from("method")));
@@ -11136,7 +11146,7 @@ fn method_release_msg(ss: &[Stmt], i: i64, cx: Ctx__m2, maps: &[String]) -> Stri
     if (m != "") {
         return m;
     }
-    let w = if (((ss)[(i) as usize].kind == "undo") && ((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].kind == "effect")) { write_inverse_msg((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].e.clone(), (ss)[(i) as usize].e.clone(), maps) } else { String::from("") };
+    let w = if (((ss)[(i) as usize].kind == "undo") && ((ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].kind == "effect")) { write_inverse_msg(ss, i, maps) } else { String::from("") };
     if (w != "") {
         return w;
     }
@@ -11165,7 +11175,9 @@ fn host_write_verb(e: Expr, names: &[String]) -> String {
 };
 }
 
-fn write_inverse_msg(acq: Expr, und: Expr, maps: &[String]) -> String {
+fn write_inverse_msg(ss: &[Stmt], i: i64, maps: &[String]) -> String {
+    let acq = (ss)[((i).checked_sub(1i64).expect("revl: Int overflow")) as usize].e.clone();
+    let und = (ss)[(i) as usize].e.clone();
     let verb = host_write_verb(acq.clone(), maps);
     if ((verb == "") || is_hole_expr(und.clone())) {
         return String::from("");
@@ -11176,9 +11188,180 @@ fn write_inverse_msg(acq: Expr, und: Expr, maps: &[String]) -> String {
     if (((call_recv(und.clone()) == recv) && (call_verb(und.clone()) == inverse)) && key_expr_same(key.clone(), first_arg(und.clone()))) {
         return String::from("");
     }
+    if (verb == "insert") {
+        let rv = restore_verdict(ss, i, maps, &recv, key.clone(), und.clone(), &verb);
+        if ((rv)[(0i64) as usize] == "1") {
+            return (rv)[(1i64) as usize].clone();
+        }
+    }
     let k = key_spelling(key.clone());
     let spelled = if (inverse == "remove") { ((recv.revl_concat(".remove(")).revl_concat(&k)).revl_concat(")") } else { ((recv.revl_concat(".insert(")).revl_concat(&k)).revl_concat(", <the value it held>)") };
     return (((((String::from("the `undo` of `effect ").revl_concat(&recv)).revl_concat(".")).revl_concat(&verb)).revl_concat("(...)` must be its inverse on the same handle and key: write `undo ")).revl_concat(&spelled)).revl_concat("`");
+}
+
+fn restore_verdict(ss: &[Stmt], i: i64, maps: &[String], recv: &str, key: Expr, und: Expr, verb: &str) -> Vec<String> {
+    let sh = restore_shape(und.clone(), recv, key.clone());
+    if (sh.revl_length() == 0i64) {
+        return vec![String::from("0"), String::from("")];
+    }
+    let bind = (sh)[(0i64) as usize].clone();
+    let v = read_verdict(ss, (i).checked_sub(1i64).expect("revl: Int overflow"), &bind, (i).checked_sub(1i64).expect("revl: Int overflow"), recv, key.clone(), maps);
+    if (v != 0i64) {
+        return vec![String::from("1"), restore_form_msg(recv, verb, &bind, &restore_why(v), &key_spelling(key.clone()))];
+    }
+    if ((sh)[(1i64) as usize] == "plain") {
+        return vec![String::from("1"), restore_form_msg(recv, verb, &bind, "it is `Opt`-shaped, so the undo must branch on it", &key_spelling(key.clone()))];
+    }
+    return vec![String::from("1"), String::from("")];
+}
+
+fn restore_shape(und: Expr, recv: &str, key: Expr) -> Vec<String> {
+    return match und {
+    Expr::Match(m) => { let m = *m; restore_match_shape(m, recv, key.clone()) },
+    Expr::Call(c) => { let c = *c; restore_plain_shape(c, recv, key.clone()) },
+    _ => vec![],
+};
+}
+
+fn restore_match_shape(m: MatchN, recv: &str, key: Expr) -> Vec<String> {
+    if (m.arms.revl_length() != 2i64) {
+        return vec![];
+    }
+    let si = arm_index(&m.arms, "Some", 0i64);
+    let ni = arm_index(&m.arms, "None", 0i64);
+    if (((si < 0i64) || (ni < 0i64)) || ((m.arms)[(si) as usize].bind == "")) {
+        return vec![];
+    }
+    let scrut = match m.scrut.clone() {
+    Expr::Var(v) => v,
+    _ => String::from(""),
+};
+    if (scrut == "") {
+        return vec![];
+    }
+    let ins = call_of((m.arms)[(si) as usize].body.clone(), recv, "insert", &(vec![key.clone(), Expr::Var((m.arms)[(si) as usize].bind.clone())]));
+    let rem = call_of((m.arms)[(ni) as usize].body.clone(), recv, "remove", &(vec![key.clone()]));
+    return if (ins && rem) { vec![scrut.clone(), String::from("match")] } else { vec![] };
+}
+
+fn restore_plain_shape(c: CallN, recv: &str, key: Expr) -> Vec<String> {
+    if ((calln_recv(c.clone()) != recv) || (calln_verb(c.clone()) != "insert")) {
+        return vec![];
+    }
+    if ((c.args.revl_length() != 2i64) || (!key_expr_same((c.args)[(0i64) as usize].clone(), key.clone()))) {
+        return vec![];
+    }
+    return match (c.args)[(1i64) as usize].clone() {
+    Expr::Var(v) => vec![v, String::from("plain")],
+    _ => vec![],
+};
+}
+
+fn arm_index(arms: &[ArmN], pat: &str, i: i64) -> i64 {
+    if (i >= arms.revl_length()) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    return if ((arms)[(i) as usize].pat == pat) { i } else { arm_index(arms, pat, (i).checked_add(1i64).expect("revl: Int overflow")) };
+}
+
+fn call_of(e: Expr, recv: &str, verb: &str, args: &[Expr]) -> bool {
+    return match e.clone() {
+    Expr::Call(c) => { let c = *c; (((call_recv(e.clone()) == recv) && (call_verb(e.clone()) == verb)) && key_args_same(&c.args, args, 0i64)) },
+    _ => false,
+};
+}
+
+fn calln_recv(c: CallN) -> String {
+    return match c.target {
+    Expr::Field(f) => { let f = *f; match f.target {
+    Expr::Var(v) => v,
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+};
+}
+
+fn calln_verb(c: CallN) -> String {
+    return match c.target {
+    Expr::Field(f) => { let f = *f; f.name },
+    _ => String::from(""),
+};
+}
+
+fn read_verdict(ss: &[Stmt], at: i64, name: &str, eff: i64, recv: &str, key: Expr, maps: &[String]) -> i64 {
+    if (at <= 0i64) {
+        return 1i64;
+    }
+    let s = (ss)[((at).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
+    if ((s.kind == "expr") && (s.bind == name)) {
+        let rr = read_recv(s.e.clone(), maps);
+        if (rr == "") {
+            return 1i64;
+        }
+        if ((rr != recv) || (!key_expr_same(read_key(s.e.clone()), key.clone()))) {
+            return 2i64;
+        }
+        if written_between(ss, at, eff, recv, key.clone(), maps) {
+            return 3i64;
+        }
+        if read_defaulted(s.e.clone()) {
+            return 4i64;
+        }
+        return 0i64;
+    }
+    return read_verdict(ss, (at).checked_sub(1i64).expect("revl: Int overflow"), name, eff, recv, key.clone(), maps);
+}
+
+fn written_between(ss: &[Stmt], i: i64, eff: i64, recv: &str, key: Expr, maps: &[String]) -> bool {
+    if (i >= eff) {
+        return false;
+    }
+    let s = (ss)[(i) as usize].clone();
+    if ((((s.kind == "effect") && (host_write_verb(s.e.clone(), maps) != "")) && (call_recv(s.e.clone()) == recv)) && key_expr_same(first_arg(s.e.clone()), key.clone())) {
+        return true;
+    }
+    return written_between(ss, (i).checked_add(1i64).expect("revl: Int overflow"), eff, recv, key.clone(), maps);
+}
+
+fn read_recv(e: Expr, maps: &[String]) -> String {
+    return match e.clone() {
+    Expr::Bin(b) => { let b = *b; if (b.op == "??") { read_recv(b.l.clone(), maps) } else { String::from("") } },
+    _ => if ((call_verb(e.clone()) == "get") && contains__m2(maps, &call_recv(e.clone()))) { call_recv(e.clone()) } else { String::from("") },
+};
+}
+
+fn read_key(e: Expr) -> Expr {
+    return match e.clone() {
+    Expr::Bin(b) => { let b = *b; if (b.op == "??") { read_key(b.l.clone()) } else { first_arg(e.clone()) } },
+    _ => first_arg(e.clone()),
+};
+}
+
+fn read_defaulted(e: Expr) -> bool {
+    return match e {
+    Expr::Bin(b) => { let b = *b; (b.op == "??") },
+    _ => false,
+};
+}
+
+fn restore_why(v: i64) -> String {
+    if (v == 1i64) {
+        return String::from("no read of this table at this key bound it earlier in the same body");
+    }
+    if (v == 2i64) {
+        return String::from("it is read from another handle or another key");
+    }
+    if (v == 3i64) {
+        return String::from("this table is written at this key between the read and the effect");
+    }
+    if (v == 4i64) {
+        return String::from("its read is defaulted (`??`), which erases the `Opt` the inverse follows");
+    }
+    return String::from("it is `Opt`-shaped, so the undo must branch on it");
+}
+
+fn restore_form_msg(name: &str, verb: &str, bind: &str, why: &str, k: &str) -> String {
+    return (((((((((((((((((String::from("the `undo` of `effect ").revl_concat(&name)).revl_concat(".")).revl_concat(&verb)).revl_concat("(...)` cannot restore `")).revl_concat(&bind)).revl_concat("` (")).revl_concat(&why)).revl_concat("): write `undo match ")).revl_concat(&bind)).revl_concat(" { Some(v) => ")).revl_concat(&name)).revl_concat(".insert(")).revl_concat(&k)).revl_concat(", v), None => ")).revl_concat(&name)).revl_concat(".remove(")).revl_concat(&k)).revl_concat(") }`");
 }
 
 fn call_recv(e: Expr) -> String {
