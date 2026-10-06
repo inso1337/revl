@@ -165,7 +165,9 @@ def test_plain_imported_extern_with_site_undo_compiles():
     ir = _compile_with_plainmod(src)
     comp = next(c for c in ir["components"] if c["name"] == "C")
     assert comp["body"] == [
-        {"step": "let-effect", "bind": "h",
+        # issue #1859: an imported plain extern's `undo` is the inverse its
+        # declaration names, so the activation bracket records `declared`.
+        {"step": "let-effect", "bind": "h", "inverse": "declared",
          "acquire": {"kind": "fn", "name": "open_conn", "args": []},
          "undo": {"kind": "fn", "name": "close_conn", "args": [{"kind": "name", "id": "h"}]}},
     ]
