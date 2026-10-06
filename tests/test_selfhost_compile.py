@@ -645,24 +645,22 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # emitter half agrees byte for byte on the reference IR; lower.rvl
         # does not yet lower an extern's declared `compensate` slot.
         "extern_compensate.rvl",
-        # Issue #1954 (item 256): the capability-bound secret seam. The EMITTER
-        # half agrees byte for byte on the reference IR — the scaffold, the
-        # fail-loud helper and the first-local bind in both the sync and the
-        # async extern body all reproduce, which is what the assertion above
-        # measures. What the fully-native chain cannot reach is that IR: the
-        # lexer has no `secret` keyword, the parser no top-level
-        # `secret NAME for CAP` node, and `selfhost/lower.rvl` no port of the
-        # reference's `_lower_secrets`, so the native chain emits none of the
-        # seam and refuses the document outright with
-        # `BAD|unexpected token at top level`. Tracked as issue #2012.
+        # Issue #1954 (item 256) / issue #2012: the capability-bound secret
+        # seam. This entry is CLOSED — `selfhost/lower.rvl` now reads
+        # `secret NAME for CAP` at the top level, lowers it to the reference's
+        # `secrets` rows (`secrets_bind`), stamps the bound names onto every
+        # emission extern that serves the capability, and refuses the four
+        # malformed shapes with the reference's own messages, so
+        # `../../noncensus_corpus/emit_ts_bound_secret.rvl` is byte-exact
+        # through the fully-native chain and no longer belongs in this tuple.
         #
-        # It is the one document in this tuple that the native GATE refuses
-        # rather than merely mis-lowers, which is why it sits outside every
+        # It is the one document in this tuple that the native GATE used to
+        # refuse rather than merely mis-lower, which is why it sits outside every
         # corpus directory the census walks (`tests/noncensus_corpus/`): inside
-        # one it would have to enter the census baseline as a standing
-        # `false-reject` waiver, a cost this gap does not need to charge while
-        # it is recorded here by name.
-        "../../noncensus_corpus/emit_ts_bound_secret.rvl",
+        # one it would have had to enter the census baseline as a standing
+        # `false-reject` waiver. The gate now refuses it with the reference's
+        # message, so that waiver was never needed.
+
         # issue #1911: the `abort` lifecycle STEP, on a document that is nothing
         # but a lifecycle test. It sits LAST in this tuple, because the
         # comparison above is order-sensitive — `diverged` is built by walking
