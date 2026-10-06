@@ -974,3 +974,22 @@ def test_in_file_test_sections_agree(emitted, reference, tmp_path, source, refer
     want, got = reference.emit(ir), emitted["emit_py_src"](ir)
     assert reference_token in want
     assert got == want
+
+
+# item 560 / issue #1914: the one key pair the injective mangling cannot split
+# ---------------------------------------------------------------------------
+# `tests/fixtures/emit_py_refusals/host_identifier_collision.rvl` is the only
+# input that reaches the namespaced branch of the mangling and the refusal arm of
+# `_check_host_keys`, so `tools/selfhost_line_coverage.py` drives both halves
+# over it. Its refusal text is asserted here.
+REFUSALS_DIR = ROOT / "tests" / "fixtures" / "emit_py_refusals"
+
+
+def test_a_host_identifier_collision_is_refused_by_name(reference):
+    """A namespaced key and the unqualified key that already spells its mangled
+    identifier are two DISTINCT wiring keys that must not land on one host
+    identifier. The reference refuses to guess which one was meant, by name."""
+    ir = compile_files([str(REFUSALS_DIR / "host_identifier_collision.rvl")])
+    with pytest.raises(reference.EmitError,
+                       match="both mangle to the Python identifier"):
+        reference.emit(ir)

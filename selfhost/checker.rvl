@@ -2430,6 +2430,27 @@ fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
   return p_stmts(ts, nx, hi, append_stmts(acc, r.ss))
 }
 
+// A provision KEY, optionally namespace-qualified as `ns::key`
+// (docs/namespacing.md). The separator is two ADJACENT `:` tokens, not a lexed
+// `::`, so a qualified key is 4 tokens (`ns`, `:`, `:`, `local`) where a bare
+// one is 1 — `qkey_len` is that token count and `qkey_text` joins the spelling
+// back into the key's wiring identity, the reconstruction the reference's
+// `_provision_key` performs. Reading the key as one bare token instead failed
+// the whole component with `bad provide block`, a stage that never reached a
+// guarantee: the false rejection `selfhost/lower.rvl` carries the same repair
+// for, since the two surfaces have to agree about what they refuse.
+fn qkey_len(ts: List[Token], i: Int) -> Int {
+  if (atk(ts, i + 1, ":") && atk(ts, i + 2, ":")) { return 4 }
+  return 1
+}
+
+fn qkey_text(ts: List[Token], i: Int) -> Str {
+  if (qkey_len(ts, i) == 4) {
+    return tkc(ts, i).text.concat("::").concat(tkc(ts, i + 3).text)
+  }
+  return tkc(ts, i).text
+}
+
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                provs: List[Provide], setup: List[Stmt]) -> ProvR {
   if (i >= end) {
@@ -2443,15 +2464,16 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     return p_comp_body(ts, i + 1, end, provh, provs, setup)
   }
   if (atw(ts, i, "provide")) {
-    let key = tkc(ts, i + 1).text
-    if (!atk(ts, i + 2, "{")) {
-      return { provs: provs, setup: setup, i: i + 2, ok: false }
+    let key = qkey_text(ts, i + 1)
+    let kl = qkey_len(ts, i + 1)
+    if (!atk(ts, i + 1 + kl, "{")) {
+      return { provs: provs, setup: setup, i: i + 1 + kl, ok: false }
     }
-    let pend = close_brace(ts, i + 2)
+    let pend = close_brace(ts, i + 1 + kl)
     if (pend == 0 - 1) {
       return { provs: provs, setup: setup, i: ts.length(), ok: false }
     }
-    let ms = p_prov_methods(ts, i + 3, pend - 1, [])
+    let ms = p_prov_methods(ts, i + 2 + kl, pend - 1, [])
     if (!ms.ok) {
       return { provs: provs, setup: setup, i: pend, ok: false }
     }
@@ -2481,10 +2503,12 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
     var k = j + 1
     while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
            && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
-      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
-        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+      let kl = qkey_len(ts, k)
+      if (atk(ts, k, "ident") && atk(ts, k + kl, ":")
+          && atk(ts, k + kl + 1, "ident")) {
+        let pair = { name: qkey_text(ts, k), ty: tkc(ts, k + kl + 1).text }
         if (isReq) { reqs = reqs.push(pair) } else { provh = provh.push(pair) }
-        k += 3
+        k += kl + 2
       } else { k += 1 }
     }
     j = k
