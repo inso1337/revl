@@ -901,6 +901,10 @@ KEYWORD_WAIT_EDGE: dict[str, str | None] = {
     "else": None, "while": None, "for": None, "of": None, "match": None,
     "assert": None, "true": None, "false": None, "null": None, "as": None,
     "in": None, "hole": None,
+    # `try e` (issue #1967) unwraps a Result by early-returning the Err. It
+    # names no handle and acquires nothing, so it suspends on nothing: the
+    # early return happens in this activation, not in another's.
+    "try": None,
     "break": None, "continue": None,
     "pure": None, "verified": None, "commutative": None, "idempotent": None,
     # `intercept`/`handoff`/`with` rewrite or hand over a provision without
