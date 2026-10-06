@@ -304,7 +304,7 @@ def test_the_use_reached_file_is_addressable_by_its_path(project):
 
 
 @needs_runtime
-def test_the_record_rides_an_edit_of_a_caller(project):
+def test_a_use_reached_record_survives_an_edit_of_a_caller(project):
     proj, _reg = project
     _add(proj)
     _load_use_reached(proj)
@@ -317,6 +317,8 @@ def test_the_record_rides_an_edit_of_a_caller(project):
     assert [t["symbol"] for t in edited["touched"]] == ["AppProvider.app.hi"]
     # the read-only buffer rode the swap holding the text that compiled, so the
     # record is still anchored, still live, and still measured against it
+    # the record is still served by name afterwards; delivering it inside the
+    # edit's own response is NOT asserted here (a #1779 follow-up)
     held = server_mod.SESSION.origin[edit_mod.ORIGIN_DEPENDENCIES]
     assert held[_truc_path(proj)] == GREETER
     (served,) = _served(proj)
