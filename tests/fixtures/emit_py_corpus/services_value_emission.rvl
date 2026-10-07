@@ -8,14 +8,19 @@
 //
 //   file   - `return emit file_host(t)`, the whole return value.
 //   bind   - `let r = emit file_host(t)`, then a later reassignment `r = emit`.
+//   pick   - `return emit file_host(t)` as the whole value of an `if` arm.
 //   fold   - a pure extern in a `return`, not routed.
 //
 // No `emit` STATEMENT appears here on purpose: the `from runtime import` line
-// must pull in `extern_emit` for the value emissions alone. A value emission
-// inside a method `if` arm renders through the same `method_step` recursion,
-// and is kept out of this document because selfhost/lower.rvl does not lower
-// method control flow yet (services_control_flow.rvl in LOWER_GAP_DOCS), and
-// this document is held byte-exact through the fully-native chain too.
+// must pull in `extern_emit` for the value emissions alone. A value emission in
+// a method `if` arm is the same `method_step` recursion as the top level
+// (`method_control` -> `method_block` -> `method_step` -> `method_value`), so
+// `pick`'s arm routes exactly as `file`'s whole return value does. That shape
+// was held out of this document while selfhost/lower.rvl did not lower
+// provide-method control flow, which is why services_control_flow.rvl sat in
+// LOWER_GAP_DOCS; #2101 taught lower.rvl that lowering, the document left the
+// list, and the shape is here now, held byte-exact through the fully-native
+// chain too.
 
 extern emission fn file_host(t: Str) -> Str = @py {
     return 'id-' + t
@@ -27,6 +32,7 @@ extern pure fn shout(t: Str) -> Str = @py {
 service Tickets {
   emission fn file(t: Str) -> Str
   emission fn bind(t: Str) -> Str
+  emission fn pick(t: Str) -> Str
   fn fold(t: Str) -> Str
 }
 
@@ -37,6 +43,12 @@ component Desk provides tickets: Tickets {
       var r = emit file_host(t)
       r = emit file_host(r)
       return r
+    }
+    fn pick(t) {
+      if (t != "") {
+        return emit file_host(t)
+      }
+      return shout(t)
     }
     fn fold(t) { return shout(t) }
   }
