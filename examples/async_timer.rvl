@@ -14,9 +14,13 @@
 // recording), reached from the two timer bodies exactly as the scheduled agent
 // run reaches `agent.run_in`.
 
+// `tick` declares the boundary it reaches rather than spelling `emission`
+// bare: a bare reach is an undeclared one, and under the agent profile
+// (`revl_load`/`revl_swap`) an undeclared reach is not read as provably
+// disjoint from the kernel (issue #2105).
 service Counter {
   fn count() -> Int
-  emission async fn tick()
+  emission[counter] async fn tick()
 }
 
 component AsyncCounter provides counter: Counter {
