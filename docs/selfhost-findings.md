@@ -1745,7 +1745,7 @@ document the **fully-native** chain does not reproduce is therefore a
 they are named document by document in
 [`LOWER_GAP_DOCS`](../tests/test_selfhost_compile.py).
 
-Tiers whose whole corpus survives the fully-native chain: `java`, `wasm`.
+Tiers whose whole corpus survives the fully-native chain: `go`, `java`, `wasm`.
 
 The per-tier counts are not stored here, because they move with every
 corpus document a pull request adds. Print them with
@@ -1780,12 +1780,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `services_host_stream.rvl`
 - `../emit_py_placement.rvl`
 - `../emit_py_builtin_shadow.rvl`
-- `../../../examples/regressions/fuzz_go_e6afacd3.rvl`
-- `../../../examples/uxprobe2_jobs.rvl`
-- `../../../backends/go/scenarios/advance.rvl`
-- `../../../examples/model_store_sqlite.rvl`
-- `../../../examples/uxprobe2_fault.rvl`
-- `../emit_py_test_sections.rvl`
 - `../../../examples/async_timer.rvl`
 - `../emit_py_async_shapes.rvl`
 - `streams.rvl`
@@ -1804,25 +1798,17 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 - `component_edges.rvl`
 - `../../../stdlib/router.rvl`
-- `../../../examples/lifecycle_cache.rvl`
-- `../../../backends/go/testdata/opt_gaps_280.rvl`
 - `../../../examples/async_timer.rvl`
-- `../../../backends/go/scenarios/advance.rvl`
 - `../../../backends/go/testdata/stream_130.rvl`
 - `../emit_rust_corpus/comp_stream.rvl`
 - `../emit_py_corpus/branches.rvl`
 - `routed_timers.rvl`
 - `ref_externs.rvl`
 - `extern_compensate.rvl`
-- `lifecycle_abort.rvl`
-- `host_map_journal.rvl`
 
 `go`:
 
-- `in_file_tests.rvl`
-- `../../../backends/go/testdata/opt_gaps_280.rvl`
-- `../../../backends/go/testdata/result_erased_1631.rvl`
-- `comp_provide_pure.rvl`
+- none; the fully-native chain reproduces the whole corpus.
 
 `java`:
 
@@ -1831,7 +1817,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 `rust`:
 
 - `comp_stream.rvl`
-- `in_file_tests.rvl`
 - `by_value_reuse.rvl`
 - `method_control_flow.rvl`
 

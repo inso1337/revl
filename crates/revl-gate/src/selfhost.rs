@@ -35443,7 +35443,7 @@ fn lower_to_ir_emits_the_services_table_for_a_simple_provider() {
 
 #[test]
 fn lower_to_ir_keeps_both_fns_around_a_one_line_named_test_block() {
-    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}]}"));
+    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}], \"tests\": [{\"name\": \"t\", \"body\": [{\"step\":\"assert\",\"expr\":{\"kind\":\"bin\",\"op\":\"==\",\"left\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"one\"},\"args\":[]},\"right\":{\"kind\":\"lit\",\"value\":1}}}]}]}"));
 }
 
 #[test]

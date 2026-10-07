@@ -30633,9 +30633,10 @@ test "lower_to_ir emits the services table for a simple provider" {
 
 test "lower_to_ir keeps both fns around a one-line named test block" {
   // fns_walk is one of the eight top-level walkers: before the skip covered the
-  // named spelling this dropped `two` from the IR entirely, silently.
+  // named spelling this dropped `two` from the IR entirely, silently. The
+  // `tests` section is now emitted too, byte-identical to the reference.
   assert lower_to_ir("""fn one() -> Int { return 1 } test "t" { assert one() == 1 } fn two() -> Int { return 2 }""")
-    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}]}"""
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}], "tests": [{"name": "t", "body": [{"step":"assert","expr":{"kind":"bin","op":"==","left":{"kind":"call","callee":{"kind":"var","name":"one"},"args":[]},"right":{"kind":"lit","value":1}}}]}]}"""
 }
 
 test "lower_to_ir lowers a config read in a provide method (component spine)" {
