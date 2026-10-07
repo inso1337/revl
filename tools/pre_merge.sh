@@ -388,7 +388,38 @@ else
     note "vocabulary mirrors (--check)"
 fi
 
-# 6. The formal backbone (formal/STATUS.md): lake build, then the axioms
+# 6. The census artifact (docs/census-artifact/, roadmap item 560, issue
+#    #2103): the committed records have to be what THIS tree produces, program
+#    by program. This is CI's `census-artifact` job run locally, with the same
+#    command, and the selector puts `census` in the gate set on exactly the
+#    paths that job's filter names.
+#
+#    Before this step the local gate had NO census entry, and the test the
+#    selector did pick for these paths (`tests/test_census_artifact.py`) SKIPS
+#    the half that reds CI: the crate-reproduction half is root-suite-skipped
+#    by design (issue #1917). So a diff that staled the artifact printed a green
+#    "83 passed, 1 skipped" locally and then reddened `census-artifact` on the
+#    PR -- a green local signal for a change CI would refuse, which is the
+#    defect this step closes. It is the same defect shape as the comment about
+#    the formal gate below: a gate that only CI runs is a gate the local signal
+#    lies about.
+#
+#    Slow (a full census re-run: ~83s on this shared box, ~20s in CI), so it is
+#    a GATE and not an always-on step: the full gate always runs it, and an
+#    affected selection runs it only when the diff moves one of the artifact's
+#    inputs -- asked of the artifact's OWN filter rather than a copy of it, so
+#    the local gate cannot disagree with CI about what the artifact reads.
+#
+#    On failure the tool names both remedies itself: `--write` for the records,
+#    and `regen_generated.py --only census` for a crate-reproduction record the
+#    checker version has moved past (that one needs cargo and minutes).
+if want gate census; then
+    step "census artifact (--verify --strict)" "$PYTHON" tools/census_artifact.py --verify --strict
+else
+    note "census artifact (--verify --strict)"
+fi
+
+# 7. The formal backbone (formal/STATUS.md): lake build, then the axioms
 #    gate (no theorem may depend on sorryAx — an unfinished proof — or any
 #    project-defined axiom), then the harness census. Needs elan/lake;
 #    absent, loud-skip — CI's `formal` job is the real gate for those.
