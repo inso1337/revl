@@ -2166,6 +2166,146 @@ def g4inverse_rows(rel: str, prog) -> list[str]:
                        site])]
 
 
+# ------------------- witnessed-extern site `undo` (issue #2098)
+#
+# A `witnessed` extern DECLARES its own inverse, and the teardown accumulator
+# registers that declared inverse itself on the `Ok` branch, so a call site
+# may not spell a site `undo` — a second, competing inverse. The checker
+# refuses it with code G4, category `witnessed` (issue #1963, `lower.
+# _lower_effect_step`), guarded by `wit_name in env.witnessed_externs and
+# undo_expr is not None`: the ACQUISITION's head naming a `witnessed` extern,
+# and the site's `undo` slot being non-empty. Nothing else moves it.
+#
+# The model's `RevL.G4Witnessed` states that rule; the exporter carries one
+# `SW` row per effect site whose acquisition head is a `witnessed` extern,
+# with the two facts the rule reads — facts the export ALREADY holds for
+# every modeled file, so no new fact kind is needed (the refusal is at
+# LOWERING, so both refused documents parse and export in full):
+#
+#  * the head's classification, off the `EX` table's column — the same table
+#    `lower`'s `witnessed_externs` is built from;
+#  * the heads the site's `undo` spells, off the `I` row's inverse column,
+#    already resolved through an inverse's indirections (issue #1792).
+#
+# The row is the rule ON THE CORPUS, NOT coverage of the checker's walk: a
+# site the exporter never reaches exports no row, and no row assembled from
+# the export can tell "the rule holds here" from "nothing was looked at".
+# `sw_coverage` enforces what IS claimable — that the rule BITES on every row
+# and that the corpus exercises both sides of it.
+
+#: What the REFERENCE decided for each `SW` row: `(rel, comp, index) ->
+#: (head, classification, the site's undo heads, holds)`. Read by
+#: `sw_coverage`.
+_SW_ROWS: dict = {}
+
+
+def sw_rows(rel: str, comp: str, terms: list,
+            extern_class_of: dict) -> list[str]:
+    """The `SW` rows of one component: one per effect site whose acquisition
+    head is a `witnessed` extern. `terms` are the component's
+    `(index, kind, heads, inverse)` sites — the same tuples the `I` rows are
+    built from — and `extern_class_of` is the file's `EX` classification
+    table. A site of another kind, or one whose head is not a `witnessed`
+    extern, emits nothing: this row's domain is the witnessed site, and the
+    admitted twin (`put_w` with NO site `undo`) is IN it."""
+    rows: list[str] = []
+    for idx, kind, heads, inverse in terms:
+        if kind != "effect" or not heads:
+            continue
+        head = heads[0]
+        cls = extern_class_of.get(head)
+        if cls != "witnessed":
+            continue
+        rows.append("\t".join(["SW", rel, comp, str(idx), head, cls,
+                               ",".join(inverse)]))
+    return rows
+
+
+def _sw_holds(cls: str, undo: list) -> bool:
+    """`RevL.G4Witnessed.legalB` at one row's columns, harness-spelled so
+    that changing the model alone moves the model and the reference's `fail`
+    becomes the harness's `missed-G4`. Polarity as for every other row: `ok`
+    is the rule HOLDING (the witnessed site spells no `undo`) and `fail` is
+    the rule VIOLATED."""
+    return cls != "witnessed" or not undo
+
+
+def sw_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `SW` row (issue #2098).
+
+    THE RULE ON THE CORPUS, NOT COVERAGE OF THE SITE WALK — and this ratchet
+    can only enforce the first half. What is enforced is that the rule BITES,
+    on the one input the row carries that the file's TEXT does not fix — the
+    site's `undo`:
+
+      * every emitted row must be IN the row's domain (a non-empty head that
+        the file's `EX` table classified `witnessed`), so a row that reached
+        outside its domain is a finding and not a silent widening;
+      * the verdict must FLIP when the `undo` the site spells is emptied —
+        the mutation is the admitted twin's shape, and it is the mutation the
+        corpus already contains (`ok_witnessed_effect_in_method.rvl`,
+        `verified_method_effect/ok_witnessed.rvl`, `emit_py_corpus/witnessed.rvl`
+        all reach a `witnessed` head with NO site `undo`), so the flip is not
+        hypothetical;
+      * the verdict must FLIP when the head's classification is mutated off
+        `witnessed`, which is the other disjunct of the rule.
+
+    A rule that returned a constant, or a row set that only ever said one
+    thing, fails all three. The other half, that the checker's walk COVERS
+    every witnessed site, is roadmap item 418 step 9 and is deliberately not
+    claimed here or anywhere in this row. What IS enforced elsewhere is that
+    the rule reaches the checker's OWN refusal: a `G4`/`witnessed` refusal
+    whose rows all say `ok` is `missed-G4` in `checker_alignment`, and fatal.
+    Returns findings, treated as gate failures."""
+    findings: list[str] = []
+    if not _SW_ROWS:
+        findings.append("sw coverage: no SW rows at all — the row would "
+                        "decide nothing and agree vacuously")
+        return findings
+    for (rel, comp, idx), (head, cls, undo, holds) in sorted(
+            _SW_ROWS.items()):
+        where = f"{rel}:{comp}[{idx}]"
+        if not head:
+            findings.append(f"sw coverage: {where}: the row names no head")
+        if cls != "witnessed":
+            findings.append(
+                f"sw coverage: {where}: the row is outside its own domain — "
+                f"head {head!r} was classified {cls!r}, not 'witnessed'")
+        if holds != (undo == []):
+            findings.append(
+                f"sw coverage: {where}: the reference decided "
+                f"{'holds' if holds else 'violated'} but the site's undo is "
+                f"{undo!r}")
+        if not holds:
+            if not _sw_holds(cls, []):
+                findings.append(
+                    f"sw coverage: {where}: emptying the site's undo does not "
+                    "flip the verdict — the row is not reading the undo")
+            if not _sw_holds("other", undo):
+                findings.append(
+                    f"sw coverage: {where}: reclassifying the head off "
+                    "'witnessed' does not flip the verdict — the row is not "
+                    "reading the classification")
+    refused = [k for k, (_h, _c, _u, h) in _SW_ROWS.items() if not h]
+    admitted = [k for k, (_h, _c, u, h) in _SW_ROWS.items() if h and not u]
+    if not refused:
+        findings.append("sw coverage: every SW row says `ok` — the corpus "
+                        "never exercises the rule, so the row is vacuous")
+    if not admitted:
+        findings.append("sw coverage: no SW row reaches a `witnessed` head "
+                        "with NO site undo — the `ok` side of the rule is "
+                        "unexercised, so agreement on it proves nothing")
+    if not findings:
+        print(f"sw coverage: {len(_SW_ROWS)} SW rows over "
+              f"heads={','.join(sorted({h for h, *_ in _SW_ROWS.values()}))}, "
+              f"{len(refused)} violating and {len(admitted)} admitting, each "
+              "flipping when the site's undo is emptied and when the head's "
+              "classification is mutated off `witnessed` — the rule ON THE "
+              "CORPUS (the sites the checker DISCOVERED), NOT coverage of the "
+              "checker's site walk")
+    return findings
+
+
 # ------------------------------- out of scope by kind (issue #1810)
 #
 # `out-of-fragment` collects refusals under a rule the model states no row
@@ -3663,6 +3803,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for idx, kind, heads, inverse in terms:
                 tsv.append("\t".join(["I", rel, c.name, str(idx), kind,
                                        ",".join(heads), ",".join(inverse)]))
+            # witnessed-extern site `undo` facts (SW, issue #2098): one row
+            # per effect site whose acquisition head is a `witnessed` extern,
+            # read off the same `terms` the `I` rows above were built from.
+            tsv.extend(sw_rows(rel, c.name, terms, extern_class_of))
             # body-step facts (AQ, issue 1166): the activation body in
             # order, one row per statement, each as the A2 rule sees it. The
             # oracle folds `RevL.A2.a2B` over them and the reference folds
@@ -5081,7 +5225,10 @@ class Verdicts(NamedTuple):
     (G-COUNCIL-SPLIT: no declared council admits when its members disagree,
     issue #1811), and `g9` TAINT rows (G9 / G-SECRET-FLOW: the rule at the
     sink class and label of the walk the checker DISCOVERED — the rule on the
-    corpus, NOT coverage of the checker's walk, issue #1811 group 2)."""
+    corpus, NOT coverage of the checker's walk, issue #1811 group 2), and
+    `sw` SW rows (the witnessed-extern site-`undo` rule at the head
+    classification and the site `undo` the export carries — the rule ON THE
+    CORPUS, NOT coverage of the checker's site walk, issue #2098)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -5111,6 +5258,7 @@ class Verdicts(NamedTuple):
     g9: dict[str, str]
     retain: dict[str, str]
     inv: dict[str, str]
+    sw: dict[tuple[str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -5126,7 +5274,8 @@ class Verdicts(NamedTuple):
                 + len(self.intercepts) + len(self.methods)
                 + len(self.places) + len(self.model_reach)
                 + len(self.councils) + len(self.g9) + len(self.retain)
-                + len(self.inv))
+                + len(self.inv)
+                + len(self.sw))
 
 
 
@@ -5167,6 +5316,7 @@ def parse_verdicts(text: str) -> Verdicts:
     g9: dict[str, str] = {}
     retain: dict[str, str] = {}
     inv: dict[str, str] = {}
+    sw: dict[tuple[str, str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -5294,13 +5444,22 @@ def parse_verdicts(text: str) -> Verdicts:
             # G6 binding uniqueness: (file, comp, scope) -> ok|fail.
             bindings[(parts[1], parts[2], parts[3])] = \
                 parts[4].split("=", 1)[1]
+        elif parts[0] == "SW" and len(parts) == 8:
+            # The witnessed-extern site-`undo` rule (issue #2098):
+            # (file, comp, site index) -> ok|fail. The head, its
+            # classification and the heads the site's `undo` spells ride in
+            # the middle columns so the row's own output shows which extern
+            # the site reached and what it spelled against it; the KEY is the
+            # SITE, not the file, because a file may hold several witnessed
+            # sites and the rule is stated per site.
+            sw[(parts[1], parts[2], parts[3])] = parts[7]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach, councils, g9, retain, inv)
+            places, model_reach, councils, g9, retain, inv, sw)
 
 
 
@@ -5604,6 +5763,29 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             holds = _g4inverse_holds(r[4], r[5], r[6], r[7], r[8])
             inv[r[1]] = "ok" if holds else "fail"
             _G4INV_ROWS[r[1]] = (r[4], r[5], r[6], r[7], r[8], holds)
+    # WITNESSED SITE-`UNDO` verdicts (issue #2098): the rule at the site's
+    # acquisition head class and the site `undo` the export carries,
+    # recomputed here from the exported columns. `_sw_holds` is
+    # harness-spelled, not imported from `RevL.G4Witnessed.legalB`, so
+    # changing the model alone moves the model and the reference's `fail`
+    # becomes the harness's `missed-G4`. THE RULE ON THE CORPUS: the site is
+    # the one the checker's own refusal named, so this recomputes the RULE
+    # and says nothing about the checker's coverage of the site walk
+    # (roadmap item 418 step 9).
+    #
+    # Polarity as for every other row: `ok` is the rule HOLDING (the site
+    # reaches a head that is not a `witnessed` extern, or spells no `undo`)
+    # and `fail` is the rule VIOLATED (a `witnessed` head spelled against a
+    # non-empty `undo`). So a `fail` is what explains a checker refusal, and
+    # `ok` is the fatal `missed-G4`.
+    sw: dict[tuple[str, str, str], str] = {}
+    _SW_ROWS.clear()
+    for r in rows:
+        if r and r[0] == "SW" and len(r) == 7:
+            undo = [x for x in r[6].split(",") if x]
+            holds = _sw_holds(r[5], undo)
+            sw[(r[1], r[2], r[3])] = "ok" if holds else "fail"
+            _SW_ROWS[(r[1], r[2], r[3])] = (r[4], r[5], undo, holds)
 
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
@@ -5939,7 +6121,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach, councils, g9, retain, inv)
+            places, model_reach, councils, g9, retain, inv, sw)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -6234,6 +6416,11 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # The INV row (G4 inverse, issue #2097), keyed by the file alone for
         # the same reason: at most one inverse row per file.
         inv_fail = v.inv.get(rel) == "fail"
+        # The SW rows (witnessed-extern site `undo`, issue #2098), keyed by
+        # (file, comp, site index): a file may hold several witnessed sites
+        # and the rule is stated per site, so any failing site on this file
+        # is this file's `sw_fail`.
+        sw_fail = any(x == "fail" for k, x in v.sw.items() if k[0] == rel)
         a1_fail = any(x == "fail" for k, x in v.async_sites.items()
                       if k[0] == rel) or any(
             x == "fail" for k, x in v.async_sigs.items() if k[0] == rel)
@@ -6253,7 +6440,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             and not df_fail and not bu_fail and not g1_fail and not a1_fail \
             and not pl_fail and not ic_fail and not ms_fail \
             and not mp_fail and not ma_fail and not cv_fail and not g9_fail \
-            and not rt_fail and not inv_fail
+            and not rt_fail and not inv_fail and not sw_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -6290,14 +6477,15 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # model being weaker than revl, and fatal.
             record("agree-G4" if inv_fail else "missed-G4", rel)
         elif code == "G4" and category == "witnessed":
-            # A witnessed extern called with a site `undo` (issue #1963,
-            # `lower._lower_effect_step`) carries the G4 code, but it is not
-            # the marker rule either: it asks whether the call site spells an
-            # inverse the witnessed extern already declares, and the model has
-            # no witnessed-extern fact. Absence of fact, ratcheted by name as
-            # the host release rule is, until the model grows the fact.
-            record("out-of-fragment-witnessed" if formal_clean
-                   else "formal-found-other", rel)
+            # The witnessed-extern site-`undo` rule (issue #2098,
+            # `lower._lower_effect_step`): a site whose acquisition head
+            # names a `witnessed` extern may not spell a site `undo` — the
+            # extern already declares its inverse, and the teardown
+            # accumulator registers it on the `Ok` branch. The rule is
+            # decided per site by the `SW` rows (`RevLOracle.swRowB`), so a
+            # refusal the rows see is `agree-G4` and a refusal the rows
+            # admit is the model being weaker, and fatal.
+            record("agree-G4" if sw_fail else "missed-G4", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -6989,7 +7177,8 @@ def main() -> int:
             ("council", ref.councils, formal.councils),
             ("g9", ref.g9, formal.g9),
             ("retain", ref.retain, formal.retain),
-            ("inv", ref.inv, formal.inv)):
+            ("inv", ref.inv, formal.inv),
+            ("sw", ref.sw, formal.sw)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -7023,7 +7212,8 @@ def main() -> int:
         f"{len(ref.councils)} council tie policies + "
         f"{len(ref.g9)} taint walks + "
         f"{len(ref.retain)} retention refusals + "
-        f"{len(ref.inv)} inverse refusals) — "
+        f"{len(ref.inv)} inverse refusals + "
+        f"{len(ref.sw)} witnessed-site refusals) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -7047,6 +7237,7 @@ def main() -> int:
     mismatches.extend(g9_coverage())
     mismatches.extend(retain_coverage())
     mismatches.extend(g4inverse_coverage())
+    mismatches.extend(sw_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
