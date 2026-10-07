@@ -17301,6 +17301,33 @@ def _undeclared_cap(service: "str | None") -> "object":
     return cap_order.Cap(_UNDECLARED_NS + service, ())
 
 
+def _undeclared_elements(services: dict) -> "frozenset":
+    """The fold elements that name an UNDECLARED reach, computed against the
+    DECLARATIONS (item 561's kernel arm, issue #2105).
+
+    One element per service with at least one `emission` method that names no
+    capability token - `_undeclared_cap`'s own spelling, so this set and the
+    elements `_held_capabilities_pairs`/`_emit_step_caps_pairs` build cannot
+    drift apart.
+
+    WHY THIS IS A SET AND NOT A NAMESPACE TEST. `_held_capabilities_pairs`
+    builds a `svc:` element on two occasions - a required service with a bare
+    `emission` method (an undeclared reach) and a required service with NO
+    emission method at all (a proof of the opposite, kept so the coverage fold
+    has a boundary identity to compare). Both spell the same token, so
+    `kernel_boundary._undeclared` cannot read the fact off the element; it is
+    read off the declarations, which is the only place it is written down. The
+    namespace-wide arm is the wrong rule and
+    `tests/test_kernel_boundary_544.py::test_the_namespace_alone_cannot_decide_the_residual`
+    pins the conflation so the next attempt does not re-measure it."""
+    return frozenset(
+        _undeclared_cap(name).to_str()
+        for name, svc in services.items()
+        if any(getattr(m, "emission", False)
+               and not getattr(m, "capabilities", None)
+               for m in getattr(svc, "methods", {}).values()))
+
+
 def _cap_render(cap: "object") -> str:
     """The source-facing spelling of a fold element: a derived undeclared
     boundary renders as the bare service name, everything else as its canonical
@@ -17812,13 +17839,15 @@ def _check_kernel_boundary(components: list[dict], services: dict,
 
     WHICH WAY IT FAILS. Toward refusing, at both unknowns, and the reading of
     each is `kernel_boundary`'s rather than this function's: the unnameable `*`
-    is disjoint from nothing (`cap_order.disjoint`'s own rule), and a `key:`
+    is disjoint from nothing (`cap_order.disjoint`'s own rule), and a `svc:`
     element - a boundary whose declaration names no capability token - is an
-    UNDECLARED reach, which is not an empty one. That second reading is scoped
-    to a candidate admitted under the untrusted-author profile (`untrusted`),
-    which is what "a generated component" means here; the first-party tree is
-    the subject of the loop, not a candidate passing through admission, and a
-    DECLARED kernel token is refused on both sides.
+    UNDECLARED reach, which is not an empty one. The second is decided against
+    the DECLARATIONS (`_undeclared_elements`), not read off the token, because
+    the same token also spells a service with no emission method at all. Both
+    readings are scoped to a candidate admitted under the untrusted-author
+    profile (`untrusted`), which is what "a generated component" means here;
+    the first-party tree is the subject of the loop, not a candidate passing
+    through admission, and a DECLARED kernel token is refused on both sides.
 
     `manifest` is item 519's product record if it is present. Its
     `model_reach[].effective` is the per-edge ceiling statement, consumed
@@ -17846,6 +17875,12 @@ def _check_kernel_boundary(components: list[dict], services: dict,
         if not declared:
             return []
     base = _spawn_reached_surface_pairs(components, services)
+    # The undeclared reaches this composition's DECLARATIONS leave open: the
+    # services whose `emission` names no capability token. Computed here,
+    # where the service table is, because the fold element cannot carry the
+    # fact (`_undeclared_elements`). Inert unless the candidate is untrusted,
+    # which is the arm's own scope.
+    undeclared = _undeclared_elements(services) if untrusted else frozenset()
     record: list[dict] = []
     for comp in components:
         own = base.get(comp["name"], set())
@@ -17880,7 +17915,8 @@ def _check_kernel_boundary(components: list[dict], services: dict,
             )
 
         hits = _kb.offending(effective,
-                             undeclared_reaches_kernel=bool(untrusted))
+                             undeclared_reaches_kernel=bool(untrusted),
+                             undeclared=undeclared)
         if hits:
             first_member, first_element = hits[0]
             members = []
@@ -17893,18 +17929,33 @@ def _check_kernel_boundary(components: list[dict], services: dict,
             named = ", ".join(f"`{m.token}`" for m in members)
             paths = ", ".join(sorted({p for m in members for p in m.paths}))
             held_str = ", ".join(f"`{s}`" for s in _cap_sorted_strs(held))                 or "no capabilities"
-            if _kb._undeclared(first_element):
-                why = (f"`{comp['name']}` reaches an unnameable host boundary, "
-                       f"and an unnameable reach is not an empty one: nothing "
-                       f"in this composition states that it stops short of the "
-                       f"kernel, so it is not provably disjoint from it. An "
-                       f"authority surrogate that declares no reach lands here "
-                       f"too, because an omitted declaration is not a proof of "
-                       f"narrowness (item 519)")
-                fix = ("name the boundary - give the crossing a declared "
-                       "capability, or give the model role it routes through "
-                       "a `reaches [...]` clause - so the reach can be "
-                       "compared with the kernel's, or drop the crossing")
+            if _kb._undeclared(first_element, undeclared):
+                if first_element.token == "*":
+                    why = (f"`{comp['name']}` reaches an unnameable host "
+                           f"boundary, and an unnameable reach is not an empty "
+                           f"one: nothing in this composition states that it "
+                           f"stops short of the kernel, so it is not provably "
+                           f"disjoint from it. An authority surrogate that "
+                           f"declares no reach lands here too, because an "
+                           f"omitted declaration is not a proof of narrowness "
+                           f"(item 519)")
+                    fix = ("name the boundary - give the crossing a declared "
+                           "capability, or give the model role it routes "
+                           "through a `reaches [...]` clause - so the reach "
+                           "can be compared with the kernel's, or drop the "
+                           "crossing")
+                else:
+                    why = (f"`{comp['name']}` reaches "
+                           f"`{_cap_render(first_element)}`, whose declaration "
+                           f"names no capability token, and an undeclared "
+                           f"reach is not an empty one: nothing in this "
+                           f"composition states that it stops short of the "
+                           f"kernel, so it is not provably disjoint from it "
+                           f"(issue #1265's exit, taken by issue #2105)")
+                    fix = (f"declare the boundary - write `emission[<token>]` "
+                           f"on `{_cap_render(first_element)}`'s method, the "
+                           f"repair issue #1265 sequenced before this arm - so "
+                           f"the reach can be compared with the kernel's")
             else:
                 why = (f"`{comp['name']}` holds "
                        f"`{_cap_render(first_element)}`, which is the kernel's "
