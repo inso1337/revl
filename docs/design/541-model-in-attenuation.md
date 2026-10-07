@@ -384,10 +384,31 @@ crossing reaches: decision 4's over-approximation stays, in the refusing
 direction. Oracle: `tests/test_model_reach_crossing.py`, ported to the gate
 (section 7).
 
-**S3. The role in the spawn product.** A spawner whose CHILD routes through a
-role reaching past the spawner is the lineage form of the same question. It
-needs the model reach folded into `_spawn_surface_closure`, and it is separate
-because the closure is the one place a mistake amplifies across a whole graph.
+**S3. The role in the spawn product. LANDED IN THE REFERENCE (issue #1193).**
+A spawner whose CHILD routes through a role reaching past the spawner is the
+lineage form of the same question, and it needs the model reach folded into
+`_spawn_surface_closure` -- which is why it is separate: the closure is the one
+place a mistake amplifies across a whole graph. `lower.py::_spawn_base_with_model`
+unions each component's role reach into the surface the closure STARTS from, so
+the existing monotone-shrinkage refusal G4 carries the case with the existing
+message and no second rule and no second diagnostic. The caller's base is left
+untouched, so what a spawner is measured against is still what it HOLDS, and a
+child whose reach the fold grew is no longer "exactly its own crossings", which
+switches the item-294 `config.` substitution off and keeps the comparison
+fail-closed. Oracle: `tests/fixtures/model_reach_spawn/` (two widenings, two
+controls) run by `tests/test_model_reach_spawn.py`.
+
+What S3 does NOT do is land the fold in the GATE. `selfhost/lower.rvl`'s
+`check_spawn` still builds `reachBase` from `reach_surface_pairs` alone, so both
+widening documents are OPEN GATE BYPASSES: they are named in
+`tests/test_gate_reference_census.py`'s `KNOWN_BYPASSES`, recorded in
+`tools/gate_reference_census_baseline.json`, and pinned in both directions by
+that file's `MODEL_REACH_SPAWN` section -- the two `ok_` controls are decided
+alike by both engines, so what diverges is the widening case and not the corpus.
+The port is the completion of a fold the gate already carries for the crossing
+side (the `MODEL_REACH_CROSSING` corpus), and it is held back only because
+`selfhost/lower.rvl` is being edited by PR #2101; it is the remaining work of
+this slice.
 
 **S4. The kernel boundary. LANDED UPSTREAM, ahead of this note.** Issue
 #1223's rule, expressed as this fold with a kernel-owned held set, is item 544

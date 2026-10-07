@@ -1,0 +1,23 @@
+// ADMITTED (item 519 slice 3, issue #1193): the control for
+// `model_child_role_reach.rvl`. The shape is identical - `Supervisor` holds
+// only `model.complete` and spawns `Worker`, whose `route model` arm routes
+// `go` through role `tool` - but `tool` reaches `model.complete`, which the
+// supervisor already holds, so the fold adds nothing and the spawn stays
+// inside its authority. It pins that the refusal is caused by the role's
+// reach and not by the presence of a role in a spawn lineage. The file name's
+// prefix is the expected verdict (`model_` refused under G4, `ok_` admitted);
+// tests/test_model_reach_spawn.py holds it.
+
+model role tool on_device reaches [model.complete]
+
+service Completions { emission[model.complete] fn complete(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+
+component Worker requires llm: Completions provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit llm.complete("x") return "x" } }
+}
+
+component Supervisor requires llm: Completions {
+  let w = effect spawn Worker with { } undo w.dispose()
+}

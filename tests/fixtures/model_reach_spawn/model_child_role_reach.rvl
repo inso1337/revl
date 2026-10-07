@@ -1,0 +1,25 @@
+// REFUSED G4 (item 519 slice 3, issue #1193): `Supervisor` holds only
+// `model.complete` and spawns `Worker`, whose `route model` arm routes
+// `go` through role `tool`, which reaches `shell.exec`. `Worker` holds
+// `shell.exec` itself (it requires the `Shell` service), so the model product
+// admits it; the spawn fold compared only `Worker`'s OWN crossings, so the
+// supervisor spawned a child reaching a boundary it does not hold. The role's
+// reach is now folded into the surface the spawn closure starts from, and the
+// existing monotone-shrinkage refusal fires verbatim. The file name's prefix is
+// the expected verdict (`model_` refused under G4, `ok_` admitted);
+// tests/test_model_reach_spawn.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+service Shell { emission[shell.exec] fn run(c: Str) -> Str }
+service Completions { emission[model.complete] fn complete(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+
+component Worker requires sh: Shell requires llm: Completions provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit llm.complete("x") return "x" } }
+}
+
+component Supervisor requires llm: Completions {
+  let w = effect spawn Worker with { } undo w.dispose()
+}

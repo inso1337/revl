@@ -233,11 +233,37 @@ def test_the_line_ratchet_fails_in_all_three_directions(census):
 # SPELLED the same on both sides -- is pinned by an in-file test in
 # `selfhost/lower.rvl` instead; see the capability-order header there.
 #
-# EMPTY: nothing on this list is open any more. It is spelled `set()` rather
-# than `{}` so the empty case stays a SET -- the comparisons below are set
-# differences, and an empty dict literal would make them a type error rather
-# than a measurement.
-KNOWN_BYPASSES: set[str] = set()
+# -- the model role in the SPAWN product (item 519, issue #1193 slice 3) --
+# `_check_spawn_attenuation` builds the surface its closure STARTS from out of
+# each component's own crossings. A component whose effective ceiling is wider
+# than its own crossings -- because a `model role` it routes through reaches
+# further -- is therefore accounted as if the role were inert, and a spawner
+# holding only the role's key admits a child that reaches past it. The
+# reference now folds each component's role reach into that base
+# (`lower.py::_spawn_base_with_model`), so the monotone-shrinkage refusal G4
+# carries the case with no second rule and no second message. The gate's
+# `check_spawn` still builds `reachBase` from `reach_surface_pairs` alone, so it
+# raises no objection and the two documents below are OPEN GATE BYPASSES.
+#
+# This is a PORT, not a mechanism: the gate already carries the whole model
+# product for the crossing side (slice 2, the `MODEL_REACH_CROSSING` corpus
+# below) and refuses every document there, so the fold and the reach it needs
+# are already in `selfhost/lower.rvl` -- what is missing is that
+# `reach_surface_pairs`' result is closed over `spawn_edges` without the role
+# reach unioned in per component first. It is held back only because
+# `selfhost/lower.rvl` is being edited by PR #2101, and it is the work this
+# slice leaves. `test_the_model_reach_spawn_corpus_is_the_recorded_bypass`
+# below pins both directions of the gap: the two `ok_` controls are decided
+# alike by both engines, so what diverges is the widening case and not the
+# corpus.
+KNOWN_BYPASSES: set[str] = {
+    # `Supervisor` holds only `model.complete` and spawns `Worker`, whose role
+    # `tool` reaches `shell.exec`
+    "tests/fixtures/model_reach_spawn/model_child_role_reach.rvl",
+    # the same widening one edge deeper: `Top` -> `Mid` -> `Leaf`, where the
+    # closure propagates the child's role reach up to the ancestor of a spawner
+    "tests/fixtures/model_reach_spawn/model_grandchild_role_reach.rvl",
+}
 
 
 def test_the_open_bypass_surface_is_exactly_the_named_list(census, measured):
@@ -371,6 +397,38 @@ def test_every_model_reach_document_is_decided_alike_by_both(measured):
         if got.get(case) != want:
             wrong.append(f"{case}: {got.get(case)}, expected {want}")
     assert not wrong, "\n  ".join(["model-reach documents moved:"] + wrong)
+
+
+# --- the model role in the SPAWN product (item 519, issue #1193 slice 3) ------
+#
+# A component's effective ceiling is its own crossings UNION what the model role
+# it routes through reaches, and a spawner must cover the CHILD's effective
+# ceiling, not just the child's own crossings. The reference folds the role
+# reach into the surface its spawn closure STARTS from
+# (`lower.py::_spawn_base_with_model`), so the monotone-shrinkage refusal G4
+# carries the case and the existing message names the widening. The gate does
+# not fold it yet, so the two `model_` documents are the bypass
+# `KNOWN_BYPASSES` caps by name above, and the two `ok_` documents are the
+# controls: a role that reaches nothing wider than the component holds, and a
+# spawner that holds the role's reach. When the gate folds it, the `model_`
+# documents move to `agree-refuse/G4`, this test fails, and the fix is to delete
+# their lines from `KNOWN_BYPASSES` and re-record the baseline -- the same
+# shrink-only ratchet the rest of this file runs.
+MODEL_REACH_SPAWN = ROOT / "tests" / "fixtures" / "model_reach_spawn"
+
+
+def test_the_model_reach_spawn_corpus_is_the_recorded_bypass(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(MODEL_REACH_SPAWN.glob("*.rvl"))
+    assert len(docs) == 4, f"the model-reach spawn corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = "false-admit/G4" if doc.stem.startswith("model_") else "agree-admit"
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["model-reach spawn documents moved:"] + wrong)
 
 
 # --- crossings through service-typed locals (issue #1509) ----------------------
