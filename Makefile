@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship pre-merge pre-merge-affected formal roadmap-check workflow-permissions runtime-seams vision-check
+.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship pre-merge pre-merge-affected formal roadmap-check roadmap-issue-state workflow-permissions runtime-seams vision-check
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -32,18 +32,41 @@ pre-merge-affected:
 # every open or partial item cites its issue, or its private security advisory
 # for a security item that must not be a public issue on this public repo.
 # --check-tier-parity is on too (issue #1572), so this target is the lint job.
+# --audit-successors (issue #2100) is on as well: it prints every top-level row
+# that carries an in-progress glyph, the issue it cites and whether it names a
+# successor. It is REPORT ONLY and needs no network, so it cannot redden this
+# target; the gate that can fail a row on live issue state is the
+# `roadmap-issue-state` target below, which is deliberately not wired here.
 roadmap-check:
-	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue --check-tier-parity
+	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue --check-tier-parity --audit-successors
 
 # The same tool with all five prose checks on: self-contradiction, dangling
 # delegation, orphaned findings, single-tier fixes for language-wide
-# guarantees, and duplicate item headers. A, B, C and E are green on main and
-# run in CI (the `roadmap-check` target above mirrors that line). D is the only
-# one still red, with two real findings (items 421 F6 and 422 F6), so this
-# target is RED on main by design: every finding it prints is a real finding.
-# Run it before writing a roadmap item and after closing one.
+# guarantees, and duplicate item headers. A, B, C, D and E are green on main
+# and run in CI (the `roadmap-check` target above mirrors that line).
+# D (--check-tier-parity) was red for a while with two real findings (items 421
+# F6 and 422 F6); issue #1572 turned the check on once both were answered, and
+# this target now exits 0. Roadmap item 523 kept claiming otherwise until issue
+# #2100 corrected it.
 roadmap-check-all:
 	python3 tools/check_roadmap_markers.py --check-all
+
+# Issue #2100: the one gate in tools/ that reads GitHub ISSUE STATE. A row that
+# carries an in-progress glyph, cites a CLOSED issue and names no successor is
+# a red here -- the marker says work is still going and the tracker says the
+# issue it points at was shut. `--require-issue` (above) asks only that a row
+# CITE an issue; it never asked whether the issue was still open.
+#
+# Needs `gh` on PATH with auth, and the network. FAIL-CLOSED: no `gh`, no auth,
+# a rate limit, a timeout or a 404 leaves that issue UNKNOWN, which is never
+# read as CLOSED -- so a broken lookup can neither invent a finding nor pass
+# silently. If NO issue could be read at all the tool exits 2, "the environment
+# cannot answer", never 0. That is why this is not in `roadmap-check`/CI: the
+# lint job must not gain a network dependency, and on main today it reports
+# real findings (rows whose cited issue closed with a residual still in the
+# tree) that issue #2100's list exists to adjudicate one by one.
+roadmap-issue-state:
+	python3 tools/check_roadmap_markers.py --require-successor --issue-state
 
 # The roadmap's CITATIONS, resolved against the working tree. The gate above
 # asks git whether a marker contradicts a branch; this one asks the tree
