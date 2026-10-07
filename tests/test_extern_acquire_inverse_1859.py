@@ -119,7 +119,7 @@ def test_a_sibling_handle_keeps_the_o1_double_close_refusal():
     assert "would double-close" in err.message
 
 
-def test_a_provide_method_acquisition_names_the_witnessed_spelling():
+def test_a_provide_method_acquisition_names_both_legal_spellings():
     err = _refusal(_PRELUDE.replace("service S { fn go(n: Int) -> Int }\n", "")
                    + "service S { fn go(n: Int) -> Int }\n"
                    "component C provides s: S {\n"
@@ -131,10 +131,113 @@ def test_a_provide_method_acquisition_names_the_witnessed_spelling():
                    "  }\n"
                    "}\n")
     assert err.message == (
-        "`effect open_h(...)` in a provide method cannot name its handle, so no "
-        "site `undo` can release it: declare `open_h` `witnessed` and drop the "
-        "site `undo`, and its declared `undo close_h(...)` releases each "
-        "acquisition")
+        "`effect open_h(...)` in a provide method cannot name its handle, so its "
+        "declared `undo close_h(...)` cannot be written at the site: write a site "
+        "`undo` naming the values this acquisition was given, or declare `open_h` "
+        "`witnessed` and drop the site `undo`, and its declared `undo close_h(...)` "
+        "releases each acquisition")
+    # the hint says which spelling reverts on a clean unload and which does not
+    assert "a site `undo` replays on a clean unload AND on abort" in err.hint
+
+
+# -- issue #2102: the seam's NAME-addressed release -------------------------
+#
+# At a provide-method seam the acquisition cannot be bound and `result` is not
+# in scope, so an `extern acquire` whose declared inverse takes `result` has no
+# spelling that names the handle. What the author CAN write is a release naming
+# the values the acquisition was given: that release is the teardown that
+# actually runs, on abort AND on a clean unload, which is why `witnessed` --
+# the refusal's other spelling, discharged on commit -- is not a substitute for
+# it. The refusals below pin the property the relaxation turns on, the VALUES;
+# each was confirmed to bite by reverting the relaxation and watching it go red
+# (the PR body records the run).
+
+_SEAM_PRELUDE = (
+    "type Handle = Opaque\n"
+    "extern acquire fn open_h(owner: Str, id: Str) -> Handle undo close_h(result)"
+    ' = @py { return owner + "/" + id }\n'
+    "extern pure fn close_h(h: Handle) -> Str = @py { return h }\n"
+    "extern pure fn close_named(owner: Str, id: Str) -> Str"
+    ' = @py { return owner + "/" + id }\n'
+    "extern pure fn close_owner(owner: Str) -> Str = @py { return owner }\n"
+    "extern pure fn close_all() -> Str = @py { return \"all\" }\n"
+    "service Ops { emission fn start(id: Str) -> Str }\n"
+)
+_SEAM_HEAD = ("component OpsC provides ops: Ops {\n"
+              '  config { owner: Str = "default", other: Str = "o2" }\n'
+              "  provide ops {\n"
+              "    fn start(id) {\n")
+_SEAM_TAIL = ("      return id\n"
+              "    }\n"
+              "  }\n"
+              "}\n")
+
+
+def _seam_src(acquire: str, undo: str | None) -> str:
+    body = f"      effect {acquire}\n"
+    if undo is not None:
+        body += f"      undo   {undo}\n"
+    return _SEAM_PRELUDE + _SEAM_HEAD + body + _SEAM_TAIL
+
+
+def _seam_refusal(acquire: str, undo: str | None) -> RevlError:
+    return _refusal(_seam_src(acquire, undo))
+
+
+def test_2102_a_seam_release_naming_the_acquisitions_values_is_admitted():
+    # the issue's reproducer: `undo close_named(config.owner, id)` beside
+    # `effect open_h(config.owner, id)`, whose declared inverse is
+    # `close_h(result)` and therefore unnameable at the site.
+    ir = compile_source(_seam_src("open_h(config.owner, id)",
+                                  "close_named(config.owner, id)"), "t.rvl")
+    step = ir["components"][0]["body"][0]["methods"][0]["body"][0]
+    assert step["step"] == "effect"
+    assert step["acquire"]["args"] == [{"kind": "config", "field": "owner"},
+                                       {"kind": "name", "id": "id"}]
+    assert step["undo"] == {"kind": "fn", "name": "close_named",
+                            "args": [{"kind": "config", "field": "owner"},
+                                     {"kind": "name", "id": "id"}]}
+
+
+def test_2102_a_seam_release_may_take_a_prefix_of_the_acquisitions_values():
+    # a release that needs only the acquisition's first value
+    assert compile_source(_seam_src("open_h(config.owner, id)",
+                                    "close_owner(config.owner)"), "t.rvl")["components"]
+
+
+SEAM_VALUE_MISMATCHES = [
+    # a literal where the acquisition was given a value
+    ("open_h(config.owner, id)", 'close_named("other", id)'),
+    # the acquisition's values swapped
+    ("open_h(config.owner, id)", "close_named(id, config.owner)"),
+    # another config field
+    ("open_h(config.owner, id)", "close_named(config.other, id)"),
+    # a release naming none of the acquisition's values
+    ("open_h(config.owner, id)", 'close_named("a", "b")'),
+    # a literal acquisition released by a different literal
+    ('open_h("a", "b")', 'close_named("a", "c")'),
+]
+
+
+@pytest.mark.parametrize("acquire, undo", SEAM_VALUE_MISMATCHES)
+def test_2102_a_seam_release_not_naming_the_acquisitions_values_is_refused(acquire, undo):
+    err = _seam_refusal(acquire, undo)
+    assert err.code == "G4"
+    assert err.category == "inverse"
+    assert "in a provide method cannot name its handle" in err.message
+
+
+def test_2102_a_seam_release_called_with_no_arguments_is_refused():
+    # a declared zero-argument release: admitted by the argument judgment, and
+    # refused here because it names none of the acquisition's values
+    err = _seam_refusal("open_h(config.owner, id)", "close_all()")
+    assert err.code == "G4"
+    assert "in a provide method cannot name its handle" in err.message
+
+
+def test_2102_a_seam_acquisition_with_no_site_undo_is_still_refused():
+    err = _seam_refusal("open_h(config.owner, id)", None)
+    assert "has no site `undo`" in err.message
 
 
 def test_the_rejection_fixture_is_refused_with_the_rule():

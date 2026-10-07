@@ -4968,8 +4968,10 @@ fn release_group(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
 // `extern acquire` that declares `undo <inv>(...)` must call `<inv>` with the
 // same arity and pass the bound handle wherever the declaration passes
 // `result`. An unbound acquisition whose inverse takes `result` is refused,
-// with the `witnessed` spelling named in a provide method, where only `spawn`
-// may be bound.
+// except in a provide method where the site `undo` names the values the
+// acquisition was given (`seam_rederivation`, issue #2102) -- only `spawn` may
+// be bound there, so that is the release the seam can write, and the refusal
+// names `witnessed` for the other shape.
 //
 // A site `undo` that calls the declared inverse with the right arity but
 // another value in a `result` slot is left alone here: the reference reports
@@ -5016,6 +5018,29 @@ fn result_slots_hold(args: List[Expr], slots: Str, bind: Str, i: Int) -> Bool {
   return result_slots_hold(args, slots, bind, i + 1)
 }
 
+// Issue #2102: the release a provide method CAN write. A provide method binds
+// only `spawn`, so the handle has no name there and the declared inverse
+// cannot be spelled. What can be spelled is a call passing the values the
+// acquisition was given, in the positions it was given them -- at least one of
+// them, since an `undo` naming none of them re-derives nothing. As with
+// `key_expr_same`, a shape this gate does not judge is answered `true`: the
+// gate under-refuses rather than refusing a program the reference admits.
+fn seam_rederivation(acq: Stmt, u: Expr) -> Bool {
+  return match acq.e {
+    Call(g) => match u {
+      Call(c) => c.args.length() > 0 && c.args.length() <= g.args.length()
+        && seam_args_prefix(c.args, g.args, 0),
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn seam_args_prefix(xs: List[Expr], ys: List[Expr], i: Int) -> Bool {
+  if (i >= xs.length()) { return true }
+  return key_expr_same(xs[i], ys[i]) && seam_args_prefix(xs, ys, i + 1)
+}
+
 fn extern_release_msg(acq: Stmt, u: Expr, cx: Ctx, seam: Bool) -> Str {
   let fnm = ext_acq_name(acq)
   if (fnm == "") { return "" }
@@ -5024,10 +5049,16 @@ fn extern_release_msg(acq: Stmt, u: Expr, cx: Ctx, seam: Bool) -> Str {
   let bar = enc.indexOf("|")
   let inv = enc.slice(0, bar)
   let slots = enc.slice(bar + 1, enc.length())
+  // Asked before `acq.bind` is read out below, which moves the field out of
+  // `acq` and leaves it unusable in the generated Rust.
+  let rederived = seam_rederivation(acq, u)
   let bind = acq.bind
   if (bind == "" && inv_has_result(slots) && seam) {
+    if (rederived) { return "" }
     return "`effect ".concat(fnm)
-      .concat("(...)` in a provide method cannot name its handle, so no site `undo` can release it: declare `")
+      .concat("(...)` in a provide method cannot name its handle, so its declared `undo ")
+      .concat(inv)
+      .concat("(...)` cannot be written at the site: write a site `undo` naming the values this acquisition was given, or declare `")
       .concat(fnm).concat("` `witnessed` and drop the site `undo`, and its declared `undo ")
       .concat(inv).concat("(...)` releases each acquisition")
   }
@@ -28245,6 +28276,42 @@ component A provides d: D { provide d { fn act(t) {
   assert db.indexOf("\"unit\"") == 0 - 1
 }
 
+test "a provide-method acquisition released by a call naming its values is admitted" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn close_named(owner: Str, id: Str) -> Unit = @py { return None }
+extern acquire fn open_h(owner: Str, id: Str) -> H undo close_h(result) = @py { return 1 }
+service S { fn go(n: Str) -> Str }
+component C provides s: S {
+  config { owner: Str = "default" }
+  provide s {
+    fn go(id) {
+      effect open_h(config.owner, id) undo close_named(config.owner, id)
+      return id
+    }
+  }
+}""")
+  assert v == ""
+}
+
+test "a provide-method acquisition released by a call naming other values is refused" {
+  let v = admit_src("""type H = Opaque
+extern pure fn close_h(h: H) -> Unit = @py { return None }
+extern pure fn close_named(owner: Str, id: Str) -> Unit = @py { return None }
+extern acquire fn open_h(owner: Str, id: Str) -> H undo close_h(result) = @py { return 1 }
+service S { fn go(n: Str) -> Str }
+component C provides s: S {
+  config { owner: Str = "default" }
+  provide s {
+    fn go(id) {
+      effect open_h(config.owner, id) undo close_named("other", id)
+      return id
+    }
+  }
+}""")
+  assert v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so its declared `undo close_h(...)` cannot be written at the site: write a site `undo` naming the values this acquisition was given, or declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"
+}
+
 test "a provision the running manifest already holds conflicts (ambient G2)" {
   let v = admit_ambient("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }", "OldStore/db/")
   assert v == "G2|provision conflict: key `db` is provided by both OldStore and NewStore (G2)"
@@ -29364,7 +29431,7 @@ component C provides s: S {
     }
   }
 }""")
-  assert v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so no site `undo` can release it: declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"
+  assert v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so its declared `undo close_h(...)` cannot be written at the site: write a site `undo` naming the values this acquisition was given, or declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"
 }
 
 test "an extern acquire released by its declared inverse is admitted" {
