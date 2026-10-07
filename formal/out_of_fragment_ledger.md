@@ -1,11 +1,12 @@
 # Out-of-fragment ledger
 
-`formal/out_of_fragment_ledger/` lists the corpus files the checker refuses
-under G5, G6, the G4 host release rule or a witnessed extern with a site `undo`,
-and about which the formal model has NO fact. These are the
-`out-of-fragment-G5`, `out-of-fragment-G6`, `out-of-fragment-inverse` and
-`out-of-fragment-witnessed` checker-alignment buckets in
-`formal/harness/diff_corpus.py`.
+`formal/out_of_fragment_ledger/` holds one record per corpus file the checker
+refuses under G5, G6, the G4 host release rule or a witnessed extern with a
+site `undo`, and about which the formal model has NO fact. It is empty today:
+every file it has ever held has since left it, and the list below records each
+departure. Its four buckets are the `out-of-fragment-G5`, `out-of-fragment-G6`,
+`out-of-fragment-inverse` and `out-of-fragment-witnessed` checker-alignment
+buckets in `formal/harness/diff_corpus.py`.
 
 Some rules have left this ledger:
 
@@ -20,9 +21,12 @@ Some rules have left this ledger:
 - The `out-of-fragment-witnessed` bucket emptied in issue #2098, when the
   witnessed-extern site-`undo` rule became `RevL.G4Witnessed` (the `SW` row).
   That bucket also stays, at zero.
+- The `out-of-fragment-inverse` bucket emptied in issue #2097, when the G4
+  host release rule became `RevL.G4Inverse` (the `INV` row). That bucket also
+  stays, at zero.
 
-Both of those buckets stay, so a new unresolvable `undo` or a new G6 purity
-refusal still reds the gate.
+All four bucket names stay registered, so a new unresolvable `undo` or a new
+G6 purity refusal still reds the gate.
 
 `out-of-fragment-witnessed` (issue #1963) held the files the checker refuses
 for a witnessed extern called with a site `undo`. It emptied in issue #2098:
@@ -43,14 +47,18 @@ them fire: MEMBERSHIP is checkable even when the contents are not.
 - A record whose file is no longer in its bucket is also a gate failure, and
   the record must be DELETED.
 
-So the ledger only shrinks, and every name left is a hole someone still owes the
-model a row for.
+So the ledger only shrinks, and it is empty today: no name is left, so no hole
+is outstanding. A name that joins it again is a hole someone owes the model a
+row for.
 
 ## Format (issue #1768)
 
 One file per record: `formal/out_of_fragment_ledger/<bucket>/<file>.json`,
-holding `["bucket", "file"]` and a newline. For example
-`examples/rejections/g4_undo_not_release.rvl` in `out-of-fragment-inverse` is
+holding `["bucket", "file"]` and a newline. The shipped ledger is empty today,
+so there is no live record to point at: the worked example below is the
+format's definition rather than a path to go and read. A file
+`examples/rejections/g4_undo_not_release.rvl` in `out-of-fragment-inverse`
+would be filed at
 
 ```
 formal/out_of_fragment_ledger/out-of-fragment-inverse/examples/rejections/g4_undo_not_release.rvl.json
@@ -81,8 +89,9 @@ here only if both change the same name.
 python3 formal/harness/diff_corpus.py --show-ledger
 ```
 
-prints `bucket file` per record, sorted. It reads the directory and runs
-nothing. `formal/STATUS.md` points here rather than listing the names.
+prints `bucket file` per record, sorted, or `the out-of-fragment ledger is
+empty` when there are none. It reads the directory and runs nothing.
+`formal/STATUS.md` points here rather than listing the names.
 
 ## Regenerating
 
