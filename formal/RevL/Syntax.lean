@@ -52,9 +52,9 @@ about them, which is why the G9 coverage obligation was carried as UNPROVED,
 These declarations are the minimum that makes the obligation expressible, and
 they are additive: every theorem stated over `Stmt` is unchanged. -/
 
-/-- The qualifier a parameter is declared with. The four non-`plain` cases are
-the ones that seed an origin in a body's own environment; `plain` is the
-absence of a qualifier, not a fifth origin. -/
+/-- The qualifier a parameter is declared with. `plain` is the absence of a
+qualifier, not a fifth origin, and of the four real qualifiers only three seed
+an origin in a body's own environment — see `Qual.seedsOrigin`. -/
 inductive Qual where
   | plain
   | trusted
@@ -63,13 +63,31 @@ inductive Qual where
   | retained
   deriving Repr, BEq, DecidableEq
 
+/-- The qualifiers that put an origin on a parameter inside its own body, which
+is exactly the set the checker must seed: `Untrusted[T]` seeds its provenance
+origin, `Secret[T]` seeds `confidential`, `Retained[T, P]` seeds
+`retained:<policy>`. `Trusted[T]` is deliberately NOT among them — the checker
+records it as a clean sink and seeds nothing — and `plain` is the absence of a
+qualifier.
+
+This is the declaration's meaning and not a checker detail: a declared
+qualifier states what the value IS, so a receiver's own body has to see it.
+The G9 coverage row (issue #2108) reads it, and a row that got it wrong would
+demand a seed the checker must not make. -/
+def Qual.seedsOrigin : Qual → Bool
+  | .plain => false
+  | .trusted => false
+  | .untrusted => true
+  | .secret => true
+  | .retained => true
+
 /-- A parameter: a name and the qualifier the DECLARATION gives it. The
 qualifier is part of the parameter, not of the call site — a receiver's own
 body is where a stripped qualifier used to launder a value. -/
 structure Param where
   name : String
   qual : Qual
-  deriving Repr, BEq
+  deriving Repr, BEq, DecidableEq
 
 /-- A `provide` method: a named body with its declared parameters. -/
 structure Method where
@@ -121,6 +139,13 @@ structure Scope where
   none — the activation runs in the component's own frame. -/
   params : List Param
   deriving Repr, BEq
+
+/-- The scope's origin-carrying parameters, in declaration order — the ones the
+checker must seed into the scope's own environment, and therefore the ones the
+walk's parameter observation is compared against. `plain` and `Trusted[T]`
+parameters are not among them. -/
+def Scope.origins (s : Scope) : List Param :=
+  s.params.filter fun p => p.qual.seedsOrigin
 
 /-- The activation's statements: the `step` items, in order. -/
 def Body.activationStmts (b : Body) : List Stmt :=

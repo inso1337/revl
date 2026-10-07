@@ -75,13 +75,6 @@ scopes (`Body.scopes` and friends) live in `RevL.Syntax`; what is added here
 is the admission relation over a whole body, which is what the G9 coverage
 obligation is stated about. -/
 
-/-! ### Component bodies (issue #2108)
-
-The typing side of the body syntax added in `RevL.Syntax`. The structural
-scopes (`Body.scopes` and friends) live in `RevL.Syntax`; what is added here
-is the admission relation over a whole body, which is what the G9 coverage
-obligation is stated about. -/
-
 /-- The statement-level admission relation under a name the body-level
 judgments cannot shadow.
 
