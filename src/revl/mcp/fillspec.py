@@ -29,7 +29,7 @@ The shape added to every obligation in `revl_check` is::
       "grammarCategory": "expression",
       "construct": "provide-method",
       "idiom": {"name": "provide-method", "rules": ["G4: ..."],
-                "fill": "db.get(key)", "example": "..."},
+                "exampleExpression": "db.get(key)", "example": "..."},
       "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                      "reason": "..."},
       "crossing": {"permitted": false, "required": false, "form": null,
@@ -105,6 +105,15 @@ statement, the acquisition or the inverse of an `effect`, a function, a test)
 and serve that construct's minimal admitted example with the one or two rules
 that make it correct (`revl.idioms`), so an agent sees the smallest correct
 instance of exactly the construct it is filling.
+
+The idiom block is an EXAMPLE, not a set of fills to submit. Its
+`exampleExpression` is the expression that stands at the construct's position
+*inside the example*, lifted verbatim, so it carries the EXAMPLE component's
+free names (`store.drop()` names the example's `store`) and submitting it into
+the author's component is refused with "`store` is not a declared requirement"
+(issue #2115). The submit-ready fills are the hole's own
+`fillable.producers[].write`, which are written in the author's scope. Read the
+idiom for the shape and the rules; take the fill from `fillable`.
 """
 
 from __future__ import annotations
@@ -731,7 +740,9 @@ def _construct(position: str | None, capability: dict) -> str:
 
 def _idiom(construct: str) -> dict:
     """The served idiom for `construct`: the rules and the minimal admitted
-    example (`revl.idioms`)."""
+    example (`revl.idioms`). The example's expression position is served as
+    `exampleExpression`, never as `fill` — it is example-internal, not a fill
+    (issue #2115); the hole's `fillable.producers[].write` carries the fills."""
     entry = idioms.get(construct)
     if entry is None:
         raise ValueError(f"fillspec: no idiom for construct {construct!r}")

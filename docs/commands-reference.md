@@ -180,10 +180,14 @@ already; this command is for reading one by name.
   `emission-method`, `component-setup`, `effect-acquire`, `effect-undo`,
   `function`, `test`) and a few served by name only (`spawn`, `subscribe`,
   `match`, `timer`). With no name, the list.
-- `--json` - the entry as `{name, summary, rules, fill, example}`.
+- `--json` - the entry as `{name, summary, rules, exampleExpression, example}`.
+  The idiom is an example, not a set of fills to submit: `exampleExpression`
+  stands inside the example and carries the example component's own names, so
+  it is refused if submitted (issue #2115); a hole's
+  `fillable.producers[].write` carries the fills.
 
-Every idiom compiles, admits for an untrusted author, and, with its `fill`
-replaced by a hole, yields a fillSpec naming that same construct
+Every idiom compiles, admits for an untrusted author, and, with its internal
+`fill` marker replaced by a hole, yields a fillSpec naming that same construct
 (`tests/test_idioms_1701.py`). An unknown name exits 2.
 
 ```bash

@@ -86,7 +86,7 @@ was corrected by hand and had drifted back within a day.
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 1 |  |
 | audit-diff.md | needs-work | 14 |  |
-| authoring-for-agents.md | needs-work | 1 |  |
+| authoring-for-agents.md | needs-work | 2 |  |
 | auto-mocks.md | needs-work | 16 |  |
 | backend-go-v3.md | needs-work | 14 | yes |
 | backend-ir-v1.md | needs-work | 16 |  |

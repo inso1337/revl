@@ -237,7 +237,7 @@ The `revl_check` MCP result enriches every open hole with one:
     "grammarCategory": "expression",
     "construct": "provide-method",
     "idiom": {"name": "provide-method", "summary": "…", "rules": ["G4: …", "A6: …"],
-              "fill": "db.get(key)", "example": "service Db { … }\n…"},
+              "exampleExpression": "db.get(key)", "example": "service Db { … }\n…"},
     "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                    "reason": "a non-emission provide-method — pure"},
     "crossing": {"permitted": false, "required": false, "form": null,
@@ -264,12 +264,18 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   where the hole stands, one of `provide-method`, `emission-method`,
   `component-setup`, `effect-acquire`, `effect-undo`, `function`, `test`,
   and that construct's minimal admitted example with the one or two rules
-  that make it correct (`{name, summary, rules, fill, example}`; `fill` is
-  what stands at the construct's position in the example). The idioms live
-  in `src/revl/idioms/`; `revl idiom NAME` and the MCP `revl_idiom` tool
-  serve them by name. Each one compiles and admits, and with its `fill`
-  replaced by a hole yields a fillSpec naming that same construct, so the
-  table cannot drift from the compiler.
+  that make it correct (`{name, summary, rules, exampleExpression, example}`).
+  The block is an **example, not a set of fills to submit** (issue #2115):
+  `exampleExpression` is the expression that stands at the construct's
+  position *inside the example*, lifted verbatim, so it carries the EXAMPLE
+  component's own free names (`store.drop()` names the example's `store`) and
+  submitting it into your component is refused with "`store` is not a declared
+  requirement". The submit-ready fills are the hole's own
+  `fillable.producers[].write`, which are written in your scope. The idioms
+  live in `src/revl/idioms/`; `revl idiom NAME` and the MCP `revl_idiom` tool
+  serve them by name. Each one compiles and admits, and with its internal
+  `fill` marker replaced by a hole yields a fillSpec naming that same
+  construct, so the table cannot drift from the compiler.
 * **`grammarCategory`** (additive, still version 2): the syntactic category a fill is a
   document of, one of `program`, `component-body`, `statements`, `expression`,
   `type`. Pass it to `revl grammar --format lark|gbnf|ebnf --category <it>` or

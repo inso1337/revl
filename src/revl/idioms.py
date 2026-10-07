@@ -13,8 +13,14 @@ rules that make it correct:
     // fill: emit db.put(key, "saved")
     // type: Str
 
-`fill` is the text that stands at the construct's position in the example, and
-`type` the type a hole there has. Every construct a fillSpec names
+`fill` is an INTERNAL marker: the text that stands at the construct's position
+in the example, used to cut the hole (`with_hole`) and to check the header is
+well formed. It is NOT a fill an author can submit: it is lifted verbatim from
+the example, so it carries the example's own free names (`store.drop()` names
+`store`, which belongs to the example's component, not to the author's — issue
+#2115). Every door therefore serves it under the honest name
+**`exampleExpression`** (`served`), never under `fill`. `type` is the type a
+hole there has. Every construct a fillSpec names
 (`mcp.fillspec.CONSTRUCTS`) has an idiom with a `type`; a few more (`spawn`,
 `subscribe`, `match`, `timer`, `try`) are served by name only and carry none. The files are revl source like any other, so
 the corpus sweeps compile and parse them with the rest of the tree, and
@@ -81,10 +87,28 @@ def table() -> dict:
     return _TABLE
 
 
+#: The name every door serves the example's expression position under. The
+#: internal `fill` marker is an example-internal position, not a fill an author
+#: can submit (issue #2115), so the served surface never calls it one.
+SERVED_EXPRESSION_KEY = "exampleExpression"
+
+
 def served(entry: dict) -> dict:
     """An idiom as every door serves it (the fillSpec, `revl_idiom`, `revl
-    idiom --json`): one shape, so the doors cannot disagree about it."""
-    return {key: entry[key] for key in ("name", "summary", "rules", "fill", "example")}
+    idiom --json`): one shape, so the doors cannot disagree about it.
+
+    The expression position inside the example is served as
+    `exampleExpression`, never as `fill`: it is lifted verbatim from the
+    example and carries that example's free names, so it is not a fill for the
+    author's component (issue #2115). The submit-ready fills are the hole's
+    `fillSpec.fillable.producers[].write`."""
+    return {
+        "name": entry["name"],
+        "summary": entry["summary"],
+        "rules": entry["rules"],
+        SERVED_EXPRESSION_KEY: entry["fill"],
+        "example": entry["example"],
+    }
 
 
 def get(name: str) -> dict | None:
@@ -111,9 +135,17 @@ def render(entry: dict) -> str:
     lines = [f"{entry['name']}: {entry['summary']}", ""]
     lines.extend(f"- {rule}" for rule in entry["rules"])
     typed = f"    (a hole here has type {entry['type']})" if "type" in entry else ""
-    lines.extend(["", f"fill: {entry['fill']}{typed}", "", entry["example"].rstrip("\n")])
+    lines.extend([
+        "",
+        f"example expression: {entry['fill']}{typed}",
+        "  (the expression this example stands at the construct's position — "
+        "example-internal, not a fill to submit; see the hole's "
+        "fillable.producers for those)",
+        "",
+        entry["example"].rstrip("\n"),
+    ])
     return "\n".join(lines) + "\n"
 
 
-__all__ = ["IDIOM_DIR", "IdiomError", "get", "names", "render", "served", "table",
-           "with_hole"]
+__all__ = ["IDIOM_DIR", "IdiomError", "SERVED_EXPRESSION_KEY", "get", "names",
+           "render", "served", "table", "with_hole"]
