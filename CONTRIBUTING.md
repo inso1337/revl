@@ -472,6 +472,31 @@ out. At zero entries the file is deleted.
    forks, clones and mirrors. Treat anything already committed as published, and
    decide about it on that basis rather than on a deletion that changes nothing.
 
+5. **A closing keyword next to an issue reference closes that issue, even in the
+   sentence that says it does not.** GitHub scans the PR body, the PR title and
+   the commit message for `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`,
+   `resolve`, `resolves` and `resolved` followed by a `#` reference, and closes
+   that issue on merge. The scan is not markdown-aware and does not read
+   negation: backticks, a fenced block, an HTML comment and a "does not" in
+   front of it are all invisible to it. On 2026-10-07 this fired twice here. PR
+   #2128's body argued that its change was not the closure of a parser family;
+   the family tracker is issue #2094, and it was closed two seconds after the
+   merge. PR #2133's body carried the same denial about the replacement tracker,
+   issue #2131, and closed it the same way. Both had to be re-opened by hand.
+   The second did not stop at the body: #2133 was a single-commit PR, so its
+   squash adopted that commit message, and the denying sentence now sits
+   permanently in the history of `00fdd6059`. Put the reference where no keyword
+   can reach it — `refs #2131`, `#2131 remains open`, `leaves #2131 open` — or
+   phrase it with the reference first: "#2131 is not closed by this PR" is safe,
+   because the keyword is no longer the thing nearest the `#`. The residual risk
+   is replay rather than the merge itself: text that already fired once does not
+   fire again on its own, but if that sha is carried into a new merge — a rebase,
+   a cherry-pick, a branch based before it — the parser reads it as new. Nothing
+   offline guards this: `tests/test_roadmap_issue_state.py` is deliberately
+   network-free (issue #2100) and reports no verdict without evidence, so an
+   issue closed this way reds no gate. If a tracking issue closes and no merge of
+   yours explains it, read the commit message of whatever landed last.
+
 ## Reporting bugs and requesting features
 
 Use the issue templates (bug report / feature request). A bug report that
