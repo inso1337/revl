@@ -129,10 +129,30 @@ KINDS = ("remote", "seam", "host")
 #: per-tier shim refusal design 457 S3 describes riding existing machinery.
 #: `stdlib/auth.rvl`'s `Auth` shim over `@cordisjs/plugin-sso` lands with item
 #: 457 S2 (the opaque `Principal` machinery); its entry is added there.
-HOST_SHIMS: dict[str, dict[str, str]] = {
+#: `caps` is the BOUNDARY each shim method crosses, one capability token per
+#: export, and it is what makes a host service's declaration true for every
+#: composition. A host row binds an extern whose NAME is derived from the row's
+#: label (`host_<label>_<op>`), so the name is a wiring fact and differs row by
+#: row; the token is not, because the row's label does not change which export
+#: of which module is reached. `_host_source` spells the token on the extern, so
+#: `stdlib/server.rvl`'s `Server` can declare one fixed token per verb and be
+#: right for every `host` row — the alternative PR #1292 declined, where the
+#: only true token would have had to name a label (issue #2105, taking docs/
+#: design/561-undeclared-emission-boundary.md's composition half). `check_
+#: hostable` holds the two halves together: a service declaration that does not
+#: name exactly these tokens is refused rather than silently believed.
+HOST_SHIMS: dict[str, dict] = {
     "Server": {
         "module": "../backends/typescript/revl_server_ts.ts",
         "package": "@cordisjs/server",
+        "caps": {
+            "get": "host.server.get",
+            "post": "host.server.post",
+            "put": "host.server.put",
+            "patch": "host.server.patch",
+            "delete": "host.server.delete",
+            "head": "host.server.head",
+        },
     },
 }
 
@@ -1475,6 +1495,20 @@ def check_hostable(service, shim, *, doc: str, line: int, label: str) -> None:
         `ctx.sso.validateSession` performs I/O — so a plain `fn` host service is
         not hostable, exactly as a plain `fn` service is not remotable
         (D-424c.2). The refusal names the method.
+
+    A third condition, added by issue #2105: the declaration and the shipped
+    shim must NAME THE SAME BOUNDARY. The shim enumerates one capability token
+    per export (`HOST_SHIMS[...]["caps"]`), `_host_source` spells that token on
+    the extern it synthesizes, and a service that declares anything else — a
+    different token, or a bare `emission` that names no reach at all — is
+    refused here rather than believed. Without it the two halves could drift:
+    the extern's declared scope is what the fold reads, so a declaration naming
+    a boundary the shim does not reach would be a claim G4 has no way to check,
+    and a bare `emission` would put the host boundary back among the undeclared
+    reaches docs/design/561-undeclared-emission-boundary.md exists to close. A
+    shim that enumerates no `caps` leaves the declaration unconstrained, which
+    is the inert default for a shim entry written before the enumeration
+    existed; every entry in `HOST_SHIMS` names its own.
     """
     if shim is None:
         known = ", ".join(f"`{n}`" for n in sorted(HOST_SHIMS)) or "<none>"
@@ -1493,6 +1527,7 @@ def check_hostable(service, shim, *, doc: str, line: int, label: str) -> None:
             "no methods",
             hint="a host row synthesizes one host-shim binding per method; a "
                  "service with none has nothing to host")
+    caps = shim.get("caps") or {}
     for op, method in service.methods.items():
         if not method.emission and not method.async_:
             raise RevlError(
@@ -1504,6 +1539,23 @@ def check_hostable(service, shim, *, doc: str, line: int, label: str) -> None:
                      "Reaching the host runtime is a boundary crossing (a route "
                      "registration, an SSO check), so this is G4 read at the host "
                      "boundary, not a new rule (item 457 S3, mirroring D-424c.2)")
+        declared = set(method.capabilities or ())
+        expected = {caps[op]} if op in caps else set()
+        if declared != expected:
+            named = ", ".join(f"`{cap}`" for cap in sorted(declared)) or "none"
+            wanted = ", ".join(f"`{cap}`" for cap in sorted(expected)) or "none"
+            raise RevlError(
+                doc, line,
+                f"service `{service.name}` is not hostable: method `{op}` "
+                f"declares {named}, but the shipped shim for `{service.name}` "
+                f"reaches {wanted}",
+                hint=f"the shim this host row is reached through is "
+                     f"`{shim['module']}` (over `{shim['package']}`); its "
+                     "exported boundary is what the provider may cross, so the "
+                     "declaration names it exactly — "
+                     + (f"`emission[{sorted(expected)[0]}] fn {op}(...)`"
+                        if expected else
+                        f"`emission fn {op}(...)`"))
 
 
 def _host_header(service, label, key, realm, shim) -> str:
@@ -1547,6 +1599,17 @@ def _host_source(service, params: dict) -> tuple[str, str]:
     the shipped host shim (one exported symbol per method). The provider is an
     ordinary component: `_link` runs G4 over it, so a method the shim cannot
     honour is caught by the ordinary gate, not trusted here.
+
+    Each extern's NAME is derived from the row's label (`host_<label>_<op>`) and
+    each extern's DECLARED SCOPE is the shim's own boundary token for that
+    export (`HOST_SHIMS[...]["caps"]`, issue #2105). The two are different facts
+    and are spelled differently for that reason: the name is the wiring — which
+    row reaches this shim — and the token is the boundary, which the row's label
+    does not change. The declared scope is what the fold reads, so it is the
+    token that makes `stdlib/server.rvl`'s per-verb declaration true for every
+    `host` row rather than for one label. `check_hostable` has already refused a
+    service whose declaration names anything else, so the claim here is checked
+    against the declaration rather than asserted beside it.
     """
     label = params["label"]
     key = params["key"]
@@ -1557,6 +1620,7 @@ def _host_source(service, params: dict) -> tuple[str, str]:
     check_hostable(service, shim, doc=doc, line=line, label=label)
 
     module = shim["module"]
+    caps = shim.get("caps") or {}
     component = f"Host{_pascal(label)}Provider"
     externs: list[str] = []
     provides: list[str] = []
@@ -1565,12 +1629,13 @@ def _host_source(service, params: dict) -> tuple[str, str]:
         names = [n for n, _ in method.params]
         arrow = f" -> {method.returns}" if method.returns else ""
         extern = f"host_{label}_{op}"
+        scope = f"[{caps[op]}]" if op in caps else ""
         # ONE extern per method, each a `@ts ref` of the shipped shim's matching
         # export. The reviewed host-reference door pins the shim's bytes into the
         # IR and jails the module to the install root (item 396 option B / item
         # 410), so the binding is auditable rather than an opaque ambient reach.
         externs.append(
-            f"extern emission fn {extern}({sig}){arrow} "
+            f"extern emission{scope} fn {extern}({sig}){arrow} "
             f"= @ts ref {op} from \"{module}\"")
         call_args = ", ".join(names)
         # every host extern here is an emission, so the call carries its
