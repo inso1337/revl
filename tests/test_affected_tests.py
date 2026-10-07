@@ -1468,8 +1468,13 @@ def test_add_census_gate_answers_for_the_whole_diff():
 
 
 # --- tools/pre_merge.sh runs the --strict half (issue #2103) ---------------- #
+# The body atom is `[ \t]` (exactly one indent character) then `[^\n]*` (the
+# rest of the line), not `[ \t]+` then `.*`. Those two overlap on a run of
+# tabs, so the engine had exponentially many ways to split a single line and
+# the regex took exponential time to reject a tab-indented script (alert 113,
+# `py/redos`). `[^\n]*` is what `.*` already meant here -- no DOTALL.
 _CENSUS_STEP = re.compile(
-    r"^if want gate census; then\n(?P<body>(?:[ \t]+.*\n)*?)^(?:else|fi)\b",
+    r"^if want gate census; then\n(?P<body>(?:[ \t][^\n]*\n)*?)^(?:else|fi)\b",
     re.M)
 
 
@@ -1537,3 +1542,26 @@ def test_the_pre_merge_census_pin_notices_its_own_removal():
         assert _census_gate_defect(mutated) is not None, (
             f"{label}: the pin does not notice, so it does not pin it"
         )
+
+
+def test_the_census_step_regex_rejects_a_hostile_script_in_linear_time():
+    """Alert 113 (`py/redos`). The body group used to be `(?:[ \\t]+.*\\n)*?`,
+    which gave the engine two ways to consume the same tab run -- `[ \\t]+` or
+    `.*` -- so rejecting the `want gate census` line followed by tab-indented
+    blank lines took exponential time. Measured on the pre-fix regex: 0.21s at
+    20 such lines, 0.86s at 22, 3.5s at 24, past 5s at 26, about 4x per two
+    lines. The script is CONTRIBUTOR-EDITABLE, so the input is not ours to
+    bound; the fix makes each line's indent unambiguous, which is linear.
+
+    Out of process on purpose: a regex that has regressed does not FAIL this
+    test, it HANGS it, and a hung test hangs the gate instead of reporting.
+    """
+    probe = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'tests')!r})\n"
+        "import test_affected_tests as t\n"
+        "pump = 'if want gate census; then\\n' + '\\t\\t\\n' * 40\n"
+        "assert t._census_step_command(pump) is None\n"
+    )
+    subprocess.run([sys.executable, "-c", probe], check=True, timeout=30,
+                   cwd=ROOT)
