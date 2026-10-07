@@ -94,6 +94,7 @@ use "./emit_go.rvl" { emit_go_src }
 use "./emit_java.rvl" { emit_java_src }
 use "./emit_wasm.rvl" { emit_wasm_src }
 use "../stdlib/json.rvl" { json_parse }
+use "../stdlib/str.rvl" { str_newline }
 
 // The tiers whose self-host emitter is byte-exact against its reference on this
 // surface AND whose entrypoint has a distinct public name, so it can co-compile
@@ -145,12 +146,265 @@ fn emit_ir(ir: Any, tier: Str) -> Str {
   return emit_rust_src(ir)
 }
 
-pub fn compile_to(source: Str, tier: Str) -> Str {
+// ============================================================ use resolution
+// Issue #2093. The driver above resolved no `use`: it handed `lower_to_ir` the
+// ONE document text it was given, so a document that imports a component from a
+// SIBLING module — `src/revl/truc/components/cli.rvl`'s
+// `use "assembler.rvl" { Assembler }` / `use "shipper.rvl" { Shipper }` — lowered
+// without those modules' service rows. The reference composes the FILE SET and
+// carries each DIRECT import's row into the document's `services` table; the
+// native chain carried only the document's own. That is a HARNESS/API limitation,
+// not a `lower.rvl` one: the IR producer is handed one string and cannot know a
+// module set exists. So the driver grows a PATH — `compile_to_at(source, tier,
+// path)` resolves the document's `use` targets through `read_module` (the one
+// host crossing: a READ, no accounted mutation — the boundary `stdlib/auth.rvl`'s
+// `host_validate` draws) and APPENDS each imported name's service row, in
+// declaration order, after the document's own. `compile_to` keeps its exact
+// two-argument behavior: with no document path there is nothing to resolve a
+// relative `use` against, so it is the identity on the IR.
+
+// The ONE host crossing of this driver: read the module a `use` names. `base` is
+// the importing document's path ("" when the caller had none), `target` the
+// literal `use` target. Resolution follows the reference loader: the target as
+// written, relative to the importing document's directory, then the same relative
+// path walked up through the document's ancestors — which is how `cli.rvl`'s
+// sibling imports and the canary's `stdlib/json.rvl` both resolve. "" when
+// nothing is there, so an unresolvable import is skipped rather than fatal.
+extern pure fn read_module(base: Str, target: Str) -> Str = @py {
+    import os
+    if base == "" or target == "":
+        return ""
+    cur = os.path.dirname(base)
+    for _ in range(0, 12):
+        cand = os.path.join(cur, target) if cur else target
+        if os.path.isfile(cand):
+            with open(cand, "r", encoding="utf-8") as fh:
+                return fh.read()
+        if not cur:
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return ""
+}
+
+// Index of `sub` in `s` at or after `start`, or -1. (The base `Str.indexOf`
+// takes no start offset, so the scans below carry their own.)
+fn ul_find(s: Str, sub: Str, start: Int) -> Int {
+  let n = s.length()
+  let m = sub.length()
+  var i = start
+  if (i < 0) { i = 0 }
+  if (m == 0) { return i }
+  while (i + m <= n) {
+    if (s.slice(i, i + m) == sub) { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+
+// `revl` string literals carry no `\n` escape (a `"\n"` is backslash + `n`, the
+// lexer's no-escape semantics), so whitespace is recognised by code point and
+// the newline comes from `stdlib/str.rvl`'s `str_newline()`.
+fn ul_is_ws(c: Str) -> Bool {
+  if (c == "") { return false }
+  let k = c.charCodeAt(0)
+  if (k == 32) { return true }
+  if (k == 9) { return true }
+  if (k == 10) { return true }
+  return k == 13
+}
+
+fn ul_trim(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  while ((a < b) && ul_is_ws(s.slice(a, a + 1))) { a += 1 }
+  while ((b > a) && ul_is_ws(s.slice(b - 1, b))) { b -= 1 }
+  return s.slice(a, b)
+}
+
+// Index of the first non-space byte at or after `i` (or `s.length()`).
+fn ul_skip_ws(s: Str, i: Int) -> Int {
+  var j = i
+  let n = s.length()
+  while ((j < n) && ul_is_ws(s.slice(j, j + 1))) { j += 1 }
+  return j
+}
+
+// The end of the line holding `i`: the next newline, or the end of the text.
+fn ul_line_end(s: Str, i: Int) -> Int {
+  var j = i
+  let n = s.length()
+  while (j < n) {
+    if (s.slice(j, j + 1).charCodeAt(0) == 10) { return j }
+    j += 1
+  }
+  return n
+}
+
+// The index of the `}` matching the `{` at `open_at`, or -1. String-aware: a
+// brace inside a JSON string does not count, and an escaped quote does not close
+// one. (A service row holds only method/param/type names, but the matcher does
+// not rely on that.)
+fn ul_match_brace(s: Str, open_at: Int) -> Int {
+  var depth = 0
+  var in_str = false
+  var esc = false
+  var i = open_at
+  let n = s.length()
+  while (i < n) {
+    let ch = s.slice(i, i + 1)
+    if (in_str) {
+      if (esc) { esc = false }
+      else {
+        if (ch == "\\") { esc = true }
+        else { if (ch == "\"") { in_str = false } }
+      }
+    }
+    else {
+      if (ch == "\"") { in_str = true }
+      else {
+        if (ch == "{") { depth += 1 }
+        else {
+          if (ch == "}") {
+            depth -= 1
+            if (depth == 0) { return i }
+          }
+        }
+      }
+    }
+    i += 1
+  }
+  return 0 - 1
+}
+
+// The index of the `{` opening the top-level `services` object of a native IR
+// document, or -1.
+fn ul_services_open(ir: Str) -> Int {
+  let at = ul_find(ir, "\"services\"", 0)
+  if (at < 0) { return 0 - 1 }
+  return ul_find(ir, "{", at)
+}
+
+// The `{ … }` JSON text of the service row named `name` in `module_ir`, or ""
+// when the module declares no such row. The quoted key must be followed by `:`,
+// so a service `Cli` does not match a `CliDispatch` key.
+fn ul_service_entry(module_ir: Str, name: Str) -> Str {
+  let at = ul_services_open(module_ir)
+  if (at < 0) { return "" }
+  let close = ul_match_brace(module_ir, at)
+  if (close < 0) { return "" }
+  let obj = module_ir.slice(at, close + 1)
+  let key = "\"".concat(name).concat("\"")
+  var k = ul_find(obj, key, 0)
+  while (k >= 0) {
+    let nxt = ul_skip_ws(obj, k + key.length())
+    if (obj.slice(nxt, nxt + 1) == ":") {
+      let b = ul_find(obj, "{", k)
+      if (b < 0) { return "" }
+      let e = ul_match_brace(obj, b)
+      if (e < 0) { return "" }
+      return obj.slice(b, e + 1)
+    }
+    k = ul_find(obj, key, k + 1)
+  }
+  return ""
+}
+
+// `ir` with `"name": entry` APPENDED to its top-level `services` object.
+// Appending — never prepending — is load-bearing: the reference puts the
+// document's own rows first and its imports after, and the emitted bytes follow
+// that order.
+fn ul_append_service(ir: Str, name: Str, entry: Str) -> Str {
+  let at = ul_services_open(ir)
+  if (at < 0) { return ir }
+  let close = ul_match_brace(ir, at)
+  if (close < 0) { return ir }
+  var sep = ""
+  if (close > at + 1) { sep = ", " }
+  let ins = sep.concat("\"").concat(name).concat("\": ").concat(entry)
+  return ir.slice(0, close).concat(ins).concat(ir.slice(close, ir.length()))
+}
+
+// The document's TOP-LEVEL `use "target" { A, B }` imports, flattened as
+// `target, name, target, name, …` in declaration order. A `use` counts only at
+// column 0 (a leading `//` or indentation makes it a comment or a nested line,
+// not a declaration) and only when a `{ … }` list follows on the same line — the
+// reference's own shape.
+fn ul_use_pairs(source: Str) -> List[Str] {
+  var out: List[Str] = []
+  var i = ul_find(source, "use ", 0)
+  while (i >= 0) {
+    if ((i == 0) || (source.slice(i - 1, i).charCodeAt(0) == 10)) {
+      let eol = ul_line_end(source, i)
+      let q0 = ul_find(source, "\"", i)
+      let lb = ul_find(source, "{", i)
+      if ((q0 >= 0) && (q0 < eol) && (lb >= 0) && (lb < eol)) {
+        let q1 = ul_find(source, "\"", q0 + 1)
+        let rb = ul_find(source, "}", lb)
+        if ((q1 >= 0) && (q1 < eol) && (rb >= 0)) {
+          let target = source.slice(q0 + 1, q1)
+          let parts = source.slice(lb + 1, rb).split(",")
+          var p = 0
+          while (p < parts.length()) {
+            let name = ul_trim(parts[p])
+            if (name != "") {
+              out = out.push(target)
+              out = out.push(name)
+            }
+            p += 1
+          }
+        }
+      }
+    }
+    i = ul_find(source, "use ", i + 4)
+  }
+  return out
+}
+
+// The document's IR with every imported service row appended: for each top-level
+// `use` name in declaration order whose module resolves, lower that module and
+// append its row — unless the document already provides that name. Only DIRECT
+// imports enter the table, which is exactly what the reference composes.
+fn ul_link_uses(ir: Str, source: Str, path: Str) -> Str {
+  let pairs = ul_use_pairs(source)
+  var out = ir
+  var i = 0
+  while (i + 1 < pairs.length()) {
+    let target = pairs[i]
+    let name = pairs[i + 1]
+    i += 2
+    if (ul_service_entry(out, name) == "") {
+      let module_src = read_module(path, target)
+      if (module_src != "") {
+        let entry = ul_service_entry(lower_to_ir(module_src), name)
+        if (entry != "") { out = ul_append_service(out, name, entry) }
+      }
+    }
+  }
+  return out
+}
+
+// The path-taking driver — the honest multi-file native compile. Identical to
+// `compile_to` except that `path` names the document on disk, so its `use`
+// declarations resolve and the imported service rows are spliced into the IR
+// before the native emitter runs. `path` may be relative; it is resolved against
+// the process working directory, and a `use` target is resolved against the
+// document's own directory first. A path that resolves nothing changes nothing.
+pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
   let verdict = admit_src(source)
   if (verdict != "") { return "REFUSED|".concat(verdict) }
-  // FULLY NATIVE from here: native IR producer → parse → native emitter.
-  return emit_ir(json_parse(lower_to_ir(source)), tier)
+  // FULLY NATIVE from here: native IR producer → use linking → parse → emitter.
+  let ir = ul_link_uses(lower_to_ir(source), source, path)
+  return emit_ir(json_parse(ir), tier)
+}
+
+pub fn compile_to(source: Str, tier: Str) -> Str {
+  // No document path -> no module set to resolve against -> the pre-#2093
+  // behavior, byte for byte.
+  return compile_to_at(source, tier, "")
 }
 
 // ============================================================ manifest parameter
@@ -316,6 +570,42 @@ test "a refused program never reaches ANY of the six emitters (G4), natively" {
   assert compile_to(src, "go").slice(0, 11) == "REFUSED|G4|"
   assert compile_to(src, "java").slice(0, 11) == "REFUSED|G4|"
   assert compile_to(src, "wasm").slice(0, 11) == "REFUSED|G4|"
+}
+
+test "the driver resolves `use` only when it is given a document path (issue #2093)" {
+  // With no path there is no module set to resolve against, so the two-argument
+  // driver is the identity — `compile_to` is unchanged byte for byte.
+  let one = "fn id(x: Int) -> Int { return x }"
+  assert compile_to_at(one, "py", "") == compile_to(one, "py")
+  // The `use` scanner sees exactly the top-level declarations, in order.
+  let nl = str_newline()
+  let pairs = ul_use_pairs("use \"a.rvl\" { A, B }".concat(nl).concat("fn f() -> Int { return 1 }").concat(nl))
+  assert pairs.length() == 4
+  assert pairs[0] == "a.rvl"
+  assert pairs[1] == "A"
+  assert pairs[2] == "a.rvl"
+  assert pairs[3] == "B"
+  // A second declaration on a later line is seen too.
+  let two = ul_use_pairs("use \"a.rvl\" { A }".concat(nl).concat("use \"b.rvl\" { B }"))
+  assert two.length() == 4
+  assert two[0] == "a.rvl"
+  assert two[2] == "b.rvl"
+  // A `use` that is not at column 0 is a comment or an indented line, not a
+  // declaration.
+  assert ul_use_pairs("// use \"a.rvl\" { A }").length() == 0
+  assert ul_use_pairs(" use \"a.rvl\" { A }").length() == 0
+  assert ul_use_pairs("fn f() -> Int { return 1 }").length() == 0
+  // The brace matcher is string-aware: the `}` inside a string does not close.
+  assert ul_match_brace("{\"a\": \"}\", \"b\": {}}", 0) == 18
+  // A service row is only matched at a KEY position.
+  assert ul_service_entry("{\"services\": {}}", "A") == ""
+  assert ul_service_entry("{\"services\": {\"CliDispatch\": {\"m\": {}}}}", "Cli") == ""
+  assert ul_service_entry("{\"services\": {\"A\": {\"m\": {}}}}", "A") == "{\"m\": {}}"
+  // Appending keeps the document's own rows first, and an empty table takes no
+  // separator.
+  let own = "{\"services\": {\"C\": {\"m\": {}}}}"
+  assert ul_append_service(own, "A", "{\"m\": {}}") == "{\"services\": {\"C\": {\"m\": {}}, \"A\": {\"m\": {}}}}"
+  assert ul_append_service("{\"services\": {}}", "A", "{\"m\": {}}") == "{\"services\": {\"A\": {\"m\": {}}}}"
 }
 
 test "an admitted component program compiles fully-native, both tiers (item 262)" {

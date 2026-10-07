@@ -585,7 +585,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # left it when the component dialect grew its `Arrow` arm, issue #1844:
         # its provide method passes an arrow to `run_loop`.)
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-        "../../../src/revl/truc/components/cli.rvl",
     ),
     "ts": (
         # (`services_composite.rvl` left this list when lower.rvl grew the
@@ -726,10 +725,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # gap (the issue #1823 provide-block drop is fixed, #1867). The other
         # combined documents are byte-exact through the native chain.
         "comp_provide_pure.rvl",
-        # `compile_to` takes one source string and resolves no `use`, so the
-        # services this document imports from assembler.rvl and shipper.rvl
-        # are missing from the native output (not a lower.rvl defect)
-        "../../../src/revl/truc/components/cli.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -833,7 +828,7 @@ def test_the_residual_is_located_in_lower_not_in_the_emitter(
             "IR, so this document is an EMITTER gap, not a lower.rvl gap — the "
             "emitter half of item 146 no longer holds over the enumerated corpus")
 
-        if compile_to(path.read_text(encoding="utf-8"), tier) != want:
+        if compile_rvl["compile_to_at"](path.read_text(encoding="utf-8"), tier, str(path)) != want:
             diverged.append(name)
 
     expected = list(LOWER_GAP_DOCS[tier])

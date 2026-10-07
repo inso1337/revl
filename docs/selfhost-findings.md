@@ -1800,7 +1800,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../emit_py_validated_shapes.rvl`
 - `branches.rvl`
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
-- `../../../src/revl/truc/components/cli.rvl`
 
 `ts`:
 
@@ -1828,7 +1827,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../../../backends/go/testdata/opt_gaps_280.rvl`
 - `../../../backends/go/testdata/result_erased_1631.rvl`
 - `comp_provide_pure.rvl`
-- `../../../src/revl/truc/components/cli.rvl`
 
 `java`:
 
