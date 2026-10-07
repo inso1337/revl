@@ -377,7 +377,9 @@ last step:
    `line` and expected type. That is your worklist. Call it with no `source`
    and it checks the composition the session holds (the draft you are filling),
    so you read your own worklist without re-sending the file you are building;
-   `source`/`files` still check a candidate you have not loaded.
+   `source`/`files` still check a candidate you have not loaded, but not while
+   a draft is held: that combination is refused, because the load it would run
+   is what replaces the draft (issue #2111).
 3. **Fill via `revl_edit` deltas.** Send a `{hole: <line>, expr: "<fill>"}` edit
    per hole, the server holds the source, so you transmit only the change, not
    the file. Deltas accumulate across calls; a refused patch advances nothing,
@@ -395,6 +397,17 @@ last step:
 
 The whole loop runs server-side against the admission gate, so every
 intermediate state is one the compiler already accepted.
+
+**The one way to lose the draft is to load over it.** Nothing in steps 1-5
+replaces the held set: `revl_check` with no `source` reads it, `revl_edit`
+patches it, and both refuse a `source`/`files` argument while a draft is held
+(issue #2111) instead of silently loading it. That refusal is a usage error
+(`category: "usage"`, never a `selfCheck`), and its message names the draft the
+call would have cost, with its components and its open holes, rather than
+reporting a line number in a composition that no longer exists. Send the `next`
+it carries (`revl_check {"session": true}` for the check; the same edit with the
+load dropped for the edit) and the loop continues where it was. A draft lives in
+memory only, so a load over it loses it for good: no file on disk has it.
 
 Where that is checked: the tool surface, its annotations and its structured
 rejections are gated by `tests/test_mcp.py`. Both properties above are gated

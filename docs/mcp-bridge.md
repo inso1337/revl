@@ -488,7 +488,11 @@ With nothing loaded, `revl_edit` also takes `files` (or `source`, `modules`,
 never has to learn that the edit needs a load first. The load answers to the
 load gates (the operator's `load` grant, a lease on a cold load). With a
 composition already loaded, `files`/`source` are refused rather than silently
-reloading over it.
+reloading over it. With a DRAFT held and nothing loaded they are refused for the
+same reason (issue #2111): the load replaces the draft, which is the session's
+only copy of it, so the call comes back as a usage error naming the draft and
+its open holes, with the same edit minus the load as its `next`. A cold load
+with no draft held is what the paragraph above describes, unchanged.
 
 **Swap by name.** The same server-side source backs an additive extension to
 `revl_swap`: called with *no* inline `source`/`files`/`modules`, it re-admits

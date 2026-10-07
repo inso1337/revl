@@ -328,6 +328,199 @@ def test_session_true_refuses_a_candidate_of_its_own(monkeypatch):
     assert "selfCheck" not in payload
 
 
+# ------------------------------------------------- a load over a held draft
+#
+# A draft is the session's only copy of the work in progress: nothing on disk
+# has it. So `files`/`source` on the edit and check verbs — which loads the
+# candidate first — is not a step in the loop while a draft is held, it is the
+# loss: the load replaces the draft, and the refusal that follows describes an
+# edit of a composition that no longer exists (issue #2111). Below: the guard,
+# and the negative controls that show a load with no draft held is untouched.
+
+@pytest.fixture
+def _no_runtime_gate(monkeypatch):
+    """Lift the runtime gate. `revl_edit` and `revl_change` are runtime verbs
+    (`runtime_gate.RUNTIME_VERBS`) and this interpreter has no cordis, so the
+    gate would answer first — with a refusal that is not the one under test.
+    The draft guard runs before anything is loaded, so the gate is lifted and
+    the load half stubbed where a test reaches it."""
+    from revl.mcp import server as server_mod
+
+    monkeypatch.setattr(server_mod, "_RUNTIME_AVAILABLE", True)
+
+
+def _draft_held(monkeypatch, source=HOLED):
+    """A session holding a draft and nothing loaded — the state `revl_load` of
+    a scaffold opens (#1727)."""
+    held = _held(monkeypatch, _HeldSession(loaded=False))
+    held.pending_draft = {"vs": {"source": source, "modules": {}},
+                          "config": None, "record": False}
+    return held
+
+
+def test_a_candidate_while_a_draft_is_held_is_refused_not_checked(monkeypatch):
+    """Step 5 of the loop, spelled the cold way. `revl_check {source: ...}` on
+    a session holding a draft used to answer about a composition the loop was
+    not building, and read as though the draft were gone (issue #2111). It is
+    now a usage refusal that names the draft it would have passed over, its
+    open holes, and the form that checks the held draft instead."""
+    held = _draft_held(monkeypatch)
+
+    payload = _call("revl_check", {"source": READONLY})
+
+    assert payload["ok"] is False
+    (diagnostic,) = payload["diagnostics"]
+    # a usage error, not a verdict: nothing about the caller's composition was
+    # judged, so `ok: false` keeps meaning "your composition has a problem"
+    assert diagnostic["category"] == "usage"
+    assert "selfCheck" not in payload
+    assert ("refused: revl_check with the inline `source` you sent checks that "
+            "candidate, not the held draft (C, 1 open hole(s))") in diagnostic["message"]
+    assert payload["draft"] is True
+    # the draft the message names is the one the session still holds
+    assert held.pending_draft["vs"]["source"] == HOLED
+    # and the remedy is the call that verifies it without re-sending it
+    assert payload["next"] == {"tool": "revl_check",
+                               "arguments": {"session": True}, "ready": True}
+    assert _call("revl_check", {"session": True})["checked"] == "session"
+
+
+def test_files_while_a_draft_is_held_is_refused_and_names_the_file(
+        monkeypatch, tmp_path, _no_runtime_gate):
+    """The edit half. `revl_edit {files: [...]}` on a draft session loads the
+    file and replaces the draft, so the edit that follows patches a
+    composition the caller never meant to build (issue #2111). The refusal
+    says which file would have been loaded, and carries the same edit pointed
+    at the held draft."""
+    monkeypatch.chdir(tmp_path)
+    plain = tmp_path / "plain.rvl"
+    plain.write_text(READONLY, encoding="utf-8")
+    held = _draft_held(monkeypatch)
+
+    payload = _call("revl_edit", {"files": [str(plain)],
+                                  "edits": [{"target": "C", "append": ""}]})
+
+    assert payload["ok"] is False
+    (diagnostic,) = payload["diagnostics"]
+    assert diagnostic["category"] == "usage"
+    assert "refused: revl_edit with `files` (plain.rvl) loads it first" \
+        in diagnostic["message"]
+    assert "replacing the held draft (C, 1 open hole(s))" in diagnostic["message"]
+    assert payload["loaded"] is False
+    assert payload["edited"] is False
+    assert payload["draft"] is True
+    assert held.pending_draft["vs"]["source"] == HOLED
+    # the next call is the edit the caller wrote, with the load dropped
+    assert payload["next"]["tool"] == "revl_edit"
+    assert payload["next"]["arguments"] == {"edits": [{"target": "C", "append": ""}]}
+    assert payload["next"]["ready"] is True
+
+
+def test_an_edit_with_nothing_to_apply_offers_a_next_that_is_not_ready(
+        monkeypatch, _no_runtime_gate):
+    """A `next` is a call to send as-is, so it must not refuse again. A
+    draft-destroying `revl_edit` that carries no `edits` of its own has
+    nothing left to point at the draft once the load is dropped, and says so
+    rather than handing back a call that fails (issue #2111)."""
+    held = _draft_held(monkeypatch)
+
+    payload = _call("revl_edit", {"source": READONLY})
+
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["category"] == "usage"
+    assert payload["next"]["tool"] == "revl_edit"
+    assert payload["next"]["ready"] is False
+    assert "`edits`" in payload["next"]["needs"]
+    assert held.pending_draft["vs"]["source"] == HOLED
+
+
+def test_the_intent_shaped_change_is_the_same_refusal(monkeypatch,
+                                                      _no_runtime_gate):
+    """`revl_change` reaches the edit door — `change.edit_arguments` hands
+    `revl_edit` the load set beside the intent it built — so the
+    intent-shaped spelling of the destroying call is refused too, naming the
+    verb the caller called and carrying the edit the intent amounts to
+    (issue #2111)."""
+    held = _draft_held(monkeypatch)
+
+    payload = _call("revl_change", {
+        "add": {"source": "component Extra provides extra: Extra { }"},
+        "source": READONLY})
+
+    assert payload["ok"] is False
+    assert "refused: revl_change with the inline `source` you sent" \
+        in payload["diagnostics"][0]["message"]
+    assert payload["diagnostics"][0]["category"] == "usage"
+    assert payload["committed"] is False
+    assert held.pending_draft["vs"]["source"] == HOLED
+    assert payload["next"]["tool"] == "revl_edit"
+    assert payload["next"]["ready"] is True
+
+
+def test_a_candidate_with_no_draft_held_is_still_checked(monkeypatch):
+    """NEGATIVE CONTROL, the cold half: the refusal is scoped to a held draft.
+    With nothing held at all, `source` is the ordinary candidate it always was
+    — checked as sent, with its canonical form, exactly as before (issue
+    #2111)."""
+    _held(monkeypatch, _HeldSession(loaded=False))
+
+    payload = _call("revl_check", {"source": READONLY})
+
+    assert payload["ok"] is True
+    assert "checked" not in payload        # a candidate of its own, not the session's
+    assert "canonicalSource" in payload
+    assert payload["selfCheck"]["admissible"] is True
+
+
+def test_a_candidate_with_a_composition_loaded_is_still_checked(
+        monkeypatch, tmp_path):
+    """NEGATIVE CONTROL, the warm half: `loaded` and `draft` are exclusive
+    states (a draft opens only on a load where nothing runs), so a session
+    running a composition holds no draft and the same call is the candidate's
+    own check — the answer describes the file, not the composition (issue
+    #2111)."""
+    monkeypatch.chdir(tmp_path)
+    other = tmp_path / "other.rvl"
+    other.write_text(CACHE, encoding="utf-8")
+    _held(monkeypatch, _HeldSession(READONLY))   # loaded, and no draft
+
+    payload = _call("revl_check", {"files": [str(other)]})
+
+    assert payload["ok"] is True
+    assert "checked" not in payload
+    assert payload["components"] == [{"name": "MemCache", "requires": [],
+                                      "provides": ["cache"]}]
+
+
+def test_a_cold_edit_that_carries_source_still_runs_its_load(monkeypatch,
+                                                            _no_runtime_gate):
+    """NEGATIVE CONTROL, the edit half: with nothing held, `revl_edit` still
+    loads the `source` it was handed and then edits it — the one-call form
+    #1690 documented, and the path #2138 deliberately preserved (issue
+    #2111). The load half is stubbed because booting needs the runtime; what
+    is asserted is that it is still reached, with the source."""
+    from revl.mcp import server as server_mod
+
+    _held(monkeypatch, _HeldSession(loaded=False))
+    loaded_with = []
+
+    def _record(arguments):
+        loaded_with.append(arguments)
+        return {"ok": False, "diagnostics": [{
+            "severity": "error", "code": "REVL", "category": "compile",
+            "message": "the load half ran"}]}
+
+    monkeypatch.setattr(server_mod, "_tool_load", _record)
+
+    payload = _call("revl_edit", {"source": READONLY,
+                                  "edits": [{"target": "C", "append": ""}]})
+
+    assert loaded_with == [{"source": READONLY}]
+    assert payload["diagnostics"][0]["message"] == "the load half ran"
+    assert payload["loaded"] is False
+    assert payload["edited"] is False
+
+
 # --------------------------------------------------------------- live session
 #
 # Everything below actually loads code into a cordis-py Context. Gate it per
