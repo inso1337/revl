@@ -616,7 +616,7 @@ def status(harness, exported):
     buf = io.StringIO()
     with redirect_stdout(buf):
         fatal = harness.checker_alignment(
-            facts, census["componentless"], ref, rows)
+            facts, census["componentless"], ref, rows, census["refusals"])
     block = harness.status_block(census, facts, census["componentless"],
                                  census["refusals"], ref, harness._ALIGN)
     return (block, fatal, dict(harness._ALIGN),
@@ -672,7 +672,8 @@ def test_the_block_stores_no_count_that_moves_with_the_corpus(harness, exported)
     ref = harness.reference_from_tsv(rows)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        harness.checker_alignment(facts, census["componentless"], ref, rows)
+        harness.checker_alignment(facts, census["componentless"], ref, rows,
+                                  census["refusals"])
     align = dict(harness._ALIGN)
     block = harness.status_block(census, facts, census["componentless"],
                                  census["refusals"], ref, align)

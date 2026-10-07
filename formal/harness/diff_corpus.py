@@ -6673,7 +6673,7 @@ def g5_files_the_prog_resolves(tsv) -> set[str]:
 
 
 def checker_alignment(file_facts: dict, componentless: list[str],
-                      v: Verdicts, tsv=()) -> list[str]:
+                      v: Verdicts, tsv=(), refusals=()) -> list[str]:
     """Compile each file with the real checker and compare refusal codes
     against the formal verdicts. Returns the fatal-bucket findings.
 
@@ -7016,7 +7016,20 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     # `G4`/`guarantee`, other rules under the same code) are untouched. A
     # refusal the `A5` rows see is `agree-G4`; a refusal they admit is the
     # model being weaker than revl, and fatal, exactly as in the loop above.
-    for rel in sorted(v.refused):
+    #
+    # Scoped to the REFUSALS THE CALLER NAMES, and not to `v.refused`, for
+    # the reason `test_the_alignment_arms_do_not_run_the_ratchet` gives: a
+    # bucket is a statement about the files the caller asked about.
+    # `v.refused` is the whole corpus, so scanning it here made every
+    # one-file test in the suite carry the two A5 fixtures' `agree-G4` and
+    # read a bucket it never modelled. `componentless` is the wrong scope
+    # for the same reason in the other direction: a file the parser refused
+    # has no component, but the census keeps parse refusals in their OWN
+    # list, so `componentless` holds none of them and scoping here would
+    # drop the A5 refusals from the gate's view entirely. The caller that
+    # models the whole corpus passes `census["refusals"]`; a caller that
+    # models no parse refusal passes nothing and sees nothing.
+    for rel in refusals:
         code, category = checker_code(rel)
         if code != "G4" or category != "reversibility":
             continue
@@ -7027,7 +7040,10 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     _ALIGN_SAMPLES.update(samples)
 
     total = sum(align.values())
-    print(f"checker alignment ({total} modeled files; every disagreeing "
+    # `total` is the sum of the buckets, and the A5 arm buckets PARSE
+    # refusals (they have no facts to model but the row still has a verdict
+    # for them), so it is not the census's "modeled" count. Say what it is.
+    print(f"checker alignment ({total} files bucketed; every disagreeing "
           f"bucket is FATAL: {'/'.join(FATAL_BUCKETS)}):")
     for k in sorted(set(align) | set(FATAL_BUCKETS) | set(OOF_RATCHET_BUCKETS)):
         n = align.get(k, 0)
@@ -7487,7 +7503,8 @@ def write_status(ledger: bool = False) -> int:
         print("nothing extracted — nothing to write")
         return 1
     ref = reference_from_tsv(tsv)
-    checker_alignment(file_facts, census["componentless"], ref, tsv)
+    checker_alignment(file_facts, census["componentless"], ref, tsv,
+                      census["refusals"])
     if ledger:
         out_of_fragment_ratchet(_ALIGN_SAMPLES, write=True)
         return 0
@@ -7629,7 +7646,7 @@ def main() -> int:
     if len(mismatches) > 10:
         print(f"  ... and {len(mismatches) - 10} more")
 
-    fatal = checker_alignment(file_facts, componentless, formal, tsv)
+    fatal = checker_alignment(file_facts, componentless, formal, tsv, refusals)
     # The two buckets that record an absence rather than a disagreement, held
     # to their committed membership so they can fail at all.
     fatal.extend(out_of_fragment_ratchet(_ALIGN_SAMPLES))

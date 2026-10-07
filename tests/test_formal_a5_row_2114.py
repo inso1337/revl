@@ -223,14 +223,16 @@ def test_the_restated_table_is_the_shipped_registry(harness):
 
 # ---------------------------------------------------- the alignment arm
 
-def _align(harness, verdicts, rel=None):
-    """`rel=None` models NO file, which isolates the pass over `v.refused`:
-    the two A5 fixtures are parse refusals, so that pass is the only thing
-    that can see them."""
+def _align(harness, verdicts, rel=None, refusals=()):
+    """`refusals` is the parse-refusal list this call asks about. The two A5
+    fixtures are PARSE refusals, so the census keeps them in its own
+    `refusals` list and they are bucketed only when the caller names them —
+    exactly as `main()` does. `rel` is the single admitted file whose facts
+    this call models."""
     facts = {} if rel is None else {rel: {}}
     buf = io.StringIO()
     with redirect_stdout(buf):
-        fatal = harness.checker_alignment(facts, [], verdicts)
+        fatal = harness.checker_alignment(facts, [], verdicts, (), refusals)
     counts = {k: n for k, n in re.findall(
         r"^  ([a-zA-Z0-9-]+)\s+(\d+)(?:\s+FATAL)?$",
         buf.getvalue(), re.MULTILINE) if n != "0"}
@@ -243,11 +245,11 @@ def test_missed_g4_is_fatal(harness):
 
 def test_both_fixtures_land_in_agree_g4(harness, verdicts):
     """THE POINT OF THE SECOND PASS. Both files have no facts, so no arm of
-    the per-file loop can see them; without the pass over `v.refused` the
-    violating direction would be unratcheted, which is the defect #2114
-    names. Modelled with no facts at all, the pass is the ONLY thing that
-    runs — and it still reaches both."""
-    counts, fatal = _align(harness, verdicts)
+    the per-file loop can see them; without the pass over the caller's
+    refusals the violating direction would be unratcheted, which is the
+    defect #2114 names. Modelled with no facts at all, the pass is the ONLY
+    thing that runs — and it still reaches both."""
+    counts, fatal = _align(harness, verdicts, refusals=(MISSING, DECLARED))
     assert counts == {"agree-G4": "2"}, counts
     assert fatal == []
 
@@ -262,9 +264,21 @@ def test_a_blind_row_lands_in_missed_g4(harness, verdicts):
         blind = verdicts._replace(a5={**verdicts.a5,
                                       **{k: "ok" for k in verdicts.a5
                                          if k[0] == rel}})
-        counts, fatal = _align(harness, blind)
+        counts, fatal = _align(harness, blind, refusals=(MISSING, DECLARED))
         assert counts == {"agree-G4": "1", "missed-G4": "1"}, (rel, counts)
         assert fatal == [f"missed-G4: {rel}"], rel
+
+
+def test_a_caller_that_models_no_refusal_sees_no_a5_bucket(harness, verdicts):
+    """The scoping that keeps the rest of the suite honest. A one-file call
+    that does not name the parse refusals must not be handed their
+    `agree-G4`: the A5 refusal pass is a statement about the files the
+    CALLER models, and `main()` names them via the census's `refusals`
+    list. Without this the two fixtures leaked into every one-file
+    alignment test in the suite."""
+    counts, fatal = _align(harness, verdicts)
+    assert counts == {}, counts
+    assert fatal == []
 
 
 def test_an_a5_fail_on_an_accepted_file_is_formal_strict(harness, verdicts):
