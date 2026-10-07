@@ -268,8 +268,15 @@ with it is refused as placed on a host with no devices.
   spec, so an edited decision is refused, but an edit to the devices and the
   decision together is a different, self-consistent declaration. The spec is
   written by the conductor into a `0700` placement directory; it is not signed.
-- **It has no load cost and no residency over time.** "The small model is
-  resident here" is a statement about a placement over time; slice S3 owns it.
-  The scheduler ranks candidates by the order the program wrote, not by cost.
+- **It does not rank by cost, and a declared cost is not expressible.** "The
+  small model is resident here" is a statement about a placement over time, and
+  the provision now records it: every load and unload with its cost, whether the
+  server already held the member before the load, and how long it was held.
+  `revl run` prints that at boot and again at teardown, so the two lines differ
+  ([providers-ollama.md](providers-ollama.md)). The scheduler still ranks
+  candidates by the order the program wrote, not by cost: whether a resident
+  fallback should beat a cold first choice is a program author's question and
+  has no surface yet, and a `model role` clause declaring a load cost is the
+  other half of slice S3 (`docs/design/539-model-portfolio.md` §11.6).
 - **A single-process run is not scheduled.** `revl run app.rvl` with no
   placement file declares no host, so there is nothing to schedule against.
