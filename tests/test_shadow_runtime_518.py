@@ -504,15 +504,19 @@ def test_a_met_threshold_still_reverts_on_an_attributed_divergence(
 # 2. the tier seam
 # ==========================================================================
 
-def test_the_answer_the_body_receives_on_a_shadow_route_is_the_incumbents(
-        incumbent_ir, same_ir):
+def test_the_answer_the_body_receives_is_the_incumbents(incumbent_ir,
+                                                        same_ir):
     """The seam's structural property, on a route that is a SHADOW.
 
     The observer runs on every crossing and the successor answers with a
     different model name on every one, but this route is not live, so the
     candidate's answer is `Answered.value` that the schedule never serves:
     `observe` returns `None` for every crossing and the value `validate_retry`
-    hands back is the incumbent's host return. The live counterpart — a
+    hands back is the incumbent's host return.
+
+    The name is #1309's pinned landing witness and is kept deliberately; what
+    changed is the ROUTE, from `live=True` to `live=False`, because a live
+    route is now the cutover rather than a shadow. The live counterpart — a
     promotion that lands, and the successor's model reaching the body — is
     `tests/test_shadow_cutover_1192.py`."""
     the_route = route(live=False)
