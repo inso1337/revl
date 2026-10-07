@@ -12459,41 +12459,74 @@ def _host_handle_root(node, env: "Env"):
     return None
 
 
-def _host_write_produces_nothing(node, env: "Env") -> bool:
-    """Whether *node* is a write on a component's own resource that produces
-    no value — the `Unit`-producing form issue #2083's `Unit` return position
-    admits (`store.insert(k, v)`, `store.remove(k)`).
+#: issue #2083: the host verbs whose result is a VALUE the caller must
+#: consume, so a body that IS one of them and whose value goes nowhere has
+#: dropped an effect. Derived where the frontend already knows the result
+#: (`_HOST_RESULT_SIG` types `Map.insert_if_absent` -> `Bool`) and listed
+#: otherwise, because the reads are the one thing the argument-only host
+#: signature does not say.
+#:
+#: Deliberately the VALUE side and not the write side. `_HOST_WRITE_INVERSE`
+#: is `Map`-only (it exists to pair a write with its `undo`), while the host
+#: surface (`_HOST_ARG_SIG`) is `Map`, `Pool`, `Job`, `Stream` and
+#: `Subscription` — so "writes that produce nothing" read off that table
+#: missed `Pool.execute`, `Map.drop`, `Pool.close`, `Stream.close` and
+#: `Subscription.close`, and a `-> Unit` method with `= pool.execute(sql)` in
+#: it stopped compiling. A verb this table does not name is ADMITTED: a family
+#: added to `_HOST_ARG_SIG` can never make a correct program fail to compile,
+#: and an unlisted READ is a hole this guard does not close — the same hole
+#: `check_ir` already leaves open — never a wrong refusal.
+_HOST_VALUE_VERBS: frozenset = frozenset({
+    "Map.get",            # Opt[V] — the read #2083 was filed about
+    "Pool.query",         # the rows a query yields
+    "Subscription.next",  # the awaited item
+}) | frozenset(_HOST_RESULT_SIG)
 
-    `_HOST_WRITE_INVERSE` names the write verbs; `_HOST_RESULT_SIG` names the
-    one of them that does return a value (`Map.insert_if_absent` is a `Bool`),
-    so the pair excludes it. `mcp/fillspec` reads the same two tables when it
-    offers the producers that fill a `Unit` hole."""
-    write = _host_write(node, env)
-    if write is None:
+
+def _host_call_produces_nothing(node, env: "Env") -> bool:
+    """Whether *node* is a call on a host local whose verb is a host verb
+    producing no value — the `Unit`-producing form issue #2083's `Unit`
+    return position admits (`store.insert(k, v)`, `store.remove(k)`,
+    `pool.execute(sql)`).
+
+    The admitted side is "a host verb (`_HOST_FAMILIES`), and not one the
+    frontend knows to produce a value (`_HOST_VALUE_VERBS`)". `store.size()`
+    and `store.keys()` are the stdlib Map VALUE surface, not host verbs, so
+    they are not admitted; `Map.drop` and `Pool.execute` produce nothing and
+    are host verbs, so they are."""
+    if not isinstance(node, dict) or node.get("kind") != "call":
         return False
-    _, family, verb = write
-    return f"{family}.{verb}" not in _HOST_RESULT_SIG
+    target = node.get("target")
+    if not isinstance(target, dict) or target.get("kind") != "name":
+        return False
+    family = env.host_locals.get(target.get("id"))
+    if family is None:
+        return False
+    verb = node.get("method")
+    if verb not in _HOST_FAMILIES.get(family, {}):
+        return False
+    return f"{family}.{verb}" not in _HOST_VALUE_VERBS
 
 
 def _unit_body_drops_host_value(node, env: "Env") -> bool:
     """Whether *node*, as the body of a method declared `Unit`, is the
-    component's own resource held (or read) and its value dropped — the silent
-    no-op of issue #2083.
+    component's own resource held (or read) and its value discarded — the
+    silent no-op of issue #2083.
 
     `check_ir` compares a body against the declared return only when
     `infer_ir` produced a type (`if actual and not compatible(...)`), and no
     host table types a resource read, so `fn record(msg) = store.get("last")`
     was admitted as the body of a declared WRITE: the call reported `ok` with
-    an empty trace. The forms refused are exactly those rooted at the
-    component's own resource handle that are not a write producing nothing —
-    a read (`store.get(k)`, `store.size()`, `store.keys()`), the handle
-    itself, `store.drop()`, and `store.insert_if_absent(k, v)`, which
-    `infer_ir` DOES type (`Bool`), so a plain `fn` refuses it too. A crossing
-    on a requirement (`emit sink.write(line)`) is not rooted at the resource
-    and is not this defect."""
+    an empty trace. The forms refused are those rooted at the component's own
+    resource handle that are not a host call producing nothing — a read
+    (`store.get(k)`, `pool.query(sql)`), the stdlib value surface
+    (`store.size()`, `store.keys()`), the handle itself, and
+    `store.insert_if_absent(k, v)`, whose `Bool` is in `_HOST_RESULT_SIG`. A
+    crossing on a requirement (`emit sink.write(line)`) is not rooted at the
+    resource and is not this defect."""
     if _host_handle_root(node, env) is None:
         return False
-    return not _host_write_produces_nothing(node, env)
+    return not _host_call_produces_nothing(node, env)
 
 
 #: issue #1980: the host write verbs whose `undo` may RESTORE the value this
@@ -14167,24 +14200,26 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # `-> Unit`, and the effect the service promised was silently
                 # dropped: the call reported `ok` with an empty trace. A body
                 # rooted at the component's own resource is refused unless it
-                # is the one form that genuinely produces nothing, a write on
-                # that resource.
+                # is a host call that produces nothing (issue #2123).
                 if decl.returns == "Unit" and actual != "Unit" \
                         and _unit_body_drops_host_value(lowered_return, env):
                     raise RevlError(
                         filename, ms.line,
                         f"`{method.name}` implements `{svc.name}.{method.name}`, "
-                        f"which returns `Unit`, but this body produces a value "
-                        f"the service never sees: it is not a write on the "
-                        f"component's own resource, so the effect "
+                        f"which returns `Unit`, but this body is a "
+                        f"value-producing form on the component's own resource: "
+                        f"the value it produces has nowhere to go, so the effect "
                         f"`{svc.name}.{method.name}` promises is dropped",
-                        hint="a `Unit` method's body must be a call that returns "
-                             "nothing — a write on the component's own resource "
-                             "(`resource.insert(k, v)`, `resource.remove(k)`) or "
-                             "a requirement declared `-> Unit` "
-                             "(`emit sink.write(line)`); a read "
-                             "(`resource.get(k)`, `resource.size()`) produces a "
-                             "value the service never sees",
+                        hint="a `Unit` method's body must be a host call that "
+                             "returns nothing — a write on the component's own "
+                             "resource (`resource.insert(k, v)`, "
+                             "`resource.remove(k)`, `resource.drop()`, "
+                             "`pool.execute(sql)`) or a requirement declared "
+                             "`-> Unit` (`emit sink.write(line)`); a "
+                             "value-producing form (`resource.get(k)`, "
+                             "`pool.query(sql)`, `sub.next()`, "
+                             "`resource.size()`, the handle itself) has nowhere "
+                             "to put its value",
                         code="T1", category="type-mismatch",
                         expected=decl.returns, actual=actual)
                 # issue #1838: `return n` from a method declared `-> Float`
