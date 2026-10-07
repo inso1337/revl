@@ -274,9 +274,17 @@ class NeverStandingRule:
 def _cap_token(spelling: str) -> str:
     """The bare capability token of a stored spelling, for matching against a
     capability glob. A spelling `cap_order` cannot parse is returned unchanged,
-    so it matches only what it is written as."""
+    so it matches only what it is written as.
+
+    The read is the STORED read (issue #1938): the only caller is
+    `NeverStandingRule.covers`, a PROHIBITION, so recovering the bare token of a
+    spelling that carries a capability's own DECLARED parameter can only make the
+    rule match MORE - which is the fail-closed direction for a rule that says
+    `may never be granted standing`. The declaration is not in scope here (a
+    policy document is loaded on its own), and the bare token is the text before
+    `(`, which needs no declaration at all."""
     try:
-        return cap_order.parse_cap(spelling).token
+        return cap_order.parse_stored_cap(spelling).token
     except cap_order.CapError:
         return spelling
 
@@ -394,7 +402,15 @@ def _canon_cap_spelling(text: str, source, lineno) -> str:
     """Parse one capability spelling through `cap_order` and return its canonical
     string, so a hand-written `gateway.send(host="api.stripe.com")` and the
     distiller's projection of the same cone render byte-identically and compare
-    equal. A malformed spelling is a `PolicyError`, not a silent pass-through."""
+    equal. A malformed spelling is a `PolicyError`, not a silent pass-through.
+
+    Deliberately the INPUT-VALIDATION read (`parse_cap`, no declaration in
+    scope) and NOT `parse_stored_cap`: this is a spelling a HUMAN wrote into a
+    policy document, which is loaded on its own with no composition's
+    declarations available. So a policy rule can name a CORE parameter but
+    cannot name a capability-declared dimension (issue #1938) — it is refused
+    here rather than silently admitted. A rule that must match a declared
+    spelling keys on the bare token instead, via `_cap_token` above."""
     try:
         return cap_order.parse_cap(text.strip()).to_str()
     except cap_order.CapError as exc:

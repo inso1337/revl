@@ -173,11 +173,17 @@ class _Projected:
 
 
 def _resource_params(cap: cap_order.Cap) -> list[tuple[str, object]]:
-    """The registered RESOURCE-kind parameters bound on a cap (host/path/table),
-    the projection §1.2 keys on. Ceiling params (uses counters) are not resource
-    scope and are excluded."""
-    return [(n, v) for n, v in cap.params
-            if cap_order.is_registered(n) and not cap_order.is_ceiling(n)]
+    """The RESOURCE-kind parameters bound on a cap (host/path/table, or - issue
+    #1938 - a DECLARED resource dimension), the projection §1.2 keys on.
+    Ceiling params (uses counters) are not resource scope and are excluded.
+
+    The kind is read off the canonical value's own TYPE rather than the name:
+    canonicalization stores every ceiling as an `int` and every resource kind as
+    a `str`, a component `tuple`, or a `Symbol` (`_canon_value` refuses a
+    `Symbol` on a ceiling), so the two kinds are disjoint by construction. That
+    is what keeps a DECLARED resource dimension in the projection - selecting by
+    `is_registered` would silently DROP it and over-cover the blast radius."""
+    return [(n, v) for n, v in cap.params if not isinstance(v, int)]
 
 
 def _admission_taint(taint: frozenset[str] | None, taint_relevant: bool) \
@@ -229,7 +235,7 @@ def _project_resource(rec: dict, cap: cap_order.Cap) \
         val = scopes[cap.token]
         if val is None:
             return None, True                       # order present, value missing
-        parsed = cap_order.parse_cap(str(val))
+        parsed = cap_order.parse_stored_cap(str(val))
         return cap_order.Cap(parsed.token, tuple(_resource_params(parsed))), True
     return None, False
 
@@ -243,7 +249,7 @@ def _project(rec: dict, cap_str: str) \
     resource scope: a resource-bearing capability with no recorded valuation fails
     closed. A bare, taint-clean capability keys fully."""
     realm = str(rec.get("realm", SHARED_REALM))
-    cap = cap_order.parse_cap(cap_str)
+    cap = cap_order.parse_stored_cap(cap_str)
     token = cap.token
 
     taint, relevant = _project_taint(rec)
@@ -295,17 +301,28 @@ def _resource_join(cones: list[cap_order.Cap]) -> cap_order.Cap | None:
         values = [c.param_map().get(name) for c in cones]
         if any(v is None for v in values):
             return None
-        _kind, order = cap_order._REGISTRY[name]
-        if order == "path":
+        # the order comes from the canonical value's own TYPE (issue #1938):
+        # canonicalization stores a `path` as a component tuple and a
+        # `discrete` as a string, so a DECLARED path joins exactly like a core
+        # one with no declaration in scope, and a declared discrete joins by
+        # equality. A `Symbol` is opaque (`_param_leq` compares it only to the
+        # identical symbol), so it takes the equality branch rather than being
+        # read as a path.
+        if values and all(isinstance(v, tuple) for v in values):
             prefix = _common_path_prefix(values)
             if not prefix:
                 return None
-            joined.append((name, "/" + "/".join(prefix)))
+            # keep the COMPONENT TUPLE (the canonical form of a `path`), not a
+            # rejoined string: `_canon_value` accepts an already-canonical tuple
+            # and `make_cap` is called below with the stored-read sentinel, so a
+            # DECLARED path joins exactly like a core one. Rendering is
+            # unaffected - `_render_value` quotes the components either way.
+            joined.append((name, tuple(prefix)))
         else:                                   # discrete: equality only
             if len(set(values)) != 1:
                 return None
             joined.append((name, values[0]))
-    candidate = cap_order.make_cap(token, joined)
+    candidate = cap_order.make_cap(token, joined, cap_order._ADMIT_UNKNOWN)
     # the join must actually COVER every observed value (a sanity gate: it can
     # only widen to a real common ancestor, never sideways).
     if not all(cap_order.covers(candidate, c) for c in cones):
@@ -363,7 +380,7 @@ def blast_radius(rule: AutoApproveRule, window: list[dict]) -> BlastRadius:
     whose admission taint set is empty or unknown is treated as EVERY taint-fold origin
     (fail-closed), so an empty set never slips a taint-relevant crossing through
     a `{} subset admitting` test."""
-    rule_caps = [cap_order.parse_cap(c) for c in rule.caps]
+    rule_caps = [cap_order.parse_stored_cap(c) for c in rule.caps]
     covered = 0
     not_covered: list[NotCovered] = []
     destinations: set[str] = set()
@@ -373,11 +390,11 @@ def blast_radius(rule: AutoApproveRule, window: list[dict]) -> BlastRadius:
         taint_raw, relevant = _project_taint(rec)
         adm_taint = _admission_taint(taint_raw, relevant)
         for cap_str in rec.get("classCCapabilities") or []:
-            crossing = cap_order.parse_cap(cap_str)
+            crossing = cap_order.parse_stored_cap(cap_str)
             cone, _bearing = _project_resource(rec, crossing)
             live = cone if cone is not None else crossing
-            for n, v in _resource_params(live):
-                destinations.add(cap_order._render_value(n, v))
+            for _n, v in _resource_params(live):
+                destinations.add(cap_order._render_value(v))
             reason = _coverage_reason(rule, rule_caps, comp, realm, live, adm_taint)
             if reason is None:
                 covered += 1
@@ -434,7 +451,7 @@ def _denied_keys(records: list[dict]) -> set[tuple[str, str, frozenset[str]]]:
         realm = str(rec.get("realm", SHARED_REALM))
         taint, _relevant = _project_taint(rec)
         for cap_str in rec.get("classCCapabilities") or []:
-            token = cap_order.parse_cap(cap_str).token
+            token = cap_order.parse_stored_cap(cap_str).token
             out.add((token, realm, taint if taint is not None else None))
     return out
 

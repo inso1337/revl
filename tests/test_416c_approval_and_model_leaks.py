@@ -373,8 +373,9 @@ def test_a_short_or_default_registered_value_never_over_redacts():
 #
 # What is resolved here instead:
 #   * the promotion stops being INVISIBLE. A call's arguments are only ever
-#     hashed into the ticket (`argsDigest`) EXCEPT at a parameter whose name sits
-#     in `cap_order._REGISTRY`, whose runtime value is lifted out and, on a yes,
+#     hashed into the ticket (`argsDigest`) EXCEPT at a parameter whose name is a
+#     resource kind — one in `cap_order._REGISTRY`, or one a capability DECLARES
+#     for itself (issue #1938) — whose runtime value is lifted out and, on a yes,
 #     written verbatim to a durable cross-session log. The ticket now says so, and
 #     names the `Secret[Str]` declaration that changes it;
 #   * and the durability becomes an OPERATOR decision

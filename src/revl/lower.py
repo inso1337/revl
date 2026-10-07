@@ -4711,7 +4711,8 @@ def _param_names(params) -> set[str]:
 
 
 def _check_argument_bound_scopes(where: str, source: str, line: int,
-                                 capabilities, params) -> None:
+                                 capabilities, params,
+                                 declarations=None) -> None:
     """issue #1985: an argument-bound destination must name one of the
     declaration's OWN parameters.
 
@@ -4724,12 +4725,18 @@ def _check_argument_bound_scopes(where: str, source: str, line: int,
     annotations are (they are not resolved at parse either - the parameter list
     is below). A binding naming no parameter is a destination nothing
     enforces: fail closed rather than store an opaque token no caller can ever
-    satisfy."""
+    satisfy.
+
+    `declarations` is the composition's `capability -> {name: kind}` map (issue
+    #1938), so a scope that binds one of the capability's OWN declared resource
+    dimensions reads back. It is passed in rather than looked up, because the
+    fold is a pure string function with no IR in scope; an empty map is the
+    identity for every program that declares no dimension."""
     if not capabilities:
         return
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
     names = _param_names(params)
-    for cap, arg in cap_order.argument_bindings(capabilities):
+    for cap, arg in cap_order.argument_bindings(capabilities, declarations):
         if arg in names:
             continue
         declared = ", ".join(sorted(names)) or "(none)"
@@ -4760,6 +4767,12 @@ def _lower_externs(program: Program, filename: str, types: dict,
     # a witnessed inverse is infinite regress. Built before the loop so an
     # inverse may name an extern declared later in the file.
     extern_class = {d.name: d.classification for d in program.externs}
+    # issue #1938: the composition's `capability -> {name: kind}` declarations,
+    # folded once. A scope that binds one of a capability's OWN declared
+    # resource dimensions reads back through this; empty for every program that
+    # declares no dimension, so every existing fold is byte-identical.
+    from . import cap_order as _cap_order  # noqa: PLC0415 - lazy, no cycle
+    _declarations = _cap_order.declarations_of(program.capability_decls)
     # G5 transitive teardown guard: a witnessed inverse that calls a plain `fn`
     # which itself reaches an emission is as much a teardown emission as a direct
     # one (the 330->329-transitive shape on the teardown path). Reuse the
@@ -4947,7 +4960,7 @@ def _lower_externs(program: Program, filename: str, types: dict,
         # to the sibling role annotations above.
         _check_argument_bound_scopes(
             f"{decl.classification} extern `{decl.name}`", filename, decl.line,
-            decl.capabilities, decl.params)
+            decl.capabilities, decl.params, _declarations)
         # item 309: the `idempotent` emission modifier and its `idempotent(key: p)`
         # keyed form. Two rules, enforced here next to the sibling reach checks:
         #   (1) `idempotent`/`idempotent(key:)` is EMISSION-ONLY. It is item-44's
@@ -5574,8 +5587,8 @@ def _cache_token_resolves(token: str, crossable: set[str]) -> bool:
     from . import cap_order  # noqa: PLC0415
     for declared in crossable:
         try:
-            if cap_order.covers(cap_order.parse_cap(declared),
-                                cap_order.parse_cap(token)):
+            if cap_order.covers(cap_order.parse_stored_cap(declared),
+                                cap_order.parse_stored_cap(token)):
                 return True
         except cap_order.CapError:
             continue
@@ -8516,6 +8529,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                      taint_strict: bool = False, untrusted: bool = False) -> dict:
     ambient = ambient or {}
 
+    # issue #1938: the composition's `capability -> {name: kind}` declarations,
+    # folded once and threaded into every fold that reads a parameterized
+    # capability SPELLING back off the source. Empty for every program that
+    # declares no dimension, so every existing fold is byte-identical.
+    from . import cap_order as _cap_order  # noqa: PLC0415 - lazy, no cycle
+    _declarations = _cap_order.declarations_of(program.capability_decls)
+
     # Taint/provenance (roadmap item 249, Slice A). Read the `Untrusted[T]` /
     # `Trusted[T]` qualifier surface off every declaration and STRIP it from the
     # declared types in place, so base typing, method lookup and the emitted IR
@@ -8595,7 +8615,7 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
             _check_argument_bound_scopes(
                 f"service method `{svc.name}.{method.name}`", program.filename,
                 getattr(method, "line", svc.line), method.capabilities,
-                method.params)
+                method.params, _declarations)
         services[svc.name] = svc
     for name, svc in ambient_services.items():
         services.setdefault(name, svc)
@@ -9229,6 +9249,19 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     obligations = holes.collect(result)
     if obligations:
         result["holes"] = obligations
+
+    # issue #1938: a capability's own declared resource dimensions, so a
+    # consumer that folds a parameterized SPELLING without the source (the
+    # approval classifier reading an extern's `capabilities`, the distiller
+    # reading the boundary) can tell a declared dimension from a ceiling. This
+    # is an IR-level member, NOT an interchange member: `audit_report`
+    # re-projects `manifest`/`boundary`/`externs`/`distributability`, so the
+    # versioned interchange document is unchanged. Absent unless a `capability`
+    # declaration exists, so every existing IR is byte-identical.
+    if _declarations:
+        result["capability_declarations"] = {
+            token: dict(names) for token, names in sorted(_declarations.items())
+        }
 
     if fault_tests:
         result["fault_tests"] = fault_tests
@@ -15252,7 +15285,7 @@ def _refine_one_crossing(token: str, clause, acting, where: str,
 
     try:
         action = _intent.Action.from_cap(
-            _cap_order.parse_cap(token),
+            _cap_order.parse_stored_cap(token),
             verb=acting.verb, tenant=acting.tenant, scopes=acting.scopes)
     except _cap_order.CapError as exc:  # pragma: no cover - parse validated
         raise RevlError(filename, line, str(exc),
@@ -17279,7 +17312,7 @@ def _cap_keyed(key: str, cap_str: str) -> "object":
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
     del key  # the boundary is the declared token, never the local wiring key
     try:
-        return cap_order.parse_cap(cap_str)
+        return cap_order.parse_stored_cap(cap_str)
     except cap_order.CapError:
         return cap_order.Cap("*", ())
 
@@ -17575,7 +17608,7 @@ def _declares_calls_ceiling(services: dict) -> bool:
         for m in svc.methods.values():
             for capstr in (m.capabilities or ()):
                 try:
-                    _, ceils = cap_order.split_ceilings(cap_order.parse_cap(capstr))
+                    _, ceils = cap_order.split_ceilings(cap_order.parse_stored_cap(capstr))
                 except cap_order.CapError:
                     continue
                 if "calls" in ceils:
@@ -17621,11 +17654,11 @@ def _check_declared_ceilings(components: list[dict], services: dict,
     for cname in sorted(report):
         entry = report[cname]
         for token, cell in entry["per_capability"].items():
-            _, ceils = cap_order.split_ceilings(cap_order.parse_cap(token))
+            _, ceils = cap_order.split_ceilings(cap_order.parse_stored_cap(token))
             declared = ceils.get("calls")
             if declared is None:
                 continue
-            bare = cap_order.split_ceilings(cap_order.parse_cap(token))[0].to_str()
+            bare = cap_order.split_ceilings(cap_order.parse_stored_cap(token))[0].to_str()
             line = comp_line.get(cname, 1)
             src = comp_src.get(cname) or filename
             if cell["kind"] == "bounded" and cell["bound"] > declared:
@@ -17716,7 +17749,11 @@ def _ceiling_attenuation_check(held: set, child_reach: set) -> "list[dict]":
             fails: list[dict] = []
             for p, wide in sorted(h_ceils.items()):
                 narrow = child_ceils.get(p)  # None == dropped == +inf == wider
-                if narrow is None or not cap_order._param_leq(p, narrow, wide):
+                # `_param_leq` reads the order off the canonical VALUES' own
+                # types, never off the parameter name (#1938), so the ceiling's
+                # name `p` is not passed; `split_ceilings` has already
+                # canonicalized both sides to `int`.
+                if narrow is None or not cap_order._param_leq(narrow, wide):
                     fails.append({"cap": c, "param": p,
                                   "child": narrow, "parent": wide})
             if not fails:
@@ -17895,7 +17932,7 @@ def _model_reach_caps(role) -> set:
             out.add(cap_order.Cap("*", ()))
             continue
         try:
-            out.add(cap_order.parse_cap(token))
+            out.add(cap_order.parse_stored_cap(token))
         except cap_order.CapError:
             out.add(cap_order.Cap("*", ()))
     return out

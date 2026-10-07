@@ -72,7 +72,7 @@ what the human render prints on its `host code:` line, and it carries:
 | --- | --- |
 | `name` | the extern's name, or `"*"` for a first-class dispatch (a reach through a value whose target is not statically nameable). |
 | `class` | the G4 classification, one of the four boundary classes: `"pure"` (no observable effect), `"acquire"` (takes a resource that must be released), `"emission"` (an irreversible crossing out of the system), or `"witnessed"` (a reversible host mutation that names its inverse). `"first-class dispatch"` is the pseudo-class for a `"*"` entry. May be `null` when the class is not known. |
-| `capabilities` | the declared capability scope of a scoped `emission[...]` / `witnessed[...]` extern, as a sorted token list (e.g. `["fs"]`). **This token, not the name, is what a `capability <glob>` policy rule keys on.** Absent for an unscoped extern, whose token is its own name. |
+| `capabilities` | the declared capability scope of a scoped `emission[...]` / `witnessed[...]` extern, as a sorted token list (e.g. `["fs"]`). **This token, not the name, is what a `capability <glob>` policy rule keys on.** Absent for an unscoped extern, whose token is its own name. A token carrying resource parameters (`fs.write(path="/data")`) appears with its parameters; a capability's own DECLARED dimensions (issue #1938, design 294) appear here too, which is additive to the schema and not to an existing token's bytes. |
 | `backends` | the backend tiers this extern has a body for (sorted), e.g. `["py"]`. |
 
 So the human line

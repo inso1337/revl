@@ -58,8 +58,8 @@ def _cap_covers(wide: str, narrow: str) -> bool:
     if wide == narrow:
         return True
     try:
-        return cap_order.covers(cap_order.parse_cap(wide),
-                                cap_order.parse_cap(narrow))
+        return cap_order.covers(cap_order.parse_stored_cap(wide),
+                                cap_order.parse_stored_cap(narrow))
     except cap_order.CapError:
         return False
 
@@ -167,11 +167,13 @@ def two_step_payload(ticket: dict, *, how_to_approve: str) -> dict:
 # What a yes ALSO does when the crossing's resource target came from a caller
 # argument (roadmap 425 F3 / 427 F5). The asymmetry this states is otherwise
 # invisible: a call's arguments are only ever HASHED into the ticket
-# (`argsDigest`), except for a parameter whose NAME happens to sit in
-# `cap_order._REGISTRY` (`path`, `host`, `table`), whose runtime VALUE is lifted
-# out and bound into the capability spelling — which `record_approval_granted`
-# then writes verbatim to a durable, cross-session, plaintext log. Nothing told
-# the author that naming a parameter `path` changes where its values end up, and
+# (`argsDigest`), except for a parameter whose NAME is a resource kind — one in
+# `cap_order._REGISTRY` (`path`, `host`, `table`), or one a capability DECLARES
+# for itself (issue #1938, `capability mail.send(account: discrete)`) — whose
+# runtime VALUE is lifted out and bound into the capability spelling — which
+# `record_approval_granted` then writes verbatim to a durable, cross-session,
+# plaintext log. Nothing told the author that naming a parameter `path` changes
+# where its values end up, and
 # nothing told the operator that a yes persists this one. Same move item 425 F1
 # made with `unreviewedHostCode`: the ticket must not understate what a yes means.
 #
@@ -183,7 +185,8 @@ _CALLER_VALUE_PROVENANCE = (
     "this crossing's resource target is a value the CALLER passed in, not a "
     "literal the author wrote. It is the one argument of this call that is not "
     "merely hashed into `argsDigest`: because the parameter is named for a "
-    "resource kind (`path`/`host`/`table`), its runtime value is lifted out and "
+    "resource kind (`path`/`host`/`table`, or a dimension the capability "
+    "declares for itself — issue #1938), its runtime value is lifted out and "
     "bound into the capability spelling you are approving. ")
 _CALLER_VALUE_DURABILITY_BOUND = _CALLER_VALUE_PROVENANCE + (
     "This session runs `--approval-record-values bound`, so approving ALSO "
@@ -698,17 +701,42 @@ class ClassMap:
                 return ext
         return None
 
+    def _declared_dims(self, ext: dict) -> dict:
+        """The declared resource dimensions of every capability `ext` declares,
+        folded to one `{name: kind}` map (issue #1938).
+
+        The declaration is per CAPABILITY TOKEN, so an extern that declares more
+        than one scoped capability gets the union of their dimensions - each one
+        is a name this crossing's signature may carry. Empty unless the IR
+        carries `capability_declarations`, which the lowerer emits only for a
+        program that declares a dimension, so every existing composition folds
+        to the core registry alone."""
+        decls = self.ir.get("capability_declarations") or {}
+        if not decls:
+            return {}
+        out: dict = {}
+        for spelling in ext.get("capabilities") or ():
+            out.update(decls.get(str(spelling).split("(", 1)[0]) or {})
+        return out
+
     def _resource_params(self, ext: dict) -> list:
         """`(index, name, secret)` for each of the extern's parameters naming a
-        `cap_order._REGISTRY` RESOURCE kind (host/path/table, never a ceiling).
-        These are the dimensions a crossing capability can be scoped on."""
+        RESOURCE kind (host/path/table, or one of the declaring capability's own
+        declared dimensions, never a ceiling). These are the dimensions a
+        crossing capability can be scoped on.
+
+        The declared layer (issue #1938) is read off the IR, so a declared
+        `discrete`/`path` dimension is scoped exactly like a core one; a
+        declared `ceiling` is excluded here and translated at mint, the same as
+        `calls`/`size`/`time`."""
         out: list = []
+        declared = self._declared_dims(ext)
         for index, param in enumerate(ext.get("params") or []):
             if not isinstance(param, dict):
                 continue
             name = param.get("name")
-            if name is None or not cap_order.is_registered(name) \
-                    or cap_order.is_ceiling(name):
+            if name is None or not cap_order.is_registered(name, declared) \
+                    or cap_order.is_ceiling(name, declared):
                 continue
             out.append((index, name, bool(param.get("secret"))))
         return out
@@ -810,6 +838,7 @@ class ClassMap:
         resource = self._resource_params(ext)
         if not resource:
             return None, None, False   # no resource dimension to scope on
+        declared = self._declared_dims(ext)
         dimensions = ", ".join(f"`{name}`" for _i, name, _s in resource)
         if scope_id is None or scope_id not in self.index.scopes:
             return None, (
@@ -873,7 +902,16 @@ class ClassMap:
         if not pairs:
             return None, refusal, False
         try:
-            return cap_order.make_cap(token, pairs).to_str(), refusal, from_caller
+            # issue #1938: the declaration has to be passed here or a declared
+            # dimension binds to nothing. Every name in `pairs` came from
+            # `_resource_params`, which already filtered on the declaration, so
+            # this call cannot refuse a name it admitted — but WITHOUT it the
+            # `CapError` below fires for a declared name and the failure is
+            # silent: `(None, None, False)` reads as "no resource dimension",
+            # the token keys bare, no refusal is reported, and the fact the
+            # audit is supposed to be about is dropped without a word.
+            return cap_order.make_cap(token, pairs, declared).to_str(), \
+                refusal, from_caller
         except cap_order.CapError:
             return None, refusal, False
 

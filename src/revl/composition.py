@@ -1351,7 +1351,7 @@ def _slo_ceilings(rows: list["Row"], uses: list[str], sources: dict,
             for method in svc.methods.values():
                 for capstr in (method.capabilities or ()):
                     try:
-                        cap = cap_order.parse_cap(capstr)
+                        cap = cap_order.parse_stored_cap(capstr)
                         _, ceils = cap_order.split_ceilings(cap)
                     except cap_order.CapError:
                         continue

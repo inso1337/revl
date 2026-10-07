@@ -50,7 +50,7 @@ from fnmatch import fnmatchcase
 from typing import Optional
 
 from . import policy as _policy
-from .cap_order import CapError, split_ceilings, parse_cap
+from .cap_order import CapError, split_ceilings, parse_stored_cap
 from .wal import KIND_EFFECT, read_wal, scope_host_confined, WALIntegrityError
 
 #: The three verdicts one recorded action can carry. `UNDECIDED` is not a
@@ -175,7 +175,7 @@ def _cap_token(raw: object) -> tuple:
     merely failed to parse."""
     text = str(raw)
     try:
-        cap = parse_cap(text)
+        cap = parse_stored_cap(text)
     except CapError:
         return text, None, {}
     resource, ceilings = split_ceilings(cap)
