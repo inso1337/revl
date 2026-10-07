@@ -8,17 +8,17 @@ scored by: `src/revl`
 
 | variant | specs | first-pass compile | green ≤ max iters | mean iters-to-green | mean tokens-to-green | cost |
 |---|---|---|---|---|---|---|
-| v2 | 5 | 2/5 (40%) | 5/5 | 2.00 | 11629 | $0.00 |
+| v2 | 6 | 3/6 (50%) | 6/6 | 1.83 | 10026 | $0.00 |
 
 ## raw-ts — probe-scored (does revl earn its keep?)
 
 ### raw-ts — lifecycle correctness (residue probe, 5 cycles/plugin)
 
-**1/5 (20%) of raw-TS attempts carry residue that revl would have refused at compile time.**
+**1/6 (17%) of raw-TS attempts carry residue that revl would have refused at compile time.**
 
-- clean (no residue — what revl compiles): 4/5 (80%)
-- leaked (≥1 category — revl would refuse): 0/5
-- failed to mount (bad plugin — also refused): 1/5
+- clean (no residue — what revl compiles): 5/6 (83%)
+- leaked (≥1 category — revl would refuse): 0/6
+- failed to mount (bad plugin — also refused): 1/6
 
 Residue-carrying cells:
 
@@ -31,9 +31,9 @@ Residue-carrying cells:
 
 ### mcp: residue after unload (5 install/unload cycles per pack)
 
-- clean: 3/5
-- leaked (at least one category): 0/5
-- could not be probed: 2/5
+- clean: 4/6
+- leaked (at least one category): 0/6
+- could not be probed: 2/6
 
 Unload is `remove()` on every registration handle, then the teardown `install` returned, if any. The return convention is this benchmark's, not the SDK's.
 
