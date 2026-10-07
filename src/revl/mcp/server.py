@@ -2850,12 +2850,114 @@ def _tool_history_lifetime(arguments: dict) -> dict:
 
 def _tool_check(arguments: dict) -> dict:
     """Compile a candidate AS SENT, so every diagnostic names a line the agent
-    wrote, and say what its canonical form is (issue #1700)."""
+    wrote, and say what its canonical form is (issue #1700).
+
+    With no candidate of its own — the bare `revl_check {}`, or the explicit
+    `{"session": true}` — it checks the composition the SESSION holds instead
+    (issue #2117). Steps 1-4 of the authoring loop mutate that working set, so
+    step 5 of 6 can verify the loop's own artifact without re-sending it: the
+    name and the loop position already imply the bare call, and `revl_swap {}`
+    and `revl_source {}` read the same set.
+
+    A call that carries neither a candidate nor anything held is a USAGE
+    refusal (`category: "usage"`), never a composition verdict: `ok: false`
+    keeps meaning "your composition has a problem" (issue #2117).
+    """
+    explicit = arguments.get("session") is True
+    if explicit and _carries_candidate(arguments):
+        return _session_error(
+            "`session: true` checks the composition the session holds, so it "
+            "takes no candidate of its own",
+            category="usage",
+            fix="drop `source`/`files` to check the held composition, or drop "
+                "`session` to check the candidate you sent")
+    if explicit or not _carries_candidate(arguments):
+        return _check_held(arguments)
     sent, _stored, canon = _canonical.prepare(arguments)
     return _canonical.attach(_check_as_sent(sent), canon)
 
 
-def _check_as_sent(arguments: dict) -> dict:
+def _carries_candidate(arguments: dict) -> bool:
+    """Whether the call carries a candidate of its own (issue #2117).
+
+    `modules` alone is not one: they are the in-memory `use` imports a
+    `source`/`files` candidate resolves against, so a call with neither is an
+    argument error rather than a candidate (and `_compile` has no candidate to
+    take)."""
+    return arguments.get("source") is not None or bool(arguments.get("files"))
+
+
+def _held_working_set() -> dict | None:
+    """The working source set the SESSION holds (issue #2117): a live edit
+    draft when one is open, else the running composition's own source; with
+    nothing loaded, the draft an edit loop is filling. None when the session
+    holds nothing checkable.
+
+    This is the same set `revl_swap {}` re-admits and `revl_source {}` reads,
+    so the check and the verbs that mutate the set agree on what it is."""
+    if SESSION.loaded:
+        return _edit.virtual_source(SESSION)
+    draft = _draft.pending(SESSION)
+    if draft is not None:
+        return draft["vs"]
+    return None
+
+
+def _held_candidate(vs: dict) -> dict:
+    """A held working set in the argument shape `revl_check` takes, so the held
+    form compiles through the SAME door as the supplied form (issue #2117) and
+    answers with the same substance. `file_modules` carries only the buffers
+    edited since load, so an unedited `files` composition still compiles as the
+    operator's own jailed files, exactly as at load."""
+    if vs.get("source") is not None:
+        return {"source": vs["source"], "modules": dict(vs.get("modules") or {})}
+    if vs.get("files"):
+        return {"files": list(vs["files"]), "modules": _edit.file_modules(vs)}
+    return {}
+
+
+def _check_held(arguments: dict) -> dict:
+    """`revl_check` with no candidate of its own: check what the session holds.
+
+    The answer is the supplied-source answer — `selfCheck`, `holes`,
+    `boundary`, `admissible` — plus `checked: "session"`, and nothing is
+    mutated (issue #2117). Nothing was sent, so there is no `canonicalSource`
+    report and `returnCanonical` has nothing to return: the same reason the
+    bare `revl_swap {}` reports none."""
+    if arguments.get("modules") is not None:
+        return _session_error(
+            "`modules` are the in-memory `use` imports of a candidate: they "
+            "ride beside `source` or `files`, and this call carries neither",
+            category="usage",
+            fix="pass `source` or `files` beside `modules`")
+    vs = _held_working_set()
+    if vs is None:
+        return _session_error(
+            "revl_check needs a candidate: pass `source` or `files`, or check "
+            "the composition the session holds — and this session holds none "
+            "(nothing is loaded and no draft is open)",
+            category="usage",
+            fix="pass `source` or `files`",
+            next=_remedy.load_next())
+    candidate = _held_candidate(vs)
+    if not candidate:
+        return _session_error(
+            "the session's composition carries no source text to check — it "
+            "was not loaded from `source` or `files`, so there is nothing to "
+            "recompile",
+            category="session")
+    result = _check_as_sent(candidate, held=vs)
+    result["checked"] = "session"
+    return result
+
+
+def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
+    """Compile a candidate as sent. `held` is the session's working set a
+    held-session check compiled instead (issue #2117), used only to describe
+    the candidate: the arguments carry the equivalent `source`/`files`/`modules`
+    the compile reads, while `held` carries the edited buffers the argument
+    shape cannot (a `files` set's edited text rides as `modules`, but its
+    `files_content` is what the comment index wants)."""
     try:
         ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
@@ -2863,7 +2965,7 @@ def _check_as_sent(arguments: dict) -> dict:
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
-        return _with_candidate_knowledge(refused, arguments, refused)
+        return _with_candidate_knowledge(refused, arguments, refused, held)
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
@@ -2885,12 +2987,20 @@ def _check_as_sent(arguments: dict) -> dict:
     return _with_candidate_knowledge(result, arguments, None)
 
 
-def _with_candidate_knowledge(payload: dict, arguments: dict, refused) -> dict:
+def _with_candidate_knowledge(payload: dict, arguments: dict, refused,
+                             held: dict | None = None) -> dict:
     """A checked candidate's comment index (issue #1745): its counts and any
     comment the compiler no longer agrees with (an `expected error:` it does
-    not raise, a `REFUSED` head on a file that compiles)."""
+    not raise, a `REFUSED` head on a file that compiles).
+
+    `held` is the session's working set a held-session check compiled (issue
+    #2117): it is the authoritative description of that candidate — its edited
+    buffers live in `files_content` — so the index reads it rather than
+    reconstructing the set from `source`/`files`."""
     try:
-        if arguments.get("source") is not None:
+        if held is not None:
+            vs = held
+        elif arguments.get("source") is not None:
             vs = {"source": arguments["source"],
                   "modules": dict(arguments.get("modules") or {})}
         elif arguments.get("files"):
@@ -3389,8 +3499,28 @@ TOOLS = [
                        "fix hint) on rejection. A draft with holes compiles; it is "
                        "refused at admission until every hole is filled. "
                        "`effectClasses` gives each provided operation's effect class "
-                       "(a/b/c) and the crossings that set it.",
-        "inputSchema": {"type": "object", "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL}},
+                       "(a/b/c) and the crossings that set it. "
+                       "With no `source`/`files` (or with `session: true`), it "
+                       "checks the composition the SESSION holds — the working "
+                       "set revl_scaffold/revl_load/revl_edit mutate, the same "
+                       "one `revl_swap {}` re-admits — and adds `checked: "
+                       "\"session\"`; so step 5 verifies the loop's own artifact "
+                       "without re-sending it, and nothing is replaced (nothing "
+                       "was sent, so there is no `canonicalSource`). A call "
+                       "that carries neither a candidate nor anything held is a "
+                       "`category: \"usage\"` refusal, not a composition "
+                       "verdict: `ok: false` means the composition has a "
+                       "problem.",
+        "inputSchema": {"type": "object", "properties": {
+            **_SOURCE_INPUT,
+            "session": {"type": "boolean",
+                        "description": "true: check the composition the session "
+                                       "holds (the running source, or the draft "
+                                       "an edit loop is filling) instead of a "
+                                       "candidate — the form the bare "
+                                       "`revl_check {}` already takes. Carries "
+                                       "no `source`/`files` of its own"},
+            **_RETURN_CANONICAL}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
     },
