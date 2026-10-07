@@ -15399,7 +15399,7 @@ fn spawn_form_at(comp: CompD, names: &[String]) -> Verd {
     return no_verd();
 }
 
-fn check_spawn(pg: Prog, cx: Ctx__m2) -> Verd {
+fn check_spawn(ts: &[Token], pg: Prog, cx: Ctx__m2) -> Verd {
     let edges = spawn_edges(&pg.comps);
     if (edges.revl_length() == 0i64) {
         return no_verd();
@@ -15413,7 +15413,7 @@ fn check_spawn(pg: Prog, cx: Ctx__m2) -> Verd {
         return no_verd();
     }
     let reachBase = reach_surface_pairs(&pg.comps, cx.clone());
-    let reachClosed = surf_closure(reachBase.clone(), &edges);
+    let reachClosed = surf_closure(model_reach_spawn_base(ts, pg.clone(), cx.clone(), reachBase.clone()), &edges);
     let av = check_spawn_atten(&pg.comps, 0i64, cx.clone(), reachBase.clone(), reachClosed.clone());
     if (av.v != "") {
         return av;
@@ -21935,6 +21935,67 @@ fn model_reach_comp(comp: CompD, cx: Ctx__m2, own: Vec<String>, bs: Vec<MBlock>,
     return no_verd();
 }
 
+fn model_reach_spawn_base(ts: &[Token], pg: Prog, cx: Ctx__m2, base: std::collections::HashMap<String, Vec<String>>) -> std::collections::HashMap<String, Vec<String>> {
+    let rs = model_roles_of(ts);
+    if (rs.revl_length() == 0i64) {
+        return base;
+    }
+    let mut i = 0i64;
+    while (i < rs.revl_length()) {
+        if (!(rs)[(i) as usize].rrok.clone()) {
+            return base;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let cs = model_councils_of(ts);
+    let sps = model_comp_spans(ts);
+    let mut m = base.clone();
+    let mut ci = 0i64;
+    while (ci < pg.comps.revl_length()) {
+        let comp = (pg.comps)[(ci) as usize].clone();
+        let cxc = ctx_for(cx.clone(), comp.clone());
+        let own = surf_get(base.clone(), comp.name.clone());
+        let held = cap_strip_all(&model_svc_ns(&held_caps_pairs(comp.clone(), cxc.clone(), own.clone()), comp.clone()));
+        if model_consults(&held) {
+            let mut crossed: Vec<String> = vec![];
+            i = 0i64;
+            while (i < held.revl_length()) {
+                crossed = union_into(crossed.clone(), vec![cap_parse((held)[(i) as usize].clone()).token]);
+                i = (i).checked_add(1i64).expect("revl: Int overflow");
+            }
+            let names = own_cross_names(comp.clone(), cxc.clone());
+            i = 0i64;
+            while (i < names.revl_length()) {
+                crossed = union_into(crossed.clone(), caps_of(cxc.appr.vcaps.clone(), (names)[(i) as usize].clone()));
+                i = (i).checked_add(1i64).expect("revl: Int overflow");
+            }
+            let mut bs: Vec<MBlock> = vec![];
+            let mut si = 0i64;
+            while (si < sps.revl_length()) {
+                if ((sps)[(si) as usize].sname == comp.name) {
+                    bs = model_blocks_in(ts, (sps)[(si) as usize].slo.clone(), (sps)[(si) as usize].shi.clone());
+                }
+                si = (si).checked_add(1i64).expect("revl: Int overflow");
+            }
+            let es = model_edges(&bs, &rs, &cs, &crossed, comp.line);
+            if (!((es.revl_length() > 0i64) && ((es)[(0i64) as usize].erole == "?"))) {
+                let mut reach: Vec<String> = vec![];
+                i = 0i64;
+                while (i < es.revl_length()) {
+                    let r = (rs)[(mrole_at(&rs, &(es)[(i) as usize].erole, 0i64)) as usize].clone();
+                    reach = union_into(reach.clone(), cap_strip_all(&model_reach_of(r.clone())));
+                    i = (i).checked_add(1i64).expect("revl: Int overflow");
+                }
+                if (reach.revl_length() > 0i64) {
+                    m.insert(comp.name.clone(), union_into(own.clone(), reach.clone()));
+                }
+            }
+        }
+        ci = (ci).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return m;
+}
+
 fn model_reach_refusal(ts: &[Token], pg: Prog, base: Ctx__m2, poisoned: &[String]) -> Verd {
     let rs = model_roles_of(ts);
     if (rs.revl_length() == 0i64) {
@@ -22489,7 +22550,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
     }
     refs = append_verds(refs.clone(), handoff_refusals(&pg.comps, &hands, &poisoned, 0i64));
     refs = append_verds(refs.clone(), wrefs.clone());
-    let sv = check_spawn(pg.clone(), base.clone());
+    let sv = check_spawn(&ts, pg.clone(), base.clone());
     if (sv.v != "") {
         refs.push(sv.clone());
     }
@@ -34064,6 +34125,18 @@ fn a_spawn_reaching_outside_the_parent_s_path_cone_is_refused__g4_() {
 fn a_spawn_that_widens_a_child_s_capabilities_is_refused__g4_() {
     let v = admit_src(String::from("service StoreA { emission[kv_a] fn wa(r: Str) -> Int }\nservice StoreB { emission[kv_b] fn wb(r: Str) -> Int }\nservice Task { emission fn go() -> Int }\ncomponent Leaker requires kv_b: StoreB provides task: Task {\n  provide task { fn go() { emit kv_b.wb(\"x\")  return 0 } }\n}\ncomponent Supervisor requires kv_a: StoreA {\n  let l = effect spawn Leaker with { } undo l.dispose()\n}"));
     assert!((v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"));
+}
+
+#[test]
+fn a_spawn_whose_child_reaches_through_a_model_role_is_refused__g4_() {
+    let v = admit_src(String::from("model role tool on_device reaches [shell.exec]\nservice Shell { emission[shell.exec] fn run(c: Str) -> Str }\nservice Completions { emission[model.complete] fn complete(p: Str) -> Str }\nservice Task { emission fn go() -> Str }\ncomponent Worker requires sh: Shell requires llm: Completions provides task: Task {\n  route model on go { * -> tool }\n  provide task { fn go() { emit llm.complete(\"x\") return \"x\" } }\n}\ncomponent Supervisor requires llm: Completions {\n  let w = effect spawn Worker with { } undo w.dispose()\n}"));
+    assert!((v == "G4|`Supervisor` spawns `Worker`, granting it `shell.exec`, but `Supervisor` holds only `model.complete` — a spawn may narrow a child's capabilities, never widen them"));
+}
+
+#[test]
+fn a_spawn_whose_role_reach_stays_within_the_spawner_admits() {
+    let v = admit_src(String::from("model role tool on_device reaches [model.complete]\nservice Completions { emission[model.complete] fn complete(p: Str) -> Str }\nservice Task { emission fn go() -> Str }\ncomponent Worker requires llm: Completions provides task: Task {\n  route model on go { * -> tool }\n  provide task { fn go() { emit llm.complete(\"x\") return \"x\" } }\n}\ncomponent Supervisor requires llm: Completions {\n  let w = effect spawn Worker with { } undo w.dispose()\n}"));
+    assert!((v == ""));
 }
 
 #[test]

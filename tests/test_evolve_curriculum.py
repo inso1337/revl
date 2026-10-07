@@ -14,17 +14,16 @@ order matters:
      that passes on the same tree.
 
 A fourth thing became worth testing with issue #1410. `hard` is derived from
-recorded gate bypasses: PR #1396 met item 391's exit and PR #1404 took the go
-carried set to zero, so the rung emptied because the work behind it was
-finished, and issue #1193 put two entries back by recording a spawn rule the
-gate has not ported yet. What is gated is therefore whether a rung is
-REACHABLE, and the population is reported beside it. The population of `hard`
-is a property of the tree and not of this file, so the tests that depend on it
-CONSTRUCT the state they are about rather than reading the tree's: `test_a_
-recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it` stages a
-baseline entry and watches the rung fill and empty again, and `test_an_empty_
-rung_and_a_source_that_could_not_run_do_not_print_the_same_thing` stages the
-empty baseline and holds the two outputs apart.
+recorded gate bypasses and the census baseline records none: PR #1396 met item
+391's exit and PR #1404 took the go carried set to zero, so the rung is empty
+because the work behind it was finished. What is gated is therefore whether a
+rung is REACHABLE, and the population is reported beside it. The tests that
+depended on `hard` being occupied would otherwise have been a third instance
+this week of a guard that only worked while something was broken, so each one
+now CONSTRUCTS the state it is about: `test_a_recorded_bypass_fills_the_hard_
+rung_and_removing_it_empties_it` stages a baseline entry and watches the rung
+fill and empty again, and `test_an_empty_rung_and_a_source_that_could_not_run_
+do_not_print_the_same_thing` holds the two apart at the output.
 """
 
 import re
@@ -407,47 +406,23 @@ def test_cli_check_exits_zero_and_the_restricted_run_exits_one():
     assert "CURRICULUM-RED" in red.stderr
 
 
-def test_an_empty_rung_and_a_source_that_could_not_run_do_not_print_the_same_thing(
-        derived, tmp_path, monkeypatch, capsys):
+def test_an_empty_rung_and_a_source_that_could_not_run_do_not_print_the_same_thing():
     """The output-level half of issue #1410.
 
-    Two different events reach the reader of a `--check` run today: a rung a
-    source reaches and found nothing on, and a source that cannot read its
-    artifacts. They are held apart by prefix and by exit code, and both halves
-    are read off real runs rather than asserted.
-
-    The empty rung is STAGED, not read off the tree. `hard` is fed by the
-    census baseline, and issue #1193 recorded two entries there, so at HEAD
-    every rung is populated and the live run prints no empty-rung line at all.
-    That is asserted below, and it is why the state this test is about has to
-    be constructed: a guard that only works while the tree sits in one
-    particular state is the thing issue #1410 was opened about.
+    Two different events reach the reader of a `--check` run today: `hard` is
+    empty because the bypasses behind it were closed, and a source that cannot
+    read its artifacts. They are held apart by prefix and by exit code, and
+    both halves are read off real runs rather than asserted.
     """
-    tool, live = derived
-
     green = _cli("--check")
     assert green.returncode == 0
-    assert "CURRICULUM-RED" not in green.stderr
-    assert "CURRICULUM-EMPTY" not in green.stderr, \
-        "a populated rung is not reported as empty: see the docstring"
-
-    # The same run, with the census source handed a baseline this test owns
-    # and no entries in it. `hard` empties, the source keeps declaring that it
-    # reaches `hard`, and nothing else about the tree moves.
-    others = [d for d in live if d.source != "census-bypass"]
-    emptied = tool.adapter_census_bypass(_staged_baseline(tmp_path, ()))
-    assert emptied.tasks == ()
-    assert "hard" in emptied.rungs()
-    monkeypatch.setattr(tool, "derive", lambda adapters=None: others + [emptied])
-    assert tool.main(["--check"]) == 0
-    staged = capsys.readouterr()
-    empty = [ln for ln in staged.err.splitlines()
+    empty = [ln for ln in green.stderr.splitlines()
              if ln.startswith("CURRICULUM-EMPTY")]
-    assert len(empty) == 1, staged.err[-2000:]
+    assert len(empty) == 1, green.stderr[-2000:]
     assert "tier 'hard' has 0 tasks at HEAD" in empty[0]
     assert "census-bypass" in empty[0], "the empty rung does not say who feeds it"
-    assert "CURRICULUM-RED" not in staged.err
-    assert "  hard       0  empty, and reachable" in staged.out, staged.out[:400]
+    assert "CURRICULUM-RED" not in green.stderr
+    assert "  hard       0  empty, and reachable" in green.stdout, green.stdout[:400]
 
     red = _cli("--check", "--adapter", "unexplained-refusal")
     assert red.returncode == 1
