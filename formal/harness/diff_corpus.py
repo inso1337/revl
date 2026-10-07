@@ -1729,6 +1729,69 @@ def g9_rows(rel: str) -> list[str]:
                        str(steps.count(G9_STEP_SEP))])]
 
 
+# ------------------------------- G9 COVERAGE (issue #2108)
+#
+# COVERAGE OF THE WALK, NOT THE RULE AT THE SINK.
+#
+# The `TAINT` row above decides the RULE on the sink class and label of the
+# walk the checker DISCOVERED. It cannot say anything about whether that walk
+# is the WHOLE body: a statement `taint.py`'s walk never reaches is a
+# statement the `TAINT` row never sees. That is the gap issue #2108 names,
+# and the two bugs that motivated it were both in the WALK, not the rule —
+# `_walk_component_methods` skipped a component's activation body entirely,
+# and a `Secret[T]` parameter was stripped inside its own receiver body
+# (`_declared_param_origins` omitted `confidential_params` for provide
+# methods). The formal layer could not state the missing obligation at all,
+# because L0 had no `provide`/activation distinction and no typed parameters;
+# `RevL.Syntax.Body` now has both, and this section is the corpus half.
+#
+# THE TWO SIDES ARE INDEPENDENT OBSERVATIONS.
+#
+#   GB  <file>  <comp>  <scope>  <ord>  <kind>  <heads>
+#       One statement of a REAL component body, read off the PARSE
+#       (`ComponentDecl.body` plus each `ProvideStmt.methods[].body`).
+#       `scope` is `activation` or `<provide key>.<method>`; `ord` is the
+#       statement's position within its scope.
+#
+#   GP  <file>  <comp>  <scope>  <names>  <quals>
+#       That scope's declared parameters: names from the provide method, and
+#       qualifiers from the SERVICE OPERATION it implements
+#       (`service S { fn m(p: Secret[Str]) }`) — the declaration, not the
+#       taint model, so a model that stopped recording a qualifier moves this
+#       column and not the walk's.
+#
+#   GW  <file>  <comp>  <scope>  <nstmts>  <seeded>  <origins>
+#       One scope the shipped checker ACTUALLY WALKED, recorded while
+#       `compile_files` ran. `nstmts` is the length of the body the walk was
+#       handed; `seeded`/`origins` are what `_seed_param_env` put into the
+#       environment the body ran under.
+#
+# THE PRIVATE SEAMS THIS PINS (all in `src/revl/taint.py`, all private, and
+# named here so a rename is a diff and not a silent agreement):
+#
+#   * `_FlowChecker.run(self, body, env)` — called with the lowered IR step
+#     list. The recorder wraps the class for the duration of
+#     `_walk_component_methods` ONLY, and records the OUTERMOST call per
+#     label: `run` recurses into nested bodies (a `for`/`if` arm) with the
+#     same `endorse_label`, so recording every call would read a loop body's
+#     length as the scope's.
+#   * `_FlowChecker.endorse_label` — `"<C> activation"` for a component's
+#     activation scope and `"<C>.<method>"` for a provide method, both
+#     spelled with the component name; a component whose name the IR does not
+#     carry falls back to bare `"activation"`/`"<method>"`, which this row
+#     reports as an unobserved scope rather than matching loosely.
+#   * `_seed_param_env(model, key, params, env)` — the walk's ONLY seeding
+#     step for a body, called with the method's lowered `params` list. The
+#     row reads its `params` argument, not the resulting `env` keys: the env
+#     holds only the parameters the MODEL declares an origin for, so an
+#     unqualified parameter is legitimately absent from it.
+#
+# WHAT THIS ROW IS NOT. It is not a proof that the walk is complete. It is
+# the corpus half of `RevL.G9Coverage.walk_covers`: it shows that on every
+# document the model is active for, the walk the checker performed visits
+# every statement of the body the parse side enumerates, and seeds every
+# declared parameter. The model's own theorem is what generalises it.
+
 # ---------------------------------------- G-RETAIN (issue #1811 group 3)
 #
 # THE RULE ON THE CORPUS, NOT COVERAGE OF THE WALK.
