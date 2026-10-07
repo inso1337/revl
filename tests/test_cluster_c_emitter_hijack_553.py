@@ -664,3 +664,402 @@ def test_derived_component_config_type_name_is_reserved():
     assert emitted.count("export interface WorkerConfig {") == 1, (
         "the user's `WorkerConfig` and the emitter's derived `<Comp>Config` "
         "interface are declared twice in one module")
+
+
+# ====================== A3, second half: user-chosen names are RENAMED (#2132)
+#
+# docs/contract-errata.md records the gap as A3 — "IR names colliding with host
+# keywords / reserved names (`ctx`, `config`, `frame`) are REJECTED, not
+# renamed" — with the amendment "v1 defines a renaming scheme; frontend
+# guarantees emitted-name safety". rust already took that posture
+# (backends/rust/emit.py folds its `_EMITTER_RESERVED` into the same injective
+# `_mangle` ladder the keyword escapes use); ts and java refused instead, so a
+# program that compiles, runs and passes on python was unportable over an
+# ordinary domain noun:
+#
+#     fn is_loopback(host: Str) -> Bool { return host == "127.0.0.1" }
+#     test "t" { assert is_loopback("127.0.0.1") }
+#     $ revl test x.rvl               # py: pass
+#     $ revl test --backend ts x.rvl  # ts: emitter refused: ... 'host'
+#
+# The distinction every case below turns on is WHO CHOSE THE NAME:
+#
+#   * a USER-chosen identifier (`host`, `ctx`, `Context`, `rawConfig`) at a
+#     position whose spelling is INTERNAL to the emitted module — a binding, a
+#     parameter, a fn name, or a read of one — is RENAMED by that same ladder
+#     (`host` -> `host_`). Nothing outside the module ever names it, so the
+#     rename cannot change what the program does or publishes, and the ladder
+#     is injective so a user's own `host_` shifts to `host__` rather than
+#     colliding with the renamed `host`.
+#   * a position whose spelling ESCAPES the module is neither renamed nor
+#     relaxed: a property key, a service key, an injected or DERIVED type name,
+#     or a name the emitter also writes as a bare token at a site the rename
+#     does not reach. A rename there is a silent wrong lookup instead of a loud
+#     refusal, so it stays loud. (That is the same reason the two strict xfails
+#     above are still open.)
+#
+# The record-field row is where the two rules meet, and it is the row a partial
+# fix misses. A field name IS the emitted JSON key, so renaming it is NOT
+# available: `_raw_field` emits property keys VERBATIM — the interface field,
+# the object-literal key and the read all keep the author's spelling. That is
+# the same resolution python reached by namespacing its own scaffolding to
+# `_revl_ctx`/`_revl_config` (item 156): the collision is removed from the
+# scaffolding side, because the user's spelling cannot move. A consumer of this
+# compiler renamed a field `ctx` -> `context_tokens` and its published JSON key
+# moved with it, which is exactly the failure `test_a3_*_record_field_*` pins.
+#
+# The six positions, each measured on py / ts / java:
+_A3_POSITIONS = {
+    "service-method param": """
+service Echo { fn echo(host: Str) -> Str }
+component C provides echo: Echo {
+  provide echo { fn echo(host) { return host } }
+}
+lifecycle test "t" { load C let r = call echo.echo("x") assert r == "x" }
+""",
+    "provide-method body let": """
+service Echo { fn echo(x: Str) -> Str }
+component C provides echo: Echo {
+  provide echo { fn echo(x) { let host = "h" return host } }
+}
+lifecycle test "t" { load C let r = call echo.echo("z") assert r == "h" }
+""",
+    "top-level fn parameter": """
+fn is_loopback(host: Str) -> Bool { return host == "127.0.0.1" }
+test "t" { assert is_loopback("127.0.0.1") }
+""",
+    "top-level fn body let": """
+fn f() -> Str { let host = "x" return host }
+test "t" { assert f() == "x" }
+""",
+    "test block body let": """
+test "t" { let host = "x" assert host == "x" }
+""",
+    "record field": """
+type Rec = { host: Str }
+fn f() -> Rec { return { host: "x" } }
+test "t" { assert f().host == "x" }
+""",
+}
+
+_A3_TIERS = ("py", "ts", "java")
+
+
+@pytest.mark.parametrize("tier", _A3_TIERS)
+@pytest.mark.parametrize("position", sorted(_A3_POSITIONS))
+def test_a3_scaffolding_named_user_identifier_runs(position: str, tier: str):
+    """Every one of the six positions runs on every tier. Before A3's second
+    half, the four non-service positions were `EmitError` on ts and the
+    record-field position was an `EmitError` on java too; all six are green
+    now, which is the acceptance criterion the issue states."""
+    status, message = _run(tier, _A3_POSITIONS[position])
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{position} on {tier}: {message}"
+
+
+# ------------------------------------------------- the record field, verbatim
+#
+# The field name is the wire key, so the assertion is on the exact emitted
+# TEXT, not merely on "it compiled": a rename that kept the module compiling
+# would still have moved the key.
+_A3_FIELDS = """
+pub type Rec = { ctx: Str, host: Str, Context: Str, rawConfig: Str }
+pub fn mk() -> Rec { return { ctx: "a", host: "b", Context: "c", rawConfig: "d" } }
+test "t" {
+  let r = mk()
+  assert r.ctx == "a"
+  assert r.host == "b"
+  assert r.Context == "c"
+  assert r.rawConfig == "d"
+}
+"""
+
+
+def test_a3_ts_record_field_is_emitted_verbatim():
+    """`type Rec = { ctx, host, Context, rawConfig }` keeps the author's
+    spelling as the emitted key: the interface field, the object-literal key
+    and the read all spell it raw. The `ctx` -> `context_tokens` rename a
+    downstream consumer measured is what this cell exists to prevent."""
+    emitted = _emit("typescript", _A3_FIELDS)
+    for name in ("ctx", "host", "Context", "rawConfig"):
+        assert f"  {name}: string" in emitted, f"field {name} must stay verbatim"
+        assert f"{name}_: string" not in emitted, f"field {name} must NOT be renamed"
+    assert '{ctx: "a", host: "b", Context: "c", rawConfig: "d"}' in emitted
+    for read in ("r.ctx", "r.host", "r.Context", "r.rawConfig"):
+        assert read in emitted, f"the read {read} must name the same raw key"
+        assert f"{read}_" not in emitted
+
+
+def test_a3_java_record_field_is_emitted_verbatim():
+    """Java's record component is a member of the record's own class, a
+    namespace disjoint from the `ctx`/`root`/`frame` tokens the scaffolding
+    occupies, so it is emitted verbatim too."""
+    emitted = _emit("java", _A3_FIELDS)
+    for name in ("ctx", "host", "Context", "rawConfig"):
+        assert f"public final String {name};" in emitted, (
+            f"record component {name} must stay verbatim")
+        assert f"public final String {name}_;" not in emitted
+    for read in ("r.ctx", "r.host", "r.Context", "r.rawConfig"):
+        assert read in emitted, f"the read {read} must name the same component"
+
+
+_A3_KEYWORD_FIELDS = """
+pub type Rec = { class: Str, new: Str }
+pub fn mk() -> Rec { return { class: "a", new: "b" } }
+test "t" { let r = mk() assert r.class == "a" assert r.new == "b" }
+"""
+
+
+def test_a3_field_position_keeps_the_keyword_ladder():
+    """The field position is verbatim against the SCAFFOLDING set, not against
+    the language: a field named a JS/Java keyword is still escaped, because
+    there the escape is what makes the module legal at all. ts quotes the key
+    (`"class"`), java has no wire key to keep and renames (`class_`)."""
+    ts = _emit("typescript", _A3_KEYWORD_FIELDS)
+    assert '"class": string' in ts and '"new": string' in ts
+    assert '{"class": "a", "new": "b"}' in ts
+    assert 'r["class"]' in ts and 'r["new"]' in ts
+
+    java = _emit("java", _A3_KEYWORD_FIELDS)
+    assert "public final String class_;" in java
+    assert "public final String new_;" in java
+    assert "this.class_" in java and "r.class_" in java
+
+
+# ------------------------------------------- the rename, and the refusals
+#
+# The roles below are read off the emitters' own role tables, so a later reader
+# who relaxes one of the refusals has to change a test that says why it is
+# there. `_ident` is the bare-identifier door; `_prop_key` is the property-key
+# door. They are deliberately different doors — see the module docstrings.
+
+_TS_RENAMABLE_ROLES = (
+    "binding", "loop binding", "match bind", "capture", "inverse capture",
+    "arrow parameter", "parameter", "parameter name", "extern parameter name",
+    "lifecycle binding", "name", "function", "function name",
+)
+_TS_VERBATIM_KEY_ROLES = (
+    "record field", "field", "optional field", "binding field", "method",
+)
+_TS_REFUSED_ROLES = (
+    "config field", "requirement", "provision key", "type name", "service",
+    "component", "extern name", "secret name", "ref symbol", "case name",
+)
+_JAVA_RENAMABLE_ROLES = (
+    "binding", "loop binding", "match bind", "name", "parameter",
+    "parameter name", "extern parameter name", "lifecycle binding",
+)
+_JAVA_VERBATIM_KEY_ROLES = ("record field", "field")
+_JAVA_REFUSED_ROLES = (
+    "method", "service", "component", "type name", "case name", "package",
+    "event name", "callable", "adt case", "extern name", "secret name",
+    "requirement", "provision", "arrow capture", "inverse capture",
+    "config field",
+)
+
+
+def _emitter_module(backend: str):
+    spec = importlib.util.spec_from_file_location(
+        f"emit_{backend}_clusterc", ROOT / "backends" / backend / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("name", ["ctx", "config", "rawConfig", "host", "Context"])
+@pytest.mark.parametrize("role", _TS_RENAMABLE_ROLES)
+def test_a3_ts_internal_roles_rename_the_scaffolding_name(role: str, name: str):
+    """A user-chosen scaffolding name at an INTERNAL position is renamed, not
+    refused, and the escape is exactly one `_` (the ladder's rung), so the
+    declaration and the use agree without a table."""
+    module = _emitter_module("typescript")
+    assert module._ident(name, role) == name + "_"
+    assert module._ident(name + "_", role) == name + "__", "the ladder is injective"
+
+
+@pytest.mark.parametrize("name", ["ctx", "config", "frame", "root", "class"])
+@pytest.mark.parametrize("role", _JAVA_RENAMABLE_ROLES)
+def test_a3_java_internal_roles_rename_the_scaffolding_name(role: str, name: str):
+    module = _emitter_module("java")
+    assert module._ident(name, role) == name + "_"
+
+
+@pytest.mark.parametrize("name", ["ctx", "config", "rawConfig", "host", "Context"])
+@pytest.mark.parametrize("role", _TS_VERBATIM_KEY_ROLES)
+def test_a3_ts_property_keys_stay_verbatim(role: str, name: str):
+    module = _emitter_module("typescript")
+    assert module._prop_key(name, role) == name
+
+
+@pytest.mark.parametrize("name", ["ctx", "config", "frame", "root", "host"])
+@pytest.mark.parametrize("role", _JAVA_VERBATIM_KEY_ROLES)
+def test_a3_java_member_names_stay_verbatim(role: str, name: str):
+    module = _emitter_module("java")
+    assert module._ident(name, role) == name
+
+
+@pytest.mark.parametrize("role", _TS_REFUSED_ROLES)
+def test_a3_ts_external_roles_still_refuse(role: str):
+    """Every role whose spelling leaves the module keeps its loud refusal. The
+    message names the identifier, so the refusal is actionable rather than a
+    bare traceback."""
+    module = _emitter_module("typescript")
+    with pytest.raises(Exception) as exc:
+        module._ident("ctx", role)
+    assert "ctx" in str(exc.value)
+
+
+@pytest.mark.parametrize("role", _JAVA_REFUSED_ROLES)
+def test_a3_java_external_roles_still_refuse(role: str):
+    module = _emitter_module("java")
+    with pytest.raises(Exception) as exc:
+        module._ident("ctx", role)
+    assert "ctx" in str(exc.value)
+
+
+_A3_CONFIG_FIELD = """
+service Echo { fn echo(x: Str) -> Str }
+component C provides echo: Echo {
+  config { __F__: Str }
+  provide echo { fn echo(x) { return config.__F__ } }
+}
+lifecycle test "t" { load C with { __F__: "h" } let r = call echo.echo("z") assert r == "h" }
+"""
+
+
+@pytest.mark.parametrize("backend,field", [
+    # Each tier is probed with a name ITS OWN scaffolding set claims: ts
+    # reserves `host` (a prelude import), java does not, and java reserves
+    # `ctx`/`fx`/`root`/`frame`/`undos`, which ts's config path does not reach
+    # the same way. A `config field` named an ordinary noun is not refused on
+    # either tier — only the scaffolding spelling is.
+    ("typescript", "host"),
+    ("java", "ctx"),
+])
+def test_a3_config_field_still_refuses(backend: str, field: str):
+    """`config field` is the one property key that stays refused, because its
+    key is written by TWO helpers — `_prop_key`/`_raw_field` for the declared
+    `<C>Config` interface and `_ident` for the `load … with {…}` literal — so
+    relaxing only one of them would emit an interface key the literal never
+    supplies. This is the deliberate remainder of A3's second half; see the PR
+    body. A `config field` named an ordinary noun is unaffected on both
+    tiers."""
+    with pytest.raises(Exception) as exc:
+        _emit(backend, _A3_CONFIG_FIELD.replace("__F__", field))
+    assert field in str(exc.value), backend
+
+
+@pytest.mark.parametrize("backend", ["typescript", "java"])
+def test_a3_config_field_named_an_ordinary_noun_is_unaffected(backend: str):
+    """The refusal above is about the SCAFFOLDING spelling only: an ordinary
+    noun is the common case and must keep working, which is why the fix is a
+    rename rather than a blanket reservation."""
+    emitted = _emit(backend, _A3_CONFIG_FIELD.replace("__F__", "tokens"))
+    assert "tokens" in emitted
+
+
+def test_a3_java_service_method_parameter_gets_its_declared_type():
+    """The provider's parameter spelling is the frontend's (`host_`, item 406),
+    the declared type is the contract's (`host: Str`). Java matched the two by
+    NAME and fell back to `Object`, which `_java_v3_type` then refused as a
+    reserved type name — so an ordinary `host` parameter was unportable to java
+    for a reason that had nothing to do with the rename. The match now falls
+    back to the position, so the interface gets the declared type."""
+    emitted = _emit("java", _A3_POSITIONS["service-method param"])
+    assert "String echo(String host);" in emitted, "the interface needs the type"
+    assert "Object echo(" not in emitted
+    assert "public String echo(String host_)" in emitted
+
+
+# ------------------------------------------------------------ additivity
+#
+# A rename that also moved programs which name NO scaffolding name would be a
+# worse bug than the refusal it replaces. The digest is the emitted module for
+# a program using an ordinary `x`/`y`/`name`/`count` spelling, computed from
+# BOTH `origin/main`'s emitters and the fixed ones: identical, and pinned here
+# so any future change to a non-colliding program is a failure rather than a
+# note in a comment.
+_A3_PLAIN = """
+pub type Rec = { name: Str, count: Int }
+service Echo { fn echo(x: Str) -> Str }
+component C provides echo: Echo {
+  provide echo { fn echo(x) { let y = x return y } }
+}
+fn pick(r: Rec) -> Str { return r.name }
+test "t" { assert pick({ name: "n", count: 2 }) == "n" }
+lifecycle test "u" { load C let z = call echo.echo("z") assert z == "z" }
+"""
+_A3_PLAIN_DIGEST = {
+    "typescript": "8c5b126f3bb3c98ef19f3e7c4e32780068eb188b0cbfebc994db1d3edcd2d9e7",
+    "java": "954352a27d29f3ce72adbad77ae1ff2921899db6c2255d91a4f454c165149310",
+}
+
+
+@pytest.mark.parametrize("backend", sorted(_A3_PLAIN_DIGEST))
+def test_a3_a_program_naming_no_scaffolding_emits_byte_identically(backend: str):
+    import hashlib
+    emitted = _emit(backend, _A3_PLAIN)
+    assert hashlib.sha256(emitted.encode()).hexdigest() == _A3_PLAIN_DIGEST[backend]
+
+
+# ------------------------------------------ the field position, end to end
+#
+# The textual cells above prove the SPELLING; these prove the module that
+# carries it still builds and runs on every tier, so the wire key is not kept
+# at the price of a program that no longer executes.
+@pytest.mark.parametrize("tier", _A3_TIERS)
+def test_a3_field_position_runs_on_every_tier(tier: str):
+    status, message = _run(tier, _A3_FIELDS)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"record field on {tier}: {message}"
+
+
+# --------------------------- the service-method parameter, reserved per tier
+#
+# `host`/`Context`/`rawConfig` are ts scaffolding only, so the cell above is
+# green on java without ever reaching java's own set. `ctx`/`root`/`frame` are
+# the java half, and they exercise a DIFFERENT trap: the frontend renames the
+# provide-side binding (`ctx` -> `ctx_`, item 406) while the service contract
+# keeps `ctx`, so the provider declaration and the body's reference to it
+# arrive at `_ident` with different spellings. The provider/plugin signature
+# sites used to emit the parameter name VERBATIM (`String ctx_`) while the
+# body's reference went through the ladder (`return ctx__`) — a javac "cannot
+# find symbol" that no refusal-side test can see. Both sites now ride the same
+# ladder as the interface, so the declaration and the body agree by
+# construction.
+_A3_JAVA_SERVICE_PARAMS = ("ctx", "root", "frame")
+
+
+def _svc_param_source(name: str) -> str:
+    return f"""
+service Echo {{ fn echo({name}: Str) -> Str }}
+component C provides echo: Echo {{
+  provide echo {{ fn echo({name}) {{ return {name} }} }}
+}}
+lifecycle test "t" {{ load C let r = call echo.echo("x") assert r == "x" }}
+"""
+
+
+@pytest.mark.parametrize("tier", ("ts", "java"))
+@pytest.mark.parametrize("name", _A3_JAVA_SERVICE_PARAMS)
+def test_a3_service_parameter_reserved_on_java_runs(name: str, tier: str):
+    status, message = _run(tier, _svc_param_source(name))
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"service param {name!r} on {tier}: {message}"
+
+
+@pytest.mark.parametrize("name", _A3_JAVA_SERVICE_PARAMS)
+def test_a3_java_provider_parameter_name_matches_the_body(name: str):
+    """The declaration and the body must spell the parameter identically: the
+    frontend's `ctx_` shifts one rung (`ctx__`) and the body shifts with it,
+    while a name the frontend left alone (`root`) shifts once at both sites."""
+    emitted = _emit("java", _svc_param_source(name))
+    assert f"String echo(String {name}_);" in emitted, "the interface keeps the contract spelling"
+    declared = re.search(
+        r"public String echo\(String (\w+)\) \{ return (\w+); \}", emitted)
+    assert declared, emitted
+    assert declared.group(1) == declared.group(2), (
+        f"declared {declared.group(1)!r} but the body reads {declared.group(2)!r}")
