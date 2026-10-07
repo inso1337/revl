@@ -451,3 +451,27 @@ import RevL
 #print axioms RevL.GRetain.corpus_walk_does_not_reach_another_sink
 #print axioms RevL.GRetain.corpus_row_decided
 #print axioms RevL.GRetain.retain_not_vacuous
+
+-- Issue #2097: the G4 inverse rule. A bracket's `undo` must be the inverse its
+-- acquisition owns: a host family's release on the handle it bound
+-- (`lower._check_site_release`, issue #1859), the inverse an `extern acquire`
+-- DECLARES on the handle it bound, or a host write's inverse on the same
+-- receiver and key (`lower._method_effect_inverse`, issue #1945). The oracle's
+-- `INV` row decides the rule at the arm, acquisition, demanded verb and
+-- demanded spelling the CHECKER reports — the rule ON THE CORPUS, the site the
+-- checker DISCOVERED, NOT coverage of the checker's walk (roadmap item 418
+-- step 9 is deliberately unclaimed); see RevL/Theorems/G4Inverse.lean.
+#print axioms RevL.G4Inverse.rowB_iff
+#print axioms RevL.G4Inverse.requiredInverse_none_off_the_tables
+#print axioms RevL.G4Inverse.extern_arm_is_the_declared_inverse
+#print axioms RevL.G4Inverse.host_release_table
+#print axioms RevL.G4Inverse.write_inverse_table
+#print axioms RevL.G4Inverse.kindOfString_is_the_kind
+#print axioms RevL.G4Inverse.unmodelled_acquisition_has_no_inverse
+#print axioms RevL.G4Inverse.extern_arm_never_falls_off_a_table
+#print axioms RevL.G4Inverse.corpus_rows_refused
+#print axioms RevL.G4Inverse.corpus_rows_flip_at_the_demanded_spelling
+#print axioms RevL.G4Inverse.corpus_host_row_flips_when_the_demand_leaves_the_table
+#print axioms RevL.G4Inverse.corpus_write_row_flips_when_the_receiver_moves
+#print axioms RevL.G4Inverse.corpus_row_verbs_are_the_tables
+#print axioms RevL.G4Inverse.g4_inverse_not_vacuous

@@ -38,3 +38,4 @@ import RevL.Theorems.ModelPlacement
 import RevL.Theorems.ModelCouncil
 import RevL.Theorems.G9Flow
 import RevL.Theorems.GRetain
+import RevL.Theorems.G4Inverse
