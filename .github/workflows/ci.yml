@@ -80,18 +80,27 @@ concurrency:
   #
   # The group is only as free as its slowest job, so every job below also
   # carries an explicit `timeout-minutes`. Without one the only bound is
-  # GitHub's 360-minute default, and a job whose RUNNER dies is often not
-  # reaped at all: the run stays `in_progress` with nothing running, holding
-  # this group for the full default. Observed 2026-10-07: a main run's
-  # `conformance` job stopped logging at 50% of the cross-tier selector (an
-  # orphaned `javac` was terminated during cleanup), the run reported
-  # `in_progress` for over an hour, and the next main run sat `pending` behind
-  # it -- so main had no verdict at all until the stuck run was cancelled by
-  # hand. The values are roughly 3x the worst duration measured on a green run
-  # (frontend matrix 64m, frontend-cordis 56m, conformance 50m, root-suite
-  # shards 19m, backend-rust 12m, everything else under 5m): 180 minutes for
-  # the four heavy jobs, 60 for the rest. They bound a runaway, not normal
-  # runtime, so they should not need raising for ordinary growth.
+  # GitHub's 360-minute default, which a genuinely wedged job would hold this
+  # group for: `cancel-in-progress` is deliberately false for pushes, so
+  # nothing else would clear it and the next main run would sit `pending`
+  # behind it with no verdict of its own. These values bound a runaway, not
+  # normal runtime. Worst observed per job across 12 green main runs:
+  # frontend-cordis 74m, the `frontend` matrix legs 62-65m, conformance 51m,
+  # backend-rust 12m, everything else at or under 5m, and the
+  # `root-suite-affected` shards 17m on the widest diff sampled (they run the
+  # real full suite, so they keep the same 180). So 180 clears the heaviest job
+  # by 2.4x, and 60 clears every remaining job by 4.9x or more -- backend-rust
+  # at 12m is the closest.
+  #
+  # Do not mistake a long-running job for a wedged one. Compare its elapsed
+  # time against the numbers above, in UTC -- `gh api .../jobs` reports UTC
+  # while a local shell's clock may be offset. Two things that look like
+  # evidence of a dead runner and are not: the job-logs endpoint returns
+  # `BlobNotFound` for every job that has not completed, healthy or not; and a
+  # `Post Run ...` step of a job that is still in its test step has not run
+  # yet, so it cannot be "stuck" there. Check that the step is actually
+  # stalled -- progress markers like `[ NN%]` still advancing mean the job is
+  # on pace, however long the step has been going.
 
 # Least privilege for GITHUB_TOKEN, workflow-wide. Every job below only checks
 # out the repository and runs tests: none opens an issue, writes a check, pushes
