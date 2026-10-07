@@ -46,13 +46,14 @@ be asked the question. On this tree it passes.
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from _load_by_path import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOLS = REPO_ROOT / "tools"
@@ -65,11 +66,7 @@ TOOL = GATE_DIR / "check_roadmap_markers.py"
 
 if str(GATE_DIR) not in sys.path:
     sys.path.insert(0, str(GATE_DIR))
-_spec = importlib.util.spec_from_file_location("gate_under_test", TOOL)
-assert _spec is not None and _spec.loader is not None, f"cannot load {TOOL}"
-gate = importlib.util.module_from_spec(_spec)
-sys.modules["gate_under_test"] = gate
-_spec.loader.exec_module(gate)
+gate = load_by_path("gate_under_test", TOOL)
 
 ROADMAP = REPO_ROOT / "docs" / "v2.0-roadmap.md"
 
