@@ -34,14 +34,14 @@ runs no census and needs no cargo.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = "tools/publish_census_artifact.py"
@@ -53,14 +53,7 @@ URL = "https://inso1337.github.io/revl/census-artifact/"
 
 def _publisher():
     """The tool, imported once. It is a script, so there is no package to use."""
-    name = "test_publish_census_artifact_under_test"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, ROOT / TOOL)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_by_path("test_publish_census_artifact_under_test", ROOT / TOOL)
 
 
 @pytest.fixture(scope="module")
