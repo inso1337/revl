@@ -2893,6 +2893,11 @@ def _held_working_set() -> dict | None:
     nothing loaded, the draft an edit loop is filling. None when the session
     holds nothing checkable.
 
+    Testing `loaded` first is the same set as testing the draft first: a draft
+    is opened only on a load where nothing is running (`draft.py` guards every
+    `pending` site with `not SESSION.loaded`), so the two states are exclusive
+    and a draft can never shadow a running composition's own source.
+
     This is the same set `revl_swap {}` re-admits and `revl_source {}` reads,
     so the check and the verbs that mutate the set agree on what it is."""
     if SESSION.loaded:
@@ -2984,7 +2989,7 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
     if blocked:
         # flagged, not handed out: holes this author can never fill
         result["unfillable"] = blocked
-    return _with_candidate_knowledge(result, arguments, None)
+    return _with_candidate_knowledge(result, arguments, None, held)
 
 
 def _with_candidate_knowledge(payload: dict, arguments: dict, refused,
