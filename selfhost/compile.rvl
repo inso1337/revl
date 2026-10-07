@@ -86,7 +86,7 @@
 // Ground truth is the reference; on the covered surface any divergence is a defect
 // in a stage.
 
-use "./lower.rvl" { admit_src, admit_ambient, lower_to_ir }
+use "./lower.rvl" { admit_src, admit_ambient, lower_to_ir, lower_to_ir_refs }
 use "./emit_py.rvl" { emit_py_src }
 use "./emit_rust.rvl" { emit_rust_src }
 use "./emit_ts.rvl" { emit_ts_src }
@@ -156,14 +156,14 @@ fn emit_ir(ir: Any, tier: Str) -> Str {
 // native chain carried only the document's own. That is a HARNESS/API limitation,
 // not a `lower.rvl` one: the IR producer is handed one string and cannot know a
 // module set exists. So the driver grows a PATH — `compile_to_at(source, tier,
-// path)` resolves the document's `use` targets through `read_module` (the one
+// path)` resolves the document's `use` targets through `read_module` (the first
 // host crossing: a READ, no accounted mutation — the boundary `stdlib/auth.rvl`'s
 // `host_validate` draws) and APPENDS each imported name's service row, in
 // declaration order, after the document's own. `compile_to` keeps its exact
 // two-argument behavior: with no document path there is nothing to resolve a
 // relative `use` against, so it is the identity on the IR.
 
-// The ONE host crossing of this driver: read the module a `use` names. `base` is
+// The FIRST host crossing of this driver: read the module a `use` names. `base` is
 // the importing document's path ("" when the caller had none), `target` the
 // literal `use` target. Resolution follows the reference loader: the target as
 // written, relative to the importing document's directory, then the same relative
@@ -187,6 +187,78 @@ extern pure fn read_module(base: Str, target: Str) -> Str = @py {
             break
         cur = parent
     return ""
+}
+
+// Issue #2089: the SECOND host crossing, and the reason the first one cannot
+// double for it. An extern's `= @backend ref SYM from "PATH"` arm lowers to the
+// IR's `refs` — `{symbol, path, sha256[, root]}` — and NONE of those three
+// values is in the text: `path` is the target's path relative to the root it
+// jails to, `sha256` is a digest of the target's BYTES, and `root` says whether
+// that root is the install origin or the composition's own tree. The reference
+// resolves all three in `src/revl/hostref.py::resolve_refs`, off the declaring
+// document's realpath and the install origin. So the driver probes the host once
+// per ref and hands the producer the result on a wire
+// (`lower.rvl::lower_to_ir_refs`), rather than letting a producer that reads only
+// tokens guess at values it cannot see.
+//
+// The answer is `SHA256 | ROOT-KIND | ROOT-RELATIVE-PATH`, or ""
+// when the ref cannot be resolved (no such file, or a target outside the jail —
+// the reference REFUSES that program outright, `_resolve_ref_disk`'s
+// `_outside_root_hint`; the driver's covered surface has no refusal channel for
+// it, so the arm is dropped and the divergence is stated here instead of being
+// emitted as a broken import path).
+//
+// The JAIL mirrors `compiler.py::_origin_install_root`'s two arms:
+//
+//   * the document's realpath is contained in the toolchain's `stdlib/` — the
+//     install-origin arm — so the jail is that stdlib's PARENT (the checkout
+//     root, or `site-packages/revl` in a wheel) and the kind is `"stdlib"`. The
+//     stdlib is recognised by a member module (`stdlib/fs.rvl`) and not by the
+//     directory's NAME: the repo has two other directories called `stdlib`
+//     (`backends/go/v3/stdlib`, `docs/census-artifact/cases/stdlib`) and neither
+//     is one.
+//   * otherwise the USER-origin arm: the jail is the document's own directory
+//     and there is no kind — item 396 option B, where `root_dirs` is the root
+//     compile files' directories, and the driver's one root file is this
+//     document.
+//
+// What is NOT mirrored is the item-319 search-path record (arm 1 of
+// `_origin_install_root`): the driver's `use` walk resolves a module by walking
+// the document's ancestors, so it has no entry to record. A `REVL_IMPORT_PATH`
+// stand-in therefore classifies by containment, like a stdlib module reached
+// relatively — the arm `_origin_install_root` documents as equivalent.
+extern pure fn ref_probe(base: Str, refpath: Str) -> Str = @py {
+    import hashlib
+    import os
+    if base == "" or refpath == "":
+        return ""
+    docdir = os.path.realpath(os.path.dirname(os.path.abspath(base)))
+    real = os.path.realpath(os.path.join(docdir, refpath))
+    if not os.path.isfile(real):
+        return ""
+    jail = ""
+    kind = ""
+    probe = docdir
+    for _ in range(0, 16):
+        if os.path.basename(probe) == "stdlib" and os.path.isfile(
+                os.path.join(probe, "fs.rvl")):
+            jail = os.path.dirname(probe)
+            kind = "stdlib"
+            break
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    if jail == "":
+        jail = docdir
+    rel = os.path.relpath(real, jail)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return ""
+    if os.path.isabs(rel):
+        return ""
+    with open(real, "rb") as fh:
+        digest = hashlib.sha256(fh.read()).hexdigest()
+    return digest + "|" + kind + "|" + rel.replace(os.sep, "/")
 }
 
 // Index of `sub` in `s` at or after `start`, or -1. (The base `Str.indexOf`
@@ -386,6 +458,84 @@ fn ul_link_uses(ir: Str, source: Str, path: Str) -> Str {
   return out
 }
 
+// The identifier starting at `at`, up to the first delimiter. The scans below
+// read a name out of a source LINE, where a name is followed by a space, `(`,
+// `,`, `:`, `{`, `}`, `"`, `[` or the end of the line.
+fn rf_word(s: Str, at: Int) -> Str {
+  var j = at
+  var out = ""
+  let n = s.length()
+  while (j < n) {
+    let c = s.slice(j, j + 1)
+    if (ul_is_ws(c)) { return out }
+    if ((c == "(") || (c == ")") || (c == ",") || (c == ":") || (c == "{")
+        || (c == "}") || (c == "\"") || (c == "[") || (c == "]")) {
+      return out
+    }
+    out = out.concat(c)
+    j += 1
+  }
+  return out
+}
+
+// The host-ref wire for `source` (issue #2089): one row per
+// `= @backend ref SYM from "PATH"` arm,
+// `NAME | BACKEND | SYMBOL | SHA256 | ROOT | PATH`, in source order — the shape
+// `lower.rvl::rw_refs_json` reads. The probe supplies the last three fields
+// (`ref_probe`); the scan supplies the first three.
+//
+// NAME is the ENCLOSING extern's declared name, which is not on the arm's line:
+// a ref arm closes its extern's declaration (`… } = @ts ref fsWrite from "…"`),
+// so the scan carries the last `extern … fn NAME` it saw and attributes every
+// arm after it to that name. Externs are walked in source order, so a name is
+// stamped onto the entry the producer emits for it.
+//
+// No rows when `path` is "" — no document on disk means nothing to resolve a ref
+// against, so the driver hands the producer an empty wire and the IR is the
+// pre-#2089 one byte for byte.
+fn rf_ref_rows(source: Str, path: Str) -> List[Str] {
+  var out: List[Str] = []
+  if (path == "") { return out }
+  var cur = ""
+  var i = 0
+  let n = source.length()
+  while (i < n) {
+    let eol = ul_line_end(source, i)
+    let line = source.slice(i, eol)
+    // A comment line declares nothing; the same discipline `ul_use_pairs`
+    // applies to a `use`.
+    if (ul_trim(line).slice(0, 2) != "//") {
+      let ex = ul_find(line, "extern", 0)
+      if (ex >= 0) {
+        let fnk = ul_find(line, "fn", ex)
+        if (fnk >= 0) { cur = rf_word(line, ul_skip_ws(line, fnk + 2)) }
+      }
+      let arm = ul_find(line, "= @", 0)
+      if ((arm >= 0) && (cur != "")) {
+        // `= @backend { … }` (a body) has no ` ref ` and is skipped here; the
+        // producer reads the body off the token stream.
+        let rk = ul_find(line, " ref ", arm)
+        let fk = ul_find(line, " from \"", arm)
+        if ((rk >= 0) && (fk >= 0)) {
+          let backend = rf_word(line, arm + 3)
+          let sym = rf_word(line, rk + 5)
+          let q0 = fk + 6
+          let q1 = ul_find(line, "\"", q0 + 1)
+          if ((backend != "") && (sym != "") && (q1 >= 0)) {
+            let probe = ref_probe(path, line.slice(q0 + 1, q1))
+            if (probe != "") {
+              out = out.push(cur.concat("|").concat(backend).concat("|").concat(sym)
+                .concat("|").concat(probe))
+            }
+          }
+        }
+      }
+    }
+    i = eol + 1
+  }
+  return out
+}
+
 // The path-taking driver — the honest multi-file native compile. Identical to
 // `compile_to` except that `path` names the document on disk, so its `use`
 // declarations resolve and the imported service rows are spliced into the IR
@@ -397,7 +547,9 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   let verdict = admit_src(source)
   if (verdict != "") { return "REFUSED|".concat(verdict) }
   // FULLY NATIVE from here: native IR producer → use linking → parse → emitter.
-  let ir = ul_link_uses(lower_to_ir(source), source, path)
+  // Issue #2089: the producer also takes the document's host-ref WIRE, so an
+  // extern's `refs` survive the native chain and the emitters can see them.
+  let ir = ul_link_uses(lower_to_ir_refs(source, rf_ref_rows(source, path)), source, path)
   return emit_ir(json_parse(ir), tier)
 }
 

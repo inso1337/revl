@@ -26260,12 +26260,90 @@ fn ir_cap_list(ts: List[Token], i: Int) -> CapR {
   return { js: out, i: k + 1 }
 }
 
+// Issue #2089: the host `refs` an extern declares. The producer reads the token
+// stream and nothing else, and a ref arm's PAYLOAD — the resolved root-relative
+// `path`, the target file's `sha256`, and the `root` kind — is a property of the
+// FILESYSTEM, not of the text: the reference resolves it in
+// `src/revl/hostref.py::resolve_refs` off the document's realpath and the
+// install origin. So the driver probes the host once per ref
+// (`selfhost/compile.rvl`'s `ref_probe`) and hands the producer a WIRE, one
+// `|`-separated row per ref:
+//
+//   NAME | BACKEND | SYMBOL | SHA256 | ROOT | PATH
+//
+// `ROOT` is empty for a ref outside the install origin, and `PATH` is the ROW'S
+// LAST field — the only one that can hold arbitrary text — so a path containing
+// the separator stays intact. An empty wire leaves the covered surface exactly
+// what it was before this: no document path means there is nothing to resolve a
+// ref against, so `lower_to_ir`/`lower_to_ir_at` stamp no `refs` key at all.
+//
+// Field `n` of one wire row, `""` when the row has fewer than `n + 1`. Every
+// field it reads is separator-free by construction: a name, a backend, a
+// symbol, a hex digest or a root kind. The row's LAST field is the PATH and
+// goes through `rw_tail` instead, which is what keeps a separator inside a path
+// intact.
+fn rw_field(row: Str, n: Int) -> Str {
+  var f = 0
+  var cur = ""
+  var i = 0
+  while (i < row.length()) {
+    let c = row.slice(i, i + 1)
+    if (c == "|") {
+      if (f == n) { return cur }
+      f += 1
+      cur = ""
+    } else if (f == n) { cur = cur.concat(c) }
+    i += 1
+  }
+  return f == n ? cur : ""
+}
+
+// The REMAINDER of a wire row after its `n`-th separator — the last field,
+// which is not truncated at a later separator, so a `|` inside it survives.
+// `""` when the row has fewer than `n` separators.
+fn rw_tail(row: Str, n: Int) -> Str {
+  var f = 0
+  var i = 0
+  while (i < row.length()) {
+    if (row.slice(i, i + 1) == "|") {
+      f += 1
+      if (f == n) { return row.slice(i + 1, row.length()) }
+    }
+    i += 1
+  }
+  return ""
+}
+
+// The `refs` object of the extern named `nm` — `{"<backend>": {symbol, path,
+// sha256[, root]}}` in the reference's key order — or `""` when the wire names
+// no ref for it (every extern with no ref arm, and every extern on a wire-less
+// run).
+fn rw_refs_json(rows: List[Str], nm: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < rows.length()) {
+    let row = rows[i]
+    if (rw_field(row, 0) == nm) {
+      var one = "{\"symbol\": ".concat(jstr(rw_field(row, 2)))
+      one = one.concat(", \"path\": ").concat(jstr(rw_tail(row, 5)))
+      one = one.concat(", \"sha256\": ").concat(jstr(rw_field(row, 3)))
+      let rk = rw_field(row, 4)
+      if (rk != "") { one = one.concat(", \"root\": ").concat(jstr(rk)) }
+      let seg = jstr(rw_field(row, 1)).concat(": ").concat(one).concat("}")
+      if (out == "") { out = seg } else { out = out.concat(", ").concat(seg) }
+    }
+    i += 1
+  }
+  return out == "" ? "" : "{".concat(out).concat("}")
+}
+
 // One extern declaration -> its IR entry. `ok:false` when the declaration
 // reaches a form outside the covered surface. The `witnessed` class (item 243),
 // a capability scope (`witnessed[fs]`/`emission[net]`, item 343) and the
 // `undo`/`compensate` teardown slots (items 243/309/440) are all in the covered
 // surface and lower to the reference's `_lower_externs` shape.
-fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str]) -> IrRes {
+fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str],
+             rows: List[Str]) -> IrRes {
   // `witnessed` is a contextual keyword (an ident), so `.text` is the class for
   // every classification. `pure`/`acquire`/`emission` are reserved keywords.
   let cls = tkc(ts, i + 1).text
@@ -26376,22 +26454,47 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str])
   }
   var bodies = ""
   var bcount = 0
-  while (atk(ts, k, "=") && atk(ts, k + 1, "hostbody")) {
-    let raw = tkc(ts, k + 1).text
-    let bi = raw.indexOf("{")
-    if (bi == 0 - 1) { return mk_irres(false, "") }
-    let backend = raw.slice(0, bi)
-    let body = raw.slice(bi + 1, raw.length())
-    let seg = jstr(backend).concat(": ").concat(jstr(body))
-    bodies = bcount == 0 ? seg : bodies.concat(", ").concat(seg)
-    bcount += 1
-    k = k + 2
+  // The body arms: `= @backend { … }` (ONE `hostbody` token, the lexer's `@`
+  // arm fusing the backend word into it when a `{` follows) and the HOST-REF arm
+  // `= @backend ref SYM from "PATH"` (plain tokens — the lexer emits a bare `@`,
+  // so `ref`/`from` re-lex as idents). Both are body arms and they INTERLEAVE:
+  // every `stdlib/fs.rvl` extern pairs a `@py` block with a `@ts ref` arm, which
+  // is why the old `atk(ts, k + 1, "hostbody")` guard ended the loop at the ref
+  // arm and the entry lost its `refs` (issue #2089). The ref arm contributes no
+  // body, so the loop's exit stays `bcount == 0` — the reference's own gate, and
+  // the reason a ref-only extern is still out of the covered surface.
+  while (atk(ts, k, "=")
+         && (atk(ts, k + 1, "hostbody") || atk(ts, k + 1, "@"))) {
+    if (atk(ts, k + 1, "hostbody")) {
+      let raw = tkc(ts, k + 1).text
+      let bi = raw.indexOf("{")
+      if (bi == 0 - 1) { return mk_irres(false, "") }
+      let backend = raw.slice(0, bi)
+      let body = raw.slice(bi + 1, raw.length())
+      let seg = jstr(backend).concat(": ").concat(jstr(body))
+      bodies = bcount == 0 ? seg : bodies.concat(", ").concat(seg)
+      bcount += 1
+      k = k + 2
+    } else {
+      // `= @ <backend> ref <SYM> from "<path>"`: seven plain tokens, no body.
+      // Anything else in a `= @backend …` slot reaches a form outside the
+      // covered surface, exactly as it did when this arm was unread.
+      if (!(ati(ts, k + 3, "ref") && atk(ts, k + 4, "ident")
+            && ati(ts, k + 5, "from") && atk(ts, k + 6, "string"))) {
+        return mk_irres(false, "")
+      }
+      k = k + 7
+    }
   }
   if (bcount == 0) { return mk_irres(false, "") }
   var js = "{\"name\": ".concat(jstr(nm)).concat(", \"class\": ").concat(jstr(cls))
     .concat(", \"params\": [").concat(ir_params_json(alias_subst_params(ps.ps, al)))
     .concat("], \"returns\": ").concat(retJson)
     .concat(", \"bodies\": {").concat(bodies).concat("}")
+  // issue #2089: the extern's host `refs`, keyed by backend, spliced in the
+  // reference's own position (right after `bodies`) and key order.
+  let refsJson = rw_refs_json(rows, nm)
+  if (refsJson != "") { js = js.concat(", \"refs\": ").concat(refsJson) }
   // The RETURN-side half of the marking (the counterpart of a parameter's
   // `secret`). `returns` above is stripped, so these two flags are the only
   // surviving record that this crossing's result is confidential:
@@ -26456,17 +26559,18 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str])
 // (`secrets_bind`), so each extern that serves a bound capability carries the
 // secret names it receives as a trailing `"secrets"` key — the reference's
 // `entry["secrets"]`, appended the same way `ir_extern` appends `"bodies"`.
+// `rows` is the host-ref wire (issue #2089), threaded to `ir_extern` verbatim.
 fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
                  decls: List[TaintDecl], al: Map[Str, Str],
-                 bnd: Map[Str, List[Str]]) -> ExAcc {
+                 bnd: Map[Str, List[Str]], rows: List[Str]) -> ExAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return { js: acc, ok: ok } }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al, bnd) }
-  if (at_event(ts, i)) { return externs_walk(ts, event_decl_end(ts, i), acc, ok, decls, al, bnd) }
-  if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd) }
-  if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al, bnd) }
+  if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al, bnd, rows) }
+  if (at_event(ts, i)) { return externs_walk(ts, event_decl_end(ts, i), acc, ok, decls, al, bnd, rows) }
+  if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd, rows) }
+  if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al, bnd, rows) }
   if (t.text == "extern") {
-    let ex = ir_extern(ts, i, decls, al)
+    let ex = ir_extern(ts, i, decls, al, rows)
     let ni = p_extern(ts, i, empty_prog()).i
     let ns = sec_of(bnd, fn_name_at(ts, i))
     let js = ex.ok && ns.length() > 0
@@ -26474,18 +26578,18 @@ fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
           .concat(", \"secrets\": [").concat(sec_names_json(ns)).concat("]}")
       : ex.js
     let acc2 = ex.ok ? (acc == "" ? js : acc.concat(", ").concat(js)) : acc
-    return externs_walk(ts, ni, acc2, ok && ex.ok, decls, al, bnd)
+    return externs_walk(ts, ni, acc2, ok && ex.ok, decls, al, bnd, rows)
   }
-  if (t.text == "type") { return externs_walk(ts, type_decl_end(ts, i + 1), acc, ok, decls, al, bnd) }
+  if (t.text == "type") { return externs_walk(ts, type_decl_end(ts, i + 1), acc, ok, decls, al, bnd, rows) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls, al, bnd) }
-    return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd)
+    if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls, al, bnd, rows) }
+    return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd, rows)
   }
-  if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok, decls, al, bnd) }
-  if (t.text == "service") { return externs_walk(ts, p_service(ts, i, empty_prog()).i, acc, ok, decls, al, bnd) }
-  if (t.text == "component") { return externs_walk(ts, p_component(ts, i, empty_prog()).i, acc, ok, decls, al, bnd) }
-  return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd)
+  if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok, decls, al, bnd, rows) }
+  if (t.text == "service") { return externs_walk(ts, p_service(ts, i, empty_prog()).i, acc, ok, decls, al, bnd, rows) }
+  if (t.text == "component") { return externs_walk(ts, p_component(ts, i, empty_prog()).i, acc, ok, decls, al, bnd, rows) }
+  return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd, rows)
 }
 
 // ============================================================ bound secrets IR
@@ -27016,6 +27120,15 @@ pub fn lower_to_ir(src: Str) -> Str {
   return lower_to_ir_at(src, default_filename())
 }
 
+// The text-only entry with its host-ref WIRE (issue #2089). `rows` is the
+// driver's per-ref host probe, `NAME | BACKEND | SYMBOL | SHA256 | ROOT | PATH`
+// rows (see `rw_refs_json`); the ref PAYLOAD cannot be read off the token
+// stream, so the producer takes it as input rather than guessing it. An empty
+// wire is the wire-less run, byte-identical to `lower_to_ir`.
+pub fn lower_to_ir_refs(src: Str, rows: List[Str]) -> Str {
+  return lower_to_ir_refs_at(src, default_filename(), rows)
+}
+
 // The filename `compile_source(src)` stamps when the caller names none
 // (`src/revl/compiler.py`'s `filename: str = "<string>"`). `lower_to_ir` is the
 // text-only entry on this side exactly as `compile_source` is on that one, so
@@ -27036,6 +27149,16 @@ fn default_filename() -> Str { return "<string>" }
 // TEXT and falls back to `"<source>"` — but "never read" was never the reason
 // to omit it; not having a filename was. Given one, the producer stamps it.
 pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
+  var none: List[Str] = []
+  return lower_to_ir_refs_at(src, fname, none)
+}
+
+// Issue #2089: the producer with the host-ref wire threaded through. Same
+// covered surface as `lower_to_ir_at` plus, per extern, the `refs` key its
+// `= @backend ref SYM from "PATH"` arms declare. The resolution itself (realpath,
+// containing root, `sha256` of the bytes, install-origin `root` kind) is the
+// driver's `ref_probe`; this entry only stamps what it is handed.
+pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   let ts = lex_src(src)
   // The transparent aliases this program declares, resolved ONCE and threaded
   // into every declaration reader below. `_resolve_type_aliases` runs once over
@@ -27059,7 +27182,7 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
   // the walk needs it: a secret bound to a capability stamps the NAME onto every
   // emission extern that serves that capability (`externs[i]["secrets"]`).
   let bnd = secrets_bind(ts)
-  let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts), al, bnd.bound)
+  let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts), al, bnd.bound, rows)
   var out = "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
     .concat(a.svcs).concat("}, \"components\": [").concat(a.comps).concat("]")
   if (typesjs != "") { out = out.concat(", \"types\": {").concat(typesjs).concat("}") }
@@ -30095,6 +30218,31 @@ test "lower_to_ir renames a predeclared parameter in the signature (issue #1633)
     == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"f\",\"params\":[{\"name\": \"len_\", \"type\": \"Int\"}, {\"name\": \"error\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"len_\"},\"right\":{\"kind\":\"var\",\"name\":\"error\"},\"operands\":\"Int\"}}]}]}"
 }
 
+test "lower_to_ir_refs drops the root key for a user-origin ref (issue #2089)" {
+  // `root` is stamped only for an install-origin ref; a user-origin row's ROOT
+  // field is empty and the key is absent, exactly as the reference emits it.
+  assert lower_to_ir_refs('extern pure fn dbl(n: Int) -> Int = @py { return n * 2 } = @ts ref dblTs from "./host.ts"', ["dbl|ts|dblTs|abc123||host.ts"])
+    == """{"ir_version": 3, "services": {}, "components": [], "externs": [{"name": "dbl", "class": "pure", "params": [{"name": "n", "type": "Int"}], "returns": "Int", "bodies": {"py": " return n * 2 "}, "refs": {"ts": {"symbol": "dblTs", "path": "host.ts", "sha256": "abc123"}}}]}"""
+}
+
+test "lower_to_ir_refs stamps an extern's host refs (issue #2089)" {
+  // The ref arm's PAYLOAD (the resolved path, the target's sha256, the root
+  // kind) is a filesystem property, so the driver probes it and hands the
+  // producer a wire row. The key lands in the reference's own position — right
+  // after `bodies` — and its own key order.
+  assert lower_to_ir_refs('extern pure fn dbl(n: Int) -> Int = @py { return n * 2 } = @ts ref dblTs from "./host.ts"', ["dbl|ts|dblTs|abc123|stdlib|backends/typescript/host.ts"])
+    == """{"ir_version": 3, "services": {}, "components": [], "externs": [{"name": "dbl", "class": "pure", "params": [{"name": "n", "type": "Int"}], "returns": "Int", "bodies": {"py": " return n * 2 "}, "refs": {"ts": {"symbol": "dblTs", "path": "backends/typescript/host.ts", "sha256": "abc123", "root": "stdlib"}}}]}"""
+}
+
+test "lower_to_ir_refs stamps no refs when the wire names another extern" {
+  // The wire is keyed by the enclosing extern's NAME; a row for a name this
+  // document does not declare leaves every extern untouched, and so does an
+  // empty wire (the `lower_to_ir`/`lower_to_ir_at` entries).
+  assert lower_to_ir_refs('extern pure fn dbl(n: Int) -> Int = @py { return n * 2 } = @ts ref dblTs from "./host.ts"', ["other|ts|dblTs|abc123|stdlib|h.ts"])
+    == """{"ir_version": 3, "services": {}, "components": [], "externs": [{"name": "dbl", "class": "pure", "params": [{"name": "n", "type": "Int"}], "returns": "Int", "bodies": {"py": " return n * 2 "}}]}"""
+  assert lower_to_ir_refs('extern pure fn dbl(n: Int) -> Int = @py { return n * 2 } = @ts ref dblTs from "./host.ts"', []) == lower_to_ir('extern pure fn dbl(n: Int) -> Int = @py { return n * 2 } = @ts ref dblTs from "./host.ts"')
+}
+
 test "one member wearing a council's name is refused, and so is no proposer" {
   assert admit_src("""model role vast off_device
 model council Release { proposer -> vast, aggregate unanimous }
@@ -30243,6 +30391,23 @@ component C provides s: S {
   provide s { fn go() { let r = caller(() => emit tick())   return 0 } }
 }""")
   assert v == "A1|`S.go` is declared sync, but this implementation reaches async function `caller`, `tick` — a sync method has no in-flight window (A1)"
+}
+
+test "rw_field reads a wire row's fixed head fields" {
+  // A missing field is "".
+  assert rw_field("a|b|c", 0) == "a"
+  assert rw_field("a|b|c", 2) == "c"
+  assert rw_field("a|b|c", 3) == ""
+  assert rw_field("a||c", 1) == ""
+}
+
+test "rw_tail reads a wire row's last field as the remainder" {
+  // The PATH is the last field, so a separator INSIDE it survives the split
+  // instead of truncating the path.
+  assert rw_tail("nm|ts|sym|sha|stdlib|a|b.ts", 5) == "a|b.ts"
+  assert rw_tail("nm|ts|sym|sha|stdlib|host.ts", 5) == "host.ts"
+  assert rw_tail("nm|ts|sym|sha|stdlib|", 5) == ""
+  assert rw_tail("nm|ts|sym|sha", 5) == ""
 }
 
 test "same key in different realms composes (per-realm G2)" {
