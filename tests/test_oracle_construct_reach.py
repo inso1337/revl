@@ -283,3 +283,202 @@ def test_the_compile_row_measures_the_corpus_its_oracle_runs_on(data):
                 [*oracle.NATIVE_CORPUS, *oracle.COMPONENT_CORPUS]}
     assert set(report["corpus"]) == expected
     assert tool._compile_corpus()
+
+
+# ------------------------------------------------------ the triage gate (#2099)
+# Roadmap item 533's second half, and the residue its tracking issue left
+# behind: the row's head read STILL OPEN while #1203 had closed on 2026-09-20,
+# because the ratchet held the unreached set and nothing held the OBLIGATION.
+# Every entry carried a name and no decision, so the count was a number with no
+# owner and the number was a hand copy of a measurement.
+#
+# `--check` is total now: an entry nobody decided fails it, and so does a
+# disposition that outlived its entry. The tests below each fail on the tree
+# where that is not so, and the last one holds the row's own count against the
+# ledger it describes, which is the half a reader of the roadmap sees.
+
+
+def test_every_ledger_entry_carries_a_written_disposition(data):
+    """Totality, measured entry by entry. A disposition is DERIVED when the
+    sibling reason-first ledger already decides the construct for a corpus this
+    oracle shares -- recomputed by inverting that file, never restated -- and
+    RECORDED when this tree's dispositions file writes the decision down."""
+    tool = _tool()
+    ledger = tool._ledger()
+    decided, recorded = tool._blind_spots(), tool._dispositions()
+
+    sources = {"DERIVED": [], "RECORDED": []}
+    undisposed = []
+    for oracle, constructs in sorted(ledger.items()):
+        for construct in sorted(constructs):
+            found = tool.triage(oracle, construct, decided, recorded)
+            if found is None:
+                undisposed.append(f"{oracle}: {construct}")
+                continue
+            sources[found[0]].append((oracle, construct))
+
+    assert undisposed == [], undisposed
+    total = sum(len(constructs) for constructs in ledger.values())
+    assert len(sources["DERIVED"]) + len(sources["RECORDED"]) == total
+    assert sources["DERIVED"], "no entry is disposed of by the sibling ledger"
+    assert sources["RECORDED"], "no entry is disposed of by this tree's file"
+    assert tool.check(data) == []
+
+
+def test_a_disposition_is_a_reason_and_not_a_label():
+    """The floor the sibling reason-first ledger sets for its own reasons, held
+    for the six no tier of it decides. A construct both implementations can
+    dispatch and nothing exercises is a DECISION, and `out of scope` is not
+    one: it says nothing a reader can act on or argue with."""
+    for oracle, rows in sorted(_tool()._dispositions().items()):
+        assert rows, f"{oracle}: an oracle with no dispositions"
+        for construct, reason in sorted(rows.items()):
+            assert len(reason) > 40, (
+                f"{oracle}: `{construct}` is disposed of by `{reason}`, which "
+                f"is a label and not a reason")
+
+
+def test_an_undisposed_entry_fails_the_check(data, monkeypatch):
+    """The regression this half exists for. Take an entry the sibling ledger
+    decides, drop that construct from the inverted map -- which is what a
+    reason-first entry being deleted does -- and the entry is owed again."""
+    tool = _tool()
+    decided = tool._blind_spots()
+    oracle, construct = next(
+        (oracle, construct)
+        for oracle, constructs in sorted(tool._ledger().items())
+        for construct in sorted(constructs)
+        if construct in decided.get(oracle, {}))
+    decided[oracle].pop(construct)
+    monkeypatch.setattr(tool, "_blind_spots", lambda: decided)
+
+    problems = tool.check(data)
+    assert any(construct in p and "NO written disposition" in p
+               for p in problems), problems
+    # the other half of the pair: a RECORDED row is a disposition too, so the
+    # entry stays disposed while the reason-first map has stopped deciding it.
+    assert not [p for p in problems if "NEWLY UNREACHED" in p], problems
+
+
+def test_a_disposition_that_outlived_its_entry_fails_the_check(data, monkeypatch):
+    """The shrink direction, one level up. A row whose construct is no longer a
+    recorded gap is the same rot as a stale ledger entry: a decision about a
+    hole that has been filled, left where the next reader takes it for live."""
+    tool = _tool()
+    recorded = tool._dispositions()
+    recorded["compile"]["a section nobody owes"] = (
+        "this line disposes of no entry in the ledger, and must be deleted "
+        "rather than left to look like a decision")
+    monkeypatch.setattr(tool, "_dispositions", lambda: recorded)
+
+    problems = tool.check(data)
+    assert any("no longer a recorded gap" in p for p in problems), problems
+
+
+def test_an_empty_disposition_fails_the_check(data, monkeypatch):
+    """`--check`'s empty clause, kept apart from the stale one: a row that is
+    still about a live entry and says nothing at all."""
+    tool = _tool()
+    recorded = tool._dispositions()
+    recorded["compile"]["tests"] = "   "
+    monkeypatch.setattr(tool, "_dispositions", lambda: recorded)
+
+    problems = tool.check(data)
+    assert any("EMPTY disposition" in p for p in problems), problems
+
+
+def test_the_triage_report_names_every_entry_and_its_source(data, capsys):
+    """`--triage` is the reader's half: the number the row quotes, broken down
+    into the decision behind each line. It prints no UNDISPOSED line, because
+    the ledger has none, and it is a flag `main` accepts."""
+    tool = _tool()
+    tool.triage_report(data)
+    out = capsys.readouterr().out
+    assert "UNDISPOSED" not in out, out
+    total = sum(len(entry["unreached"]) for entry in data.values())
+    for oracle, entry in data.items():
+        assert f"{oracle}: {len(entry['unreached'])} unreached" in out
+        for construct in entry["unreached"]:
+            assert f" {construct}\n" in out, construct
+    assert f"{total} disposed:" in out
+    assert " DERIVED " in out and " RECORDED " in out
+
+    with pytest.raises(SystemExit) as exit_code:
+        tool.main(["--help"])
+    assert exit_code.value.code == 0
+    assert "--triage" in capsys.readouterr().out
+
+
+def test_the_gate_census_unreached_tags_are_elicitable(data, census):
+    """The five `gate_census` dispositions are dispositions of a MEASURED fact
+    and not of an absence, which is the difference between this ledger and a
+    list of things nobody looked at.
+
+    The row's corpus is `_census_documents`, which is documents only; the
+    census's `ACCEPTED_PROGRAMS` / `REJECTED_PROGRAMS` / `ADMISSION_PROGRAMS`
+    are strings in `tests/test_selfhost_lower.py` and are excluded there by
+    construction. So four of the five tags read UNREACHED while the census's own
+    gate issues them the moment it is handed those programs -- which is what
+    this test does, over the tables themselves. HOST-ARITY is the fifth and the
+    one still owed a document: no table carries it, so it is driven here by the
+    program `tests/test_selfhost_lower.py` already pins its sentence for."""
+    tool = _tool()
+    oracle = load_by_path(
+        "selfhost_lower_programs",
+        ROOT / "tests" / "test_selfhost_lower.py")
+    where = ROOT / "tests" / "test_selfhost_lower.py"
+    documents = [(where, src) for _name, src in oracle.ACCEPTED_PROGRAMS]
+    documents += [(where, entry[1]) for entry in oracle.REJECTED_PROGRAMS]
+    documents += [(where, src) for _name, src in census.ADMISSION_PROGRAMS]
+
+    reached = set(tool._census_reach(census, documents))
+    assert {"BOOT", "HANDOFF", "ROUTE", "SPAWN"} <= reached, (
+        f"the census's gate no longer issues {sorted({'BOOT', 'HANDOFF', 'ROUTE', 'SPAWN'} - reached)} "
+        f"for any program in its own tables, so those dispositions name a "
+        f"reach that does not exist")
+
+    assert "HOST-ARITY" not in reached, (
+        "HOST-ARITY is elicited by an in-memory table now. The ledger entry is "
+        "still a gap -- no corpus DOCUMENT draws it -- but the disposition "
+        "says no table carries it, so correct that line")
+    arity = tool._census_reach(
+        census, [(where, 'fn f() { let p = Pool.open("dsn") }\n')])
+    assert set(arity) == {"HOST-ARITY"}, arity
+
+    # and the entry is still a gap, which is why it is in the ledger at all.
+    assert {"BOOT", "HANDOFF", "HOST-ARITY", "ROUTE", "SPAWN"} == \
+        set(data["gate_census"]["unreached"])
+
+
+def test_the_roadmap_row_agrees_with_the_measurement(data):
+    """The anti-staleness half, and the one a reader of the roadmap depends on.
+    Item 533's row quoted a count measured on a different day, so it went on
+    reading STILL OPEN after the work behind it had closed. The row is held
+    against the ledger it describes here, so a ledger that shrinks without the
+    row being edited fails instead of ageing."""
+    markers = load_by_path(
+        "check_roadmap_markers_for_item_533",
+        ROOT / "tools" / "check_roadmap_markers.py")
+    text = (ROOT / "docs" / "v2.0-roadmap.md").read_text(encoding="utf-8")
+    rows = [item for item in markers.items(text) if item["number"] == "533"]
+    assert len(rows) == 1, [item["line"] for item in rows]
+    row = rows[0]["body"]
+
+    tool = _tool()
+    decided, recorded = tool._blind_spots(), tool._dispositions()
+    derived = recorded_count = 0
+    for oracle, constructs in tool._ledger().items():
+        for construct in constructs:
+            source = tool.triage(oracle, construct, decided, recorded)[0]
+            derived += source == "DERIVED"
+            recorded_count += source == "RECORDED"
+    measured = derived + recorded_count
+    assert measured == sum(len(entry["unreached"]) for entry in data.values())
+
+    assert f"ledger's {measured} entries" in row, (
+        f"the row does not quote the measured {measured}")
+    assert f"{derived} are DERIVED" in row, (
+        f"the row does not quote the measured {derived} DERIVED")
+    assert f"the {recorded_count} no tier" in row, (
+        f"the row does not quote the measured {recorded_count} RECORDED")
+    assert "issue #2099" in row, "the row does not name the issue that owns it"
