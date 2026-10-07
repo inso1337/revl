@@ -322,6 +322,22 @@ python3 scripts/axioms_gate.py \
   RevL.G9Flow.corpus_rows_decided \
   RevL.G9Flow.escape_moves_the_label \
   RevL.G9Flow.g9_not_vacuous \
+  RevL.G9Coverage.coversB_iff \
+  RevL.G9Coverage.coversBodyB_iff \
+  RevL.G9Coverage.coversB_self \
+  RevL.G9Coverage.walk_covers \
+  RevL.G9Coverage.reachIn_callSvc \
+  RevL.G9Coverage.scope_origins_exclude_plain_and_trusted \
+  RevL.G9Coverage.witnessBody_scopes \
+  RevL.G9Coverage.witnessBody_is_admitted \
+  RevL.G9Coverage.walkOf_is_the_walk \
+  RevL.G9Coverage.coversB_admits_the_full_walk \
+  RevL.G9Coverage.coversB_refuses_a_walk_that_drops_the_activation_scope \
+  RevL.G9Coverage.coversB_refuses_a_shortened_walk \
+  RevL.G9Coverage.coversB_refuses_a_walk_that_strips_a_secret_param \
+  RevL.G9Coverage.coversB_refuses_a_walk_that_seeds_a_trusted_param \
+  RevL.G9Coverage.coversB_refuses_a_scope_the_body_does_not_have \
+  RevL.G9Coverage.g9Coverage_not_vacuous \
   RevL.GRetain.holdsB_iff \
   RevL.GRetain.rowB_iff \
   RevL.GRetain.hold_clears_the_deadline \
@@ -428,6 +444,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.modelReachB_iff \
   RevLOracle.councilRowB_iff \
   RevLOracle.g9RowB_iff \
+  RevLOracle.gcRowB_iff \
   RevLOracle.retainRowB_iff RevLOracle.gretainRowB_iff \
   RevLOracle.g4InvRowB_iff RevLOracle.g4invRowB_iff \
   RevLOracle.swRowB_iff RevLOracle.swRowBAll_iff \
