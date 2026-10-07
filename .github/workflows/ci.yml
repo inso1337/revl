@@ -77,6 +77,21 @@ concurrency:
   # next merge, so main went a day with no verdict at all). Under this rule the
   # running main commit always reports, and the newest tip is always next.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  #
+  # The group is only as free as its slowest job, so every job below also
+  # carries an explicit `timeout-minutes`. Without one the only bound is
+  # GitHub's 360-minute default, and a job whose RUNNER dies is often not
+  # reaped at all: the run stays `in_progress` with nothing running, holding
+  # this group for the full default. Observed 2026-10-07: a main run's
+  # `conformance` job stopped logging at 50% of the cross-tier selector (an
+  # orphaned `javac` was terminated during cleanup), the run reported
+  # `in_progress` for over an hour, and the next main run sat `pending` behind
+  # it -- so main had no verdict at all until the stuck run was cancelled by
+  # hand. The values are roughly 3x the worst duration measured on a green run
+  # (frontend matrix 64m, frontend-cordis 56m, conformance 50m, root-suite
+  # shards 19m, backend-rust 12m, everything else under 5m): 180 minutes for
+  # the four heavy jobs, 60 for the rest. They bound a runaway, not normal
+  # runtime, so they should not need raising for ordinary growth.
 
 # Least privilege for GITHUB_TOKEN, workflow-wide. Every job below only checks
 # out the repository and runs tests: none opens an issue, writes a check, pushes
@@ -144,6 +159,7 @@ jobs:
   # `contents: read` floor -- it opens nothing and writes no check.
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
       frontend: ${{ steps.detect.outputs.frontend }}
       backends: ${{ steps.backends.outputs.backends }}
@@ -239,6 +255,7 @@ jobs:
   # pinned so the finding set is reproducible across runs.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -505,6 +522,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     # Heavy job: never on a pull request (issue #1678). It runs on the merge queue
     # (merge_group), on push to main, nightly, on dispatch and from the tag
     # build (workflow_call). On a PR the root suite is still collected, by the
@@ -648,6 +666,7 @@ jobs:
 
   backend-python:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Decoupled from `frontend` (approved CI-topology change): the backends
     # import revl directly and self-contain their frontend usage, so the old
     # `needs: frontend` was pure ordering. Dropping it lets every backend run
@@ -720,6 +739,7 @@ jobs:
   # the runtime IS there.
   frontend-cordis:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     # Heavy job, same rule as `frontend`: never on a pull request, always on
     # merge_group, push, schedule, dispatch and workflow_call (issue #1678).
     if: ${{ github.event_name != 'pull_request' }}
@@ -831,6 +851,7 @@ jobs:
     # pins both halves.
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     # Issue #1774: four shards. Every shard runs the same selection; a FULL
     # selection (and any selection of 40 or more files) is then split by test
     # file across the four (`REVL_TEST_SHARD`, tests/_shard.py), so a full
@@ -979,6 +1000,7 @@ jobs:
   # the `pull-requests: read` that `gh pr list` needs.
   merged-prs-landed:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
       pull-requests: read
@@ -1049,6 +1071,7 @@ jobs:
   # exists to prevent.
   held-out:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'push' ||
@@ -1144,6 +1167,7 @@ jobs:
   # the precondition that makes requiring it safe.
   census-artifact:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'push' ||
@@ -1208,6 +1232,7 @@ jobs:
   # against the job that sets it, a filesystem probe is invisible to that audit.
   sandbox-container:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Heavy job: never on a pull request, always on merge_group, push,
     # schedule, dispatch and workflow_call (issue #1678).
     if: ${{ github.event_name != 'pull_request' }}
@@ -1294,6 +1319,7 @@ jobs:
   # the job if the boot assets did not actually come up.
   sandbox-microvm:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Heavy job: never on a pull request, always on merge_group, push,
     # schedule, dispatch and workflow_call (issue #1678).
     if: ${{ github.event_name != 'pull_request' }}
@@ -1369,6 +1395,7 @@ jobs:
 
   backend-typescript:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Decoupled from `frontend` (see backend-python).
     # Issue #1817: on a pull request, skipped when `changes` reports that no
     # changed path is one a backend job can observe (all six or none; the
@@ -1474,6 +1501,7 @@ jobs:
   # on `changes` so a documentation-only PR does not pay for a node install.
   frontend-assets:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [changes]
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
     steps:
@@ -1501,6 +1529,7 @@ jobs:
 
   backend-wasm:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Decoupled from `frontend` (see backend-python).
     # Issue #1817: on a pull request, skipped when `changes` reports that no
     # changed path is one a backend job can observe (all six or none; the
@@ -1651,6 +1680,7 @@ jobs:
 
   backend-rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Decoupled from `frontend` (see backend-python).
     # Issue #1817: on a pull request, skipped when `changes` reports that no
     # changed path is one a backend job can observe (all six or none; the
@@ -1718,6 +1748,7 @@ jobs:
   # rule forbids. The skip guard at the end is what keeps it from going back.
   gate-wasm:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1789,6 +1820,7 @@ jobs:
 
   backend-java:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Decoupled from `frontend` (see backend-python).
     # Issue #1817: on a pull request, skipped when `changes` reports that no
     # changed path is one a backend job can observe (all six or none; the
@@ -1836,6 +1868,7 @@ jobs:
 
   backend-go:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Decoupled from `frontend` (see backend-python).
     # Issue #1817: on a pull request, skipped when `changes` reports that no
     # changed path is one a backend job can observe (all six or none; the
@@ -1912,6 +1945,7 @@ jobs:
   # runtime state leak, which is what this job is for.
   backend-roots-combined:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1928,6 +1962,7 @@ jobs:
   # the one place every tier's compiler exists at once.
   conformance:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     # Fail fast: this job provisions six toolchains and runs for minutes, so
     # skip it entirely when `lint` or `frontend` is red (see backend-python for
     # the rationale; required context unchanged). Heavy job: never on a pull
@@ -2164,6 +2199,7 @@ jobs:
   # tests/test_env_gated_skips_run_somewhere.py checks.
   temporal-exit:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Heavy job: never on a pull request, always on merge_group, push,
     # schedule, dispatch and workflow_call (issue #1678).
     if: ${{ github.event_name != 'pull_request' }}
@@ -2213,6 +2249,7 @@ jobs:
   # gets softened". STATUS.md tracks proved/stuck/TODO per guarantee.
   formal:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Fail fast: the Lean `lake build` is heavy, so skip it when `lint` or
     # `frontend` is red (see backend-python for the rationale; required context
     # unchanged). Heavy job: never on a pull request, always on merge_group,
