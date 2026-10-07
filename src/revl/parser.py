@@ -760,11 +760,20 @@ class ModelRouteArm:
     `role` may also be the literal `"*"`, which parses so that
     `revl.model_route` can refuse "any available role" BY NAME rather than as
     a bare syntax error. SYNTAX ONLY — every rule over the pair lives in
-    `revl.model_route`."""
+    `revl.model_route`.
+
+    `prefer_resident` is the trailing clause `prefer resident` (item 2118,
+    design note 539 section 11.6 item 2): THIS arm's author saying that a
+    candidate already loaded may beat an earlier-written one. It is a property
+    of one arm and of nothing else — there is no spelling of it that reaches
+    another arm, and an arm that does not write it is ordered by `candidates`
+    alone. SYNTAX ONLY, as above: `revl.model_route` decides whether the arm
+    it is written on can be ranked at all."""
     origin: str
     role: str
     line: int
     alternates: tuple = ()
+    prefer_resident: bool = False
 
     @property
     def candidates(self) -> tuple:
@@ -3320,8 +3329,21 @@ class Parser:
             while self.at("|"):
                 self.next()
                 alternates.append(self._model_route_candidate(origin))
+            # item 2118: `prefer resident` closes an arm, after the candidate
+            # set. `prefer` and `resident` are CONTEXTUAL identifiers, like
+            # `route`/`model` above and for the same reason: the lexer's
+            # KEYWORDS table and the self-hosted lexer that mirrors it need no
+            # sync. The clause is on ONE arm and can be written on none, some,
+            # or all of them — there is no block-level form of it, which is
+            # what keeps a "prefer resident" from becoming a default.
+            prefer_resident = False
+            if self.at("ident", "prefer"):
+                self.next()
+                self.expect("ident", value="resident",
+                            what="`resident` after `prefer` on a `route model` arm")
+                prefer_resident = True
             arms.append(ModelRouteArm(origin, role, origin_tok.line,
-                                      tuple(alternates)))
+                                      tuple(alternates), prefer_resident))
             if self.at(","):
                 self.next()
         self.expect("}")

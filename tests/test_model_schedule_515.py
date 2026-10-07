@@ -563,3 +563,118 @@ quantisation = ["int8"]
     assert "model schedule [edge]: First.classify confidential -> fast on gpu0" in out
     assert ("model schedule [pi]: Second.label confidential -> small on cpu0, "
             "fallback 1 of 1") in out
+
+
+# --------------------------------------------------------------------------
+# 6. One arm may opt in to residency (item 2118, design note 539 section 11.6)
+# --------------------------------------------------------------------------
+
+# The portfolio with the confidential arm opted in. Everything else is
+# byte-identical, which is the point: the clause is on ONE arm, and the
+# `* -> cloud` arm below it is ordered exactly as it always was.
+OPTED_IN = PORTFOLIO.replace("confidential -> fast | small,",
+                             "confidential -> fast | small prefer resident,")
+
+# Two routed actions: one arm opted in, one not. A per-arm clause must not
+# reach the second arm, and this is the program that would show it if it did.
+TWO_ARMS = """
+model role fast on_device device gpu memory 6144 quant q4_k_m
+model role small on_device device cpu memory 512 quant int8
+
+service Answer {
+  fn classify(text: Str) -> Str
+  fn label(text: Str) -> Str
+}
+
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> fast | small prefer resident
+  }
+  route model on label {
+    * -> fast | small
+  }
+  provide out {
+    fn classify(text) = text
+    fn label(text) = text
+  }
+}
+"""
+
+
+CONFIDENTIAL = ("Classifier", "classify", "confidential")
+
+
+def plan_with(source, devices, residency, host="edge"):
+    """`plan`, with what the host already holds handed to the search."""
+    compile_source(source, "schedule.rvl")
+    roles, table = ms.routes_of(Parser(source, "schedule.rvl").parse())
+    return ms.schedule(host, ms.parse_devices(host, devices), roles,
+                       ms.steps_for(table), residency)
+
+
+def test_an_arm_that_did_not_opt_in_is_ordered_by_the_written_set():
+    """Decision 12, unchanged: residency may never IMPLICITLY reorder
+    candidates. `PORTFOLIO` writes no clause, so the residency that moves the
+    opted-in program below leaves this one on `fast` - and leaves the decision
+    itself unchanged, because an input no arm reads is not part of it."""
+    decided = plan_with(PORTFOLIO, [gpu(), cpu()], {"small": "cpu0"})
+    assert chosen(decided)[CONFIDENTIAL] == ("fast", "gpu0")
+    assert decided.residency == {}
+    assert "residency" not in ms.handoff(decided)
+
+
+def test_an_opted_in_arm_lets_a_held_candidate_beat_an_earlier_written_one():
+    decided = plan_with(OPTED_IN, [gpu(), cpu()], {"small": "cpu0"})
+    assert chosen(decided)[CONFIDENTIAL] == ("small", "cpu0")
+    assert decided.residency == {"small": "cpu0"}
+    assert ms.handoff(decided)["residency"] == {"small": "cpu0"}
+
+
+def test_the_rank_of_an_opted_in_choice_is_its_position_in_the_written_set():
+    """`rank` indexes the candidates as the program wrote them, not the order
+    the search tried them, so what a plan REPORTS is unchanged by residency:
+    only which candidate it settles on can differ."""
+    decided = plan_with(OPTED_IN, [gpu(), cpu()], {"small": "cpu0"})
+    placement = next(p for p in decided.placements if p.origin == "confidential")
+    assert (placement.role, placement.rank) == ("small", 1)
+    assert placement.candidates == ("fast", "small")
+    assert "fallback 1 of 1" in placement.describe()
+
+
+def test_an_opted_in_arm_with_nothing_held_keeps_the_written_order():
+    """The clause is a preference, not a requirement: a host that holds
+    nothing, and a residency that names a role this arm does not offer, both
+    leave the written order alone."""
+    empty = plan_with(OPTED_IN, [gpu(), cpu()], {})
+    assert chosen(empty)[CONFIDENTIAL] == ("fast", "gpu0")
+    assert empty.residency == {}
+    elsewhere = plan_with(OPTED_IN, [gpu(), cpu()], {"cloud": "cloud0"})
+    assert chosen(elsewhere)[CONFIDENTIAL] == ("fast", "gpu0")
+
+
+def test_the_opt_in_is_read_per_arm_and_does_not_reach_a_second_arm():
+    """The whole of section 11.6 item 2 in one program: the same residency, one
+    arm opted in and one not, and only the opted-in arm moves. A global flag
+    would move both."""
+    decided = plan_with(TWO_ARMS, [gpu(), cpu()], {"small": "cpu0"})
+    got = chosen(decided)
+    assert got[CONFIDENTIAL] == ("small", "cpu0")
+    assert got[("Classifier", "label", "*")] == ("fast", "gpu0")
+
+
+def test_a_held_candidate_that_cannot_be_placed_falls_back():
+    """The clause reorders the candidates the host holds; it does not make them
+    placeable. On a GPU-only host `small` is tried first, misses, and the arm
+    settles on the candidate it always would have."""
+    decided = plan_with(OPTED_IN, [gpu()], {"small": "cpu0"})
+    assert chosen(decided)[CONFIDENTIAL] == ("fast", "gpu0")
+
+
+def test_a_refusal_from_an_opted_in_arm_names_the_order_it_tried():
+    """A refusal that listed the candidates in written order would not match
+    the search that produced it, so the order actually tried is stated."""
+    with pytest.raises(ms.ScheduleRefusal) as excinfo:
+        plan_with(OPTED_IN, [gpu(quant=("fp16",)), cpu(quant=("fp16",))],
+                  {"small": "cpu0"})
+    assert ("This arm wrote `prefer resident`, so its candidates were tried "
+            "`small`, then `fast`.") in str(excinfo.value)

@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import model_placement as mp  # noqa: E402
+from revl import model_schedule as ms  # noqa: E402
 from revl import placement as _placement  # noqa: E402
 from revl.compiler import compile_files  # noqa: E402
 from revl.providers import (  # noqa: E402
@@ -432,6 +433,25 @@ def test_the_provision_reads_back_what_it_recorded(ollama, schedule):
     assert [e["event"] for e in after["events"]] == ["load", "unload"]
     assert provisions.residency() == {"small": after}
     assert provisions.residue() == {}
+
+
+def test_what_a_host_holds_reads_as_residency_for_the_plan(ollama, schedule):
+    """The read side of item 2118: `resident_roles()` is the only route by
+    which what a host holds reaches a ranking, and it reads the report landed
+    by item 1 rather than deriving one of its own. A role is held exactly when
+    it loaded more often than it unloaded and reached a device, and reading
+    this asks the server nothing — the plan may do it."""
+    schedule("edge", {"small": "cpu0"}, {"cpu0": "cpu"})
+    provisions = _provisions(ollama)
+    assert ms.resident_roles(provisions) == {}
+    provisions.open("llm", {"small"})
+    asked = len(ollama.requests)
+    assert ms.resident_roles(provisions) == {"small": "cpu0"}
+    assert len(ollama.requests) == asked
+    provisions.close("llm", ("small",))
+    # loaded and then unloaded is not resident, and the same reader says so:
+    # this is what keeps the ranking input from outliving the member it names.
+    assert ms.resident_roles(provisions) == {}
 
 
 def test_a_member_the_server_already_held_is_recorded_as_resident(
