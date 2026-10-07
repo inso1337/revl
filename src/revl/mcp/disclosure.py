@@ -149,27 +149,35 @@ def is_hatch(arguments: dict) -> bool:
     return HATCH_NAME in (arguments or {})
 
 
-def hatch(arguments: dict) -> tuple[str, dict, str]:
-    """Parse an escape-hatch call: `(verb, args, reason)`.
+def hatch(arguments: dict) -> tuple[str, dict, str, dict]:
+    """Parse an escape-hatch call: `(verb, args, reason, next_arguments)`.
 
     `reason` is "" when the call is well formed, otherwise what is wrong with
-    it. A hatch that cannot name the verb it means refuses by name: answering
-    the lookup instead would be a different answer to a different question —
-    the silent no-op the hatch exists to prevent."""
+    it. `next_arguments` is the arguments of the `revl_verbs` call a refusal
+    should hand back: empty when no discovery call is the remedy, and
+    `{"names": [verb]}` when the caller named a verb but left `args` out —
+    that lookup returns the verb's own schema out of the FULL advertised list,
+    so it reaches a verb outside the tier, which `revl_verbs {}` (the index)
+    cannot (issue #2110). A hatch that cannot name the verb it means refuses
+    by name: answering the lookup instead would be a different answer to a
+    different question — the silent no-op the hatch exists to prevent."""
     arguments = arguments or {}
     verb = arguments.get(HATCH_NAME)
     if not isinstance(verb, str) or not verb.strip():
         return "", {}, (f"`{HATCH_NAME}` must be the name of the verb to call "
-                        f"(a non-empty string); got {_kind(verb)}")
+                        f"(a non-empty string); got {_kind(verb)}"), {}
     verb = verb.strip()
     if arguments.get(HATCH_ARGS) is None:
-        return verb, {}, (f"`{HATCH_ARGS}` is required with `{HATCH_NAME}`: the "
-                          f"verb's arguments, `{{}}` for a verb that takes none")
+        return verb, {}, (
+            f"`{HATCH_ARGS}` is required with `{HATCH_NAME}`: the verb's "
+            f"arguments, `{{}}` for a verb that takes none. Next: "
+            f"`{DISCOVERY} {{names: [\"{verb}\"]}}` returns this verb's "
+            f"schema"), {"names": [verb]}
     args = arguments[HATCH_ARGS]
     if not isinstance(args, dict):
         return verb, {}, (f"`{HATCH_ARGS}` must be an object of the verb's "
-                          f"arguments; got {_kind(args)}")
-    return verb, args, ""
+                          f"arguments; got {_kind(args)}"), {}
+    return verb, args, "", {}
 
 
 def _kind(value) -> str:

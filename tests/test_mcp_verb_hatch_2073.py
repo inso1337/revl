@@ -223,6 +223,37 @@ def test_a_malformed_hatch_does_not_reach_a_handler():
     assert "listed" not in payload
 
 
+def test_the_missing_args_refusal_points_at_the_verb_not_the_index():
+    """Issue #2110: the refusal for a verb named without `args` used to hand
+    back `revl_verbs {}` — the tier index, which by construction omits every
+    verb outside the tier. `revl_export` is outside it, so that `next` cannot
+    contain the answer, and the model was left guessing `args: {}` to elicit
+    the `path` requirement. The refusal names `names`, and its `next` is the
+    lookup of the verb the caller actually asked for."""
+    verb = "revl_export"
+    # the regression only bites for a verb the tier index cannot answer with
+    assert verb not in [t["name"] for t in _list()]
+
+    payload = _call(disclosure.DISCOVERY, {disclosure.HATCH_NAME: verb})
+    assert payload["ok"] is False, payload
+    message = payload["diagnostics"][0]["message"]
+    assert "names" in message and verb in message, message
+
+    nxt = payload["next"]
+    assert nxt["tool"] == disclosure.DISCOVERY
+    assert nxt["arguments"] == {"names": [verb]}, nxt
+    assert nxt["ready"] is True
+
+    # following `next` answers the question the refusal was asked: the verb's
+    # schema, out of the FULL advertised list rather than the tier
+    followed = _call(nxt["tool"], nxt["arguments"])
+    assert followed["ok"] is True, followed
+    assert [t["name"] for t in followed["tools"]] == [verb]
+    assert "path" in followed["tools"][0]["inputSchema"]["properties"]
+    # ...where the call `next` used to point at genuinely cannot
+    assert verb not in _call(disclosure.DISCOVERY, {})["listed"]
+
+
 # ------------------------------------------------- the data-loss path (#2042)
 
 MEM_TEXT = ("service Store { fn find(term: Str) -> Bool }\n"

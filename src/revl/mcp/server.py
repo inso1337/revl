@@ -5283,13 +5283,13 @@ def _tool_verbs(arguments: dict) -> dict:
         # call answers. Reaching this handler with `name` means a transport
         # bypassed that dispatch, and answering the index here would be exactly
         # the silent no-op the hatch exists to prevent.
-        _verb, _args, reason = _disclosure.hatch(arguments)
+        _verb, _args, reason, _next = _disclosure.hatch(arguments)
         return _session_error(
             reason or (f"`{_disclosure.HATCH_NAME}` selects the escape hatch, "
                        f"which is dispatched before this handler; call "
                        f"`{_disclosure.DISCOVERY}` with no arguments for the "
                        f"index"),
-            next=_remedy.call(_disclosure.DISCOVERY, {}))
+            next=_remedy.call(_disclosure.DISCOVERY, _next))
     names = list(arguments.get("names") or [])
     topic = arguments.get("topic")
     if topic is None and not names:
@@ -5452,10 +5452,11 @@ def _hatch_call(arguments: dict) -> dict:
     that cannot name the verb it means refuses by name, rather than quietly
     answering the lookup, which would be a different answer to a different
     question and so the silent no-op this exists to prevent."""
-    verb, args, reason = _disclosure.hatch(arguments)
+    verb, args, reason, next_arguments = _disclosure.hatch(arguments)
     if reason:
         return _session_error(reason,
-                              next=_remedy.call(_disclosure.DISCOVERY, {}))
+                              next=_remedy.call(_disclosure.DISCOVERY,
+                                                next_arguments))
     if _HANDLERS.get(verb) is None:
         return _session_error(
             f"no verb named {verb!r} to call through "
