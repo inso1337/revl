@@ -1,0 +1,6 @@
+fn put(key, value) {
+  effect store.insert(key, value)
+  undo   store.remove(key)
+  emit db.execute(`INSERT INTO cache_log VALUES (${key})`)
+       compensate db.execute(`DELETE FROM cache_log WHERE k = ${key}`)
+}
