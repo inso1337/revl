@@ -11,6 +11,7 @@ import ast
 import subprocess
 import importlib.util
 import io
+import json
 import re
 import sys
 import tokenize
@@ -1301,3 +1302,238 @@ def test_the_runtime_is_off_the_compile_graph():
         assert sel(path)["full"] is False, path
 
 
+# --- the census artifact gate (issue #2103) --------------------------------- #
+#
+# `tools/census_artifact.py --verify --strict` is the thing that reds when the
+# committed census artifact (docs/census-artifact/) is not what THIS tree
+# produces. It ran in CI's `census-artifact` job and NOWHERE else.
+#
+# The local signal for such a diff looked like coverage and was not. The
+# selector's census/provenance rule did pick `tests/test_census_artifact.py` for
+# these paths, and that module SKIPS the half that reds CI (its
+# crate-reproduction half is root-suite-skipped by design, issue #1917), so a
+# diff that staled the artifact printed a green "83 passed, 1 skipped" locally
+# and then reddened `census-artifact` on the PR. Two lanes were red on exactly
+# that artifact while this was written (#2101, #2119), the second for adding four
+# `.rvl` documents under tests/fixtures/ -- a directory `corpus_dirs` in
+# tools/gate_reference_census_baseline.json lists, so a new FIXTURE silently
+# joins the census without anyone touching docs/census-artifact/.
+#
+# The fix is an entry in the selector's gate set (asked of the artifact's OWN
+# input filter, so the local gate and CI cannot disagree about what the artifact
+# reads) plus the step in tools/pre_merge.sh that runs the `--strict` check for
+# it. Both halves are pinned here, each with the mutation that makes it red.
+
+_CENSUS_BASELINE = ROOT / "tools" / "gate_reference_census_baseline.json"
+_PRE_MERGE = ROOT / "tools" / "pre_merge.sh"
+
+
+def _census_inputs_on_disk() -> list[str]:
+    """Paths the artifact's OWN filter calls inputs.
+
+    Derived from the artifact's tables (CHECKER_SOURCES, REPORT_INPUTS,
+    GATE_CRATE_GLOBS, the baseline's corpus_dirs) rather than restated here: a
+    second hand-written copy would only move the drift into this file, and the
+    #2119 shape — a document added to a corpus directory — is exactly what a
+    copy of today's file list would stop describing."""
+    module = at.census_module()
+    assert module is not None, "tools/census_artifact.py did not load"
+    candidates = [*module.CHECKER_SOURCES, *module.REPORT_INPUTS]
+    for pattern in module.GATE_CRATE_GLOBS:
+        candidates += [str(p.relative_to(ROOT)) for p in ROOT.glob(pattern)
+                       if p.is_file()]
+    baseline = json.loads(_CENSUS_BASELINE.read_text(encoding="utf-8"))
+    for directory in baseline["corpus_dirs"]:
+        found = next(iter(sorted((ROOT / directory).rglob("*.rvl"))), None)
+        if found is not None:
+            candidates.append(str(found.relative_to(ROOT)))
+    records = sorted((ROOT / "docs" / "census-artifact").rglob("*"))
+    candidates += [str(p.relative_to(ROOT)) for p in records if p.is_file()][:1]
+    return sorted({c for c in candidates if at.census_inputs([c], ROOT)})
+
+
+def test_every_census_artifact_input_selects_the_census_gate():
+    """Issue #2103. A diff that moves an input of the committed census artifact
+    can stale it, and the only check that says so is `--verify --strict`."""
+    inputs = _census_inputs_on_disk()
+    assert len(inputs) >= 5, (
+        "the derivation found almost nothing, so this test would pass on an "
+        f"empty list: {inputs}"
+    )
+    missing = sorted(f for f in inputs if "census" not in sel(f)["gates"])
+    assert not missing, (
+        "these paths are inputs of the committed census artifact, so a change "
+        "to one can stale docs/census-artifact/, but the selector does not put "
+        f"the `census` gate on them:\n  {missing}\n"
+        "The local signal for such a diff is then tests/test_census_artifact.py, "
+        "which SKIPS the half that reds CI's `census-artifact` job. Add the path "
+        "to the artifact's own filter (tools/census_artifact.py) and this rule "
+        "picks it up; a path list copied into the selector would only drift."
+    )
+
+
+def test_the_census_gate_fires_in_a_targeted_selection_not_only_in_full():
+    """The FULL gate carrying `census` is not the fix on its own.
+    `tests/fixtures/**` was ALREADY a full-gate trigger, and PR #2119's lane
+    still met a red `census-artifact` on the PR — a full-gate trigger only helps
+    a lane that runs the full gate. An input that is otherwise a narrow change
+    has to pull the gate in by itself."""
+    r = sel("stdlib/json.rvl")
+    assert r["full"] is False, r["reason"]
+    assert "census" in r["gates"], r["reason"]
+    assert "census artifact input moved" in r["reason"], (
+        "the selection carries the gate but does not say why, which is the "
+        f"difference between a gate and a mystery: {r['reason']!r}"
+    )
+
+
+def test_a_new_corpus_fixture_selects_the_census_gate():
+    """The #2119 trigger itself. `corpus_dirs` lists tests/fixtures, so a new
+    `.rvl` document there joins the census — the lane that added four of them
+    had edited nothing under docs/census-artifact/ and had no local signal."""
+    r = sel("tests/fixtures/model_reach_spawn/probe.rvl")
+    assert "census" in r["gates"], r["reason"]
+
+
+def test_the_census_gate_stays_off_what_the_artifact_does_not_read():
+    """A gate that fires on everything is as useless as one that never fires:
+    the census re-run costs ~83s on the shared box, so it must not land on a
+    diff that cannot have staled the artifact. The negative list is chosen to be
+    as close to a census input as the tree gets without being one — a committed
+    census TEST, the gate crate's README (the crate is pinned, its README is
+    not), the selector itself, and a `bench/` document (a `.rvl` under a
+    corpus dir IS an input; one outside every corpus dir is not)."""
+    for f in ("docs/readme.md", "src/revl/mcp/http_face.py",
+              "bench/codegen/python/run.py", "crates/revl-gate/README.md",
+              "tools/affected_tests.py", "tests/test_census_artifact.py"):
+        r = sel(f)
+        assert r["full"] is False, f"{f} unexpectedly escalated to FULL"
+        assert "census" not in r["gates"], (
+            f"{f} is not an input of the committed census artifact, but it "
+            "selects the census gate. Every such diff then pays a full census "
+            "re-run, which is how a gate gets switched off."
+        )
+
+
+def test_the_census_rule_is_what_puts_the_gate_there(monkeypatch):
+    """Anti-vacuity, rule half. The assertion above is only worth something if
+    the RULE is what satisfies it: with the rule's answer forced empty — what
+    deleting the `add_census_gate` calls does — a census input stops selecting
+    the gate. Without this, an unrelated rule (or a full-gate escalation) could
+    be supplying `census` and the pin would still pass."""
+    f = "tools/census_artifact.py"
+    assert "census" in sel(f)["gates"]
+    assert sel(f)["full"] is False, (
+        "repoint this self-test: this path is now a FULL trigger, so the gate "
+        "would arrive through GATES_ALL instead of the rule under test"
+    )
+    monkeypatch.setattr(at, "census_inputs", lambda changed, root: [])
+    assert "census" not in sel(f)["gates"]
+
+
+def test_the_full_gate_carries_the_census_gate_because_of_its_own_entry(
+        monkeypatch):
+    """Anti-vacuity, GATES_ALL half. `make pre-merge` (and every FULL
+    selection) has to carry the gate, and it carries it through GATES_ALL —
+    not by accident, and not through the per-path rule. Removing the entry
+    takes the gate off a FULL selection that is not itself a census input,
+    which is the hole that let issue #1332's vocabulary gate reach main four
+    times."""
+    assert "census" in at.GATES_ALL
+    assert "census" in sel("src/revl/parser.py")["gates"]
+    monkeypatch.setattr(
+        at, "GATES_ALL", tuple(g for g in at.GATES_ALL if g != "census"))
+    r = sel("tests/conftest.py")
+    assert r["full"] is True, r["reason"]
+    assert "census" not in r["gates"], (
+        "a FULL selection that is not a census input still carries the gate, "
+        "so this self-test no longer isolates the GATES_ALL entry"
+    )
+
+
+def test_add_census_gate_answers_for_the_whole_diff():
+    """`main()` may take `_test_add_delete_override`'s answer instead of
+    `select()`'s, and that answer knows only about the new test files it was
+    handed (issue #162). The gate is a property of the whole diff, so it is
+    applied to whichever answer is used, and applying it twice is free."""
+    narrow = {"full": False, "reason": "only new test file(s) added -> targeted",
+              "pytest": ["tests/test_newthing.py"], "backends": [],
+              "gates": ["ruff"]}
+    once = at.add_census_gate(narrow, ["tools/census_artifact.py"], ROOT)
+    assert once["gates"] == ["census", "ruff"]
+    assert "census artifact input moved: tools/census_artifact.py" in once["reason"]
+    assert at.add_census_gate(once, ["tools/census_artifact.py"], ROOT) == once
+    untouched = at.add_census_gate(narrow, ["docs/readme.md"], ROOT)
+    assert untouched == narrow, "the gate landed on a diff with no input in it"
+
+
+# --- tools/pre_merge.sh runs the --strict half (issue #2103) ---------------- #
+_CENSUS_STEP = re.compile(
+    r"^if want gate census; then\n(?P<body>(?:[ \t]+.*\n)*?)^(?:else|fi)\b",
+    re.M)
+
+
+def _census_step_command(text: str) -> str | None:
+    """The command tools/pre_merge.sh runs for the `census` gate, or None.
+
+    Read out of the script's `want gate census` branch rather than restated, so
+    this pins the WIRING: the gate name the selector emits has to be the name
+    the script switches on, and the command has to be the one CI's
+    `census-artifact` job runs."""
+    block = _CENSUS_STEP.search(text)
+    if block is None:
+        return None
+    line = re.search(r'^[ \t]+step\s+"[^"]*"\s+(?P<cmd>.*)$',
+                     block.group("body"), re.M)
+    return line.group("cmd").strip() if line else None
+
+
+def _census_gate_defect(text: str) -> str | None:
+    """Why this pre_merge.sh would NOT close issue #2103, or None. The pure
+    half, so the self-test below can feed it a mutated script."""
+    cmd = _census_step_command(text)
+    if cmd is None:
+        return ("tools/pre_merge.sh has no `want gate census` step, so the gate "
+                "the selector emits runs nothing locally")
+    if "census_artifact.py" not in cmd:
+        return f"the census step does not run the census checker: {cmd!r}"
+    if "--verify" not in cmd or "--strict" not in cmd:
+        return (f"the census step runs {cmd!r} without `--verify --strict`. "
+                "`--verify` alone prints `census verify: REPRODUCED` on a STALE "
+                "artifact too -- `--strict` is the half that objects, and it is "
+                "the half CI runs")
+    if re.search(r"\|\||;", cmd):
+        return (f"the census step cannot fail: {cmd!r} swallows the exit status "
+                "of the check it runs")
+    return None
+
+
+def test_pre_merge_runs_the_census_check_locally():
+    """Issue #2103, gate half. `tools/pre_merge.sh` mentioned the census exactly
+    once, as trailing prose inside the FORMAL gate's comment, which reads like
+    the census is gated locally when it is not."""
+    defect = _census_gate_defect(_PRE_MERGE.read_text(encoding="utf-8"))
+    assert defect is None, defect
+
+
+def test_the_pre_merge_census_pin_notices_its_own_removal():
+    """Anti-vacuity, wiring half: the three ways this step could stop closing
+    the defect. The step deleted, the `--strict` half dropped, and the exit
+    status swallowed. Each mutation has to be visible to the pin above."""
+    text = _PRE_MERGE.read_text(encoding="utf-8")
+    assert _census_gate_defect(text) is None, "the pin is already red"
+
+    for label, mutated in (
+            ("step removed",
+             text.replace("if want gate census; then", "if false; then")),
+            ("--strict dropped",
+             text.replace("tools/census_artifact.py --verify --strict",
+                          "tools/census_artifact.py --verify")),
+            ("exit status swallowed",
+             text.replace("tools/census_artifact.py --verify --strict",
+                          "tools/census_artifact.py --verify --strict || true")),
+    ):
+        assert mutated != text, f"the {label} mutation did not change the script"
+        assert _census_gate_defect(mutated) is not None, (
+            f"{label}: the pin does not notice, so it does not pin it"
+        )

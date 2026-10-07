@@ -251,6 +251,7 @@ command, in order, reporting each step:
 | site wheel | `tools/check_site_wheel.py` — the playground wheel is NOT committed; `.github/workflows/pages.yml` builds it into the published site, and this checks that contract (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
 | docs drift | `tools/docgen.py --check` (the source-derived doc blocks; `make docs-gen` regenerates) |
 | lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
+| census artifact | `tools/census_artifact.py --verify --strict` — CI's `census-artifact` job, run locally on the artifact's own input filter, so a diff that stales `docs/census-artifact/` reds here instead of on the PR. Adding a corpus document is enough to stale it (`corpus_dirs` includes `tests/fixtures`), and the test the selector used to pick for these paths skips the half that reds. The slowest step in this gate: a full census re-run, ~85 s on a shared dev box (issue #2103) |
 | formal | `sh formal/scripts/run_gate.sh` (lake build + the axioms gate; loud-skips without lake) |
 
 Two properties make it trustworthy rather than theatre:

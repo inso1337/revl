@@ -44,13 +44,15 @@ MACHINE OUTPUT (one key per line, for tools/pre_merge.sh to consume):
     REASON <one-line reason>
     PYTEST <space-separated pytest node-ids/paths, or empty>
     BACKENDS <space-separated tiers with a dedicated pre-merge step>
-    GATES <space-separated of: conformance site-wheel ruff formal>
+    GATES <space-separated of: conformance site-wheel ruff formal docs
+           vocabulary census>
 Lines beginning with '# ' are the human summary and are ignored by the parser.
 """
 from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import io
 import re
 import subprocess
@@ -66,7 +68,7 @@ BACKEND_TIERS = ("python", "go", "rust", "wasm", "java", "typescript")
 # ts-referencing tests, which is exactly what the FULL gate does for ts too.
 BACKEND_STEP_TIERS = ("python", "go", "rust", "wasm", "java")
 GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs",
-             "vocabulary")
+             "vocabulary", "census")
 
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
@@ -419,6 +421,107 @@ def _is_scoring_corpus_document(f: str, root: Path) -> bool:
     if not dirs:
         return True
     return any(f == d or f.startswith(d + "/") for d in dirs)
+
+
+# Issue #2103. The census artifact's own check — `tools/census_artifact.py
+# --verify --strict` — ran in CI's `census-artifact` job and NOWHERE else. The
+# local signal for a diff that stales the artifact was `tests/test_census_
+# artifact.py`, which the census/provenance arm below does select, and that
+# module SKIPS the half that reds CI (the crate-reproduction half is
+# root-suite-skipped by design, issue #1917): a green "83 passed, 1 skipped"
+# for a change CI was about to red. Two lanes were red on exactly that artifact
+# while this was written.
+#
+# The rule below is the missing entry, not a new check: `moved_inputs` is the
+# SAME filter CI's `decide` step runs, so a kind of input added to the artifact
+# reaches this gate the day it reaches CI's, and the two cannot drift into
+# disagreeing about what the artifact reads.
+#
+# It is asked IN PROCESS rather than through `--moved-inputs`, which is the
+# same filter behind a subprocess that reads the diff on stdin: `select()` is
+# called a few hundred times in one run of this module's own suite, and the
+# committed view is cached for the same reason `_READ_CACHE` is.
+_CENSUS_MODULE: dict[str, object] = {}
+_CENSUS_COMMITTED: dict[Path, dict | None] = {}
+
+
+def census_module():
+    """`tools/census_artifact.py` as a module, or None when it cannot load.
+
+    Loaded by path, and only from THIS file's own checkout: the module derives
+    its `ROOT` from where it lives, so it can answer for the tree it is in and
+    no other."""
+    if "module" not in _CENSUS_MODULE:
+        path = (Path(__file__).resolve().parents[1]
+                / "tools" / "census_artifact.py")
+        module = None
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "revl_census_selector", path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+        except Exception:      # noqa: BLE001 - the caller fails safe on None
+            module = None
+        _CENSUS_MODULE["module"] = module
+    return _CENSUS_MODULE["module"]
+
+
+def census_inputs(changed, root) -> list[str]:
+    """The changed paths that are inputs of the committed census artifact.
+
+    FAILS SAFE in both directions it cannot answer: the tool will not load, or
+    the committed records cannot be read, and EVERY changed path is an input.
+    That is `moved_inputs`' own reading of `committed=None` ("a broken artifact
+    cannot switch its own gate off") and it is the direction that runs the gate
+    rather than the one that skips it.
+
+    A root that is not the checkout the tool lives in gets the opposite answer,
+    deliberately: a synthetic tree in this module's own tests has no census
+    artifact at all, so no path in it is one of its inputs."""
+    module = census_module()
+    if module is None:
+        return list(changed)
+    root = Path(root).resolve()
+    if root != Path(module.ROOT).resolve():
+        return []
+    if root not in _CENSUS_COMMITTED:
+        try:
+            _CENSUS_COMMITTED[root] = module.filter_view(module.load_records())
+        except (OSError, ValueError, KeyError, TypeError):
+            # The same four the tool's own `--moved-inputs` catches, so
+            # "unreadable artifact" means the same thing on both sides.
+            _CENSUS_COMMITTED[root] = None
+    try:
+        return module.moved_inputs(list(changed), _CENSUS_COMMITTED[root])
+    except Exception:          # noqa: BLE001 - fail safe, see the docstring
+        return list(changed)
+
+
+def add_census_gate(result: dict, changed, root) -> dict:
+    """Issue #2103: `result` with the `census` gate when the diff owes it.
+
+    Called from `select()` and again from `main()`, because `main()` may take
+    `_test_add_delete_override`'s answer instead of `select()`'s and that
+    answer knows only about the new test files it was handed. The gate is a
+    property of the WHOLE diff, so it is applied to whichever answer is used.
+    The second call is free: it returns immediately when the gate is already
+    there."""
+    if "census" in result["gates"]:
+        return result
+    moved = census_inputs(changed, root)
+    if not moved:
+        return result
+    shown = ", ".join(moved[:3])
+    if len(moved) > 3:
+        shown += f", +{len(moved) - 3} more"
+    return {
+        **result,
+        "gates": sorted({*result["gates"], "census"}),
+        "reason": (f"{result['reason']} (census artifact input moved: {shown}"
+                   " -> census gate runs census_artifact.py --verify"
+                   " --strict)"),
+    }
 
 
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
@@ -1253,6 +1356,12 @@ def select(changed, root) -> dict:
     # 1.2s: 1.19s for `--check` over 1585 sites and 0.03s for `--self-test`,
     # measured on this tree against a 15-110s affected run.
     gates: set[str] = {"ruff", "vocabulary"}
+    # `census` is deliberately NOT in the set above: it is a filter over the
+    # diff rather than a whole-tree read, so it is applied once at the end
+    # (`add_census_gate`), and only for a diff that moves one of the artifact's
+    # inputs. A gate that always ran would put an 83s census re-run on every
+    # affected selection, including the documentation-only one the fast path
+    # exists to keep cheap.
     reasons: list[str] = []
 
     for f in changed:
@@ -1713,13 +1822,13 @@ def select(changed, root) -> dict:
         return _full(f"unmapped file {f} -> full (fail safe)")
 
     reason = "; ".join(dict.fromkeys(reasons)) + " -> targeted"
-    return {
+    return add_census_gate({
         "full": False,
         "reason": reason,
         "pytest": sorted(pytest_nodes),
         "backends": sorted(backends),
         "gates": sorted(gates),
-    }
+    }, changed, root)
 
 
 # --------------------------------------------------------------------------- #
@@ -2125,6 +2234,10 @@ def main(argv=None) -> int:
     changed, added, deleted, base = changed_files(root, args.base)
     result = (_test_add_delete_override(changed, added, deleted, root)
               or select(changed, root))
+    # Issue #2103: the census gate is a property of the whole diff, and the
+    # override above may have answered for only part of it. `select()` has
+    # already applied this for its own answer; the call is a no-op then.
+    result = add_census_gate(result, changed, root)
     if args.ci_backends:
         print(f"CI_BACKENDS {' '.join(ci_backends(changed, result, root))}".rstrip())
         return 0
