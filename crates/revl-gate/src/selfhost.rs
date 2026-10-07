@@ -665,6 +665,7 @@ pub struct MArm {
     arole: String,
     aline: i64,
     acands: Vec<String>,
+    apref: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -21528,7 +21529,12 @@ fn model_arms_in(ts: &[Token], lo: i64, hi: i64) -> MArmR {
                     more = false;
                 }
             }
-            out.push(MArm { aorig: orig.clone(), arole: (cands)[(0i64) as usize].clone(), aline: line, acands: cands.clone() });
+            let mut pref = false;
+            if (((cands.revl_length() > 1i64) && at_word(ts, j.clone(), "prefer")) && at_word(ts, (j).checked_add(1i64).expect("revl: Int overflow"), "resident")) {
+                pref = true;
+                j = (j).checked_add(2i64).expect("revl: Int overflow");
+            }
+            out.push(MArm { aorig: orig.clone(), arole: (cands)[(0i64) as usize].clone(), aline: line, acands: cands.clone(), apref: pref });
             i = j.clone();
         }
     }
@@ -21824,6 +21830,24 @@ fn model_held_str(held: &[String]) -> String {
     return text;
 }
 
+fn model_order_roles(a: MArm, held: &[String]) -> Vec<String> {
+    if ((!a.apref) || (held.revl_length() == 0i64)) {
+        return a.acands;
+    }
+    let mut first: Vec<String> = vec![];
+    let mut rest: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < a.acands.revl_length()) {
+        if contains__m2(held, &(a.acands)[(i) as usize]) {
+            first.push((a.acands)[(i) as usize].clone());
+        } else {
+            rest.push((a.acands)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return push_all(first.clone(), rest.clone(), 0i64);
+}
+
 fn model_arm_roles(a: MArm, rs: &[MRole], cs: &[CDecl]) -> Vec<String> {
     if ((a.acands.revl_length() == 1i64) && (mrole_at(rs, &(a.acands)[(0i64) as usize], 0i64) == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
         let ci = ccl_at(cs, &(a.acands)[(0i64) as usize], 0i64);
@@ -21838,7 +21862,7 @@ fn model_arm_roles(a: MArm, rs: &[MRole], cs: &[CDecl]) -> Vec<String> {
         }
         return out;
     }
-    return a.acands;
+    return model_order_roles(a.clone(), &(vec![]));
 }
 
 fn model_edges(bs: &[MBlock], rs: &[MRole], cs: &[CDecl], crossed: &[String], line: i64) -> Vec<MEdge> {
@@ -33496,6 +33520,13 @@ fn a_bare_emit_in_a_provide_method_if_is_admitted() {
 }
 
 #[test]
+fn a_bare_prefer_with_no_resident_is_refused_by_name__not_stepped_over() {
+    assert!((admit_src(mset("* -> fast | small prefer")) == String::from("MODEL|").revl_concat(&mundecided_msg("classify", "Classifier"))));
+    assert!((admit_src(mset("* -> fast | small prefer held")) == String::from("MODEL|").revl_concat(&mundecided_msg("classify", "Classifier"))));
+    assert!((admit_src(mset("* -> fast | small resident")) == String::from("MODEL|").revl_concat(&mundecided_msg("classify", "Classifier"))));
+}
+
+#[test]
 fn a_block_match_arm_in_a_provide_method_is_read_as_the_arm_s_scope() {
     let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o { Some(v) => { let z = v + 1\n z }, None => 0 }\n      return x\n    }\n  }\n}"));
     assert!((v == ""));
@@ -33540,6 +33571,13 @@ fn a_candidate_requires_resolves_against_the_running_service_block() {
     let cand = String::from("service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }");
     assert!((admit_src(cand.clone()) == "G1|unknown service `Store` in `requires` of CacheLayer"));
     assert!((admit_ambient(cand.clone(), String::from("Kv/store/;App/app/;App<store;!services;:Store;:AppSvc")) == ""));
+}
+
+#[test]
+fn a_candidate_set_with_the_residency_clause_is_decided__not_refused() {
+    assert!((admit_src(mset("* -> fast | small prefer resident")) == ""));
+    let three = String::from("model role a on_device device cpu memory 512 quant int8\nmodel role b on_device device cpu memory 512 quant int8\nmodel role c on_device device cpu memory 512 quant int8\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> a | b | c prefer resident }\n  provide out { fn classify(text) = text }\n}");
+    assert!((admit_src(three.clone()) == ""));
 }
 
 #[test]
@@ -34116,9 +34154,28 @@ fn a_requirement_key_may_not_spell_a_builtin_type() {
 }
 
 #[test]
+fn a_residency_clause_on_a_council_arm_is_refused_by_name() {
+    let head = String::from("model role fast on_device device cpu memory 512 quant int8\nmodel role small on_device device cpu memory 512 quant int8\nmodel council Release {\n  proposer -> fast,\n  adversary -> small,\n  aggregate unanimous quorum declared on_tie split\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> Release prefer resident }\n  provide out { fn classify(text) = text }\n}");
+    let bare = String::from("model role fast on_device device cpu memory 512 quant int8\nmodel role small on_device device cpu memory 512 quant int8\nmodel council Release {\n  proposer -> fast,\n  adversary -> small,\n  aggregate unanimous quorum declared on_tie split\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> Release }\n  provide out { fn classify(text) = text }\n}");
+    assert!((admit_src(head.clone()) == String::from("MODEL|").revl_concat(&mundecided_msg("classify", "Classifier"))));
+    assert!((admit_src(bare.clone()) == ""));
+}
+
+#[test]
+fn a_residency_clause_on_one_candidate_is_refused_by_name() {
+    assert!((admit_src(mset("* -> fast prefer resident")) == String::from("MODEL|").revl_concat(&mundecided_msg("classify", "Classifier"))));
+}
+
+#[test]
 fn a_role_is_declared_once__and_the_refusal_names_both_residences() {
     let v = admit_src(String::from("model role local on_device\nmodel role local off_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
     assert!((v == "MODEL|model role `local` is declared twice (first on line 1, as `on_device`; here as `off_device`)"));
+}
+
+#[test]
+fn a_role_named__prefer__or__resident__is_still_an_ordinary_candidate() {
+    let src = String::from("model role fast on_device device cpu memory 512 quant int8\nmodel role prefer on_device device cpu memory 512 quant int8\nmodel role resident on_device device cpu memory 512 quant int8\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> fast | prefer | resident prefer resident }\n  provide out { fn classify(text) = text }\n}");
+    assert!((admit_src(src.clone()) == ""));
 }
 
 #[test]
@@ -34623,6 +34680,15 @@ fn an_operation_named_without_a_parameter_list_decides_nothing_about_arguments()
     assert!((admit_ambient(bad.clone(), String::from("Kv/store/;!services;:Store,get,bump")) == ""));
     let miss = String::from("service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nope(key) } }");
     assert!((admit_ambient(miss.clone(), String::from("Kv/store/;!services;:Store,get,bump")) == "A6|`store.nope` is not a method of service Store"));
+}
+
+#[test]
+fn an_opted_in_arm_with_no_residency_is_ordered_exactly_as_written() {
+    let a = MArm { aorig: String::from("*"), arole: String::from("fast"), aline: 1i64, acands: vec![String::from("fast"), String::from("small")], apref: true };
+    assert!((model_order_roles(a.clone(), &(vec![])) == a.acands));
+    assert!((model_order_roles(a.clone(), &(vec![String::from("small")])) == vec![String::from("small"), String::from("fast")]));
+    let b = MArm { aorig: String::from("*"), arole: String::from("fast"), aline: 1i64, acands: vec![String::from("fast"), String::from("small")], apref: false };
+    assert!((model_order_roles(b.clone(), &(vec![String::from("small")])) == b.acands));
 }
 
 #[test]
@@ -35268,6 +35334,17 @@ fn the_residence_vocabulary_is_closed__so_a_typo_is_a_refusal() {
     let v = admit_src(String::from("model role local on_devise\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
     assert!((v == "MODEL|unknown residence `on_devise` for model role `local`"));
     assert!((admit_tag(String::from("model role local on_devise\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "MODEL"));
+}
+
+#[test]
+fn the_residency_clause_is_read_on_the_arm_that_wrote_it__not_its_sibling() {
+    assert!((admit_src(mset("confidential -> fast | small prefer resident, * -> fast | slow")) == admit_src(mset("* -> fast | slow"))));
+}
+
+#[test]
+fn the_residency_clause_moves_no_set_rule_and_no_memory_floor() {
+    assert!((admit_src(mset("* -> fast | slow prefer resident")) == admit_src(mset("* -> fast | slow"))));
+    assert!((admit_src(mset("* -> bare | small prefer resident")) == admit_src(mset("* -> bare | small"))));
 }
 
 #[test]
