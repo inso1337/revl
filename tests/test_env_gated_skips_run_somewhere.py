@@ -145,6 +145,15 @@ _INTENTIONALLY_LOCAL: dict[str, str] = {
         "in CI against a loopback fake of the same native API, so the gate "
         "hides a machine, not a code path."
     ),
+    "RVL_ROADMAP_GATE_DIR": (
+        "An OVERRIDE, not a gate, and the same shape as REVL_CONFORMANCE_PY: "
+        "tests/test_roadmap_issue_state.py falls back to this checkout's own "
+        "tools/check_roadmap_markers.py, which is exactly the file CI's lint "
+        "job runs, so every assertion it guards DOES execute in CI without "
+        "the variable. It exists so the same suite can be pointed at a base "
+        "worktree's copy of the tool to demonstrate that the new invariants "
+        "fail before the fix (issue #2100). Unset in CI is correct."
+    ),
 }
 
 # Reading one of these is a read of the CHILD process's environment being
