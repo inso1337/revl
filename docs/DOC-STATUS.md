@@ -174,7 +174,7 @@ was corrected by hand and had drifted back within a day.
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 47 | yes |
-| rejections.md | needs-work | 78 |  |
+| rejections.md | needs-work | 81 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
 | revl-attest.md | current | 9 |  |

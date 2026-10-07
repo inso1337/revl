@@ -20,6 +20,7 @@ import RevL.Theorems.G9Flow
 import RevL.Theorems.GRetain
 import RevL.Theorems.G4Inverse
 import RevL.Theorems.G4_WitnessedSiteUndo
+import RevL.Theorems.A5_CompensationAccompaniesEmission
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -2519,6 +2520,82 @@ def swVerdicts (p : String) (rs : SWRows) : String := Id.run do
     out := out ++ s!"SW\t{p}\t{r.comp}\t{r.index}\t{r.head}\t{r.cls}\t{r.undo}\t{v}\n"
   return out
 
+/-! ### The `A5` row — compensation accompanies an emission (issue #2114)
+
+`A5` carries one extern declaration's declared COMPUTER-USE capability token
+and whether that declaration's `compensate` slot is filled — the two columns
+`ui_family.teardown_refusal` actually decided at, when `parser.py` called it
+over the declaration's `capabilities`. The row decides
+`RevL.A5.legalToken` at those columns, and the class is read from the TOKEN
+through the model's own restatement of `ui_family.REVERSIBILITY`, so a
+registry the checker widens alone moves the checker and the harness's fatal
+`missed-A5` names the divergence.
+
+The refusal is raised at extern-DECLARATION time, so a document that violates
+the rule is refused AT PARSE and produces no facts at all: the harness
+assembles the violating rows off the refusal's own sentence and reported
+`G4`/`reversibility` code, and the admitted rows off the export. The row is
+**the rule on the corpus, not the coverage of the checker's extern walk** —
+an extern the exporter never reaches exports no row, and `a5_coverage` says
+so. -/
+
+section A5Row
+
+/-- One `A5` row: the declaration, the token it declares and its
+`compensate` column. -/
+structure A5Row where
+  path : String
+  name : String
+  token : String
+  compensate : String
+
+def parseA5 (f : List String) : Option A5Row :=
+  match f with
+  | ["A5", path, name, token, compensate] =>
+      some ⟨path, name, token, compensate⟩
+  | _ => none
+
+/-- The row's verdict: the rule at the token and the `compensate` column,
+through `RevL.A5.legalCols`. An unreadable column decides nothing (`false`),
+never a vacuous `ok`. -/
+def a5RowB (r : A5Row) : Bool := RevL.A5.legalCols r.token r.compensate
+
+/-- `a5RowB` is exactly the rule at the carried columns: the row holds when
+the `compensate` column parses and the declaration is `Legal` there, and is
+`false` — never vacuously `true` — when the column does not parse. -/
+theorem a5RowB_iff (r : A5Row) :
+    a5RowB r = true ↔
+      ∃ b, RevL.A5.parseCompensate r.compensate = some b ∧
+        RevL.A5.Legal ⟨"", r.token, b⟩ :=
+  RevL.A5.legalCols_iff r.token r.compensate
+
+def a5RowBAll (rows : List A5Row) : Bool := rows.all a5RowB
+
+theorem a5RowBAll_iff (rows : List A5Row) :
+    a5RowBAll rows = true ↔ ∀ r ∈ rows,
+      ∃ b, RevL.A5.parseCompensate r.compensate = some b ∧
+        RevL.A5.Legal ⟨"", r.token, b⟩ := by
+  unfold a5RowBAll
+  rw [List.all_eq_true]
+  exact forall_congr' fun r => imp_congr_right fun _ => a5RowB_iff r
+
+/-- The `A5` rows of one file. Kept out of `main` so its elaboration stays
+within the default heartbeat budget. -/
+structure A5Rows where
+  rows : List A5Row
+
+def parseA5Rows (fields : List (List String)) : A5Rows :=
+  { rows := fields.filterMap parseA5 }
+
+def a5Verdicts (p : String) (rs : A5Rows) : String := Id.run do
+  let mut out := ""
+  for r in rs.rows.filter (fun r => r.path == p) do
+    let v := if a5RowB r then "ok" else "fail"
+    out := out ++ s!"A5\t{p}\t{r.name}\t{r.token}\t{r.compensate}\t{v}\n"
+  return out
+
+end A5Row
+
 end SWitness
 
 -- ---------------------------------------------------------------- main
@@ -2653,6 +2730,7 @@ def main (args : List String) : IO UInt32 := do
     let retainrows := parseGRetainRows fields
     let invrows := parseG4InvRows fields
     let swrows := parseSWRows fields
+    let a5rows := parseA5Rows fields
     let itrows := fields.filterMap parseIT
     let mcrows := fields.filterMap parseMC
     let aerows := fields.filterMap parseAE
@@ -2926,6 +3004,15 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ accessVerdicts p fm garows
       out := out ++ asyncVerdicts p fnrows anrows asrows agrows
       out := out ++ declVerdicts p fm brows psrows itrows mcrows
+    -- A5 verdicts (compensation accompanies an emission, issue #2114),
+    -- emitted OUTSIDE the per-path loop: the violating shape is refused AT
+    -- PARSE, so its file has no `M` row and never enters `paths`, while the
+    -- exporter's `A5` row for it is in the export like any other. Emitting
+    -- per the ROWS' own paths is what makes the refused direction a computed
+    -- verdict rather than a fact of record, which is the difference between
+    -- `agree-G4` and a `missed-G4` the harness could not have seen.
+    for q in (a5rows.rows.map (·.path)).eraseDups do
+      out := out ++ a5Verdicts q a5rows
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -3004,3 +3091,5 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.g4invRowB_iff
 #print axioms RevLOracle.swRowB_iff
 #print axioms RevLOracle.swRowBAll_iff
+#print axioms RevLOracle.a5RowB_iff
+#print axioms RevLOracle.a5RowBAll_iff

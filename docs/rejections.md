@@ -67,7 +67,7 @@ to the diagnostic; see docs/why-traces.md.
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
 | A3 | host-safe identifiers | lowering transform (renames, never refuses) |
-| A5 | compensation accompanies an emission | by construction |
+| A5 | compensation accompanies an emission | extern declaration (registry rule); reported as G4 / `reversibility` |
 | A6 | provide-methods match the service signature | lower / compat gate |
 | A8 | mid-body failure reverts and contains (L-Raise) | lower |
 | A9 | a provide key is declared in the component's `provides` clause | lower |
@@ -651,21 +651,47 @@ emitter's own helper names) cross on the live cordis-wasm runtime
 
 ## A5 — compensation accompanies an emission
 
-No refusing example: `compensate` is an *optional* slot (DESIGN.md §3.5 —
-an emission "may declare" one) that the grammar binds only to an `emit`,
-and `emit` requires a declared `emission` (G4). For every ordinary
-capability there is no "compensation required but missing" program; the
-guarantee is by construction. The lowering test is
-`test_a5_compensate_lowering`.
+The obligation is a **registry** rule, and the code that carries it is
+**G4 with category `reversibility`** — there is no A5 code. Since issue
+#2114 that is what this section says, and it supersedes an earlier
+argument here that claimed "no refusing example *can* exist".
 
-One family is the exception, and it refuses under G4 rather than here
-(roadmap item 522, `docs/design/538-ui-transactions.md`). A computer-use
-verb carries a reversibility class that the registry owns, not the
-author, so the `compensate` slot is no longer free: `ui.text` is
-compensatable and must declare one, while `ui.click` (unknown) and
-`ui.download` (irreversible) may not, because the declared slot is what
-the residue and erase reports read and a transaction over a step with no
-inverse has to report `uncompensated` rather than a clean teardown.
+That earlier argument ran: `compensate` is an *optional* slot (DESIGN.md
+§3.5 — an emission "may declare" one), the grammar binds it only to an
+`emit`, and `emit` requires a declared `emission` (G4), so for every
+ordinary capability there is no "compensation required but missing"
+program and the guarantee is by construction. The premise is right and
+the conclusion does not follow from it. A guarantee whose subject is an
+*optional* clause is vacuous **until something states when the clause
+becomes required**; "no program violates it" was only ever true of the
+ordinary capabilities because nothing in the language asked them for a
+compensation. The claim was therefore a statement about the absence of a
+rule, not a guarantee, and it is withdrawn here rather than left
+standing.
+
+What states the requirement is the registry. A computer-use verb carries
+a reversibility class that the registry owns, not the author
+(`src/revl/ui_family.py`, `REVERSIBILITY`; roadmap item 522,
+`docs/design/538-ui-transactions.md`), so the `compensate` slot is no
+longer free: a verb whose class is `compensatable` **must** declare one,
+while a verb whose class has **no inverse** (`unknown`, `irreversible`)
+**may not**, because the declared slot is what the residue and erase
+reports read and a transaction over a step with no inverse has to report
+`uncompensated` rather than a clean teardown. Both directions are
+refused at the extern declaration by `ui_family.teardown_refusal`, called
+from the parser, and both are reported as `code="G4"`,
+`category="reversibility"`. Refusing examples:
+
+- `examples/rejections/a5_compensatable_without_compensate.rvl` — a
+  `compensatable` verb omits its `compensate`.
+- `examples/rejections/a5_no_inverse_declares_compensate.rvl` — a verb
+  with no inverse declares one.
+
+`test_a5_compensate_lowering` is *not* the test for this obligation: it
+asserts only that a declared clause is **carried** into the IR, never
+that one had to be declared. The differential row is `formal/STATUS.md`'s
+A5 row and its non-vacuity witnesses; the rule itself is
+`RevL.A5.legalToken` and the boundary lemmas beside it.
 
 ## A6 — provide-methods match the service signature
 
