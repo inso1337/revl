@@ -109,6 +109,7 @@ sys.path.insert(0, str(REPO / "backends" / "python"))
 
 from revl import cap_order
 from revl import recovery
+from revl import ui_family  # the shipped computer-use reversibility registry
 from revl.compiler import compile_files
 from revl.diagnostics import classify
 from revl.errors import RevlError
@@ -2306,6 +2307,282 @@ def sw_coverage() -> list[str]:
     return findings
 
 
+# ------------------- compensation accompanies an emission (issue #2114)
+#
+# A5. `docs/rejections.md` called this guarantee BY CONSTRUCTION and argued no
+# refusing example could exist, because `compensate` is an OPTIONAL slot
+# (`DESIGN.md`: an emission "may declare" one). The slot is optional; the
+# OBLIGATION is not. `ui_family.teardown_refusal`, called from `parser.py` at
+# extern-declaration time over the declared `capabilities`, makes it mandatory
+# the moment the emission is a computer-use one, off the registry table:
+#
+#  * a verb whose class is `compensatable` MUST fill its `compensate` slot
+#    ("is compensatable, so extern `X` must declare `compensate`");
+#  * a verb whose class has NO INVERSE (`irreversible`, `unknown`) MUST NOT
+#    ("is irreversible, so extern `X` may not declare `compensate`").
+#
+# Both are raised with `code="G4"`, `category="reversibility"`. So the
+# obligation is real and DECIDABLE — a finite check over declarations with no
+# reach, the shape `G-COUNCIL-SPLIT` already implements — and the code the
+# checker credits it to is its sibling G4's. The row below states that rule
+# and the STATUS row records the code, instead of the guarantee sitting at
+# `none` with "Unbuilt work" in Notes.
+#
+# The rule's DOMAIN is the declared capability token of an extern, and the
+# class is REGISTRY-owned, not author-owned, so the exporter carries one `A5`
+# row per (extern declaration, declared capability token) whose token the
+# shipped registry classifies as a computer-use verb. A declaration with no
+# capability token, or one whose token is outside the family (`db.insert`),
+# emits no row: the rule does not reach it, which is `RevL.A5`'s
+# `outside_the_family_is_out_of_the_row`.
+#
+# ONE HALF IS NOT ON THE EXPORT. The refusal is raised at PARSE, so a document
+# that violates A5 produces NO FACTS AT ALL: it appears in the
+# `REFUSED-AT-PARSE` census and nowhere else. A row assembled only from the
+# export could therefore never say anything but `ok`, and would be vacuous in
+# exactly the way `a5_coverage` refuses. That half is therefore read off the
+# checker's REPORTED refusal — the same door the `INV` row takes for the
+# lowering-time G4/inverse refusals — and it is what makes the row decide both
+# polarities. `a5_coverage` requires both, and requires that the violating
+# rows are exactly the ones the checker refused under `G4`/`reversibility`.
+#
+# The row is the rule ON THE CORPUS, NOT coverage of the checker's walk: an
+# extern the exporter never reaches exports no row.
+
+#: `ui_family.REVERSIBILITY`, restated — the `INV` row restates its tables the
+#: same way. A widening of the shipped registry then moves the CHECKER alone,
+#: and the disagreement surfaces as a finding in `a5_coverage` rather than
+#: being absorbed into the reference by importing it.
+_A5_REVERSIBILITY = {
+    "screen.observe": "reversible",
+    "ui.find": "reversible",
+    "ui.text": "compensatable",
+    "ui.click": "unknown",
+    "ui.download": "irreversible",
+}
+
+#: `ui_family.NO_INVERSE`: the classes for which a declared inverse is a false
+#: cleanliness claim.
+_A5_NO_INVERSE = frozenset({"irreversible", "unknown"})
+
+#: The class the rule makes mandatory.
+_A5_COMPENSATABLE = "compensatable"
+
+#: The `G4`/`reversibility` refusals the row could not read: `rel -> why`.
+#: A finding, never a silent skip.
+_A5_UNREADABLE: dict[str, str] = {}
+
+#: What the REFERENCE decided for each `A5` row:
+#: `(rel, extern, token) -> (class, has_compensate, holds)`. Read by
+#: `a5_coverage`.
+_A5_ROWS: dict = {}
+
+
+def _a5_class(token: str) -> str | None:
+    """`ui_family.reversibility` over the RESTATED table: parameters (item
+    294) stripped, then the token's first two segments — a LADDER RUNG
+    resolves to its VERB's class, so `ui.text.selector` cannot be more
+    reversible than `ui.text`. `None` outside the family."""
+    segments = token.split("(", 1)[0].split(".")
+    if len(segments) < 2:
+        return None
+    return _A5_REVERSIBILITY.get(f"{segments[0]}.{segments[1]}")
+
+
+def _a5_holds(cls: str | None, has_compensate: bool) -> bool:
+    """`RevL.A5.legalB` at one row's columns, harness-spelled so that changing
+    the model alone moves the model and the reference's `fail` becomes the
+    harness's `missed-G4`. Polarity as for every other row: `ok` is the rule
+    HOLDING (the `compensatable` declaration fills its `compensate` slot, or
+    the class is one the rule does not reach) and `fail` is the rule VIOLATED.
+    A class outside the family HOLDS: the rule does not reach it."""
+    if cls == _A5_COMPENSATABLE:
+        return has_compensate
+    if cls in _A5_NO_INVERSE:
+        return not has_compensate
+    return True
+
+
+#: The two sentences `ui_family.teardown_refusal` prints, and the direction
+#: each names. Read off the checker's own refusal, like the `INV` row's three.
+A5_REFUSAL_RE = re.compile(
+    r"^`(?P<kind>[a-z]+)\[(?P<token>[^\]]+)\]` is (?P<cls>[a-z]+), so "
+    r"extern `(?P<name>[^`]+)` (?P<direction>must|may not) declare "
+    r"`compensate`$")
+
+
+def a5_rows(rel: str, prog) -> list[str]:
+    """The `A5` rows of one ACCEPTED file: one per (extern declaration,
+    declared capability token) whose token the SHIPPED registry classifies as
+    a computer-use verb. `has_compensate` is the declaration's own
+    `compensate` slot, read the way `parser.extern_decl` reads it before it
+    hands the answer to `teardown_refusal` (`compensate is not None`).
+
+    The domain filter is the shipped registry's, deliberately, while the
+    DECISION below is the restated table's: a widening of the registry then
+    emits a row the reference calls out of domain, which `a5_coverage`
+    reports, instead of being silently absorbed."""
+    rows: list[str] = []
+    for e in prog.externs:
+        has = e.compensate is not None
+        for token in (e.capabilities or ()):
+            if ui_family.reversibility(token) is None:
+                continue
+            rows.append("\t".join(["A5", rel, e.name, token,
+                                   "yes" if has else "no"]))
+    return rows
+
+
+def a5_refusal_rows(rel: str, err) -> list[str]:
+    """The `A5` row one PARSE-REFUSED document contributes — the violating
+    half, which the export cannot carry (see the section note).
+
+    The refusal's own sentence names the token and the extern; the shipped
+    registry says which of the two rules that token's class puts it under; and
+    the sentence's direction has to AGREE with the registry, or the two halves
+    of the checker have drifted and the row records a finding rather than
+    deciding a shape it cannot read. The compensate column then follows from
+    the rule the direction names: `must declare` is the column EMPTY,
+    `may not declare` is the column FILLED."""
+    info = classify(err)
+    if info.get("code") != "G4" or info.get("category") != "reversibility":
+        return []
+    m = A5_REFUSAL_RE.match(info.get("message") or "")
+    if m is None:
+        _A5_UNREADABLE[rel] = (
+            "the G4/reversibility refusal is not one of the two sentences "
+            "`ui_family.teardown_refusal` prints")
+        return []
+    token, name = m.group("token"), m.group("name")
+    direction = m.group("direction")
+    cls = ui_family.reversibility(token)
+    if cls is None:
+        _A5_UNREADABLE[rel] = (
+            f"the G4/reversibility refusal names the token {token!r}, which "
+            "the shipped registry does not classify")
+        return []
+    if (cls == _A5_COMPENSATABLE) != (direction == "must"):
+        _A5_UNREADABLE[rel] = (
+            f"the refusal says {direction!r} for a token the shipped registry "
+            f"classifies {cls!r}: the two halves of the checker disagree")
+        return []
+    return ["\t".join(["A5", rel, name, token,
+                        "no" if direction == "must" else "yes"])]
+
+
+def a5_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `A5` row (issue #2114).
+
+    THE RULE ON THE CORPUS, NOT coverage of the checker's walk. What is
+    enforced is that the rule BITES, in both directions, on the one input the
+    row carries that the document's TEXT does not fix — whether the
+    declaration's `compensate` slot is filled:
+
+      * every emitted row must be IN the row's domain: the restated table must
+        classify the row's token, so a row that reached outside the family is
+        a finding and not a silent widening;
+      * the restated table's own entries must be the shipped registry's, so a
+        registry the checker widened alone cannot leave the reference behind;
+      * the verdict must FLIP when the `compensate` column is emptied on a
+        `compensatable` row and when it is filled on a NO-INVERSE row — the
+        two mutations are the two rules, and they are the mutations the corpus
+        already contains (`type_amount` with `compensate clear_amount()`, and
+        `ui.click` with no `compensate` at all);
+      * the verdict must FLIP when the class is mutated to `reversible`, which
+        neither half reaches, so a row that returned a constant fails here;
+      * the corpus must exercise BOTH polarities, and the `compensatable` half
+        must be exercised SATISFIED as well as violated — agreement on a row
+        set that only ever said `ok` proves nothing, and neither does one that
+        only ever said `fail`;
+      * every VIOLATING row must be a document the checker REFUSED under
+        `G4`/`reversibility`: the violation is a parse-time refusal, and the
+        only honest way to carry it is off the checker's own reported code. A
+        violating row over a file the checker accepted would be `formal-strict`
+        in `checker_alignment`; this is the other direction, stated here.
+
+    Returns findings, treated as gate failures."""
+    findings: list[str] = []
+    for token, cls in sorted(_A5_REVERSIBILITY.items()):
+        shipped = ui_family.reversibility(token)
+        if shipped != cls:
+            findings.append(
+                f"a5 coverage: the restated table says {token!r} is {cls!r} "
+                f"and the shipped registry says {shipped!r} — the reference "
+                "has drifted from the checker")
+    for rel, why in sorted(_A5_UNREADABLE.items()):
+        findings.append(f"a5 coverage: {rel}: {why}")
+    if not _A5_ROWS:
+        findings.append("a5 coverage: no A5 rows at all — the row would "
+                        "decide nothing and agree vacuously")
+        return findings
+    for (rel, name, token), (cls, has, holds) in sorted(_A5_ROWS.items()):
+        where = f"{rel}:{name}[{token}]"
+        if cls is None:
+            findings.append(
+                f"a5 coverage: {where}: the row is outside its own domain — "
+                f"the restated table does not classify {token!r}")
+            continue
+        if holds != _a5_holds(cls, has):
+            findings.append(
+                f"a5 coverage: {where}: the reference decided "
+                f"{'holds' if holds else 'violated'} but the declaration's "
+                f"compensate column is {'filled' if has else 'empty'}")
+        if not holds:
+            if cls == _A5_COMPENSATABLE and not _a5_holds(cls, True):
+                findings.append(
+                    f"a5 coverage: {where}: filling the `compensate` slot does "
+                    "not flip the verdict — the row is not reading the column")
+            if cls in _A5_NO_INVERSE and not _a5_holds(cls, False):
+                findings.append(
+                    f"a5 coverage: {where}: emptying the `compensate` slot "
+                    "does not flip the verdict — the row is not reading the "
+                    "column")
+            if not _a5_holds("reversible", has):
+                findings.append(
+                    f"a5 coverage: {where}: reclassifying the token as "
+                    "`reversible` does not flip the verdict — the row is not "
+                    "reading the class")
+        if holds and cls == _A5_COMPENSATABLE and has                 and _a5_holds(cls, False):
+            findings.append(
+                f"a5 coverage: {where}: emptying the `compensate` slot on an "
+                "admitted `compensatable` declaration does not flip the "
+                "verdict — the row is not reading the column")
+    refused = {k: x for k, x in _A5_ROWS.items() if not x[2]}
+    admitted = {k: x for k, x in _A5_ROWS.items() if x[2]}
+    satisfied = {k: x for k, x in admitted.items()
+                 if x[0] == _A5_COMPENSATABLE and x[1]}
+    if not refused:
+        findings.append("a5 coverage: every A5 row says `ok` — the corpus "
+                        "never exercises the rule, so the row is vacuous")
+    if not satisfied:
+        findings.append("a5 coverage: no admitted A5 row is a "
+                        "`compensatable` declaration WITH its `compensate` "
+                        "slot filled — the obligation's satisfied side is "
+                        "unexercised, so agreement on it proves nothing")
+    if not any(x[0] in _A5_NO_INVERSE for x in admitted.values()):
+        findings.append("a5 coverage: no A5 row reaches a class with NO "
+                        "INVERSE — the rule's other half is unexercised")
+    for (rel, name, token), (_cls, _has, holds) in sorted(refused.items()):
+        info = checker_code(rel)
+        if info != ("G4", "reversibility"):
+            findings.append(
+                f"a5 coverage: {rel}: the row is VIOLATED on a file the "
+                f"checker reports {info[0]!r}/{info[1]!r} — the violation of "
+                "A5 is a parse-time G4/reversibility refusal, and a violating "
+                "row over any other reported code is not this rule")
+    if not findings:
+        print(f"a5 coverage: {len(_A5_ROWS)} A5 rows over "
+              f"tokens={','.join(sorted({t for _, _, t in _A5_ROWS}))}, "
+              f"{len(refused)} violating and {len(admitted)} admitting "
+              f"({len(satisfied)} of them `compensatable` WITH its "
+              "`compensate` slot filled), each flipping when the `compensate` "
+              "column moves and when the class moves off the rule — the rule "
+              "ON THE CORPUS, and the violations are exactly the documents "
+              "the checker refused under G4/reversibility")
+    return findings
+
+
+
 # ------------------------------- out of scope by kind (issue #1810)
 #
 # `out-of-fragment` collects refusals under a rule the model states no row
@@ -3391,6 +3668,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # G6 fixtures from every count in this harness.
             refusals[rel] = classify(e).get("code") or "UNCODED"
             tsv.append("\t".join(["X", rel, refusals[rel]]))
+            # The A5 half the export cannot carry: a document that violates
+            # the rule is refused AT PARSE, so it contributes no facts. Read
+            # off the refusal's own sentence and code (issue #2114).
+            tsv.extend(a5_refusal_rows(rel, e))
             continue
         if not prog.components:
             # Parsed, but there is no composition to model. Recorded by name
@@ -3449,6 +3730,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         tsv.extend(g9_rows(rel))
         tsv.extend(retain_rows(rel))
         tsv.extend(g4inverse_rows(rel, prog))
+        tsv.extend(a5_rows(rel, prog))
         # async names (AN, issue #1808), file-wide
         for name in async_names(prog):
             tsv.append("\t".join(["AN", rel, name]))
@@ -5228,7 +5510,12 @@ class Verdicts(NamedTuple):
     corpus, NOT coverage of the checker's walk, issue #1811 group 2), and
     `sw` SW rows (the witnessed-extern site-`undo` rule at the head
     classification and the site `undo` the export carries — the rule ON THE
-    CORPUS, NOT coverage of the checker's site walk, issue #2098)."""
+    CORPUS, NOT coverage of the checker's site walk, issue #2098), and
+    `a5` A5 rows (compensation accompanies an emission: a `compensatable`
+    extern fills its `compensate` slot and a class with no inverse does not,
+    at the declaration's own capability token — the rule ON THE CORPUS, read
+    off the declaration the export carries and the refusal the checker
+    REPORTS under `G4`/`reversibility`, issue #2114)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -5259,6 +5546,7 @@ class Verdicts(NamedTuple):
     retain: dict[str, str]
     inv: dict[str, str]
     sw: dict[tuple[str, str, str], str]
+    a5: dict[tuple[str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -5275,7 +5563,7 @@ class Verdicts(NamedTuple):
                 + len(self.places) + len(self.model_reach)
                 + len(self.councils) + len(self.g9) + len(self.retain)
                 + len(self.inv)
-                + len(self.sw))
+                + len(self.sw) + len(self.a5))
 
 
 
@@ -5317,6 +5605,7 @@ def parse_verdicts(text: str) -> Verdicts:
     retain: dict[str, str] = {}
     inv: dict[str, str] = {}
     sw: dict[tuple[str, str, str], str] = {}
+    a5: dict[tuple[str, str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -5453,13 +5742,25 @@ def parse_verdicts(text: str) -> Verdicts:
             # SITE, not the file, because a file may hold several witnessed
             # sites and the rule is stated per site.
             sw[(parts[1], parts[2], parts[3])] = parts[7]
+        elif parts[0] == "A5" and len(parts) == 6:
+            # Compensation accompanies an emission (issue #2114):
+            # (file, extern, declared capability token) -> ok|fail. The
+            # declaration's `compensate` column rides in the row so its own
+            # output shows what it read, and the CLASS is not a column at all:
+            # the row carries the DECLARED TOKEN, and both sides read the class
+            # off it through their own copy of the registry (the reference's
+            # `_a5_class`, the oracle's `legalToken`), which is what makes the
+            # two copies' agreement a check rather than a restatement. The KEY
+            # is the DECLARATION AT ITS TOKEN, because one extern may declare
+            # several computer-use capabilities and the rule is stated at each.
+            a5[(parts[1], parts[2], parts[3])] = parts[5]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-            places, model_reach, councils, g9, retain, inv, sw)
+            places, model_reach, councils, g9, retain, inv, sw, a5)
 
 
 
@@ -5803,6 +6104,30 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             sw[(r[1], r[2], r[3])] = "ok" if holds else "fail"
             _SW_ROWS[(r[1], r[2], r[3])] = (r[4], r[5], undo, holds)
 
+    # COMPENSATION ACCOMPANIES AN EMISSION (issue #2114): the rule at the
+    # declaration's own capability token and its `compensate` column,
+    # recomputed here from the exported columns. `_a5_holds` is
+    # harness-spelled, not imported from `RevL.A5.legalB`, so changing the
+    # model alone moves the model and the reference's `fail` becomes the
+    # harness's `missed-G4`. THE RULE ON THE CORPUS: the class is read off
+    # the DECLARED TOKEN, so this recomputes the RULE and says nothing about
+    # the checker's coverage of the extern walk.
+    #
+    # Polarity as for every other row: `ok` is the rule HOLDING (a
+    # `compensatable` declaration with its `compensate` slot filled, or a
+    # class the rule does not reach) and `fail` is the rule VIOLATED. So a
+    # `fail` is what explains a checker refusal, and `ok` over a refused
+    # file is the fatal `missed-G4`.
+    a5: dict[tuple[str, str, str], str] = {}
+    _A5_ROWS.clear()
+    for r in rows:
+        if r and r[0] == "A5" and len(r) == 5:
+            cls = _a5_class(r[3])
+            has = r[4] == "yes"
+            holds = _a5_holds(cls, has)
+            a5[(r[1], r[2], r[3])] = "ok" if holds else "fail"
+            _A5_ROWS[(r[1], r[2], r[3])] = (cls, has, holds)
+
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
     for r in srows:
@@ -6137,7 +6462,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-            places, model_reach, councils, g9, retain, inv, sw)
+            places, model_reach, councils, g9, retain, inv, sw, a5)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -6437,6 +6762,16 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # and the rule is stated per site, so any failing site on this file
         # is this file's `sw_fail`.
         sw_fail = any(x == "fail" for k, x in v.sw.items() if k[0] == rel)
+        # The A5 rows (compensation accompanies an emission, issue #2114),
+        # keyed by (file, extern, declared capability token): one extern may
+        # declare several computer-use capabilities and the rule is stated at
+        # each, so any failing token on this file is this file's `a5_fail`.
+        # ONLY the admitted direction can reach here — the violating shape is
+        # refused AT PARSE, so it has no facts and is bucketed by the second
+        # pass below. This half is what makes a `compensatable` declaration
+        # that fills its `compensate` slot an `agree-accept` rather than an
+        # unchecked claim.
+        a5_fail = any(x == "fail" for k, x in v.a5.items() if k[0] == rel)
         a1_fail = any(x == "fail" for k, x in v.async_sites.items()
                       if k[0] == rel) or any(
             x == "fail" for k, x in v.async_sigs.items() if k[0] == rel)
@@ -6456,7 +6791,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             and not df_fail and not bu_fail and not g1_fail and not a1_fail \
             and not pl_fail and not ic_fail and not ms_fail \
             and not mp_fail and not ma_fail and not cv_fail and not g9_fail \
-            and not rt_fail and not inv_fail and not sw_fail
+            and not rt_fail and not inv_fail and not sw_fail \
+            and not a5_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -6492,6 +6828,18 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # explains the refusal; a row that says `ok` over a refusal is the
             # model being weaker than revl, and fatal.
             record("agree-G4" if inv_fail else "missed-G4", rel)
+        elif code == "G4" and category == "reversibility":
+            # Compensation accompanies an emission (A5, issue #2114):
+            # `ui_family.teardown_refusal` is called from `parser.py` at
+            # EXTERN-DECLARATION time, so this refusal is raised at PARSE and
+            # a document carrying it has no facts at all — which is why the
+            # `A5` rows are assembled from the export for the admitted
+            # direction and from this refusal's own sentence for the
+            # violating one. A file can only reach this arm if it parsed AND
+            # the checker refused it here, which the call site makes
+            # impossible; kept so that a future call site that moves the
+            # check off the parser is bucketed rather than silently dropped.
+            record("agree-G4" if a5_fail else "missed-G4", rel)
         elif code == "G4" and category == "witnessed":
             # The witnessed-extern site-`undo` rule (issue #2098,
             # `lower._lower_effect_step`): a site whose acquisition head
@@ -6655,6 +7003,25 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     nm_codes: dict[str, list[str]] = {}
     for rel in componentless:
         nm_codes.setdefault(checker_code(rel)[0], []).append(rel)
+
+    # PARSE-REFUSED files carrying the A5 refusal (issue #2114). The
+    # compensation obligation is raised at extern-DECLARATION time, so the
+    # only document that can violate it is one the parser never finishes:
+    # such a file has no facts, so no arm of the loop above can see it, and
+    # leaving it to the `REFUSED-AT-PARSE` census would leave A5's violating
+    # direction unratcheted — which is the whole defect the issue names.
+    #
+    # The refusal is matched on the checker's REPORTED code AND category, so
+    # `g4_missing_undo.rvl` and the two `g4_effect_no_undo_*` fixtures (both
+    # `G4`/`guarantee`, other rules under the same code) are untouched. A
+    # refusal the `A5` rows see is `agree-G4`; a refusal they admit is the
+    # model being weaker than revl, and fatal, exactly as in the loop above.
+    for rel in sorted(v.refused):
+        code, category = checker_code(rel)
+        if code != "G4" or category != "reversibility":
+            continue
+        a5_fail = any(x == "fail" for k, x in v.a5.items() if k[0] == rel)
+        record("agree-G4" if a5_fail else "missed-G4", rel)
 
     _ALIGN.update(align)
     _ALIGN_SAMPLES.update(samples)
@@ -7194,7 +7561,8 @@ def main() -> int:
             ("g9", ref.g9, formal.g9),
             ("retain", ref.retain, formal.retain),
             ("inv", ref.inv, formal.inv),
-            ("sw", ref.sw, formal.sw)):
+            ("sw", ref.sw, formal.sw),
+            ("a5", ref.a5, formal.a5)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -7254,6 +7622,7 @@ def main() -> int:
     mismatches.extend(retain_coverage())
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())
+    mismatches.extend(a5_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

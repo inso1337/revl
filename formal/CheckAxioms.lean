@@ -494,3 +494,28 @@ import RevL
 #print axioms RevL.G4Witnessed.corpus_sites_decided
 #print axioms RevL.G4Witnessed.corpus_flip_is_the_undo_column
 #print axioms RevL.G4Witnessed.witnessed_site_undo_not_vacuous
+
+-- A5: compensation accompanies an emission (issue #2114). The obligation is
+-- `ui_family.teardown_refusal`'s, raised from `parser.py` at extern
+-- declaration time over the declaration's own `capabilities`, and reported
+-- under code `G4`, category `reversibility`. The row decides the rule at the
+-- declared capability token and the declaration's `compensate` column — both
+-- already in the export, and the violating half read off the refusal's own
+-- sentence — not on the coverage of the checker's extern walk; see
+-- RevL/Theorems/A5_CompensationAccompaniesEmission.lean.
+#print axioms RevL.A5.registersB_iff
+#print axioms RevL.A5.claimsNothingB_iff
+#print axioms RevL.A5.legalB_iff
+#print axioms RevL.A5.a5B_iff
+#print axioms RevL.A5.not_legal_of_legalB_false
+#print axioms RevL.A5.legalToken_iff
+#print axioms RevL.A5.legalCols_iff
+#print axioms RevL.A5.compensatable_without_compensate_refused
+#print axioms RevL.A5.no_inverse_may_not_declare
+#print axioms RevL.A5.reversible_untouched
+#print axioms RevL.A5.rung_is_not_an_escape_hatch
+#print axioms RevL.A5.valuation_does_not_move_the_class
+#print axioms RevL.A5.outside_the_family_is_out_of_the_row
+#print axioms RevL.A5.fixtures_decided
+#print axioms RevL.A5.a5_not_vacuous
+#print axioms RevL.A5.witness_bites

@@ -1,0 +1,24 @@
+// REJECTED — A5: a crossing of a computer-use verb whose registry class has
+// NO INVERSE, whose extern nevertheless declares a `compensate`. This is A5's
+// second half, and it is the half that keeps the rule from being read as
+// "declare a compensate whenever you cross": a verb the registry says is
+// `unknown` — `ui.click` acts on the user's screen and nothing in the family
+// can undo the click itself — must NOT claim a compensation, because a
+// compensation that cannot restore the state it names is worse than none.
+//
+// Without this half the rule would be satisfiable by adding a `compensate` to
+// every extern, which is the direction the row's `witness_bites` theorem
+// exercises. The refusal is again read off the checker's REPORTED CODE — G4
+// with category `reversibility` — not off the filename.
+//
+// expected error:
+//   a5_no_inverse_declares_compensate.rvl:23: `emission[ui.click]` is
+//     unknown, so extern `actuate` may not declare `compensate`
+//     remove the `compensate` clause, or cross a verb the registry lists as
+//     compensatable
+
+extern pure fn clear_amount()
+  = @py { return None }
+
+extern emission[ui.click] fn actuate(s: Str) compensate clear_amount()
+  = @py { return None }

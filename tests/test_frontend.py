@@ -505,6 +505,16 @@ REJECTIONS = {
     # announced is the sibling of A6 (A6 bounds the *methods* of a declared key;
     # A9 bounds the *key* against the clause). Dedicated code A9 (A1-A8 are all
     # occupied in the amendment table), with a hint naming both fixes.
+    # issue #2114: A5's two refusals. `compensate` is an optional slot, so the
+    # guarantee is stated over the registry (revl.ui_family.REVERSIBILITY):
+    # a `compensatable` verb must declare one, a verb with no inverse must not.
+    # Both are raised at the extern declaration under code G4 with category
+    # `reversibility` — the code is the sibling G4's, which is why
+    # formal/STATUS.md credits the row there instead of claiming an A5 code.
+    "a5_compensatable_without_compensate.rvl":
+        "`emission[ui.text]` is compensatable, so extern `type_amount` must declare `compensate`",
+    "a5_no_inverse_declares_compensate.rvl":
+        "`emission[ui.click]` is unknown, so extern `actuate` may not declare `compensate`",
     "a9_provide_key_not_declared.rvl": "`skin` is not declared in the `provides` clause of S (A9)",
     # issue #1172: the converse of A9. A key the clause declares that no block
     # installs used to link as the provider of that key and leave every
@@ -595,11 +605,20 @@ REJECTIONS = {
 #   A4  `format` escaping — LOWERING TRANSFORM. Literal `$N` lowers to `$$N`;
 #       there is nothing to refuse. Positive tests:
 #       test_a4_literal_dollars_are_escaped, test_plain_string_dollar_is_literal.
-#   A5  compensation accompanies an emission — BY CONSTRUCTION. `compensate` is
-#       an *optional* slot (DESIGN.md §3.5: an emission "may declare" one) that
-#       the grammar binds only to an `emit`, and `emit` requires an `emission`
-#       (G4). There is no "compensation required but missing" program. Positive
-#       test: test_a5_compensate_lowering.
+#   A5  compensation accompanies an emission — STATIC, ROW `A5` in
+#       formal/STATUS.md, carried by the checker as G4 with category
+#       `reversibility` (NOT by an A5 code — there is none). `compensate` is
+#       an optional slot (DESIGN.md §3.5: an emission "may declare" one), so
+#       "compensation accompanies an emission" is vacuous until the registry
+#       says WHEN it is required. revl.ui_family.REVERSIBILITY says exactly
+#       that: a `compensatable` verb must declare one, and a verb with no
+#       inverse must not. The obligation is therefore a REGISTRY property
+#       stated over declarations, and it is refused at the extern declaration
+#       (parser.py, the `ui_family.teardown_refusal` call). Refusing
+#       examples: a5_compensatable_without_compensate.rvl,
+#       a5_no_inverse_declares_compensate.rvl. Positive tests:
+#       test_a5_compensate_lowering (the clause is carried into the IR) and
+#       tests/test_formal_a5_row_2114.py (the row and its non-vacuity).
 #   A7  emission flags — ADVISORY to backends; enforcement is G4 itself
 #       (docs/contract-errata.md A7). Covered by g4_unmarked_emission.rvl and
 #       g4_emission_not_declared.rvl.
