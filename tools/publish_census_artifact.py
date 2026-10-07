@@ -313,10 +313,19 @@ def _commands() -> str:
         '<p>No account, no key, no hosted service. From a checkout:</p>'
         '<pre><code>git clone ' + _esc(REPO_URL) + '.git\n'
         'cd revl\n'
-        'python3 -m venv .venv &amp;&amp; .venv/bin/pip install -e . pytest\n'
-        '.venv/bin/python tools/gate_reference_census.py --check\n'
-        '.venv/bin/python tools/corpus_provenance.py --check\n'
-        '.venv/bin/python tools/census_artifact.py --check</code></pre>'
+        'python3 -m venv /tmp/revl-venv &amp;&amp; /tmp/revl-venv/bin/pip '
+        'install -e . pytest\n'
+        '/tmp/revl-venv/bin/python tools/gate_reference_census.py --check\n'
+        '/tmp/revl-venv/bin/python tools/corpus_provenance.py --check\n'
+        '/tmp/revl-venv/bin/python tools/census_artifact.py --check</code></pre>'
+        '<p>The venv goes <strong>outside</strong> the checkout, and that is not '
+        'tidiness. The census measures its inputs rather than listing them, '
+        'through an audit hook on every file the run opens, so a <code>.venv'
+        '</code> inside the clone puts pytest\'s own modules into that set: the '
+        'pins gain files no record pins, and <code>--check</code> then fails on '
+        '<code>pins.jsonl</code> with UNPINNED INPUT lines that are your '
+        'environment and not the census. Anywhere outside the clone works, and '
+        'the same three commands pass. The pin set is what the run read.</p>'
         '<p>Those three need python and pytest, and take seconds. <code>pytest'
         '</code> is there because the census imports the reference classifier '
         'from <code>tests/test_selfhost_lower.py</code> instead of copying it, '
@@ -327,9 +336,21 @@ def _commands() -> str:
         'moved. The crate engine, <code>tools/gate_reference_census.py --engine '
         'crate --check</code>, additionally needs cargo, builds the shipped gate, '
         'and is the slow half.</p>'
+        '<p>Three commands ask three different questions, and only one of them '
+        'is the gate. <code>--moved-inputs</code> answers "does this diff touch '
+        'an input the census hashes?" and exits 0 when it does; that is what CI '
+        'asks to decide whether to spend the slow check at all. <code>--check'
+        '</code> answers "have the committed records drifted?", cheaply, and it '
+        'answers only that: a missing per-checker-version crate reproduction is '
+        'not drift and <code>--check</code> cannot see one. <code>--verify '
+        '--strict</code> is the verdict — records, pins, the crate reproduction '
+        'at this checker version, and the strict flags, all of them, on this '
+        'tree. <code>--check</code> is the cheap drift check; <code>--verify '
+        '--strict</code> is the verdict; <code>--moved-inputs</code> is what '
+        'chooses whether CI runs it.</p>'
         '<p>Holding this copy instead, ask whether its numbers were true on the '
         'inputs they name:</p>'
-        '<pre><code>.venv/bin/python tools/census_artifact.py --verify '
+        '<pre><code>/tmp/revl-venv/bin/python tools/census_artifact.py --verify '
         'census-artifact.json</code></pre>'
         '<p><code>--verify</code> pins every file the verdicts depend on by '
         'sha256 and recomputes every row whose source is byte-identical in your '
@@ -441,6 +462,9 @@ def readme(report: dict) -> str:
     """The outsider's entry point: what this is, and the commands."""
     c = report["census"]
     alw = c["false_admit_allowance"]
+    residual = (", ".join(f"`{fam}`x{n}"
+                          for fam, n in sorted(alw["families"].items()))
+                if alw["families"] else "none, and the allowance is empty")
     census_prov = next(r for r in c["provenance"]["corpora"]
                        if r["corpus"] == "census")
     return f"""# The gate/reference census
@@ -465,7 +489,7 @@ comparative claim: it is revl measuring revl.
 | run | `{c["run"]}` |
 | engine | `{c["engine"]}` |
 | `false-admission` members | {c["false_admission"]["count"]}, and structurally zero: the bucket is in `NEVER_BASELINED` |
-| standing `false-admit` allowance | {alw["total"]} ({alw["baseline_file"]}) |
+| standing `false-admit` allowance | {alw["total"]} — {residual} ({alw["baseline_file"]}) |
 | corpus independent of the loop | {census_prov["independent_percent"]}% of {census_prov["total"]}, by `{c["provenance"]["tool"]}` |
 
 `census-artifact.md` is the whole argument, including the moves that would cook
@@ -481,11 +505,21 @@ No account, no key, no hosted service:
 ```
 git clone {REPO_URL}.git
 cd revl
-python3 -m venv .venv && .venv/bin/pip install -e . pytest
-.venv/bin/python tools/gate_reference_census.py --check
-.venv/bin/python tools/corpus_provenance.py --check
-.venv/bin/python tools/census_artifact.py --check
+python3 -m venv /tmp/revl-venv && /tmp/revl-venv/bin/pip install -e . pytest
+/tmp/revl-venv/bin/python tools/gate_reference_census.py --check
+/tmp/revl-venv/bin/python tools/corpus_provenance.py --check
+/tmp/revl-venv/bin/python tools/census_artifact.py --check
 ```
+
+The venv goes **outside** the checkout, and that is not tidiness. The census
+measures its inputs rather than listing them, through an audit hook on every file
+the run opens, so a `.venv` inside the clone puts pytest's own modules into that
+set: the pins gain files no record pins, and `--check` then fails on
+`pins.jsonl` with UNPINNED INPUT lines that are your environment and not the
+census. Anywhere outside the clone works — `/tmp/revl-venv`,
+`$HOME/.venvs/revl` — and the same three commands pass. The pin set is what the
+run read; there is no flag that makes a venv inside the checkout invisible, and
+none is wanted.
 
 Those three need python and pytest and take seconds. `pytest` is there because
 the census imports the reference classifier from `tests/test_selfhost_lower.py`
@@ -501,6 +535,19 @@ repository — the `.rvl` files under fixed directories plus the inline program
 lists in `tests/test_selfhost_lower.py` and `tools/gate_reference_census.py` —
 so there is no download and no hosted copy to go stale.
 
+## Which of these is the verdict
+
+Three commands, three different questions, and only one of them is the gate:
+
+| command | the question it answers |
+|---|---|
+| `tools/census_artifact.py --moved-inputs` | given a diff, does it touch an input this census hashes? Exit 0 means yes. This is what CI asks to decide whether to run the slow check at all. |
+| `tools/census_artifact.py --check` | have the committed records drifted from what today's tree produces? Cheap, and it answers only that: a missing per-checker-version crate reproduction is not drift, and `--check` cannot see one. |
+| `tools/census_artifact.py --verify --strict` | the verdict. The records, the pins, the crate reproduction at this checker version, and the strict flags, all of them, on this tree. |
+
+`--check` is the cheap drift check. `--verify --strict` is the verdict.
+`--moved-inputs` is what chooses whether CI runs it.
+
 ## Checking THIS copy rather than reproducing it
 
 `--check` asks whether this file is what today's tree produces, and it fails as
@@ -508,7 +555,7 @@ soon as the corpus grows. A reader holding this copy needs a different question
 answered: were the numbers true on the inputs they name?
 
 ```
-.venv/bin/python tools/census_artifact.py --verify census-artifact.json
+/tmp/revl-venv/bin/python tools/census_artifact.py --verify census-artifact.json
 ```
 
 `--verify` re-runs the census in your clone and compares in two steps: the pins,
@@ -521,6 +568,17 @@ measurement rather than a check of this one). The pinned files are measured
 rather than listed, through an audit hook on every file the run opens, so a file
 your run reads that this copy does not pin is named as an UNPINNED INPUT.
 
+The same check against the records this edition was rendered from, with the
+strict flags CI uses, is:
+
+```
+/tmp/revl-venv/bin/python tools/census_artifact.py --verify --strict
+```
+
+It exits 0 only if the committed records are current *and* a crate reproduction
+exists at this checker version. That is the verdict; the `--check` above is the
+cheap drift check.
+
 ## What this does not establish
 
 {c["not_established"][0]}
@@ -529,7 +587,7 @@ The rest is in the report's own `What this does not establish` section, which is
 part of the artifact rather than commentary on it:
 
 ```
-.venv/bin/python tools/census_artifact.py --from-records | sed -n '/What this does not establish/,$p'
+/tmp/revl-venv/bin/python tools/census_artifact.py --from-records | sed -n '/What this does not establish/,$p'
 ```
 """
 
