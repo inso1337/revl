@@ -11656,9 +11656,10 @@ fn extern_release_msg(acq: Stmt, u: Expr, cx: Ctx__m2, seam: bool) -> String {
     let bar = enc.revl_index_of("|");
     let inv = enc.revl_slice(0i64, bar);
     let slots = enc.revl_slice((bar).checked_add(1i64).expect("revl: Int overflow"), enc.revl_length());
+    let rederived = seam_rederivation(acq.clone(), u.clone());
     let bind = acq.bind;
     if (((bind == "") && inv_has_result(&slots)) && seam) {
-        if seam_rederivation(acq.clone(), u.clone()) {
+        if rederived {
             return String::from("");
         }
         return (((((((String::from("`effect ").revl_concat(&fnm)).revl_concat("(...)` in a provide method cannot name its handle, so its declared `undo ")).revl_concat(&inv)).revl_concat("(...)` cannot be written at the site: write a site `undo` naming the values this acquisition was given, or declare `")).revl_concat(&fnm)).revl_concat("` `witnessed` and drop the site `undo`, and its declared `undo ")).revl_concat(&inv)).revl_concat("(...)` releases each acquisition");
@@ -33939,6 +33940,18 @@ fn a_provide_method_is_the_ui_unit_only_when_it_crosses_a_computer_use_verb() {
 }
 
 #[test]
+fn a_provide_method_acquisition_released_by_a_call_naming_its_values_is_admitted() {
+    let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern pure fn close_named(owner: Str, id: Str) -> Unit = @py { return None }\nextern acquire fn open_h(owner: Str, id: Str) -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(n: Str) -> Str }\ncomponent C provides s: S {\n  config { owner: Str = \"default\" }\n  provide s {\n    fn go(id) {\n      effect open_h(config.owner, id) undo close_named(config.owner, id)\n      return id\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_provide_method_acquisition_released_by_a_call_naming_other_values_is_refused() {
+    let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern pure fn close_named(owner: Str, id: Str) -> Unit = @py { return None }\nextern acquire fn open_h(owner: Str, id: Str) -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(n: Str) -> Str }\ncomponent C provides s: S {\n  config { owner: Str = \"default\" }\n  provide s {\n    fn go(id) {\n      effect open_h(config.owner, id) undo close_named(\"other\", id)\n      return id\n    }\n  }\n}"));
+    assert!((v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so its declared `undo close_h(...)` cannot be written at the site: write a site `undo` naming the values this acquisition was given, or declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"));
+}
+
+#[test]
 fn a_provision_the_running_manifest_already_holds_conflicts__ambient_g2_() {
     let v = admit_ambient(String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"), String::from("OldStore/db/"));
     assert!((v == "G2|provision conflict: key `db` is provided by both OldStore and NewStore (G2)"));
@@ -34484,18 +34497,6 @@ fn an_explicit_withdrawal_row_strands_the_same_consumer() {
 #[test]
 fn an_extern_acquire_in_a_provide_method_names_the_witnessed_spelling() {
     let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern pure fn noop() -> Unit = @py { return None }\nextern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n) {\n      effect open_h() undo noop()\n      return n\n    }\n  }\n}"));
-    assert!((v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so its declared `undo close_h(...)` cannot be written at the site: write a site `undo` naming the values this acquisition was given, or declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"));
-}
-
-#[test]
-fn a_provide_method_acquisition_released_by_a_call_naming_its_values_is_admitted() {
-    let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern pure fn close_named(owner: Str, id: Str) -> Unit = @py { return None }\nextern acquire fn open_h(owner: Str, id: Str) -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(n: Str) -> Str }\ncomponent C provides s: S {\n  config { owner: Str = \"default\" }\n  provide s {\n    fn go(id) {\n      effect open_h(config.owner, id) undo close_named(config.owner, id)\n      return id\n    }\n  }\n}"));
-    assert!((v == ""));
-}
-
-#[test]
-fn a_provide_method_acquisition_released_by_a_call_naming_other_values_is_refused() {
-    let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern pure fn close_named(owner: Str, id: Str) -> Unit = @py { return None }\nextern acquire fn open_h(owner: Str, id: Str) -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(n: Str) -> Str }\ncomponent C provides s: S {\n  config { owner: Str = \"default\" }\n  provide s {\n    fn go(id) {\n      effect open_h(config.owner, id) undo close_named(\"other\", id)\n      return id\n    }\n  }\n}"));
     assert!((v == "G4|`effect open_h(...)` in a provide method cannot name its handle, so its declared `undo close_h(...)` cannot be written at the site: write a site `undo` naming the values this acquisition was given, or declare `open_h` `witnessed` and drop the site `undo`, and its declared `undo close_h(...)` releases each acquisition"));
 }
 
