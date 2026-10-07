@@ -65,7 +65,10 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    never write, so stop and ask the operator rather than spend effort on it.
    `idiom` is the smallest admitted example of the construct the hole stands
    in (`construct`), with the rules that make it correct: read it before
-   writing the fill. `grammarCategory` names the syntactic slot the fill must be (today
+   writing the fill. It is an example, not a fill (issue #2115):
+   `idiom.exampleExpression` stands inside the example and carries the
+   example's own names, so do not submit it — take the fill from `fillable`.
+   `grammarCategory` names the syntactic slot the fill must be (today
    `expression` for every hole); pass it as `category` to `revl_grammar`
    with a `format` to hold a constrained decoder to that slot. Fill one hole against its spec, re-check,
    repeat. This is the step that turns generate-whole/refuse/regenerate into

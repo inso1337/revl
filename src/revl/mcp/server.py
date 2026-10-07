@@ -3236,7 +3236,11 @@ def _tool_idiom(arguments: dict) -> dict:
     """revl_idiom (issue #1701): the minimal admitted example of one construct
     with the rules that make it correct, by name; with no `name`, the list of
     idioms. A hole's fillSpec already carries the idiom of its construct, so
-    this is for asking about a construct before there is a hole in it."""
+    this is for asking about a construct before there is a hole in it. The
+    idiom's expression position is served as `exampleExpression` — the
+    expression standing at the construct's position inside the example, so it
+    carries the example's own names and is NOT a fill to submit (issue #2115);
+    a hole's `fillable.producers[].write` carries the fills."""
     from .. import idioms  # noqa: PLC0415 - reads the idiom files on first use
 
     name = arguments.get("name")
@@ -4981,7 +4985,10 @@ TOOLS = [
                        "with the one or two rules that make it correct. Every "
                        "hole's fillSpec already carries the idiom of its "
                        "construct; ask by `name` for any other, or omit it for "
-                       "the list.",
+                       "the list. The idiom's expression position is served as "
+                       "`exampleExpression`: it stands inside the example and "
+                       "carries the example's own names, so it is not a fill to "
+                       "submit — a hole's `fillable.producers[].write` has those.",
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -484,8 +484,14 @@ idiom of its construct (`construct`, `idiom`; [holes.md](holes.md) §8), so
 this tool is for asking about a construct before there is a hole in it.
 
 - Inputs (optional): `name`, an idiom such as `emission-method`, `effect-undo`
-  or `spawn`, returns `{ok, idiom: {name, summary, rules, fill, example}}`.
-  With no `name` it returns `{ok, idioms: [{name, summary}]}`. An unknown name
+  or `spawn`, returns `{ok, idiom: {name, summary, rules, exampleExpression,
+  example}}`. The idiom is an example, not a set of fills to submit:
+  `exampleExpression` is the expression that stands at the construct's position
+  inside the example, so it carries the example component's own names
+  (`store.drop()` names the example's `store`) and submitting it is refused
+  (issue #2115). The submit-ready fills are a hole's
+  `fillable.producers[].write`. With no `name` it returns
+  `{ok, idioms: [{name, summary}]}`. An unknown name
   is refused, listing the idioms. The same table is printed by
   [`revl idiom`](commands-reference.md#revl-idiom).
 

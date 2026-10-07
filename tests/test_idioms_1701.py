@@ -8,8 +8,13 @@ Exit tests from the issue:
 
 The idioms are `.rvl` files under src/revl/idioms/, so the round trip below is
 what keeps the table and the fillSpec from drifting apart: with an idiom's
-`fill` replaced by a typed hole, the fillSpec of that hole names that very
-construct and serves that very idiom.
+internal `fill` marker replaced by a typed hole, the fillSpec of that hole
+names that very construct and serves that very idiom.
+
+The served name for that marker is `exampleExpression`, not `fill` (issue
+#2115): it is the expression position inside the example, so it carries the
+example component's own names and is refused if submitted as a fill. Section 6
+pins the name on all three doors.
 """
 
 from __future__ import annotations
@@ -141,8 +146,71 @@ def test_the_cli_prints_an_idiom():
                          capture_output=True, text=True, cwd=ROOT,
                          env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"})
     assert run.returncode == 0, run.stderr
-    assert json.loads(run.stdout)["fill"] == "store.drop()"
+    assert json.loads(run.stdout)["exampleExpression"] == "store.drop()"
     missing = subprocess.run([sys.executable, "-m", "revl", "idiom", "nope"],
                              capture_output=True, text=True, cwd=ROOT,
                              env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"})
     assert missing.returncode == 2 and "no idiom named" in missing.stderr
+
+
+# ---- 6. the served block is an example, not a fill (issue #2115) --------------
+
+def test_the_served_expression_is_named_for_where_it_stands():
+    """`served` never calls the marker a fill: the name says it is the
+    expression position inside the example, and the internal marker is intact."""
+    for entry in ENTRIES.values():
+        block = idioms.served(entry)
+        assert idioms.SERVED_EXPRESSION_KEY == "exampleExpression"
+        assert block[idioms.SERVED_EXPRESSION_KEY] == entry["fill"]
+        assert "fill" not in block, entry["name"]
+        assert set(block) == {"name", "summary", "rules", "exampleExpression", "example"}
+
+
+def test_every_door_serves_the_same_expression_name():
+    """The three doors cannot disagree: fillSpec, `revl_idiom`, `revl idiom --json`."""
+    hole = idioms.with_hole(ENTRIES["effect-undo"])
+    payload = _call("revl_check", {"source": hole})["structuredContent"]
+    idiom = payload["holes"][0]["fillSpec"]["idiom"]
+    assert idiom["exampleExpression"] == ENTRIES["effect-undo"]["fill"]
+    assert "fill" not in idiom
+
+    served = _call("revl_idiom", {"name": "effect-undo"})["structuredContent"]["idiom"]
+    assert served == idiom
+
+    run = subprocess.run([sys.executable, "-m", "revl", "idiom", "effect-undo", "--json"],
+                         capture_output=True, text=True, cwd=ROOT,
+                         env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"})
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout) == idiom
+
+
+def test_the_served_expression_is_not_a_submittable_fill():
+    """The substance of #2115, measured on the scaffold the issue used.
+
+    The served expression names the *example* component's binding (`store`,
+    `db`, `key`), so it is refused as a fill; the author-facing fills are the
+    hole's `fillable.producers[].write`, which for the `Str` hole names the
+    component's own parameter `msg`.
+    """
+    scaffold = _call("revl_scaffold", {
+        "service": "Audit", "component": "AuditLog", "provides": "audit",
+        "methods": ["record(msg: Str) -> Str"], "resource": "Map[Str, Str]",
+    })["structuredContent"]
+    by_construct = {o["fillSpec"]["construct"]: o["fillSpec"]
+                    for o in scaffold["obligations"]}
+    assert set(by_construct) == {"effect-acquire", "effect-undo", "provide-method"}
+
+    # every hole serves the expression under the honest name, never `fill`
+    for spec in by_construct.values():
+        assert "fill" not in spec["idiom"]
+        assert spec["idiom"]["exampleExpression"] == ENTRIES[spec["construct"]]["fill"]
+
+    # the example's names are the ones the issue measured, not the author's
+    assert by_construct["effect-undo"]["idiom"]["exampleExpression"] == "store.drop()"
+    assert by_construct["provide-method"]["idiom"]["exampleExpression"] == "db.get(key)"
+
+    # the fills offered to the author carry no example binding
+    writes = [p["write"] for p in
+              by_construct["provide-method"]["fillable"]["producers"]]
+    assert "msg" in writes
+    assert not [w for w in writes if "db" in w or "key" in w], writes
