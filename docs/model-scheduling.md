@@ -111,7 +111,7 @@ The same program on a host that offers only a 1024 MiB CPU prints:
 
 An arm may close with `prefer resident`:
 
-```revl
+```revl fragment
 route model on classify {
   confidential -> fast | small prefer resident,
   * -> cloud
