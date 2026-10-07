@@ -572,12 +572,28 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # grammar registry, no validate seam, and the call renders raw.
         "../emit_ts_refusals/validated_emission_operation.rvl",
         "../emit_py_validated_shapes.rvl",
-        # component branch shapes. What is left here is ONE form: a
-        # statement-block match arm (`Some(n) => { let doubled = n * 2
-        # doubled + 1 }`), which the shared self-host PARSER has no node for at
-        # all — `selfhost/parser.rvl` reads an arm body as an expression. It is
-        # a parser gap reached through lower.rvl, and it withholds the whole
-        # component because one provide method of fourteen spells it.
+        # component branch shapes. `selfhost/parser.rvl` reads an arm body as an
+        # expression, so it has no node for a statement-block match arm
+        # (`Some(n) => { let doubled = n * 2 doubled + 1 }`). That node is NOT
+        # what withholds this document, and it is not the only reason the
+        # document is here. Measured on this fixture: replacing the block arm
+        # with a plain one (`Some(n) => n * 2 + 1`) leaves the native output
+        # BYTE-IDENTICAL (4440 bytes, `_Values` still absent) while the
+        # reference moves 6542 -> 6514, and deleting the `block_match` method
+        # outright still diverges (4379 vs 6240). Five of the fourteen provide
+        # methods drop the whole `_Values` class on their own — `record`
+        # (record update), `optional` and `parse` (optional chain), `new_map`
+        # (`Map.empty()`), `block_match` — and `read_optional` diverges on its
+        # own without dropping it (3994 vs 4004). Deleting all six makes the
+        # document byte-exact. In one-method components a record update, an
+        # optional chain and `Map.empty()` each drop the class by itself, while
+        # the same constructs in an ordinary `fn` are fine: these are several
+        # independent component-position gaps in `selfhost/lower.rvl`. The
+        # reference lowers the block arm inline as a `do` expression
+        # (`lower.py::_lower_component_block_arm`), and `selfhost/lower.rvl`
+        # has no `do` producer (`cir_expr` has no `do` arm) — but that is one
+        # gap of several, so issue #2094's parser node, with or without a `do`
+        # producer, cannot close this entry.
         "branches.rvl",
         # whole-program documents combining several of the above.
         # (`../../../examples/v3_step_scheduler.rvl` left this list with the
@@ -649,8 +665,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # the stream surface (`subscribe`, `merge`, `every ... in`),
         "../../../backends/go/testdata/stream_130.rvl",
         "../emit_rust_corpus/comp_stream.rvl",
-        # the statement-block match arm, which the self-host parser has no node
-        # for (the same document is in the py list above),
+        # the statement-block match arm: the parser has no node for the block,
+        # but that is neither the only nor the operative reason this document is
+        # withheld — several component-position gaps in `selfhost/lower.rvl`
+        # each drop the whole provide class on their own, and the block arm is
+        # one of them (see the py list above),
         "../emit_py_corpus/branches.rvl",
         # and the two documents written for this slice, which combine the above.
         "routed_timers.rvl",
