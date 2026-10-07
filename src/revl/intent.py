@@ -278,6 +278,17 @@ def _canonical_scopes(
     twice is refused for the reason a ceiling bound twice is: a mapping hides the
     contradiction and the second spelling would silently win. Sorted by name so
     two records with the same scopes are equal.
+
+    The check is against the CORE registry, and deliberately not against any
+    capability's DECLARED dimension (issue #1938). A declaration is per-capability
+    and this is intent-level, so the two vocabularies are not in the same scope:
+    `capability mail.send(account: discrete)` says what `mail.send` records, not
+    what a scope named `account` would mean, and refusing the scope name here
+    would make one capability's parameter choice govern an unrelated dimension.
+    There is also no composition in scope at this call site, so consulting
+    declarations would mean consulting whichever ones happened to be reachable.
+    `domain` - the fact that reads scope-shaped - stays out of the capability
+    vocabulary for the same reason: its home is this dimension.
     """
     seen: dict[str, frozenset[str]] = {}
     for name, members in pairs:

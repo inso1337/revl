@@ -160,8 +160,8 @@ def _cap_covers(wide: str, narrow: str) -> bool:
     if wide == narrow:
         return True                     # the fast path: identical stored spelling
     try:
-        return cap_order.covers(cap_order.parse_cap(wide),
-                                cap_order.parse_cap(narrow))
+        return cap_order.covers(cap_order.parse_stored_cap(wide),
+                                cap_order.parse_stored_cap(narrow))
     except cap_order.CapError:
         return False                    # unparseable -> only exact-string matches
 
@@ -5694,7 +5694,7 @@ class Session:
         withheld = {scopes[t] for t in from_caller if t in scopes}
         if ticket.get("classCCapabilities"):
             fields["classCCapabilities"] = sorted(
-                cap_order.parse_cap(cap).token if cap in withheld else cap
+                cap_order.parse_stored_cap(cap).token if cap in withheld else cap
                 for cap in ticket["classCCapabilities"])
         if scopes:
             fields["resourceScopes"] = {
@@ -7809,7 +7809,7 @@ class Session:
         if spelling is None:
             return capability == grant["capability"]
         try:
-            held_cap = cap_order.parse_cap(grant["capability"])
+            held_cap = cap_order.parse_stored_cap(grant["capability"])
         except cap_order.CapError:
             return capability == grant["capability"]
         _obj, own = cap_order.split_ceilings(held_cap)
@@ -7839,7 +7839,7 @@ class Session:
         if not declared:
             return grant["capability"]
         try:
-            cap = cap_order.parse_cap(grant["capability"])
+            cap = cap_order.parse_stored_cap(grant["capability"])
         except cap_order.CapError:
             return grant["capability"]
         if any(name in dict(cap.params) for name in declared):
@@ -7858,7 +7858,7 @@ class Session:
             # round-trip is what keeps this from putting text on a prompt that
             # is not a capability (`*` tops the order and carries no parameter,
             # so `*(calls=2)` is not a thing an operator could have granted).
-            cap_order.parse_cap(spelling)
+            cap_order.parse_stored_cap(spelling)
         except (cap_order.CapError, KeyError, TypeError):
             return grant["capability"]
         return spelling
@@ -8221,7 +8221,7 @@ class Session:
             return False
         for cap_str in class_c:
             try:
-                crossing = cap_order.parse_cap(cap_str)
+                crossing = cap_order.parse_stored_cap(cap_str)
             except cap_order.CapError:
                 return False
             if not any(cap_order.covers(rc, crossing) for rc in entry["caps"]):

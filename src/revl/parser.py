@@ -2327,6 +2327,37 @@ class RetentionDecl:
 
 
 @dataclass
+class CapabilityDecl:
+    """`capability <token>(<name>: <kind>, ...)` — issue #1938.
+
+    A capability's own RESOURCE DIMENSIONS. The core registry
+    (`revl.cap_order._REGISTRY`) names the dimensions every capability shares
+    (`path`/`host`/`table`, plus the `calls`/`size`/`time` ceilings); a product
+    capability may need a dimension the core vocabulary does not name — the
+    ACCOUNT a mail send is sent as, say — and without a way to say so, that
+    fact ends up carried OUTSIDE the capability spelling (in a gate's own
+    bookkeeping), where `revl audit` never sees it and the audited artifact
+    omits a fact the audit is supposed to be about.
+
+    `kind` is deliberately NOT a free-form type: the vocabulary is closed to
+    `revl.cap_order.CORE_KINDS` — `path`, `discrete`, `ceiling` — the three
+    value ORDERS the algebra already implements. A declaration chooses a
+    dimension, never a new order, so `covers` gains no case it did not have.
+    The kind is also NOT part of the token's bytes: a bound spelling renders
+    the same `name=value` pairs whatever the kind, so a spelling written before
+    this declaration existed reads back unchanged.
+
+    `parameters` keeps the author's order and each name's line so a later
+    refusal can point at the offending parameter rather than at the block.
+    """
+
+    token: str
+    # (name, kind, line) in the author's order.
+    parameters: list = field(default_factory=list)
+    line: int = 0
+
+
+@dataclass
 class Program:
     filename: str
     services: list[ServiceDecl] = field(default_factory=list)
@@ -2364,6 +2395,12 @@ class Program:
     # item 426 S2: layer documents. Also pre-linker — `revl.composition` folds
     # them into the row table before `compile_files` sees a single path.
     layers: list[LayerDecl] = field(default_factory=list)
+    # issue #1938: the resource DIMENSIONS a capability declares for itself.
+    # Read by `revl.cap_order` through the explicit `declared`/`declarations`
+    # parameters (never module state) at every point that ADMITS or
+    # CANONICALIZES a parameterized spelling. Empty for every program that
+    # declares none, so those programs are byte-identical.
+    capability_decls: list[CapabilityDecl] = field(default_factory=list)
     # Set by compile_files so the checker can resolve module-private vs
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
@@ -2455,6 +2492,14 @@ class Parser:
         self._src_lines = source.split("\n")
         self._line_offset = line_offset
         self.pos = 0
+        # issue #1938: the capability resource DIMENSIONS this program declares,
+        # token -> {name: kind}. Filled by `_collect_capability_decls` BEFORE the
+        # real pass (so a use may precede its declaration) and re-registered,
+        # idempotently, by the top-level `capability` branch. It is the ONLY
+        # piece of parser state `_capability_params` consults, and it is passed
+        # to `cap_order` explicitly rather than installed as module state, so two
+        # parses never share a registry.
+        self._cap_decls: dict[str, dict[str, str]] = {}
         # When set, the next `_bor` call does not consume a top-level `|` — it
         # is the functional-record-update separator `{base | f = e}`, not the
         # bitwise-OR operator (item 366). The flag is cleared the moment it is
@@ -2673,6 +2718,12 @@ class Parser:
     def parse(self) -> Program:
         with recursion_headroom():
             try:
+                # issue #1938: the capability resource DIMENSIONS are collected
+                # BEFORE the real pass, so a capability may be used above the
+                # line that declares it. `_collect_capability_decls` parses each
+                # declaration with the same production the real pass calls, so
+                # the two can never disagree about what a declaration is.
+                self._collect_capability_decls()
                 return self._parse_program()
             except RevlError as e:
                 better = self._maybe_stray_backtick_error(e)
@@ -2788,6 +2839,17 @@ class Parser:
                 break
             if self.at("kw", "use"):
                 program.uses.append(self.use_decl())
+            elif self._at_capability_decl():
+                # issue #1938: `capability <token>(<name>: <kind>, ...)`. A
+                # CONTEXTUAL ident on the `boot`/`fault`/`event`/`secret`
+                # discipline — the shape test lives in `_at_capability_decl`, so
+                # an ordinary `capability` name is untouched and the self-hosted
+                # lexer's KEYWORDS table needs no sync. `_collect_capability_decls`
+                # has already registered this declaration (that is what lets a
+                # use precede it); this branch re-registers it, which is a no-op
+                # for an identical declaration and a refusal for a conflicting
+                # one.
+                program.capability_decls.append(self._capability_decl())
             elif self.at("kw", "service"):
                 program.services.append(self.service(commutative=False))
             elif self.at("kw", "commutative"):
@@ -3696,6 +3758,141 @@ class Parser:
         self.expect(")")
         return target
 
+    def _at_capability_decl(self) -> bool:
+        """Whether the cursor is on a top-level `capability <token>(...)`
+        DECLARATION (issue #1938).
+
+        `capability` is a CONTEXTUAL ident, the `boot`/`fault`/`event`/
+        `secret`/`retention`/`model` discipline: it heads a declaration ONLY in
+        this shape, so a program that already uses `capability` as an ordinary
+        name keeps parsing and the self-hosted lexer's KEYWORDS table (and the
+        gate crate's frontier derived from it) needs no sync. The tokens after
+        it are what make the shape unambiguous rather than merely rare:
+        `capability <glob> requires approval` is a POLICY document rule (parsed
+        by `revl.policy`, never by this grammar) and `cache capability` sits
+        inside a fn body, so neither reaches a top-level statement head — and a
+        `capability <ident>` followed by anything but `(`/`.` is not claimed
+        here at all, it keeps its existing "expected a top-level declaration"
+        refusal.
+
+        READ-ONLY, hence `-> bool`: `revl.source_grammar` treats an annotated
+        `-> bool` parse method as pure LOOKAHEAD (it answers a question and
+        reads nothing), so this predicate contributes no production and the
+        generated grammar gains exactly one rule — `_capability_decl`."""
+        return (self.at("ident", "capability")
+                and self.peek_ahead(1).kind == "ident"
+                and self.peek_ahead(2).kind in ("(", "."))
+
+    def _collect_capability_decls(self) -> None:
+        """Register every `capability` declaration in the file BEFORE the real
+        pass (issue #1938), so a capability may be USED above the line that
+        declares it — the ordering a reader expects of a registry, and the
+        ordering a file that declares its dimensions beside its other
+        declarations naturally has.
+
+        Called from `parse()`, not `_parse_program()`: a method called from the
+        start rule would become a rule of the generated grammar, and this is a
+        pre-pass over tokens, not a production.
+
+        The scan walks BRACE depth, because every position that can hold a
+        `capability` ident in a non-declaration role is inside a block (`cache
+        capability` sits in a fn body; a component's operations sit in its
+        `{ }`), while a top-level statement head is the only place
+        `_at_capability_decl` can be true. Each candidate is parsed by
+        `_capability_decl` ITSELF, at its real position, so the pre-pass can
+        never admit a shape the real pass would reject — it can only see it
+        EARLIER, and a malformed declaration refuses here, at its own line,
+        exactly as it would there. A declaration the scan MISSES (an unbalanced
+        brace makes the depth wrong) is still parsed by the top-level branch
+        when the real pass reaches it; a use above such a declaration is then
+        refused as undeclared, which is the declare-before-use ordering rather
+        than a wrong answer."""
+        saved = self.pos
+        depth = 0
+        try:
+            i = 0
+            while i < len(self.toks):
+                kind = self.toks[i].kind
+                if kind == "{":
+                    depth += 1
+                elif kind == "}":
+                    depth = max(0, depth - 1)
+                else:
+                    self.pos = i
+                    if depth == 0 and self._at_capability_decl():
+                        self._capability_decl()
+                        i = self.pos
+                        continue
+                i += 1
+        finally:
+            self.pos = saved
+
+    def _capability_decl(self) -> "CapabilityDecl":
+        """`capability <token>(<name>: <kind> (, <name>: <kind>)*)` — issue
+        #1938. Declares the resource DIMENSIONS this capability carries, which
+        bind from call arguments and then appear in the crossing's capability
+        spelling, and therefore in the approval ticket's spelling and in the
+        audit token. `mail.send(account="ops")` is the motivating shape: the
+        ACCOUNT a send is sent as is a fact the audit is ABOUT, so it belongs
+        in the audited artifact rather than in a gate's private bookkeeping.
+
+        The KIND vocabulary is CLOSED — `revl.cap_order.CORE_KINDS`, the three
+        value ORDERS the order algebra already implements — so a declaration
+        chooses a dimension and never a new order, and `covers` gains no case
+        it did not have. The kind is also NOT part of the token's bytes, so a
+        bound spelling written before this declaration existed reads back
+        unchanged.
+
+        Registration is idempotent for an IDENTICAL re-declaration and a
+        CONFLICTING one is refused: `_collect_capability_decls` has already
+        registered this declaration by the time the real pass reaches it, so
+        the second registration must be a no-op."""
+        from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+        line = self.next().line          # consume the contextual `capability`
+        parts = [self.expect("ident", what="a capability token").value]
+        while self.at("."):
+            self.next()
+            parts.append(self.expect("ident").value)
+        token = ".".join(parts)
+        self.expect("(", what=f"`(` after `{token}` in a capability declaration")
+        pairs: list[tuple[str, str]] = []
+        rows: list[tuple[str, str, int]] = []
+        while not self.at(")"):
+            name_line = self.peek().line
+            name = self.expect(
+                "ident", what="a resource parameter name").value
+            self.expect(":", what=f"`:` after the resource parameter `{name}`")
+            kind_tok = self.peek()
+            if kind_tok.kind != "ident":
+                raise self.err(
+                    kind_tok.line,
+                    f"a resource parameter kind must be one of "
+                    f"`path`, `discrete`, `ceiling`, found "
+                    f"{kind_tok.value!r}",
+                    hint=f"write `{name}: discrete` — a declaration chooses a "
+                         "value order the core registry already has, never a "
+                         "new one")
+            self.next()
+            pairs.append((name, kind_tok.value))
+            rows.append((name, kind_tok.value, name_line))
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        try:
+            declared = cap_order.parse_declarations(pairs, what=token)
+        except cap_order.CapError as exc:
+            raise self.err(line, str(exc), hint=exc.hint) from exc
+        prev = self._cap_decls.get(token)
+        if prev is not None and prev != declared:
+            raise self.err(
+                line,
+                f"capability `{token}` is declared twice with different "
+                "resource parameters",
+                hint="a capability's resource dimensions are one set — merge "
+                     "the two declarations rather than restating it")
+        self._cap_decls[token] = declared
+        return CapabilityDecl(token, rows, line)
+
     def _capability_list(self, kind: str = "emission") -> tuple[str, ...]:
         """`[a, b]` after `emission`/`witnessed` — the boundaries this operation
         may cross.
@@ -3772,10 +3969,21 @@ class Parser:
         path value (trailing slash dropped, `.`/`..`/`//`/`"/"` refused), refuses
         a parameter list on `*` and duplicate keys, and returns the canonical
         `(T, P)`, stored as its canonical spelling so the fold re-reads it at a
-        single point."""
+        single point.
+
+        issue #1938: the registry is closed against UNDECLARED names, so the
+        declaring capability's own dimensions (`capability mail.send(account:
+        discrete)`) are passed in as the second argument. That is the ONLY thing
+        the declaration changes here: a name no core row and no declaration holds
+        still refuses with the same message, and a token with no declaration
+        produces byte-identical output. The KIND is not part of the bytes —
+        `_capability_decl` validated it, and `cap_order` reads the order back off
+        the canonical VALUE — so a bound spelling round-trips through every fold
+        that re-reads it."""
         if not self.at("("):
             return token
         from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+        declared = self._cap_decls.get(token)
         line = self.next().line          # consume `(`
         raw: list[tuple[str, object]] = []
         while not self.at(")"):
@@ -3824,7 +4032,7 @@ class Parser:
                 self.next()
         self.expect(")")
         try:
-            return cap_order.make_cap(token, raw).to_str()
+            return cap_order.make_cap(token, raw, declared).to_str()
         except cap_order.CapError as exc:
             raise self.err(line, str(exc), hint=exc.hint) from exc
 

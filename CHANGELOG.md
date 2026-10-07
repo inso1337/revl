@@ -22,6 +22,18 @@ release also folds in the full agent story and the standing correctness debt.
 - Typing frontier closed: match-arm checking in check-position, generics
   instantiation, `type X = Y` alias resolution matching TypeScript, and six
   accept-but-won't-compile holes each verified against `javac` and `cargo`.
+- **Declared resource dimensions (#1938).** A composition can now declare its
+  own capability's resource parameters:
+  `capability mail.send(account: discrete, folder: path)`. The parameter is
+  bound from the call arguments and then appears in the approval ticket's
+  spelling and in the audit token, so `revl audit` records which mailbox is
+  sending instead of the fact living only in a gate's own spelling. The kind
+  vocabulary stays closed (`path`/`discrete`/`ceiling`, the three orders the
+  core vocabulary already used) and the registry stays closed against
+  UNDECLARED names, so a typo is still refused at parse. A composition that
+  declares no dimension is byte-identical everywhere; `INTERCHANGE_VERSION`
+  stays `1.0` (the declaration is an IR member, not an interchange member).
+  See docs/design/294-parameterized-capabilities.md.
 
 ### The agent story
 

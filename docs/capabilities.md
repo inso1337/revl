@@ -90,6 +90,31 @@ written before any provider exists, so `emission[db]` does not require a `db`
 to exist yet. The names are checked where they can be: against what a
 provider's body actually reaches.
 
+### Parameters, and a capability's own resource dimensions
+
+A capability may carry resource parameters — `fs.write(path="/data")`,
+`gateway.send(host="api.stripe.com")` — and a composition may declare the
+parameters of its OWN capability (issue #1938):
+
+```rvl
+capability mail.send(account: discrete, folder: path)
+```
+
+The declaration is top-level and names the capability's dotted token. Each
+parameter is `name: kind`, and the **kind vocabulary is closed** to `path`
+(containment), `discrete` (equality) and `ceiling` (an integer bound), which
+are the three orders the core vocabulary already uses. A declaration therefore
+adds a DIMENSION, never a new order: the algebra, the audit and the approval
+order are unchanged. The kind is not part of the token's bytes, so the spelling
+an operator reads is `mail.send(account="ops")` whatever kind `account` was
+given.
+
+The registry is closed against *undeclared* names: a parameter that is neither
+a core name (`path`, `host`, `table`, `calls`/`requests`, `size`/`bytes`,
+`time`) nor a parameter of that capability's declaration is refused at parse
+with `unknown capability parameter`. That is what keeps a typo from silently
+narrowing nothing. See design 294, "Declared resource dimensions".
+
 ## 3. The rule (G4, refined)
 
 syntax-2.0 §4b.1: *a service declaration is an upper bound on its providers'

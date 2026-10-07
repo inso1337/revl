@@ -1159,6 +1159,18 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if declaration_key(module, "model_council", index) not in emitted_keys:
                 merged.model_councils.append(decl)
                 emitted_keys.add(declaration_key(module, "model_council", index))
+        # issue #1938: a `capability <token>(<name>: <kind>)` declaration rides
+        # with the DECLARATION CLOSURE for exactly the reason a `retention`
+        # policy does - the thing that names it is an `emission[...]` scope on
+        # an extern or a service operation, and those are imported. Dropping it
+        # here would make the single-source path admit a spelling the CLI path
+        # refuses for naming a parameter "this composition does not declare".
+        # Same per-module declaration-key discipline as every list above, so an
+        # imported declaration cannot be carried twice.
+        for index, decl in enumerate(getattr(module.program, "capability_decls", ())):
+            if declaration_key(module, "capability", index) not in emitted_keys:
+                merged.capability_decls.append(decl)
+                emitted_keys.add(declaration_key(module, "capability", index))
         # issue #1904: a `lifecycle test` names the components it `load`s, and
         # components are never imported (`merged.components` above is built from
         # the root modules only). Collecting an imported module's lifecycle test

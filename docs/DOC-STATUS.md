@@ -96,7 +96,7 @@ was corrected by hand and had drifted back within a day.
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 26 |  |
 | bundle.md | needs-work | 0 |  |
-| capabilities.md | needs-work | 41 |  |
+| capabilities.md | needs-work | 43 |  |
 | capability-attenuation.md | needs-work | 25 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
 | census-artifact.md | current | 0 |  |
