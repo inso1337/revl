@@ -37,7 +37,7 @@ WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 # workflow file with its own pytest step must be added here deliberately
 # (test_every_pytest_running_workflow_is_scanned enforces that it cannot just
 # sit outside the scan).
-WORKFLOWS = ("ci.yml", "arm64-smoke.yml", "x64-smoke.yml")
+WORKFLOWS = ("ci.yml", "arm64-smoke.yml", "x64-smoke.yml", "pages.yml")
 
 # Directories that are not part of the checked-in test tree (vendored or
 # build output); a test_*.py under one of these, if it ever appeared, is not
@@ -69,6 +69,16 @@ _DYNAMIC_STEPS = {
         "a narrow selection it does not cover every file in tests/ -- it "
         "cannot be credited with covering any specific file unconditionally, "
         "and tests/ is covered by the plain `pytest tests/ -q` steps anyway."
+    ),
+    ("pages.yml", "deploy"): (
+        "the only `pytest` token in this job is a PACKAGE NAME, in "
+        "`python3 -m pip install --quiet -e . pytest`; the job runs no pytest "
+        "invocation and selects no test target, so there is nothing here for "
+        "the coverage scan to credit. pytest is installed because "
+        "tools/census_artifact.py loads the reference classifier out of "
+        "tests/test_selfhost_lower.py by path, and that module imports pytest: "
+        "without it the verify step refuses with `cannot import the reference "
+        "classifier ... It needs pytest on the path` (issue #1268)."
     ),
 }
 
