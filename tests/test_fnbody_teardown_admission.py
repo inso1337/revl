@@ -98,8 +98,9 @@ def test_399_acquire_undo_allowed_in_provide_method():
 
 def test_399_a_seam_acquire_whose_inverse_takes_the_handle_names_witnessed():
     # issue #1859: `r_open` declares `undo r_close(result)`, and a provide
-    # method cannot bind the handle to pass, so no site `undo` releases it.
-    # The refusal names the spelling that does: a `witnessed` extern.
+    # method cannot bind the handle to pass, so this site `undo` cannot be that
+    # call. It names none of the acquisition's values either (issue #2102), so
+    # the refusal names the spelling that does: a `witnessed` extern.
     with pytest.raises(RevlError) as ei:
         _compile(_ACQ_UNDO + (
             "extern pure fn r_forget(tag: Str) = @py { return }\n"

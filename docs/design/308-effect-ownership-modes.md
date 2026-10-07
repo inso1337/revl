@@ -365,24 +365,35 @@ can exist. Inside a provide METHOD it cannot: only `spawn` (and a
 result-declared host verb, item 397) may be acquired there, `result` is
 not in scope in a site `undo` the way it is in the extern's own slot, and
 re-minting a same-typed handle to release is exactly the double-close O1
-refuses. So a seam that acquires a handle has no way to name it, and the
-only shape that used to compile was one passing something ELSE to the
-inverse. That shape compiled solely because the site `undo` slot was never
-argument-checked; once it is (`_check_inverse_args`), it is a type error
-like any other, and O1's hint at a seam names the reachable fix instead.
+refuses. So a seam that acquires a handle has no way to name it. The shape
+that compiled before the site `undo` slot was argument-checked
+(`_check_inverse_args`) passed something ELSE to the inverse; that is a
+type error like any other.
 
-That fix needs no new surface. `witnessed` (item 243, extended to
-provide-method bodies by item 318) is the one classification whose
-DECLARED inverse is actually replayed: the acquisition carries no site
-`undo` at all, and `undo <inverse>(result)` auto-registers on the
-enclosing activation's transactional accumulator, once per acquisition,
-with `result` bound to what the acquisition returned. That is precisely
-"release exactly the handle that was acquired", on the frame whose
-teardown is the right one, on the `Ok` branch only. Making `result`
-available in a site `undo`, or admitting a general method-scope acquire
-binding (the F9 surface, DECIDED below and not built), would each be a
-second, weaker copy of that mechanism; a handle-carrying form would be a
-third. The refusals point at `witnessed` rather than inventing one.
+What a seam CAN write is the NAME-addressed release (item 2102): a site
+`undo` that calls a release with the values the acquisition was given, in
+the positions it was given them, re-deriving the resource from the same
+address the acquisition used. `effect open_h(config.owner, id) undo
+close_named(config.owner, id)` is that shape; a literal, a swapped pair,
+another config field, a release called with none of the values, and no
+site `undo` at all are each still refused. The release's callee is the
+author's, exactly as the declared-inverse spelling leaves the inverse's
+other arguments to the author; the VALUES are what is pinned.
+
+The other reachable fix needs no new surface either. `witnessed` (item
+243, extended to provide-method bodies by item 318) is the one
+classification whose DECLARED inverse is actually replayed: the
+acquisition carries no site `undo` at all, and `undo <inverse>(result)`
+auto-registers on the enclosing activation's transactional accumulator,
+once per acquisition, with `result` bound to what the acquisition
+returned. That is precisely "release exactly the handle that was
+acquired", on the frame whose teardown is the right one, on the `Ok`
+branch only — which is why it is the wrong fix for a resource that must
+also revert on a clean unload, where a site `undo` is what runs. Making
+`result` available in a site `undo`, or admitting a general method-scope
+acquire binding (the F9 surface, DECIDED below and not built), would each
+be a second, weaker copy of one of these two; a handle-carrying form would
+be a third. The refusal names both spellings.
 
 ### B1: a borrow does not escape its scope
 

@@ -219,11 +219,15 @@ handle the bracket bound wherever the declaration passes `result`; the other
 arguments are the author's. Anything else runs at teardown and leaves the
 handle open while the teardown reports a clean release, so it is refused, and
 so is an unbound acquisition whose inverse takes the handle. In a provide
-method, where only `spawn` may be bound, the refusal names the spelling that
-does release each acquisition: declare the extern `witnessed`. Closing a
-sibling bracket's handle stays the O1 double-close (G7). What this proves is
-the choice of inverse; that the host body reverts is still the declaration's
-assertion (issue #1859, g4_extern_undo_not_declared.rvl):
+method only `spawn` may be bound, so the handle has no name at the site: there
+the release is written NAME-addressed instead, as a call naming the values the
+acquisition was given, and only a site `undo` that is neither spelling is
+refused — the refusal names the other one, `witnessed`, which replays on abort
+only and is the wrong fix for a resource that must revert on a clean unload
+(issue #2102). Closing a sibling bracket's handle stays the O1 double-close
+(G7). What this proves is the choice of inverse; that the host body reverts is
+still the declaration's assertion (issue #1859,
+g4_extern_undo_not_declared.rvl):
 
 ```revl reject G4
 type H = Opaque

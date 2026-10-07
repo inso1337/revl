@@ -3035,10 +3035,13 @@ _SITE_INVERSE_GUIDANCE = (
     "was acquired: in an activation body bind the acquisition and name the "
     "binding (`let h = effect <acquire>(...) undo <inverse>(h)`); at a "
     "provide-method seam, where no acquisition may be bound and `result` is "
-    "not in scope, declare the extern `witnessed` and drop the site `undo`, "
-    "so its DECLARED `undo <inverse>(result)` is the one that replays, once "
-    "per acquisition, with `result` bound to the handle that was actually "
-    "acquired (docs/design/243-witnessed-externs.md)")
+    "not in scope, write a site `undo` naming the values the acquisition was "
+    "given (`effect open_h(owner, id)` / `undo close_named(owner, id)`), which "
+    "replays on a clean unload AND on abort — or declare the extern "
+    "`witnessed` and drop the site `undo`, so its DECLARED `undo "
+    "<inverse>(result)` is the one that replays, once per acquisition, with "
+    "`result` bound to the handle that was actually acquired, on the abort "
+    "path only (docs/design/243-witnessed-externs.md, issue #2102)")
 
 
 def _site_inverse_refusal(err: RevlError, slot: str) -> RevlError:
@@ -3106,8 +3109,9 @@ def _lower_site_inverse(expr, env: "Env", *, slot: str):
     position is what makes this particular refusal navigable (item 274). A
     site `undo` is the teardown that actually runs on abort, and the generic
     hint offers advice the author cannot take there: at a provide-method seam
-    the acquisition cannot be bound and `result` is not in scope, so the only
-    move that releases the acquired handle is `witnessed`. So the slot rides
+    the acquisition cannot be bound and `result` is not in scope, so the
+    handle cannot be named and the release must be written the way it can be —
+    a call naming the values the acquisition was given. So the slot rides
     on `env` for the duration of the lowering - the same idiom `_lower_expr`
     already uses for the expression mode - and `_check_component_call` renders
     the slot-naming, spelling-listing refusal while it is set, the generic one
@@ -9521,7 +9525,7 @@ def _check_component_call(node: dict, env: Env, filename: str, line: int) -> Non
     The general judgment is the only one that runs, so it is the one that has
     to carry the position: `_lower_site_inverse` names the inverse slot on
     `env` for the duration of that slot's lowering, and a mismatch raised
-    while it is set is re-rendered with the slot named and the two legal
+    while it is set is re-rendered with the slot named and the legal
     spellings listed. The MESSAGE is the stratum checker's verbatim either
     way, so the T1 shape consumers classify on never depends on position;
     only the HINT does, because at a site `undo` the generic hint offers
@@ -11873,6 +11877,59 @@ def _extern_release_form(inv: str, slots: list, who: str) -> str:
     return f"`undo {inv}(...)` as the declaration calls it"
 
 
+def _same_lowered_node(a, b) -> bool:
+    """Whether two lowered expression nodes are the same expression.
+
+    Canonical JSON, the same rendering `_key_spelling` already uses to compare a
+    key expression with its declaration's, so the node's own key order cannot
+    matter. Used by `_seam_rederivation` to ask whether a site `undo` passes the
+    very values the acquisition was given."""
+    try:
+        return (json.dumps(a, sort_keys=True, default=repr)
+                == json.dumps(b, sort_keys=True, default=repr))
+    except (TypeError, ValueError):  # pragma: no cover - nodes are JSON trees
+        return False
+
+
+def _seam_rederivation(acquire, undo) -> bool:
+    """Whether a provide-method site `undo` names the acquisition's own values.
+
+    Issue #2102. A provide method may bind only `spawn`, so an acquisition's
+    handle has no name at the site and an `extern acquire` whose declared
+    inverse takes `result` cannot write that call there. What CAN be written is
+    the release that needs no handle: a call passing the values the acquisition
+    was given, in the positions it was given them. That is the same expression
+    identity `_method_effect_inverse` already demands of a host write's `undo`
+    (the same key expression on the same receiver), and it is strictly TIGHTER
+    than what this gate already admits where a declaration passes no `result`
+    at all (any arguments, at the declared arity).
+
+    The callee is the author's, exactly as the declared-inverse spelling leaves
+    the inverse's other arguments to the author: what is pinned here is the
+    VALUES, and the call's own signature is held by the argument judgment every
+    component-body call already passes through (`_check_component_call`), which
+    is also what keeps a call naming the acquisition's values but not matching
+    the release it names from being admitted. At least one argument is
+    required: an `undo` naming none of the acquisition's values re-derives
+    nothing, and admitting it would re-open the `undo noop()` hole this rule
+    exists to close.
+
+    So `effect open_h(owner, id)` with `undo close_h(result)` is released by
+    `undo close_named(owner, id)` (a release taking both values) or by
+    `undo close_owner(owner)` (a release taking only a prefix of them), and
+    refused for a literal, a swapped pair, another config field, a release
+    called with no arguments, and for no site `undo` at all."""
+    if not isinstance(acquire, dict) or not isinstance(undo, dict):
+        return False
+    if undo.get("kind") != "fn":
+        return False
+    given = acquire.get("args") or []
+    passed = undo.get("args") or []
+    if not passed or len(passed) > len(given):
+        return False
+    return all(_same_lowered_node(p, g) for p, g in zip(passed, given))
+
+
 def _check_extern_release(step: dict, env: "Env", filename: str, line: int, *,
                           bind: str | None, safe: str | None,
                           seam: bool = False) -> None:
@@ -11887,13 +11944,25 @@ def _check_extern_release(step: dict, env: "Env", filename: str, line: int, *,
     wherever the declaration passes `result`; the other arguments are the
     author's, and `_lower_site_inverse` has already checked their types. An
     acquisition whose declared inverse takes `result` must be bound, since an
-    unbound one leaves nothing to pass. In a provide method (`seam`) only
-    `spawn` may be bound, so there the refusal names the spelling that does
-    release exactly what a seam acquires: a `witnessed` extern, whose declared
-    inverse registers once per acquisition.
+    unbound one leaves nothing to pass.
 
-    What this proves is the CHOICE of inverse, not that the host body reverts:
-    that half stays the declaration author's assertion."""
+    In a provide method (`seam`) only `spawn` may be bound, so there the handle
+    has no name and the declared inverse cannot be written at the site. That is
+    not a gap in the language: the release a seam can write is the
+    NAME-addressed one, a call passing the values the acquisition was given
+    (`_seam_rederivation`), which is exactly what the declaration would have
+    named the handle for. Only when the site `undo` is not that either does the
+    refusal name the other spelling, a `witnessed` extern, whose declared
+    inverse registers once per acquisition — on abort only, which is why it is
+    the wrong fix for a resource that must revert on a clean unload.
+
+    What a site `undo` means at teardown: it is the call that actually RUNS,
+    on abort and on a clean unload, while the activation is unwinding. A
+    non-`witnessed` extern's declared inverse is never replayed by either tier,
+    so dropping the site `undo` is not a shorter spelling of the same thing —
+    it registers no reversion at all. What this rule proves is the CHOICE of
+    inverse, not that the host body reverts: that half stays the declaration
+    author's assertion."""
     found = _extern_acquire_of(step.get("acquire"), env)
     if found is None:
         return
@@ -11907,16 +11976,23 @@ def _check_extern_release(step: dict, env: "Env", filename: str, line: int, *,
             f"teardown reports a clean release. That `{inv}` reverts the "
             f"acquisition is what the declaration asserts (issue #1859)")
     if bind is None and any(slots) and seam:
+        if _seam_rederivation(step.get("acquire"), step.get("undo")):
+            return
         raise RevlError(
             filename, line,
             f"`effect {fn}(...)` in a provide method cannot name its handle, so "
-            f"no site `undo` can release it: declare `{fn}` `witnessed` and drop "
-            f"the site `undo`, and its declared `undo {inv}(...)` releases each "
-            f"acquisition",
-            hint=hint + ". A provide method may bind only `spawn`; a witnessed "
-                 "extern's declared inverse registers on the activation's "
-                 "accumulator with `result` bound to what the acquisition "
-                 "returned (docs/design/243-witnessed-externs.md)",
+            f"its declared `undo {inv}(...)` cannot be written at the site: "
+            f"write a site `undo` naming the values this acquisition was given, "
+            f"or declare `{fn}` `witnessed` and drop the site `undo`, and its "
+            f"declared `undo {inv}(...)` releases each acquisition",
+            hint=hint + ". A provide method may bind only `spawn`, so the handle "
+                 "has no name at the site: the release that works there names "
+                 "the acquisition's own values instead of the handle it "
+                 "returned, and a site `undo` replays on a clean unload AND on "
+                 "abort, where a `witnessed` declared inverse replays on abort "
+                 "only and is discharged on commit — the right fix only when "
+                 "the resource is meant to persist (issue #2102, "
+                 "docs/design/243-witnessed-externs.md)",
             code="G4", category="inverse")
     if bind is None and any(slots):
         raise RevlError(
@@ -12174,10 +12250,14 @@ def _walk_value_nodes(node):
 # Inside a PROVIDE METHOD it is not: only `spawn` (and a result-declared host
 # verb) may be acquired there, so the author cannot create an acquiring binding
 # to hang an own-undo on, and `result` is not in scope in a site `undo` either.
-# The spelling that DOES release exactly the acquired handle at a seam is
-# `witnessed`: its declared inverse auto-registers on the enclosing activation's
-# transactional accumulator, once per acquisition, with `result` bound to what
-# the acquisition returned (docs/design/243-witnessed-externs.md, item 318).
+# TWO spellings DO release exactly what a seam acquires. A site `undo` naming
+# the values the acquisition was given (`effect open_h(owner, id)` /
+# `undo close_named(owner, id)`, issue #2102) is the teardown that runs on a
+# clean unload AND on abort. A `witnessed` extern's declared inverse
+# auto-registers on the enclosing activation's transactional accumulator, once
+# per acquisition, with `result` bound to what the acquisition returned — on
+# the abort path only, so it is the right fix only when the resource is meant
+# to persist (docs/design/243-witnessed-externs.md, item 318).
 _O1_HINT_ACTIVATION = (
     "let teardown run the inverse; if a resource must end early, that is an "
     "explicit-release surface revl does not have yet (only the acquiring "
@@ -12186,10 +12266,13 @@ _O1_HINT_SEAM = (
     "let teardown run the inverse. The own-undo exemption is not reachable "
     "here: only `spawn` may be acquired inside a provide-method body, so there "
     "is no acquiring binding to hang an `undo` on, and `result` is not in "
-    "scope in a site `undo`. To release exactly what a seam acquires, declare "
-    "the extern `witnessed` and drop the site `undo`: its DECLARED `undo "
-    "<inverse>(result)` auto-registers on the enclosing activation's "
-    "transactional accumulator, once per acquisition "
+    "scope in a site `undo`. To release exactly what a seam acquires, write a "
+    "site `undo` naming the values the acquisition was given (`undo "
+    "close_named(owner, id)` for `effect open_h(owner, id)`), which replays on "
+    "a clean unload and on abort — or declare the extern `witnessed` and drop "
+    "the site `undo`, whose DECLARED `undo <inverse>(result)` auto-registers "
+    "on the enclosing activation's transactional accumulator, once per "
+    "acquisition, on the abort path only "
     "(docs/design/243-witnessed-externs.md). Early release is an "
     "explicit-release surface revl does not have yet")
 
