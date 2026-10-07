@@ -105,6 +105,10 @@ BENCH_DEPENDENT_TESTS = (
     # committed artifact drifting from the ledgers it was recomputed from, so a
     # bench change has to re-run it.
     "tests/test_framework_bench.py",
+    # Issue #2124 / CodeQL alert 87: drives `bench/framework_unload_survey.py`'s
+    # tar and zip extraction guards with crafted members, so a bench change to
+    # that module can change its verdict.
+    "tests/test_framework_unload_survey_tarslip.py",
     "tests/test_inprocess_gate.py",
     "tests/test_inprocess_gate_rust.py",
     # Indexes every tracked `.rvl` outside `bench/results/` for its
