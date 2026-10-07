@@ -67,7 +67,7 @@ to the diagnostic; see docs/why-traces.md.
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
 | A3 | host-safe identifiers | lowering transform (renames, never refuses) |
-| A5 | compensation accompanies an emission | by construction |
+| A5 | compensation accompanies an emission | lowering transform (carries the slot, never refuses); the mandatory case refuses under G4 |
 | A6 | provide-methods match the service signature | lower / compat gate |
 | A8 | mid-body failure reverts and contains (L-Raise) | lower |
 | A9 | a provide key is declared in the component's `provides` clause | lower |
@@ -647,21 +647,46 @@ emitter's own helper names) cross on the live cordis-wasm runtime
 
 ## A5 — compensation accompanies an emission
 
-No refusing example: `compensate` is an *optional* slot (DESIGN.md §3.5 —
-an emission "may declare" one) that the grammar binds only to an `emit`,
-and `emit` requires a declared `emission` (G4). For every ordinary
-capability there is no "compensation required but missing" program; the
-guarantee is by construction. The lowering test is
-`test_a5_compensate_lowering`.
+**Reclassified in issue #2114: out of scope by kind, with the residue
+named.** A5 has no refusing example because it is not a refusal rule at
+all — it is a *lowering* rule, on the same footing as A3. `compensate` is
+an *optional* slot (DESIGN.md §3.5 — an emission "may declare" one) that
+the grammar binds only to an `emit`, and `emit` requires a declared
+`emission` (G4). The lowering admits a bare emission (`src/revl/lower.py`
+line 14945: "emissions are permitted bare (A5)") and carries a declared
+clause into the same `emit` step (`src/revl/lower.py` line 14944);
+`src/revl/lower.py` line 16587 files the slot as IR v1 amendment A5, and
+`docs/contract-errata.md` records A5 as an amendment rather than a
+rejection ("A3, A4, A5 are lowering transforms … not refusals"). So there
+is no A5-shaped verdict for a corpus to flip and no A5 differential row is
+possible — the oracle has never printed an `A5` code, and nothing in
+`src/revl/` raises one. The positive test is `test_a5_compensate_lowering`
+in `tests/test_frontend.py`, which pins the slot surviving lowering.
 
-One family is the exception, and it refuses under G4 rather than here
-(roadmap item 522, `docs/design/538-ui-transactions.md`). A computer-use
-verb carries a reversibility class that the registry owns, not the
-author, so the `compensate` slot is no longer free: `ui.text` is
-compensatable and must declare one, while `ui.click` (unknown) and
-`ui.download` (irreversible) may not, because the declared slot is what
-the residue and erase reports read and a transaction over a step with no
-inverse has to report `uncompensated` rather than a clean teardown.
+The residue — the one shape where compensation is **required** — is a
+*registry* property rather than A5's, and it refuses under **G4** rather
+than here (roadmap item 522, `docs/design/538-ui-transactions.md` line
+90). A computer-use verb carries a reversibility class that the registry
+owns, not the author, so the `compensate` slot is no longer free:
+`ui.text` is compensatable and must declare one, while `ui.click`
+(unknown) and `ui.download` (irreversible) may not, because the declared
+slot is what the residue and erase reports read and a transaction over a
+step with no inverse has to report `uncompensated` rather than a clean
+teardown. `src/revl/ui_family.py::teardown_refusal` states it in its own
+words — "Two refusals, both fail-closed, both G4" — and
+`tests/test_ui_transaction_classification_522.py` pins both directions:
+`test_a_compensatable_verb_must_declare_its_inverse`,
+`test_the_refusal_classifies_as_a_g4_reversibility_finding` (which asserts
+`record["code"] == "G4"`), and `test_an_ordinary_capability_is_untouched`
+(an ordinary emission "keeps both spellings"). So **G4 carries the
+obligation**, and A5's row in `formal/STATUS.md` now reads
+`residue-by-design` and names that carrier instead of `Unbuilt work`.
+
+One limit is recorded rather than closed: the `compensatable` class is
+registry-owned (`src/revl/ui_family.py::REVERSIBILITY`), so *which* verbs
+owe a compensation is a property of that table and not of any program. A
+differential row for it would be a row over the registry, filed under the
+code the refusal actually carries — which is G4's row, not this one.
 
 ## A6 — provide-methods match the service signature
 

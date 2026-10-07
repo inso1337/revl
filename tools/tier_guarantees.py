@@ -156,9 +156,15 @@ ACKNOWLEDGED: dict[str, str] = {
           "no reproducer to run. The rename transform itself is pinned by the "
           "per-tier reserved-word suites (`backends/*/test_reserved_word_"
           "idents_*.py`).",
-    "A5": "compensation accompanies an emission by construction: the grammar "
-          "attaches `compensate` to the `emit` that carries it, so a violating "
-          "program is not expressible and cannot be written as a fixture.",
+    "A5": "A5 is a LOWERING rule, not a refusal (issue #2114): `compensate` "
+          "is an OPTIONAL slot (`DESIGN.md` §3.5 — an emission \"may declare\" "
+          "one) that the grammar attaches to the `emit` that carries it, so a "
+          "violating program is not expressible and cannot be written as a "
+          "fixture. The one shape where compensation IS required — the "
+          "registry-owned `compensatable` class (item 522, `src/revl/"
+          "ui_family.py::teardown_refusal`) — refuses under `G4`, so its "
+          "reproducer belongs to that code's row and is held by `tests/"
+          "test_ui_transaction_classification_522.py`.",
     "G-SECRET": "the confidentiality fixtures in `examples/rejections/` are "
                 "refused under `G-SECRET-FLOW` (the disclosure-sink half). "
                 "`G-SECRET` (the capability-reach half) is enforced in "

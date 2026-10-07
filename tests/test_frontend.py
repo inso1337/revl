@@ -595,11 +595,15 @@ REJECTIONS = {
 #   A4  `format` escaping — LOWERING TRANSFORM. Literal `$N` lowers to `$$N`;
 #       there is nothing to refuse. Positive tests:
 #       test_a4_literal_dollars_are_escaped, test_plain_string_dollar_is_literal.
-#   A5  compensation accompanies an emission — BY CONSTRUCTION. `compensate` is
-#       an *optional* slot (DESIGN.md §3.5: an emission "may declare" one) that
+#   A5  compensation accompanies an emission — LOWERING, not a refusal (issue
+#       #2114: residue-by-design, out of scope by kind). `compensate` is an
+#       *optional* slot (DESIGN.md §3.5: an emission "may declare" one) that
 #       the grammar binds only to an `emit`, and `emit` requires an `emission`
-#       (G4). There is no "compensation required but missing" program. Positive
-#       test: test_a5_compensate_lowering.
+#       (G4). There is no "compensation required but missing" program, so no
+#       A5-shaped verdict exists to flip. The one shape where compensation IS
+#       required — the registry-owned `compensatable` class (item 522) —
+#       refuses under G4, whose row carries it. Positive test:
+#       test_a5_compensate_lowering.
 #   A7  emission flags — ADVISORY to backends; enforcement is G4 itself
 #       (docs/contract-errata.md A7). Covered by g4_unmarked_emission.rvl and
 #       g4_emission_not_declared.rvl.
