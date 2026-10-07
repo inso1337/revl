@@ -20,12 +20,16 @@ Usage:
   python3 bench/run.py --runner cline --specs 3 --variants v2   # pilot
   python3 bench/run.py --runner cline                      # full matrix
   python3 bench/run.py --runner local --specs 3 --variants v2   # local pilot
+  python3 bench/run.py --runner local --label L --resume --specs 04-migrator
+      # continue an interrupted run in its own directory: every cell that
+      # already has a final row is skipped and every other cell starts over
 """
 
 import argparse
 import datetime
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -433,6 +437,26 @@ def run_one_probed(spec: dict, system: str, run_dir: Path, args,
             "finish_reason": reply.get("finish_reason"), **rec}
 
 
+def read_jsonl(path: Path) -> list:
+    """Rows a run directory already holds.
+
+    A process killed mid-write leaves a truncated last line. Dropping it is
+    right rather than salvaging it: `--resume` regenerates the cell it belonged
+    to, so a half-written row is never trusted.
+    """
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--runner", choices=["cline", "mock", "local"], required=True)
@@ -457,6 +481,14 @@ def main():
     ap.add_argument("--inline-system", action="store_true",
                     help="merge grammar into the user prompt instead of cline -s")
     ap.add_argument("--label", default=None, help="run directory name")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue the run in --label's directory instead of "
+                         "starting it over: a cell that already has a final row "
+                         "is skipped, and a cell a previous process died inside "
+                         "starts from an empty directory rather than on top of "
+                         "the attempts it left behind. A full matrix against a "
+                         "local model is hours, so an interrupted run is the "
+                         "expected case, not the exception.")
     ap.add_argument("--compiler-root", default=None,
                     help="score against <dir>/src/revl instead of the live tree "
                          "(e.g. a clean export of a pinned commit)")
@@ -495,9 +527,26 @@ def main():
     results_path = run_dir / "results.jsonl"
     rows = []
     raw_rows = []  # raw-ts scoring records, for the paradigm-comparison summary
+    done: set = set()
+    if args.resume:
+        rows = read_jsonl(results_path)
+        raw_rows = [r for r in rows
+                    if r.get("summary") and r.get("variant") == RAW_TS_VARIANT]
+        done = {(r.get("spec"), r.get("variant")) for r in rows if r.get("summary")}
+        print(f"resume: {len(done)} final cell(s) already in {results_path.name}")
 
     for spec in specs:
         for variant in variants:
+            if (spec["id"], variant) in done:
+                print(f"  {spec['id']}/{variant}: already final, skipped")
+                continue
+            if args.resume:
+                # A cell the previous process died inside holds a prefix of one
+                # generation's attempts. Appending to that prefix would score a
+                # stale attempt as this cell's work, so the cell starts empty.
+                cell_dir = run_dir / spec["id"] / variant
+                if cell_dir.is_dir():
+                    shutil.rmtree(cell_dir)
             system = prompts[variant]
 
             # raw-ts: the paradigm baseline. One generation, no compiler retry
