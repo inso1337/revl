@@ -699,13 +699,18 @@ def test_a_file_joining_a_ratcheted_bucket_fails_without_touching_the_block(
     record names it, and a stale block still fails `sync_status`."""
     block, _fatal, _align, samples = status
     write, check = ledger
-    write(samples)
     bucket = harness.OOF_RATCHET_BUCKETS[0]
-    joined = list(samples.get(bucket, [])) + ["zz/joined.rvl"]
+    # Since issue #2098 emptied `out-of-fragment-witnessed` every ratcheted
+    # bucket in this corpus is empty, so there is no member here to join. The
+    # precondition the name needs is stated rather than read off `samples`: a
+    # ledger holding one name in `bucket`, which a second name then joins.
+    held = {**samples, bucket: [NEWCOMER]}
+    write(held)
+    joined = [*held[bucket], "zz/joined.rvl"]
     monkeypatch.setitem(harness._ALIGN_SAMPLES, bucket, joined)
     rows_block = harness.status_block({}, {}, [], {}, None, harness._ALIGN)
     assert rows_block == block
-    findings = check({**samples, bucket: joined})
+    findings = check({**held, bucket: joined})
     assert len(findings) == 1 and findings[0].startswith(f"joined {bucket}: zz/joined.rvl")
     assert harness.sync_status(block.replace("ratcheted", "informational", 1),
                                write=False) is not None
@@ -820,11 +825,14 @@ def test_a_file_joining_an_out_of_fragment_bucket_fails_the_gate(
     reds until somebody models it or writes the hole down."""
     _block, _fatal, _align, samples = status
     write, check = ledger
-    write(samples)
-    assert check(samples) == []
-    joined = {**samples,
-              "out-of-fragment-G5": [
-                  *samples.get("out-of-fragment-G5", []), NEWCOMER]}
+    # The corpus states no G5 member since issue #2098 emptied the last
+    # ratcheted bucket, so the ledger the newcomer joins is seeded here.
+    incumbent = "examples/rejections/g5_incumbent.rvl"
+    base = {**samples, "out-of-fragment-G5": [incumbent]}
+    write(base)
+    assert check(base) == []
+    joined = {**base,
+              "out-of-fragment-G5": [incumbent, NEWCOMER]}
     findings = check(joined)
     assert findings == [f for f in findings if f.startswith(
         "joined out-of-fragment-G5: ")]
@@ -837,10 +845,11 @@ def test_a_file_joining_the_g6_bucket_fails_the_gate(harness, status, ledger):
     fixture's contents; it can still refuse to let one in unannounced."""
     _block, _fatal, _align, samples = status
     write, check = ledger
-    write(samples)
+    incumbent = "examples/rejections/g6_incumbent.rvl"
+    base = {**samples, "out-of-fragment-G6": [incumbent]}
+    write(base)
     newcomer = "examples/rejections/g6_new_shape.rvl"
-    findings = check({**samples, "out-of-fragment-G6": [
-        *samples.get("out-of-fragment-G6", []), newcomer]})
+    findings = check({**base, "out-of-fragment-G6": [incumbent, newcomer]})
     assert len(findings) == 1
     assert findings[0].startswith(f"joined out-of-fragment-G6: {newcomer}")
 
@@ -868,8 +877,14 @@ def test_a_missing_ledger_is_a_failure_not_a_pass(harness, status, ledger):
     same failure mode as an informational bucket, spelled as a file."""
     _block, _fatal, _align, samples = status
     _write, check = ledger
-    findings = check(samples)
+    # A missing ledger is a failure only when the corpus has a member: with
+    # every bucket empty, no directory IS the empty ledger. The precondition
+    # this name needs — a member and no directory — is stated here.
+    held = {**samples, "out-of-fragment-G5": [NEWCOMER]}
+    findings = check(held)
     assert len(findings) == 1 and "is missing" in findings[0]
+    # The boundary, which is why the precondition above is not optional.
+    assert check(samples) == []
 
 
 def test_a_ledger_with_an_unreadable_record_is_a_failure(harness, status, ledger):
@@ -991,8 +1006,17 @@ def test_show_ledger_prints_bucket_and_name_sorted(harness, status, ledger):
     assert harness.show_ledger() == "the out-of-fragment ledger is empty"
 
 
-def test_show_ledger_is_a_read_only_flag():
-    """`--show-ledger` prints the committed ledger and writes nothing."""
+#: `show_ledger`'s answer for a ledger with no records. The committed ledger
+#: is in that state since issue #2098 emptied the last ratcheted bucket.
+LEDGER_EMPTY = "the out-of-fragment ledger is empty"
+
+
+def test_show_ledger_is_a_read_only_flag(harness):
+    """`--show-ledger` prints the committed ledger and writes nothing. The
+    committed ledger holds no records since issue #2098 emptied the last
+    ratcheted bucket, so the printed form is the empty-ledger sentinel; the
+    lines are still sorted, still agree with the in-process `show_ledger`,
+    and are still either a `bucket name` row or that one sentinel."""
     import subprocess
 
     before = sorted(p.as_posix() for p in (ROOT / "formal").rglob("*")
@@ -1000,9 +1024,11 @@ def test_show_ledger_is_a_read_only_flag():
     out = subprocess.run([sys.executable, str(ROOT / "formal" / "harness" /
                                               "diff_corpus.py"), "--show-ledger"],
                          capture_output=True, text=True, check=True, cwd=ROOT)
-    assert out.stdout.splitlines() == sorted(out.stdout.splitlines())
-    assert all(line.split(" ", 1)[0].startswith("out-of-fragment-")
-               for line in out.stdout.splitlines())
+    lines = out.stdout.splitlines()
+    assert lines == sorted(lines)
+    assert lines == harness.show_ledger().splitlines()
+    assert lines == [LEDGER_EMPTY] or all(
+        line.split(" ", 1)[0].startswith("out-of-fragment-") for line in lines)
     after = sorted(p.as_posix() for p in (ROOT / "formal").rglob("*")
                    if "out_of_fragment_ledger" in p.as_posix())
     assert before == after

@@ -475,3 +475,22 @@ import RevL
 #print axioms RevL.G4Inverse.corpus_write_row_flips_when_the_receiver_moves
 #print axioms RevL.G4Inverse.corpus_row_verbs_are_the_tables
 #print axioms RevL.G4Inverse.g4_inverse_not_vacuous
+
+-- Issue #2098: the witnessed-extern site-`undo` rule. A `witnessed` extern
+-- already declares its own inverse, so its call sites do not spell one, and a
+-- site that spells one anyway is refused (G4, category `witnessed`). The rule
+-- is decided by the oracle's `SW` row on the site's own columns — the
+-- acquisition head's classification and the heads the site's `undo` spells,
+-- both already in the export — not on the coverage of the checker's site walk;
+-- see RevL/Theorems/G4_WitnessedSiteUndo.lean.
+#print axioms RevL.G4Witnessed.legalB_iff
+#print axioms RevL.G4Witnessed.swB_iff
+#print axioms RevL.G4Witnessed.legalCols_iff
+#print axioms RevL.G4Witnessed.unmodelled_classification_is_refused
+#print axioms RevL.G4Witnessed.other_head_never_refused
+#print axioms RevL.G4Witnessed.witnessed_undo_refused
+#print axioms RevL.G4Witnessed.refused_of_mem
+#print axioms RevL.G4Witnessed.corpus_columns_decided
+#print axioms RevL.G4Witnessed.corpus_sites_decided
+#print axioms RevL.G4Witnessed.corpus_flip_is_the_undo_column
+#print axioms RevL.G4Witnessed.witnessed_site_undo_not_vacuous

@@ -19,6 +19,7 @@ import RevL.Theorems.ModelCouncil
 import RevL.Theorems.G9Flow
 import RevL.Theorems.GRetain
 import RevL.Theorems.G4Inverse
+import RevL.Theorems.G4_WitnessedSiteUndo
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -2438,6 +2439,87 @@ def g4invVerdicts (p : String) (rs : G4InvRows) : String := Id.run do
   return out
 
 end G4Inverse
+/-! ### The `SW` row — witnessed-extern site `undo` on the corpus (issue #2098)
+
+`SW` carries the acquisition head of one effect SITE, the classification the
+shipped checker's own export gave that head (`witnessed` or not), and the heads
+the site's `undo` spells — the two columns the checker's refusal
+(`lower._lower_effect_step`, code `G4`, category `witnessed`) actually decided
+at. The row decides `RevL.G4Witnessed.legalB` at those columns. It is **the
+rule on the corpus, not the coverage of the checker's walk** (see
+`RevL/Theorems/G4_WitnessedSiteUndo.lean`): the row's premises ARE the site the
+checker's own refusal named, so a checker that stops reaching the site produces
+no row at all, and `diff_corpus.py` files that refusal under the fatal
+`missed-G4` rather than reading it as an agreement. The row is emitted for
+every effect site whose head the export classified `witnessed`, so the admitted
+twin (a `witnessed` head with NO site `undo`) produces an `ok` row and the rule
+is demonstrably not a constant. -/
+
+section SWitness
+
+/-- One `SW` row. `head` and `cls` are the site's acquisition head and its
+exported classification; `undo` is the comma-joined heads the site's `undo`
+spells (empty when the site spells none). -/
+structure SWRow where
+  path : String
+  comp : String
+  index : String
+  head : String
+  cls : String
+  undo : String
+
+def parseSW (f : List String) : Option SWRow :=
+  match f with
+  | ["SW", path, comp, index, head, cls, undo] =>
+      some ⟨path, comp, index, head, cls, undo⟩
+  | _ => none
+
+/-- The site's `undo` heads, read the way `splitKeys` reads a comma-joined
+column: `""` is no head, never one empty head. -/
+def swUndo (r : SWRow) : List String :=
+  (r.undo.splitOn ",").filter (fun s => s != "")
+
+/-- The row's verdict: the rule at the head's classification and the site's
+`undo`, through `legalCols` — which is `false`, never a vacuous `ok`, for a
+classification the export does not name. -/
+def swRowB (r : SWRow) : Bool := RevL.G4Witnessed.legalCols r.cls (swUndo r)
+
+/-- `swRowB` is exactly the rule at the carried columns: the site is admitted
+when its head's classification is not `witnessed` or its `undo` is empty, and
+`false` — never vacuously `true` — when the classification does not parse. -/
+theorem swRowB_iff (r : SWRow) :
+    swRowB r = true ↔
+      ∃ c, RevL.G4Witnessed.clsOfString r.cls = some c ∧
+        RevL.G4Witnessed.Legal ⟨"", c, swUndo r⟩ := by
+  unfold swRowB
+  exact RevL.G4Witnessed.legalCols_iff r.cls (swUndo r)
+
+def swRowBAll (rows : List SWRow) : Bool := rows.all swRowB
+
+theorem swRowBAll_iff (rows : List SWRow) :
+    swRowBAll rows = true ↔ ∀ r ∈ rows,
+      ∃ c, RevL.G4Witnessed.clsOfString r.cls = some c ∧
+        RevL.G4Witnessed.Legal ⟨"", c, swUndo r⟩ := by
+  unfold swRowBAll
+  rw [List.all_eq_true]
+  exact forall_congr' fun r => imp_congr_right fun _ => swRowB_iff r
+
+/-- The `SW` rows of one file. Kept out of `main` so its elaboration stays
+within the default heartbeat budget. -/
+structure SWRows where
+  rows : List SWRow
+
+def parseSWRows (fields : List (List String)) : SWRows :=
+  { rows := fields.filterMap parseSW }
+
+def swVerdicts (p : String) (rs : SWRows) : String := Id.run do
+  let mut out := ""
+  for r in rs.rows.filter (fun r => r.path == p) do
+    let v := if swRowB r then "ok" else "fail"
+    out := out ++ s!"SW\t{p}\t{r.comp}\t{r.index}\t{r.head}\t{r.cls}\t{r.undo}\t{v}\n"
+  return out
+
+end SWitness
 
 -- ---------------------------------------------------------------- main
 
@@ -2570,6 +2652,7 @@ def main (args : List String) : IO UInt32 := do
     let g9rows := parseG9Rows fields
     let retainrows := parseGRetainRows fields
     let invrows := parseG4InvRows fields
+    let swrows := parseSWRows fields
     let itrows := fields.filterMap parseIT
     let mcrows := fields.filterMap parseMC
     let aerows := fields.filterMap parseAE
@@ -2740,6 +2823,8 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ gretainVerdicts p retainrows
       -- INV verdicts (the G4 inverse rule on the corpus, issue #2097)
       out := out ++ g4invVerdicts p invrows
+      -- SW verdicts (witnessed-extern site `undo` on the corpus, issue #2098)
+      out := out ++ swVerdicts p swrows
       -- W verdicts (spawn attenuation) per edge
       for e in edges do
         let childCaps := (lookupCaps closed e.2).filterMap (capOf capTable)
@@ -2905,3 +2990,5 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.gretainRowB_iff
 #print axioms RevLOracle.g4InvRowB_iff
 #print axioms RevLOracle.g4invRowB_iff
+#print axioms RevLOracle.swRowB_iff
+#print axioms RevLOracle.swRowBAll_iff

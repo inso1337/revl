@@ -17,13 +17,21 @@ Some rules have left this ledger:
   inverse's indirections.
 - The G6 bucket emptied in issue #1812, when binding uniqueness became
   `RevL.G6Binding` (the `BU` row).
+- The `out-of-fragment-witnessed` bucket emptied in issue #2098, when the
+  witnessed-extern site-`undo` rule became `RevL.G4Witnessed` (the `SW` row).
+  That bucket also stays, at zero.
 
 Both of those buckets stay, so a new unresolvable `undo` or a new G6 purity
 refusal still reds the gate.
 
-`out-of-fragment-witnessed` (issue #1963) holds the files the checker refuses
-for a witnessed extern called with a site `undo`. The model has no
-witnessed-extern fact yet.
+`out-of-fragment-witnessed` (issue #1963) held the files the checker refuses
+for a witnessed extern called with a site `undo`. It emptied in issue #2098:
+the facts the rule reads were already in the export — the `EX` row's
+classification column (is the acquisition head a `witnessed` extern?) and the
+`I` row's inverse column (does the site spell an `undo`?) — so `RevL.G4Witnessed`
+states the rule as the `SW` row, and the two files it held now agree with the
+checker. The bucket itself stays registered at zero, so a witnessed site `undo`
+the export cannot see still reds the gate rather than passing silently.
 
 ## Why it is a ratchet
 
