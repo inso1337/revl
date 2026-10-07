@@ -355,7 +355,23 @@ python3 scripts/axioms_gate.py \
   RevL.G4Witnessed.corpus_columns_decided \
   RevL.G4Witnessed.corpus_sites_decided \
   RevL.G4Witnessed.corpus_flip_is_the_undo_column \
-  RevL.G4Witnessed.witnessed_site_undo_not_vacuous < .axioms.out
+  RevL.G4Witnessed.witnessed_site_undo_not_vacuous \
+  RevL.A5.registersB_iff \
+  RevL.A5.claimsNothingB_iff \
+  RevL.A5.legalB_iff \
+  RevL.A5.a5B_iff \
+  RevL.A5.not_legal_of_legalB_false \
+  RevL.A5.legalToken_iff \
+  RevL.A5.legalCols_iff \
+  RevL.A5.compensatable_without_compensate_refused \
+  RevL.A5.no_inverse_may_not_declare \
+  RevL.A5.reversible_untouched \
+  RevL.A5.rung_is_not_an_escape_hatch \
+  RevL.A5.valuation_does_not_move_the_class \
+  RevL.A5.outside_the_family_is_out_of_the_row \
+  RevL.A5.fixtures_decided \
+  RevL.A5.a5_not_vacuous \
+  RevL.A5.witness_bites < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -414,6 +430,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.g9RowB_iff \
   RevLOracle.retainRowB_iff RevLOracle.gretainRowB_iff \
   RevLOracle.g4InvRowB_iff RevLOracle.g4invRowB_iff \
-  RevLOracle.swRowB_iff RevLOracle.swRowBAll_iff < .oracle-axioms.out
+  RevLOracle.swRowB_iff RevLOracle.swRowBAll_iff \
+  RevLOracle.a5RowB_iff RevLOracle.a5RowBAll_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py

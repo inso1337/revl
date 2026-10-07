@@ -156,9 +156,15 @@ ACKNOWLEDGED: dict[str, str] = {
           "no reproducer to run. The rename transform itself is pinned by the "
           "per-tier reserved-word suites (`backends/*/test_reserved_word_"
           "idents_*.py`).",
-    "A5": "compensation accompanies an emission by construction: the grammar "
-          "attaches `compensate` to the `emit` that carries it, so a violating "
-          "program is not expressible and cannot be written as a fixture.",
+    "A5": "A5's obligation is real and has reproducers "
+          "(`examples/rejections/a5_compensatable_without_compensate.rvl`, "
+          "`examples/rejections/a5_no_inverse_declares_compensate.rvl`), but "
+          "the code that carries it is G4 with category `reversibility` - "
+          "there is no A5 code - so `revl.diagnostics.classify` reports them "
+          "under G4 and no fixture is refused UNDER A5. The rule is the "
+          "computer-use reversibility registry's (`src/revl/ui_family.py`); "
+          "it is stated and witnessed in `formal/STATUS.md`'s A5 row "
+          "(issue #2114).",
     "G-SECRET": "the confidentiality fixtures in `examples/rejections/` are "
                 "refused under `G-SECRET-FLOW` (the disclosure-sink half). "
                 "`G-SECRET` (the capability-reach half) is enforced in "

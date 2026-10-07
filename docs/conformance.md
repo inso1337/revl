@@ -230,7 +230,7 @@ The six host columns share their verdict wherever a register does not separate t
 | `G1` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g1_template_undeclared.rvl`](../examples/rejections/g1_template_undeclared.rvl) |
 | `G2` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g2_provision_conflict.rvl`](../examples/rejections/g2_provision_conflict.rvl) |
 | `G3` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g3_dependency_cycle.rvl`](../examples/rejections/g3_dependency_cycle.rvl) |
-| `G4` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/g4_approval_compensate.rvl`](../examples/rejections/g4_approval_compensate.rvl) |
+| `G4` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g4_approval_compensate.rvl`](../examples/rejections/g4_approval_compensate.rvl) |
 | `G5` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/g5_undo_arrow_emission.rvl`](../examples/rejections/g5_undo_arrow_emission.rvl) |
 | `G6` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/g6_closure_mutates_capture.rvl`](../examples/rejections/g6_closure_mutates_capture.rvl) |
 | `G7` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/v2_verified_direct_recursion.rvl`](../examples/rejections/v2_verified_direct_recursion.rvl) |
@@ -261,6 +261,9 @@ The six host columns share their verdict wherever a register does not separate t
   - `examples/rejections/lifecycle_no_swap.rvl`: admitted
 - `G3` on revl is a **recorded divergence**. The self-host gate refuses every other G3 reproducer, and not these:
   - `examples/rejections/v2_use_cycle.rvl`: admitted
+- `G4` on revl is a **recorded divergence**. The self-host gate refuses every other G4 reproducer, and not these:
+  - `examples/rejections/a5_compensatable_without_compensate.rvl`: admitted
+  - `examples/rejections/a5_no_inverse_declares_compensate.rvl`: admitted
 - `G5` on revl is **unimplemented**. The self-host gate answers every G5 reproducer under G4 (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `G6` on revl is a **recorded divergence**. The self-host gate refuses every other G6 reproducer, and not these:
   - `examples/rejections/g6_impure_statement.rvl`: admitted
@@ -268,7 +271,7 @@ The six host columns share their verdict wherever a register does not separate t
 - `G9` on revl is **unimplemented**. The self-host gate raises no objection to any G9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `A2` on revl is **unimplemented**. The self-host gate raises no objection to any A2 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `A3` on py, ts, rust, java, wasm, go, revl has **no reproducer**. A3 renames rather than refusing (`docs/guarantees.md`: "renames, never refuses"), so no program is rejected under it and there is no reproducer to run. The rename transform itself is pinned by the per-tier reserved-word suites (`backends/*/test_reserved_word_idents_*.py`).
-- `A5` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Compensation accompanies an emission by construction: the grammar attaches `compensate` to the `emit` that carries it, so a violating program is not expressible and cannot be written as a fixture.
+- `A5` on py, ts, rust, java, wasm, go, revl has **no reproducer**. A5's obligation is real and has reproducers (`examples/rejections/a5_compensatable_without_compensate.rvl`, `examples/rejections/a5_no_inverse_declares_compensate.rvl`), but the code that carries it is G4 with category `reversibility` - there is no A5 code - so `revl.diagnostics.classify` reports them under G4 and no fixture is refused UNDER A5. The rule is the computer-use reversibility registry's (`src/revl/ui_family.py`); it is stated and witnessed in `formal/STATUS.md`'s A5 row (issue #2114).
 - `A8` on revl is **unimplemented**. The self-host gate raises no objection to any A8 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `A9` on revl is **unimplemented**. The self-host gate raises no objection to any A9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `T3` on py, ts, rust, java, wasm, go, revl has **no reproducer**. An open hole is refused at the ADMISSION gate rather than by `compile_files`, so a hole fixture compiles here and is refused one stage later; the reproducers live with the gate (`src/revl/holes.py`, `docs/holes.md`).

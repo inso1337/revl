@@ -1,0 +1,25 @@
+// REJECTED — A5: a crossing of a `compensatable` computer-use verb whose
+// extern declares no inverse. `compensate` is an OPTIONAL slot on every
+// extern (DESIGN.md §3.5: an emission "may declare" one), so A5's obligation
+// is not "a compensate is present" — it is "a compensate is present EXACTLY
+// when the registry says the verb has no inverse of its own". `ui.text`
+// (revl.ui_family.REVERSIBILITY) is `compensatable`: the verb overwrites what
+// the user had, so the crossing must name the compensation that restores it.
+//
+// The refusal is read off the checker's REPORTED CODE, which is G4 with
+// category `reversibility` (src/revl/parser.py, the extern-declaration call
+// to `ui_family.teardown_refusal`). The code is the sibling G4's; the
+// CATEGORY is this rule's own, and it is the only raiser in the tree that
+// uses it. formal/STATUS.md's A5 row credits it there rather than claiming
+// an A5 code that does not exist.
+//
+// expected error:
+//   a5_compensatable_without_compensate.rvl:24: `emission[ui.text]` is
+//     compensatable, so extern `type_amount` must declare `compensate`
+//     write `compensate clear_amount()` after the parameter list
+
+extern pure fn clear_amount()
+  = @py { return None }
+
+extern emission[ui.text] fn type_amount(s: Str)
+  = @py { return None }
