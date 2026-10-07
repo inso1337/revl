@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "src/revl@sha256:e2d9ecee20d1",
+    "compiler_commit": "src/revl@sha256:6977c0c7adba",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -715,8 +715,12 @@
         ]
       },
       "not_yet_run": [
-        "The harness runs and is tested; no pinned-model generation for this host is",
-        "committed. The report's three-host row says exactly what that run needs."
+        "Coverage, not the host. The harness runs and is tested, and a",
+        "pinned-model run for this host is committed under",
+        "bench/results/pinned-three-host; the three-host row states how many of",
+        "the briefs every host answered, and the run covers a fraction of the",
+        "thirty briefs. The row is still not a statement about the other",
+        "twenty-five."
       ],
       "prompt_authored_by": "this repository"
     },
@@ -1288,8 +1292,8 @@
           "spec": "24-normalizing-cache",
           "variant": "v1",
           "ok": false,
-          "code": "G6",
-          "category": "guarantee",
+          "code": "T1",
+          "category": "stdlib",
           "message": "no builtin method `take` on `Str` \u2014 the stdlib surface is charAt, charCodeAt, checked_div_euclid, checked_div_floor, checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, is_alpha, is_digit, is_space, join, keys, length, list, lookup, mod, push, remove, repeat, set, size, slice, split, startsWith, str, to_int, to_int32, to_str (docs/stdlib-2.0.md)",
           "line": 10
         },
@@ -1486,9 +1490,22 @@
       "note": "still not sourced from the attack suite: that measures our gate against attacks we wrote for it"
     },
     "tokens-to-green": {
-      "status": "not-run",
-      "blocked_on": "pass --tokens-from <run label>",
-      "runner": "python3 bench/tokens.py"
+      "status": "measured",
+      "corpus": "bench/results/pinned-three-host",
+      "n": 6,
+      "token_source": "reported by the endpoint that served the run",
+      "median_output_tokens": 8192,
+      "mean_output_tokens": 10025.5,
+      "max_attempts_in_corpus": 3,
+      "sources_are_not_comparable": "a reported count includes the model's reasoning channel; an estimated count is recounted from the emitted source and cannot. Comparing a figure from one source with a figure from the other compares two different quantities",
+      "admitted_cells": 6,
+      "total_cells": 6,
+      "is_pinned_model": true,
+      "models": [
+        "hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M"
+      ],
+      "why": "every record names hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M",
+      "means": "output tokens spent per admitted component"
     },
     "admission-latency": {
       "status": "not-run",
@@ -1498,8 +1515,96 @@
       "note": "a committed measurement exists and was taken on a different machine and Python; it is pointed at rather than copied into this cell, because a latency number is machine-bound and copying one into a differently headed table is how a number loses its conditions"
     },
     "three-host": {
-      "status": "not-run",
-      "blocked_on": "no corpus from one model across all three hosts is committed. It is one command, `python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 --model <the pinned tag> --variants v2,raw-ts,mcp --timeout 3600 --label <label>`, then `python3 bench/framework_bench.py --three-host-from <label> --write`. It needs the pinned weights on a local endpoint that nothing else is using, `npm ci` in backends/typescript and in bench/mcp_host, and time: up to five generations per spec (three revl attempts, one per probed host) at roughly nine minutes each for this model on a contended machine, so a five-spec pilot is hours and all thirty specs is most of a day"
+      "status": "measured",
+      "corpus": "bench/results/pinned-three-host",
+      "n": 3,
+      "specs": [
+        "02-pg-pool",
+        "05-rate-limiter",
+        "06-audit-logger"
+      ],
+      "specs_by_host": {
+        "revl": [
+          "01-kv-provider",
+          "02-pg-pool",
+          "03-user-cache",
+          "04-migrator",
+          "05-rate-limiter",
+          "06-audit-logger"
+        ],
+        "raw-ts": [
+          "01-kv-provider",
+          "02-pg-pool",
+          "03-user-cache",
+          "04-migrator",
+          "05-rate-limiter",
+          "06-audit-logger"
+        ],
+        "framework": [
+          "01-kv-provider",
+          "02-pg-pool",
+          "03-user-cache",
+          "04-migrator",
+          "05-rate-limiter",
+          "06-audit-logger"
+        ]
+      },
+      "dropped_no_answer_within_cap": [
+        "01-kv-provider",
+        "03-user-cache",
+        "04-migrator"
+      ],
+      "models": [
+        "hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M"
+      ],
+      "same_model_on_every_host": true,
+      "is_pinned_model": true,
+      "revl": {
+        "n": 3,
+        "first_pass_admitted": 2,
+        "admitted_within_attempts": 3,
+        "refused": [],
+        "per_spec": {
+          "02-pg-pool": {
+            "attempts": 3,
+            "first_pass": false,
+            "admitted": true
+          },
+          "05-rate-limiter": {
+            "attempts": 1,
+            "first_pass": true,
+            "admitted": true
+          },
+          "06-audit-logger": {
+            "attempts": 1,
+            "first_pass": true,
+            "admitted": true
+          }
+        }
+      },
+      "raw-ts": {
+        "n": 3,
+        "clean": [
+          "02-pg-pool",
+          "05-rate-limiter",
+          "06-audit-logger"
+        ],
+        "leaked": {},
+        "could_not_load": []
+      },
+      "framework": {
+        "n": 3,
+        "clean": [
+          "02-pg-pool",
+          "05-rate-limiter",
+          "06-audit-logger"
+        ],
+        "leaked": {},
+        "could_not_load": []
+      },
+      "refused_by_revl_loaded_by_another_host": [],
+      "note": "revl is scored on admission and the other two hosts on residue after load-unload cycles. The fields are kept apart because they answer different questions; a reader comparing a revl admission count to a residue count is comparing the questions.",
+      "reprobe": "python3 bench/score_raw_ts.py --run pinned-three-host; python3 bench/score_mcp.py --run pinned-three-host"
     }
   },
   "briefs": [
@@ -1921,7 +2026,7 @@
       "spec": "24-normalizing-cache/v1",
       "hard_gate": "compiles",
       "result": "fail",
-      "refusal_code": "G6"
+      "refusal_code": "T1"
     },
     {
       "spec": "24-normalizing-cache/v2",
@@ -2124,7 +2229,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "src/revl@sha256:e2d9ecee20d1",
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2134,7 +2239,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "src/revl@sha256:e2d9ecee20d1",
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2144,7 +2249,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "src/revl@sha256:e2d9ecee20d1",
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2154,7 +2259,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "src/revl@sha256:e2d9ecee20d1",
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2164,8 +2269,28 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "src/revl@sha256:e2d9ecee20d1",
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
         "run": "bench/results/typed-deepseek-v4-pro",
+        "protocol": "docs/eval-protocol.md"
+      }
+    },
+    {
+      "text": "tokens to green: 8192 median output tokens per admitted component (n=6, reported by the endpoint that served the run, generated by the pinned model)",
+      "rung": "measured",
+      "public": true,
+      "evidence": {
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
+        "run": "bench/results/pinned-three-host",
+        "protocol": "docs/eval-protocol.md"
+      }
+    },
+    {
+      "text": "one model, three hosts, over the same 3 briefs (generated by the pinned model hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M): revl admitted 3 and refused 0; raw Cordis TypeScript left residue in 0 and could not load 0; the MCP host left residue in 0 and could not load 0 (n=3 per host)",
+      "rung": "measured",
+      "public": true,
+      "evidence": {
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
+        "run": "bench/results/pinned-three-host",
         "protocol": "docs/eval-protocol.md"
       }
     },
@@ -2174,7 +2299,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "src/revl@sha256:e2d9ecee20d1",
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2184,7 +2309,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "src/revl@sha256:e2d9ecee20d1",
+        "compiler_commit": "src/revl@sha256:6977c0c7adba",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2192,19 +2317,14 @@
   ],
   "remaining_gates": [
     {
-      "gate": "column: tokens-to-green",
-      "what": "not measured in this report",
-      "why": "pass --tokens-from <run label>"
-    },
-    {
       "gate": "column: admission-latency",
       "what": "not measured in this report",
       "why": "pass --measure-latency to time the gate on this machine"
     },
     {
       "gate": "a pinned-model run across all three hosts",
-      "what": "the pinned model produced injection-escape; every other cell is a re-score of a corpus another model generated, or not run",
-      "why": "no corpus from one model across all three hosts is committed. It is one command, `python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 --model <the pinned tag> --variants v2,raw-ts,mcp --timeout 3600 --label <label>`, then `python3 bench/framework_bench.py --three-host-from <label> --write`. It needs the pinned weights on a local endpoint that nothing else is using, `npm ci` in backends/typescript and in bench/mcp_host, and time: up to five generations per spec (three revl attempts, one per probed host) at roughly nine minutes each for this model on a contended machine, so a five-spec pilot is hours and all thirty specs is most of a day"
+      "what": "run over 3 of 30 briefs",
+      "why": "the rest of the task set has not been generated; every three-host number carries n=3"
     },
     {
       "gate": "independent reproduction",

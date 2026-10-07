@@ -7,9 +7,8 @@ better one.
 
 ## What this report is not
 
-- **column: tokens-to-green**: not measured in this report. pass --tokens-from <run label>
 - **column: admission-latency**: not measured in this report. pass --measure-latency to time the gate on this machine
-- **a pinned-model run across all three hosts**: the pinned model produced injection-escape; every other cell is a re-score of a corpus another model generated, or not run. no corpus from one model across all three hosts is committed. It is one command, `python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 --model <the pinned tag> --variants v2,raw-ts,mcp --timeout 3600 --label <label>`, then `python3 bench/framework_bench.py --three-host-from <label> --write`. It needs the pinned weights on a local endpoint that nothing else is using, `npm ci` in backends/typescript and in bench/mcp_host, and time: up to five generations per spec (three revl attempts, one per probed host) at roughly nine minutes each for this model on a contended machine, so a five-spec pilot is hours and all thirty specs is most of a day
+- **a pinned-model run across all three hosts**: run over 3 of 30 briefs. the rest of the task set has not been generated; every three-host number carries n=3
 - **independent reproduction**: every claim stands at the 'measured' rung and none at 'demonstrated'. the ladder's 'demonstrated' rung requires a reproduction by a party that is not the generator; nobody outside this repository has run the suite
 - **a throughput measurement on an idle machine**: the throughput figures were taken with the server accounting for only 21% of each request's wall clock. no idle machine was available during this run; the figure does not reproduce the quoted one and a contended measurement is a weak refutation either way
 - **publication**: nothing here is published outside this repository. the artifacts are files in bench/results/framework-bench/
@@ -31,7 +30,7 @@ better one.
 | gate API | 1.0.0 |
 | language | 2.0.0 |
 | checker frontier | `reference-full:2.0.0` |
-| compiler commit | `src/revl@sha256:e2d9ecee20d1` |
+| compiler commit | `src/revl@sha256:6977c0c7adba` |
 | report schema | EVAL-REPORT-1 |
 
 Measured throughput: **24.3 t/s** generation (sd 1.0, n=5 warm samples), 83.9 t/s prompt.
@@ -131,8 +130,13 @@ Evidence, with the file and line of every symbol: `bench/results/framework-bench
 | admits (first pass) | not applicable, see below | not run (`@modelcontextprotocol/sdk` 1.30.0 named, harness not built) | 22/30 on `v1` (corpus bench/results/typed-deepseek-v4-pro, NOT the pinned model) |
 | residue after N cycles | **4/10** leak (6 cycles) | not run (`@modelcontextprotocol/sdk` 1.30.0 named, harness not built) | not applicable: a residue-carrying component is refused at compile time (G4 and the no-residue proof), so none reaches a corpus the probe could score |
 | injection escape | not run (host not in the run) | not run (`@modelcontextprotocol/sdk` 1.30.0 named, harness not built) | 2/5 scored attempts complied (model behaviour); 3 of 8 generated produced no answer within the cap and are excluded; **0** escaped, 1 refused on the injection, 1 refused on an unrelated fault |
-| tokens to green | not applicable | not run (`@modelcontextprotocol/sdk` 1.30.0 named, harness not built) | not run |
+| tokens to green | not applicable | not run (`@modelcontextprotocol/sdk` 1.30.0 named, harness not built) | 8192 median output tokens (n=6, reported by the endpoint that served the run, **pinned model**) |
 | admission latency | no gate to time | not run (`@modelcontextprotocol/sdk` 1.30.0 named, harness not built) | not run here; see `bench/results/admission-latency.md` |
+
+### What the tokens-to-green figure counts
+
+a reported count includes the model's reasoning channel; an estimated count is recounted from the emitted source and cannot. Comparing a figure from one source with a figure from the other compares two different quantities.
+
 
 ### Why the raw-TypeScript row is not a compile-rate
 
@@ -187,7 +191,19 @@ apart rather than folded into a containment figure.
 
 ## One model, three hosts, one run
 
-**not run.** no corpus from one model across all three hosts is committed. It is one command, `python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 --model <the pinned tag> --variants v2,raw-ts,mcp --timeout 3600 --label <label>`, then `python3 bench/framework_bench.py --three-host-from <label> --write`. It needs the pinned weights on a local endpoint that nothing else is using, `npm ci` in backends/typescript and in bench/mcp_host, and time: up to five generations per spec (three revl attempts, one per probed host) at roughly nine minutes each for this model on a contended machine, so a five-spec pilot is hours and all thirty specs is most of a day
+Corpus `bench/results/pinned-three-host`, 3 briefs answered by every host, model(s) `hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M` (the pinned model).
+
+| host | scored on | n | refused | admitted / clean | residue | could not load |
+|---|---|---|---|---|---|---|
+| revl | admission | 3 | **0** | 3 (first pass 2) | not applicable | not applicable |
+| raw Cordis / TypeScript | residue | 3 | not applicable | 3 | 0 | 0 |
+| @modelcontextprotocol/sdk | residue | 3 | not applicable | 3 | 0 | 0 |
+
+revl is scored on admission and the other two hosts on residue after load-unload cycles. The fields are kept apart because they answer different questions; a reader comparing a revl admission count to a residue count is comparing the questions.
+
+Dropped from every host because one host's answer came from the reasoning channel: `01-kv-provider`, `03-user-cache`, `04-migrator`.
+
+Re-probe without the model: `python3 bench/score_raw_ts.py --run pinned-three-host; python3 bench/score_mcp.py --run pinned-three-host`.
 
 ## The third host
 
@@ -233,7 +249,7 @@ registered tool.
 
 Every claim in that table is checked against the published artifact rather than asserted: `bench/framework_unload_survey.py` holds 13 claims across 8 packages and fails if any is falsified. The evidence, with the file and line each symbol was found at, is `bench/results/framework-bench/unload-survey.json`.
 
-What that check says and does not say: a confirmed claim means the symbol is in the published file. It says nothing about what calling it releases, which is the residue probe's question and is why the framework residue cell is not-run rather than filled from the survey.
+What that check says and does not say: a confirmed claim means the symbol is in the published file. It says nothing about what calling it releases, which is the residue probe's question; that cell is measured above, from a probe run, and is still not filled in from the survey.
 
 ### The harness
 
@@ -261,10 +277,9 @@ connected, so the probe opens tools, resources and prompts before
 connecting, through one registration of each that it removes again. That
 is what any host that loads packs while serving has to do.
 
-### Why its cells are still empty
+### What this host did in the pinned-model run
 
-The harness runs and is tested; no pinned-model generation for this host is
-committed. The report's three-host row says exactly what that run needs.
+It answered 3 of the briefs every host answered: 3 clean after the load-unload cycles, 0 carrying residue, and 0 it could not load at all.
 
 ## Claims and their rung
 
@@ -275,6 +290,8 @@ committed. The report's three-host row says exactly what that run needs.
 | v1: 22 of 30 committed generations are admitted by the current checker (n=30, corpus bench/results/typed-deepseek-v4-pro, NOT generated by the pinned model) | measured |
 | v2: 22 of 30 committed generations are admitted by the current checker (n=30, corpus bench/results/typed-deepseek-v4-pro, NOT generated by the pinned model) | measured |
 | v2host: 23 of 30 committed generations are admitted by the current checker (n=30, corpus bench/results/typed-deepseek-v4-pro, NOT generated by the pinned model) | measured |
+| tokens to green: 8192 median output tokens per admitted component (n=6, reported by the endpoint that served the run, generated by the pinned model) | measured |
+| one model, three hosts, over the same 3 briefs (generated by the pinned model hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M): revl admitted 3 and refused 0; raw Cordis TypeScript left residue in 0 and could not load 0; the MCP host left residue in 0 and could not load 0 (n=3 per host) | measured |
 | injection, revl: the pinned model produced the undeclared action in 2 of 5 attempts (n=5, a property of the model, not of the host) | measured |
 | injection, revl: 2 of 2 complying attempts were refused by a named hard gate, leaving 0 escapes (n=2 complying attempts, not 5) | measured |
 

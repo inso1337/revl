@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -214,9 +215,9 @@ class _Args:
 
     admits_from = None
     residue_from = "hand-corpus"
-    tokens_from = None
+    tokens_from = "pinned-three-host"
     injection_from = None
-    three_host_from = None
+    three_host_from = "pinned-three-host"
     attempt = 1
     compiler_root = None
     pin = None
@@ -1013,7 +1014,7 @@ def test_a_compiler_outside_the_checkout_is_named_without_its_directory():
     assert "/somewhere/else" not in reported
 
 
-def test_the_committed_report_is_what_the_documented_command_reproduces():
+def test_the_committed_report_is_what_the_documented_command_reproduces(report):
     """`bench/README.md` documents `python3 bench/framework_bench.py --write`
     with no flags. If a cell only appears when a flag names the corpus that is
     committed beside the report, the documented command silently drops it and
@@ -1023,10 +1024,20 @@ def test_the_committed_report_is_what_the_documented_command_reproduces():
     assert defaults.admits_from == "typed-deepseek-v4-pro"
     assert defaults.residue_from == "hand-corpus"
     assert defaults.injection_from == "injection-ornith"
+    # The three-host corpus and the tokens column read the same run, because
+    # both ask one model the same briefs. Two labels here would be two runs.
+    assert defaults.three_host_from == "pinned-three-host"
+    assert defaults.tokens_from == "pinned-three-host"
     for label in (defaults.admits_from, defaults.residue_from,
-                  defaults.injection_from):
+                  defaults.injection_from, defaults.tokens_from,
+                  defaults.three_host_from):
         assert (BENCH / "results" / label).is_dir(), (
             f"a default names {label}, which is not committed")
+    # `_Args` is this file's stand-in for the documented command, so a default
+    # that moved would move every test that reads `report` with it rather than
+    # leaving them green against a corpus nobody names.
+    assert (report["columns"]["three-host"]["status"] == "measured"
+            and report["columns"]["tokens-to-green"]["status"] == "measured")
 
 
 def test_the_built_report_headline_agrees_with_a_fresh_recompute(report):
@@ -1347,13 +1358,148 @@ def test_a_brief_answered_from_reasoning_leaves_every_host(synthetic_results):
     assert cell["dropped_no_answer_within_cap"] == ["02"]
 
 
-def test_without_a_run_the_row_says_exactly_what_it_needs(report):
-    cell = report["columns"]["three-host"]
+def test_without_a_run_the_row_says_exactly_what_it_needs():
+    """What a caller who passes `--three-host-from none` gets, and what the
+    report said before a pinned-model corpus existed. The row is not silently
+    empty: it carries the one command that would produce it."""
+    cell = framework_bench.column_three_host(None, {"present": False}, ROOT)
     assert cell["status"] == framework_bench.NOT_RUN
     needs = cell["blocked_on"]
     assert "--variants v2,raw-ts,mcp" in needs
     assert "--three-host-from" in needs
     assert "npm ci" in needs
-    gate = next(g for g in report["remaining_gates"]
+    gates = framework_bench.remaining_gates(
+        framework_bench.load_hosts(), {"three-host": cell}, {"present": False})
+    gate = next(g for g in gates
                 if g["gate"] == "a pinned-model run across all three hosts")
     assert gate["why"] == framework_bench.THREE_HOST_NEEDS
+
+
+def test_the_committed_three_host_row_names_its_n_and_its_refusals(report):
+    """The exit criterion of issue #1267, on the artifact rather than on a
+    synthetic corpus: one model, one task set, three hosts, the refusal column
+    leading, and n stated instead of implied."""
+    cell = report["columns"]["three-host"]
+    assert cell["status"] == "measured", cell
+    assert cell["is_pinned_model"] and cell["same_model_on_every_host"]
+    assert cell["n"] == len(cell["specs"]) == len(cell["revl"]["per_spec"])
+    assert cell["specs"], "a three-host row over no briefs is not a row"
+    for host in ("raw-ts", "framework"):
+        assert cell[host]["n"] == cell["n"], host
+    # The briefs the row does not cover are named, and so is the reason a
+    # covered brief left the set, rather than left to be read from a gap.
+    gate = next(g for g in report["remaining_gates"]
+                if g["gate"] == "a pinned-model run across all three hosts")
+    assert f"run over {cell['n']} of" in gate["what"], gate
+    assert f"n={cell['n']}" in gate["why"], gate
+    body = framework_bench.render(report)
+    section = body.index("## One model, three hosts, one run")
+    header = next(line for line in body[section:].splitlines()
+                  if line.startswith("| host |"))
+    assert header.index("refused") < header.index("admitted"), header
+
+
+# ---------------------------------------------------------------------------
+# Continuing a run that was interrupted
+# ---------------------------------------------------------------------------
+
+
+def _runner_tree(tmp_path: Path) -> Path:
+    """A BENCH directory holding the files `run.py` reads by path.
+
+    `run.py` resolves specs and prompts relative to its own `BENCH`, so the
+    module attribute is what a test moves; nothing else about the run has to be
+    synthetic, and the runner is exercised as written."""
+    (tmp_path / "prompts").mkdir(parents=True)
+    shutil.copy(BENCH / "specs.json", tmp_path / "specs.json")
+    for name in ("v2.md", "raw-ts.md", "mcp.md"):
+        shutil.copy(BENCH / "prompts" / name, tmp_path / "prompts" / name)
+    return tmp_path
+
+
+def _rows(path: Path) -> list:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _run(monkeypatch, *argv: str):
+    """Drive `main()` the way the command line does: through sys.argv. The
+    runner reads its own argv rather than taking it as an argument, so a test
+    that wants the flag's real parsing path patches argv instead of reaching
+    past `parse_args`."""
+    monkeypatch.setattr(sys, "argv", ["bench/run.py", *argv])
+    return bench_run.main()
+
+
+def test_read_jsonl_drops_a_line_a_killed_process_truncated(tmp_path):
+    """A run stopped mid-write leaves a half line. Salvaging it would put a
+    partial row in the corpus; `--resume` regenerates that cell instead, so the
+    truncated tail is dropped."""
+    path = tmp_path / "results.jsonl"
+    path.write_text('{"spec": "01-kv-provider", "summary": true}\n{"spec": "02-pg')
+    rows = bench_run.read_jsonl(path)
+    assert rows == [{"spec": "01-kv-provider", "summary": True}]
+    assert bench_run.read_jsonl(tmp_path / "absent.jsonl") == []
+
+
+def test_a_resumed_run_keeps_the_cells_it_already_has(tmp_path, monkeypatch, capsys):
+    """A matrix against a local model is hours, so an interrupted run is the
+    expected case. Without --resume the only way to continue one was to start
+    it over: `run.py` rewrote results.jsonl from the rows it had generated
+    itself, so naming an existing label truncated the corpus it was meant to be
+    continuing."""
+    monkeypatch.setattr(bench_run, "BENCH", _runner_tree(tmp_path))
+    _run(monkeypatch, "--runner", "mock", "--variants", "v2", "--specs", "1",
+         "--label", "resumed")
+    capsys.readouterr()
+    results = tmp_path / "results" / "resumed" / "results.jsonl"
+    before = _rows(results)
+    assert [(r["spec"], r.get("summary", False)) for r in before] == [
+        ("01-kv-provider", False), ("01-kv-provider", False),
+        ("01-kv-provider", True)]
+
+    _run(monkeypatch, "--runner", "mock", "--variants", "v2", "--specs", "2",
+         "--label", "resumed", "--resume")
+    out = capsys.readouterr().out
+    after = _rows(results)
+    assert "01-kv-provider/v2: already final, skipped" in out
+    assert after[:len(before)] == before, "the first process's rows moved"
+    assert {r["spec"] for r in after if r.get("summary")} == {
+        "01-kv-provider", "02-pg-pool"}
+
+
+def test_a_resumed_run_does_not_append_to_a_cell_it_died_inside(
+        tmp_path, monkeypatch, capsys):
+    """A cell a process died inside holds a prefix of one generation's attempts.
+    Appending to that prefix would score a stale attempt as this cell's work, so
+    the cell starts empty. Five leftovers is the shape of a cell interrupted
+    twice; the mock writes exactly two, so two is what survives."""
+    monkeypatch.setattr(bench_run, "BENCH", _runner_tree(tmp_path))
+    stale = tmp_path / "results" / "half" / "01-kv-provider" / "v2"
+    stale.mkdir(parents=True)
+    for i in range(1, 6):
+        (stale / f"attempt-{i}.rvl").write_text("component {\n")
+    (tmp_path / "results" / "half" / "results.jsonl").write_text("")
+
+    _run(monkeypatch, "--runner", "mock", "--variants", "v2", "--specs", "1",
+         "--label", "half", "--resume")
+    capsys.readouterr()
+    assert sorted(p.name for p in stale.glob("attempt-*.rvl")) == [
+        "attempt-1.rvl", "attempt-2.rvl"]
+
+
+def test_without_resume_a_second_run_starts_the_label_over(tmp_path, monkeypatch,
+                                                           capsys):
+    """The default is unchanged: naming a label is a decision to write that
+    corpus, and a caller who wants the old rows keeps them by asking for
+    --resume. Asserted so the flag cannot quietly become the default and change
+    what a run.py invocation means."""
+    monkeypatch.setattr(bench_run, "BENCH", _runner_tree(tmp_path))
+    _run(monkeypatch, "--runner", "mock", "--variants", "v2", "--specs", "2",
+         "--label", "restart")
+    capsys.readouterr()
+    results = tmp_path / "results" / "restart" / "results.jsonl"
+    assert {r["spec"] for r in _rows(results)} == {"01-kv-provider", "02-pg-pool"}
+    _run(monkeypatch, "--runner", "mock", "--variants", "v2", "--specs", "1",
+         "--label", "restart")
+    capsys.readouterr()
+    assert {r["spec"] for r in _rows(results)} == {"01-kv-provider"}
