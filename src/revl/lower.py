@@ -12483,17 +12483,30 @@ _HOST_VALUE_VERBS: frozenset = frozenset({
 }) | frozenset(_HOST_RESULT_SIG)
 
 
-def _host_call_produces_nothing(node, env: "Env") -> bool:
-    """Whether *node* is a call on a host local whose verb is a host verb
-    producing no value — the `Unit`-producing form issue #2083's `Unit`
-    return position admits (`store.insert(k, v)`, `store.remove(k)`,
-    `pool.execute(sql)`).
+#: issue #2127: the host verbs a `Unit` body may NOT be. `_HOST_VALUE_VERBS`
+#: names the ones that produce a value the service never sees; the ACQUIRE
+#: verbs produce no value but do produce an OBLIGATION — a handle nothing
+#: reclaims — which the body drops just as silently. `= pool.open("db", 2)`
+#: spelled as a method body opens a second pool and discards it, and it
+#: reached the guard because the acquire verbs are host verbs
+#: (`_HOST_FAMILIES`) absent from `_HOST_VALUE_VERBS`. `_HOST_ACQUIRE_VERBS`
+#: is the table the frontend already derives the acquisition bracket from
+#: (`effect <acquire> undo <release>`), so reading it here keeps the two
+#: rules on one vocabulary instead of a second hand-written list.
+_HOST_UNIT_BODY_REFUSED_VERBS: frozenset = \
+    _HOST_VALUE_VERBS | frozenset(_HOST_ACQUIRE_VERBS)
 
-    The admitted side is "a host verb (`_HOST_FAMILIES`), and not one the
-    frontend knows to produce a value (`_HOST_VALUE_VERBS`)". `store.size()`
-    and `store.keys()` are the stdlib Map VALUE surface, not host verbs, so
-    they are not admitted; `Map.drop` and `Pool.execute` produce nothing and
-    are host verbs, so they are."""
+
+def _host_call_admitted_as_unit_body(node, env: "Env") -> bool:
+    """Whether *node* is a call on a host local whose verb may be the body of
+    a method declared `Unit` — the form issue #2083's `Unit` return position
+    admits (`store.insert(k, v)`, `store.remove(k)`, `pool.execute(sql)`).
+
+    The admitted side is "a host verb (`_HOST_FAMILIES`), and not one of the
+    verbs a `Unit` body cannot be (`_HOST_UNIT_BODY_REFUSED_VERBS`: the reads
+    and the acquires)". `store.size()` and `store.keys()` are the stdlib Map
+    VALUE surface, not host verbs, so they are not admitted; `Map.drop` and
+    `Pool.execute` produce nothing and are host verbs, so they are."""
     if not isinstance(node, dict) or node.get("kind") != "call":
         return False
     target = node.get("target")
@@ -12505,7 +12518,7 @@ def _host_call_produces_nothing(node, env: "Env") -> bool:
     verb = node.get("method")
     if verb not in _HOST_FAMILIES.get(family, {}):
         return False
-    return f"{family}.{verb}" not in _HOST_VALUE_VERBS
+    return f"{family}.{verb}" not in _HOST_UNIT_BODY_REFUSED_VERBS
 
 
 def _unit_body_drops_host_value(node, env: "Env") -> bool:
@@ -12518,15 +12531,16 @@ def _unit_body_drops_host_value(node, env: "Env") -> bool:
     host table types a resource read, so `fn record(msg) = store.get("last")`
     was admitted as the body of a declared WRITE: the call reported `ok` with
     an empty trace. The forms refused are those rooted at the component's own
-    resource handle that are not a host call producing nothing — a read
-    (`store.get(k)`, `pool.query(sql)`), the stdlib value surface
-    (`store.size()`, `store.keys()`), the handle itself, and
+    resource handle that are not a host call admitted as a `Unit` body — a
+    read (`store.get(k)`, `pool.query(sql)`), the stdlib value surface
+    (`store.size()`, `store.keys()`), the handle itself, an acquire
+    (`pool.open("db", 2)`, `store.new()`, issue #2127) and
     `store.insert_if_absent(k, v)`, whose `Bool` is in `_HOST_RESULT_SIG`. A
     crossing on a requirement (`emit sink.write(line)`) is not rooted at the
     resource and is not this defect."""
     if _host_handle_root(node, env) is None:
         return False
-    return not _host_call_produces_nothing(node, env)
+    return not _host_call_admitted_as_unit_body(node, env)
 
 
 #: issue #1980: the host write verbs whose `undo` may RESTORE the value this
@@ -14200,15 +14214,17 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # `-> Unit`, and the effect the service promised was silently
                 # dropped: the call reported `ok` with an empty trace. A body
                 # rooted at the component's own resource is refused unless it
-                # is a host call that produces nothing (issue #2123).
+                # is a host call admitted as a `Unit` body (issues #2123,
+                # #2127).
                 if decl.returns == "Unit" and actual != "Unit" \
                         and _unit_body_drops_host_value(lowered_return, env):
                     raise RevlError(
                         filename, ms.line,
                         f"`{method.name}` implements `{svc.name}.{method.name}`, "
                         f"which returns `Unit`, but this body is a "
-                        f"value-producing form on the component's own resource: "
-                        f"the value it produces has nowhere to go, so the effect "
+                        f"value-producing or resource-acquiring form on the "
+                        f"component's own resource: what it produces has "
+                        f"nowhere to go, so the effect "
                         f"`{svc.name}.{method.name}` promises is dropped",
                         hint="a `Unit` method's body must be a host call that "
                              "returns nothing — a write on the component's own "
@@ -14219,7 +14235,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                              "value-producing form (`resource.get(k)`, "
                              "`pool.query(sql)`, `sub.next()`, "
                              "`resource.size()`, the handle itself) has nowhere "
-                             "to put its value",
+                             "to put its value, and an acquiring form "
+                             "(`resource.new()`, `pool.open(\"db\", 2)`, "
+                             "`src.source()`) leaves a handle nothing releases",
                         code="T1", category="type-mismatch",
                         expected=decl.returns, actual=actual)
                 # issue #1838: `return n` from a method declared `-> Float`

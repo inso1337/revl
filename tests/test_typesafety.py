@@ -575,9 +575,18 @@ def test_provide_method_with_no_declared_return_needs_none():
 # message that claimed a value had been produced. The matrix at the bottom is
 # the oracle: every verb of the host surface, admitted exactly when the frontend
 # does not know it to produce a value.
+#
+# Issue #2127 is the other edge of that widening. "Not a value verb" is not the
+# same as "produces nothing to release": an ACQUIRE verb (`Map.new`,
+# `Pool.open`, `Stream.source`) produces no value but produces an OBLIGATION,
+# and a body spelled as one — `= pool.open("db", 2)`, the same call as the
+# component's own `effect` — opens a second handle nothing reclaims. The
+# admitted set is therefore "a host verb that is neither value-producing nor
+# acquiring", and the acquire half is read off `_HOST_ACQUIRE_VERBS`, the table
+# the acquisition bracket is already derived from.
 
-_REFUSAL = ("which returns `Unit`, but this body is a value-producing form on "
-            "the component's own resource")
+_REFUSAL = ("which returns `Unit`, but this body is a value-producing or "
+            "resource-acquiring form on the component's own resource")
 
 _AUDIT = """service Audit {
   fn record(msg: Str) -> Unit
@@ -671,6 +680,23 @@ def test_unit_method_body_admits_the_resource_release():
     assert ir["components"][0]["name"] == "AuditLog"
 
 
+@pytest.mark.parametrize("fixture,body", [
+    (_AUDIT, '= resource.new()'),
+    (_POOL, '= pool.open("db", 2)'),
+    (_STREAM, '= src.source()'),
+])
+def test_unit_method_body_must_not_be_an_acquire(fixture, body):
+    # issue #2127: an acquire produces no VALUE, so "not a value verb" admitted
+    # it — but it produces an OBLIGATION. `= pool.open("db", 2)` as a body is
+    # the component's own acquisition spelled a second time, and it opens a
+    # handle nothing releases. Refused like the reads, with the acquire named
+    # in the hint rather than a false claim that a value was produced.
+    err = _err(fixture % body)
+    assert _REFUSAL in err
+    assert "resource.new()" in err
+    assert "leaves a handle nothing releases" in err
+
+
 _EMIT = """service Sink {
   emission fn write(line: Str)
 }
@@ -719,14 +745,18 @@ def test_unit_method_hint_names_only_producers_that_compile():
     assert compile_source(_POOL % "= pool.execute(sql)")["components"]
 
 
-#: The oracle, as a matrix over the whole host surface (issue #2123):
+#: The oracle, as a matrix over the whole host surface (issues #2123, #2127):
 #: `_HOST_ARG_SIG` is `Map.{new,drop,insert,insert_if_absent,remove,get}`,
 #: `Pool.{open,close,query,execute}`, `Job.run`, `Stream.{source,close}` and
 #: `Subscription.{next,close}`. A `Unit` body spelled as one of these is
-#: admitted exactly when the frontend does not know the verb to produce a
-#: value. The acquisition verbs are not bodies (they are `effect` bindings) and
-#: `Job.run` is a qualified call on the host crate, not a call on a local, so
-#: neither reaches the guard — see the PR body for that fail-open residue.
+#: admitted exactly when the frontend knows the verb to be neither
+#: value-producing nor acquiring — so the three acquire verbs and the reads are
+#: refused, and the writes and releases are admitted. `Job.run` is the one verb
+#: the guard cannot reach: it is a qualified call on the host crate, not a call
+#: on a local, so `_host_handle_root` never sees it — see the PR body for that
+#: fail-open residue. The `effect` bindings themselves (`let resource = effect
+#: Map.new() undo resource.drop()`) are acquisitions in the sanctioned bracket
+#: and are not bodies, so they never reach the guard either.
 _UNIT_BODY_MATRIX = [
     # (fixture, body, admitted, verb)
     (_AUDIT, '= resource.insert(msg, msg)', True, "Map.insert"),
@@ -741,6 +771,10 @@ _UNIT_BODY_MATRIX = [
     (_AUDIT, '= resource.size()', False, "Map.size"),
     (_POOL, '= pool.query("select 1")', False, "Pool.query"),
     (_STREAM, '= sub.next()', False, "Subscription.next"),
+    # the acquire verbs (issue #2127): no value, but a handle nothing releases
+    (_AUDIT, '= resource.new()', False, "Map.new"),
+    (_POOL, '= pool.open("db", 2)', False, "Pool.open"),
+    (_STREAM, '= src.source()', False, "Stream.source"),
 ]
 
 
