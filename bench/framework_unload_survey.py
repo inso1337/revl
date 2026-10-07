@@ -337,20 +337,29 @@ def _safe_extract_tar(tar: tarfile.TarFile, dest: Path) -> None:
     These archives come from a public index and were not built here, so every
     member is checked rather than trusted: tarfile will otherwise write
     `../../anything` if a member says so.
+
+    The test is `is_relative_to` and not a `startswith` on the resolved string.
+    A prefix test admits a member that lands in a SIBLING of `dest`, because
+    `/tmp/x/foo` is a prefix of `/tmp/x/foobar`: `../foobar/pwn.py` under a
+    `foo` root passed the prefix test and was then written outside the root.
+    `filter="data"` re-checks inside tarfile, so a member this loop misjudges
+    still cannot be written outside, and archive-set setuid bits do not survive.
     """
     root = dest.resolve()
     for member in tar.getmembers():
-        if not str((root / member.name).resolve()).startswith(str(root)):
+        if not (root / member.name).resolve().is_relative_to(root):
             raise SurveyError(f"archive member escapes the root: {member.name}")
         if member.issym() or member.islnk():
             raise SurveyError(f"archive member is a link: {member.name}")
-    tar.extractall(dest)
+    tar.extractall(dest, filter="data")
 
 
 def _safe_extract_zip(zf: zipfile.ZipFile, dest: Path) -> None:
+    """The zip side of the check above, with the same sibling-directory bug:
+    the prefix test admitted `/tmp/x/foobar` for a `/tmp/x/foo` root."""
     root = dest.resolve()
     for name in zf.namelist():
-        if not str((root / name).resolve()).startswith(str(root)):
+        if not (root / name).resolve().is_relative_to(root):
             raise SurveyError(f"archive member escapes the root: {name}")
     zf.extractall(dest)
 
