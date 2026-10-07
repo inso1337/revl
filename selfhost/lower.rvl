@@ -21508,6 +21508,24 @@ fn cir_builtin(root: Str, meth: Str, args: List[Expr], sc: List[Bind], hostSc: L
   return mk_irres(true, s.concat("}"))
 }
 
+// `cir_builtin` for a receiver written IN PLACE rather than as a bare name:
+// `x.concat(a).concat(b)`, `[1, 2].map(f)`. The reference's ExprCall handler
+// reads the receiver through the same pure-expression funnel and nests the
+// node it produces as the builtin's `target` (the other half of the issue
+// #1942 rule below), so the outer call is a `builtin` whose `target` is the
+// inner node — never a `call` and never a `name`.
+fn cir_builtin_recv(tg: Expr, meth: Str, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  let t = cir_expr(tg, sc, hostSc, cx)
+  if (!t.ok) { return mk_irres(false, "") }
+  let a = cir_args(args, 0, sc, hostSc, cx, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  var s = "{\"kind\": \"builtin\", \"method\": ".concat(jstr(meth))
+    .concat(", \"target\": ").concat(t.js)
+    .concat(", \"args\": [").concat(a.js).concat("]")
+  if (meth == "to_int") { s = s.concat(", \"recv\": null") }
+  return mk_irres(true, s.concat("}"))
+}
+
 fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   return match tg {
     // `<handle>.<key>.<op>(…)` is read first: its head is a provision read, and
@@ -21538,8 +21556,12 @@ fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: C
                         : mk_irres(false, ""))))),
       // a receiver written in place: the reference refuses a non-builtin
       // method on a stdlib value there (issue #1942), so nothing this producer
-      // could type is a program it lowers
-      _ => mk_irres(false, ""),
+      // could type is a program it lowers — but a BUILTIN method on such a
+      // receiver is legal and nests the receiver's node as the `target`
+      // (`x.concat(a).concat(b)`, `[1, 2].map(f)`).
+      _ => is_builtin_method(fl.name)
+        ? cir_builtin_recv(fl.target, fl.name, args, sc, hostSc, cx)
+        : mk_irres(false, ""),
     },
     // A bare-name callee. A tagged ADT constructor beats every other shape: it
     // is a case, not a callable, and no host runtime defines a function for it.
@@ -21886,8 +21908,72 @@ fn cir_emit_step(ts: List[Token], lo: Int, cx: CCtx, sc: List[Bind], hostSc: Lis
   return { ok: true, js: step.concat("}"), i: nx }
 }
 
-// A provide-method's body steps (`effect`/`emit`/`return`/`let`). Scope `sc`
-// starts as the method's params and grows with each `let`.
+// Does the method body [lo, hi] carry a control-flow statement? Before the
+// arms below existed such a body was refused whole, so gating the collision
+// check on this keeps every body that has none byte-identical to what it was.
+fn cir_has_control(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var i = lo
+  while (i <= hi) {
+    if (atw(ts, i, "if") || atw(ts, i, "while") || atw(ts, i, "for")) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The reference keeps every name a provide method binds unique METHOD-WIDE:
+// `_alloc_safe` appends `_` while the candidate is a parameter, a component
+// local or a name the method has already used, because `used_safe` is built
+// once per method and `_lower_scoped_block` restores VISIBILITY without
+// restoring it. This producer writes an author name verbatim, so a body that
+// would need a mangled name is refused rather than mis-lowered — the same
+// fail-closed choice `cir_match` makes for a colliding binder. A plain
+// statement walk cannot bind one name twice in one scope, so only the
+// control-flow arms can reach this, and their bodies are exactly the ones
+// that had no lowering at all before.
+fn cir_method_rebinds(ts: List[Token], lo: Int, hi: Int, vis: List[Bind]) -> Bool {
+  var seen: List[Str] = []
+  var i = 0
+  while (i < vis.length()) {
+    seen = seen.push(vis[i].name)
+    i += 1
+  }
+  i = lo
+  while (i <= hi) {
+    var n = ""
+    if ((atw(ts, i, "let") || atw(ts, i, "var")) && atk(ts, i + 1, "ident")) {
+      n = tkc(ts, i + 1).text
+    } else {
+      if (atw(ts, i, "for") && atk(ts, i + 1, "(") && atk(ts, i + 2, "ident")) {
+        n = tkc(ts, i + 2).text
+      }
+    }
+    if (n != "") {
+      if (contains(seen, n)) { return true }
+      seen = seen.push(n)
+    }
+    i += 1
+  }
+  return false
+}
+
+// The token index just past a whole `if` statement starting at `i` (past the
+// closing brace of its `then` block, or of the trailing `else`/`else if`). It
+// is what makes an `else if` arm able to hand the nested `if` a bounded span.
+fn cir_if_end(ts: List[Token], i: Int) -> Int {
+  let c = expr_at(ts, i + 1)
+  if (is_bad(c.e) || !atk(ts, c.i, "{")) { return 0 - 1 }
+  let tend = close_brace(ts, c.i)
+  if (tend == 0 - 1) { return 0 - 1 }
+  if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) { return close_brace(ts, tend + 1) }
+  if (atw(ts, tend, "else") && atw(ts, tend + 1, "if")) { return cir_if_end(ts, tend + 1) }
+  return tend
+}
+
+// A provide-method's body steps (`effect`/`emit`/`return`/`let`, and the
+// control-flow steps `if`/`while`/`for`/`break`/`continue`). Scope `sc` starts
+// as the method's params and grows with each `let`; a loop's binder is pushed
+// for its body alone. A body whose bindings would need the reference's
+// method-wide `_alloc_safe` mangling is refused by the caller.
 fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], acc: Str) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
   if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, acc) }
@@ -21922,6 +22008,78 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (!em.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
     return cir_method_stmts(ts, em.i, hi, cx, sc, hostSc, nacc)
+  }
+  if (atw(ts, lo, "if")) {
+    let c = expr_at(ts, lo + 1)
+    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return mk_irres(false, "") }
+    let tend = close_brace(ts, c.i)
+    if (tend == 0 - 1) { return mk_irres(false, "") }
+    let ce = cir_expr(c.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
+    if (!ce.ok) { return mk_irres(false, "") }
+    let tb = cir_method_stmts(ts, c.i + 1, tend - 1, cx, sc, hostSc, "")
+    if (!tb.ok) { return mk_irres(false, "") }
+    var js = "{\"step\": \"if\", \"cond\": ".concat(ce.js)
+      .concat(", \"then\": [").concat(tb.js).concat("]")
+    var nexti = tend
+    if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
+      let eend = close_brace(ts, tend + 1)
+      if (eend == 0 - 1) { return mk_irres(false, "") }
+      let eb = cir_method_stmts(ts, tend + 2, eend - 1, cx, sc, hostSc, "")
+      if (!eb.ok) { return mk_irres(false, "") }
+      js = js.concat(", \"else\": [").concat(eb.js).concat("]")
+      nexti = eend
+    } else {
+      if (atw(ts, tend, "else") && atw(ts, tend + 1, "if")) {
+        let eend = cir_if_end(ts, tend + 1)
+        if (eend == 0 - 1) { return mk_irres(false, "") }
+        let eb = cir_method_stmts(ts, tend + 1, eend, cx, sc, hostSc, "")
+        if (!eb.ok) { return mk_irres(false, "") }
+        js = js.concat(", \"else\": [").concat(eb.js).concat("]")
+        nexti = eend
+      } else {
+        js = js.concat(", \"else\": null")
+      }
+    }
+    let step = js.concat("}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_method_stmts(ts, nexti, hi, cx, sc, hostSc, nacc)
+  }
+  if (atw(ts, lo, "while")) {
+    let c = expr_at(ts, lo + 1)
+    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return mk_irres(false, "") }
+    let wend = close_brace(ts, c.i)
+    if (wend == 0 - 1) { return mk_irres(false, "") }
+    let ce = cir_expr(c.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
+    if (!ce.ok) { return mk_irres(false, "") }
+    let wb = cir_method_stmts(ts, c.i + 1, wend - 1, cx, sc, hostSc, "")
+    if (!wb.ok) { return mk_irres(false, "") }
+    let step = "{\"step\": \"while\", \"cond\": ".concat(ce.js)
+      .concat(", \"body\": [").concat(wb.js).concat("]}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_method_stmts(ts, wend, hi, cx, sc, hostSc, nacc)
+  }
+  if (atw(ts, lo, "for")) {
+    if (!atk(ts, lo + 1, "(")) { return mk_irres(false, "") }
+    let bind = tkc(ts, lo + 2).text
+    let it = expr_at(ts, lo + 4)
+    if (is_bad(it.e) || !atk(ts, it.i, ")") || !atk(ts, it.i + 1, "{")) { return mk_irres(false, "") }
+    let bend = close_brace(ts, it.i + 1)
+    if (bend == 0 - 1) { return mk_irres(false, "") }
+    let ie = cir_expr(it.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 4).line))
+    if (!ie.ok) { return mk_irres(false, "") }
+    let fb = cir_method_stmts(ts, it.i + 2, bend - 1, cx, sc.push({ name: bind, ty: "" }), hostSc, "")
+    if (!fb.ok) { return mk_irres(false, "") }
+    let step = "{\"step\": \"for\", \"bind\": ".concat(jstr(bind))
+      .concat(", \"iterable\": ").concat(ie.js)
+      .concat(", \"body\": [").concat(fb.js).concat("]}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_method_stmts(ts, bend, hi, cx, sc, hostSc, nacc)
+  }
+  if (atw(ts, lo, "break") || atw(ts, lo, "continue")) {
+    let step = "{\"step\": ".concat(jstr(tkc(ts, lo).text))
+      .concat(", \"line\": ").concat(tkc(ts, lo).line.to_str()).concat("}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc)
   }
   if (atw(ts, lo, "return")) {
     let r = expr_at(ts, lo + 1)
@@ -22183,6 +22341,10 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
   if (atk(ts, h, "{")) {
     let bend = close_brace(ts, h)
     if (bend == 0 - 1) { return mk_irres(false, "") }
+    if (cir_has_control(ts, h + 1, bend - 1)
+        && cir_method_rebinds(ts, h + 1, bend - 1, concat_binds(sc, pbinds))) {
+      return mk_irres(false, "")
+    }
     let br = cir_method_stmts(ts, h + 1, bend - 1, cx,
                               tenv_put(concat_binds(sc, pbinds), "returns ", mret),
                               hostSc, "")

@@ -495,11 +495,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # marking, and the effect block's pure setup all left this list when
         # lower.rvl grew the `match`/`format`/`fn`/witnessed-`effect` surface.)
         #
-        # issue #721: provide-method control flow (`if`/`while`/`for`/`break`/
-        # `continue`). The EMITTER half is byte-exact, selfhost/emit_py.rvl
-        # carries `method_control`, so this is a `selfhost/lower.rvl` gap: the
-        # native IR producer does not lower a method-body control-flow step.
-        "services_control_flow.rvl",
+        # (issue #721: provide-method control flow (`if`/`while`/`for`/
+        # `break`/`continue`) left this list when `cir_method_stmts` in
+        # selfhost/lower.rvl grew those arms — the native IR producer now
+        # lowers a method-body control-flow step to the same `if`/`while`/`for`
+        # shape the reference does. The same slice taught the producer a
+        # chained builtin call written in place (`x.concat(a).concat(b)`): it
+        # nests the receiver's node as the builtin's `target` instead of
+        # refusing and dropping the whole component.)
         # item 391: a component-body `Stream.source()` acquisition (a `host`
         # node). The EMITTER half is byte-exact on the reference IR; the native
         # IR producer drops the whole `let src = effect Stream.source() undo
@@ -625,10 +628,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
         # bracket, the `assign` step and `undo_captures` landed in a provide
         # method body.)
-        # issue #721: provide-method control flow, the same lower.rvl gap the
-        # py list records: selfhost/emit_ts.rvl reproduces the reference bytes
-        # from the reference IR, and the fully-native chain does not.
-        "../emit_py_corpus/services_control_flow.rvl",
+        # (issue #721: provide-method control flow left this list with the py
+        # entry above — the one native `selfhost/lower.rvl` producer fix closes
+        # the residual for BOTH tiers, because selfhost/emit_ts.rvl already
+        # reproduced the reference bytes from the reference IR.)
         # issue #106: the families selfhost/emit_ts.rvl learned in one slice.
         # The emitter half of each is byte-exact on the REFERENCE IR (asserted
         # above for every document); the native chain is not, because

@@ -1777,7 +1777,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 <!-- docgen:selfhost-residual-docs begin -->
 `py`:
 
-- `services_control_flow.rvl`
 - `services_host_stream.rvl`
 - `../emit_py_placement.rvl`
 - `../emit_py_builtin_shadow.rvl`
@@ -1805,7 +1804,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 - `component_edges.rvl`
-- `../emit_py_corpus/services_control_flow.rvl`
 - `../../../stdlib/router.rvl`
 - `../../../stdlib/fs.rvl`
 - `../../../examples/lifecycle_cache.rvl`
