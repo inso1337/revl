@@ -1524,6 +1524,90 @@ def _swap_server_side(replacing: tuple) -> dict:
             **_effect_classes.report(full, running, against=True)}
 
 
+# -- a load over a held draft (issue #2111) ---------------------------------
+#
+# A draft is the session's only copy of the work in progress: nothing on disk
+# has it, and `revl_load` is the only thing that boots it. `revl_edit` and
+# `revl_check` load the `source`/`files` they are handed when nothing is
+# loaded, which is what makes a cold edit one call instead of two (issue
+# #1690). While a draft is held that load is not a step in the loop — it IS
+# the loss: `draft.open_draft` replaces the held working set, and a hole-free
+# candidate drops it outright (`_boot`). The caller then reads a refusal about
+# its own edit ("no `hole` on line 12 to fill") and goes looking for the right
+# line in a composition that no longer exists.
+#
+# So the combination is refused while a draft is held, and only then: a cold
+# load with no draft held is what `revl_load` is for and is untouched (issue
+# #2138 deliberately preserved it). The refusal is a USAGE error, never a
+# composition verdict — nothing about the caller's composition has been judged
+# — so `ok: false` keeps meaning "your composition has a problem" (#2117), and
+# the message names the draft it would have cost, which is the fact the caller
+# could not see.
+
+def _held_draft() -> dict | None:
+    """The draft a carried `source`/`files` would destroy (issue #2111), or
+    None.
+
+    Testing `loaded` first is the same test as asking whether a draft is held:
+    a draft is opened only on a load where nothing is running (`draft.py`
+    guards every `pending` site with `not SESSION.loaded`), so the two states
+    are exclusive — the reading `_held_working_set` documents."""
+    return None if SESSION.loaded else _draft.pending(SESSION)
+
+
+def _load_shape(arguments: dict) -> str:
+    """A call's `source`/`files`, named as the caller wrote it, so a refusal
+    can say what it would have loaded (issue #2111)."""
+    files = arguments.get("files")
+    if files:
+        names = ", ".join(os.path.basename(str(path)) for path in files)
+        return f"`files` ({names})"
+    return "the inline `source` you sent"
+
+
+def _held_draft_phrase() -> str:
+    """The held draft, named so a refusal can say what the call would have
+    cost: its components and its open holes (issue #2111).
+
+    A working set that no longer compiles is still the held draft, so it is
+    named without the count rather than counted alone — the same reading
+    `revl_state` publishes as `holes: null` (`_tool_state`)."""
+    draft = _draft.pending(SESSION)
+    if draft is None:
+        return "the held draft"
+    try:
+        ir = _edit.compile_virtual(draft["vs"])
+    except RevlError:
+        return "the held draft"
+    names = [component["name"] for component in _summary(ir)["components"]]
+    holes = len(_draft.collect_holes(ir))
+    return (f"the held draft ({', '.join(names) if names else 'no components'}, "
+            f"{holes} open hole(s))")
+
+
+def _without_load(arguments: dict) -> dict:
+    """`arguments` with the `source`/`files` dropped: the same call pointed at
+    the held draft instead of at a candidate of its own (issue #2111)."""
+    return {k: v for k, v in arguments.items() if k not in ("source", "files")}
+
+
+def _held_edit_next(arguments: dict) -> dict:
+    """The edit a draft-destroying call should have been (issue #2111): the
+    call with its `source`/`files` dropped, so the patch lands on the draft the
+    session already holds.
+
+    Always `revl_edit`, because that is what the edit arguments amount to —
+    `revl_change` reaches the same door through `change.edit_arguments`, which
+    has already turned its intent into `edits`. `ready` is false when nothing
+    left in the call is an edit, because a `next` sent as-is must not refuse
+    again."""
+    edits = arguments.get("edits")
+    ready = isinstance(edits, list) and bool(edits)
+    return _remedy.call("revl_edit", _without_load(arguments), ready=ready,
+                        needs=None if ready else
+                        "`edits` — the patch operations to apply to the held draft")
+
+
 def _tool_edit(arguments: dict, verify=None, caller: str = "revl_edit") -> dict:
     """Patch the server-side source of the running composition and re-admit —
     deltas, not documents (roadmap item 50, docs/mcp-bridge.md).
@@ -1531,6 +1615,12 @@ def _tool_edit(arguments: dict, verify=None, caller: str = "revl_edit") -> dict:
     With nothing loaded, a call that carries `files` or `source` loads it first,
     through `revl_load` itself, then edits it (issue #1690): an agent never has
     to learn that the edit verb needs a load verb before it.
+
+    With nothing loaded and a DRAFT held, the same call is refused (issue
+    #2111): the load it would run replaces the draft the loop was filling, so
+    the edit that follows would be aimed at a composition the caller never
+    meant to build. The refusal is a usage error, names the draft and its open
+    holes, and carries the same edit pointed at the held draft.
 
     With a composition already loaded, the same call is not refused (issue
     #2035). `files` is the load set and nothing is being loaded, so it is
@@ -1542,6 +1632,16 @@ def _tool_edit(arguments: dict, verify=None, caller: str = "revl_edit") -> dict:
     through its own intent-shaped call, so a message that said `revl_edit`
     named a tool the caller had not called."""
     carried = any(arguments.get(k) is not None for k in ("source", "files"))
+    if carried and _held_draft() is not None:
+        return _session_error(
+            f"refused: {caller} with {_load_shape(arguments)} loads it first, "
+            f"replacing {_held_draft_phrase()} — a draft is held in memory "
+            "only, so nothing else has a copy of it",
+            category="usage",
+            fix="drop `source`/`files` — the held draft is what this call "
+                "edits, and it is already in memory",
+            next=_held_edit_next(arguments),
+            loaded=False, edited=False, swapped=False, draft=True)
     if not carried and not SESSION.loaded and _draft.pending(SESSION) is not None:
         return _edit_draft(arguments, verify)
     ignored = False
@@ -2862,6 +2962,12 @@ def _tool_check(arguments: dict) -> dict:
     A call that carries neither a candidate nor anything held is a USAGE
     refusal (`category: "usage"`), never a composition verdict: `ok: false`
     keeps meaning "your composition has a problem" (issue #2117).
+
+    A call that carries a candidate while a DRAFT is held is the same kind of
+    usage refusal (issue #2111): the candidate is compiled instead of the draft
+    the loop is filling, so the answer describes a composition that is not the
+    one being worked on. Verifying the held draft is `{"session": true}`, which
+    names it without re-sending it.
     """
     explicit = arguments.get("session") is True
     if explicit and _carries_candidate(arguments):
@@ -2871,6 +2977,16 @@ def _tool_check(arguments: dict) -> dict:
             category="usage",
             fix="drop `source`/`files` to check the held composition, or drop "
                 "`session` to check the candidate you sent")
+    if _carries_candidate(arguments) and _held_draft() is not None:
+        return _session_error(
+            f"refused: revl_check with {_load_shape(arguments)} checks that "
+            f"candidate, not {_held_draft_phrase()} — the draft is the loop's "
+            "artifact, and a check that names a candidate cannot see it",
+            category="usage",
+            fix="drop `source`/`files` to check the composition the session "
+                "holds",
+            next=_remedy.call("revl_check", {"session": True}),
+            draft=True)
     if explicit or not _carries_candidate(arguments):
         return _check_held(arguments)
     sent, _stored, canon = _canonical.prepare(arguments)

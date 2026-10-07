@@ -389,12 +389,24 @@ supplied source would mean re-sending the whole file, which the scaffold tells
 you not to do. `modules` alone is not a candidate: they are a `source`/`files`
 candidate's `use` imports.
 
+**A candidate sent over a held draft is refused (issue #2111).** A draft is the
+session's only copy of the work in progress, and `revl_check {source|files}`
+does not merely check beside it: the load it runs replaces the held working
+set, so verifying the work would destroy it. The combination is therefore
+refused while a draft is held, and the refusal names the draft and its open
+holes rather than describing only the candidate's own problem. Its `next` is
+`revl_check {"session": true}`, the held form above: the draft is checked
+without being re-sent. Checking a supplied candidate with no draft held is
+unchanged.
+
 **A usage error is not a composition verdict.** `ok: false` means the
 composition has a problem. A call that names no candidate and holds none comes
 back with `category: "usage"`, a `fix` naming the missing argument and a `next`
 holding the call to make, never with `category: "internal"` and never as a
 verdict. A verdict always carries `selfCheck`; a usage error never does, so a
-caller can branch on that alone.
+caller can branch on that alone. The draft refusal above is the same kind of
+usage error, and carries no `selfCheck` for the same reason: nothing about the
+caller's composition was judged.
 
 ### `revl_admit`
 
@@ -574,7 +586,11 @@ draft through the same gates a `revl_load` runs (the load half of the operator
 gate, a lease on a cold load, the session's admission checks, the approval
 ticket). A gate that refuses leaves the draft held, hole-free, with the reason.
 `revl_load` with no source boots the held draft (with `config`/`record` if
-given), and refuses while a hole remains. With no draft held it is refused by
+given), and refuses while a hole remains. A `source`/`files` passed to
+`revl_edit` or `revl_check` while a draft is held is refused rather than
+loaded, since that load is what would replace it (issue #2111): the held set is
+checked with `revl_check {"session": true}` and patched by an edit that drops
+the load. With no draft held it is refused by
 name: with nothing loaded its `next` is the reload of what this session last
 ran, and with a composition running it says to use `revl_edit` or `revl_swap`. `revl_unload` discards it,
 `revl_state` reports `draft: {holes}`, and `revl_source` reads from it. A draft
@@ -703,6 +719,20 @@ files resolves to the edited text. The disk is never written: the swapped text
 is what the session holds, and `revl_snapshot` returns it. With nothing loaded,
 pass `files` (or `source`) and the call loads it through `revl_load` first,
 then edits it.
+
+**A load over a held draft is refused (issue #2111).** Load-first is a
+cold-start convenience, and a draft is the session's only copy of the work in
+progress. While a draft is held, `revl_edit {source|files, edits}` is refused
+instead of loading: the load it would run replaces the held working set (a
+candidate with no holes drops the draft outright), so the edit that follows
+would patch a composition the caller never meant to build. The refusal is a
+usage error (`category: "usage"`, never a composition verdict), and its message
+says what the call would have loaded and what it would have cost (the draft's
+components and its open holes) instead of reporting a line number in a
+composition that no longer exists. `fix` says to drop `source`/`files`, and
+`next` holds the same call with them dropped, so the patch lands on the held
+draft. The same refusal answers `revl_change` when its intent carries
+`source`/`files`. With no draft held the load-first form is unchanged.
 
 A `{symbol, replacement}` edit replaces one declaration, top-level or nested,
 addressed as `revl_source` addresses it, and keeps the comment block above it.
@@ -841,6 +871,9 @@ calls for one change, five of them `revl_check` polls):
 
 Each intent is carried out as `revl_edit` edits, so the path jail, the trust
 rule for edited files, the gates and drafts behave exactly as for `revl_edit`:
+in particular an intent that carries `files`/`source` while a draft is held is
+refused as a usage error rather than loading over it (issue #2111), with the
+`next` holding the same edit pointed at the held draft.
 
 | intent | does |
 |---|---|
