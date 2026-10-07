@@ -70,7 +70,7 @@ import dataclasses
 import math
 
 from . import model_answer as _model_answer
-from .errors import RevlError
+from .errors import RevlError, foreign_increment_refusal
 
 # reserved keys carried inside the `types` table (type names never start
 # with an underscore, so these cannot collide)
@@ -1294,6 +1294,17 @@ def null_error(filename: str, line: int) -> RevlError:
 
 def _binop_type(op: str, lt: str | None, rt: str | None,
                 filename: str | None, line: int, types: dict | None = None):
+    if op == "++":
+        # `a ++ b` parses (parser._bin) only so that BOTH operand types are in
+        # hand here: `++` is not a revl operator, but it concatenates strings in
+        # JS/PHP/Lua/Perl/SQL, so an author whose task is building a `Str`
+        # guesses it first. With two `Str`s the refusal names `+` and
+        # `.concat(b)`; every other shape keeps the increment wording
+        # (issue #2150). Raised even without a filename — `++` has no type to
+        # return, so there is no gradual reading of it — and from here because
+        # this one function types every binary node on both strata
+        # (`infer_ast` and the IR-level `infer_ir`).
+        raise foreign_increment_refusal(filename, line, op, lt, rt)
     if op in ("==", "!=", "===", "!=="):
         # `types` is the declared-type table: without it a record LITERAL
         # compared with a value of a declared record type (`p == { x: 1, y: 2 }`)

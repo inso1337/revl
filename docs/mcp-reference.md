@@ -520,9 +520,10 @@ make it correct (issue #1701). Every hole's `fillSpec` already carries the
 idiom of its construct (`construct`, `idiom`; [holes.md](holes.md) §8), so
 this tool is for asking about a construct before there is a hole in it.
 
-- Inputs (optional): `name`, an idiom such as `emission-method`, `effect-undo`
-  or `spawn`, returns `{ok, idiom: {name, summary, rules, exampleExpression,
-  example}}`. The idiom is an example, not a set of fills to submit:
+- Inputs (optional): `name`, an idiom such as `emission-method`, `effect-undo`,
+  `spawn` or `str-concat`, returns `{ok, idiom: {name, summary, rules,
+  exampleExpression, example}}`. The idiom is an example, not a set of fills to
+  submit:
   `exampleExpression` is the expression that stands at the construct's position
   inside the example, so it carries the example component's own names
   (`store.drop()` names the example's `store`) and submitting it is refused

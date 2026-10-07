@@ -84,3 +84,55 @@ class RevlErrors(RevlError):
         census = (f"{n} refusals across {m} "
                   f"{'file' if m == 1 else 'files'}")
         return "\n".join([str(e) for e in self.errors] + [census])
+
+
+def foreign_increment_refusal(filename: str | None, line: int, op: str,
+                              left: str | None = None,
+                              right: str | None = None) -> RevlError:
+    """The refusal for a foreign in/decrement operator (`++` / `--`).
+
+    `++` is not a revl operator in any position, but it concatenates strings in
+    JS, PHP, Lua, Perl and SQL, so an author whose task is building a `Str`
+    reaches for `a ++ b` before `a + b` — and with a non-`Str` value in the same
+    position, `"total: " ++ n`. When an operand is known to be `Str` the refusal
+    names the spellings that DO join strings, because a message about numeric
+    increment teaches that author nothing and the same sentence comes back turn
+    after turn (issue #2150). Every other operand shape keeps the increment
+    wording item 384 shipped — correct there, and pinned by
+    `examples/rejections/foreign_increment.rvl`.
+
+    Lives here because every end of the pipeline raises it: the parser, on the
+    error path where no operand is known (`i++`), the checker
+    (`typecheck._binop_type`, which types every binary node on both the parser
+    and the IR strata), and lowering (`lower._refuse_foreign_increment`, which
+    holds the position for a body the checker does not infer with a filename).
+    One wording, one place.
+    """
+    if op == "++" and "Str" in (left, right):
+        if left == "Str" and right == "Str":
+            hint = ("both operands are `Str`: `a + b` joins two strings and "
+                    "`a.concat(b)` is the method form (docs/stdlib-2.0.md); "
+                    "`revl_idiom` serves the `str-concat` example")
+        else:
+            other = right if left == "Str" else left
+            whose = (f"the other operand is `{other}`" if other else
+                     "the other operand is not a `Str`")
+            hint = (f"`+` joins `Str` to `Str`; {whose}, so convert it with "
+                    "`.to_str()` or interpolate it — write `` `n=${n}` `` "
+                    "(docs/stdlib-2.0.md); `revl_idiom` serves the "
+                    "`str-format` example")
+        return RevlError(
+            filename, line,
+            "`++` is not an operator in revl — string concatenation is `+` "
+            "(`a + b`) or `a.concat(b)`",
+            hint=hint,
+        )
+    sign = op[0]
+    word = "increment" if sign == "+" else "decrement"
+    return RevlError(
+        filename, line,
+        f"revl has no `{sign}{sign}` {word} operator — expressions are pure "
+        "(syntax-2.0 §3.3)",
+        hint=f"mutate a `var` with `{sign}= 1` (write `i {sign}= 1`), inside a "
+             "`while`/`for` loop body",
+    )

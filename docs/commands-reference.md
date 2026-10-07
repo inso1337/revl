@@ -179,7 +179,7 @@ already; this command is for reading one by name.
 - `NAME` - an idiom: one per construct a fillSpec names (`provide-method`,
   `emission-method`, `component-setup`, `effect-acquire`, `effect-undo`,
   `function`, `test`) and a few served by name only (`spawn`, `subscribe`,
-  `match`, `timer`). With no name, the list.
+  `match`, `timer`, `try`, `str-concat`, `str-format`). With no name, the list.
 - `--json` - the entry as `{name, summary, rules, exampleExpression, example}`.
   The idiom is an example, not a set of fills to submit: `exampleExpression`
   stands inside the example and carries the example component's own names, so

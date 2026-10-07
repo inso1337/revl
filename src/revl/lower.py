@@ -24,7 +24,7 @@ from collections import deque
 
 from . import holes, ownership
 from ._paths import stdlib_root
-from .errors import RevlError, RevlErrors
+from .errors import RevlError, RevlErrors, foreign_increment_refusal
 from .hostfile import _contained
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
@@ -7090,6 +7090,24 @@ def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
         node["expected"] = declared
 
 
+def _refuse_foreign_increment(expr, filename: str, type_env: dict | None,
+                              types: dict | None) -> None:
+    """Refuse a `++` node before any backend can see it (issue #2150).
+
+    `a ++ b` parses (parser._bin) so that the checker can name the
+    concatenation spelling when both operands are `Str`. A body the checker
+    does not infer with a filename — a provide-method body, an effect argument —
+    reaches lowering with the node intact, and `++` is not an operator on any
+    tier: refuse it here, with the position lowering still has.
+    """
+    if expr.op != "++":
+        return
+    raise foreign_increment_refusal(
+        filename, expr.line, expr.op,
+        infer_ast(expr.left, type_env, types, None),
+        infer_ast(expr.right, type_env, types, None))
+
+
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
@@ -7169,6 +7187,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             return {"kind": "var", "name": _predeclared_mangle(expr.name)}
         return {"kind": "var", "name": expr.name}
     if isinstance(expr, ExprBin):
+        _refuse_foreign_increment(expr, filename, type_env, types)
         node = {"kind": "bin", "op": expr.op,
                 "left": _lower_pure_expr(expr.left, scope, callables, alias_fns, filename, type_env, types),
                 "right": _lower_pure_expr(expr.right, scope, callables, alias_fns, filename, type_env, types)}
@@ -10016,6 +10035,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 env, filename, line)
         return node
     if isinstance(expr, ExprBin):
+        _refuse_foreign_increment(expr, filename, env.type_env, env.types)
         node = {"kind": "bin", "op": expr.op,
                 "left": _lower_component_pure_expr(expr.left, env, scope, callables,
                                                    pure_only),
