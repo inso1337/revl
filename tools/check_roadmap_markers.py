@@ -174,6 +174,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -280,6 +281,85 @@ ADVISORY_RE = re.compile(
 
 # Sections whose items are historical record, not tracked work.
 UNTRACKED_SECTIONS = ("Done (dependency order as built)", "Declined, deliberately")
+
+
+# ---------------------------------------------------------------------------
+# --require-successor: the issue-citation check above, carried one step
+# further. `--require-issue` makes an open or partial item CITE an issue; it
+# cannot tell whether that issue is still open, and measured on main 18 of the
+# 25 rows marked "🚧 PARTIAL" cite a CLOSED one. This half asks the second
+# question, and it is split in two on purpose (issue #2100):
+#
+#   OFFLINE, no network: every row carrying an in-progress glyph must name a
+#   tracking issue. That is the cheap slice, and it is a real gate rather than
+#   a restatement of --require-issue, because --require-issue reads `items()`
+#   and `items()` classifies "(issue #1197) **🚧 PARTIAL ..." as OPEN: the
+#   citation and the bold span come first, so the status glyph sits about
+#   twenty characters in and `rest[:2]` never sees it. The audit below reads
+#   the marker where the file actually writes it, so those 25 rows are in
+#   scope here and were never in scope there.
+#
+#   ONLINE, with --issue-state: the cited issue's live state. A row whose cited
+#   issue is CLOSED and which names no DISTINCT successor issue is a finding.
+#   FAIL-CLOSED: no `gh`, no auth, a timeout, a rate limit or a malformed
+#   answer leaves the issue UNKNOWN, and unknown is never read as closed. See
+#   gh_issue_states.
+# ---------------------------------------------------------------------------
+
+# The glyphs that say "this row is still work". `INFLIGHT_GLYPHS` (🚧) is the
+# in-flight marker and `PARTIAL_GLYPHS` (◑) the partial one; the 25 rows this
+# audit exists for spell it out as "🚧 PARTIAL".
+INPROGRESS_GLYPHS = INFLIGHT_GLYPHS + PARTIAL_GLYPHS
+
+# The in-progress marker as this file actually writes it: "(issue #1197)
+# **🚧 PARTIAL, ..." and "◑ (issue #79) DESIGN DONE ...". Applied to an item's
+# text with its "N. " prefix already removed by ITEM_RE, so the citation and
+# the bold span that precede the glyph in the first form are both optional.
+INPROGRESS_ROW_RE = re.compile(
+    r"""^
+        (?:\(issue\s*\#\d+\)\s*)?   # "(issue #1197) ", when the row leads with it
+        (?:\*\*)?\s*                # the bold span that follows it
+        (?P<glyph>[\U0001F6A7◑])    # 🚧 or ◑
+    """,
+    re.VERBOSE,
+)
+
+# The NUMBER inside an issue citation. ISSUE_RE answers yes/no, which is all
+# --require-issue needs; this audit needs the number itself, to report the
+# cited issue, to ask the tracker about it, and to tell the row's OWN citation
+# apart from a successor it names further down. Same two spellings ISSUE_RE
+# accepts, and a bare "#58" is still not one of them (it collides with the
+# merged-PR references the roadmap writes that way).
+ISSUE_NUM_RE = re.compile(r"(?:issues?\s*\#|/issues/)(\d+)", re.IGNORECASE)
+
+# Phrases with which this file states, INSIDE a row whose marker already says
+# the row is unfinished, that something is still outstanding. Used for the
+# audit's "states a residual" column and NOT to fail anything: whether a
+# residual is REAL is a question about the tree and the tracker, which is
+# exactly why the row has to carry a successor instead of a keyword. The list
+# is the vocabulary the 25 rows actually use, not a guess at English.
+RESIDUAL_RE = re.compile(
+    r"""(
+          \bSTILL\s+OPEN\b
+        | \*\*\s*Open:\s*\*\*
+        | (?<!\w)Open:
+        | \bunmet\b
+        | \bnot\s+yet\b
+        | \bremain(?:s|ing)?\b
+        | \bdeferred\b
+        | \bunowned\b
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# How long one `gh api` call may take. macOS has no `timeout(1)`; the bound is
+# enforced by subprocess.run, and a call that hits it is an UNKNOWN, not a
+# closed issue.
+GH_TIMEOUT = 20.0
+
+# What `gh api ... --jq .state` may answer. Anything else is malformed and is
+# treated the same way a failure is: unknown.
+GH_STATES = ("open", "closed")
 
 
 class Git:
@@ -846,6 +926,277 @@ def issue_findings(text: str) -> list[str]:
             f"    {title}"
         )
     return findings
+
+
+def inprogress_records(text: str) -> list[dict]:
+    """Every top-level row whose OWN text carries an in-progress glyph.
+
+    WHY THIS DOES NOT JUST USE `items()`. `items()` derives an item's status
+    from the first two characters of its text, which is right for
+    "118. ◑ (issue #79) ..." and wrong for the 25 rows that read
+    "(issue #1197) **🚧 PARTIAL, ...": there the citation and the bold span
+    come first, the glyph sits about twenty characters in, and `rest[:2]`
+    answers "open". Those 25 rows are the measurement behind issue #2100, so
+    this reads the marker where the file writes it (INPROGRESS_ROW_RE) instead
+    of changing `items()` and moving every other gate's scope underneath it.
+
+    One record per row, in file order: the line, the item number, the section,
+    which glyph it carries, the issue it CITES (the first citation, which is
+    how this file writes the row's own issue), every OTHER issue number the
+    row names anywhere (its candidate successors), whether its text states a
+    residual, and whether it is a security item carrying an advisory instead of
+    a public issue. It decides nothing; `successor_findings` does.
+    """
+    out: list[dict] = []
+    for it in items(text):
+        m = INPROGRESS_ROW_RE.match(it["text"])
+        if not m:
+            continue
+        glyph = m.group("glyph")
+        header_nums = [int(n) for n in ISSUE_NUM_RE.findall(it["text"])]
+        all_nums = [int(n) for n in ISSUE_NUM_RE.findall(it["body"])]
+        primary = header_nums[0] if header_nums else None
+        out.append({
+            "line": it["line"],
+            "number": it["number"],
+            "section": it["section"],
+            "kind": "in-flight" if glyph in INFLIGHT_GLYPHS else "partial",
+            "glyph": glyph,
+            "primary": primary,
+            "successors": sorted({n for n in all_nums if n != primary}),
+            "residual": bool(RESIDUAL_RE.search(it["body"])),
+            "advisory": bool(ADVISORY_RE.search(it["body"])),
+            "title": re.sub(r"\s+", " ", it["text"])[:96],
+        })
+    return out
+
+
+def successor_findings(text: str,
+                       states: dict[int, str] | None = None) -> list[str]:
+    """In-progress rows whose cited issue has CLOSED with no successor named.
+
+    THE ONE FINDING, and it fires on EVIDENCE and nothing else. `states` is the
+    live lookup's answer and is OPTIONAL; absent, or missing this row's issue,
+    the state is UNKNOWN. Unknown is not closed. A lookup that failed, timed
+    out, was rate limited, found no `gh` or found no token therefore cannot
+    manufacture a finding, and cannot excuse one either -- the row moves into
+    the report's unavailable count, where it is visible instead of silently
+    green. That asymmetry is the whole design: this gate speaks only when it
+    has positively read the tracker, which is why `make lint` can run it
+    offline and why it needs no network to stay honest.
+
+    A row that cites no issue at all is NOT a finding here. It is decidably
+    broken offline, but it is already `--require-issue`'s question, and failing
+    on it would make this flag red on main for a reason that has nothing to do
+    with issue state. The audit reports those rows by line and count instead;
+    see `successor_report`.
+    """
+    findings: list[str] = []
+    if not states:
+        return findings
+    for rec in inprogress_records(text):
+        if rec["section"] in UNTRACKED_SECTIONS:
+            continue
+        primary = rec["primary"]
+        if primary is None or rec["successors"]:
+            continue
+        if states.get(primary) != "closed":
+            continue
+        findings.append(
+            f"L{rec['line']}: item {rec['number']} ({rec['kind']}) cites issue "
+            f"#{primary}, which is CLOSED, and names no successor issue. The "
+            f"row still reads as work in progress with nothing left to follow: "
+            f"either close the row out, or name the issue that now carries the "
+            f"residual.\n"
+            f"    {rec['title']}"
+        )
+    return findings
+
+
+def repo_slug(root: Path) -> str | None:
+    """`owner/repo` from the checkout's `origin`, or None if it cannot be read.
+
+    Only used to spell the API path. A None here is a lookup that cannot run,
+    which is an UNKNOWN for every issue, never a closed one.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    m = re.search(r"github\.com[:/]+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?$",
+                  proc.stdout.strip())
+    return m.group(1) if m else None
+
+
+def gh_issue_states(numbers: list[int], repo: str | None,
+                    timeout: float = GH_TIMEOUT) -> tuple[dict[int, str],
+                                                         list[str]]:
+    """Live state of each issue, from `gh`, as `{number: "open"|"closed"}`.
+
+    FAIL-CLOSED, and that is the whole design. Every way this can go wrong --
+    no `gh` on PATH, no repo slug, no auth, no network, a timeout, a rate
+    limit, a 404, a malformed answer -- leaves the issue OUT of the mapping.
+    An absent issue is UNKNOWN, and `successor_findings` reads unknown as
+    "cannot say", never as "closed". So a failed lookup can never turn a row
+    into a finding; and it never turns one into a pass either, because the
+    second return value is the list of failures and the report prints them
+    with a count, so a bare OK is impossible.
+
+    Returns (states, unavailable). The failures are PROSE for the report, one
+    line per issue, in the order asked.
+    """
+    exe = shutil.which("gh")
+    if exe is None:
+        return {}, [f"`gh` is not on PATH, so no issue state was consulted "
+                    f"({len(numbers)} issue(s) unknown)"]
+    if not repo:
+        return {}, [f"the checkout's `origin` is not a github.com URL, so no "
+                    f"issue state was consulted ({len(numbers)} issue(s) "
+                    f"unknown)"]
+    states: dict[int, str] = {}
+    unavailable: list[str] = []
+    for number in numbers:
+        try:
+            proc = subprocess.run(
+                [exe, "api", f"repos/{repo}/issues/{number}", "--jq", ".state"],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            unavailable.append(f"#{number}: `gh api` did not answer within "
+                               f"{timeout:g}s")
+            continue
+        except OSError as exc:
+            unavailable.append(f"#{number}: could not run `gh`: {exc}")
+            continue
+        if proc.returncode != 0:
+            first = (proc.stderr or proc.stdout).strip().splitlines()
+            unavailable.append(
+                f"#{number}: `gh api` exited {proc.returncode}"
+                + (f": {first[0]}" if first else "")
+            )
+            continue
+        state = proc.stdout.strip().lower()
+        if state in GH_STATES:
+            states[number] = state
+        else:
+            unavailable.append(f"#{number}: `gh api` answered "
+                               f"{proc.stdout.strip()!r}, which is not a state")
+    return states, unavailable
+
+
+def successor_report(text: str, states: dict[int, str] | None,
+                     unavailable: list[str], looked_up: bool) -> str:
+    """The audit: one line per in-progress row, then the split, then the gaps.
+
+    Printed whenever `--audit-successors` is on (which `--require-successor`
+    implies), whether or not anything is a finding, so the answer can never be
+    mistaken for a bare OK. With `--issue-state` the state column is the
+    tracker's; without it every cited issue reads UNKNOWN and the report says
+    so rather than guessing.
+    """
+    records = inprogress_records(text)
+    states = states or {}
+    inflight = [r for r in records if r["glyph"] in INFLIGHT_GLYPHS]
+    cited = [r for r in records if r["primary"] is not None]
+    uncited = [r for r in records if r["primary"] is None]
+    lines = [
+        f"--audit-successors: {len(records)} top-level row(s) carry an "
+        f"in-progress glyph, of which {len(inflight)} are 🚧 in-flight (the "
+        f"population issue #2100 measured) and "
+        f"{len(records) - len(inflight)} are ◑ partial.",
+        f"  {len(cited)} cite an issue; {len(uncited)} cite none.",
+    ]
+    if not looked_up:
+        lines.append(
+            "  No live state was consulted (--issue-state is off), so every "
+            "cited issue reads UNKNOWN below. That is not a pass and not a "
+            "closed issue: it is this gate declining to answer a question it "
+            "has no evidence for."
+        )
+    for rec in records:
+        primary = rec["primary"]
+        if primary is None:
+            state = "NO-ISSUE"
+        elif primary in states:
+            state = states[primary]
+        elif looked_up:
+            state = "unavailable"
+        else:
+            state = "unknown"
+        succ = (",".join(f"#{n}" for n in rec["successors"])
+                if rec["successors"] else "none")
+        lines.append(
+            f"  L{rec['line']}: item {rec['number']} ({rec['kind']}) "
+            f"issue={('#' + str(primary)) if primary else '-'} state={state} "
+            f"residual={'yes' if rec['residual'] else 'no'} "
+            f"successor={succ}"
+        )
+    if looked_up:
+        counts = {"open": 0, "closed": 0, "unavailable": 0}
+        for rec in cited:
+            counts[states.get(rec["primary"], "unavailable")] += 1
+        lines.append(
+            f"  Split over all {len(cited)} cited issue(s): "
+            f"{counts['open']} OPEN, {counts['closed']} CLOSED, "
+            f"{counts['unavailable']} UNKNOWN (lookup did not resolve)."
+        )
+        sub = {"open": 0, "closed": 0, "unavailable": 0}
+        for rec in inflight:
+            if rec["primary"] is None:
+                continue
+            sub[states.get(rec["primary"], "unavailable")] += 1
+        lines.append(
+            f"  Split over the {len(inflight)} 🚧 row(s), the measurement in "
+            f"issue #2100: {sub['open']} cite an OPEN issue, "
+            f"{sub['closed']} cite a CLOSED one, {sub['unavailable']} could "
+            f"not be resolved."
+        )
+        stale = [r for r in records
+                 if states.get(r["primary"]) == "closed" and not r["successors"]]
+        stale_inflight = [r for r in stale if r["glyph"] in INFLIGHT_GLYPHS]
+        lines.append(
+            f"  {len(stale)} in-progress row(s) cite a CLOSED issue and name no "
+            f"successor ({len(stale_inflight)} of them 🚧); those are the "
+            f"findings --require-successor reports."
+        )
+    else:
+        lines.append(
+            f"  Of the {len(inflight)} 🚧 row(s) (issue #2100's population), "
+            f"{len([r for r in inflight if r['primary'] is not None])} cite an "
+            f"issue and {len([r for r in inflight if r['primary'] is None])} "
+            f"cite none. Whether a cited issue has CLOSED needs --issue-state."
+        )
+    if uncited:
+        lines.append(
+            f"  {len(uncited)} row(s) carry an in-progress glyph and cite no "
+            f"issue at all, which this audit reports rather than fails because "
+            f"the citation question is --require-issue's, and because a bare "
+            f"`#58` in this file is a merged-PR reference as often as an issue:"
+        )
+        lines.extend(
+            f"    L{r['line']}: item {r['number']} ({r['kind']}) "
+            f"{'[security advisory] ' if r['advisory'] else ''}{r['title']}"
+            for r in uncited
+        )
+    if unavailable:
+        lines.append(
+            f"  {len(unavailable)} lookup(s) did NOT resolve and are counted "
+            f"as UNKNOWN above, never as CLOSED:"
+        )
+        lines.extend("    " + u for u in unavailable[:20])
+        if len(unavailable) > 20:
+            lines.append(f"    ... and {len(unavailable) - 20} more")
+    lines.append(
+        "  What this audit did NOT decide: whether any row's residual is real. "
+        "A closed issue and a stale marker look identical from here, so the "
+        "rows above are a list to read, not a list to flip."
+    )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1876,6 +2227,34 @@ def main(argv: list[str] | None = None) -> int:
                          "cite a GitHub issue, or, for a security item, a "
                          "private security advisory (GHSA id or advisory URL). "
                          "See CONTRIBUTING.md 'Tracking work'.")
+    ap.add_argument("--audit-successors", action="store_true",
+                    help="print the in-progress-row audit: for every top-level "
+                         "row carrying an in-progress glyph (🚧 or ◑), the "
+                         "issue it cites, that issue's live state when known, "
+                         "whether the row states a residual, and the successor "
+                         "issues it names, then the open/closed split and the "
+                         "rows that cite nothing. Advisory: it reports and "
+                         "exits 0. See issue #2100.")
+    ap.add_argument("--require-successor", action="store_true",
+                    help="ALSO gate on the audit: fail a row that carries an "
+                         "in-progress glyph, cites an issue, and whose cited "
+                         "issue is CLOSED with no successor issue named. "
+                         "Fires only on positive evidence, so offline (no "
+                         "--issue-state) it cannot fire at all. Implies "
+                         "--audit-successors. See issue #2100.")
+    ap.add_argument("--issue-state", action="store_true",
+                    help="consult the LIVE state of each cited issue with "
+                         "`gh`, so the audit can report the open/closed split "
+                         "and --require-successor can fail a row whose issue "
+                         "has closed. This is the only flag here that touches "
+                         "the network, it is off by default, and it is "
+                         "FAIL-CLOSED: no `gh`, no auth, a timeout, a rate "
+                         "limit or a malformed answer leaves the issue UNKNOWN "
+                         "-- reported with a count, never read as CLOSED. "
+                         "Given alone it is the advisory read; with "
+                         "--require-successor it is the gate. If it is given "
+                         "and NO state can be read at all, the exit is 2 "
+                         "(environment cannot answer), never 0.")
     ap.add_argument("--check-contradiction", action="store_true",
                     help="(A) ALSO fail when a closure claim's own scope of "
                          "text says the work is not done. The item 422 shape.")
@@ -1949,6 +2328,46 @@ def main(argv: list[str] | None = None) -> int:
                 f"GitHub issue or security advisory:\n"
                 + "\n".join("  " + e for e in extra)
             )
+    # The successor audit. `--issue-state` is the ONLY thing in this file that
+    # touches the network, and it is off by default: `make lint` and the CI
+    # lint job run the offline half, which needs no `gh`, no token and no
+    # network. Both flags share one report, printed below in every exit path.
+    successor_note = ""
+    issue_states: dict[int, str] | None = None
+    issue_unavailable: list[str] = []
+    looked_up = args.issue_state
+    if args.require_successor or args.audit_successors or args.issue_state:
+        records = inprogress_records(text)
+        cited = sorted({r["primary"] for r in records if r["primary"] is not None})
+        if args.issue_state:
+            if cited:
+                issue_states, issue_unavailable = gh_issue_states(
+                    cited, repo_slug(ROOT))
+                if not issue_states:
+                    # The question was asked and the environment could not
+                    # answer it. That is exit 2's documented meaning, and it is
+                    # deliberately NOT exit 0 (which would read as a pass) and
+                    # NOT a finding (which would read as a closed issue).
+                    print("error: --issue-state was given but no issue state "
+                          "could be read, so the live half cannot answer. "
+                          "Nothing below is a verdict on any row.",
+                          file=sys.stderr)
+                    for u in issue_unavailable:
+                        print(f"  {u}", file=sys.stderr)
+                    return 2
+            else:
+                issue_states = {}
+        successor_note = successor_report(text, issue_states,
+                                          issue_unavailable, looked_up)
+        if args.require_successor:
+            extra = successor_findings(text, issue_states)
+            if extra:
+                findings.append(
+                    f"--require-successor: {len(extra)} in-progress row(s) "
+                    f"cite a CLOSED issue and name no successor "
+                    f"(issue #2100):\n"
+                    + "\n".join("  " + e for e in extra)
+                )
     for flag, label, produce in (
         (args.check_contradiction, "--check-contradiction",
          lambda: contradiction_findings(text)),
@@ -1984,6 +2403,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"roadmap markers OK: {scanned} in-progress marker(s) with a named "
               f"branch, all consistent with {args.base}.")
         print(coverage)
+        if successor_note:
+            print(successor_note)
         print("This gate checked that the markers do not CONTRADICT git. It did "
               "not, and cannot, check that any landed branch actually closed the "
               "finding it is attached to.")
@@ -1994,6 +2415,8 @@ def main(argv: list[str] | None = None) -> int:
     for f in findings:
         print(f"  - {f}\n")
     print(coverage + "\n")
+    if successor_note:
+        print(successor_note + "\n")
     if audit["unexamined"]:
         print(
             f"NOTE: {len(audit['unexamined'])} of {audit['total']} commit "

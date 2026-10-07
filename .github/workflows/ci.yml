@@ -399,6 +399,21 @@ jobs:
       # first, and 421 F6(i) now names every tier's scope, so it is clean and
       # an off check would only be silence read as success.
       #
+      # --audit-successors (issue #2100) joins the line. It is REPORT ONLY and
+      # offline: it prints every top-level row carrying an in-progress glyph,
+      # the issue it cites and whether it names a successor, and it never
+      # changes the exit status, so it cannot redden this job. It is here so
+      # the population is visible on every run.
+      #
+      # --require-successor / --issue-state are deliberately NOT here. They
+      # read live issue state through `gh`, which would give this job a network
+      # and token dependency, and on main today they report real findings --
+      # rows whose cited issue closed with a residual still in the tree -- that
+      # issue #2100's list exists to adjudicate one at a time. Run them locally
+      # with `make roadmap-issue-state`, which is fail-closed: an issue whose
+      # state could not be read is UNKNOWN, never CLOSED, and if nothing at all
+      # could be read the tool exits 2 rather than reporting a clean pass.
+      #
       # Never add `|| true`, and never narrow a check to make this line pass.
       # `make roadmap-check-all` runs all five locally.
       #
@@ -423,6 +438,7 @@ jobs:
             --check-orphan \
             --require-issue \
             --check-tier-parity \
+            --audit-successors \
             --head-branch "$HEAD_BRANCH"
       # The citation half of the same question. check_roadmap_markers above
       # resolves the roadmap's MARKERS against git and says so itself: it
