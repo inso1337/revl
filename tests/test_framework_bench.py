@@ -215,9 +215,9 @@ class _Args:
 
     admits_from = None
     residue_from = "hand-corpus"
-    tokens_from = None
+    tokens_from = "pinned-three-host"
     injection_from = None
-    three_host_from = None
+    three_host_from = "pinned-three-host"
     attempt = 1
     compiler_root = None
     pin = None
@@ -1014,7 +1014,7 @@ def test_a_compiler_outside_the_checkout_is_named_without_its_directory():
     assert "/somewhere/else" not in reported
 
 
-def test_the_committed_report_is_what_the_documented_command_reproduces():
+def test_the_committed_report_is_what_the_documented_command_reproduces(report):
     """`bench/README.md` documents `python3 bench/framework_bench.py --write`
     with no flags. If a cell only appears when a flag names the corpus that is
     committed beside the report, the documented command silently drops it and
@@ -1024,10 +1024,20 @@ def test_the_committed_report_is_what_the_documented_command_reproduces():
     assert defaults.admits_from == "typed-deepseek-v4-pro"
     assert defaults.residue_from == "hand-corpus"
     assert defaults.injection_from == "injection-ornith"
+    # The three-host corpus and the tokens column read the same run, because
+    # both ask one model the same briefs. Two labels here would be two runs.
+    assert defaults.three_host_from == "pinned-three-host"
+    assert defaults.tokens_from == "pinned-three-host"
     for label in (defaults.admits_from, defaults.residue_from,
-                  defaults.injection_from):
+                  defaults.injection_from, defaults.tokens_from,
+                  defaults.three_host_from):
         assert (BENCH / "results" / label).is_dir(), (
             f"a default names {label}, which is not committed")
+    # `_Args` is this file's stand-in for the documented command, so a default
+    # that moved would move every test that reads `report` with it rather than
+    # leaving them green against a corpus nobody names.
+    assert (report["columns"]["three-host"]["status"] == "measured"
+            and report["columns"]["tokens-to-green"]["status"] == "measured")
 
 
 def test_the_built_report_headline_agrees_with_a_fresh_recompute(report):
@@ -1348,16 +1358,45 @@ def test_a_brief_answered_from_reasoning_leaves_every_host(synthetic_results):
     assert cell["dropped_no_answer_within_cap"] == ["02"]
 
 
-def test_without_a_run_the_row_says_exactly_what_it_needs(report):
-    cell = report["columns"]["three-host"]
+def test_without_a_run_the_row_says_exactly_what_it_needs():
+    """What a caller who passes `--three-host-from none` gets, and what the
+    report said before a pinned-model corpus existed. The row is not silently
+    empty: it carries the one command that would produce it."""
+    cell = framework_bench.column_three_host(None, {"present": False}, ROOT)
     assert cell["status"] == framework_bench.NOT_RUN
     needs = cell["blocked_on"]
     assert "--variants v2,raw-ts,mcp" in needs
     assert "--three-host-from" in needs
     assert "npm ci" in needs
-    gate = next(g for g in report["remaining_gates"]
+    gates = framework_bench.remaining_gates(
+        framework_bench.load_hosts(), {"three-host": cell}, {"present": False})
+    gate = next(g for g in gates
                 if g["gate"] == "a pinned-model run across all three hosts")
     assert gate["why"] == framework_bench.THREE_HOST_NEEDS
+
+
+def test_the_committed_three_host_row_names_its_n_and_its_refusals(report):
+    """The exit criterion of issue #1267, on the artifact rather than on a
+    synthetic corpus: one model, one task set, three hosts, the refusal column
+    leading, and n stated instead of implied."""
+    cell = report["columns"]["three-host"]
+    assert cell["status"] == "measured", cell
+    assert cell["is_pinned_model"] and cell["same_model_on_every_host"]
+    assert cell["n"] == len(cell["specs"]) == len(cell["revl"]["per_spec"])
+    assert cell["specs"], "a three-host row over no briefs is not a row"
+    for host in ("raw-ts", "framework"):
+        assert cell[host]["n"] == cell["n"], host
+    # The briefs the row does not cover are named, and so is the reason a
+    # covered brief left the set, rather than left to be read from a gap.
+    gate = next(g for g in report["remaining_gates"]
+                if g["gate"] == "a pinned-model run across all three hosts")
+    assert f"run over {cell['n']} of" in gate["what"], gate
+    assert f"n={cell['n']}" in gate["why"], gate
+    body = framework_bench.render(report)
+    section = body.index("## One model, three hosts, one run")
+    header = next(line for line in body[section:].splitlines()
+                  if line.startswith("| host |"))
+    assert header.index("refused") < header.index("admitted"), header
 
 
 # ---------------------------------------------------------------------------

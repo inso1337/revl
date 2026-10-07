@@ -249,8 +249,12 @@
         ]
       },
       "not_yet_run": [
-        "The harness runs and is tested; no pinned-model generation for this host is",
-        "committed. The report's three-host row says exactly what that run needs."
+        "Coverage, not the host. The harness runs and is tested, and a",
+        "pinned-model run for this host is committed under",
+        "bench/results/pinned-three-host; the three-host row states how many of",
+        "the briefs every host answered, and the run covers a fraction of the",
+        "thirty briefs. The row is still not a statement about the other",
+        "twenty-five."
       ],
       "prompt_authored_by": "this repository"
     },

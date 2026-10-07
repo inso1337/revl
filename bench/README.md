@@ -277,11 +277,31 @@ host loaded and ran.
 `python3 bench/run.py --runner mock --variants v2,raw-ts,mcp --specs 3` runs
 the whole pipeline with no model.
 
-No pinned-model run of this row is committed. It costs up to five generations
-per brief, at roughly nine minutes each for this model on a contended machine
-(see "What a live run costs"). It also needs room for the pinned weights,
-about 22 GB: on an endpoint already serving another model, loading the pin can
-evict that model from under whoever is using it.
+A pinned-model run of this row **is** committed: `bench/results/pinned-three-host/`
+holds the generations and `results.jsonl` the records, and
+`bench/results/framework-bench/report.md` carries the row they produce. It
+covers a fraction of the thirty briefs, so the row's `n` is small and every
+number in it is stated at that `n`; the row is not a statement about the
+briefs it does not cover. The rest of the task set costs up to five
+generations per brief, at roughly nine minutes each for this model on a
+contended machine (see "What a live run costs"), and it needs room for the
+pinned weights, about 22 GB: on an endpoint already serving another model,
+loading the pin can evict that model from under whoever is using it.
+
+Re-running the committed corpus, or extending it, is the same command plus
+`--resume`, which keeps the cells already in `results.jsonl` and starts a cell
+the previous process died inside from empty rather than appending to the
+attempts it left behind:
+
+```bash
+python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 \
+    --model hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M \
+    --variants v2,raw-ts,mcp --timeout 1800 \
+    --label pinned-three-host --resume --specs 06-audit-logger,07-session-store
+```
+
+Without `--resume`, naming an existing label starts it over: the run rewrites
+`results.jsonl` from the rows it generated itself.
 
 ### The injection-escape column
 
@@ -341,10 +361,10 @@ snapshot names the scoring compiler by a content digest of `src/revl`, not by a
 commit.
 
 `bench/results/framework-bench/report.md` lists its own remaining gates: the
-three-host row has not been generated with the pinned model (the report prints
-the command that would), every claim stands at the `measured` rung because
-nobody outside this repository has reproduced it, and nothing is published
-outside this repository.
+three-host row is measured over a fraction of the thirty briefs and carries
+that `n`, every claim stands at the `measured` rung because nobody outside
+this repository has reproduced it, and nothing is published outside this
+repository.
 
 ## The blast-radius benchmark (issue #1702)
 

@@ -472,6 +472,13 @@ def column_residue(run: str) -> dict:
 # The three hosts of one run, by the variant `bench/run.py` writes for each.
 THREE_HOST_VARIANTS = (("revl", "v2"), ("raw-ts", "raw-ts"), ("framework", "mcp"))
 
+# The committed corpus the three-host row and the tokens-to-green column are
+# both read from, and the default for both flags. It is one run because it has
+# to be: the two columns ask the same model the same briefs, and reading them
+# from different corpora would make the report's rows incomparable while
+# looking like one table.
+THREE_HOST_LABEL = "pinned-three-host"
+
 # What the committed report is missing when no three-host corpus is named.
 # Everything in it is a fact about this repository or about a measurement
 # already committed (the per-call time is design note 562's, section 6.4).
@@ -1283,7 +1290,8 @@ def _unload_section(cell: dict) -> list:
     return lines
 
 
-def _third_host_section(framework: dict | None, survey: dict) -> list:
+def _third_host_section(framework: dict | None, survey: dict,
+                        three_host: dict | None = None) -> list:
     """Which framework, why, what was rejected, and what is still not run."""
     if not framework or not framework.get("name"):
         return []
@@ -1306,6 +1314,13 @@ def _third_host_section(framework: dict | None, survey: dict) -> list:
     if survey.get("present"):
         rows = survey.get("frameworks") or []
         claims = sum(len(r.get("claims") or []) for r in rows)
+        measured = three_host.get("status") == "measured"
+        probe = (
+            "which is the residue probe's question; that cell is measured above, "
+            "from a probe run, and is still not filled in from the survey."
+            if measured else
+            "which is the residue probe's question and is why the framework "
+            "residue cell is not-run rather than filled from the survey.")
         lines += [
             f"Every claim in that table is checked against the published "
             f"artifact rather than asserted: `bench/framework_unload_survey.py` "
@@ -1314,9 +1329,7 @@ def _third_host_section(framework: dict | None, survey: dict) -> list:
             f"found at, is `{survey['path']}`.", "",
             "What that check says and does not say: a confirmed claim means the "
             "symbol is in the published file. It says nothing about what calling "
-            "it releases, which is the residue probe's question and is why the "
-            "framework residue cell is not-run rather than filled from the "
-            "survey.", "",
+            f"it releases, {probe}", "",
         ]
     else:
         lines += [f"No unload survey is committed: {survey.get('reason', '')}.", ""]
@@ -1327,8 +1340,28 @@ def _third_host_section(framework: dict | None, survey: dict) -> list:
         if convention:
             lines += ["**The unload convention is this benchmark's, not the "
                       "SDK's.**", ""] + list(convention) + [""]
+    # The registry's `not_yet_run` is a fact about the registry when it was
+    # written, so it is checked against the run the report actually carries
+    # instead of printed. A host that has now answered briefs would otherwise
+    # keep a paragraph saying it has not, and the report would contradict its
+    # own table one section further down.
     blocked = framework.get("blocked_on") or framework.get("not_yet_run")
-    if blocked:
+    if three_host.get("status") == "measured":
+        fw = three_host.get("framework") or {}
+        lines += [
+            "### What this host did in the pinned-model run", "",
+            f"It answered {fw.get('n', 0)} of the briefs every host answered: "
+            f"{len(fw.get('clean') or [])} clean after the load-unload cycles, "
+            f"{len(fw.get('leaked') or {})} carrying residue, and "
+            f"{len(fw.get('could_not_load') or [])} it could not load at all.",
+            "",
+        ]
+        if fw.get("could_not_load"):
+            lines += ["Could not load — the pack did not parse or mount, so the "
+                      "probe had nothing to cycle:", ""]
+            lines += [f"- `{s}`" for s in fw["could_not_load"]]
+            lines += [""]
+    elif blocked:
         lines += ["### Why its cells are still empty", ""] + list(blocked) + [""]
     return lines
 
@@ -1667,7 +1700,8 @@ def render(report: dict) -> str:
                   "cell. " + inj["note"] + ".", ""]
 
     lines += _three_host_section(cols.get("three-host") or {})
-    lines += _third_host_section(framework, report.get("unload_survey") or {})
+    lines += _third_host_section(framework, report.get("unload_survey") or {},
+                                 cols.get("three-host") or {})
 
     lines += ["## Claims and their rung", "",
               "| claim | rung |", "|---|---|"]
@@ -1699,15 +1733,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "('none' to skip)")
     ap.add_argument("--residue-from", default="hand-corpus",
                     help="committed raw-ts corpus for the residue column")
-    ap.add_argument("--tokens-from", default=None,
-                    help="committed corpus for the tokens-to-green column")
+    ap.add_argument("--tokens-from", default=THREE_HOST_LABEL,
+                    help="committed corpus for the tokens-to-green column "
+                         "('none' to skip)")
     ap.add_argument("--injection-from", default="injection-ornith",
                     help="committed bench/injection_escape.py run label "
                          "for the injection-escape column ('none' to skip)")
-    ap.add_argument("--three-host-from", default=None,
+    ap.add_argument("--three-host-from", default=THREE_HOST_LABEL,
                     help="a bench/run.py run label holding v2, raw-ts and mcp "
                          "cells from one model: the three-host row "
-                         "('none' or omitted to leave it not-run)")
+                         "('none' to leave it not-run)")
     ap.add_argument("--attempt", type=int, default=1)
     ap.add_argument("--compiler-root", default=None,
                     help="score against a different checkout's compiler")
@@ -1733,6 +1768,8 @@ def main(argv: list[str] | None = None) -> int:
         args.injection_from = None
     if args.three_host_from == "none":
         args.three_host_from = None
+    if args.tokens_from == "none":
+        args.tokens_from = None
 
     report = build_report(args)
 
