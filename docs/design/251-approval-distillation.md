@@ -84,6 +84,18 @@ the distiller REFUSES with a typed reason rather than emit the wider host-free
 rule no operator narrowing produced. Distillation can still only select text an
 operator could have written, never widen past it.
 
+Issue #1938 widens "exposes a resource param" from `_REGISTRY` alone to
+`_REGISTRY` PLUS a capability's own DECLARED dimensions
+(`capability mail.send(account: discrete)`, design 294). Everywhere below that
+says "`_REGISTRY` resource param", read "a resource-kind parameter, core or
+declared": a declared dimension keys and distills by exactly the same rule, and
+the projection is read off the already-canonical value's own TYPE rather than
+off the registry, so the fold needs no declaration in scope. The one order a
+type cannot recover is a declared `path`, whose component tuple renders to the
+same bytes as the `discrete` string of the same characters; a comparison there
+degrades to equality instead of containment, which is strictly narrower and so
+fail-closed (it can refuse to distill, never widen a rule).
+
 ## The one thing to get right
 
 **A distilled rule is a rule an operator could have typed, and nothing more.**
@@ -385,6 +397,12 @@ resource valuation** (§2.1), not `argsDigest`, so a crossing that carries a
 `_REGISTRY` resource param but reaches the fold without its resource scope
 projected is a visible red, not a silent bare-token match; this is the surface
 the N1 CRITICAL slipped through when the destination lived only in the hash.
+Issue #1938 makes that surface cover a DECLARED dimension too: the withheld
+redaction in `_distillation_ledger_fields` recovers the bare token through
+`cap_order.parse_stored_cap`, so a declared spelling is redacted exactly like a
+core one. Read with `parse_cap` it would have failed to parse, the redaction
+would have been silently skipped, and the caller's value would have been written
+to the cross-session WAL forever - the same N1 leak, one dimension over.
 
 ## 4. Review, apply, revoke, attribute (item 55)
 
@@ -681,6 +699,11 @@ Ordered, first slice landable alone.
   because the bound resource valuation is not recorded until Slice 2, a capability
   with a `_REGISTRY` resource order returns "cannot distill (resource scope
   unrecorded)" until then, fail-closed, exactly parallel to the taint dimension.
+  A DECLARED resource dimension (issue #1938) is read through
+  `cap_order.parse_stored_cap` here, so it behaves identically to a core one; the
+  only degradation is a declared `path`, whose containment comparison falls back
+  to equality where no declaration is in scope - strictly narrower, so it can
+  refuse to distill but never widen a rule.
   Bare-token capabilities (no resource order) distill fully here. The slice
   produces offers as pure data, applies no policy, and so cannot widen authority.
   It ships detection on the corrected resource-scoped key, the typed diff, the

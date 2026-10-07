@@ -95,7 +95,7 @@ def _parse_caps(cap_strs) -> tuple[Cap, ...]:
     out: list[Cap] = []
     for s in cap_strs:
         try:
-            out.append(cap_order.parse_cap(s))
+            out.append(cap_order.parse_stored_cap(s))
         except cap_order.CapError:
             out.append(Cap(_STAR, ()))
     return tuple(out)

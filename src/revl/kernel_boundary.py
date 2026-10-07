@@ -340,7 +340,7 @@ def effective_from_model_reach(component: str, manifest: dict | None) -> list:
             continue
         for text in row.get("effective") or []:
             try:
-                extra.append(cap_order.parse_cap(text))
+                extra.append(cap_order.parse_stored_cap(text))
             except cap_order.CapError:
                 extra.append(cap_order.Cap("*", ()))
     return extra

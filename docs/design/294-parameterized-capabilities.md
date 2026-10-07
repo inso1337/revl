@@ -314,6 +314,12 @@ Each parameter name carries ONE value order, fixed by a small registry
 (a pure table in the checker; adding a parameter kind is adding a row,
 with its order and its canonicalization):
 
+The **kind** vocabulary is closed to the three orders below, and the
+registry is closed against names a capability has not DECLARED (see
+"Declared resource dimensions"). Adding a kind is a core registry row;
+adding a DIMENSION is a `capability <token>(...)` declaration, which
+chooses from these kinds and cannot mint a new one.
+
 - **`path` (containment).** `a <=_path b` iff the canonicalized COMPONENT
   list of `b` is a prefix of `a`'s. Canonicalization is lexical only and
   fully specified: split on `/`, drop a single trailing slash (`/tmp/`
@@ -333,13 +339,16 @@ with its order and its canonicalization):
   parameters), `table="orders" <= table="users"` does not. A richer host
   order (subdomain containment) is a registry row for later, not designed
   here.
-- **The registry is CLOSED.** A parameter name not in the registry is
-  refused at parse, never defaulted to the discrete order. A discrete
-  default would make security invariant 4 false as written, and it
-  opens a typo hazard: `pth="/data"` would parse, narrow nothing, and
-  partition the token's cone so that revoke-by-cone misses grants
-  spelled with the typo. Adding a parameter kind is adding a registry
-  row, and the parse refusal names the registered names.
+- **The registry is CLOSED — against UNDECLARED names.** A parameter
+  name is legal only if it is a core registry name (the table above) or
+  a name the capability itself DECLARES (the next subsection). Every
+  other name is refused, never defaulted to the discrete order. A
+  discrete default would make security invariant 4 false as written,
+  and it opens a typo hazard: `pth="/data"` would parse, narrow
+  nothing, and partition the token's cone so that revoke-by-cone misses
+  grants spelled with the typo. The refusal names the legal names at
+  the point of refusal: the core names always, plus the declaring
+  capability's own declared names when a declaration is in scope.
 - **numeric ceilings (`calls`, `bytes`, and friends spelled `k<=N` or
   `k=N` meaning "at most N").** `N <=_k M` iff `N <= M` as integers: a
   smaller ceiling is narrower. `calls=10 <= calls=100`. Ceiling-kind
@@ -374,6 +383,97 @@ is spelled by dropping the modifier, and 294 keeps that rule; no
 per-token unsatisfiable valuation is representable, deny is non-mention).
 Reflexivity, antisymmetry, and transitivity hold per parameter order and
 lift through the product; the set-level check below preserves them.
+
+### Declared resource dimensions (the registry is closed against undeclared names)
+
+The core registry above is a closed table of *kinds*. It is not a closed
+table of *names*: a product capability that has a resource dimension the
+core vocabulary does not name — the sending mailbox of `emission[mail.send]`
+is the reported case (issue #1938) — DECLARES it, and the declared name
+becomes legal for that capability alone.
+
+```
+capability <token>(<name>: <kind>, ...)          # a top-level declaration
+```
+
+- **The kind vocabulary stays closed.** `<kind>` is one of the existing
+  three orders, spelled exactly as the registry rows spell them:
+  `path` (component-prefix containment), `discrete` (exact match), and
+  `ceiling` (numeric, erased at mint). A declaration chooses a kind; it
+  cannot introduce a new order, a new comparison, or a new soundness
+  argument. The security argument in "the no-widening argument" is
+  therefore unchanged: the number of orders is still three.
+- **The declaration is per capability and per name.** `account` declared
+  on `mail.send` is legal on `mail.send` and nowhere else. It does not
+  become a global name, so two capabilities may declare the same name
+  with different kinds without interfering.
+- **Declaring is not enough; the declaration must agree with the
+  extern's own signature.** A declared name is only *spellable*; it is
+  still resolved against the parameter list of the extern that declares
+  the capability. A declaration naming a parameter the extern does not
+  have is refused. This relocates the typo hazard from one global list
+  to each declaration site, which is a strictly smaller surface — it is
+  not a removal of it.
+- **The kind is NOT part of the token's bytes.** A declared name's
+  canonical spelling is shape-identical to a core name's
+  (`account=account`, `account="ops"`), and the canonical VALUE's Python
+  type already encodes its order (`path` → component tuple, `discrete`
+  → `str`, `ceiling` → `int`), exactly as for a core row. Nothing in
+  `Cap`, `to_str`, `covers`, `covers_set` or `split_ceilings` needs the
+  declaration, so a declared spelling round-trips byte-identically.
+- **Two reads, and only two.** A capability spelling is read in exactly
+  two ways, and conflating them is the one real hazard here:
+  - `cap_order.parse_cap(text, declared=None)` — the **input-validation**
+    read, for a spelling a HUMAN wrote: a policy document, an operator
+    profile, a peer charter or advertisement, a parser-internal raw
+    declaration. A policy file is loaded on its own with no
+    composition's declarations in scope, so it **cannot name a declared
+    dimension at all**: the name is refused at parse. That is deliberate
+    and fail-closed — refusing a malformed spelling is the load-bearing
+    property (`_canon_cap_spelling`, and the four peer/policy pins).
+  - `cap_order.parse_stored_cap(text)` — the **stored/artifact** read,
+    for a spelling the COMPILER canonicalized: an IR `capabilities`
+    entry, a WAL record, a ticket `classCCapabilities`/`resourceScopes`
+    value, a grant spelling, a recorded-history entry. It passes the
+    `_ADMIT_UNKNOWN` sentinel, so `_make_cap` admits an unclassifiable
+    name and passes the already-canonical value through unchanged.
+- **Why the stored read is sound (the no-widening argument, one
+  dimension over).** A declared `path` canonicalizes to a component
+  tuple; re-read with no declaration in scope it falls to the
+  type-based order and becomes a `discrete` string of the same
+  characters, rendering to the **same bytes**. So `path` containment
+  degrades to **equality**. Equality is strictly narrower than
+  containment, so a stored read can never widen a cone — it can only
+  fail to find one, which fails closed.
+- **Why the stored read has to exist.** It is not a convenience. The
+  withheld-value redaction recovers a token from a spelling
+  (`session._distillation_ledger_fields`); with the input-validation
+  read a declared spelling raises, and because the recovery sits in a
+  generator inside a `sorted(...)` with no handler, the redaction is
+  **silently skipped** and the caller's resource value is written to
+  the cross-session WAL. That is the item-251 N1 leak one dimension
+  over. See design 251, "the withheld redaction".
+- **An undeclared name is still refused.** `fs.write(pth="/x")` is a
+  typo on a capability that declares nothing, and is refused exactly as
+  before, with the same message prefix. All three existing refusal pins
+  (`tests/test_cap_order.py`, `tests/test_parameterized_capabilities.py`,
+  `tests/test_capability_leases.py`) probe `pth` and keep passing
+  verbatim.
+- **Compatibility.** A composition that declares no new dimension is
+  byte-identical everywhere, as the Compatibility section already
+  promises. A composition that ADOPTS a declared dimension changes that
+  token's bytes on every surface where a parameterised spelling is
+  recorded (audit line, boundary JSON, ticket resource fields, WAL,
+  distilled rule spellings) — additive to the interchange SCHEMA,
+  non-additive to spellings. The ticket `hash` is unaffected: bound
+  spellings are composed strictly after the hash body. Adoption is
+  opt-in per capability, so no existing spelling moves on its own.
+
+`domain` is deliberately NOT part of this. A mail domain reads like a
+set, and `Cap` valuations are single-valued by construction — a
+set-valued parameter is not expressible as a `Cap` parameter and would
+need a different algebra, not a new row. Its home is the declared-scope
+surface (item 470, `intent._canonical_scopes`).
 
 ### The set-level check (what item 66's code actually computes)
 
@@ -633,6 +733,34 @@ exactly this reason.
   (`manifest.instances`) gains parameter detail on edges that have it;
   spawn-free or parameter-free compositions keep byte-identical
   manifests (the item-66 discipline, `docs/capability-attenuation.md`).
+- **A declared dimension is additive to the schema, not to spellings
+  (issue #1938).** The declaration itself is an IR member
+  (`capability_declarations`), not an interchange member: `audit_report`
+  re-projects only `manifest`/`boundary`/`externs`/`distributability`,
+  so `docs/interchange-format.md` is untouched and
+  `INTERCHANGE_VERSION` stays `1.0`. The member is stamped only when a
+  declaration exists, so an existing IR is byte-identical. What DOES
+  change for a composition that adopts a dimension is that token's
+  spelling on every surface that records one - the `revl audit` line,
+  the boundary `capabilities` map, the ticket's
+  `classCCapabilities`/`resourceScopes`, the cross-session WAL record,
+  a distilled `AutoApproveRule`, and a standing grant's cone. That is
+  the point of the change: the audited artifact now records the fact the
+  audit is about. An added parameter never changes an EXISTING token's
+  bytes, and the ticket `hash` is unaffected (bound spellings are
+  composed strictly after `hash` is taken, over the bare worst-class
+  fold).
+- **A spelling a human wrote is still validated against the closed
+  registry.** The stored read (`cap_order.parse_stored_cap`) is for a
+  spelling the COMPILER canonicalized - an IR `capabilities` entry, a
+  WAL record, a ticket field, a grant. A spelling a human writes by hand
+  (a policy document, an operator profile, a peer's advertised reach, an
+  `auto-approve` rule, a charter) is read with `cap_order.parse_cap` and
+  refused when it names a parameter no declaration in scope can explain:
+  a policy document is loaded on its own, so it has no declaration
+  available and cannot name a declared dimension at all. That asymmetry
+  is deliberate and fail-closed - it is what keeps a typo in a policy
+  file from silently matching nothing.
 
 ## Security: the no-widening argument (question 6)
 
@@ -658,11 +786,14 @@ argument is short enough to state completely:
    today). Mint is bounded by the ticket/class-map declaration through
    the same relation, so an operator cannot mint above the program's
    own declaration.
-4. **Incomparable means refused.** Unregistered parameter names never
-   reach a comparison at all (the registry is closed; refusal at
-   parse). Symbolic values against literals and malformed paths refuse
-   at the comparison with the pair named, never an admit. No default-
-   allow row exists anywhere in the design.
+4. **Incomparable means refused.** An undeclared parameter name never
+   reaches a comparison at all (the registry is closed against
+   undeclared names; refusal before the comparison). A declared name
+   reaches a comparison only under the kind its declaration chose, one
+   of the same three orders, so the count of orders — the attack
+   surface — does not grow. Symbolic values against literals and
+   malformed paths refuse at the comparison with the pair named, never
+   an admit. No default-allow row exists anywhere in the design.
 5. **The order itself is the attack surface, so it stays tiny.** The
    registry has three orders (component-prefix, discrete, integer) plus
    symbol identity; the component-prefix canonicalizer is the one
@@ -742,7 +873,9 @@ policy check reuses `cap_order`. Out of 294's critical path.
 Grammar and order:
 - `emission[fs.write(path="/data/incoming")]` parses; `*`-with-params,
   duplicate keys, relative path, `..` and `.` components, `path="/"`,
-  and an unregistered parameter name (`pth="/data"`) all refuse with
+  an unregistered parameter name (`pth="/data"`), and a name that is not
+  a parameter of THAT capability's declaration (`emission[fs.write(
+  host="x")]` where `fs.write` declares only `path`) all refuse with
   the documented messages.
 - `path="/tmp/"` canonicalizes to `/tmp`: the two spellings are
   cone-equal (one grant covers crossings spelled either way).
@@ -829,7 +962,12 @@ Honesty surface:
   runtime revl does not have and is not claimed; that fold stays with
   the cost-ceilings item.
 - **Richer host orders** (subdomain containment, table wildcard): a
-  registry row each, added when a consumer exists.
+  core registry row each, added when a consumer exists. Note this is
+  *adding an order*, which a capability declaration cannot do — a
+  declaration picks one of the three orders that exist. The extension
+  point for a product's own DIMENSION is the `capability` declaration
+  (issue #1938); the extension point for a new ORDER remains a core
+  registry row plus a soundness argument.
 - **Cross-realm prefix revocation**: refused above to keep the revoke
   predicate identical to the coverage predicate.
 

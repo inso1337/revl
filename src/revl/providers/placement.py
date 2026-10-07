@@ -186,8 +186,8 @@ def model_operations(ir, roles) -> tuple:
 
 def _reach_refusal(role, binding) -> Refusal | None:
     try:
-        held = [cap_order.parse_cap(t) for t in role.reach_tokens]
-        reach = [cap_order.parse_cap(t) for t in binding.reaches]
+        held = [cap_order.parse_stored_cap(t) for t in role.reach_tokens]
+        reach = [cap_order.parse_stored_cap(t) for t in binding.reaches]
     except cap_order.CapError as exc:
         return Refusal(
             f"the binding for model role `{role.name}` names a reach that is "
