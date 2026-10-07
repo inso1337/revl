@@ -178,6 +178,22 @@ function bigintToWire(v: bigint): unknown {
   return Number(v)
 }
 
+/** Set an OWN data property, never the inherited `__proto__` accessor.
+ *
+ *  `rec[k] = v` is not a plain write. For `k === "__proto__"` it invokes the
+ *  inherited accessor, which REPLACES `rec`'s prototype with `v` and defines no
+ *  own property at all — so a peer that sends `{"__proto__": {...}}` hands the
+ *  decoded record attacker-chosen INHERITED properties while `Object.keys(rec)`
+ *  stays empty, and the forgery is invisible to every structural check the
+ *  value later passes (CodeQL `js/remote-property-injection`, alerts 94 and 95).
+ *  `defineProperty` writes the own property the key names, which is what every
+ *  caller here means; for any other key it is the assignment it replaces. */
+function ownSet(rec: Record<string, unknown>, k: string, v: unknown): void {
+  Object.defineProperty(rec, k, {
+    value: v, enumerable: true, writable: true, configurable: true,
+  })
+}
+
 /** Bigints in an outbound argument, and nothing else. The request path does
  *  not run the ADT codec below — changing that is a cross-language decision,
  *  not this tier's — so this only replaces a guaranteed throw. */
@@ -187,7 +203,7 @@ function encodeBigInts(v: unknown): unknown {
   if (v && typeof v === 'object' && !(v instanceof Map)) {
     const o = v as Record<string, unknown>
     const rec: Record<string, unknown> = {}
-    for (const k of Object.keys(o)) rec[k] = encodeBigInts(o[k])
+    for (const k of Object.keys(o)) ownSet(rec, k, encodeBigInts(o[k]))
     return rec
   }
   return v
@@ -204,7 +220,7 @@ export function encodeValue(v: unknown): unknown {
       return out
     }
     const rec: Record<string, unknown> = {}
-    for (const k of Object.keys(o)) rec[k] = encodeValue(o[k])
+    for (const k of Object.keys(o)) ownSet(rec, k, encodeValue(o[k]))
     return rec
   }
   return v
@@ -220,7 +236,7 @@ export function decodeValue(v: unknown): unknown {
       return out
     }
     const rec: Record<string, unknown> = {}
-    for (const k of Object.keys(o)) rec[k] = decodeValue(o[k])
+    for (const k of Object.keys(o)) ownSet(rec, k, decodeValue(o[k]))
     return rec
   }
   return v
@@ -291,7 +307,7 @@ function typeHead(type: string): { head: string; args: string[] } {
 /** A generic type's parameters replaced by the arguments it was used with. */
 function substitute(type: string, env: Record<string, string>): string {
   const { head, args } = typeHead(type)
-  if (args.length === 0) return env[head] ?? head
+  if (args.length === 0) return Object.hasOwn(env, head) ? env[head] : head
   return `${head}[${args.map((a) => substitute(a, env)).join(', ')}]`
 }
 
@@ -329,13 +345,18 @@ export function decodeAs(v: unknown, type: string | null | undefined,
   const decl = types[head]
   if (decl && typeof decl === 'object') {
     const env: Record<string, string> = {}
-    ;(decl.params ?? []).forEach((p: string, i: number) => { if (args[i]) env[p] = args[i] })
+    ;(decl.params ?? []).forEach((p: string, i: number) => { if (args[i]) ownSet(env, p, args[i]) })
     if (decl.kind === 'record' && typeof v === 'object' && !Array.isArray(v) && !tagged) {
       const fields = (decl.fields ?? {}) as Record<string, string>
       const o = v as Record<string, unknown>
       const rec: Record<string, unknown> = {}
       for (const k of Object.keys(o)) {
-        rec[k] = k in fields ? decodeAs(o[k], substitute(fields[k], env), types) : decodeValue(o[k])
+        // `k in fields` is true for `k === "__proto__"` through
+        // `Object.prototype`, and `fields["__proto__"]` then reads the
+        // prototype OBJECT where a type name belongs. Only an OWN field name
+        // declares a type.
+        ownSet(rec, k, Object.hasOwn(fields, k)
+          ? decodeAs(o[k], substitute(fields[k], env), types) : decodeValue(o[k]))
       }
       return rec
     }
