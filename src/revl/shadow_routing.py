@@ -299,21 +299,29 @@ class Answered:
     `revl.mcp.canary`'s own format, or ``None`` when the recorder did not
     supply one. A pair with two worlds is compared on both; a pair with fewer
     than two is compared on its records alone, and the ledger reports how many
-    of each it holds so a reader is never guessing which comparison ran."""
+    of each it holds so a reader is never guessing which comparison ran.
+
+    ``value`` is the answer a CALLER receives when this side serves the
+    crossing, and it is ``None`` for a side that cannot hand one over. The
+    incumbent's is ``None`` because a running seam already holds the
+    incumbent's validated answer and hands this object the raw host return
+    instead; a candidate's is the answer its own completion produced, which is
+    what a live route serves."""
 
     record: Mapping[str, Any]
     world: Any = None
+    value: Any = None
 
 
 @dataclass(frozen=True)
 class Served:
     """What one crossing did.
 
-    ``side`` is which answer was handed back to the caller, and it is
-    :data:`INCUMBENT` on every crossing of a route that is not live.
-    ``shadowed`` says whether the candidate was consulted at all: on a
-    crossing the share did not select, it was not called, and the ledger
-    counts that rather than asserting it."""
+    ``side`` is which answer was handed back to the caller: :data:`INCUMBENT`
+    on every crossing of a route that is not live, and on every crossing of a
+    live route the share did not select. ``shadowed`` says whether the
+    candidate was consulted at all: on a crossing the share did not select, it
+    was not called, and the ledger counts that rather than asserting it."""
 
     crossing: tuple
     shadowed: bool
@@ -470,20 +478,25 @@ class Scheduler:
     def offer(self, crossing: tuple,
               answered: Optional[Answered] = None,
               served: Optional[str] = None) -> Optional[Answered]:
-        """Offer one crossing to the schedule. Returns the INCUMBENT's answer.
+        """Offer one crossing to the schedule. Returns the answer SERVED.
 
-        ``answered`` is that answer when the caller already holds it, which is
-        what a running seam holds: the incumbent has answered and asking it
-        again would issue and pay for a second completion. Absent, the
-        ``incumbent`` producer is called for it.
+        ``answered`` is the incumbent's answer when the caller already holds
+        it, which is what a running seam holds: the incumbent has answered and
+        asking it again would issue and pay for a second completion. Absent,
+        the ``incumbent`` producer is called for it.
 
         ``served`` is which side's answer actually reached the caller, for a
         caller that KNOWS rather than infers. Absent, it is derived from the
         route the way :func:`serve` derives it, which is the route's claim
-        about who is answering. `revl.shadow_runtime` passes it explicitly and
-        always passes `INCUMBENT`, because its seam discards the observer's
-        return and therefore cannot serve a candidate's answer whatever the
-        route says."""
+        about who is answering. `revl.shadow_runtime` passes it explicitly:
+        the incumbent answers a crossing of a route that is not live, and the
+        candidate answers one the share selected on a route that is.
+
+        The return is the answer matching the :class:`Served` this call
+        records, so a caller that hands it back serves what the ledger says it
+        served. On a route that is not live that is the incumbent's, which is
+        what every offline caller already got; :func:`serve` ignores the
+        return and keeps its batch shape."""
         if self._refusal is not None:
             return answered
         if not isinstance(crossing, tuple) or len(crossing) != 2:
@@ -494,8 +507,6 @@ class Scheduler:
                 f"no second correlation")
             return answered
         shadowed = selects(self.route, crossing)
-        side = served if served is not None else (
-            CANDIDATE if self.route.live else INCUMBENT)
         left = answered
         if left is None:
             if self._incumbent is None:
@@ -510,9 +521,15 @@ class Scheduler:
         if not shadowed:
             # The candidate is not consulted at all. This is the branch the
             # share exists to take, and `candidate_calls` counts the other one.
-            self._served.append(Served(crossing, False, side))
+            # The incumbent's answer is then the only one there is to hand
+            # back, whatever the route's `live` says: a crossing the share did
+            # not select is a crossing the candidate did not answer, and a
+            # ledger that said otherwise would name an answer nobody made.
+            self._served.append(Served(crossing, False, INCUMBENT))
             return left
         self._calls += 1
+        side = served if served is not None else (
+            CANDIDATE if self.route.live else INCUMBENT)
         right = self._candidate(crossing)
         observation = promotion.Observation(
             left.record, right.record,
@@ -526,7 +543,7 @@ class Scheduler:
             action=self.route.action, realm=self.route.realm,
             side=side, observation=observation))
         self._served.append(Served(crossing, True, side))
-        return left
+        return right if side == CANDIDATE else left
 
     def ledger(self) -> ShadowLedger:
         """The accumulated window. A refused schedule yields an EMPTY ledger
@@ -559,7 +576,10 @@ def serve(route: ShadowRoute, crossings: Sequence[tuple], *,
        counted at the call rather than derived from the share.
     2. The answer SERVED is the incumbent's on every crossing while the route
        is not live, shadowed or not. A shadow whose candidate answers is not a
-       shadow.
+       shadow. On a LIVE route the candidate's answer is the one served on the
+       crossings the share selected, and the incumbent's on the rest: a live
+       route is the cutover, and it is what makes a landed promotion change
+       which model answers.
     3. Every entry carries this route's action and realm, so the window is
        this action class's evidence and `decide` can refuse one that is not.
 

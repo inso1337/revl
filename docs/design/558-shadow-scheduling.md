@@ -356,17 +356,26 @@ after the response has validated:
 ```python
 _revl_record_model_call(started, attempt + 1, budget + 1, value)
 revl_note_validated_completion(site)
-_revl_serve_shadow(_revl_recorded_crossing.get(), value)
-return validated
+served = _revl_serve_shadow(_revl_recorded_crossing.get(), value)
+return validated if served is None else served
 ```
+
+`served` is `None` on every crossing of a route that is not live, so this is
+the slice-3 behaviour above for every composition that never promotes; it is
+the successor's answer only on a route the register holds as promoted, which is
+the cutover section 17.6 item 1 used to leave open and
+`tests/test_shadow_cutover_1192.py` now measures.
 
 `revl.shadow_runtime.TierShadow` wires that hook to a
 `revl.shadow_routing.Scheduler`. Three properties of the placement, each a run
 rather than an assertion:
 
-* **The hook cannot change the answer.** Its return is discarded and
-  `validate_retry` returns the object `validate_response` produced. Measured
-  with a successor answering a different model name on every crossing.
+* **The hook cannot change the answer while the route is a shadow.** On a
+  route the register does not hold as promoted the hook returns `None` for
+  every crossing and `validate_retry` returns the object `validate_response`
+  produced. Measured with a successor answering a different model name on
+  every crossing. A route that IS promoted is not a shadow — it is the
+  cutover, and section 17.6 item 1 records what that leaves open.
 * **The successor's own completion does not re-enter the seam.** It crosses
   the same `validate_retry`, so the tier holds a re-entrancy register for the
   duration of the hook. Measured as a count: 21 crossings observed, not 42.
@@ -509,15 +518,18 @@ completion.
 
 Slice 2 derives the SERVED SIDE from the route: `live` means the candidate is
 answering, so an entry on a live route records `candidate`. An offline caller
-has nothing better. A seam does: this hook's return is discarded, so the
-incumbent answered, and `TierShadow` passes `INCUMBENT` to `Scheduler.offer`
-as a fact. `Scheduler.offer` grew a `served=` parameter for it and keeps slice
-2's derivation as the default, so `serve` is unchanged.
+has nothing better. A seam does: this hook KNOWS who answered — it returns the
+candidate's answer exactly when the schedule served the candidate and `None`
+when it served the incumbent — so `TierShadow` passes that to
+`Scheduler.offer` as a fact. `Scheduler.offer` grew a `served=` parameter for
+it and keeps slice 2's derivation as the default, so `serve` is unchanged.
 
-A route served through this seam is a shadow whatever its `live` flag says.
-`live` selects the gate's rule, which is that the first attributed divergence
-reverts, and not who answered. A route whose successor really answers is a cutover, and
-this seam does not perform one.
+So the side the ledger records and the answer the body received are one
+statement at this seam, and `tests/test_shadow_cutover_1192.py` reads both off
+one run. A route served through this seam is a shadow while the register holds
+the class on its base arm, whatever its `live` flag says; once a promotion
+lands the register derives `live` itself, and then the route is a cutover this
+seam performs. `live` is not a caller's flag in either case.
 
 ## 16. Still not verified, after slice 3
 
@@ -651,16 +663,17 @@ refused at share `0/1` (`evidence-missing`) and at full share
 
 ### 17.6. What this does not do
 
-1. **No tier consults the register to pick the role that answers.** Section
-   15's seam discards the observer's return, so a promotion does not change
-   which model answers a call. The register is the declared arm and the rule
-   the gate applies, and it is not a cutover. That is why item 518 stays
-   open after this section. What is left for 518: a tier reads the register
-   and answers a promoted class with the promoted role, the python seam
-   serves the observer's answer for a class the register holds as promoted
-   instead of discarding it, and the other five tiers get the same seam.
-   Provisioning the model behind a role (device profile, load and unload,
-   one shared provision) is item 515's, not 518's.
+1. **Five tiers still do not consult the register to pick the role that
+   answers.** The python tier now does: section 15's seam returns the
+   observer's answer, so on a class the register holds as promoted the body
+   receives the successor's model, and a revert puts the incumbent's back
+   (`tests/test_shadow_cutover_1192.py` measures both directions and the
+   action-class scoping). The other five tiers still discard the observer's
+   return, so for them a promotion does not change which model answers a call.
+   That is why item 518 stays open after this section. What is left for 518:
+   the other five tiers get the same seam. Provisioning the model behind a
+   role (device profile, load and unload, one shared provision) is item 515's,
+   not 518's.
 2. **No CLI and no item 520 adapter.** `revl promote` and the `shadow` stage
    record for the evolution controller are still unbuilt.
 3. **Section 16 items 1, 2, 4 and 5 are unchanged.** Five tiers are unwired,

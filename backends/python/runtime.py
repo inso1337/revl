@@ -689,9 +689,11 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
         # naming the crossing the recorder just made for the winning attempt.
         revl_note_validated_completion(site)
         # item 518: consult the shadow observer for THIS crossing, after the
-        # answer has validated and with no path from it to the return below.
-        _revl_serve_shadow(_revl_recorded_crossing.get(), value)
-        return validated
+        # answer has validated. `served` is `None` while the route is a shadow —
+        # the observer cannot change the answer — and is the candidate's answer
+        # on a route the register holds as promoted, which is the cutover.
+        served = _revl_serve_shadow(_revl_recorded_crossing.get(), value)
+        return validated if served is None else served
 
 
 async def validate_retry_async(make_call, budget: int, schema, where: str = "",
@@ -729,9 +731,11 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
         _revl_record_model_call(started, attempt + 1, budget + 1, result)
         revl_note_validated_completion(site)
         # item 518: the async colour crosses the same seam. The observer is
-        # synchronous on both, so one implementation serves both colours.
-        _revl_serve_shadow(_revl_recorded_crossing.get(), result)
-        return validated
+        # synchronous on both, so one implementation serves both colours, and
+        # the served answer — the candidate's on a promoted route, `None` on a
+        # shadow — returns from both.
+        served = _revl_serve_shadow(_revl_recorded_crossing.get(), result)
+        return validated if served is None else served
 
 
 # ---------------------------------------------------------------------------
@@ -1035,15 +1039,22 @@ def revl_recorded_crossing() -> "Optional[tuple]":
 # `revl.shadow_routing`'s and none of them are here: this module is everything
 # an emitted component imports and it may not grow a dependency on the
 # compiler package. What is here is the seam itself, one hook consulted at the
-# completion crossing, whose return value is discarded.
+# completion crossing, whose return value IS the answer the body receives.
 #
 # Three properties the placement below is chosen for, each measured in
-# `tests/test_shadow_runtime_518.py` rather than asserted here:
+# `tests/test_shadow_runtime_518.py` and `tests/test_shadow_cutover_1192.py`
+# rather than asserted here:
 #
-#   * The hook cannot change the answer. It is called after the response has
-#     validated and its result is ignored, so `validate_retry` returns the
-#     object `validate_response` produced whatever the observer does. A seam
-#     that could substitute an answer would be a cutover, not a shadow.
+#   * The hook cannot change the answer while the route is a shadow. It is
+#     called after the response has validated, and on a route the register does
+#     not hold as promoted it returns `None` for every crossing, so
+#     `validate_retry` returns the object `validate_response` produced whatever
+#     the observer does. A route the register DOES hold as promoted is not a
+#     shadow: it is the cutover a landed promotion bought, the hook returns the
+#     successor's validated answer for it, and `validate_retry` serves that
+#     instead. The distinction is the register's `live` flag and not this
+#     seam's: the seam obeys, which is what makes the promotion revertible
+#     (revert clears `live` and the next crossing is the incumbent's again).
 #   * It fires once per crossing, on the attempt that validated, and it is
 #     handed the crossing the recorder minted for that attempt. An exhausted
 #     budget raises before it and is NOT shadowed: with no incumbent answer
@@ -1051,7 +1062,9 @@ def revl_recorded_crossing() -> "Optional[tuple]":
 #   * A fault in the observer stops the SHADOW and never the incumbent. The
 #     exception is caught, the hook is detached, and the fault is kept for the
 #     operator to read (`revl_shadow_faults`), because a shadow that failed
-#     silently would leave a window that looks short rather than broken.
+#     silently would leave a window that looks short rather than broken. A
+#     faulted hook returns `None`, so a fault can only ever leave the
+#     incumbent's answer in place.
 # ---------------------------------------------------------------------------
 
 #: The observer, or None. Absent is the default and every path below is then a
@@ -1083,6 +1096,13 @@ def revl_attach_shadow(observe: Callable) -> None:
     recorded are the observer's decisions: this seam decides nothing and reads
     no share, so the declared fraction lives in exactly one place.
 
+    What the observer RETURNS is the answer the body receives: `None` leaves
+    the incumbent's validated response in place, and anything else is served
+    instead of it. That is the whole of the cutover — a promotion that lands
+    is only a change of answer because the observer starts returning the
+    successor's — and it is the observer's `live` route, not this seam, that
+    decides which it returns.
+
     Attaching resets the fault list, because a fresh window's faults are its
     own."""
     _revl_shadow.set(observe)
@@ -1109,27 +1129,36 @@ def revl_shadow_faults() -> tuple:
     return _revl_shadow_faults.get()
 
 
-def _revl_serve_shadow(crossing, value) -> None:
+def _revl_serve_shadow(crossing, value):
     """Consult this fiber's shadow observer for one completion crossing.
 
-    Returns nothing, by construction: the caller's next statement returns the
-    incumbent's validated answer and there is no path from here to it."""
+    Returns the answer to serve, or `None` when the incumbent's validated
+    answer stands. Every early return is `None`: no observer, a re-entrant
+    crossing (the successor's own completion), a crossing with no key, and a
+    faulted observer all leave the incumbent's answer in place, so no path
+    through this function can lose a validated response.
+
+    `value` is the raw host return the recorder was handed for this attempt.
+    The observer may answer with a value; on a route the register holds as
+    promoted that value is the one the body receives, and on a shadow the
+    observer answers `None` and this returns `None` too."""
     observe = _revl_shadow.get()
     if observe is None or _revl_in_shadow.get():
-        return
+        return None
     if not isinstance(crossing, tuple) or len(crossing) != 2 \
             or crossing[0] is None:
         # Recording is off, or the timeline was hand-built: there is no
         # crossing to key an observation on, and a shadow keyed on None would
         # accumulate every completion in the process under one key.
-        return
+        return None
     token = _revl_in_shadow.set(True)
     try:
-        observe(crossing, value)
+        return observe(crossing, value)
     except Exception as error:  # noqa: BLE001 - a shadow may not break the run
         _revl_shadow.set(None)
         _revl_shadow_faults.set((*_revl_shadow_faults.get(),
                                  (crossing, repr(error))))
+        return None
     finally:
         _revl_in_shadow.reset(token)
 

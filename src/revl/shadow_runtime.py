@@ -101,27 +101,41 @@ WHAT IS UNCHANGED, DELIBERATELY
 -------------------------------
 The share is still a rational `n/d` and selection is still a keyed SHA-256 of
 `(salt, component, step_index)`; nothing here introduces a PRNG. The candidate
-is still called only on selected crossings, counted at the call site, and the
-incumbent's answer is still the one served, and at the tier seam that is
-structural, because the hook's return value is discarded. And the verdict is
-still a replay comparison: an unresolvable comparator DIVERGES.
+is still called only on selected crossings and counted at the call site. And
+the verdict is still a replay comparison: an unresolvable comparator DIVERGES.
+
+WHAT THE SEAM NOW SERVES, AND WHY
+---------------------------------
+The incumbent's answer is the one served on every crossing of a route that is
+not live, which is a shadow. A route that IS live is the cutover a landed
+promotion bought, and this hook hands the seam the candidate's answer for it:
+:meth:`TierShadow.observe` returns that answer, and
+`backends/python/runtime.py` serves it instead of the response it validated.
+The incumbent's completion is not skipped on a live crossing, because the
+comparison that can REVERT the promotion is made from both answers — the
+shadow continues underneath the cutover, which is what makes the promotion
+evidence-gated and the revert real rather than a report.
+
+`live` is the register's statement, so what selects the cutover is the
+register's own derivation and not a caller's flag: an unpromoted class is
+scheduled a shadow and cannot change an answer.
 
 ONE THING THAT IS NOT INHERITED, AND WHY
 ----------------------------------------
 Slice 2 DERIVES the side that was served from the route: `live` means the
 candidate is answering, so an entry on a live route records `candidate`. An
-offline caller has nothing better to go on. A seam does. This hook's return is
-discarded, so the incumbent answered every crossing this module records, and
-:class:`TierShadow` passes that to `Scheduler.offer` as a fact rather than
-letting it be inferred. A route served through here is a shadow whatever its
-`live` flag says; `live` selects the gate's RULE (the first attributed
-divergence reverts) and not who answered. A route whose successor really
-answers is a cutover, and this seam does not perform one.
+offline caller has nothing better to go on. A seam does. This hook KNOWS who
+answered — it returns the candidate's answer when the schedule served the
+candidate and `None` when it served the incumbent — and :class:`TierShadow`
+passes that to `Scheduler.offer` as a fact rather than letting it be inferred.
+So the ledger's side and the answer the body received are one statement here,
+and `tests/test_shadow_cutover_1192.py` is the measurement that they are.
 
 PUBLIC SURFACE
 --------------
 ``world_for(ir, component)``        : the recorded world, BUILT from the IR
-``answered(ir, component, record)`` : one side's answer with its world built
+``answered(ir, component, record, value)`` : one side's answer, with its world
+                                     built and the answer it serves carried
 ``declared_actions(ir, component)`` : the provide-method names, from the IR
 ``crossing_actions(ir, component)`` : `{step_index: action}`, the derivation
 ``resolve(ir, route)``              : realm, slice and crossings, or a refusal
@@ -249,10 +263,19 @@ def world_for(ir: Mapping[str, Any], component: str):
 
 
 def answered(ir: Mapping[str, Any], component: str,
-             record: Mapping[str, Any]) -> routing.Answered:
+             record: Mapping[str, Any],
+             value: Any = None) -> routing.Answered:
     """One side's :class:`~revl.shadow_routing.Answered`: its sealed item 517
-    record, and its recorded world BUILT from that side's generation."""
-    return routing.Answered(record=record, world=world_for(ir, component))
+    record, its recorded world BUILT from that side's generation, and the
+    answer a caller receives when THIS side serves the crossing.
+
+    ``value`` is the candidate producer's to fill in. A live route serves the
+    candidate's answer, and this is the only channel from the producer to the
+    body: without it the schedule records that the candidate served while the
+    seam has nothing to hand over and returns the incumbent's answer, which is
+    a ledger and an answer that disagree."""
+    return routing.Answered(record=record, world=world_for(ir, component),
+                            value=value)
 
 
 # ---------------------------------------------------------------------------
@@ -602,11 +625,18 @@ class TierShadow:
     ``candidate(crossing)`` issues the SUCCESSOR's answer to the same
     crossing. It is called only on the crossings the share selects, by
     `revl.shadow_routing.Scheduler`, which counts the calls at the call site.
+    Its :class:`~revl.shadow_routing.Answered` carries the answer itself in
+    ``value``, because on a live route that answer is the one the body
+    receives.
 
     Three properties, each measured in `tests/test_shadow_runtime_518.py`:
 
-    1. The value the body receives is the incumbent's, always. The hook's
-       return is discarded by the seam, so there is no path from here to it.
+    1. A SHADOW cannot change the answer. On a route that is not live this
+       hook returns ``None`` on every crossing, the seam keeps the response it
+       validated, and the value the body receives is the incumbent's. A route
+       that IS live is not a shadow: it is the cutover a landed promotion
+       bought, and this hook returns the candidate's answer for it — which is
+       measured in `tests/test_shadow_cutover_1192.py`.
     2. The candidate's own completion does not re-enter the seam: the tier
        holds a re-entrancy register for the duration of the hook.
     3. An observer fault stops the shadow and not the run. The tier catches
@@ -648,9 +678,24 @@ class TierShadow:
         action, and which this schedule therefore did not observe."""
         return self._foreign
 
-    def observe(self, crossing: tuple, value: Any) -> None:
-        """What the tier calls. Returns nothing, deliberately: the seam
-        discards this return and the body gets the incumbent's answer.
+    def observe(self, crossing: tuple, value: Any) -> Optional[Any]:
+        """What the tier calls. Returns the answer to SERVE, or ``None``.
+
+        ``None`` means "the answer this crossing already has", which is the
+        incumbent's: the tier's seam returns the response it validated. That
+        is the return on every crossing of a route that is not live, and on
+        every crossing of a live route the share did not select — a shadow
+        never changes the answer, and it is the whole of this class's
+        behaviour until a promotion lands.
+
+        A non-``None`` return is the CANDIDATE's answer, and it is handed back
+        only when the schedule served the candidate on this crossing, which is
+        to say only on a live route: a live route is what the register derives
+        once a class is promoted, so this is the promotion changing which
+        model answers. The incumbent has already answered this crossing too
+        and its completion is not skipped — the comparison that can revert the
+        promotion is made from both answers, so the shadow continues under the
+        cutover.
 
         A crossing the composition does not attribute to this route's action
         is counted and dropped. That is the derivation acting rather than
@@ -660,10 +705,16 @@ class TierShadow:
         self._observed += 1
         if not self.resolution.owns(crossing):
             self._foreign += 1
-            return
-        self._scheduler.offer(crossing,
-                              answered=self._incumbent(crossing, value),
-                              served=routing.INCUMBENT)
+            return None
+        left = self._incumbent(crossing, value)
+        served = routing.CANDIDATE if self.resolution.route.live \
+            else routing.INCUMBENT
+        answer = self._scheduler.offer(crossing, answered=left, served=served)
+        if answer is None or answer is left:
+            # The schedule served the incumbent, so the crossing keeps the
+            # answer the seam already validated.
+            return None
+        return answer.value
 
     # -- attaching ---------------------------------------------------------
 
