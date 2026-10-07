@@ -334,13 +334,18 @@ def sides(incumbent_ir, candidate_ir, *, disagree_at=None, slo=None):
                                  ("shadow.rvl", 1))
             return host_return("local:successor-1")
 
-        runtime.validate_retry(make_call, budget=0,
-                               schema={"type": "object"}, where=COMPONENT)
+        # The successor's answer, as its own completion validated it. It is
+        # handed to the schedule as `Answered.value` because on a LIVE route
+        # that answer is the one the body receives: the seam serves what this
+        # producer returns instead of the response it validated.
+        served_value = runtime.validate_retry(
+            make_call, budget=0, schema={"type": "object"}, where=COMPONENT)
         said = f"said-{step}" if step != disagree_at else f"other-{step}"
         return srt.answered(candidate_ir, COMPONENT, seal(
             step_index=step, role="successor",
             placement=PLACEMENT_SUCCESSOR,
-            answer=answer_digest(said), prompt=f"asked-{step}"))
+            answer=answer_digest(said), prompt=f"asked-{step}"),
+            value=served_value)
 
     metrics = (lambda _crossing: dict(slo)) if slo is not None else None
     return incumbent, candidate, metrics, calls
@@ -501,11 +506,20 @@ def test_a_met_threshold_still_reverts_on_an_attributed_divergence(
 
 def test_the_answer_the_body_receives_is_the_incumbents(incumbent_ir,
                                                         same_ir):
-    """The seam's structural property. The observer runs on every crossing
-    and the successor answers with a different model name on every one; the
-    value `validate_retry` hands back is still the incumbent's host return,
-    because the hook's result is discarded."""
-    the_route = route(live=True)
+    """The seam's structural property, on a route that is a SHADOW.
+
+    The observer runs on every crossing and the successor answers with a
+    different model name on every one, but this route is not live, so the
+    candidate's answer is `Answered.value` that the schedule never serves:
+    `observe` returns `None` for every crossing and the value `validate_retry`
+    hands back is the incumbent's host return.
+
+    The name is #1309's pinned landing witness and is kept deliberately; what
+    changed is the ROUTE, from `live=True` to `live=False`, because a live
+    route is now the cutover rather than a shadow. The live counterpart — a
+    promotion that lands, and the successor's model reaching the body — is
+    `tests/test_shadow_cutover_1192.py`."""
+    the_route = route(live=False)
     resolution = srt.resolve(incumbent_ir, the_route)
     incumbent, candidate, _m, _calls = sides(incumbent_ir, same_ir)
     shadow = srt.TierShadow(resolution, incumbent=incumbent,
@@ -520,23 +534,23 @@ def test_the_answer_the_body_receives_is_the_incumbents(incumbent_ir,
 
 def test_the_ledger_records_the_side_the_seam_actually_served(incumbent_ir,
                                                               same_ir):
-    """Even on a LIVE route.
+    """On a LIVE route, and the answer the body got says the same thing.
 
     `live` says which rule the gate applies, which is that the first
-    attributed divergence reverts, and slice 2 derives the served side from
-    it because an offline caller has nothing better to go on. A seam does: this hook's return is
-    discarded, so the incumbent answered, and the ledger says the incumbent
-    answered. A route this seam serves is a shadow whatever its `live` flag
-    says, and a route whose successor really answers is a cutover this seam
-    does not perform."""
+    attributed divergence reverts. Slice 2 derived the served side from that
+    flag because an offline caller has nothing better to go on. A seam does:
+    the hook returns the candidate's answer on a live route, so the candidate
+    answered and the ledger says the candidate answered. The side recorded and
+    the value served are one statement, and this test reads both."""
     _s, ledger, verdict, _t, _c = run(
         incumbent_ir, same_ir, route_overrides={"live": True},
         plan_overrides={"live": True}, disagree_at=5)
 
     assert ledger.route.live is True
-    assert {served.side for served in ledger.served} == {sr.INCUMBENT}
-    assert all(entry.side == sr.INCUMBENT for entry in ledger.entries)
-    assert f"answers served by the incumbent: {WIDTH} of {WIDTH}" \
+    assert {served.side for served in ledger.served} == {sr.CANDIDATE}
+    assert all(entry.side == sr.CANDIDATE for entry in ledger.entries)
+    # ... and nothing the incumbent answered, on a route the successor owns
+    assert f"answers served by the incumbent: 0 of {WIDTH}" \
         in sr.render(verdict, ledger)
     # and the live RULE still applied
     assert verdict.decision == sp.REVERT

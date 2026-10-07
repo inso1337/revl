@@ -101,15 +101,18 @@ def sides(incumbent_ir, candidate_ir, route, *, disagree_at=None):
                                      "Model", ("shadow.rvl", 1))
             return live.host_return("local:successor-1")
 
-        runtime.validate_retry(make_call, budget=0,
-                               schema={"type": "object"},
-                               where=live.COMPONENT)
+        # The successor's validated answer, handed to the schedule as
+        # `Answered.value`: on a LIVE route the seam serves this instead of
+        # the response it validated, which is the promotion's cutover.
+        served_value = runtime.validate_retry(make_call, budget=0,
+                                              schema={"type": "object"},
+                                              where=live.COMPONENT)
         said = f"said-{step}" if step != disagree_at else f"other-{step}"
         return srt.answered(candidate_ir, live.COMPONENT, live.seal(
             step_index=step, role=route.candidate_role,
             placement=PLACEMENT[route.candidate_role],
             answer=live.answer_digest(said), prompt=f"asked-{step}",
-            recorded_at=RECORDED_AT))
+            recorded_at=RECORDED_AT), value=served_value)
 
     return incumbent, candidate, calls
 
