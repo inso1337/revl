@@ -1780,7 +1780,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `services_host_stream.rvl`
 - `../emit_py_placement.rvl`
 - `../emit_py_builtin_shadow.rvl`
-- `../../../stdlib/fs.rvl`
 - `../../../examples/regressions/fuzz_go_e6afacd3.rvl`
 - `../../../examples/uxprobe2_jobs.rvl`
 - `../../../backends/go/scenarios/advance.rvl`
@@ -1805,7 +1804,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 - `component_edges.rvl`
 - `../../../stdlib/router.rvl`
-- `../../../stdlib/fs.rvl`
 - `../../../examples/lifecycle_cache.rvl`
 - `../../../backends/go/testdata/opt_gaps_280.rvl`
 - `../../../examples/async_timer.rvl`

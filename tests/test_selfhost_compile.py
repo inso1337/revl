@@ -518,17 +518,21 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `idempotent` modifier (the Ledger service comes out empty), and the
         # `undo_captures` pin on a method-body effect.
         "../emit_py_placement.rvl",
-        # item 391: two more EMITTER-exact documents the native IR producer
+        # item 391: another EMITTER-exact document the native IR producer
         # reproduces wrongly. emit_py_builtin_shadow.rvl: the reference frontend
         # escapes a parameter named `len_` to `len__` (and every read of it) and
         # leaves a call of the user's `fn len` as `len`. The native IR escapes
         # the reads but not the parameter, and escapes the call, so the native
         # chain emits `def ladder(len__, sorted__)` over a body that reads
-        # `len___` and calls `len__`. stdlib/fs.rvl: the native IR drops the
-        # extern's host `refs`, so the module loses its `import inspect` /
-        # `_REVL_REFS` header.
+        # `len___` and calls `len__`.
+        # (issue #2089: stdlib/fs.rvl left this list — the native IR producer
+        # used to drop the extern's host `refs`, so the module lost its
+        # `import inspect` / `_REVL_REFS` header. `lower_to_ir_refs` now reads
+        # the driver's per-ref host probe off a wire and stamps the `refs` key
+        # in the reference's own position and key order, so the document
+        # reproduces byte-for-byte through the fully-native chain on both the
+        # py and ts tiers.)
         "../emit_py_builtin_shadow.rvl",
-        "../../../stdlib/fs.rvl",
         # item 391: the in-file test sections. selfhost/emit_py.rvl emits all
         # three byte-exact from the reference IR; the native IR producer
         # carries no `tests` or `fault_tests` section at all, so the native
@@ -656,8 +660,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # selfhost/lower.rvl does not produce the IR these documents need:
         # a routed require's header (the whole component set drops),
         "../../../stdlib/router.rvl",
-        # an extern's host `refs` (the thunks and their imports drop),
-        "../../../stdlib/fs.rvl",
+        # (issue #2089: stdlib/fs.rvl left this list with the py entry above —
+        # an extern's host `refs` used to drop, taking the thunks and their
+        # imports with them. The one native `selfhost/lower.rvl` producer fix
+        # closes the residual for BOTH tiers.)
         # the in-file `tests` section, plain and lifecycle,
         "../../../examples/lifecycle_cache.rvl",
         "../../../backends/go/testdata/opt_gaps_280.rvl",
