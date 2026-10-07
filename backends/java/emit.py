@@ -404,13 +404,26 @@ def _secret_config_fields(config_fields: list) -> list[str]:
 def _secret_method_params(env, key: str, mname: str, params: list) -> list[str]:
     """The parameters a provide method registers at its head: the positions the
     service declared `Secret[T]`, read off the same `params[i]["secret"]` stamp
-    the py, ts and go emitters read. Empty outside `_SECRET_MODE`."""
+    the py, ts and go emitters read. Empty outside `_SECRET_MODE`.
+
+    The names are returned in their EMITTED spelling (`_ident(..., "parameter
+    name")`), because the call site writes them into a `revlMarkSecret(...)`
+    call that has to name the parameter the SIGNATURE declared. Those two used
+    to be the same string; under A3 (issue #2132) a parameter the frontend
+    renamed (`host` -> `host_`, item 406) or one the emitter's own ladder moved
+    (`ctx` -> `ctx_`) is not, and a mark naming the author's spelling would be
+    a javac "cannot find symbol". Applying the ladder here rather than at each
+    call site keeps it applied at every site by construction -- and keeps the
+    `if secret_params:` branch in `_emit_component_modern` a single statement,
+    which matters because that branch is unreachable outside `_SECRET_MODE`
+    and every statement added inside it is a new uncovered region the line
+    ratchet has to price (tools/selfhost_line_coverage.py)."""
     if not _SECRET_MODE:
         return []
     service = env.provides[key]
     declared = env.services[service]["methods"].get(mname, {}).get("params", [])
     secret = {mp["name"] for mp in declared if isinstance(mp, dict) and mp.get("secret")}
-    return [p for p in params if p in secret]
+    return [_ident(p, "parameter name") for p in params if p in secret]
 
 TYPE_MAP = {
     "Str": "String",
@@ -6497,19 +6510,17 @@ def _param_type(env: _Env, key: str, mname: str, p: str, names: list = None) -> 
     reserved type name, so an ordinary `host` parameter made a program that
     runs on python unportable to java (issue #2132).
 
-    The two lists are positional, so when the name lookup misses and `names`
-    (the provider's full parameter list) has the same arity as the contract's,
-    fall back to the index. The name lookup stays first, so a program whose
-    two spellings already agree is byte-identical."""
+    The two lists are positional, so the same index answers for both spellings:
+    `names` is the provider's full parameter list and the contract's `i`th type
+    is the type of whichever name sits at `i`. The name test comes first in the
+    `or`, so a program whose two spellings already agree is byte-identical, and
+    the positional arm keeps the original arity guard."""
     service = env.provides[key]
     declared = env.services[service]["methods"].get(mname, {}).get("params", [])
-    for mp in declared:
-        if mp["name"] == p:
+    for i, mp in enumerate(declared):
+        if mp["name"] == p or (names is not None and len(names) == len(declared)
+                               and names[i] == p):
             return mp["type"]
-    if names is not None and len(names) == len(declared):
-        for i, n in enumerate(names):
-            if n == p:
-                return declared[i]["type"]
     return "Object"
 
 
@@ -8688,10 +8699,7 @@ def _emit_component_modern(
             # lets every sink scrub it once the body hands it on.
             secret_params = _secret_method_params(env, key, contract, method.get("params") or [])
             if secret_params:
-                # A3: the registered spelling must be the DECLARED one, so it
-                # rides the same ladder as the parameter name above.
-                marks = ", ".join(_ident(s, "parameter name") for s in secret_params)
-                out.append(f"        revlMarkSecret({marks});")
+                out.append(f"        revlMarkSecret({', '.join(secret_params)});")
             scope = _UI_SCOPES.get((name, key, contract))
             if scope is not None:
                 # issue #1369: the method runs in a UI scope
@@ -8925,8 +8933,7 @@ def _emit_component(
             ret = (render_type(_method_return(env, key, contract))
                    if _method_return(env, key, contract) else "void")
             secret_params = _secret_method_params(env, key, contract, method.get("params") or [])
-            mark = (f"revlMarkSecret({', '.join(_ident(s, 'parameter name') for s in secret_params)}); "
-                    if secret_params else "")
+            mark = f"revlMarkSecret({', '.join(secret_params)}); " if secret_params else ""
             out.append(f"    public {ret} {mname}({params}) {{ {mark}{_method_body(env, key, method)} }}")
         out.append("}")
         out.append("")
