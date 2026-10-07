@@ -558,10 +558,35 @@ def test_provide_method_with_no_declared_return_needs_none():
 # admitted as the body of a method declared `-> Unit`, the value it produced
 # went nowhere, and the effect the service promises was silently dropped — the
 # call reported `ok` with an empty trace, so the authoring loop's own
-# self-check confirmed success. The fill spec calls this hole a write ("the
-# fill is a write on `resource`"), so a body rooted at the component's own
-# resource is refused at a `Unit` return position unless it is the one form
-# that genuinely produces nothing — a write on that resource.
+# self-check confirmed success.
+#
+# The refusal is scoped by the VALUE the body produces, not by a write list.
+# `_HOST_WRITE_INVERSE` is `Map`-only (it pairs a write with its `undo`), while
+# the host surface is `Map`, `Pool`, `Job`, `Stream` and `Subscription`: a
+# write list read off it refused `= pool.execute(sql)` and `= store.drop()`,
+# which produce nothing and are perfectly good `Unit` bodies. A host verb the
+# frontend does not know to produce a value is therefore ADMITTED — a new host
+# family can never make a correct program fail to compile.
+#
+# Issue #2123 is the shipped half of that: the write-list spelling of the rule
+# reached `main` and refused `= pool.execute(sql)` — the body of
+# `examples/fault_sweep_two_phase.rvl:23` and `examples/lifecycle_cache.rvl:28`,
+# which escape only because their service declares the method `-> Int` — with a
+# message that claimed a value had been produced. The matrix at the bottom is
+# the oracle: every verb of the host surface, admitted exactly when the frontend
+# does not know it to produce a value.
+#
+# Issue #2127 is the other edge of that widening. "Not a value verb" is not the
+# same as "produces nothing to release": an ACQUIRE verb (`Map.new`,
+# `Pool.open`, `Stream.source`) produces no value but produces an OBLIGATION,
+# and a body spelled as one — `= pool.open("db", 2)`, the same call as the
+# component's own `effect` — opens a second handle nothing reclaims. The
+# admitted set is therefore "a host verb that is neither value-producing nor
+# acquiring", and the acquire half is read off `_HOST_ACQUIRE_VERBS`, the table
+# the acquisition bracket is already derived from.
+
+_REFUSAL = ("which returns `Unit`, but this body is a value-producing or "
+            "resource-acquiring form on the component's own resource")
 
 _AUDIT = """service Audit {
   fn record(msg: Str) -> Unit
@@ -577,6 +602,31 @@ component AuditLog provides audit: Audit {
 }
 """
 
+_POOL = """service Audit {
+  fn record(sql: Str) -> Unit
+}
+
+component AuditLog provides audit: Audit {
+  let pool = effect Pool.open("db", 2) undo pool.close()
+  provide audit {
+    fn record(sql) %s
+  }
+}
+"""
+
+_STREAM = """service Feed {
+  fn tick() -> Unit
+}
+
+component Fanin provides feed: Feed {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  provide feed {
+    fn tick() %s
+  }
+}
+"""
+
 
 @pytest.mark.parametrize("body", [
     '= resource.get("last")',                 # the issue's fixture: a read for a write
@@ -588,8 +638,16 @@ component AuditLog provides audit: Audit {
 ])
 def test_unit_method_body_must_be_a_write(body):
     err = _err(_AUDIT % body)
-    assert "which returns `Unit`, but this body produces a value the service never sees" in err
-    assert "it is not a write on the component's own resource" in err
+    assert _REFUSAL in err
+    assert "has nowhere to go" in err
+
+
+@pytest.mark.parametrize("body", [
+    '= pool.query("select 1")',                # the rows, dropped
+])
+def test_unit_method_body_must_be_a_write_outside_map(body):
+    err = _err(_POOL % body)
+    assert _REFUSAL in err
 
 
 @pytest.mark.parametrize("body", [
@@ -598,10 +656,45 @@ def test_unit_method_body_must_be_a_write(body):
     '{ return resource.insert(msg, msg) }',
 ])
 def test_unit_method_body_admits_the_resource_write(body):
-    # the narrowing is exactly the fill spec's producers: a write on the
-    # component's own resource still compiles
+    # the fill spec's own producers: a write on the component's own resource
+    # still compiles
     ir = compile_source(_AUDIT % body)
     assert ir["components"][0]["name"] == "AuditLog"
+
+
+@pytest.mark.parametrize("body", [
+    '= pool.execute(sql)',                     # a SQL write: host verb, no result
+    '= pool.close()',                          # the release verb: host verb, no result
+])
+def test_unit_method_body_admits_a_nothing_producing_host_verb(body):
+    # the host surface is wider than `_HOST_WRITE_INVERSE`: `Pool.execute`
+    # writes and returns nothing, and it was refused while the rule read its
+    # write list off the `Map`-only table
+    ir = compile_source(_POOL % body)
+    assert ir["components"][0]["name"] == "AuditLog"
+
+
+def test_unit_method_body_admits_the_resource_release():
+    # `store.drop()` is the acquire verb's own inverse: nothing comes back
+    ir = compile_source(_AUDIT % "= resource.drop()")
+    assert ir["components"][0]["name"] == "AuditLog"
+
+
+@pytest.mark.parametrize("fixture,body", [
+    (_AUDIT, '= resource.new()'),
+    (_POOL, '= pool.open("db", 2)'),
+    (_STREAM, '= src.source()'),
+])
+def test_unit_method_body_must_not_be_an_acquire(fixture, body):
+    # issue #2127: an acquire produces no VALUE, so "not a value verb" admitted
+    # it — but it produces an OBLIGATION. `= pool.open("db", 2)` as a body is
+    # the component's own acquisition spelled a second time, and it opens a
+    # handle nothing releases. Refused like the reads, with the acquire named
+    # in the hint rather than a false claim that a value was produced.
+    err = _err(fixture % body)
+    assert _REFUSAL in err
+    assert "resource.new()" in err
+    assert "leaves a handle nothing releases" in err
 
 
 _EMIT = """service Sink {
@@ -637,6 +730,85 @@ def test_unit_method_hint_names_a_spelling_that_compiles():
     assert "return resource.insert(k, v)" in err
     assert "revl has no `Unit` literal" in err
     assert compile_source(_AUDIT % "{ return resource.insert(msg, msg) }")
+
+
+def test_unit_method_hint_names_only_producers_that_compile():
+    # the same reading, over the whole producer list the hint now carries: the
+    # two the write-list rule refused (`resource.drop()`, `pool.execute(sql)`)
+    # are named as producers, and each compiles as a `Unit` body
+    err = _err(_AUDIT % '= resource.get("last")')
+    for spelling in ("resource.insert(k, v)", "resource.remove(k)",
+                     "resource.drop()", "pool.execute(sql)",
+                     "emit sink.write(line)"):
+        assert spelling in err, spelling
+    assert compile_source(_AUDIT % "= resource.drop()")["components"]
+    assert compile_source(_POOL % "= pool.execute(sql)")["components"]
+
+
+#: The oracle, as a matrix over the whole host surface (issues #2123, #2127):
+#: `_HOST_ARG_SIG` is `Map.{new,drop,insert,insert_if_absent,remove,get}`,
+#: `Pool.{open,close,query,execute}`, `Job.run`, `Stream.{source,close}` and
+#: `Subscription.{next,close}`. A `Unit` body spelled as one of these is
+#: admitted exactly when the frontend knows the verb to be neither
+#: value-producing nor acquiring — so the three acquire verbs and the reads are
+#: refused, and the writes and releases are admitted. `Job.run` is the one verb
+#: the guard cannot reach: it is a qualified call on the host crate, not a call
+#: on a local, so `_host_handle_root` never sees it — see the PR body for that
+#: fail-open residue. The `effect` bindings themselves (`let resource = effect
+#: Map.new() undo resource.drop()`) are acquisitions in the sanctioned bracket
+#: and are not bodies, so they never reach the guard either.
+_UNIT_BODY_MATRIX = [
+    # (fixture, body, admitted, verb)
+    (_AUDIT, '= resource.insert(msg, msg)', True, "Map.insert"),
+    (_AUDIT, '= resource.remove(msg)', True, "Map.remove"),
+    (_AUDIT, '= resource.drop()', True, "Map.drop"),
+    (_POOL, '= pool.execute(sql)', True, "Pool.execute"),
+    (_POOL, '= pool.close()', True, "Pool.close"),
+    (_STREAM, '= src.close()', True, "Stream.close"),
+    (_STREAM, '= sub.close()', True, "Subscription.close"),
+    (_AUDIT, '= resource.get("last")', False, "Map.get"),
+    (_AUDIT, '= resource.insert_if_absent(msg, msg)', False, "Map.insert_if_absent"),
+    (_AUDIT, '= resource.size()', False, "Map.size"),
+    (_POOL, '= pool.query("select 1")', False, "Pool.query"),
+    (_STREAM, '= sub.next()', False, "Subscription.next"),
+    # the acquire verbs (issue #2127): no value, but a handle nothing releases
+    (_AUDIT, '= resource.new()', False, "Map.new"),
+    (_POOL, '= pool.open("db", 2)', False, "Pool.open"),
+    (_STREAM, '= src.source()', False, "Stream.source"),
+]
+
+
+@pytest.mark.parametrize("fixture,body,admitted,verb", _UNIT_BODY_MATRIX,
+                         ids=[m[3] for m in _UNIT_BODY_MATRIX])
+def test_unit_method_body_host_verb_matrix(fixture, body, admitted, verb):
+    if admitted:
+        assert compile_source(fixture % body)["components"]
+    else:
+        err = _err(fixture % body)
+        assert _REFUSAL in err
+        assert "has nowhere to go" in err
+
+
+_SHIPPED_UNIT_EXECUTE = [
+    "examples/fault_sweep_two_phase.rvl",
+    "examples/lifecycle_cache.rvl",
+]
+
+
+@pytest.mark.parametrize("path", _SHIPPED_UNIT_EXECUTE)
+def test_shipped_pool_execute_body_compiles_as_a_unit_method(path):
+    # both shipped examples spell the same body, `fn execute(sql) =
+    # pool.execute(sql)`, behind a service that declares `-> Int`, so the guard
+    # never fires in CI — which is why the `Map`-only write list regressed them
+    # unnoticed (issue #2123). Declare the method `-> Unit`, the natural
+    # spelling for "run this statement, I want no result", and the shipped body
+    # must still compile.
+    src = (ROOT / path).read_text()
+    assert "fn execute(sql) = pool.execute(sql)" in src
+    unit = src.replace("fn execute(sql: Str) -> Int",
+                       "fn execute(sql: Str) -> Unit")
+    assert unit != src
+    assert compile_source(unit)["components"]
 
 
 # ---- `type X = Y` is a transparent alias ----------------------------------
