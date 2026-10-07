@@ -21,6 +21,7 @@ import RevL.Theorems.GRetain
 import RevL.Theorems.G4Inverse
 import RevL.Theorems.G4_WitnessedSiteUndo
 import RevL.Theorems.A5_CompensationAccompaniesEmission
+import RevL.Theorems.G9Coverage
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -2685,6 +2686,210 @@ def declVerdicts (p : String) (fm : List MRow) (brows : List BRow)
     out := out ++ s!"MS\t{p}\t{m.name}\tmethod={msv}\n"
   return out
 
+/-! ### The `GC` row — G9 path coverage of a component body (issue #2108)
+
+`STATUS.md` carried G9 path coverage as the one guarantee row marked
+`UNPROVED, unstatable`: L0 had no component body, so "the checker visits every
+statement of a real body" could not even be *written down*, let alone proved,
+and the two real bugs that motivated the obligation were both in the checker's
+walk. `RevL/Theorems/G9Coverage.lean` grows L0 and states the row. This section
+is the bridge that makes the differential oracle *bite* on it, in the shape
+every other row here uses: a decision procedure (`gcRowB`) that the oracle runs,
+proved equivalent (`gcRowB_iff`) to the judgment the theorem is about.
+
+Three kinds of row, deliberately **not** folded into one, because the two sides
+are independent observations and a row that merged them could not tell a
+disagreement from a rounding:
+
+* `GB` — a component body's ACTIVATION, as the **parse** sees it: how many
+  statements the activation declares. One row per component.
+* `GP` — one provide METHOD of that body, as the **parse** sees it: its block
+  key, its method name, how many statements its body declares, and its declared
+  parameters with their qualifiers. Read straight off `ServiceDecl.methods`, so
+  the qualifier column does not depend on the taint model.
+* `GW` — one scope the **checker's walk actually opened**, observed by running
+  the checker: its label, how many statements of it the walk visited, the
+  parameters the walk seeded into its own environment with the qualifier read
+  off the seeded origin, and the checker's raw `endorse_label` — carried as a
+  column so the exporter's pinned spelling is on the record and not only in a
+  comment.
+
+`GB`/`GP` come from the parse; `GW` comes from `compile_files` driving
+`revl.taint._walk_component_methods`. That is what makes the row a comparison
+rather than a tautology: the body's scope shape is read without running the
+walk, and the walk's shape is read without consulting the parse.
+
+**What this row is not.** It is not `RevL.G9Flow.g9RowB` or
+`RevL.G9.no_authority_from_untrusted`: those decide the *rule* at the sink
+(#1811 groups 2 & 3, PRs #2081/#2082) and are untouched. This row decides only
+whether the walk covered the body — the half that was previously unstatable.
+
+`GW` rows exist only for files whose taint model is `active`, because
+`check_taint` returns before the enforcing walk for an inactive model. A
+component the parse reports and the walk never opened is therefore a *fatal*
+`missed-G9-coverage` in `diff_corpus.py`, and — separately — a walk whose
+observation failed outright (the recorder captured no scope for a component the
+parse says has one) is the distinct fatal bucket
+`missed-G9-coverage-observation`. The two are different findings and the row
+must never report the second as the first. -/
+
+section G9Coverage
+
+/-- A carried qualifier spelling. `none` for a spelling the model does not
+carry, so an unmodelled qualifier can never agree. -/
+def parseQual : String → Option RevL.Syntax.Qual
+  | "plain" => some .plain
+  | "trusted" => some .trusted
+  | "untrusted" => some .untrusted
+  | "secret" => some .secret
+  | "retained" => some .retained
+  | _ => none
+
+/-- One carried parameter, spelled `name:qual`. -/
+def parseParam (s : String) : Option RevL.Syntax.Param :=
+  match s.splitOn ":" with
+  | [name, q] => (parseQual q).map fun k => ⟨name, k⟩
+  | _ => none
+
+/-- A comma-joined parameter list. The empty string is the empty list, and a
+member the model does not carry yields `none` rather than being dropped, so a
+qualifier the harness spells and the model does not know never agrees. -/
+def parseParams (s : String) : Option (List RevL.Syntax.Param) :=
+  if s == "" then some [] else (s.splitOn ",").mapM parseParam
+
+/-- One `GB` row: a component body's activation, as the parse sees it — the
+number of statements the activation declares. `0` means the body has no
+activation scope at all, which `Body.scopes` reads as no scope; it is a
+different observation from a walk that opened a scope and visited nothing. -/
+structure GBRow where
+  path : String
+  comp : String
+  stmts : Nat
+
+def parseGB (f : List String) : Option GBRow :=
+  match f with
+  | ["GB", path, comp, stmts] => stmts.toNat?.map fun n => ⟨path, comp, n⟩
+  | _ => none
+
+/-- One `GP` row: one provide method of a component body, as the parse sees it. -/
+structure GPRow where
+  path : String
+  comp : String
+  key : String
+  method : String
+  stmts : Nat
+  params : List RevL.Syntax.Param
+
+def parseGP (f : List String) : Option GPRow :=
+  match f with
+  | ["GP", path, comp, key, method, stmts, params] =>
+      (stmts.toNat?).bind fun n => (parseParams params).map fun ps =>
+        ⟨path, comp, key, method, n, ps⟩
+  | _ => none
+
+/-- One `GW` row: one scope the checker's walk actually opened. `endorse` is
+the raw `endorse_label` the walk was driven with, carried so the pinned
+spelling is a column rather than a comment. -/
+structure GWRow where
+  path : String
+  comp : String
+  label : String
+  stmts : Nat
+  params : List RevL.Syntax.Param
+  endorse : String
+
+def parseGW (f : List String) : Option GWRow :=
+  match f with
+  | ["GW", path, comp, label, stmts, params, endorse] =>
+      (stmts.toNat?).bind fun n => (parseParams params).map fun ps =>
+        ⟨path, comp, label, n, ps, endorse⟩
+  | _ => none
+
+/-- The body a `GB` row and its `GP` rows describe, as `RevL.Syntax.Body`.
+
+The statements are placeholders, and that is the point: what the row observes
+about a body is its **scope shape** — which scopes it has, in what order, with
+how many statements and which origin-carrying parameters — and `Body.scopes`
+reads exactly those columns. `List.replicate` makes the count the observation
+rather than a coincidence: a `GB` row carrying `0` produces a body with no
+activation scope, so `Body.scopes`'s "the activation first, and only when it
+has a statement" is exercised rather than assumed. -/
+def bodyOf (r : GBRow) (ps : List GPRow) : RevL.Syntax.Body where
+  items := List.replicate r.stmts (RevL.Syntax.Item.step (.pure (.lit "")))
+    ++ ps.map (fun p =>
+        RevL.Syntax.Item.provide
+          { key := p.key
+            methods := [{ name := p.method, params := p.params
+                          body := List.replicate p.stmts (.pure (.lit "")) }] })
+
+/-- The walk a `GW` row's columns describe, as `RevL.G9Coverage.Walked`. -/
+def walkOfRows (ws : List GWRow) : List RevL.G9Coverage.Walked :=
+  ws.map fun w => { scope := w.label, stmts := w.stmts, params := w.params }
+
+/-- The row's verdict: does the walk the `GW` rows record cover the body the
+`GB`/`GP` rows describe? -/
+def gcRowB (r : GBRow) (ps : List GPRow) (ws : List GWRow) : Bool :=
+  RevL.G9Coverage.coversBodyB (walkOfRows ws) (bodyOf r ps)
+
+/-- `gcRowB` is exactly the theorem's three conjuncts at the carried columns —
+so the procedure the oracle runs and the judgment `RevL.G9Coverage` proves are
+the same statement, and a row that drifted from the theorem fails here rather
+than in prose. -/
+theorem gcRowB_iff (r : GBRow) (ps : List GPRow) (ws : List GWRow) :
+    gcRowB r ps ws = true ↔
+      RevL.G9Coverage.walkLabels (walkOfRows ws) = (bodyOf r ps).scopeLabels
+        ∧ RevL.G9Coverage.walkCounts (walkOfRows ws)
+            = (bodyOf r ps).scopes.map (fun s => s.stmts.length)
+        ∧ RevL.G9Coverage.walkParams (walkOfRows ws)
+            = (bodyOf r ps).scopes.map RevL.Syntax.Scope.origins := by
+  unfold gcRowB
+  exact RevL.G9Coverage.coversBodyB_iff _ _
+
+/-- The three kinds of coverage row of one export. Kept out of `main` so its
+elaboration stays within the default heartbeat budget. -/
+structure G9CoverageRows where
+  gb : List GBRow
+  gp : List GPRow
+  gw : List GWRow
+
+def parseG9CoverageRows (fields : List (List String)) : G9CoverageRows :=
+  { gb := fields.filterMap parseGB
+    gp := fields.filterMap parseGP
+    gw := fields.filterMap parseGW }
+
+/-- One `GC` row per scope of each component the export carries, in the body's
+order and out to the longer of the body's scope list and the walk's — so a walk
+that opened FEWER scopes than the body still produces a row for the missing
+one, with `fail`, and the missing scope is *named* rather than silently absent.
+The label is the body's where the body has a scope and the walk's where only
+the walk does, so a scope the body does not have is named too.
+
+The per-scope verdict is `Walked.matches` at that scope, which is the same
+conjunction `gcRowB` makes over the whole list: this is the row's verdict
+projected so the failure names a scope. -/
+def gcVerdicts (p : String) (rs : G9CoverageRows) : String := Id.run do
+  let mut out := ""
+  for b in rs.gb.filter (fun r => r.path == p) do
+    let ps := rs.gp.filter (fun r => r.path == p && r.comp == b.comp)
+    let ws := rs.gw.filter (fun r => r.path == p && r.comp == b.comp)
+    let bd := bodyOf b ps
+    let wl := walkOfRows ws
+    for i in List.range (Nat.max bd.scopes.length wl.length) do
+      let sc := bd.scopes[i]?
+      let w := wl[i]?
+      let label := match sc with
+        | some s => s.label
+        | none => match w with
+          | some x => x.scope
+          | none => ""
+      let v := match sc, w with
+        | some s, some x => if x.matches s then "ok" else "fail"
+        | _, _ => "fail"
+      out := out ++ s!"GC\t{p}\t{b.comp}\t{label}\tcoverage={v}\n"
+  return out
+
+end G9Coverage
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | [inPath, outPath] =>
@@ -2727,6 +2932,7 @@ def main (args : List String) : IO UInt32 := do
     let mrows' := parseModelRows fields
     let crows := parseCouncilRows fields
     let g9rows := parseG9Rows fields
+    let gcrow := parseG9CoverageRows fields
     let retainrows := parseGRetainRows fields
     let invrows := parseG4InvRows fields
     let swrows := parseSWRows fields
@@ -2909,6 +3115,8 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ councilVerdicts p crows
       -- TAINT verdicts (G9 / G-SECRET-FLOW on the corpus, issue #1811 group 2)
       out := out ++ g9Verdicts p g9rows
+      -- GC verdicts (G9 path coverage of a component body, issue #2108)
+      out := out ++ gcVerdicts p gcrow
       -- RETAIN verdicts (G-RETAIN on the corpus, issue #1811 group 3)
       out := out ++ gretainVerdicts p retainrows
       -- INV verdicts (the G4 inverse rule on the corpus, issue #2097)
@@ -3093,3 +3301,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.swRowBAll_iff
 #print axioms RevLOracle.a5RowB_iff
 #print axioms RevLOracle.a5RowBAll_iff
+#print axioms RevLOracle.gcRowB_iff
