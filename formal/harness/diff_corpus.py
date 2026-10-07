@@ -1905,6 +1905,267 @@ def retain_rows(rel: str) -> list[str]:
                        str(chain.count(GRETAIN_STEP_SEP))])]
 
 
+# ------------------------------- G4 inverse (issue #2097)
+#
+# THE RULE ON THE CORPUS, NOT COVERAGE OF THE WALK.
+#
+# Three checker rules carry the code `G4` and the category `inverse`, and the
+# model states none of them until this row:
+#
+#   * `lower._check_host_release` (issue #1859) — the `undo` of a host
+#     acquisition must be its FAMILY's release, on the handle it bound:
+#     `Map.new` -> `drop`, `Pool.open` -> `close`, `Stream.source` -> `close`.
+#   * `lower._check_extern_release` — the `undo` of an `extern acquire` must be
+#     the call its own declaration named, applied to the handle it bound.
+#   * `lower._method_effect_inverse` (issue #1945) — the `undo` of a host write
+#     must be its table entry on the SAME receiver and the SAME key:
+#     `Map.insert` -> `remove`, `Map.insert_if_absent` -> `remove`,
+#     `Map.remove` -> `insert`.
+#
+# The row carries the arm, the acquisition, the inverse verb the checker
+# DEMANDED, the spelling its own advice told the author to write, and the
+# `undo` the checker actually READ at the site:
+#
+#   INV  <file>  <code>  <category>  <arm>  <acq>  <verb>  <inv>  <site>
+#
+# `verb` and `inv` are read out of the checker's refusal — never invented
+# here — and `site` is read out of the file's AST, at the bracket whose
+# acquisition the refusal named. The oracle decides `RevL.G4Inverse.rowB` at
+# those columns (`Oracle.g4invVerdicts`), the same polarity as every other row,
+# so a `fail` is the rule VIOLATED at an acquisition and a site the checker
+# itself reported — the refusal explained rather than contradicted — and an
+# `ok` where the checker refused is the fatal `missed-G4`.
+#
+# WHAT THIS ROW IS NOT. It decides the rule at the site the checker
+# DISCOVERED. It is NOT a proof, and not a test, that the checker's walk
+# COVERS every bracket, every `extern acquire` and every host write in the
+# file: a bracket `lower` never reaches is a bracket this row never sees, and
+# no row assembled from the checker's own refusal can see it. That is roadmap
+# item 418 step 9 and is deliberately unclaimed here and in
+# `formal/RevL/Theorems/G4Inverse.lean`.
+
+#: The three arms, as `RevL.G4Inverse.kindOfString` spells them. Spelled HERE
+#: rather than imported from the model, so renaming one on either side is a
+#: diff and not a silent agreement.
+G4INV_ARMS = ("host", "extern", "write")
+
+#: `lower._HOST_ACQUIRE_VERBS` (`typecheck.py`) as `lower._host_release_of`
+#: reads it, and `lower._HOST_WRITE_INVERSE` as `lower._host_write` reads it.
+#: Restated here and in `RevL.G4Inverse` rather than imported from
+#: `src/revl/`, so widening the checker's tables moves the checker alone and
+#: the refusal becomes the harness's fatal `missed-G4` instead of a silent
+#: agreement.
+G4INV_HOST_RELEASE = {"Map.new": "drop", "Pool.open": "close",
+                      "Stream.source": "close"}
+G4INV_WRITE_INVERSE = {"Map.insert": "remove", "Map.insert_if_absent": "remove",
+                       "Map.remove": "insert"}
+
+#: The checker's own three sentences, split into the facts the row carries.
+#: Anchored, so a refusal this row does not understand yields no row and is
+#: recorded in `_G4INV_UNREADABLE` instead of being decided.
+G4INV_HOST_RE = re.compile(
+    r"^the `undo` of `let \S+ = effect (\S+)\(\.\.\.\)` must release THAT "
+    r"handle: write `undo (\S+)\.(\w+)\(\)`$")
+G4INV_EXTERN_RE = re.compile(
+    r"^the `undo` of `(?:let \S+ = )?effect (\S+)\(\.\.\.\)` must be the "
+    r"inverse `([^`]+)` declares(?:, on THAT handle)?: write `undo (.+)`$")
+G4INV_WRITE_RE = re.compile(
+    r"^the `undo` of `effect (\S+)\.(\w+)\(\.\.\.\)` must be its inverse on "
+    r"the same handle and key: write `undo (.+)`$")
+
+#: `rel -> why` for every `G4`/`inverse` refusal the row could NOT read. A
+#: gate finding, not a silent `fail`: a row that decided an unreadable refusal
+#: would be agreeing vacuously, and a checker that began demanding an inverse
+#: outside its own tables should be made to say so here rather than pass.
+_G4INV_UNREADABLE: dict[str, str] = {}
+
+
+def _g4inv_spell_arg(a: object) -> str | None:
+    """One argument of an `undo` call, spelled as the checker's own
+    `_key_spelling`/`_source_spelling` spell it: a name as itself, a literal
+    as JSON. `None` for a shape this row does not read."""
+    if isinstance(a, ExprVar):
+        return a.name
+    if isinstance(a, ExprLit):
+        return json.dumps(a.value)
+    return None
+
+
+def _g4inv_spell(e: object) -> str | None:
+    """An `undo` expression as the checker's advice spells it, or `None` for a
+    shape the row does not read. `store.remove("k")`, `store.drop()`,
+    `log_flush()`."""
+    if not isinstance(e, ExprCall):
+        return None
+    callee = e.callee
+    if isinstance(callee, ExprField) and isinstance(callee.target, ExprVar):
+        head = f"{callee.target.name}.{callee.name}"
+    elif isinstance(callee, ExprVar):
+        head = callee.name
+    else:
+        return None
+    spelled = [_g4inv_spell_arg(a) for a in (e.args or ())]
+    if any(a is None for a in spelled):
+        return None
+    return f"{head}({', '.join(spelled)})"
+
+
+def _g4inv_blocks(stmts, out: list) -> None:
+    """Every `LetEffect`/`EffectStmt` in a statement list, in SOURCE ORDER —
+    the order the checker walks them, which is what makes the first violating
+    bracket the one it refused. Descends the block forms the checker's own
+    walk descends."""
+    for ms in stmts or ():
+        kind = type(ms).__name__
+        if isinstance(ms, (LetEffect, EffectStmt)):
+            out.append(ms)
+        elif kind == "IfStmt":
+            _g4inv_blocks(ms.then, out)
+            _g4inv_blocks(ms.otherwise, out)
+        elif kind in ("WhileStmt", "ForStmt", "StreamIterStmt"):
+            _g4inv_blocks(ms.body, out)
+        elif kind == "ProvideStmt":
+            for pm in ms.methods:
+                _g4inv_blocks(pm.body, out)
+
+
+def _g4inv_candidates(prog) -> list[tuple[str, str, str, str]]:
+    """`(arm, acq, site, recv)` for every bracket in the file that this row
+    models, in source order. `recv` is the source-spelled receiver the checker
+    names in its own sentence, or `""` for the arms that name none.
+
+    `acq` is the FAMILY-QUALIFIED name the row's tables are keyed by
+    (`Map.new`, `Map.insert`) or the extern's own name (`log_open`) — the same
+    keys `lower._host_release_of`, `lower._host_write` and
+    `lower._extern_acquire_of` build. A receiver whose family the file does
+    not bind (`env.host_locals` has no entry) yields no candidate, so a refusal
+    on it is the fatal `missed-G4` rather than a guessed row."""
+    extern_acquire = {e.name for e in prog.externs
+                      if e.classification == "acquire"}
+    handles: dict[str, str] = {}
+    for comp in prog.components:
+        blocks: list = []
+        _g4inv_blocks(comp.body, blocks)
+        for stmt in blocks:
+            route = _route(getattr(stmt.acquire, "callee", None))
+            if route is None:
+                continue
+            root, chain = route
+            if chain and root not in handles \
+                    and f"{root}.{chain}" in G4INV_HOST_RELEASE \
+                    and isinstance(getattr(stmt, "bind", None), str):
+                handles[stmt.bind] = root
+    out: list[tuple[str, str, str, str]] = []
+    scopes = ([("component", c.body) for c in prog.components]
+              + [("fn", f.body) for f in prog.fn_decls]
+              + [("test", t.body) for t in prog.tests])
+    for _scope, body in scopes:
+        blocks = []
+        _g4inv_blocks(body, blocks)
+        for stmt in blocks:
+            route = _route(getattr(stmt.acquire, "callee", None))
+            site = _g4inv_spell(getattr(stmt, "undo", None))
+            if route is None or site is None:
+                continue
+            root, chain = route
+            if not chain:
+                if root in extern_acquire:
+                    out.append(("extern", root, site, ""))
+                continue
+            if root in handles:
+                key = f"{handles[root]}.{chain}"
+                if key in G4INV_WRITE_INVERSE:
+                    out.append(("write", key, site, root))
+                continue
+            key = f"{root}.{chain}"
+            if key in G4INV_HOST_RELEASE:
+                out.append(("host", key, site, root))
+    return out
+
+
+def _g4inv_site(cands: list[tuple[str, str, str, str]], arm: str, acq: str,
+                inv: str) -> str | None:
+    """The `undo` the checker read at the bracket its refusal named: the first
+    bracket on that arm and that acquisition whose `undo` is NOT the spelling
+    the checker demanded — which is the first one it can have refused."""
+    same = [c for c in cands if c[0] == arm and c[1] == acq]
+    violating = [c for c in same if c[2] != inv]
+    pick = violating or same
+    return pick[0][2] if pick else None
+
+
+#: The verb a demanded spelling names — the LAST segment of its callee, so
+#: `store.remove(k)` -> `remove` and `log_close(log)` -> `log_close`. Read off
+#: the checker's own advice rather than off this row's tables, so a checker
+#: that began demanding a verb the row does not hold says so here instead of
+#: agreeing with itself, and so all three arms' `verb` column means the same
+#: thing. The extern arm NEEDS this: its sentence names the acquisition that
+#: DECLARES the inverse (`` the inverse `log_open` declares ``), which is not
+#: the inverse's own verb — that appears only in the advice.
+G4INV_DEMAND_RE = re.compile(r"^(?:\w+\.)*(\w+)\(")
+
+
+def _g4inv_demand_verb(inv: str) -> str | None:
+    """The verb of a demanded spelling, or `None` for a shape whose verb this
+    row cannot read. Used by all three arms, so `verb` is the advice's verb in
+    every row and never the arm's own guess."""
+    m = G4INV_DEMAND_RE.match(inv)
+    return m.group(1) if m is not None else None
+
+
+def g4inverse_rows(rel: str, prog) -> list[str]:
+    """The `INV` rows of one modeled file (issue #2097).
+
+    See the section note above for what the row decides and, at length, what it
+    does not. A file the checker accepts, a refusal outside `G4`/`inverse`, or
+    a refusal the row cannot read emits no row — the last of those records a
+    finding in `_G4INV_UNREADABLE` instead of deciding the unreadable."""
+    err = checker_refusal(rel)
+    if err is None or err.code != "G4" or err.category != "inverse":
+        return []
+    message = err.message or ""
+    cands = _g4inv_candidates(prog)
+    m = G4INV_HOST_RE.match(message)
+    if m is not None:
+        arm, acq = "host", m.group(1)
+        inv = f"{m.group(2)}.{m.group(3)}()"
+    else:
+        m = G4INV_EXTERN_RE.match(message)
+        if m is not None:
+            arm, acq, inv = "extern", m.group(1), m.group(3)
+        else:
+            m = G4INV_WRITE_RE.match(message)
+            if m is None:
+                _G4INV_UNREADABLE[rel] = (
+                    "the G4/inverse refusal is not one of the three sentences "
+                    "the row carries")
+                return []
+            arm, recv, acq_verb, inv = "write", m.group(1), m.group(2), m.group(3)
+            same = [c for c in cands if c[0] == "write" and c[3] == recv
+                    and c[1].endswith("." + acq_verb)]
+            if not same:
+                _G4INV_UNREADABLE[rel] = (
+                    f"the G4/inverse refusal names the receiver {recv!r} and "
+                    f"the write {acq_verb!r}, whose host family the file does "
+                    "not bind — the row has no table to read")
+                return []
+            acq = same[0][1]
+    verb = _g4inv_demand_verb(inv)
+    if verb is None:
+        _G4INV_UNREADABLE[rel] = (
+            f"the G4/inverse refusal demands {inv!r}, whose verb the row "
+            "cannot read")
+        return []
+    site = _g4inv_site(cands, arm, acq, inv)
+    if site is None:
+        _G4INV_UNREADABLE[rel] = (
+            f"the G4/inverse refusal names the acquisition {acq!r}, which the "
+            "file's brackets do not bind")
+        return []
+    return ["\t".join(["INV", rel, err.code, err.category, arm, acq, verb, inv,
+                       site])]
+
+
 # ------------------------------- out of scope by kind (issue #1810)
 #
 # `out-of-fragment` collects refusals under a rule the model states no row
@@ -3047,6 +3308,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         tsv.extend(council_rows(rel, prog))
         tsv.extend(g9_rows(rel))
         tsv.extend(retain_rows(rel))
+        tsv.extend(g4inverse_rows(rel, prog))
         # async names (AN, issue #1808), file-wide
         for name in async_names(prog):
             tsv.append("\t".join(["AN", rel, name]))
@@ -4521,6 +4783,117 @@ def retain_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE read for each `INV` row (issue #2097):
+#: `file -> (arm, acq, verb, inv, site, holds)`. Read by `g4inverse_coverage`.
+_G4INV_ROWS: dict = {}
+
+
+def _g4inv_required(arm: str, acq: str, verb: str) -> str | None:
+    """`RevL.G4Inverse.requiredInverse`, respelled in Python so the reference's
+    verdict is an INDEPENDENT recomputation: changing the model alone surfaces
+    as a mismatch. The host arm reads the family's release, the write arm the
+    write's table entry, and the extern arm IS the verb the checker's advice
+    named — the declaration is the only fact that arm has."""
+    if arm == "host":
+        return G4INV_HOST_RELEASE.get(acq)
+    if arm == "write":
+        return G4INV_WRITE_INVERSE.get(acq)
+    if arm == "extern":
+        return verb
+    return None
+
+
+def _g4inverse_holds(arm: str, acq: str, verb: str, inv: str,
+                     site: str) -> bool:
+    """`RevL.G4Inverse.rowB` at the exported columns, respelled. The rule HOLDS
+    when the acquisition's OWN inverse is the verb the checker demanded AND the
+    site's `undo` is the spelling the checker demanded — spelling equality is
+    what carries the receiver and the key."""
+    required = _g4inv_required(arm, acq, verb)
+    return required is not None and required == verb and site == inv
+
+
+def g4inverse_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `INV` row (issue #2097).
+
+    THE RULE ON THE CORPUS, NOT COVERAGE OF THE WALK — and this ratchet can
+    only enforce the first half. Every `G4`/`inverse` refusal in the corpus IS
+    a refusal, so a ratchet shaped like `council_coverage`'s (one row admitted
+    and one refused) could never be satisfied: an admitted corpus row is a
+    `missed-G4`, which is fatal. What is enforced instead is that the rule
+    BITES on every row, on the one input the file's TEXT does not fix — the
+    site:
+
+      * the refusal must be one of the three sentences the row carries, and the
+        acquisition it names must be one the row's tables hold, so a refusal
+        that fell outside the row is a finding and not a silent `fail`;
+      * the demanded verb must be the one the acquisition's OWN table holds, so
+        a checker that began demanding a verb the row does not carry says so
+        here rather than agreeing with itself;
+      * the verdict must FLIP when the `site` column is replaced by the
+        spelling the checker's own advice demanded: refused at the site the
+        checker reported, admitted at the demanded spelling. A row that
+        returned a constant, or that ignored the receiver or the key, fails
+        this.
+
+    A rule that returned a constant fails all three. The other half, that the
+    checker's walk COVERS every bracket, is roadmap item 418 step 9 and is
+    deliberately not claimed here or anywhere in this row. Returns findings,
+    treated as gate failures."""
+    findings = [f"g4inverse coverage: {rel}: {why}"
+                for rel, why in sorted(_G4INV_UNREADABLE.items())]
+    if not _G4INV_ROWS:
+        findings.append("g4inverse coverage: no INV rows at all — the row "
+                        "would decide nothing and agree vacuously")
+        return findings
+    for rel, (arm, acq, verb, inv, site, holds) in sorted(_G4INV_ROWS.items()):
+        if arm not in G4INV_ARMS:
+            findings.append(f"g4inverse coverage: {rel}: the row carries arm "
+                            f"{arm!r}, which the rule does not state")
+            continue
+        required = _g4inv_required(arm, acq, verb)
+        if required is None:
+            findings.append(
+                f"g4inverse coverage: {rel}: the {arm} arm names the "
+                f"acquisition {acq!r}, which the row's table does not hold")
+            continue
+        if required != verb:
+            findings.append(
+                f"g4inverse coverage: {rel}: the checker demanded the verb "
+                f"{verb!r} for {acq!r} but the row's own table holds "
+                f"{required!r} — the model is behind the checker")
+        if not inv:
+            findings.append(f"g4inverse coverage: {rel}: the row carries no "
+                            "demanded spelling to flip on")
+            continue
+        if not site:
+            findings.append(f"g4inverse coverage: {rel}: the row carries no "
+                            "site to decide")
+            continue
+        at_site = _g4inverse_holds(arm, acq, verb, inv, site)
+        at_demand = _g4inverse_holds(arm, acq, verb, inv, inv)
+        if holds != at_site:
+            findings.append(
+                f"g4inverse coverage: {rel}: the reference decided "
+                f"{'holds' if holds else 'violated'} at the reported site but "
+                f"{'holds' if at_site else 'violated'} at it")
+        if at_site or not at_demand:
+            findings.append(
+                f"g4inverse coverage: {rel}: the verdict does not read the "
+                f"site — at the reported {site!r} {at_site}, at the demanded "
+                f"{inv!r} {at_demand}; the rule must be VIOLATED at the one "
+                "and HOLD at the other")
+    if not findings:
+        print(f"g4inverse coverage: {len(_G4INV_ROWS)} INV rows over "
+              f"arms={','.join(sorted({a for a, *_ in _G4INV_ROWS.values()}))} "
+              "and acquisitions="
+              f"{','.join(sorted({a for _arm, a, *_ in _G4INV_ROWS.values()}))}"
+              ", each VIOLATED at the site the checker reported and HOLDING at "
+              "the spelling it demanded — the rule ON THE CORPUS (the site the "
+              "checker DISCOVERED), NOT coverage of the checker's walk")
+    return findings
+
+
 #: What the REFERENCE read for each component's declaration rules: (steps,
 #: intercept targets, provides, operations). Read by `prelude_coverage`.
 _PRELUDE_ROWS: dict = {}
@@ -4737,6 +5110,7 @@ class Verdicts(NamedTuple):
     councils: dict[tuple[str, str], str]
     g9: dict[str, str]
     retain: dict[str, str]
+    inv: dict[str, str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -4751,7 +5125,8 @@ class Verdicts(NamedTuple):
                 + len(self.async_sigs) + len(self.preludes)
                 + len(self.intercepts) + len(self.methods)
                 + len(self.places) + len(self.model_reach)
-                + len(self.councils) + len(self.g9) + len(self.retain))
+                + len(self.councils) + len(self.g9) + len(self.retain)
+                + len(self.inv))
 
 
 
@@ -4791,6 +5166,7 @@ def parse_verdicts(text: str) -> Verdicts:
     councils: dict[tuple[str, str], str] = {}
     g9: dict[str, str] = {}
     retain: dict[str, str] = {}
+    inv: dict[str, str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -4898,6 +5274,15 @@ def parse_verdicts(text: str) -> Verdicts:
             # because a compile stops at its first refusal and so exports at
             # most one retention row per file.
             retain[parts[1]] = parts[9]
+        elif parts[0] == "INV" and len(parts) == 8:
+            # G4 inverse (issue #2097): file -> ok|fail. The arm, the
+            # acquisition, the verb the checker demanded, the spelling it
+            # demanded and the site it refused ride in the middle columns so
+            # the row's own output shows the acquisition and the demanded
+            # spelling the verdict was read off — the whole point of the row.
+            # The KEY is the file, because a compile stops at its first
+            # refusal and so exports at most one inverse row per file.
+            inv[parts[1]] = parts[7]
         elif parts[0] in ("PL", "IC", "MS") and len(parts) == 4:
             # the three declaration rules: (file, comp) -> ok|fail.
             {"PL": preludes, "IC": intercepts, "MS": methods}[parts[0]][
@@ -4915,7 +5300,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach, councils, g9, retain)
+                    places, model_reach, councils, g9, retain, inv)
 
 
 
@@ -5197,6 +5582,28 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             retain[r[1]] = "ok" if holds else "fail"
             _GRETAIN_ROWS[r[1]] = (r[4], r[5], r[6], int(r[7]), int(r[8]),
                                    r[9], r[10], holds)
+
+    # G4 inverse verdicts (issue #2097): the rule at the arm, acquisition,
+    # demanded verb and spelling the checker's OWN refusal reported, recomputed
+    # here from the exported columns. `_g4inverse_holds` and the two tables
+    # (`G4INV_HOST_RELEASE`, `G4INV_WRITE_INVERSE`) are harness-spelled, not
+    # imported from `RevL.G4Inverse.rowB`, so changing the model alone moves
+    # the model and the reference's `fail` becomes the harness's `missed-G4`.
+    # THE RULE ON THE CORPUS: the site and the demanded spelling are the ones
+    # the checker reported, so this recomputes the RULE and says nothing about
+    # the checker's coverage of the walk (roadmap item 418 step 9).
+    #
+    # Polarity as for every other row: `ok` is the rule HOLDING and `fail` is
+    # the rule VIOLATED. A refusal at a site that is not the demanded spelling
+    # is exactly a VIOLATION, so a `fail` is what explains a checker refusal
+    # and `ok` is the fatal `missed-G4`.
+    inv: dict[str, str] = {}
+    _G4INV_ROWS.clear()
+    for r in rows:
+        if r and r[0] == "INV" and len(r) == 9:
+            holds = _g4inverse_holds(r[4], r[5], r[6], r[7], r[8])
+            inv[r[1]] = "ok" if holds else "fail"
+            _G4INV_ROWS[r[1]] = (r[4], r[5], r[6], r[7], r[8], holds)
 
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
@@ -5532,7 +5939,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-                    places, model_reach, councils, g9, retain)
+                    places, model_reach, councils, g9, retain, inv)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -5824,6 +6231,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # The RETAIN row (G-RETAIN, issue #1811 group 3), keyed by the file
         # alone for the same reason: at most one retention row per file.
         rt_fail = v.retain.get(rel) == "fail"
+        # The INV row (G4 inverse, issue #2097), keyed by the file alone for
+        # the same reason: at most one inverse row per file.
+        inv_fail = v.inv.get(rel) == "fail"
         a1_fail = any(x == "fail" for k, x in v.async_sites.items()
                       if k[0] == rel) or any(
             x == "fail" for k, x in v.async_sigs.items() if k[0] == rel)
@@ -5843,7 +6253,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             and not df_fail and not bu_fail and not g1_fail and not a1_fail \
             and not pl_fail and not ic_fail and not ms_fail \
             and not mp_fail and not ma_fail and not cv_fail and not g9_fail \
-            and not rt_fail
+            and not rt_fail and not inv_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -5866,16 +6276,19 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # The release rules (issue #1859, `lower._check_site_release`: the
             # host family's release, and an `extern acquire`'s declared
             # inverse) and the provide-method write inverse rule (issue #1945,
-            # `lower._method_effect_inverse`) carry the G4 code, but none is
-            # the marker rule the `G` row states: they ask whether a bracket's
-            # `undo` is the inverse its acquisition owns (the family's release
-            # on the bound handle, a host write's inverse on the same handle
-            # and key), and the model's HA row carries no inverse fact yet
-            # (issue #1859's formal slice adds the `inv` column). Absence of
-            # fact, ratcheted by name as the approval floor is, until that
-            # column lands.
-            record("out-of-fragment-inverse" if formal_clean
-                   else "formal-found-other", rel)
+            # `lower._method_effect_inverse`) carry the G4 code. None is the
+            # marker rule the `G` row states: each asks whether a bracket's
+            # `undo` is the inverse its acquisition owns — the family's release
+            # on the bound handle, an `extern acquire`'s DECLARED inverse on
+            # the handle it bound, a host write's inverse on the same handle
+            # and key. That is a third rule under G4 and it is now MODELLED by
+            # the `INV` row (`RevL.G4Inverse`, issue #2097): the arm is read
+            # off the checker's own refusal sentence, the acquisition and the
+            # demanded spelling likewise, and `rowB` decides whether the site
+            # IS the demanded spelling. A row that says `fail` (VIOLATED)
+            # explains the refusal; a row that says `ok` over a refusal is the
+            # model being weaker than revl, and fatal.
+            record("agree-G4" if inv_fail else "missed-G4", rel)
         elif code == "G4" and category == "witnessed":
             # A witnessed extern called with a site `undo` (issue #1963,
             # `lower._lower_effect_step`) carries the G4 code, but it is not
@@ -6575,7 +6988,8 @@ def main() -> int:
             ("model_reach", ref.model_reach, formal.model_reach),
             ("council", ref.councils, formal.councils),
             ("g9", ref.g9, formal.g9),
-            ("retain", ref.retain, formal.retain)):
+            ("retain", ref.retain, formal.retain),
+            ("inv", ref.inv, formal.inv)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -6608,7 +7022,8 @@ def main() -> int:
         f"{len(ref.model_reach)} model reach edges + "
         f"{len(ref.councils)} council tie policies + "
         f"{len(ref.g9)} taint walks + "
-        f"{len(ref.retain)} retention refusals) — "
+        f"{len(ref.retain)} retention refusals + "
+        f"{len(ref.inv)} inverse refusals) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -6631,6 +7046,7 @@ def main() -> int:
     mismatches.extend(council_coverage())
     mismatches.extend(g9_coverage())
     mismatches.extend(retain_coverage())
+    mismatches.extend(g4inverse_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

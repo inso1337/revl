@@ -18,6 +18,7 @@ import RevL.Theorems.ModelPlacement
 import RevL.Theorems.ModelCouncil
 import RevL.Theorems.G9Flow
 import RevL.Theorems.GRetain
+import RevL.Theorems.G4Inverse
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -2353,6 +2354,91 @@ def gretainVerdicts (p : String) (rs : GRetainRows) : String := Id.run do
 
 end GRetain
 
+/-! ### The `INV` row — the G4 inverse rule on the corpus (issue #2097)
+
+`INV` carries the acquisition, the inverse verb the checker DEMANDED, the
+spelling its own advice told the author to write, and the `undo` the checker
+actually READ at the site. It decides `RevL.G4Inverse.rowB` at those columns —
+the rule that a host acquisition's `undo` is its family's release
+(`lower._check_host_release`, issue #1859), that an `extern acquire`'s `undo`
+is the call its declaration named (`lower._check_extern_release`), and that a
+host write's `undo` is its table entry on the same receiver and key
+(`lower._method_effect_inverse`, issue #1945).
+
+It is **the rule on the corpus, not the coverage of the checker's walk** (see
+`RevL/Theorems/G4Inverse.lean`): the row's premises ARE the checker's own
+refusal, so a checker that stopped reporting an acquisition's inverse produces
+no row at all, and `diff_corpus.py` files that refusal under the fatal
+`missed-G4` rather than reading it as an agreement. An arm this row does not
+carry, or an acquisition its tables do not name, yields `false` here — never a
+vacuous `ok`. -/
+
+section G4Inverse
+
+/-- One `INV` row. `arm`, `acq`, `verb`, `inv` and `site` are the columns the
+rule reads; `code` and `category` are carried so the row's own output shows
+which refusal it was exported from. -/
+structure G4InvRow where
+  path : String
+  code : String
+  category : String
+  arm : String
+  acq : String
+  verb : String
+  inv : String
+  site : String
+
+def parseG4Inv (f : List String) : Option G4InvRow :=
+  match f with
+  | ["INV", path, code, category, arm, acq, verb, inv, site] =>
+      some ⟨path, code, category, arm, acq, verb, inv, site⟩
+  | _ => none
+
+/-- The row's verdict: the rule at the arm, the acquisition, the demanded verb
+and spelling, and the site's `undo`. `false` for an arm the model does not
+carry, so an unreadable row can never print `ok`. -/
+def g4InvRowB (r : G4InvRow) : Bool :=
+  match RevL.G4Inverse.kindOfString r.arm with
+  | some k => RevL.G4Inverse.rowB k r.acq r.verb r.inv r.site
+  | none => false
+
+/-- `g4InvRowB` is exactly the rule at the carried columns, and `false` —
+never vacuously `true` — for an arm the model does not carry. -/
+theorem g4InvRowB_iff (r : G4InvRow) :
+    g4InvRowB r = true ↔ ∃ k, RevL.G4Inverse.kindOfString r.arm = some k ∧
+      RevL.G4Inverse.rowB k r.acq r.verb r.inv r.site = true := by
+  unfold g4InvRowB
+  cases hk : RevL.G4Inverse.kindOfString r.arm with
+  | none => simp
+  | some k => simp
+
+def g4invRowB (rows : List G4InvRow) : Bool := rows.all g4InvRowB
+
+theorem g4invRowB_iff (rows : List G4InvRow) :
+    g4invRowB rows = true ↔ ∀ r ∈ rows, ∃ k,
+      RevL.G4Inverse.kindOfString r.arm = some k ∧
+        RevL.G4Inverse.rowB k r.acq r.verb r.inv r.site = true := by
+  unfold g4invRowB
+  rw [List.all_eq_true]
+  exact forall_congr' fun r => imp_congr_right fun _ => g4InvRowB_iff r
+
+/-- The `INV` rows of one file. Kept out of `main` so its elaboration stays
+within the default heartbeat budget. -/
+structure G4InvRows where
+  rows : List G4InvRow
+
+def parseG4InvRows (fields : List (List String)) : G4InvRows :=
+  { rows := fields.filterMap parseG4Inv }
+
+def g4invVerdicts (p : String) (rs : G4InvRows) : String := Id.run do
+  let mut out := ""
+  for r in rs.rows.filter (fun r => r.path == p) do
+    let v := if g4InvRowB r then "ok" else "fail"
+    out := out ++ s!"INV\t{p}\t{r.arm}\t{r.acq}\tverb={r.verb}\tinv={r.inv}\tsite={r.site}\t{v}\n"
+  return out
+
+end G4Inverse
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -2483,6 +2569,7 @@ def main (args : List String) : IO UInt32 := do
     let crows := parseCouncilRows fields
     let g9rows := parseG9Rows fields
     let retainrows := parseGRetainRows fields
+    let invrows := parseG4InvRows fields
     let itrows := fields.filterMap parseIT
     let mcrows := fields.filterMap parseMC
     let aerows := fields.filterMap parseAE
@@ -2651,6 +2738,8 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ g9Verdicts p g9rows
       -- RETAIN verdicts (G-RETAIN on the corpus, issue #1811 group 3)
       out := out ++ gretainVerdicts p retainrows
+      -- INV verdicts (the G4 inverse rule on the corpus, issue #2097)
+      out := out ++ g4invVerdicts p invrows
       -- W verdicts (spawn attenuation) per edge
       for e in edges do
         let childCaps := (lookupCaps closed e.2).filterMap (capOf capTable)
@@ -2814,3 +2903,5 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.g9RowB_iff
 #print axioms RevLOracle.retainRowB_iff
 #print axioms RevLOracle.gretainRowB_iff
+#print axioms RevLOracle.g4InvRowB_iff
+#print axioms RevLOracle.g4invRowB_iff

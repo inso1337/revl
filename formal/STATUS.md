@@ -387,6 +387,20 @@ Three summary readings of that map:
 | `RevL.GRetain.corpus_walk_does_not_reach_another_sink` | G-RETAIN on the corpus — the corpus chain | **proved** | `propext, Classical.choice, Quot.sound` | the corpus chain `load() -> db_put` does not reach `fs_put`, so the walk premise is mutation-sensitive |
 | `RevL.GRetain.corpus_row_decided` | G-RETAIN on the corpus — the corpus shapes | **proved** | `propext, Classical.choice, Quot.sound` | the corpus row refused at the checker's instant and admitted AT the deadline and a year before it, with the `until` column the same in all three |
 | `RevL.GRetain.retain_not_vacuous` | G-RETAIN on the corpus — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | the corpus row's own columns decided at four instants — refused past the deadline, admitted at it, admitted before it, admitted under a hold — so the `RETAIN` row is mutation-sensitive in every direction and a row that ignored `now` fails here |
+| `RevL.G4Inverse.rowB_iff` | G4 inverse on the corpus — the row's verdict (issue #2097) | **proved** | `propext` | the row prints `ok` precisely where the rule holds and `fail` precisely where it is violated, so a `fail` is the rule VIOLATED at a site the checker itself reported, at an acquisition and a demanded spelling the checker itself named |
+| `RevL.G4Inverse.requiredInverse_none_off_the_tables` | G4 inverse on the corpus — the two tables | **proved** | `propext` | the lookup is `none` exactly off the host and write tables, and never on the extern arm (whose requirement is the acquisition's own declaration), so an acquisition outside the tables yields no verdict at all |
+| `RevL.G4Inverse.extern_arm_is_the_declared_inverse` | G4 inverse on the corpus — the extern arm has no table | **proved** | none | `requiredInverse .extern` is the verb the checker named, at every acquisition and verb: that arm's content is the site comparison, which is the honest reading of `lower._check_extern_release` (`inv` comes from `env.extern_inverse`) |
+| `RevL.G4Inverse.extern_arm_never_falls_off_a_table` | G4 inverse on the corpus — the extern arm cannot be skipped | **proved** | `propext` | `requiredInverse .extern` is never `none`, at an acquisition that IS off both other tables, so the extern arm cannot be silently dropped the way a table miss drops a row |
+| `RevL.G4Inverse.host_release_table` | G4 inverse on the corpus — the host table | **proved** | none | the checker's `_HOST_ACQUIRE_VERBS`, all three entries: `Map.new` → `drop`, `Pool.open` → `close`, `Stream.source` → `close` |
+| `RevL.G4Inverse.write_inverse_table` | G4 inverse on the corpus — the write table | **proved** | none | the checker's `_HOST_WRITE_INVERSE`, all three entries: `Map.insert` → `remove`, `Map.insert_if_absent` → `remove`, `Map.remove` → `insert` |
+| `RevL.G4Inverse.kindOfString_is_the_kind` | G4 inverse on the corpus — the arm column | **proved** | none | the exporter's three arm names are the three the row carries, so no arm can silently miss and leave the row undecided |
+| `RevL.G4Inverse.unmodelled_acquisition_has_no_inverse` | G4 inverse on the corpus — the other direction | **proved** | none | `Log.open` is off the host release table and `Map.get` off the write inverse table, so a checker that began refusing under a family or a write outside these tables yields no row and the refusal lands in the fatal `missed-G4` rather than in an agreement |
+| `RevL.G4Inverse.corpus_rows_refused` | G4 inverse on the corpus — the corpus shapes | **proved** | none | the four documents' own columns refused: the extern declaration's inverse against `log_flush()`, the host family's release against `store.get("x")`, and `Map.insert`'s inverse against two wrong-key sites |
+| `RevL.G4Inverse.corpus_rows_flip_at_the_demanded_spelling` | G4 inverse on the corpus — the corpus flip | **proved** | none | each of the four rows is admitted at the spelling the checker demanded with nothing but the `site` column moved, so the four refusals are a verdict about the site rather than a constant |
+| `RevL.G4Inverse.corpus_host_row_flips_when_the_demand_leaves_the_table` | G4 inverse on the corpus — the host arm reads its table | **proved** | none | the same site spelling against a demand that has left `hostRelease` is refused, so the row is not merely comparing the checker's advice with itself |
+| `RevL.G4Inverse.corpus_write_row_flips_when_the_receiver_moves` | G4 inverse on the corpus — the write arm reads its receiver | **proved** | none | the demanded verb and key on a SIBLING handle is still refused, so issue #1859's "on THAT handle" is carried by the spelling rather than assumed |
+| `RevL.G4Inverse.corpus_row_verbs_are_the_tables` | G4 inverse on the corpus — the verb compared against | **proved** | none | the requirement is the table's (or the declaration's) at all three arms on the corpus acquisitions, so the row's premise is jointly satisfiable at each arm |
+| `RevL.G4Inverse.g4_inverse_not_vacuous` | G4 inverse on the corpus — non-vacuity | **proved** | none | the four corpus shapes refused at the reported site and admitted at the demanded spelling, plus a demand off `hostRelease` and a sibling receiver: the `INV` row is mutation-sensitive to the site, its receiver, its key and the tables |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -745,6 +759,106 @@ the hint. The hint is advice and is not scraped for anything the row
 decides; the `now` column is cross-checked against the harness's own pin by
 `retain_coverage`, so a message the exporter mis-parses fails the gate
 rather than producing a plausible-looking row.
+
+
+## G4 inverse — the bracket's `undo` is the inverse its acquisition owns (`RevL.Theorems.G4Inverse`, issue #2097)
+
+Two checker rules carry the `G4` code and the `inverse` category without
+being the marker rule `G` states:
+
+* `lower._check_site_release` (issue #1859) — a bracket's `undo` must be
+  the release its acquisition owns: a host family's release applied to the
+  handle the bracket bound (`_HOST_ACQUIRE_VERBS`: `Map.new` → `drop`,
+  `Pool.open` → `close`, `Stream.source` → `close`), or, for an
+  `extern acquire fn`, the inverse the extern **declares** applied to that
+  handle.
+* `lower._method_effect_inverse` (issue #1945) — a host write's `undo` must
+  be its table entry on the same receiver with the same key expression
+  (`_HOST_WRITE_INVERSE`: `Map.insert` → `remove`,
+  `Map.insert_if_absent` → `remove`, `Map.remove` → `insert`).
+
+Until this row landed, the formal model had no fact for either, so every
+such refusal landed in the `out-of-fragment-inverse` bucket: a
+deliberately-named absence of fact, ratcheted shrink-only, and **not** a
+claim that the model covered the rule. Four documents held the bucket open
+(`examples/rejections/g4_extern_undo_not_declared.rvl`,
+`examples/rejections/g4_undo_not_release.rvl`,
+`examples/rejections/g4_method_write_not_inverse.rvl`,
+`tests/fixtures/canary_candidate_inverse.rvl`).
+
+### The model
+
+`InvKind` is the arm: `host`, `extern`, `write`. `requiredInverse` is the
+rule's one lookup — `hostRelease` for the host arm, `writeInverse` for the
+write arm, and **`some verb` for the extern arm**, because that arm's
+requirement comes from `env.extern_inverse`, the extern's own declaration,
+not from a table the model could hold. `rowB` is then the whole rule: the
+acquisition's own inverse is the verb the checker demanded, **and** the
+site's `undo` is the spelling the checker demanded. Spelling equality is
+what carries the receiver and the key, which is why `rowB` needs no
+separate handle or key argument — and
+`corpus_write_row_flips_when_the_receiver_moves` shows that a row
+comparing only verbs and keys would return `true` where this one returns
+`false`.
+
+`hostRelease` and `writeInverse` are **restated** from
+`src/revl/typecheck.py`'s `_HOST_ACQUIRE_VERBS` and `src/revl/lower.py`'s
+`_HOST_WRITE_INVERSE` rather than imported: the formal layer is a separate
+library and cannot import Python, so the tables are transcribed, and
+`host_release_table` / `write_inverse_table` pin all three entries of each.
+A checker that gained a family or a write would produce an acquisition the
+table does not hold — `unmodelled_acquisition_has_no_inverse` — and that
+emits **no row**, so the refusal lands in the fatal `missed-G4` rather than
+in an agreement. The direction that keeps this row from passing by looking
+away is the `none` arm of `requiredInverse`, and
+`requiredInverse_none_off_the_tables` states exactly where `none` can
+occur.
+
+### What the differential-oracle `INV` row does and does not add
+
+The oracle's `INV` row decides `rowB` at the **arm, acquisition, demanded
+verb and demanded spelling the checker's own refusal names**, all four read
+out of the refusal's prose by the exporter (`formal/harness/diff_corpus.py`).
+`g4InvRowB_iff` pins the oracle's decider to `rowB`, so a `fail` is the
+rule VIOLATED at a site the checker itself reported, with the refusal
+explained rather than contradicted. The harness recomputes the verdict
+independently (`_g4inverse_holds`, harness-spelled) and compares, so
+changing the model alone moves the model and the reference's `fail` becomes
+the harness's `missed-G4` — which is fatal.
+
+`g4inverse_coverage` executes the non-vacuity claim rather than asserting
+it, and its findings are gate failures. For every exported row it requires
+that the refusal be one of the three sentences the row carries, that the
+acquisition be one the row's tables hold, that the demanded verb be the one
+that table holds — and that the verdict **flip** when the `site` column is
+replaced by the spelling the checker's own advice demanded. Refused at the
+site the checker reported, admitted at the demanded spelling: a row that
+returned a constant, or that ignored the receiver or the key, fails the
+ratchet.
+
+### What this row does NOT claim
+
+**It is the rule ON THE CORPUS — the site the checker DISCOVERED — and
+NOT coverage of the checker's walk.** The four documents are all
+refusals, so the row's non-vacuity is a mutation-sensitivity ratchet, not
+an admitted/refused pair: it cannot distinguish "the rule holds at the
+bracket the checker reached" from "the checker never reached the bracket".
+Roadmap item 418 step 9 (route A) is deliberately **unclaimed** here, in
+the module docstring, in the row's own printed coverage line, and in this
+section. Nothing here substitutes for it.
+
+Two further limits, stated rather than hidden. The exporter recognises only
+the three canonical refusal sentences; a `G4`/`inverse` refusal in another
+shape emits no row and is recorded as a `g4inverse coverage` finding, so a
+checker that grew a fourth shape reds the gate rather than producing a
+plausible-looking row. And the demanded spelling is read out of the
+checker's `` write `undo …` `` advice, which for `Map.remove` is
+`store.insert(k, <the value it held>)` — not a call any real site can
+literally carry, so that entry's flip is a **substitution** of the
+`site` column rather than a spelling any document could exhibit. The row
+states the rule for that entry (`write_inverse_table`) and the substitution
+still shows the verdict reads the `site` column, but no corpus document
+exercises it, and this section does not claim one does.
 
 
 ## The effect-classification lattice — G4/G5/G8 re-proved (item 418, step 4)

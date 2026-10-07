@@ -330,7 +330,21 @@ python3 scripts/axioms_gate.py \
   RevL.GRetain.unmodelled_sink_scope_has_no_sink \
   RevL.GRetain.corpus_walk_does_not_reach_another_sink \
   RevL.GRetain.corpus_row_decided \
-  RevL.GRetain.retain_not_vacuous < .axioms.out
+  RevL.GRetain.retain_not_vacuous \
+  RevL.G4Inverse.rowB_iff \
+  RevL.G4Inverse.requiredInverse_none_off_the_tables \
+  RevL.G4Inverse.extern_arm_is_the_declared_inverse \
+  RevL.G4Inverse.host_release_table \
+  RevL.G4Inverse.write_inverse_table \
+  RevL.G4Inverse.kindOfString_is_the_kind \
+  RevL.G4Inverse.unmodelled_acquisition_has_no_inverse \
+  RevL.G4Inverse.extern_arm_never_falls_off_a_table \
+  RevL.G4Inverse.corpus_rows_refused \
+  RevL.G4Inverse.corpus_rows_flip_at_the_demanded_spelling \
+  RevL.G4Inverse.corpus_host_row_flips_when_the_demand_leaves_the_table \
+  RevL.G4Inverse.corpus_write_row_flips_when_the_receiver_moves \
+  RevL.G4Inverse.corpus_row_verbs_are_the_tables \
+  RevL.G4Inverse.g4_inverse_not_vacuous < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -387,6 +401,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.modelReachB_iff \
   RevLOracle.councilRowB_iff \
   RevLOracle.g9RowB_iff \
-  RevLOracle.retainRowB_iff RevLOracle.gretainRowB_iff < .oracle-axioms.out
+  RevLOracle.retainRowB_iff RevLOracle.gretainRowB_iff \
+  RevLOracle.g4InvRowB_iff RevLOracle.g4invRowB_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py
