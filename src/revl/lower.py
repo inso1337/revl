@@ -1944,6 +1944,23 @@ def _loop_has_targeting_break(stmts) -> bool:
     return False
 
 
+def _method_return_remedy(returns: str) -> str:
+    """The `return`-spelling a provide method's T1 hint points at.
+
+    For every type but `Unit` it is the obvious one. `Unit` is the exception
+    (issue #2083): `return <Unit>` is a remedy nobody can follow, because revl
+    has no `Unit` literal — `return Unit` is "a builtin type, not a value" and
+    `return ()` does not parse — so the hint names a form that compiles: a
+    `return` of a call that returns nothing (a write on the component's own
+    resource, or a requirement declared `-> Unit`)."""
+    if returns == "Unit":
+        return ("end the body with a `return` of a call that returns nothing — the "
+                "component's own resource write (`return resource.insert(k, v)`) or "
+                "a requirement declared `-> Unit`; revl has no `Unit` literal, so "
+                "`return <Unit>` does not compile")
+    return f"end the body with `return <{render_type(returns)}>`"
+
+
 def _definitely_returns(stmts) -> bool:
     """True when control cannot reach the end of `stmts` without returning.
 
@@ -12422,6 +12439,96 @@ def _host_write(acquire, env: "Env"):
     return target.get("id"), family, verb
 
 
+def _host_handle_root(node, env: "Env"):
+    """The host local *node* is rooted at — the component's own resource
+    handle itself (`store`) or a call on it (`store.get(k)`) — else None.
+
+    `env.host_locals` carries the family of every local bound to a host
+    acquisition (`let store = effect Map.new()`), which is what makes a
+    `store.<verb>` call recognizable without a type (issue #2083)."""
+    if not isinstance(node, dict):
+        return None
+    kind = node.get("kind")
+    if kind == "name":
+        return node.get("id") if node.get("id") in env.host_locals else None
+    if kind == "call":
+        target = node.get("target")
+        if isinstance(target, dict) and target.get("kind") == "name" \
+                and target.get("id") in env.host_locals:
+            return target.get("id")
+    return None
+
+
+#: issue #2083: the host verbs whose result is a VALUE the caller must
+#: consume, so a body that IS one of them and whose value goes nowhere has
+#: dropped an effect. Derived where the frontend already knows the result
+#: (`_HOST_RESULT_SIG` types `Map.insert_if_absent` -> `Bool`) and listed
+#: otherwise, because the reads are the one thing the argument-only host
+#: signature does not say.
+#:
+#: Deliberately the VALUE side and not the write side. `_HOST_WRITE_INVERSE`
+#: is `Map`-only (it exists to pair a write with its `undo`), while the host
+#: surface (`_HOST_ARG_SIG`) is `Map`, `Pool`, `Job`, `Stream` and
+#: `Subscription` — so "writes that produce nothing" read off that table
+#: missed `Pool.execute`, `Map.drop`, `Pool.close`, `Stream.close` and
+#: `Subscription.close`, and a `-> Unit` method with `= pool.execute(sql)` in
+#: it stopped compiling. A verb this table does not name is ADMITTED: a family
+#: added to `_HOST_ARG_SIG` can never make a correct program fail to compile,
+#: and an unlisted READ is a hole this guard does not close — the same hole
+#: `check_ir` already leaves open — never a wrong refusal.
+_HOST_VALUE_VERBS: frozenset = frozenset({
+    "Map.get",            # Opt[V] — the read #2083 was filed about
+    "Pool.query",         # the rows a query yields
+    "Subscription.next",  # the awaited item
+}) | frozenset(_HOST_RESULT_SIG)
+
+
+def _host_call_produces_nothing(node, env: "Env") -> bool:
+    """Whether *node* is a call on a host local whose verb is a host verb
+    producing no value — the `Unit`-producing form issue #2083's `Unit`
+    return position admits (`store.insert(k, v)`, `store.remove(k)`,
+    `pool.execute(sql)`).
+
+    The admitted side is "a host verb (`_HOST_FAMILIES`), and not one the
+    frontend knows to produce a value (`_HOST_VALUE_VERBS`)". `store.size()`
+    and `store.keys()` are the stdlib Map VALUE surface, not host verbs, so
+    they are not admitted; `Map.drop` and `Pool.execute` produce nothing and
+    are host verbs, so they are."""
+    if not isinstance(node, dict) or node.get("kind") != "call":
+        return False
+    target = node.get("target")
+    if not isinstance(target, dict) or target.get("kind") != "name":
+        return False
+    family = env.host_locals.get(target.get("id"))
+    if family is None:
+        return False
+    verb = node.get("method")
+    if verb not in _HOST_FAMILIES.get(family, {}):
+        return False
+    return f"{family}.{verb}" not in _HOST_VALUE_VERBS
+
+
+def _unit_body_drops_host_value(node, env: "Env") -> bool:
+    """Whether *node*, as the body of a method declared `Unit`, is the
+    component's own resource held (or read) and its value discarded — the
+    silent no-op of issue #2083.
+
+    `check_ir` compares a body against the declared return only when
+    `infer_ir` produced a type (`if actual and not compatible(...)`), and no
+    host table types a resource read, so `fn record(msg) = store.get("last")`
+    was admitted as the body of a declared WRITE: the call reported `ok` with
+    an empty trace. The forms refused are those rooted at the component's own
+    resource handle that are not a host call producing nothing — a read
+    (`store.get(k)`, `pool.query(sql)`), the stdlib value surface
+    (`store.size()`, `store.keys()`), the handle itself, and
+    `store.insert_if_absent(k, v)`, whose `Bool` is in `_HOST_RESULT_SIG`. A
+    crossing on a requirement (`emit sink.write(line)`) is not rooted at the
+    resource and is not this defect."""
+    if _host_handle_root(node, env) is None:
+        return False
+    return not _host_call_produces_nothing(node, env)
+
+
 #: issue #1980: the host write verbs whose `undo` may RESTORE the value this
 #: body read from the same table, and the read verb whose result carries the
 #: `Opt` that decides between restoring and removing. `Map.get(k)` is `Opt[V]`
@@ -14087,6 +14194,33 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 check_ir(lowered_return, decl.returns, env.type_env,
                          env.types, env.services, filename, ms.line,
                          f"`{method.name}` returns")
+                # issue #2083: `check_ir` leaves an UNKNOWN body alone (`if
+                # actual and ...`), so a resource READ — whose value no host
+                # table types — was admitted as the body of a method declared
+                # `-> Unit`, and the effect the service promised was silently
+                # dropped: the call reported `ok` with an empty trace. A body
+                # rooted at the component's own resource is refused unless it
+                # is the one form that genuinely produces nothing, a write on
+                # that resource.
+                if decl.returns == "Unit" and actual != "Unit" \
+                        and _unit_body_drops_host_value(lowered_return, env):
+                    raise RevlError(
+                        filename, ms.line,
+                        f"`{method.name}` implements `{svc.name}.{method.name}`, "
+                        f"which returns `Unit`, but this body produces a value "
+                        f"the service never sees: the result is discarded, so "
+                        f"the effect `{svc.name}.{method.name}` promises is "
+                        f"dropped",
+                        hint="a `Unit` method's body must be a call that returns "
+                             "nothing — a write on the component's own resource "
+                             "(`resource.insert(k, v)`, `resource.remove(k)`, "
+                             "`pool.execute(sql)`) or a requirement declared "
+                             "`-> Unit` (`emit sink.write(line)`); a read "
+                             "(`resource.get(k)`, `pool.query(sql)`, "
+                             "`resource.size()`) produces a value the service "
+                             "never sees",
+                        code="T1", category="type-mismatch",
+                        expected=decl.returns, actual=actual)
                 # issue #1838: `return n` from a method declared `-> Float`
                 # is a coercion site, marked as a pure fn's `return` is
                 # (docs/arithmetic.md), so every tier emits the conversion
@@ -14423,7 +14557,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     f"`{method.name}` implements `{svc.name}.{method.name}`, which "
                     f"returns `{render_type(decl.returns)}`, but this body never "
                     f"returns a value",
-                    hint=f"end the body with `return <{render_type(decl.returns)}>` — a "
+                    hint=f"{_method_return_remedy(decl.returns)} — a "
                          f"provider must produce what its service promises, or "
                          f"consumers bound to `{svc.name}` receive nothing (rust E0308, "
                          'java "missing return statement")',

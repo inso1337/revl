@@ -550,6 +550,138 @@ def test_provide_method_with_no_declared_return_needs_none():
     assert ir["components"][0]["name"] == "M"
 
 
+# ---- issue #2083: a `Unit` return is a WRITE position ----------------------
+#
+# `check_ir`'s tail is `if actual and not compatible(...)` and `infer_ir`
+# answers `None` for anything reached through a host handle, so the whole test
+# was skipped for a body that read the component's own resource: a READ was
+# admitted as the body of a method declared `-> Unit`, the value it produced
+# went nowhere, and the effect the service promises was silently dropped — the
+# call reported `ok` with an empty trace, so the authoring loop's own
+# self-check confirmed success.
+#
+# The refusal is scoped by the VALUE the body produces, not by a write list.
+# `_HOST_WRITE_INVERSE` is `Map`-only (it pairs a write with its `undo`), while
+# the host surface is `Map`, `Pool`, `Job`, `Stream` and `Subscription`: a
+# write list read off it refused `= pool.execute(sql)` and `= store.drop()`,
+# which produce nothing and are perfectly good `Unit` bodies. A host verb the
+# frontend does not know to produce a value is therefore ADMITTED — a new host
+# family can never make a correct program fail to compile.
+
+_AUDIT = """service Audit {
+  fn record(msg: Str) -> Unit
+  fn last() -> Opt[Str]
+}
+
+component AuditLog provides audit: Audit {
+  let resource = effect Map.new() undo resource.drop()
+  provide audit {
+    fn record(msg) %s
+    fn last() = resource.get("last")
+  }
+}
+"""
+
+_POOL = """service Audit {
+  fn record(sql: Str) -> Unit
+}
+
+component AuditLog provides audit: Audit {
+  let pool = effect Pool.open("db", 2) undo pool.close()
+  provide audit {
+    fn record(sql) %s
+  }
+}
+"""
+
+
+@pytest.mark.parametrize("body", [
+    '= resource.get("last")',                 # the issue's fixture: a read for a write
+    '{ return resource.get("last") }',         # ... in block form
+    '= resource.size()',                       # `Int` at runtime, unknown to the checker
+    '= resource.keys()',
+    '= resource',                              # the handle itself
+    '= resource.insert_if_absent(msg, msg)',   # a write whose `Bool` goes nowhere
+])
+def test_unit_method_body_must_be_a_write(body):
+    err = _err(_AUDIT % body)
+    assert "which returns `Unit`, but this body produces a value the service never sees" in err
+    assert "the result is discarded" in err
+
+
+@pytest.mark.parametrize("body", [
+    '= pool.query("select 1")',                # the rows, dropped
+])
+def test_unit_method_body_must_be_a_write_outside_map(body):
+    err = _err(_POOL % body)
+    assert "which returns `Unit`, but this body produces a value the service never sees" in err
+
+
+@pytest.mark.parametrize("body", [
+    '= resource.insert(msg, msg)',
+    '= resource.remove(msg)',
+    '{ return resource.insert(msg, msg) }',
+])
+def test_unit_method_body_admits_the_resource_write(body):
+    # the fill spec's own producers: a write on the component's own resource
+    # still compiles
+    ir = compile_source(_AUDIT % body)
+    assert ir["components"][0]["name"] == "AuditLog"
+
+
+@pytest.mark.parametrize("body", [
+    '= pool.execute(sql)',                     # a SQL write: host verb, no result
+    '= pool.close()',                          # the release verb: host verb, no result
+])
+def test_unit_method_body_admits_a_nothing_producing_host_verb(body):
+    # the host surface is wider than `_HOST_WRITE_INVERSE`: `Pool.execute`
+    # writes and returns nothing, and it was refused while the rule read its
+    # write list off the `Map`-only table
+    ir = compile_source(_POOL % body)
+    assert ir["components"][0]["name"] == "AuditLog"
+
+
+def test_unit_method_body_admits_the_resource_release():
+    # `store.drop()` is the acquire verb's own inverse: nothing comes back
+    ir = compile_source(_AUDIT % "= resource.drop()")
+    assert ir["components"][0]["name"] == "AuditLog"
+
+
+_EMIT = """service Sink {
+  emission fn write(line: Str)
+}
+
+service Audit {
+  emission[sink] fn record(line: Str) -> Unit
+}
+
+component AuditProvider requires sink: Sink provides audit: Audit {
+  provide audit {
+    fn record(line) %s
+  }
+}
+"""
+
+
+def test_unit_method_body_admits_a_requirement_crossing():
+    # the crossing the fill spec offers for a `Unit` emission hole is
+    # `emit sink.write(<line: Str>)` (mcp/fillspec.py), which lowers to a call
+    # on a requirement: not rooted at the component's resource, so the refusal
+    # above must not reach it
+    ir = compile_source(_EMIT % "= emit sink.write(line)")
+    assert ir["components"][0]["name"] == "AuditProvider"
+
+
+def test_unit_method_hint_names_a_spelling_that_compiles():
+    # the hint is read literally: it names `return resource.insert(k, v)`, and
+    # that spelling — with the method's own parameter names — compiles, which
+    # `return <Unit>` (the old hint) could not: revl has no `Unit` literal
+    err = _err(_AUDIT % "{ let n = msg }")
+    assert "return resource.insert(k, v)" in err
+    assert "revl has no `Unit` literal" in err
+    assert compile_source(_AUDIT % "{ return resource.insert(msg, msg) }")
+
+
 # ---- `type X = Y` is a transparent alias ----------------------------------
 #
 # It used to parse as a one-case variant whose single case was named `Y`, so
