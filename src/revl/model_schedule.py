@@ -75,7 +75,7 @@ matches is the provider's published profile, which reaches revl only as
 
 Nothing loads or unloads a model here. The schedule is a plan-time decision
 the conductor prints and refuses on; the provision keyed by role, with its
-load, unload and `no_residue` teardown, is slice S2 and is not built.
+load, unload and `no_residue` teardown, is slice S2 and has landed.
 """
 
 from __future__ import annotations
