@@ -7282,6 +7282,9 @@ _ALIGN: dict[str, int] = {}
 _ALIGN_SAMPLES: dict[str, list[str]] = {}
 #: `rel -> "U5" | "G"`, which witness carried a file into `agree-G5`.
 _G5_WITNESS: dict[str, str] = {}
+#: The last run's files whose checker walk COVERS their bodies (issue #2108).
+#: Deliberately NOT a bucket: see the arm at the end of `checker_alignment`.
+_GC_COVERED: list[str] = []
 
 
 def g5_files_the_prog_resolves(tsv) -> set[str]:
@@ -7355,6 +7358,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     _ALIGN.clear()
     _ALIGN_SAMPLES.clear()
     _G5_WITNESS.clear()
+    _GC_COVERED.clear()
     g5_resolved = g5_files_the_prog_resolves(tsv)
 
     def record(key: str, rel: str) -> None:
@@ -7677,12 +7681,23 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # (or, worse, hide one behind the other). `_GC_UNOBSERVED` is the
         # files where the parse says a scope exists and the recorder saw
         # none, so those files are claimed by the observation bucket alone.
+        #
+        # The AGREEMENT is NOT a bucket, and is counted apart from the list
+        # above. A file's chain bucket already says what the checker and the
+        # model agree the file IS; coverage says, independently, whether the
+        # checker's walk of its bodies is COMPLETE. Both readings are of the
+        # same file, so recording the agreement as a bucket would give one
+        # file two of them: that breaks the one-bucket-per-file map the fatal
+        # list, the ratchets and the alignment tests read, and makes the
+        # census's "files bucketed" total read 566 for a 551-file corpus. The
+        # two DISAGREEMENTS above ARE buckets — each is a finding about the
+        # checker, and a fatal bucket has to name its files.
         if rel in _GC_UNOBSERVED:
             record("missed-G9-coverage-observation", rel)
         elif any(x == "fail" for k, x in v.gc.items() if k[0] == rel):
             record("missed-G9-coverage", rel)
         elif any(k[0] == rel for k in v.gc):
-            record("agree-G9-coverage", rel)
+            _GC_COVERED.append(rel)
 
     # Files with no composition to model, and files revl refused at parse:
     # named, not omitted. Neither carries a computed verdict, so neither can
@@ -7733,6 +7748,11 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     # `total` is the sum of the buckets, and the A5 arm buckets PARSE
     # refusals (they have no facts to model but the row still has a verdict
     # for them), so it is not the census's "modeled" count. Say what it is.
+    #
+    # It stays exact at one bucket per file because the G9 coverage axis
+    # below is NOT a bucket (issue #2108): a coverage agreement is a second
+    # reading of a file the chain above already bucketed, so counting it here
+    # would report 566 files bucketed for a 551-file corpus.
     print(f"checker alignment ({total} files bucketed; every disagreeing "
           f"bucket is FATAL: {'/'.join(FATAL_BUCKETS)}):")
     for k in sorted(set(align) | set(FATAL_BUCKETS) | set(OOF_RATCHET_BUCKETS)):
@@ -7744,6 +7764,24 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             print(f"  ALIGN {k}: {rel}")
     for rel in samples.get("agree-G5", []):
         print(f"  ALIGN agree-G5 via {_G5_WITNESS.get(rel, '?')}: {rel}")
+
+    # G9 COVERAGE (issue #2108), printed as its own line and NOT as a bucket
+    # in the list above. The two ways it can DISAGREE are buckets there —
+    # `missed-G9-coverage` for a walk that skipped a scope or a statement the
+    # body has, `missed-G9-coverage-observation` for a walk the harness never
+    # observed at all — and both are fatal and name their files. Agreement is
+    # a second reading of files the chain above has already bucketed, so it
+    # carries a count and no membership, and it is outside the "files
+    # bucketed" total: a file that both agrees on its verdict and has a fully
+    # covered walk is one file, not two.
+    covered = set(_GC_COVERED)
+    covered_scopes = sum(1 for k in v.gc if k[0] in covered)
+    print(f"G9 coverage of the walk (issue #2108; a second axis over the "
+          f"files above, not a bucket and outside the total): "
+          f"{len(_GC_COVERED)} file(s) over {covered_scopes} scope(s) agree — "
+          f"every scope the bodies have is one the model's walk visits, with "
+          f"the statement count and the parameter qualifiers it seeds. The "
+          f"two `missed-G9-coverage*` buckets above are the disagreements.")
 
     print(f"no-manifest ({len(componentless)} files parsed with no component, "
           f"outside the model's fragment):")
@@ -8105,7 +8143,15 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             "too and is not a hole: a type-checker refusal (T1, T2, T3) or "
             "name resolution of declarations and of the lifecycle test DSL, "
             "routed by an explicit rule (`out_of_scope`), so it grows with "
-            "corpus work that never touched this layer."),
+            "corpus work that never touched this layer. The G9 coverage axis "
+            "(issue #2108) is not a bucket either: it is a SECOND reading of "
+            "a file the chain has already bucketed — whether the checker's "
+            "walk of its bodies is complete — so the gate prints its agreeing "
+            "count on its own line, and its two disagreements are the FATAL "
+            "`missed-G9-coverage` and `missed-G9-coverage-observation` rows "
+            "below. Recording the agreement as a bucket would give one file "
+            "two of them, which is what the one-bucket-per-file maps the "
+            "fatal list, the ratchets and the census total are built on."),
         "",
         "| bucket | files | gate |",
         "| --- | --- | --- |",

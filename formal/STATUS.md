@@ -1793,7 +1793,14 @@ is the list of unbuilt work. `out-of-scope` is informational too and is
 not a hole: a type-checker refusal (T1, T2, T3) or name resolution of
 declarations and of the lifecycle test DSL, routed by an explicit rule
 (`out_of_scope`), so it grows with corpus work that never touched this
-layer.
+layer. The G9 coverage axis (issue #2108) is not a bucket either: it is
+a SECOND reading of a file the chain has already bucketed — whether the
+checker's walk of its bodies is complete — so the gate prints its
+agreeing count on its own line, and its two disagreements are the FATAL
+`missed-G9-coverage` and `missed-G9-coverage-observation` rows below.
+Recording the agreement as a bucket would give one file two of them,
+which is what the one-bucket-per-file maps the fatal list, the ratchets
+and the census total are built on.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1811,7 +1818,6 @@ layer.
 | `agree-G5` | printed by the gate | informational |
 | `agree-G6` | printed by the gate | informational |
 | `agree-G9` | printed by the gate | informational |
-| `agree-G9-coverage` | printed by the gate | informational |
 | `agree-accept` | printed by the gate | informational |
 | `agree-intercept` | printed by the gate | informational |
 | `agree-prelude` | printed by the gate | informational |
