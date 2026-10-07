@@ -36,6 +36,28 @@ The council table is threaded in from `revl.model_council.check()` rather than
 computed here: this slice reads two validated tables and re-derives neither
 (design note 543 section 14).
 
+ONE ARM MAY OPT IN TO RESIDENCY (item 2118)
+-------------------------------------------
+An arm may close with `prefer resident`:
+
+    route model on classify {
+      confidential -> fast | small prefer resident,
+      * -> cloud
+    }
+
+It lets a candidate the host ALREADY HOLDS beat an earlier-written one, for
+that arm and for nothing else. It is a clause on one arm with no block-level
+form, so there is no spelling of it that reorders a second arm and no way to
+make it a default; an arm that does not write it is ordered by the written
+set whatever the host reports (design note 539 section 11.6 item 2, over
+decision 12: the written order is the preference). Residency never reaches
+the ordering except through this clause.
+
+The clause is REFUSED where it would rank nothing - on a one-candidate arm,
+and on an arm that reaches a council, which is one candidate whose
+aggregation the council declares - because an accepted-but-inert clause reads
+as a requirement without being one.
+
 WHICH WAY EVERY DECISION FAILS
 ------------------------------
 Every rule below refuses when it is unsure. There is no "assume the role is
@@ -565,6 +587,14 @@ def check(program, filename: str | None = None,
     the arm's line, which item 519's attenuation refusal points at. A program
     with no block gets `{}`.
 
+    `prefer_resident` is added by item 2118 to the entry of an arm that wrote
+    `prefer resident`, and only to that entry: it says the arm's own author
+    opted in to a candidate the host already holds beating an earlier-written
+    one. No arm that did not write the clause carries the key, so every entry
+    written before the clause existed is byte for byte what it was, and
+    `revl.model_schedule` - which reads it - orders by the written set alone
+    for every arm that does not have it.
+
     `councils` is `revl.model_council.check()`'s validated table, which an arm
     may name where it names a role (item 516 slice 2). It is threaded in
     rather than computed here for the reason design note 543 section 14 gives:
@@ -788,6 +818,29 @@ def check(program, filename: str | None = None,
                         )
                     resolved.append(role)
                 if council_placement is not None:
+                    # item 2118: `prefer resident` is the per-arm opt-in that
+                    # lets an already-loaded candidate beat an earlier-written
+                    # one, and an arm that reaches a council has exactly one
+                    # candidate to order, so the clause rules nothing out here.
+                    # The council's aggregation is declared and total (item
+                    # 516), so which member answers is not the author's to
+                    # reorder. Refused for the same reason a one-candidate arm
+                    # is: a clause that rules nothing out reads as a
+                    # requirement without being one.
+                    if arm.prefer_resident:
+                        raise RevlError(
+                            where, arm.line,
+                            f"`{arm.origin} -> {name} prefer resident` in "
+                            f"`route model on {stmt.action}` ({comp.name}) "
+                            f"ranks a council by residency",
+                            hint="a council is one candidate whose aggregation "
+                                 "is declared by the council, so `prefer "
+                                 "resident` has nothing to reorder. Name "
+                                 "roles instead of a council to rank them, or "
+                                 "drop the clause "
+                                 "(docs/design/539-model-portfolio.md)",
+                            code=CODE, category=CATEGORY,
+                        )
                     # `candidates` and `line` are additive and uniform across
                     # every placement shape (item 519). For a council they are
                     # the MEMBER roles, because those are the roles the arm
@@ -802,16 +855,44 @@ def check(program, filename: str | None = None,
                 head = resolved[0]
                 if len(resolved) > 1:
                     _check_candidate_set(where, comp, stmt, arm, resolved)
+                elif arm.prefer_resident:
+                    # item 2118: a one-candidate arm has nothing to rank. The
+                    # clause is admitted by the grammar (it is the same clause
+                    # on every arm) and refused here, where the arm's shape is
+                    # known, rather than silently accepted and never read -
+                    # an accepted-but-inert clause is the fail-open shape item
+                    # 515 removed from the candidate set itself.
+                    raise RevlError(
+                        where, arm.line,
+                        f"`{arm.origin} -> {name} prefer resident` in "
+                        f"`route model on {stmt.action}` ({comp.name}) names "
+                        f"one candidate, so ranking it by residency rules "
+                        f"nothing out",
+                        hint="`prefer resident` lets a candidate the host has "
+                             "already loaded beat an earlier-written one. "
+                             "Write the fallback it is meant to beat - "
+                             f"`{arm.origin} -> {name} | <role> prefer "
+                             "resident` - or drop the clause "
+                             "(docs/design/539-model-portfolio.md)",
+                        code=CODE, category=CATEGORY,
+                    )
                 # `candidates` and `line` are additive (items 515 and 519): the
                 # attenuation refusal points at the ARM that routes through the
                 # role, not at the component head. A consumer reading
                 # `role`/`residence` is unaffected.
-                arms[arm.origin] = {
+                arm_placement = {
                     "role": head.name,
                     "residence": head.residence,
                     "candidates": tuple(r.name for r in resolved),
                     "line": arm.line,
                 }
+                # `prefer_resident` is additive in the same way and for the
+                # same reason (item 2118): the key is present exactly on the
+                # arms that wrote the clause, so every arm that did not opt in
+                # has the table entry it had before the clause existed.
+                if arm.prefer_resident:
+                    arm_placement["prefer_resident"] = True
+                arms[arm.origin] = arm_placement
             actions[stmt.action] = arms
         if actions:
             placed[comp.name] = actions

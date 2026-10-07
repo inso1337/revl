@@ -254,6 +254,109 @@ def test_a_plain_host_needs_and_gets_nothing(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# 2b. The residency an opted-in arm ranked on (item 2118)
+# --------------------------------------------------------------------------
+
+# `APP` with the clause on the one arm that has a fallback, and a host that
+# declares both devices so `small` can really be placed when residency moves
+# it first. Everything else is byte-identical to the program above.
+OPTED_IN_APP = APP.replace(
+    "route model on classify { confidential -> fast | small }",
+    "route model on classify { confidential -> fast | small prefer resident }")
+
+BOTH_DEVICES = """
+[processes.edge]
+components = ["Classifier"]
+""" + PROBES + """
+[[processes.edge.devices]]
+name = "gpu0"
+device = "gpu"
+memory_mib = 8192
+quantisation = ["q4_k_m"]
+
+[[processes.edge.devices]]
+name = "cpu0"
+device = "cpu"
+memory_mib = 16384
+quantisation = ["int8"]
+"""
+
+DEVICES = [{"name": "gpu0", "device": "gpu", "memory_mib": 8192,
+            "quantisation": ["q4_k_m"]},
+           {"name": "cpu0", "device": "cpu", "memory_mib": 16384,
+            "quantisation": ["int8"]}]
+
+
+def _decide(tmp_path, source, residency=None):
+    """Write `source` for a host that declares both devices, decide its
+    schedule with `residency` as what the host already holds, and hand back
+    the file and the decision."""
+    app, _plc = _write(tmp_path, source, BOTH_DEVICES)
+    decided = ms.placement_schedules(
+        [app], {"edge": {"components": ["Classifier"], "devices": DEVICES}},
+        residency={"edge": residency or {}})
+    return app, decided[0]
+
+
+def test_an_arm_that_did_not_opt_in_carries_no_residency(tmp_path):
+    """An input no arm read is not part of the decision, so it is not carried:
+    the entry is byte for byte the one this program got before the clause
+    existed, whatever the host reports."""
+    app, decided = _decide(tmp_path, APP, {"small": "cpu0"})
+    assert decided.resident == {"fast": "gpu0"}
+    entry = ms.handoff(decided)
+    assert "residency" not in entry
+    assert ms.verify_handoff([app], "edge", ["Classifier"], entry) == \
+        {"fast": "gpu0"}
+
+
+def test_an_opted_in_handoff_carries_its_residency_and_verifies(tmp_path):
+    app, decided = _decide(tmp_path, OPTED_IN_APP, {"small": "cpu0"})
+    assert decided.resident == {"small": "cpu0"}
+    entry = ms.handoff(decided)
+    assert entry["residency"] == {"small": "cpu0"}
+    # The child re-derives the SAME decision from the input the conductor used
+    # rather than believing the entry: same placement, same written rank.
+    assert ms.verify_handoff([app], "edge", ["Classifier"], entry) == \
+        {"small": "cpu0"}
+    assert entry["schedule"]["placements"][0]["rank"] == 1
+
+
+def test_a_residency_no_arm_reads_is_refused(tmp_path):
+    """The child is handed an input it must consume. A residency for a program
+    whose arms all left the clause out is refused rather than carried, for the
+    reason a schedule for a host that routes nothing is: nothing would read
+    it."""
+    app, decided = _decide(tmp_path, APP)
+    entry = ms.handoff(decided)
+    entry["residency"] = {"small": "cpu0"}
+    with pytest.raises(ms.ScheduleRefusal) as excinfo:
+        ms.verify_handoff([app], "edge", ["Classifier"], entry)
+    assert "no arm placed here wrote `prefer resident`" in str(excinfo.value)
+
+
+def test_a_malformed_residency_is_refused(tmp_path):
+    app, decided = _decide(tmp_path, OPTED_IN_APP, {"small": "cpu0"})
+    entry = ms.handoff(decided)
+    entry["residency"] = {"small": 1}
+    with pytest.raises(ms.ScheduleRefusal) as excinfo:
+        ms.verify_handoff([app], "edge", ["Classifier"], entry)
+    assert "must map role names to device names" in str(excinfo.value)
+
+
+def test_a_tampered_residency_is_refused(tmp_path):
+    """The residency is an INPUT of the decision, so a different input is a
+    different decision - and the child derives the decision rather than
+    believing it, which is what catches this."""
+    app, decided = _decide(tmp_path, OPTED_IN_APP, {"small": "cpu0"})
+    entry = ms.handoff(decided)
+    entry["residency"] = {"fast": "gpu0"}
+    with pytest.raises(ms.ScheduleRefusal) as excinfo:
+        ms.verify_handoff([app], "edge", ["Classifier"], entry)
+    assert "does not match the one derived" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
 # 3. End to end through run_placement, with real py children
 # --------------------------------------------------------------------------
 

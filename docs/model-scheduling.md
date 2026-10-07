@@ -76,7 +76,9 @@ step, in program order:
 
 - A role arm is satisfied by one of its candidates. They are tried in the
   order written, and within a candidate, devices are tried in the order the
-  host declares them.
+  host declares them. An arm may opt in to residency instead — see
+  [One arm may opt in to residency](#one-arm-may-opt-in-to-residency) — and an
+  arm that does not is ordered by the written set however the host reports.
 - A council arm is satisfied only when every member role is placed, because a
   council asks every member.
 - A role is loaded once per host. A later step that picks a role already
@@ -104,6 +106,55 @@ The same program on a host that offers only a 1024 MiB CPU prints:
 ```
   model schedule [pi]: Classifier.classify confidential -> small on cpu0, fallback 1 of 1
 ```
+
+## One arm may opt in to residency
+
+An arm may close with `prefer resident`:
+
+```revl fragment
+route model on classify {
+  confidential -> fast | small prefer resident,
+  * -> cloud
+}
+```
+
+That arm's author is saying a candidate the host **already holds** may beat an
+earlier-written one. The clause is on one arm and there is no block-level,
+host-level or command-line form of it, so it can never reorder a second arm and
+never becomes a default: the written order stays the preference for every arm
+that does not write it, and for every arm of every program written before the
+clause existed (design note 539 §11.6 item 2, over decision 12).
+
+What residency changes is **which candidate an opted-in arm settles on**. It
+does not change the candidate set, and it does not change the memory the plan
+reserves for the role it picks. The candidates the host holds are tried first,
+each group still in the order the program wrote it; the rest follow, and a held
+candidate that does not fit is a miss like any other, so the arm falls back
+through the order it always had. `rank` in the decision and in the printed
+fallback is still the position in the **written** set, so the line reads
+`small on cpu0, fallback 1 of 1` whether or not residency moved it there.
+
+The clause is refused where it would rank nothing, because an accepted-but-inert
+clause reads as a requirement without being one:
+
+- on an arm that names one candidate, which has no order to change;
+- on an arm that reaches a council, which is one candidate whose aggregation
+  the council declares.
+
+The plan reads what a host holds off the record item 1 landed — the provision's
+`timeline`, through `Provisions.residency()`, which
+`model_schedule.resident_roles()` turns into `{role: device}`. Nothing calls
+that reader at plan time yet: acquisition is item 1's second half, and
+`_model_schedules`'s `residency` parameter is the seam it plugs into.
+
+The self-host gate does not read the clause yet. Its arm reader
+(`model_arms_in` in `selfhost/lower.rvl`) reads `<origin> -> <candidate>` arms
+separated by `,`/`;` and has no place for a trailing clause, so an arm that
+writes one leaves it a token it cannot account for and it refuses the whole
+block **by name** — `` `route model on classify` in Classifier is written in a
+form this gate does not decide`` — rather than stepping over the clause and
+deciding an arm it did not read. Fail-closed, and not the exit item 2 asks for:
+extending that reader is a follow-up owed to §11.6 item 2.
 
 ## The refusal
 
@@ -274,9 +325,12 @@ with it is refused as placed on a host with no devices.
   server already held the member before the load, and how long it was held.
   `revl run` prints that at boot and again at teardown, so the two lines differ
   ([providers-ollama.md](providers-ollama.md)). The scheduler still ranks
-  candidates by the order the program wrote, not by cost: whether a resident
-  fallback should beat a cold first choice is a program author's question and
-  has no surface yet, and a `model role` clause declaring a load cost is the
-  other half of slice S3 (`docs/design/539-model-portfolio.md` §11.6).
+  candidates by the order the program wrote unless an arm writes `prefer
+  resident`, which lets a candidate the host already holds beat an earlier
+  written one for that arm alone: residency never reorders an arm that did not
+  ask, and it is a preference an author states rather than a measurement the
+  planner applies. A `model role` clause declaring a load cost is decided out of
+  scope, so a declared cost stays inexpressible and item 538's measured cost is
+  the answer (`docs/design/539-model-portfolio.md` §11.6).
 - **A single-process run is not scheduled.** `revl run app.rvl` with no
   placement file declares no host, so there is nothing to schedule against.

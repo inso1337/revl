@@ -46,6 +46,32 @@ before a later one does, and the same inputs always give the same schedule.
 The walk is exhaustive up to `SEARCH_BUDGET` placement attempts; past that it
 refuses rather than admitting a schedule it did not finish looking for.
 
+ONE ARM MAY ASK FOR RESIDENCY TO BREAK A TIE (item 2118)
+-------------------------------------------------------
+An arm may close with `prefer resident`:
+
+    route model on classify {
+      confidential -> fast | small prefer resident,
+      * -> cloud
+    }
+
+That arm's author is saying a candidate the host ALREADY HOLDS may beat an
+earlier-written one, and the clause is on one arm: there is no block-level
+form of it, no host-level form, and no command-line form, so it can never
+reorder a second arm and never becomes a default. An arm that does not write
+it is ordered by the written set whatever the host reports, and a caller that
+passes no residency at all - which is every caller that does not mean to rank
+by it - schedules exactly as it did before the clause existed. That is
+design note 539 section 11.6 item 2, over decision 12: the written order is
+the preference, and residency is a preference an author states.
+
+What residency can change is WHICH candidate an opted-in arm settles on. It
+does not change the candidate set, and it does not change the memory the plan
+reserves for the role it picks: reading what the host holds into the plan's
+own accounting is item 1's second half, which this clause is the surface for
+rather than the whole of. `resident_roles()` reads what a host holds off the
+landed reader, and `schedule(..., residency=...)` is where it is consumed.
+
 WHICH WAY THIS FAILS
 --------------------
 Closed.
@@ -204,12 +230,19 @@ def _device_quantisation(where: str, value) -> tuple:
 @dataclass(frozen=True)
 class Step:
     """One placement the schedule must make. `options` are role names in the
-    order the program wrote them; a council member is a one-option step."""
+    order the program wrote them; a council member is a one-option step.
+
+    `prefer_resident` is the arm's per-arm opt-in (item 2118, `prefer
+    resident`). It is False on every step of every arm that did not write the
+    clause, and `_Search.order()` reads residency on a step ONLY when it is
+    True - so `options` is the whole ordering for an arm that did not opt in,
+    whatever the host reports."""
     component: str
     action: str
     origin: str
     options: tuple
     council: str | None = None
+    prefer_resident: bool = False
 
 
 def steps_for(table: dict, components=None) -> list:
@@ -233,7 +266,11 @@ def _arm_steps(component: str, action: str, origin: str, placement: dict) -> lis
     council = placement.get("council")
     candidates = tuple(placement.get("candidates") or (placement["role"],))
     if council is None:
-        return [Step(component, action, origin, candidates)]
+        return [Step(component, action, origin, candidates, None,
+                     bool(placement.get("prefer_resident")))]
+    # A council member step is one option by construction, so it is never
+    # rankable and never carries the opt-in; `revl.model_route` refuses the
+    # clause on a council arm rather than leaving it here unread.
     return [Step(component, action, origin, (member,), council)
             for member in candidates]
 
@@ -273,12 +310,21 @@ class Schedule:
 
     `resident` maps each role this host loads to the one device it is loaded
     on: one entry per role however many steps chose it.
+
+    `residency` is the OTHER direction and is NOT `resident`: it is what the
+    host ALREADY HELD when this decision was made, `{role: device}`, and it is
+    an INPUT, not part of the decision. It is recorded only when an arm on this
+    host wrote `prefer resident` and so actually ranked by it (item 2118), so
+    it is empty for every schedule made before that clause existed and for
+    every host whose arms all left the clause out - a reader that ignores it
+    reads what it always read.
     """
     host: str
     devices: tuple
     placements: tuple
     resident: dict = field(default_factory=dict)
     demands: dict = field(default_factory=dict, compare=False)
+    residency: dict = field(default_factory=dict, compare=False)
 
     def loads(self) -> int:
         """How many model loads this host makes: one per resident role."""
@@ -301,37 +347,85 @@ class Schedule:
         }
 
 
-def schedule(host: str, devices, roles: dict, steps) -> Schedule:
-    """Place every step on `devices`, or raise `ScheduleRefusal`."""
-    search = _Search(host, tuple(devices), roles, list(steps))
+def schedule(host: str, devices, roles: dict, steps,
+             residency: dict | None = None) -> Schedule:
+    """Place every step on `devices`, or raise `ScheduleRefusal`.
+
+    `residency` is `{role: device}` for what the host already holds at plan
+    time - `resident_roles()` reads it off the landed reader - and it is read
+    by exactly the steps whose arm opted in with `prefer resident` (item
+    2118). The default is no residency at all, so a caller that passes none
+    makes the decision it made before the clause existed: written order.
+    """
+    residency = dict(residency or {})
+    steps = list(steps)
+    search = _Search(host, tuple(devices), roles, steps, residency)
     if not search.place(0):
         raise ScheduleRefusal(_refusal(search))
     chosen = tuple(search.chosen)
     demands = {p.role: roles[p.role].profile for p in chosen
                if roles[p.role].profile is not None}
+    # A residency is recorded only when some arm on this host asked for one.
+    # A caller that passes residency to a program whose arms all left the
+    # clause out gets the schedule it always got AND the entry it always got,
+    # because an input no arm reads is not part of the decision.
+    ranked = residency if any(s.prefer_resident for s in steps) else {}
     return Schedule(host, tuple(devices), chosen, dict(search.resident),
-                    demands)
+                    demands, ranked)
 
 
 class _Search:
-    """Depth-first placement over the steps, candidates in written order."""
+    """Depth-first placement over the steps, candidates in written order.
 
-    def __init__(self, host, devices, roles, steps):
+    `residency` is what the host already holds, and `order()` is the only
+    place it is read: the search itself is unchanged, so the set of
+    placements it considers is the same set it always considered and only the
+    sequence in which an opted-in arm tries them differs.
+    """
+
+    def __init__(self, host, devices, roles, steps, residency=None):
         self.host = host
         self.devices = devices
         self.roles = roles
         self.steps = steps
+        self.residency = dict(residency or {})
         self.free = {d.name: d.memory_mib for d in devices}
         self.resident: dict[str, str] = {}
         self.chosen: list = [None] * len(steps)
         self.attempts = 0
         self.dead_end = None
 
+    def order(self, step: Step) -> tuple:
+        """`step.options` in the order this plan tries them.
+
+        The written order, unless the arm opted in AND the host reported what
+        it holds: then the candidates the host already holds come first, each
+        group still in the order the program wrote it. `Step.options` remains
+        the written set, and `Placement.rank` is still an index into it, so
+        what the plan REPORTS is unchanged - only which candidate it settles
+        on can differ, and only for an arm that asked.
+
+        Residency orders candidates here and does nothing else: it does not
+        change the memory the plan reserves for the role it picks, and it
+        cannot move a role into or out of the candidate set. Reading what the
+        host holds into the plan's own memory accounting is item 1's second
+        half, which this clause is the surface for rather than the whole of.
+        """
+        if not step.prefer_resident or not self.residency:
+            return step.options
+        held = tuple(name for name in step.options if name in self.residency)
+        cold = tuple(name for name in step.options if name not in self.residency)
+        return held + cold
+
     def place(self, index: int) -> bool:
         if index == len(self.steps):
             return True
         step = self.steps[index]
-        for rank, role_name in enumerate(step.options):
+        for role_name in self.order(step):
+            # `rank` indexes the WRITTEN set, not the order tried, so a
+            # fallback reported by an opted-in arm is the position the program
+            # wrote rather than the position residency moved it to.
+            rank = step.options.index(role_name)
             for device, how in self.options(role_name):
                 self._count_attempt()
                 self._take(index, step, rank, role_name, device, how)
@@ -424,6 +518,15 @@ def _message(search: _Search, step: Step, free: dict, resident: dict) -> str:
         f"`{name}` ({search.roles[name].profile.describe()}): "
         f"{_why_not(search, search.roles[name].profile, free, resident)}"
         for name in step.options)
+    # item 2118: an arm that opted in was tried in an order residency chose,
+    # and a refusal that did not say so would leave the author reading a list
+    # that does not match the search.
+    ranked = ""
+    if step.prefer_resident:
+        ranked = (" This arm wrote `prefer resident`, so its candidates were "
+                  "tried " + ", then ".join(f"`{name}`"
+                                            for name in search.order(step))
+                  + ".")
     return (
         f"host `{search.host}` cannot place action `{step.action}` "
         f"({step.component}), origin `{step.origin}`{member}: no candidate "
@@ -431,7 +534,7 @@ def _message(search: _Search, step: Step, free: dict, resident: dict) -> str:
         f"names, so the placement is refused rather than moved to a device "
         f"the program did not declare; declare a device that fits in "
         f"[[processes.{search.host}.devices]], or place the component on a "
-        f"host that has one (item 515, {_DESIGN})")
+        f"host that has one (item 515, {_DESIGN}){ranked}")
 
 
 def _why_not(search: _Search, profile, free: dict, resident: dict) -> str:
@@ -517,13 +620,21 @@ def _declaration_closure(loader, roots) -> list:
     return included
 
 
-def placement_schedules(files, processes: dict) -> list:
+def placement_schedules(files, processes: dict,
+                        residency: dict | None = None) -> list:
     """Schedule every placement host, or raise `ScheduleRefusal`.
 
     Every host's `devices` table is validated whether or not anything is
     routed to it. A host with no routed model action gets no schedule, so a
     composition with no `route model` block schedules nothing and changes
     nothing downstream.
+
+    `residency` is `{host: {role: device}}` - what each host already holds at
+    plan time, as `resident_roles()` reads it off the landed reader - and each
+    host's entry reaches `schedule()` under the same rule: read by the steps
+    whose arm wrote `prefer resident`, and by no others. A caller that passes
+    none schedules exactly as it did before the clause existed, which is every
+    caller that does not mean to rank by residency.
     """
     hosts = {name: parse_devices(name, (conf or {}).get("devices"))
              for name, conf in processes.items()}
@@ -532,8 +643,31 @@ def placement_schedules(files, processes: dict) -> list:
     for name, conf in processes.items():
         steps = steps_for(table, (conf or {}).get("components") or [])
         if steps:
-            schedules.append(schedule(name, hosts[name], roles, steps))
+            schedules.append(schedule(name, hosts[name], roles, steps,
+                                      (residency or {}).get(name) or {}))
     return schedules
+
+
+def resident_roles(provisions) -> dict:
+    """`{role: device}` for every role a `Provisions` reports as HELD now.
+
+    This is the read side of item 2118 and the only route by which residency
+    reaches a ranking: `placement_schedules(files, processes,
+    residency={host: resident_roles(provisions)})`. It asks the reader landed
+    by item 1 (`revl.providers.provision.Provisions.residency()`) and derives
+    nothing of its own - a role counts as held exactly when that report shows
+    it loaded more often than it unloaded AND on a device, because a role that
+    was loaded and unloaded is not resident and one that never reached a
+    device is not a placement this host can reuse.
+
+    Pure: `residency()` reads the record and asks the server nothing, so this
+    can be called at plan time.
+    """
+    held = {}
+    for role, report in provisions.residency().items():
+        if report.get("loads", 0) > report.get("unloads", 0) and report.get("device"):
+            held[role] = report["device"]
+    return held
 
 
 # --------------------------------------------------------------------------
@@ -555,8 +689,19 @@ READING_TIERS = ("py",)
 def handoff(decided: Schedule) -> dict:
     """The `spec[SPEC_KEY]` entry for one host: its declared devices and the
     decision. The devices are carried so the child can re-derive the decision
-    from the composition's files instead of believing the entry."""
-    return {
+    from the composition's files instead of believing the entry.
+
+    A schedule that ranked by residency also carries the residency it ranked
+    on, under `residency`. That is an INPUT of the decision, exactly as
+    `devices` is, so carrying it is what keeps the child's re-derivation the
+    SAME decision rather than a second one: the child still recomputes from
+    the files and still refuses any difference, and the entry is still not
+    believed over them. A schedule that ranked nothing - every host whose arms
+    all left the clause out, and every host scheduled before the clause
+    existed - carries no `residency` key at all, so its entry is byte for byte
+    the entry it was.
+    """
+    entry = {
         "host": decided.host,
         "devices": [{"name": d.name, "device": d.device,
                      "memory_mib": d.memory_mib,
@@ -564,6 +709,9 @@ def handoff(decided: Schedule) -> dict:
                     for d in decided.devices],
         "schedule": decided.to_dict(),
     }
+    if decided.residency:
+        entry["residency"] = dict(decided.residency)
+    return entry
 
 
 def verify_handoff(files, host: str, components, entry) -> dict | None:
@@ -577,6 +725,13 @@ def verify_handoff(files, host: str, components, entry) -> dict | None:
     * the entry is malformed, names another host, or differs in any field from
       the schedule derived from `files`, `components` and the entry's own
       declared devices.
+
+    `residency` is the one field a child does not derive for itself, because
+    it is a fact about the host rather than about the composition: it is what
+    the conductor observed the host holding when it planned. The child takes
+    it as given and re-derives the DECISION from it, so a conductor that
+    ranked by residency and a child that did not know what the host held would
+    still not disagree - the child is handed the input the conductor used.
     """
     roles, table = routes_of(composition_program(files))
     steps = steps_for(table, components)
@@ -587,7 +742,9 @@ def verify_handoff(files, host: str, components, entry) -> dict | None:
                 f"model schedule; a process does not run a model it was not "
                 f"scheduled onto ({_DESIGN})")
         return None
-    if not isinstance(entry, dict) or set(entry) != {"host", "devices", "schedule"}:
+    if not isinstance(entry, dict) or not (
+            {"host", "devices", "schedule"} <= set(entry)
+            and set(entry) <= {"host", "devices", "schedule", "residency"}):
         raise ScheduleRefusal(
             f"host `{host}`: the model schedule in its spec is malformed")
     if entry["host"] != host:
@@ -598,8 +755,21 @@ def verify_handoff(files, host: str, components, entry) -> dict | None:
         raise ScheduleRefusal(
             f"host `{host}` routes no model action but its spec carries a "
             f"model schedule; a schedule for nothing is refused")
+    residency = entry.get("residency") or {}
+    if not isinstance(residency, dict) or not all(
+            isinstance(role, str) and isinstance(device, str)
+            for role, device in residency.items()):
+        raise ScheduleRefusal(
+            f"host `{host}`: the residency in its model schedule spec is "
+            f"malformed; it must map role names to device names")
+    if residency and not any(step.prefer_resident for step in steps):
+        raise ScheduleRefusal(
+            f"host `{host}`: the model schedule in its spec carries a "
+            f"residency but no arm placed here wrote `prefer resident`, so "
+            f"nothing ranked by it; an input no arm reads is refused rather "
+            f"than carried (item 2118, {_DESIGN})")
     expected = schedule(host, parse_devices(host, entry["devices"]), roles,
-                        steps).to_dict()
+                        steps, residency).to_dict()
     if entry["schedule"] != expected:
         raise ScheduleRefusal(
             f"host `{host}`: the model schedule in its spec does not match the "

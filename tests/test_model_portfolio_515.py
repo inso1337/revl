@@ -263,6 +263,118 @@ def test_the_secret_origin_reaches_no_candidate():
 
 
 # --------------------------------------------------------------------------
+# One arm may opt in to residency (item 2118, design note 539 section 11.6)
+# --------------------------------------------------------------------------
+
+# The flagship with ONE arm opted in and nothing else changed. `prefer
+# resident` is what section 11.6 item 2 reserves: the arm's own author saying
+# a candidate the host already holds may beat an earlier-written one. Decision
+# 12 is not reopened - the written order is still the preference, and it is
+# still what the arm that does not write the clause gets.
+OPTED_IN = PORTFOLIO.replace("confidential -> fast | small,",
+                             "confidential -> fast | small prefer resident,")
+
+# The one-candidate arm, the same clause: nothing for it to order.
+ONE_CANDIDATE = PORTFOLIO.replace("confidential -> fast | small,",
+                                  "confidential -> fast prefer resident,")
+
+# An arm that reaches a council: one candidate whose aggregation the council
+# declares, so again nothing for the clause to order.
+COUNCIL_ARM = """
+model role fast on_device device gpu memory 6144 quant q4_k_m
+model role small on_device device cpu memory 512 quant int8
+
+model council Release {
+  proposer  -> fast,
+  adversary -> small,
+  aggregate unanimous
+}
+
+service Answer { fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> Release prefer resident
+  }
+  provide out { fn classify(text) = text }
+}
+"""
+
+
+def test_the_opt_in_reaches_the_arm_that_wrote_it():
+    from revl.model_route import check
+    from revl.parser import Parser
+
+    placed = check(Parser(OPTED_IN, "optin.rvl").parse())
+    arm = placed["Classifier"]["classify"]["confidential"]
+    assert arm["prefer_resident"] is True
+    # The head, the candidate set and the residence are what they were: the
+    # clause is an ordering preference and re-derives nothing (item 514's
+    # ceiling reads `role`, item 515's search reads `candidates`).
+    assert arm["role"] == "fast"
+    assert arm["candidates"] == ("fast", "small")
+    assert arm["residence"] == "on_device"
+
+
+def test_an_arm_that_did_not_opt_in_carries_no_such_key():
+    """The key is additive in the sense item 519 gives that word: present on
+    exactly the arms that wrote the clause, so every arm written before the
+    clause existed has the table entry it had. A key on every arm would be
+    the global flag section 11.6 refuses, and this is the assertion that would
+    fail first if one were ever introduced."""
+    from revl.model_route import check
+    from revl.parser import Parser
+
+    placed = check(Parser(PORTFOLIO, "none.rvl").parse())
+    for origin, arm in placed["Classifier"]["classify"].items():
+        assert "prefer_resident" not in arm, origin
+
+
+def test_the_opt_in_is_admitted_on_the_wildcard_arm_too():
+    """`*` is an origin like any other arm's, so the clause is admitted there.
+    What makes it per-arm is that writing it on one arm says nothing about
+    another - not that some arms may not write it."""
+    src = PORTFOLIO.replace("* -> cloud", "* -> fast | small prefer resident")
+    from revl.model_route import check
+    from revl.parser import Parser
+
+    placed = check(Parser(src, "wild.rvl").parse())
+    assert placed["Classifier"]["classify"]["*"]["prefer_resident"] is True
+    assert placed["Classifier"]["classify"]["confidential"]["candidates"] == \
+        ("fast", "small")
+
+
+def test_a_one_candidate_arm_that_opts_in_is_refused():
+    """A clause that rules nothing out reads as a requirement without being
+    one, which is the fail-open shape item 515 removed from the candidate set
+    itself. Admitted by the grammar, refused here, where the arm's shape is
+    known."""
+    err = _refuses(ONE_CANDIDATE, "onearm.rvl")
+    assert err.code == CODE
+    assert "rules nothing out" in str(err)
+    assert "prefer resident" in str(err)
+    assert "confidential" in str(err)
+
+
+def test_an_arm_that_reaches_a_council_and_opts_in_is_refused():
+    """A council is one candidate and the council declares how its members
+    agree, so which member answers is not the arm's to order."""
+    err = _refuses(COUNCIL_ARM, "council.rvl")
+    assert err.code == CODE
+    assert "ranks a council by residency" in str(err)
+    assert "Release" in str(err)
+
+
+def test_the_clause_needs_the_word_resident():
+    """`prefer` is contextual and closes an arm only when `resident` follows
+    it, so the second word is not optional: there is one spelling of this
+    opt-in, not two."""
+    err = _refuses(OPTED_IN.replace("prefer resident", "prefer warm"),
+                   "warm.rvl")
+    assert "resident" in str(err)
+
+
+# --------------------------------------------------------------------------
 # No IR: item 512's property, held by this item
 # --------------------------------------------------------------------------
 

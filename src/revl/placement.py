@@ -2231,15 +2231,26 @@ def capability_realm_diagnostic(processes: dict, ir: dict,
     return None
 
 
-def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
+def _model_schedules(files, processes: dict,
+                     residency: dict | None = None) -> tuple[str | None, dict]:
     """Schedule the routed model actions onto each host's declared devices
     (item 515, `revl.model_schedule`). Prints the decision, one line per
     placement, and returns `(refusal, {host: spec entry})`. The entry is what
     the host's child is handed under `model_schedule.SPEC_KEY`; a host with
-    no routed model action has none, so its spec is unchanged."""
+    no routed model action has none, so its spec is unchanged.
+
+    `residency` is `{host: {role: device}}` for what each host already holds
+    at plan time, as `model_schedule.resident_roles()` reads it off the landed
+    reader (item 2118). It reaches the decision only through an arm that wrote
+    `prefer resident`, so passing it cannot reorder an arm that did not opt
+    in, and passing none is the written order every caller had before. The
+    default is `None` because no plan-time caller observes a host's residency
+    yet - acquisition is item 1's second half, and this parameter is the seam
+    it plugs into rather than a ranking switch."""
     from . import model_schedule  # noqa: PLC0415 - loaded only at plan time
     try:
-        schedules = model_schedule.placement_schedules(files, processes)
+        schedules = model_schedule.placement_schedules(files, processes,
+                                                       residency)
     except model_schedule.ScheduleRefusal as exc:
         return str(exc), {}
     for host in schedules:

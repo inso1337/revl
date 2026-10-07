@@ -84,7 +84,7 @@ r__emit_stmt = r_pure_expr [ "compensate" r_pure_expr ] [ "with" r_pure_expr ] [
 r_realms_route = "realms" "(" { (string "," | "?" ident ",") } ("?" ident "," | "?" ident | string [ "," ]) ")" [ "strategy" "(" ident ")" ] ;
 r_realm_placeholder = "realm" "(" "?" ident ")" ;
 r_realm_label = "realm" "(" string ")" ;
-r_model_route_stmt = "route" "model" "on" ident "{" ({ r__skip_semis ("*" | ident) "->" r__model_route_candidate { "|" r__model_route_candidate } [ "," ] } | { r__skip_semis ("*" | ident) "->" r__model_route_candidate { "|" r__model_route_candidate } [ "," ] } r__skip_semis) "}" ;
+r_model_route_stmt = "route" "model" "on" ident "{" ({ r__skip_semis ("*" | ident) "->" r__model_route_candidate { "|" r__model_route_candidate } [ "prefer" "resident" ] [ "," ] } | { r__skip_semis ("*" | ident) "->" r__model_route_candidate { "|" r__model_route_candidate } [ "prefer" "resident" ] [ "," ] } r__skip_semis) "}" ;
 r_record_literal = "{" { r__record_key_name ":" ("[" { r_literal [ "," ] } "]" | r_literal) [ "," ] } "}" ;
 r_provide = "provide" r__provision_key "{" { [ "async" ] "fn" ident "(" { r__name [ ":" r_type_ ] [ "," ] } ")" [ "->" r_type_ ] ("=" r_pure_expr | "{" { r__skip_semis r_stmt__in_method_on } r__skip_semis "}") } "}" ;
 r__ternary = r__ternary_body ;
