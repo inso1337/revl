@@ -9754,7 +9754,7 @@ fn spawn_form_at(comp: CompD, names: List[Str]) -> Verd {
 
 // The spawn-boundary gate: bounds then attenuation, both `code="G4"`, run only
 // when the program spawns (empty edge list -> no obligation, as in the reference).
-fn check_spawn(pg: Prog, cx: Ctx) -> Verd {
+fn check_spawn(ts: List[Token], pg: Prog, cx: Ctx) -> Verd {
   let edges = spawn_edges(pg.comps)
   if (edges.length() == 0) { return no_verd() }
   let emisClosed = surf_closure(emis_surface_map(pg.comps, cx), edges)
@@ -9765,7 +9765,14 @@ fn check_spawn(pg: Prog, cx: Ctx) -> Verd {
   // per-instance `config.` symbol and the uncanonicalizable parameter list.
   if (!svc_caps_modelled(pg.svcs, 0)) { return no_verd() }
   let reachBase = reach_surface_pairs(pg.comps, cx)
-  let reachClosed = surf_closure(reachBase, edges)
+  // THE MODEL ROLE IN THIS PRODUCT (item 519 slice 3, issue #1193): the closure
+  // starts from each child's own crossings PLUS the reach of the model role it
+  // routes through, so a spawner holding only the role's key is refused by the
+  // fold below with no second rule and no second message. `reachBase` itself is
+  // passed on untouched: a spawner is measured against what it HOLDS, and
+  // folding its own reach into that would mask the widening being refused.
+  let reachClosed = surf_closure(
+    model_reach_spawn_base(ts, pg, cx, reachBase), edges)
   let av = check_spawn_atten(pg.comps, 0, cx, reachBase, reachClosed)
   if (av.v != "") { return av }
   return no_verd()
@@ -17511,6 +17518,87 @@ fn model_reach_comp(comp: CompD, cx: Ctx, own: List[Str], bs: List[MBlock],
   return no_verd()
 }
 
+// The MODEL ROLE in the SPAWN product (item 519 slice 3, issue #1193):
+// `base` with each component's model-role reach folded in, which is the surface
+// `check_spawn`'s attenuation closure STARTS from.
+//
+// `reach_surface_pairs` builds that surface out of each component's OWN
+// crossings, so a component whose effective ceiling is wider than its own
+// crossings -- because a `model role` it routes through reaches further -- is
+// accounted as if the role were inert, and a spawner holding only the role's
+// key admits a child that reaches past it. `model_reach_comp` decides exactly
+// this widening one component at a time for the model product; this is the part
+// of its reach that belongs in the spawn product, so the EXISTING
+// monotone-shrinkage refusal (G4) carries the lineage form of the case. The
+// closure then propagates a child's grown ceiling up to the ancestors of its
+// spawner, exactly as it already propagates a grandchild's own crossings.
+//
+// `base` comes back as it stands -- byte-identical -- for a program that
+// declares no role, for a component that does not consult a model, and for a
+// component whose role edges this fold does NOT decide (`model_edges`' "?"
+// sentinel, or a role that did not parse): an undecided component is left
+// ALONE rather than guessed at. Not folding keeps the gate's previous answer,
+// where folding a reach the fold cannot justify could raise a FALSE refusal --
+// and a false rejection over the corpus is the regression this gate exists to
+// catch. Every program that does not opt into `model role` is unaffected.
+fn model_reach_spawn_base(ts: List[Token], pg: Prog, cx: Ctx,
+                          base: SurfMap) -> SurfMap {
+  let rs = model_roles_of(ts)
+  if (rs.length() == 0) { return base }
+  var i = 0
+  while (i < rs.length()) {
+    if (!rs[i].rrok) { return base }
+    i += 1
+  }
+  let cs = model_councils_of(ts)
+  let sps = model_comp_spans(ts)
+  var m = base
+  var ci = 0
+  while (ci < pg.comps.length()) {
+    let comp = pg.comps[ci]
+    let cxc = ctx_for(cx, comp)
+    let own = surf_get(base, comp.name)
+    let held = cap_strip_all(model_svc_ns(held_caps_pairs(comp, cxc, own), comp))
+    if (model_consults(held)) {
+      var crossed: List[Str] = []
+      i = 0
+      while (i < held.length()) {
+        crossed = union_into(crossed, [cap_parse(held[i]).token])
+        i += 1
+      }
+      let names = own_cross_names(comp, cxc)
+      i = 0
+      while (i < names.length()) {
+        crossed = union_into(crossed, caps_of(cxc.appr.vcaps, names[i]))
+        i += 1
+      }
+      var bs: List[MBlock] = []
+      var si = 0
+      while (si < sps.length()) {
+        if (sps[si].sname == comp.name) {
+          bs = model_blocks_in(ts, sps[si].slo, sps[si].shi)
+        }
+        si += 1
+      }
+      let es = model_edges(bs, rs, cs, crossed, comp.line)
+      if (!(es.length() > 0 && es[0].erole == "?")) {
+        var reach: List[Str] = []
+        i = 0
+        while (i < es.length()) {
+          let r = rs[mrole_at(rs, es[i].erole, 0)]
+          reach = union_into(reach, cap_strip_all(model_reach_of(r)))
+          i += 1
+        }
+        if (reach.length() > 0) {
+          m = m.set(comp.name, union_into(own, reach))
+        }
+      }
+    }
+    ci += 1
+  }
+  return m
+}
+
 // The whole fold, run where `check_and_lower` collects it: after the spawn
 // attenuation, over the components the component loop did not poison, the
 // first refusal only (the reference raises once).
@@ -18326,7 +18414,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // the spawn-boundary bounds (G4/G6) and capability attenuation (item 66) run
   // once every component is lowered, before the G2/G3 link — the reference's
   // order (`_check_spawn_emission_bounds`, `_check_spawn_attenuation`, `_link`).
-  let sv = check_spawn(pg, base)
+  let sv = check_spawn(ts, pg, base)
   if (sv.v != "") { refs = refs.push(sv) }
   // the MODEL REACH fold (item 519, slice 2 of issue #1193): collected right
   // after the spawn attenuation, which is where `check_and_lower` collects
@@ -28569,6 +28657,48 @@ component Supervisor requires kv_a: StoreA {
   let l = effect spawn Leaker with { } undo l.dispose()
 }""")
   assert v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// ---- item 519, the role reach in the SPAWN product (issue #1193 slice 3) ---
+
+test "a spawn whose child reaches through a model role is refused (G4)" {
+  // the fail-open slice 3 closes: `Worker` holds `shell.exec` itself (it
+  // requires the `Shell` service), so its OWN crossings are inside the
+  // supervisor's `model.complete` and the spawn was admitted. The child's
+  // effective ceiling is wider than its own crossings because the role its
+  // `route model` arm names reaches `shell.exec`, and the fold now starts the
+  // spawn closure from that ceiling, so the existing monotone-shrinkage
+  // refusal fires with no second rule and no second message.
+  let v = admit_src("""model role tool on_device reaches [shell.exec]
+service Shell { emission[shell.exec] fn run(c: Str) -> Str }
+service Completions { emission[model.complete] fn complete(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+component Worker requires sh: Shell requires llm: Completions provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit llm.complete("x") return "x" } }
+}
+component Supervisor requires llm: Completions {
+  let w = effect spawn Worker with { } undo w.dispose()
+}""")
+  assert v == "G4|`Supervisor` spawns `Worker`, granting it `shell.exec`, but `Supervisor` holds only `model.complete` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+test "a spawn whose role reach stays within the spawner admits" {
+  // the control: identical shape, and the role reaches `model.complete`,
+  // which the supervisor already holds. It pins that the fold widens the
+  // COMPARISON and not the verdict -- a role in a spawn lineage is not itself
+  // a refusal.
+  let v = admit_src("""model role tool on_device reaches [model.complete]
+service Completions { emission[model.complete] fn complete(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+component Worker requires llm: Completions provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit llm.complete("x") return "x" } }
+}
+component Supervisor requires llm: Completions {
+  let w = effect spawn Worker with { } undo w.dispose()
+}""")
+  assert v == ""
 }
 
 // item 260 §3.3: the BUDGET half. The crossing fold is ceiling-blind — stripped,

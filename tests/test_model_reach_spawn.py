@@ -23,11 +23,13 @@ crossings, so `holds` still names what the spawner actually holds.
 
 tests/fixtures/model_reach_spawn/ holds the corpus: `model_` is refused under
 G4, `ok_` is the admitted control. tests/test_gate_reference_census.py records
-the self-host gate's half of it: the two `model_` documents are `false-admit/G4`
-bypasses, named in `KNOWN_BYPASSES` and recorded in
-`tools/gate_reference_census_baseline.json`, while the two `ok_` controls are
-`agree-admit`. The gate half of this slice is a follow-up to the port of slice
-2, so the census reports the divergence until it lands.
+the self-host gate's half of it: all four documents are decided alike by both
+engines -- the two `model_` documents `agree-refuse/G4`, the two `ok_` controls
+`agree-admit` -- and `KNOWN_BYPASSES` there is empty, because the gate folds the
+same reach in (`selfhost/lower.rvl`'s `model_reach_spawn_base`). The two halves
+are pinned separately on purpose: this file holds the reference against the
+fixtures, the census holds the gate against the reference over the whole
+corpus, and neither can move without the other going red.
 """
 
 from pathlib import Path

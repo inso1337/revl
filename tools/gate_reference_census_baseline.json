@@ -1,10 +1,5 @@
 {
- "buckets": {
-  "false-admit/G4": [
-   "tests/fixtures/model_reach_spawn/model_child_role_reach.rvl",
-   "tests/fixtures/model_reach_spawn/model_grandchild_role_reach.rvl"
-  ]
- },
+ "buckets": {},
  "corpus_dirs": [
   "examples",
   "tests/fixtures",
@@ -15,31 +10,6 @@
   "backends",
   "dogfood"
  ],
- "details": {
-  "tests/fixtures/model_reach_spawn/model_child_role_reach.rvl": {
-   "bucket": "false-admit/G4",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Supervisor` spawns `Worker`, granting it `shell.exec`, but `Supervisor` holds only `model.complete` \u2014 a spawn may narrow a child's capabilities, never widen them",
-    "tag": "G4"
-   }
-  },
-  "tests/fixtures/model_reach_spawn/model_grandchild_role_reach.rvl": {
-   "bucket": "false-admit/G4",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`Top` spawns `Mid`, granting it `shell.exec`, but `Top` holds only `model.complete` \u2014 a spawn may narrow a child's capabilities, never widen them",
-    "tag": "G4"
-   }
-  }
- },
+ "details": {},
  "note": "Recorded by `python3 tools/gate_reference_census.py --record`. Every entry is a KNOWN gate/reference divergence over the census corpus; `--check` fails on one that is not here, and on one here that no longer diverges, so the allowance can only shrink in a diff somebody reads. A `false-admit` entry is an OPEN GATE BYPASS, not an accepted state: the list is capped by name in tests/test_gate_reference_census.py so it cannot grow quietly while it is worked down."
 }
