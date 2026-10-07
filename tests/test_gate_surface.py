@@ -251,9 +251,13 @@ _BASE = (
     "        _f.write('announce:' + msg + '\\n')\n"
     "    return\n"
     "}\n"
+    # The tokens are the boundaries each provider body actually crosses, and
+    # they are load-bearing since issue #2105: the kernel-boundary arm refuses a
+    # candidate reaching a service whose `emission` names none. `stash` reaches
+    # the `witnessed[fs]` extern, `shout` the bare `emission` extern `announce`.
     "service Ops {\n"
-    "  emission fn stash(p: Str)\n"
-    "  emission fn shout(sink: Str, msg: Str)\n"
+    "  emission[fs] fn stash(p: Str)\n"
+    "  emission[announce] fn shout(sink: Str, msg: Str)\n"
     "}\n"
     "component Agent provides ops: Ops {\n"
     "  provide ops {\n"
@@ -264,7 +268,8 @@ _BASE = (
 )
 
 _TURN_OK = (
-    "service Turn { emission fn run(p: Str, sink: Str) }\n"
+    # the turn reaches `ops`, which is the boundary its body crosses.
+    "service Turn { emission[ops] fn run(p: Str, sink: Str) }\n"
     "component TurnComp requires ops: Ops provides turn: Turn {\n"
     "  provide turn {\n"
     '    fn run(p, sink) { emit ops.stash(p); emit ops.shout(sink, "from-turn") }\n'
