@@ -56,7 +56,13 @@ IDENT_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 # and `*/` (`/* */`). See `_comment_text`.
 _COMMENT_LINE_BREAK_RE = re.compile(r"[\r\n\u0085\u2028\u2029]")
 
-# Names the emitted scaffolding uses; user bindings may not shadow them.
+# Names the emitted scaffolding uses as a BARE IDENTIFIER, so a user *binding*
+# or *parameter* may not shadow them. `_ident` enforces this at the roles whose
+# spelling is internal (renaming instead of refusing, A3/issue #2132) and
+# `_raw_field` does not, because a record field / service method name is a
+# property KEY, a namespace the scaffolding never occupies — except a
+# `config field`, whose key is written by two helpers and so stays refused
+# (see `_raw_field`).
 EMITTER_RESERVED = {"ctx", "config", "rawConfig", "host", "Context"}
 
 # JS/TS reserved words (enough to reject anything the IR should never contain).
@@ -433,9 +439,22 @@ def _mangle(name: str, extra: frozenset = frozenset()) -> str:
     reserved: no member of `JS_RESERVED` ends in `_`.
 
     Only a name whose root is reserved can change, so no existing program that
-    does not name a JS keyword changes its emitted output. This is TARGET
-    keywords only; the host roots stay routed through `host.<name>` in
-    `_v3_var` and the emitter scaffolding stays rejected below.
+    does not name a JS keyword (or, for the positions below, a scaffolding
+    name) changes its emitted output. This is TARGET keywords only; the host
+    roots stay routed through `host.<name>` in `_v3_var`.
+
+    The emitter scaffolding (`EMITTER_RESERVED`) is folded into this same
+    ladder, but ONLY at the roles in `_SCAFFOLDING_RENAMABLE_ROLES` — a
+    binding or parameter, whose spelling is internal to the emitted module —
+    where a user-chosen `host`/`ctx`/`Context` is RENAMED (`host` -> `host_`)
+    rather than refused (erratum A3, issue #2132). At a property-key position
+    it is neither renamed nor refused: a record field / service method name /
+    field read is emitted VERBATIM, because that spelling is the wire key. It
+    stays a loud refusal at `type name`/`service`/`component`/`extern
+    name`/`secret name`/`ref symbol`/`requirement`/`provision key`/`case
+    name`/`config field`, whose spelling is not internal (a `config field` key
+    is written by two helpers, so only one of them could be relaxed — see
+    `_raw_field`).
 
     `extra` is a second, POSITION-LOCAL reserved family that the same ladder
     must also respect (`JS_GLOBAL_RESERVED` at the one site where a case name
@@ -453,9 +472,59 @@ def _mangle(name: str, extra: frozenset = frozenset()) -> str:
     return name
 
 
+# The `_ident` roles whose spelling is INTERNAL to the emitted module: a local,
+# a parameter, a capture, a loop/match/case binding, a fn name, or a read of one
+# of those. A user-CHOSEN identifier in one of these positions may COLLIDE with
+# the emitter scaffolding without any harm being possible, because nothing
+# outside the module ever names it — so it is RENAMED by the same injective
+# ladder `_mangle` already uses for JS keywords, instead of refused (erratum A3,
+# issue #2132: "v1 defines a renaming scheme; frontend guarantees emitted-name
+# safety").
+#
+# Every role NOT in this set keeps its refusal, because its spelling is NOT
+# internal — it is a property key or a string the runtime resolves by name, so a
+# rename would be a SILENT wrong lookup rather than a loud one:
+#
+#   "config field"    -> an object-literal key handed to `plug(root, C, {...})`
+#   "requirement"     -> `ctx.<field>` / `_revl_route_<field>`
+#   "provision key"   -> `root.<field>.<op>()`
+#   "case name"       -> the ADT tag. The declaration/factory/match sites do go
+#                        through `_ident`, but the CONSTRUCTION site emits the
+#                        tag raw (`{ kind: <case> }`, `_expr` kind "adt"), so a
+#                        rename here would not reach it. Measured: a case named
+#                        a JS keyword (`static`) is already broken on ts for
+#                        exactly that reason; a scaffolding-named case would join
+#                        it. Fixing the construction site is a separate change.
+#   "type name", "service", "component", "extern name", "secret name",
+#   "ref symbol"      -> a type/binding the emitter DERIVES from the name, or a
+#                        name it also emits as a string; a rename needs a
+#                        derivation-aware reservation (the still-open xfail in
+#                        tests/test_cluster_c_emitter_hijack_553.py), not this
+#                        ladder
+#
+# The injected type names (`RevlSecretShape`, `RevlResult`, `RevlActivation`,
+# `RevlFrame`, `RevlSpawnHandle`, java's `Pool`/`Map`) are NOT in
+# `EMITTER_RESERVED` and stay reserved through the backends that own them.
+_SCAFFOLDING_RENAMABLE_ROLES = frozenset({
+    "binding", "loop binding", "match bind",
+    "capture", "inverse capture", "arrow parameter",
+    "parameter", "parameter name", "extern parameter name",
+    "lifecycle binding", "name", "function", "function name",
+})
+
+
 def _ident(name: object, role: str, extra: frozenset = frozenset()) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
+    if role in _SCAFFOLDING_RENAMABLE_ROLES:
+        # `EMITTER_RESERVED` joins the ladder as a position-INDEPENDENT family:
+        # it is passed at the declaration AND at every use, so the two agree by
+        # construction (`host` -> `host_`, and the user's own `host_` ->
+        # `host__`, which keeps the ladder injective), which is why this cannot
+        # be a one-position `extra` like `JS_GLOBAL_RESERVED`. Pure, so a
+        # program that binds no scaffolding name emits byte-identically to
+        # before.
+        return _mangle(name, extra | EMITTER_RESERVED)
     if name in EMITTER_RESERVED:
         raise EmitError(
             f"{role} identifier collides with emitter scaffolding: {name!r}"
@@ -482,8 +551,10 @@ def _method_ident(name: object) -> str:
     `_prop_key`, because a bare `new(..)` in an interface is a construct
     signature, not a method named `new`.
 
-    Validation is `_raw_field`'s: the identifier shape and the emitter
-    scaffolding names."""
+    Validation is `_raw_field`'s: the identifier shape, and the emitter
+    scaffolding names refused for a `config field` only — a method name is a
+    property key, so `host`/`ctx` are legal members (`{ host(x) { .. } }` and
+    `s.host(x)` both resolve) and only `config field` still refuses."""
     return _raw_field(name, "method")
 
 
@@ -575,12 +646,38 @@ def _prop_key(name: object, role: str) -> str:
 def _raw_field(name: object, role: str) -> str:
     """Validate a record FIELD name and return it verbatim.
 
-    Same validation as `_ident` (shape, emitter scaffolding) minus the
-    `_mangle` rename, which a field name must not get: the emitted key has to
-    stay the raw revl field name so it matches the runtime key (item 279)."""
+    Same validation as `_ident` (shape) minus the `_mangle` rename, which a
+    field name must not get: the emitted key has to stay the raw revl field
+    name so it matches the runtime key (item 279).
+
+    It also does NOT apply `EMITTER_RESERVED` (A3, issue #2132) — with ONE
+    exception, `config field`. A record field is a PROPERTY KEY, and the
+    property-key namespace is disjoint from the emitter's binding namespace:
+    the scaffolding names (`host`, `Context`, `ctx`, `config`, `rawConfig`) are
+    a module-scope import or a closure parameter, never a property, so
+    `type Rec = { host: Str }` emits `host: string` and `r.host` with no
+    collision — measured, and `host`/`ctx` are ordinary domain nouns a user is
+    entitled to spell. Refusing them here made the field position the one A3
+    cell that could not be renamed away: the frontend escapes a *binding*, but
+    a field name IS the emitted wire key, so renaming it would silently change
+    the key a consumer reads (a consumer renamed a field `ctx` ->
+    `context_tokens` and its published JSON key moved with it). Keeping the
+    reservation only in `_ident` keeps the documented safety net exactly where
+    it is real — a binding or parameter that would shadow the scaffolding —
+    while a field, a method name and a field read stay verbatim.
+
+    `config field` is the exception and stays REFUSED. Unlike a record field,
+    the ts config field's key is written by two different helpers: this one for
+    the declared interface (`<C>Config`) and `_ident` for the `load … with {…}`
+    literal key (`:5397`). Relaxing only the declaration would emit an interface
+    whose key the literal never supplies, so the honest posture is the loud
+    refusal it has always been — the same one java's config field keeps.
+
+    `_method_ident` shares this validation: a method name is a property name
+    too, and a JS reserved word is quoted by `_prop_key` rather than renamed."""
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
-    if name in EMITTER_RESERVED:
+    if role == "config field" and name in EMITTER_RESERVED:
         raise EmitError(
             f"{role} identifier collides with emitter scaffolding: {name!r}"
         )

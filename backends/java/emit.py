@@ -404,13 +404,26 @@ def _secret_config_fields(config_fields: list) -> list[str]:
 def _secret_method_params(env, key: str, mname: str, params: list) -> list[str]:
     """The parameters a provide method registers at its head: the positions the
     service declared `Secret[T]`, read off the same `params[i]["secret"]` stamp
-    the py, ts and go emitters read. Empty outside `_SECRET_MODE`."""
+    the py, ts and go emitters read. Empty outside `_SECRET_MODE`.
+
+    The names are returned in their EMITTED spelling (`_ident(..., "parameter
+    name")`), because the call site writes them into a `revlMarkSecret(...)`
+    call that has to name the parameter the SIGNATURE declared. Those two used
+    to be the same string; under A3 (issue #2132) a parameter the frontend
+    renamed (`host` -> `host_`, item 406) or one the emitter's own ladder moved
+    (`ctx` -> `ctx_`) is not, and a mark naming the author's spelling would be
+    a javac "cannot find symbol". Applying the ladder here rather than at each
+    call site keeps it applied at every site by construction -- and keeps the
+    `if secret_params:` branch in `_emit_component_modern` a single statement,
+    which matters because that branch is unreachable outside `_SECRET_MODE`
+    and every statement added inside it is a new uncovered region the line
+    ratchet has to price (tools/selfhost_line_coverage.py)."""
     if not _SECRET_MODE:
         return []
     service = env.provides[key]
     declared = env.services[service]["methods"].get(mname, {}).get("params", [])
     secret = {mp["name"] for mp in declared if isinstance(mp, dict) and mp.get("secret")}
-    return [p for p in params if p in secret]
+    return [_ident(p, "parameter name") for p in params if p in secret]
 
 TYPE_MAP = {
     "Str": "String",
@@ -798,8 +811,18 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     member of `_JAVA_RESERVED` ends in `_`.
 
     Only a name whose root is reserved can change, so no existing program that
-    does not name a Java keyword changes its emitted output. Target keywords
-    only; the emitter scaffolding stays rejected in `_ident`.
+    does not name a Java keyword (or, at the positions below, a scaffolding
+    name) changes its emitted output. Target keywords only.
+
+    The emitter scaffolding (`_EMITTER_RESERVED`) is folded into this same
+    ladder, but ONLY at the roles in `_JAVA_SCAFFOLDING_RENAMABLE_ROLES` — a
+    binding or parameter, whose spelling is internal to the emitted module —
+    where a user-chosen `ctx`/`root`/`frame` is RENAMED (`ctx` -> `ctx_`)
+    rather than refused (erratum A3, issue #2132). A `record field` / `field`
+    (a member name, not a binding) is emitted VERBATIM; the scaffolding stays a
+    loud refusal at `type name`/`service`/`component`/`requirement`/
+    `provision`/`method`/`callable`/`adt case`/`case name`/`package`/`event
+    name`/`arrow capture`/`inverse capture`, whose spelling is not internal.
 
     `extra` is an additional, position-specific reserved set folded into the
     same injective ladder: a type name passes `_JAVA_TYPE_RESERVED` so the
@@ -880,12 +903,76 @@ def _check_host_keys(ir: dict) -> None:
                     )
 
 
+# Issue #2132 / errata A3, Java half. `_EMITTER_RESERVED` mixes two kinds of
+# name, and only one of them may be renamed:
+#
+#   * names the EMITTER chose (`ctx`, `root`, `frame`, `Components`, the
+#     `Revl*` prelude types, the java.lang prelude types). These are the
+#     module's own scaffolding: the emitted code names them as bare tokens, so
+#     a user identifier that lands on one is a real collision. They stay
+#     refusals at every role that is not listed below.
+#   * names the AUTHOR chose that happen to collide with the above. Refusing
+#     those makes a program that compiles and runs on the python tier
+#     unportable to Java for a spelling reason alone.
+#
+# The roles listed here are the ones whose spelling is INTERNAL to the emitted
+# module: a local, a parameter, a loop/match binder, or a reference to one of
+# those. Renaming such a name cannot change what the program does, and cannot
+# change what it publishes, because the name never leaves the function body it
+# is declared in. Every declaration and every use of the same name goes
+# through this same role or through `name`, so `_mangle`'s table-free ladder
+# keeps them in agreement by construction. (That is exactly the posture rust
+# already takes with its own `_EMITTER_RESERVED`; see backends/rust/emit.py.)
+#
+# Deliberately NOT here: `config field`, `type name`, `service`, `component`,
+# `requirement`, `provision`, `method`, `callable`, `adt case`, `case name`,
+# `package`, `event name`, `event field type`, `arrow capture`, `inverse
+# capture`. (`record field` and `field` are handled separately below: a member
+# name, not a binding.) Each of those
+# either names something the emitter spells as a bare token at a site the
+# rename does not reach (`callable`/`adt case`/`arrow capture`/`inverse
+# capture` call `_ident` for validation and then emit the ORIGINAL spelling),
+# or is keyed by its raw spelling in an emitter table (`case name` -- see
+# `case_owners`), or is a property key / injected name that A3's amendment
+# does not cover. All of them stay loud refusals rather than becoming a silent
+# mismatch.
+_JAVA_SCAFFOLDING_RENAMABLE_ROLES = frozenset({
+    "binding",
+    "loop binding",
+    "match bind",
+    "name",
+    "parameter",
+    "parameter name",
+    "extern parameter name",
+    "lifecycle binding",
+})
+
+
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
+    extra = _JAVA_TYPE_RESERVED if role == "type name" else frozenset()
+    if role in _JAVA_SCAFFOLDING_RENAMABLE_ROLES:
+        return _mangle(name, extra | _EMITTER_RESERVED)
+    if role in ("record field", "field"):
+        # A record COMPONENT is a member name, not a module-scope binding, so
+        # it is a different namespace from the `ctx`/`root`/`frame` tokens the
+        # scaffolding occupies: `record Rec(String ctx)` declares a field and
+        # a constructor parameter of its OWN class, and no code inside that
+        # class reads the emitter's `ctx`. (Measured: `type Rec = { ctx: Str }`
+        # emits `public final String ctx;` with `this.ctx` throughout and no
+        # module-scope `ctx` reference.) Renaming the component instead would
+        # change the member name the author chose -- the same hazard the
+        # typescript tier's `_raw_field` documents for a published wire key --
+        # so the field is emitted verbatim and only the Java keyword ladder
+        # (`class` -> `class_`) still applies. The reservation stays enforced
+        # at `type name`, where a nested class of the same simple name really
+        # is a javac error. `field` is the same namespace on the READ side
+        # (`{target}.{_ident(name, "field")}`): a member access, which the
+        # emitter never spells as a bare token either.
+        return _mangle(name, extra)
     if name in _EMITTER_RESERVED:
         raise EmitError(f"{role} identifier collides with Java/reserved name: {name!r}")
-    extra = _JAVA_TYPE_RESERVED if role == "type name" else frozenset()
     return _mangle(name, extra)
 
 
@@ -6409,10 +6496,30 @@ def _bind_decl_type(component: dict, bind: str, render_type,
     return host
 
 
-def _param_type(env: _Env, key: str, mname: str, p: str) -> str:
+def _param_type(env: _Env, key: str, mname: str, p: str, names: list = None) -> str:
+    """The declared type of the provider method's parameter `p`.
+
+    `p` is the PROVIDER's spelling of the parameter; the type lives in the
+    service CONTRACT, which is a separate list. Those two spellings used to be
+    identical, and a name lookup was enough. They no longer are: the frontend
+    RENAMES a provider binding that collides with a host-reserved name (item
+    406, `revl.lower._safe_name`), so `service Echo { fn echo(host: Str) }`
+    with `provide echo { fn echo(host) }` reaches this function as `p ==
+    "host_"` against a contract that still says `host`. The lookup missed and
+    the caller rendered `Object` -- which `_java_v3_type` then refuses as a
+    reserved type name, so an ordinary `host` parameter made a program that
+    runs on python unportable to java (issue #2132).
+
+    The two lists are positional, so the same index answers for both spellings:
+    `names` is the provider's full parameter list and the contract's `i`th type
+    is the type of whichever name sits at `i`. The name test comes first in the
+    `or`, so a program whose two spellings already agree is byte-identical, and
+    the positional arm keeps the original arity guard."""
     service = env.provides[key]
-    for mp in env.services[service]["methods"].get(mname, {}).get("params", []):
-        if mp["name"] == p:
+    declared = env.services[service]["methods"].get(mname, {}).get("params", [])
+    for i, mp in enumerate(declared):
+        if mp["name"] == p or (names is not None and len(names) == len(declared)
+                               and names[i] == p):
             return mp["type"]
     return "Object"
 
@@ -8570,9 +8677,19 @@ def _emit_component_modern(
             # consistently. Byte-identical for v3 (`render_type` IS
             # `_java_v3_type`) and for any v1/v2 program using only declared
             # types (both renderers agree via TYPE_MAP).
+            pnames = method.get("params") or []
+            # A3: the parameter NAME goes through `_ident`'s ladder here, not
+            # verbatim. The service interface (:9001) already renders the
+            # contract's spelling through `_ident(..., "parameter")`, and the
+            # body's every reference to this parameter goes through
+            # `_ident(..., "name")`; a bare `{p}` here would declare `root`
+            # while the body reads `root_` (and `ctx_` against `ctx__`), i.e.
+            # a javac "cannot find symbol". Same ladder at all three sites, so
+            # they agree by construction.
             params = ", ".join(
-                f"{render_type(_param_type(env, key, contract, p))} {p}"
-                for p in method.get("params") or []
+                f"{render_type(_param_type(env, key, contract, p, pnames))} "
+                f"{_ident(p, 'parameter name')}"
+                for p in pnames
             )
             ret = (render_type(_method_return(env, key, contract))
                    if _method_return(env, key, contract) else "void")
@@ -8807,9 +8924,11 @@ def _emit_component(
         for method in provide.get("methods") or []:
             contract = method.get("name")   # the service-table key (issue #1512)
             mname = _method_name(contract)
+            pnames = method.get("params") or []
             params = ", ".join(
-                f"{render_type(_param_type(env, key, contract, p))} {p}"
-                for p in method.get("params") or []
+                f"{render_type(_param_type(env, key, contract, p, pnames))} "
+                f"{_ident(p, 'parameter name')}"
+                for p in pnames
             )
             ret = (render_type(_method_return(env, key, contract))
                    if _method_return(env, key, contract) else "void")

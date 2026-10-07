@@ -98,9 +98,15 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
     expect(result.stdout + result.stderr).toContain(`${expected} passed`)
   })
 
-  it('rejects binding names that would shadow emitter scaffolding', () => {
+  // A user-chosen name that collides with emitter scaffolding is RENAMED, not
+  // refused (erratum A3, docs/contract-errata.md; issue #2132). The name is
+  // internal to the emitted component body, so escaping it costs nothing and
+  // cannot change what the program publishes. This cell used to assert the
+  // refusal; it now asserts the rename AND that the declaration and its use
+  // agree without a symbol table, which is the property the rename has to have.
+  it('renames binding names that would shadow emitter scaffolding', () => {
     const dir = mkdtempSync(join(tmpdir(), 'revl-emit-'))
-    const bad = {
+    const shadowing = {
       ir_version: 1,
       services: {},
       components: [
@@ -126,9 +132,52 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
       ],
     }
     const path = join(dir, 'shadow.json')
-    writeFileSync(path, JSON.stringify(bad))
+    writeFileSync(path, JSON.stringify(shadowing))
+    const result = runEmit(path)
+    expect(result.status, result.stderr).toBe(0)
+    // the binding is escaped by exactly one `_` ...
+    expect(result.stdout).toContain('const ctx_ = host.Map.new()')
+    // ... the use rides the same ladder, so it reaches the renamed binding ...
+    expect(result.stdout).toContain('() => ctx_.drop()')
+    expect(result.stdout).not.toContain('const ctx = ')
+    // ... and the frame journal key keeps the AUTHOR's spelling: it is the
+    // emitter's own bookkeeping, not a published wire key.
+    expect(result.stdout).toContain('key: "ctx"')
+  })
+
+  // The reservations that are NOT renamable stay loud: a service name is the
+  // portability contract's own name, so a collision there is refused rather
+  // than silently escaped.
+  it('rejects service names that would shadow emitter scaffolding', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'revl-emit-'))
+    const path = join(dir, 'service.json')
+    writeFileSync(path, JSON.stringify({
+      ir_version: 1,
+      services: { ctx: { methods: {} } },
+      components: [],
+    }))
     const result = runEmit(path)
     expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('scaffolding')
+  })
+
+  // A3 (issue #2132) renames a scaffolding name ONLY where the spelling is
+  // internal to the emitted module. Every other role still refuses, and a
+  // later reader who widens the renamable set has to change these cells: each
+  // one is an end-to-end program, not a unit call, so it pins the refusal the
+  // emitter actually produces. `config field` is here for its own reason --
+  // its key is written by two helpers, so relaxing one would emit an interface
+  // key the `load … with {…}` literal never supplies.
+  it.each([
+    ['component', { ir_version: 1, services: {}, components: [{ name: 'ctx', config: [], requires: {}, provides: {}, body: [] }] }],
+    ['type name', { ir_version: 3, types: { host: { kind: 'record', fields: { a: 'Str' } } } }],
+    ['config field', { ir_version: 1, services: {}, components: [{ name: 'C', config: [{ name: 'host', type: 'Str', default: null }], requires: {}, provides: {}, body: [] }] }],
+  ])('still refuses a scaffolding name at the %s position', (role, ir) => {
+    const dir = mkdtempSync(join(tmpdir(), 'revl-emit-'))
+    const path = join(dir, 'refused.json')
+    writeFileSync(path, JSON.stringify(ir))
+    const result = runEmit(path)
+    expect(result.status, `${role} was emitted: ${result.stdout}`).not.toBe(0)
     expect(result.stderr).toContain('scaffolding')
   })
 })
