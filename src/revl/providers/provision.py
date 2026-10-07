@@ -38,11 +38,20 @@ Only a MANAGED binding (`provider = "ollama"`) has a lifecycle here. Every
 other endpoint manages its own residency, and its role has no provision: revl
 sends it completions and loads nothing.
 
-RESIDENCY OVER TIME (slice S3's raw material, recorded, not yet read). Every
-load and unload is appended to `timeline` with its monotonic time, the device,
-the wall time revl waited for the load, and the load duration the server
-reported. Nothing reads it to rank candidates yet; the scheduler that would is
-S3's.
+RESIDENCY OVER TIME (slice S3, the reader). Every load and unload is appended
+to `timeline` with its monotonic time, the device, the wall time revl waited,
+and, for a load, whether the server already held the member before revl loaded
+it. `residency()` is the reader: it answers what the provision recorded over
+time — loads, unloads, what each cost, how long the member was held, and
+whether the load was a cold one — without asking the server anything.
+`summary()` reports it, so the line `revl run` prints at boot and the line it
+prints at teardown are no longer the same line.
+
+Ranking candidates by that residency is NOT done here. Written order is the
+preference the design fixed (decision 12 of `docs/design/539-model-portfolio.md`,
+§11.6), and whether a resident fallback should beat a cold first choice is a
+program author's question that needs its own surface rather than a new default.
+That, and a declared load cost on the profile, are the rest of S3.
 """
 
 from __future__ import annotations
@@ -139,12 +148,14 @@ class RoleProvision:
                 f"{', '.join(binding.device_names())}). The member is loaded "
                 f"only where the schedule placed it; add `devices.{device}` to "
                 f"the binding. See {DOC}")
+        already = self._probe_resident()
         started = self._clock()
         reply = self.adapter.load(device)
         self.loads += 1
         self.device = device
         self.timeline.append({
             "event": "load", "device": device, "at": started,
+            "already_resident": already,
             "load_seconds": reply.get("revl_load_seconds"),
             "server_load_ns": reply.get("load_duration")})
         try:
@@ -152,6 +163,21 @@ class RoleProvision:
         except BaseException:
             self._unload()
             raise
+
+    def _probe_resident(self) -> bool | None:
+        """Whether the server already held the member before revl loaded it.
+
+        Asked once, before the load, because a load the server did not have to
+        perform — the member was already there — is otherwise indistinguishable
+        from one that was genuinely instant: both report a near-zero
+        `server_load_ns`. `None` when the server could not be asked; that is
+        recorded and never refused, since `_check_resident()` right after the
+        load is the real check.
+        """
+        try:
+            return self.adapter.residency() is not None
+        except ProviderError:
+            return None
 
     def _check_resident(self, device: str) -> None:
         entry = self.adapter.residency()
@@ -182,10 +208,46 @@ class RoleProvision:
         # a load with no pair, which `residue()` then reports
         at = self._clock()
         self.adapter.unload()
+        finished = self._clock()
         self.unloads += 1
         self.timeline.append({"event": "unload", "device": self.device,
-                              "at": at})
+                              "at": at, "unload_seconds": finished - at})
         self.device = None
+
+    # -- what was recorded --------------------------------------------------
+
+    def residency(self) -> dict:
+        """What this provision recorded about the member over time: the first
+        reader of `timeline`. Pure — the server is not asked (that is
+        `residue()`), so it is a report of what happened, not a claim about
+        what the server holds now.
+
+        `resident_seconds` is the time the member was held over the
+        load/unload pairs that completed; a member still held (more loads than
+        unloads) contributes nothing to it and shows up as `held_by`.
+        """
+        with self._lock:
+            loads = [e for e in self.timeline if e["event"] == "load"]
+            unloads = [e for e in self.timeline if e["event"] == "unload"]
+            last = loads[-1] if loads else {}
+            return {
+                "role": self.role,
+                "device": last.get("device"),
+                "loads": self.loads,
+                "unloads": self.unloads,
+                "consumers": list(self.consumers),
+                "held_by": list(self.holders),
+                "already_resident": last.get("already_resident"),
+                "load_seconds": sum(e.get("load_seconds") or 0.0
+                                    for e in loads),
+                "server_load_ns": sum(e.get("server_load_ns") or 0
+                                      for e in loads),
+                "unload_seconds": sum(e.get("unload_seconds") or 0.0
+                                      for e in unloads),
+                "resident_seconds": sum(u["at"] - l["at"]
+                                        for l, u in zip(loads, unloads)),
+                "events": [dict(e) for e in self.timeline],
+            }
 
     # -- the teardown proof -------------------------------------------------
 
@@ -213,10 +275,22 @@ class RoleProvision:
             return problems
 
     def summary(self) -> str:
-        where = f" on {self.timeline[0]['device']}" if self.timeline else ""
-        return (f"model role `{self.role}`: {len(self.consumers)} consumer(s) "
-                f"({', '.join(self.consumers)}), {self.loads} load(s){where}, "
-                f"{self.unloads} unload(s)")
+        r = self.residency()
+        where = f" on {r['device']}" if r["device"] else ""
+        loaded = f"{r['loads']} load(s){where}"
+        if r["loads"]:
+            loaded += f" in {r['load_seconds']:.2f}s"
+            if r["already_resident"] is True:
+                loaded += " (already resident)"
+            elif r["already_resident"] is False:
+                loaded += " (loaded cold)"
+        line = (f"model role `{self.role}`: {len(r['consumers'])} consumer(s) "
+                f"({', '.join(r['consumers'])}), {loaded}, "
+                f"{r['unloads']} unload(s)")
+        if r["unloads"]:
+            line += (f" in {r['unload_seconds']:.2f}s, "
+                     f"held {r['resident_seconds']:.1f}s")
+        return line
 
 
 class Provisions:
@@ -283,3 +357,9 @@ class Provisions:
 
     def summaries(self) -> list:
         return [p.summary() for p in self._by_role.values() if p.loads]
+
+    def residency(self) -> dict:
+        """`{role: <that role's residency>}` for every role that loaded a
+        member."""
+        return {role: p.residency() for role, p in self._by_role.items()
+                if p.loads}

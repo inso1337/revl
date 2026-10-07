@@ -66,12 +66,17 @@ Every model host whose operations route to a role is a consumer of that role's
 provision (`src/revl/providers/provision.py`). In the child, before any
 component activates:
 
-1. The first consumer's acquire loads the member: `POST /api/generate` with no
-   prompt, `keep_alive: -1` and the load options for the device
-   `revl.model_placement.device_for(role)` answers.
-2. The server is then asked what it holds (`GET /api/ps`). A model it does not
-   report loaded, or one on the wrong class of device, is unloaded and the boot
-   refused. The class is the share of the model in GPU memory
+1. The first consumer's acquire asks the server what it already holds
+   (`GET /api/ps`), then loads the member: `POST /api/generate` with no prompt,
+   `keep_alive: -1` and the load options for the device
+   `revl.model_placement.device_for(role)` answers. The answer to that first
+   question is recorded with the load, so a member the server already held is
+   reported as resident rather than as a cold load that happened to be instant.
+   A server that cannot be asked is recorded as unknown and does not refuse the
+   boot; the check after the load is the real one.
+2. The server is then asked again what it holds (`GET /api/ps`). A model it
+   does not report loaded, or one on the wrong class of device, is unloaded and
+   the boot refused. The class is the share of the model in GPU memory
    (`size_vram / size`), rounded the way `ollama ps` prints it: a `cpu` device
    must read 0% and a `gpu` device 100%, so a model that only partly fits the
    GPU is refused too. A CPU load still holds a little GPU memory for its
@@ -86,11 +91,15 @@ it chooses, and a request with the default keep-alive starts an idle timer that
 would unload it behind the provision's back.
 
 At teardown, after every component is gone, each consumer releases, and the
-last release unloads the member (`keep_alive: 0`). The per-process residue
-proof then asks the server again:
+last release unloads the member (`keep_alive: 0`). What the provision recorded
+over time is read back and printed at boot and at teardown, so the two lines
+say what the load cost, whether it was cold, what the unload cost and how long
+the member was held; the per-process residue proof then asks the server again:
 
 ```
-[edge] model | provision       | model role `small`: 2 consumer(s) (llm, tagger), 1 load(s) on cpu0, 1 unload(s)
+[edge] model | provision       | model role `small`: 2 consumer(s) (llm, tagger), 1 load(s) on cpu0 in 0.42s (loaded cold), 0 unload(s)
+...
+[edge] model | provision       | model role `small`: 2 consumer(s) (llm, tagger), 1 load(s) on cpu0 in 0.42s (loaded cold), 1 unload(s) in 0.03s, held 12.4s
 [edge] residue no residue | registry=0 provisions=[] disposables=1/1 models=unloaded
 ```
 

@@ -15,6 +15,10 @@ What is pinned:
   class is unloaded again and refused, and `residue()` reports a member it
   still holds after the last release;
 * acquire and release pair per consumer;
+* what the provision recorded over time is readable: each load and unload with
+  its cost, whether the server already held the member before the load, and how
+  long it was held (`residency()`), reported on the boot and teardown lines
+  (slice S3's reader);
 * `revl run --placement --providers` loads in the child before any component
   activates, serves the model crossings, unloads after the last component is
   gone, and its per-process residue proof includes the models.
@@ -50,7 +54,7 @@ from revl import placement as _placement  # noqa: E402
 from revl.compiler import compile_files  # noqa: E402
 from revl.providers import (  # noqa: E402
     Adapter, CompletionRequest, ProviderConfigError, ProviderError,
-    ProvisionRefused, Provisions, bind_for_run, close_hosts,
+    ProvisionRefused, Provisions, RoleProvision, bind_for_run, close_hosts,
     open_hosts, parse_config, provision_residue,
 )
 from revl.providers.provision import gpu_share  # noqa: E402
@@ -72,7 +76,9 @@ class FakeOllama:
 
     `mode`: "ok"; "misplace" (every load lands in GPU memory, whatever the
     options say); "spill" (a GPU load only half fits); "sticky" (an unload is
-    acknowledged and ignored).
+    acknowledged and ignored); "blind_once" (the first `GET /api/ps` fails, so
+    the provision's pre-load probe cannot be answered, and every later one
+    answers normally).
 
     A CPU load still holds a little GPU memory, as a real server does for its
     compute graph."""
@@ -81,12 +87,17 @@ class FakeOllama:
         self.requests: list = []
         self.loaded: dict = {}
         self.mode = "ok"
+        self.blind = False
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
                 outer.requests.append({"method": "GET", "path": self.path})
                 if self.path == "/api/ps":
+                    if outer.mode == "blind_once" and not outer.blind:
+                        outer.blind = True
+                        self._send({"error": "busy"}, 500)
+                        return
                     self._send({"models": [
                         {"name": m, "model": m, "size": SIZE,
                          "size_vram": v} for m, v in outer.loaded.items()]})
@@ -383,8 +394,103 @@ def test_the_timeline_records_each_load_and_unload(ollama, schedule):
     assert load["event"] == "load" and load["device"] == "cpu0"
     assert load["server_load_ns"] == 4_200_000
     assert load["load_seconds"] >= 0
+    assert load["already_resident"] is False     # the server held nothing
     assert unload["event"] == "unload" and unload["device"] == "cpu0"
     assert unload["at"] >= load["at"]
+    assert unload["unload_seconds"] >= 0
+
+
+def test_the_provision_reads_back_what_it_recorded(ollama, schedule):
+    """`residency()` is the first reader of `timeline`: it reports the loads
+    and unloads, what each cost, and how long the member was held. Reading it
+    asks the server nothing — the fake's request log does not move — because
+    `residue()` is the check of what the server holds now."""
+    schedule("edge", {"small": "cpu0"}, {"cpu0": "cpu"})
+    provisions = _provisions(ollama)
+    provisions.open("llm", {"small"})
+    provisions.open("tagger", {"small"})
+    asked = len(ollama.requests)
+    boot = provisions.get("small").residency()
+    assert len(ollama.requests) == asked
+    assert boot["device"] == "cpu0"
+    assert (boot["loads"], boot["unloads"]) == (1, 0)
+    assert boot["consumers"] == ["llm", "tagger"]
+    assert boot["held_by"] == ["llm", "tagger"]
+    assert boot["already_resident"] is False
+    assert boot["load_seconds"] >= 0
+    assert boot["server_load_ns"] == 4_200_000
+    assert boot["unload_seconds"] == 0.0
+    assert boot["resident_seconds"] == 0.0
+    assert [e["event"] for e in boot["events"]] == ["load"]
+    provisions.close("llm", ("small",))
+    provisions.close("tagger", ("small",))
+    after = provisions.get("small").residency()
+    assert (after["loads"], after["unloads"]) == (1, 1)
+    assert after["held_by"] == []
+    assert after["unload_seconds"] >= 0
+    assert after["resident_seconds"] >= 0
+    assert [e["event"] for e in after["events"]] == ["load", "unload"]
+    assert provisions.residency() == {"small": after}
+    assert provisions.residue() == {}
+
+
+def test_a_member_the_server_already_held_is_recorded_as_resident(
+        ollama, schedule):
+    """The issue's premise sentence — "the small model is resident here" — is
+    now a recorded fact rather than something the boot line cannot say. The
+    pre-load probe sees the member the server already held, so a load with a
+    near-zero server time is not read as a cold load that was instant."""
+    schedule("edge", {"small": "cpu0"}, {"cpu0": "cpu"})
+    ollama.loaded["tiny:1b"] = GRAPH             # loaded by someone else
+    provisions = _provisions(ollama)
+    provisions.open("llm", {"small"})
+    small = provisions.get("small")
+    assert small.timeline[0]["already_resident"] is True
+    assert small.residency()["already_resident"] is True
+    assert "(already resident)" in small.summary()
+    assert "(loaded cold)" not in small.summary()
+    provisions.close("llm", ("small",))
+
+
+def test_a_server_that_cannot_be_asked_before_the_load_is_not_refused(
+        ollama, schedule):
+    """A probe that fails is recorded as `None` and refuses nothing: the load
+    goes ahead, and the check right after it is the real one. The report says
+    neither "already resident" nor "loaded cold", because it does not know."""
+    schedule("edge", {"small": "cpu0"}, {"cpu0": "cpu"})
+    ollama.mode = "blind_once"
+    provisions = _provisions(ollama)
+    assert provisions.open("llm", {"small"}) == ("small",)
+    small = provisions.get("small")
+    assert small.timeline[0]["already_resident"] is None
+    assert small.residency()["already_resident"] is None
+    assert "(already resident)" not in small.summary()
+    assert "(loaded cold)" not in small.summary()
+    provisions.close("llm", ("small",))
+    assert provisions.residue() == {}
+
+
+def test_the_boot_line_and_the_teardown_line_report_the_residency(
+        ollama, schedule):
+    """The line `revl run` prints at boot says what the load cost and whether
+    it was cold; the line at teardown adds the unload's cost and how long the
+    member was held. The two are no longer the same line."""
+    schedule("edge", {"small": "cpu0"}, {"cpu0": "cpu"})
+    now = [10.0]
+    small = RoleProvision("small", Adapter(_binding(ollama)),
+                          clock=lambda: now[0])
+    small.acquire("llm")
+    boot = small.summary()
+    now[0] = 70.0
+    small.release("llm")
+    teardown = small.summary()
+    assert boot != teardown
+    assert re.search(r"1 load\(s\) on cpu0 in \d+\.\d\ds \(loaded cold\), "
+                     r"0 unload\(s\)$", boot), boot
+    assert re.search(r"1 load\(s\) on cpu0 in \d+\.\d\ds \(loaded cold\), "
+                     r"1 unload\(s\) in 0\.00s, held 60\.0s$", teardown), \
+        teardown
+    assert small.residency()["resident_seconds"] == 60.0
 
 
 def test_an_unloaded_managed_adapter_refuses_to_complete(ollama):
@@ -557,8 +663,9 @@ def test_a_placement_loads_once_serves_and_unloads_once_with_no_residue(
               for m in map(_PROBE.search, out.splitlines()) if m}
     assert probes['out.classify("hello")'] == "=> 'label:hello'"
     assert probes['tg.tags("hi")'] == "=> 'label:hi'"
-    assert "model role `small`: 2 consumer(s) (llm, tagger), 1 load(s) on " \
-           "cpu0, 1 unload(s)" in out
+    assert re.search(r"model role `small`: 2 consumer\(s\) \(llm, tagger\), "
+                     r"1 load\(s\) on cpu0 in \d+\.\d\ds \(loaded cold\), "
+                     r"1 unload\(s\) in \d+\.\d\ds, held \d+\.\ds", out), out
     assert re.search(r"\[edge\] residue no residue \|.* models=unloaded", out)
     assert "[edge] DOWN" in out
     assert ollama.loaded == {}
