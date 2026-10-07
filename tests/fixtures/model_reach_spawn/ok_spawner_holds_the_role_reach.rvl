@@ -1,0 +1,23 @@
+// ADMITTED (item 519 slice 3, issue #1193): the other control for
+// `model_child_role_reach.rvl`, same shape and same role reach, with the
+// missing `requires` added: `Supervisor` holds `shell.exec` as well as
+// `model.complete`, so it covers the ceiling its child reaches through role
+// `tool`. It pins that the fold widens the COMPARISON and not the verdict -
+// a spawner that holds what the role reaches still admits. The file name's
+// prefix is the expected verdict (`model_` refused under G4, `ok_` admitted);
+// tests/test_model_reach_spawn.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+service Shell { emission[shell.exec] fn run(c: Str) -> Str }
+service Completions { emission[model.complete] fn complete(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+
+component Worker requires sh: Shell requires llm: Completions provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit llm.complete("x") return "x" } }
+}
+
+component Supervisor requires sh: Shell requires llm: Completions {
+  let w = effect spawn Worker with { } undo w.dispose()
+}

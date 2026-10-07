@@ -8936,7 +8936,17 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                  live_components, services, spawn_reg,
                                  program.filename, untrusted=untrusted,
                                  emitting=frozenset(emitting_fns
-                                                    - witnessed_externs))
+                                                    - witnessed_externs),
+                                 # the model role in the same product (item
+                                 # 519 slice 3): the same roles and the same
+                                 # crossings the model fold below reads, so
+                                 # the two folds cannot disagree about which
+                                 # component routes through which role
+                                 roles=model_roles,
+                                 routes=model_routes,
+                                 emitting_caps=emitting_caps,
+                                 lines={c.name: c.line
+                                        for c in program.components})
 
     # The MODEL ROLE in that same product (item 519): a component's effective
     # ceiling is the union of what it holds and what the model role it routes
@@ -17905,6 +17915,110 @@ def _model_reach_edges(comp: dict, actions: dict, held: set, roles: dict,
     return edges
 
 
+def _model_consult(comp: dict, actions: dict, base: dict, services: dict,
+                   roles: dict, crossed_names: dict,
+                   emitting_caps: "dict | None",
+                   lines: "dict | None") -> "tuple[set, list[dict]]":
+    """One component's half of the model fold (item 519): what it holds, and
+    every (role, placement) edge its effective ceiling folds in.
+
+    Factored out so the SPAWN product (slice 3, issue #1193) folds the SAME
+    edges the model product folds. Two spellings of "which roles does this
+    component route through" is exactly the drift that would let one fold see
+    an edge the other does not, and the spawn fold's answer is the one that
+    amplifies across a whole graph."""
+    own = base.get(comp["name"], set())
+    held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
+    if not _consults_a_model(held):
+        return held, []
+    crossed = {c.token for c in held}
+    for name in crossed_names.get(comp["name"]) or ():
+        crossed.update((emitting_caps or {}).get(name) or ())
+    # a crossing edge has no arm to point at, so it cites the component's
+    # declaration line (`lines`), which the lowered dict does not carry
+    edges = _model_reach_edges(
+        comp, actions, held, roles, crossed,
+        (lines or {}).get(comp["name"], comp.get("line", 1)))
+    return held, edges
+
+
+def _model_reach_by_component(components: list[dict], services: dict,
+                              roles: dict, routes: dict,
+                              emitting: "frozenset | None" = None,
+                              emitting_caps: "dict | None" = None,
+                              lines: "dict | None" = None,
+                              base: "dict | None" = None,
+                              crossed_names: "dict | None" = None
+                              ) -> dict[str, set]:
+    """Each component's model-role REACH as fold elements (item 519 slice 3).
+
+    The union of `_model_reach_caps` over every role the component routes
+    through, ceilings stripped exactly as the model product strips them, so
+    this is the part of a component's effective ceiling that its own `holds`
+    does not already name. `{}` for a program that declares no `model role`,
+    which is what keeps every other check byte-identical for a program that
+    does not opt in."""
+    if not roles:
+        return {}
+    if crossed_names is None:
+        crossed_names = {}
+    if base is None:
+        base = _spawn_reached_surface_pairs(components, services, emitting,
+                                            crossed_names)
+    out: dict[str, set] = {}
+    for comp in components:
+        actions = (routes or {}).get(comp["name"]) or {}
+        _held, edges = _model_consult(comp, actions, base, services, roles,
+                                      crossed_names, emitting_caps, lines)
+        reach: set = set()
+        for edge in edges:
+            reach |= _strip_ceilings(_model_reach_caps(roles[edge["role"]]))
+        if reach:
+            out[comp["name"]] = reach
+    return out
+
+
+def _spawn_base_with_model(base: dict, components: list[dict], services: dict,
+                           roles: "dict | None", routes: "dict | None",
+                           emitting: "frozenset | None",
+                           emitting_caps: "dict | None",
+                           lines: "dict | None",
+                           crossed_names: "dict | None" = None) -> dict:
+    """`base` with each component's model-role reach folded in — the input
+    `_spawn_surface_closure` starts from (item 519 slice 3, issue #1193).
+
+    A spawned child's capability set is its own crossings PLUS whatever the
+    role it routes through can reach; that union is its effective ceiling, and
+    it is what a spawner must cover. The closure already folds a child's reach
+    UP into its ancestors, so correcting the per-component base is what closes
+    the lineage form of the model hole: a supervisor holding only
+    `model.complete` whose child routes a role reaching `shell.exec` was
+    accounted as if the role were inert, one component at a time in the model
+    product and not at all across the spawn edge.
+
+    The caller's `base` is left untouched (`_check_spawn_attenuation` reads it
+    for `held` and for the item-294 substitution decision): a spawner is
+    measured against what it actually HOLDS, so folding its own reach into the
+    comparison would mask the widening it is being refused for, and a child
+    whose reach the fold grew is no longer "exactly its own crossings", so
+    per-instance `config.` substitution switches itself off and a symbol stays
+    symbol-compared (fail closed). `base` is returned as-is, byte-identical,
+    when no role folds in. `crossed_names` is the same out-param
+    `_spawn_reached_surface_pairs` fills for the model product, so a crossing
+    reached through a service-typed local is a role edge in BOTH folds rather
+    than only in the one that happens to pass it (issue #1509)."""
+    if not roles:
+        return base
+    reach_of = _model_reach_by_component(components, services, roles,
+                                         routes or {}, emitting, emitting_caps,
+                                         lines, base=base,
+                                         crossed_names=crossed_names)
+    if not reach_of:
+        return base
+    return {name: set(caps) | reach_of.get(name, set())
+            for name, caps in base.items()}
+
+
 def _check_model_attenuation(components: list[dict], services: dict,
                              roles: dict, routes: dict,
                              filename: str,
@@ -17957,18 +18071,8 @@ def _check_model_attenuation(components: list[dict], services: dict,
     product: list[dict] = []
     for comp in components:
         actions = (routes or {}).get(comp["name"]) or {}
-        own = base.get(comp["name"], set())
-        held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
-        if not _consults_a_model(held):
-            continue
-        crossed = {c.token for c in held}
-        for name in crossed_names.get(comp["name"]) or ():
-            crossed.update((emitting_caps or {}).get(name) or ())
-        # a crossing edge has no arm to point at, so it cites the component's
-        # declaration line (`lines`), which the lowered dict does not carry
-        edges = _model_reach_edges(
-            comp, actions, held, roles, crossed,
-            (lines or {}).get(comp["name"], comp.get("line", 1)))
+        held, edges = _model_consult(comp, actions, base, services, roles,
+                                     crossed_names, emitting_caps, lines)
         if not edges:
             continue
         where = comp.get("source") or filename
@@ -18054,7 +18158,11 @@ def _check_model_attenuation(components: list[dict], services: dict,
 def _check_spawn_attenuation(components: list[dict], services: dict,
                              spawn_reg: dict, filename: str,
                              untrusted: bool = False,
-                             emitting: "frozenset | None" = None) -> list[dict]:
+                             emitting: "frozenset | None" = None,
+                             roles: "dict | None" = None,
+                             routes: "dict | None" = None,
+                             emitting_caps: "dict | None" = None,
+                             lines: "dict | None" = None) -> list[dict]:
     """Capability attenuation on spawn (item 66, extended by item 294): a
     spawned child's capability set must be a **checked subset** of its
     spawner's (monotone shrinkage, the direction §5 admits for purity). A spawn
@@ -18098,13 +18206,33 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
     spawns THAT component. A child that itself spawns carries grandchild reach
     whose symbols belong to a different config bound at a different edge, so
     deeper per-instance resolution is left to a later slice and an unresolved
-    symbol stays refused (fail closed), never admitted."""
+    symbol stays refused (fail closed), never admitted.
+
+    THE MODEL ROLE IN THIS PRODUCT (item 519 slice 3, issue #1193). A child's
+    effective ceiling is its own crossings UNION what the model role it routes
+    through reaches, and that union is what its spawner must cover - the
+    lineage form of the rule `_check_model_attenuation` applies one component
+    at a time. The union is folded into the surface the closure STARTS from
+    (`_spawn_base_with_model`), so the existing monotone-shrinkage fold and its
+    existing refusal carry the case with no second rule and no second message:
+    `Supervisor` holding `model.complete` spawning `Worker` whose role reaches
+    `shell.exec` is a G4 widening, refused by name. The closure then propagates
+    it to the ancestors of a spawner, exactly as it already propagates a
+    grandchild's own crossings. `base` here stays the child's OWN crossings, so
+    what the spawner is measured against is still what it HOLDS (see
+    `_spawn_base_with_model`). Inert - byte-identical - for a program that
+    declares no role."""
     edges = spawn_reg.get("edges") or []
     if not edges:
         return []
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    base = _spawn_reached_surface_pairs(components, services, emitting)
-    reachable = _spawn_surface_closure(base, edges)
+    crossed_names: dict = {}
+    base = _spawn_reached_surface_pairs(components, services, emitting,
+                                        crossed_names)
+    reachable = _spawn_surface_closure(
+        _spawn_base_with_model(base, components, services, roles, routes,
+                               emitting, emitting_caps, lines, crossed_names),
+        edges)
 
     chain: list[dict] = []
     seen: set = set()

@@ -1,0 +1,28 @@
+// REFUSED G4 (item 519 slice 3, issue #1193): the transitive form. `Top` holds
+// only `model.complete` and spawns `Mid`; `Mid` holds `shell.exec` and spawns
+// `Leaf`, whose `route model` arm routes `go` through role `tool`, reaching
+// `shell.exec`. `Mid`'s own spawn edge is inside its authority, so nothing is
+// refused there - but the reachable set the closure folds UP into `Top` now
+// carries the role's reach, exactly as it already carried a grandchild's own
+// crossings, and `Top` holds neither. The file name's prefix is the expected
+// verdict (`model_` refused under G4, `ok_` admitted);
+// tests/test_model_reach_spawn.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+service Shell { emission[shell.exec] fn run(c: Str) -> Str }
+service Completions { emission[model.complete] fn complete(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+
+component Top requires llm: Completions {
+  let m = effect spawn Mid with { } undo m.dispose()
+}
+
+component Mid requires sh: Shell requires llm: Completions {
+  let l = effect spawn Leaf with { } undo l.dispose()
+}
+
+component Leaf requires sh: Shell requires llm: Completions provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit llm.complete("x") return "x" } }
+}

@@ -5640,7 +5640,36 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     edges_by_file: dict[str, list[tuple[str, str]]] = {}
     for r in srows:
         edges_by_file.setdefault(r[1], []).append((r[2], r[3]))
+    # MPV / MAV verdicts (G-MODEL-PLACE, issue #1811): the placed arms
+    # against the confidentiality origins, and each consulted role's reach
+    # within the component's held set, by the spawn rule's own halves. The
+    # rows are parsed here, ahead of the closure, because `ME` and `MRC` are
+    # also what the closure's BASE reads below.
+    conf_by_file: dict[str, set[str]] = {}
+    mp_by: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    reach_by: dict[tuple[str, str], set[str]] = {}
+    consulted_by: dict[tuple[str, str], set[str]] = {}
+    for r in rows:
+        if r and r[0] == "MO" and len(r) == 3:
+            conf_by_file.setdefault(r[1], set()).add(r[2])
+        elif r and r[0] == "MP" and len(r) == 7:
+            mp_by.setdefault((r[1], r[2]), []).append((r[4], r[6]))
+        elif r and r[0] == "MRC" and len(r) == 4:
+            reach_by.setdefault((r[1], r[2]), set()).add(r[3])
+        elif r and r[0] == "ME" and len(r) == 4:
+            consulted_by.setdefault((r[1], r[2]), set()).add(r[3])
+    # The MODEL-ROLE reach in the spawn surface (item 519 slice 3, issue
+    # #1193): a child that routes through a role reaches whatever that role
+    # reaches, so the surface the closure STARTS from is the component's own
+    # crossings PLUS the reach of every role it consults (`ME` names the role,
+    # `MRC` its reach -- the same `reach_by` the `MAV` row judges, so a role's
+    # reach has ONE spelling in this file). `attenuation_halves` strips the
+    # ceilings on the resource half, exactly as the closure's comparison does.
     closed: dict[tuple[str, str], set[str]] = {k: set(v) for k, v in owns.items()}
+    for (rel, comp), consulted in consulted_by.items():
+        for role in sorted(consulted):
+            closed.setdefault((rel, comp), set()).update(
+                reach_by.get((rel, role), set()))
     changed = True
     while changed:
         changed = False
@@ -5651,19 +5680,6 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     closed.get((rel, child), set()))
                 if len(closed[(rel, parent)]) != before:
                     changed = True
-    # MPV / MAV verdicts (G-MODEL-PLACE, issue #1811): the placed arms
-    # against the confidentiality origins, and each consulted role's reach
-    # within the component's held set, by the spawn rule's own halves.
-    conf_by_file: dict[str, set[str]] = {}
-    mp_by: dict[tuple[str, str], list[tuple[str, str]]] = {}
-    reach_by: dict[tuple[str, str], set[str]] = {}
-    for r in rows:
-        if r and r[0] == "MO" and len(r) == 3:
-            conf_by_file.setdefault(r[1], set()).add(r[2])
-        elif r and r[0] == "MP" and len(r) == 7:
-            mp_by.setdefault((r[1], r[2]), []).append((r[4], r[6]))
-        elif r and r[0] == "MRC" and len(r) == 4:
-            reach_by.setdefault((r[1], r[2]), set()).add(r[3])
     places: dict[tuple[str, str], str] = {}
     model_reach: dict[tuple[str, str, str], str] = {}
     _MODEL_ROWS.clear()

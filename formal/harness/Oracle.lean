@@ -2775,7 +2775,19 @@ def main (args : List String) : IO UInt32 := do
       -- Held = own reach + every capability the `requires` bindings grant.
       let held := uk.foldl (fun acc r => upsertCaps acc r.comp [r.cap]) owns
       let edges := (us.map (fun r => (r.parent, r.child))).eraseDups
-      let closed := closeN (edges.length + 1) edges owns
+      -- The MODEL-ROLE reach in the closure's BASE (item 519 slice 3, issue
+      -- #1193): a child that routes through a role reaches whatever that role
+      -- reaches, so the surface the closure STARTS from is the component's own
+      -- crossings plus the reach of every role it consults -- `ME` names the
+      -- role, `MRC` its reach, the same rows `modelVerdicts` judges, so a
+      -- role's reach has ONE spelling in this file.
+      let base := (mrows'.me.filter (fun r => r.path == p)).foldl
+        (fun acc e =>
+          upsertCaps acc e.comp
+            ((mrows'.mrc.filter (fun r => r.path == p && r.role == e.role)).map
+              (·.cap)))
+        owns
+      let closed := closeN (edges.length + 1) edges base
       -- G verdicts (marker rule) per component
       for cn in fm.map (·.name) do
         let markerOK := g4OK ems (uu.filter (fun r => r.comp == cn))
