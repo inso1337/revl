@@ -550,6 +550,95 @@ def test_provide_method_with_no_declared_return_needs_none():
     assert ir["components"][0]["name"] == "M"
 
 
+# ---- issue #2083: a `Unit` return is a WRITE position ----------------------
+#
+# `check_ir`'s tail is `if actual and not compatible(...)` and `infer_ir`
+# answers `None` for anything reached through a host handle, so the whole test
+# was skipped for a body that read the component's own resource: a READ was
+# admitted as the body of a method declared `-> Unit`, the value it produced
+# went nowhere, and the effect the service promises was silently dropped — the
+# call reported `ok` with an empty trace, so the authoring loop's own
+# self-check confirmed success. The fill spec calls this hole a write ("the
+# fill is a write on `resource`"), so a body rooted at the component's own
+# resource is refused at a `Unit` return position unless it is the one form
+# that genuinely produces nothing — a write on that resource.
+
+_AUDIT = """service Audit {
+  fn record(msg: Str) -> Unit
+  fn last() -> Opt[Str]
+}
+
+component AuditLog provides audit: Audit {
+  let resource = effect Map.new() undo resource.drop()
+  provide audit {
+    fn record(msg) %s
+    fn last() = resource.get("last")
+  }
+}
+"""
+
+
+@pytest.mark.parametrize("body", [
+    '= resource.get("last")',                 # the issue's fixture: a read for a write
+    '{ return resource.get("last") }',         # ... in block form
+    '= resource.size()',                       # `Int` at runtime, unknown to the checker
+    '= resource.keys()',
+    '= resource',                              # the handle itself
+    '= resource.insert_if_absent(msg, msg)',   # a write whose `Bool` goes nowhere
+])
+def test_unit_method_body_must_be_a_write(body):
+    err = _err(_AUDIT % body)
+    assert "which returns `Unit`, but this body produces a value the service never sees" in err
+    assert "it is not a write on the component's own resource" in err
+
+
+@pytest.mark.parametrize("body", [
+    '= resource.insert(msg, msg)',
+    '= resource.remove(msg)',
+    '{ return resource.insert(msg, msg) }',
+])
+def test_unit_method_body_admits_the_resource_write(body):
+    # the narrowing is exactly the fill spec's producers: a write on the
+    # component's own resource still compiles
+    ir = compile_source(_AUDIT % body)
+    assert ir["components"][0]["name"] == "AuditLog"
+
+
+_EMIT = """service Sink {
+  emission fn write(line: Str)
+}
+
+service Audit {
+  emission[sink] fn record(line: Str) -> Unit
+}
+
+component AuditProvider requires sink: Sink provides audit: Audit {
+  provide audit {
+    fn record(line) %s
+  }
+}
+"""
+
+
+def test_unit_method_body_admits_a_requirement_crossing():
+    # the crossing the fill spec offers for a `Unit` emission hole is
+    # `emit sink.write(<line: Str>)` (mcp/fillspec.py), which lowers to a call
+    # on a requirement: not rooted at the component's resource, so the refusal
+    # above must not reach it
+    ir = compile_source(_EMIT % "= emit sink.write(line)")
+    assert ir["components"][0]["name"] == "AuditProvider"
+
+
+def test_unit_method_hint_names_a_spelling_that_compiles():
+    # the hint is read literally: it names `return resource.insert(k, v)`, and
+    # that spelling — with the method's own parameter names — compiles, which
+    # `return <Unit>` (the old hint) could not: revl has no `Unit` literal
+    err = _err(_AUDIT % "{ let n = msg }")
+    assert "return resource.insert(k, v)" in err
+    assert "revl has no `Unit` literal" in err
+    assert compile_source(_AUDIT % "{ return resource.insert(msg, msg) }")
+
+
 # ---- `type X = Y` is a transparent alias ----------------------------------
 #
 # It used to parse as a one-case variant whose single case was named `Y`, so
