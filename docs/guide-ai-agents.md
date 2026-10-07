@@ -311,7 +311,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 |---|---|---|
 | `revl_verbs` | find a verb `tools/list` does not show: every verb by topic, then the schemas of a topic or of named verbs | [mcp-reference.md](mcp-reference.md#revl_verbs) |
 | `revl_scaffold` | start from a typed, holed skeleton instead of a whole invented component; every hole comes back with its `fillSpec` | [scaffold.md](scaffold.md) |
-| `revl_check` | does this compile? structured diagnostics — code, guarantee, and the `fix` rewrite — **and open holes' `fillSpec`** if not | [mcp-reference.md](mcp-reference.md#revl_check) |
+| `revl_check` | does this compile? structured diagnostics — code, guarantee, and the `fix` rewrite — **and open holes' `fillSpec`** if not; with no candidate it checks the composition the session holds | [mcp-reference.md](mcp-reference.md#revl_check) |
 | `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |
 | `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
 | `revl_ship` | check → admit → plan in one early-exit call; `apply:true` also swaps | [token-economy.md](token-economy.md) |
@@ -374,7 +374,10 @@ last step:
    hole type-checks, so the rest of the draft still checks ([holes.md](holes.md)).
 2. **`revl_check` returns fill-specs.** A draft with holes compiles but can
    never admit; `revl_check` comes back with each open hole's `fillSpec`, its
-   `line` and expected type. That is your worklist.
+   `line` and expected type. That is your worklist. Call it with no `source`
+   and it checks the composition the session holds (the draft you are filling),
+   so you read your own worklist without re-sending the file you are building;
+   `source`/`files` still check a candidate you have not loaded.
 3. **Fill via `revl_edit` deltas.** Send a `{hole: <line>, expr: "<fill>"}` edit
    per hole, the server holds the source, so you transmit only the change, not
    the file. Deltas accumulate across calls; a refused patch advances nothing,

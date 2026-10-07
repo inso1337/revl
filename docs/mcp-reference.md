@@ -31,7 +31,9 @@ order, and each verb on it opens its description with "Authoring loop step N of
    it in `blastRadius` for the components they touch, and `revl_plan` shows
    what a swap would do.
 5. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
-   fail with the code and the fix.
+   fail with the code and the fix. Called with no candidate it checks the
+   composition the session holds, so the loop can verify what steps 1-4 built
+   without re-sending it.
 6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
    `revl_edit` re-admits and swaps on its own. On a cold start, use `revl_load`.
 
@@ -369,7 +371,30 @@ guarantee:
 - `note`: why a draft with holes is not admissible, or why rows are
   `unchecked`.
 
-- Inputs: `source` / `files` / `modules`.
+- Inputs: `source` / `files` / `modules`, or none at all (see below);
+  `session: true` asks for the held form explicitly; `returnCanonical` adds the
+  canonical text.
+
+**With no candidate, it checks the composition the session holds.** Pass no
+`source` and no `files` (or pass `session: true`) and `revl_check` compiles the
+working set the session holds: the running source, or the draft an edit loop is
+filling (the set `revl_swap {}` re-admits and `revl_source {}` reads). The
+answer is the same substance the supplied form returns, plus
+`checked: "session"`: `selfCheck`, `holes` (with their fillSpecs), `boundary`,
+`admissible`, `effectClasses`. Nothing is replaced, and no `canonicalSource` is
+reported: nothing was sent, so `returnCanonical` has nothing to return, exactly
+as for the bare `revl_swap {}`. This is what step 5 of the
+authoring loop calls: the loop's steps 1-4 mutate the held set, so checking a
+supplied source would mean re-sending the whole file, which the scaffold tells
+you not to do. `modules` alone is not a candidate: they are a `source`/`files`
+candidate's `use` imports.
+
+**A usage error is not a composition verdict.** `ok: false` means the
+composition has a problem. A call that names no candidate and holds none comes
+back with `category: "usage"`, a `fix` naming the missing argument and a `next`
+holding the call to make, never with `category: "internal"` and never as a
+verdict. A verdict always carries `selfCheck`; a usage error never does, so a
+caller can branch on that alone.
 
 ### `revl_admit`
 

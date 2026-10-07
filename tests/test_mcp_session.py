@@ -120,6 +120,214 @@ component Watcher requires cache: Cache provides log: Log {
     assert set(admitted["manifest"]["loadOrder"]) == {"C", "Watcher"}
 
 
+# ---------------- step 5 reads what steps 1-4 mutated (issue #2117)
+#
+# `revl_check` is the loop's verification step, but the loop mutates the
+# composition the SESSION holds: `revl_scaffold` -> `revl_load` (which opens a
+# draft for a holed scaffold, #1727) -> `revl_edit` fills -> `revl_swap`. A
+# check that could only compile a SUPPLIED source made step 5 unreachable for
+# the loop's own artifact — the agent had to re-send the whole file, which the
+# scaffold tells it not to do. So the bare `revl_check {}` (and the explicit
+# `{"session": true}`) checks the held working set: the same set `revl_swap {}`
+# re-admits and `revl_source {}` reads, and the same substance comes back
+# (`selfCheck`, `holes`, `boundary`, `admissible`), so it is a check.
+#
+# The second half is the shape of the refusal. `revl_check {}` on a session
+# holding nothing used to answer `ok: false` with a raw
+# `ValueError: provide \`source\` or \`files\`` under `category: "internal"` —
+# an argument error wearing a composition verdict's clothes. An agent that asks
+# "is what I just built correct?" and reads `ok: false` starts changing code
+# that is right. So a usage error is now `category: "usage"`, with a `fix`
+# naming the missing argument and a `next` carrying the call to make.
+#
+# Both halves need a session that HOLDS a composition, and only `revl_load`
+# opens one — a runtime verb (`runtime_gate.RUNTIME_VERBS`). The held form
+# reads `loaded`, `origin`, `draft` and `pending_draft` and never touches the
+# driver, so these tests stub the boot, not the read.
+
+# a composition whose only fault is a reach the component never required: a
+# verdict about the code, which `ok: false` is for
+UNDECLARED = """
+service S { fn f(a: Int) -> Int }
+component C provides s: S { provide s { fn f(a) = nope(a) } }
+"""
+
+# what a scaffold returns before its holes are filled: a draft that compiles
+HOLED = """
+service S { fn f(a: Int) -> Str }
+component C provides s: S {
+  provide s { fn f(a) { return hole } }
+}
+"""
+
+
+class _HeldSession:
+    """A session holding a composition, with no runtime booted.
+
+    `Session.loaded` is `_driver is not None`, and the held form of
+    `revl_check` reads only `loaded`, `origin`, `draft` and `pending_draft` —
+    never the driver — so what is stubbed here is the boot, not the read."""
+
+    def __init__(self, source=None, loaded=True):
+        self.ir = None
+        self.origin = ({"source": source, "modules": {}}
+                       if source is not None else None)
+        self.draft = None
+        self.pending_draft = None
+        self.loaded = loaded
+
+    def unload(self):
+        self.loaded = False
+
+
+def _held(monkeypatch, session):
+    from revl.mcp import server as server_mod
+
+    monkeypatch.setattr(server_mod, "SESSION", session)
+    return session
+
+
+def test_a_held_composition_is_checkable_without_resending_it(monkeypatch):
+    """The bare form names no candidate, so it checks what the session holds —
+    and answers with the supplied form's substance, so step 5 verifies the
+    artifact steps 1-4 built (issue #2117)."""
+    held = _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_check", {})
+
+    assert payload["ok"] is True, payload
+    assert payload["checked"] == "session"
+    assert payload["components"] == [{"name": "C", "requires": [],
+                                      "provides": ["cache"]}]
+    assert payload["selfCheck"]["admissible"] is True
+    assert [g["code"] for g in payload["selfCheck"]["guarantees"]] == [
+        f"G{n}" for n in range(1, 10)]
+    assert payload["selfCheck"]["summary"] == {"pass": 9, "fail": 0,
+                                               "unchecked": 0}
+    assert payload["holes"] == []
+    assert payload["boundary"]["C"] == {"emissions": [], "capabilities": {},
+                                        "compensated": 0, "awaits": 0,
+                                        "externs": []}
+    # nothing was sent, so there is no canonical form to report — and the
+    # session is byte-identical afterwards: verifying does not disturb the work
+    assert "canonicalSource" not in payload
+    assert held.origin == {"source": READONLY, "modules": {}}
+    assert held.draft is None
+
+
+def test_the_explicit_session_form_is_the_bare_form(monkeypatch):
+    """`{"session": true}` and `{}` are one door: the spelling an agent reaches
+    for when it wants to be explicit costs it nothing (issue #2117)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    assert _call("revl_check", {"session": True}) == _call("revl_check", {})
+
+
+def test_a_held_draft_is_checkable_before_it_boots(monkeypatch):
+    """The state `revl_load` of a scaffold opens (#1727): a draft with open
+    holes, held but not booted. Step 5 reads it — the holes with their
+    fillSpecs, the self-check, the boundary — so the loop can verify the work
+    before the swap that admits it (issue #2117)."""
+    held = _held(monkeypatch, _HeldSession(loaded=False))
+    held.pending_draft = {"vs": {"source": HOLED, "modules": {}},
+                          "config": None, "record": False}
+
+    payload = _call("revl_check", {})
+
+    assert payload["ok"] is True, payload
+    assert payload["checked"] == "session"
+    assert [h["expected"] for h in payload["holes"]] == ["Str"]
+    assert payload["holes"][0]["fillSpec"]["expected"] == "Str"
+    # a draft is checkable but not admissible: that is what step 5 reports
+    assert payload["selfCheck"]["admissible"] is False
+    assert payload["selfCheck"]["summary"]["fail"] == 0
+    assert held.pending_draft["vs"]["source"] == HOLED
+
+
+def test_a_held_composition_that_does_not_compile_is_a_verdict(monkeypatch):
+    """The held form is a real check: a composition that does not compile comes
+    back as a guarantee diagnostic with its `selfCheck`, exactly as the
+    supplied form answers it (issue #2117)."""
+    _held(monkeypatch, _HeldSession(UNDECLARED))
+
+    payload = _call("revl_check", {})
+
+    assert payload["ok"] is False
+    assert payload["checked"] == "session"
+    assert payload["diagnostics"][0]["code"] == "G1"
+    assert payload["diagnostics"][0]["category"] != "usage"
+    assert payload["selfCheck"]["admissible"] is False
+
+
+def test_an_argument_error_is_not_a_composition_verdict(monkeypatch):
+    """`revl_check {}` on a session holding nothing is a USAGE error: the
+    `category` says so, the `fix` names the missing argument, the `next` is the
+    call to make — and no `selfCheck` is attached, because there is no verdict
+    to give (issue #2117)."""
+    from revl.mcp import server as server_mod
+
+    _held(monkeypatch, server_mod.Session())
+
+    payload = _call("revl_check", {})
+
+    assert payload["ok"] is False
+    (diagnostic,) = payload["diagnostics"]
+    assert diagnostic["category"] == "usage"
+    assert "source" in diagnostic["message"]
+    assert "ValueError" not in diagnostic["message"]
+    assert diagnostic["fix"] == "pass `source` or `files`"
+    assert payload["next"]["tool"] == "revl_load"
+    assert "selfCheck" not in payload
+
+
+def test_a_candidate_that_names_no_candidate_is_a_usage_error(monkeypatch):
+    """`modules` are a candidate's `use` imports: a call carrying them and no
+    `source`/`files` names no candidate to compile, so it is an argument error
+    with the missing argument spelled out — not `ok: false` read as a verdict
+    (issue #2117)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_check", {
+        "modules": {"./lib.rvl": "pub fn d(n: Int) -> Int { return n }"}})
+
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["category"] == "usage"
+    assert payload["diagnostics"][0]["fix"] == (
+        "pass `source` or `files` beside `modules`")
+    assert "selfCheck" not in payload
+
+
+def test_an_empty_files_list_names_no_candidate_either(monkeypatch):
+    """`files: []` carries no files, and this tree reads `files` by truth, not
+    by presence (`query_tools`, `quarantine`, `edit.virtual_source` all test
+    `not files`), so it is the bare form: the held composition is checked. The
+    alternative reading — an empty candidate — is the shape that has no
+    meaning, which is why the sibling verbs do not take it either
+    (issue #2117)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_check", {"files": []})
+
+    assert payload["ok"] is True, payload
+    assert payload["checked"] == "session"
+    assert payload["selfCheck"]["admissible"] is True
+
+
+def test_session_true_refuses_a_candidate_of_its_own(monkeypatch):
+    """`{"session": true}` chooses which artifact to check, so a call that also
+    carries one asks for two different checks: refused as an argument error,
+    naming both ways out, rather than silently checking one of them
+    (issue #2117)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_check", {"session": True, "source": READONLY})
+
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["category"] == "usage"
+    assert "takes no candidate of its own" in payload["diagnostics"][0]["message"]
+    assert "selfCheck" not in payload
+
+
 # --------------------------------------------------------------- live session
 #
 # Everything below actually loads code into a cordis-py Context. Gate it per
