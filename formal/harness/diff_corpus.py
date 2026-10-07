@@ -83,7 +83,9 @@ with no component has no composition to model and is named in the
 `no-manifest` report rather than dropped from every count.
 """
 
+import contextlib
 import dataclasses
+import inspect
 import itertools
 import json
 import os
@@ -109,6 +111,7 @@ sys.path.insert(0, str(REPO / "backends" / "python"))
 
 from revl import cap_order
 from revl import recovery
+from revl import taint  # the shipped walk, observed (issue #2108)
 from revl import ui_family  # the shipped computer-use reversibility registry
 from revl.compiler import compile_files
 from revl.diagnostics import classify
@@ -127,6 +130,11 @@ from revl.typecheck import (
     structural_fields,
 )
 from revl.taint import strip_qualifiers  # the shipped qualifier normalization
+# The prefix `Retained[T, P]` seeds its origin with (item 472), imported rather
+# than respelled: the G9 coverage row maps a seeded origin back to the
+# qualifier spelling, and a policy origin it does not recognise is a fatal
+# `missed-G9-coverage-observation` instead of a silent agreement.
+from revl.retention import ORIGIN_PREFIX
 from revl.wal import WAL_GUARANTEE, WAL_VERSION
 # The approval floor's two pieces of algebra (item 246), imported rather than
 # restated: the scope an `Approval[C]` type carries, and whether a scope
@@ -136,6 +144,7 @@ from revl.lower import _approval_covers, _approval_scope_of
 from revl.lower import _HOST_CALLABLES
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
+    ComponentDecl,
     EffectStmt,
     EmitExpr,
     EmitStmt,
@@ -150,10 +159,12 @@ from revl.parser import (
     ExprMatch,
     ExprRecord,
     ExprVar,
+    HandoffStmt,
     IsolateStmt,
     LetApprovalStmt,
     LetEffect,
     LetStmt,
+    ModelRouteStmt,
     Parser,
     ProvideStmt,
     RouteStmt,
@@ -1613,11 +1624,17 @@ def council_rows(rel: str, prog) -> list[str]:
 # DISCOVERED. It is NOT a proof, and not a test, that the checker's walk
 # COVERS every tainting path in the file: a path `taint.py`'s propagation
 # never reaches is a path this row never sees, and no row assembled from the
-# checker's own output can report that. Proving the search itself — growing
-# the L0 bodies so the checker's coverage of the walk is proved — is roadmap
-# item 418 step 9 and is out of this row's reach. `g9_coverage` prints the
-# distinction, `formal/STATUS.md` states it, and the PR that added the row
-# repeats it.
+# checker's own output can report that. The coverage half is a SEPARATE row —
+# the `GB`/`GP`/`GW`/`GC` rows below, issue #2108, stated in
+# `formal/RevL/Theorems/G9Coverage.lean` over L0 `Body` and bridged to this
+# harness by `RevLOracle.gcRowB`. `g9_coverage` prints the distinction,
+# `formal/STATUS.md` states it, and the PR that added the row repeats it.
+#
+# NAMING. The coverage obligation was long attributed to roadmap item 418 step
+# 9. That attribution was wrong and is corrected in `docs/v2.0-roadmap.md`:
+# item 418 step 9's "after an operational semantics exists" is this row's
+# PRECONDITION — the expressibility that made the obligation statable at all —
+# not the obligation. The tracker is issue #2108.
 
 #: The two checker refusals the `TAINT` row decides, as `code -> category`.
 #: The two OTHER taint refusals are different rules and are deliberately left
@@ -1743,54 +1760,543 @@ def g9_rows(rel: str) -> list[str]:
 # (`_declared_param_origins` omitted `confidential_params` for provide
 # methods). The formal layer could not state the missing obligation at all,
 # because L0 had no `provide`/activation distinction and no typed parameters;
-# `RevL.Syntax.Body` now has both, and this section is the corpus half.
+# `RevL.Syntax.Body` now has both, `RevL.G9Coverage.coversBodyB` decides the
+# obligation, and this section is the corpus half.
 #
 # THE TWO SIDES ARE INDEPENDENT OBSERVATIONS.
 #
-#   GB  <file>  <comp>  <scope>  <ord>  <kind>  <heads>
-#       One statement of a REAL component body, read off the PARSE
-#       (`ComponentDecl.body` plus each `ProvideStmt.methods[].body`).
-#       `scope` is `activation` or `<provide key>.<method>`; `ord` is the
-#       statement's position within its scope.
+#   GB  <file>  <comp>  <stmts>
+#       The component body's ACTIVATION, as the PARSE sees it: how many
+#       statements the activation declares. `0` means the body has no
+#       activation scope at all — which `RevL.Syntax.Body.scopes` reads as no
+#       scope — and it is a different observation from a walk that opened a
+#       scope and visited nothing.
 #
-#   GP  <file>  <comp>  <scope>  <names>  <quals>
-#       That scope's declared parameters: names from the provide method, and
-#       qualifiers from the SERVICE OPERATION it implements
-#       (`service S { fn m(p: Secret[Str]) }`) — the declaration, not the
-#       taint model, so a model that stopped recording a qualifier moves this
-#       column and not the walk's.
+#   GP  <file>  <comp>  <key>  <method>  <stmts>  <params>
+#       One provide method: its provide key, its name, the number of
+#       statements its body declares, and its ORIGIN-CARRYING parameters
+#       spelled `name:qual` and comma-joined (empty string for none). The
+#       parameters are the ones the TAINT MODEL gives an origin
+#       (`taint._declared_param_origins`) and NOT the ones the declaration
+#       annotates: `route get "/notes/{id}"` makes `id` untrusted with no
+#       annotation in sight, and the row must observe what the checker seeds,
+#       not what the source spells. `plain` and `Trusted[T]` are excluded —
+#       `RevL.Syntax.Qual.seedsOrigin` is the same filter.
 #
-#   GW  <file>  <comp>  <scope>  <nstmts>  <seeded>  <origins>
+#   GW  <file>  <comp>  <label>  <stmts>  <params>  <endorse>
 #       One scope the shipped checker ACTUALLY WALKED, recorded while
-#       `compile_files` ran. `nstmts` is the length of the body the walk was
-#       handed; `seeded`/`origins` are what `_seed_param_env` put into the
-#       environment the body ran under.
+#       `compile_files` ran. `label` is the walk's scope, translated from its
+#       `<comp>.<method>` spelling to the body's `<provide key>.<method>` BY
+#       NAME; `stmts` is the length of the body the walk was handed; `params`
+#       are the origins `_seed_param_env` wrote into that body's own
+#       environment, respelled as qualifiers; and `endorse` is the raw
+#       `endorse_label` the walk was driven with, carried so the pinned
+#       spelling is a column rather than a comment.
+#
+#   GC  <file>  <comp>  <scope>  coverage=ok|fail
+#       The oracle's OUTPUT, not an export row: `RevLOracle.gcVerdicts`
+#       decides `RevL.G9Coverage.coversBodyB` over `GB`/`GP`/`GW` and projects
+#       it one row per scope, out to the longer of the two lists, so a walk
+#       that opened FEWER scopes than the body still produces a NAMED `fail`
+#       for the missing one.
 #
 # THE PRIVATE SEAMS THIS PINS (all in `src/revl/taint.py`, all private, and
-# named here so a rename is a diff and not a silent agreement):
+# named here so a rename is a loud failure and not a silent agreement):
 #
-#   * `_FlowChecker.run(self, body, env)` — called with the lowered IR step
-#     list. The recorder wraps the class for the duration of
-#     `_walk_component_methods` ONLY, and records the OUTERMOST call per
-#     label: `run` recurses into nested bodies (a `for`/`if` arm) with the
-#     same `endorse_label`, so recording every call would read a loop body's
-#     length as the scope's.
-#   * `_FlowChecker.endorse_label` — `"<C> activation"` for a component's
-#     activation scope and `"<C>.<method>"` for a provide method, both
-#     spelled with the component name; a component whose name the IR does not
-#     carry falls back to bare `"activation"`/`"<method>"`, which this row
-#     reports as an unobserved scope rather than matching loosely.
+#   * `_walk_component_methods` and `_FlowChecker.run(self, body, env)` — the
+#     walk is observed by wrapping `_walk_component_methods` itself and
+#     installing a recording `_FlowChecker` subclass for the duration of that
+#     ONE call, so every recorded `run` is by construction the real refusal
+#     walk over a real component body. `_infer_scope_env` and
+#     `_infer_signatures` also construct `_FlowChecker`s (over `_callables`,
+#     with no `endorse_label`), so filtering on the checker's constructor
+#     arguments would not have been enough. Only calls with `enforce` set are
+#     recorded, and only the OUTERMOST call per label: `run` recurses into
+#     nested bodies (a `for`/`if` arm) with the SAME `endorse_label`, so
+#     recording every call would read a loop body's length as the scope's.
+#   * `_FlowChecker.endorse_label` — `f"{component} activation"` for the
+#     activation scope and `f"{component}.{method}"` for a provide method.
+#     The recorder asserts BOTH spellings against the component it is walking
+#     and records a problem when neither holds, so a spelling change is a
+#     fatal `missed-G9-coverage-observation` rather than a loose match. A
+#     component whose name the IR does not carry (`component` falsy) is a
+#     problem too, not a fallback.
 #   * `_seed_param_env(model, key, params, env)` — the walk's ONLY seeding
-#     step for a body, called with the method's lowered `params` list. The
-#     row reads its `params` argument, not the resulting `env` keys: the env
-#     holds only the parameters the MODEL declares an origin for, so an
-#     unqualified parameter is legitimately absent from it.
+#     step for a body. The row reads the ENVIRONMENT it left, in insertion
+#     order, which is the declaration order `RevL.Syntax.Scope.origins`
+#     preserves; the env holds only the parameters the MODEL declares an
+#     origin for, so an unqualified parameter is legitimately absent from it.
 #
 # WHAT THIS ROW IS NOT. It is not a proof that the walk is complete. It is
-# the corpus half of `RevL.G9Coverage.walk_covers`: it shows that on every
-# document the model is active for, the walk the checker performed visits
-# every statement of the body the parse side enumerates, and seeds every
-# declared parameter. The model's own theorem is what generalises it.
+# the corpus half of `RevL.G9Coverage.walk_covers`: on every document the
+# model is active for, the walk the checker performed visits every statement
+# of the body the parse side enumerates and seeds every origin-carrying
+# parameter. The model's own theorem is what generalises it, and
+# `gcRowB_iff` is the proof that the oracle's procedure and the theorem are
+# the same statement.
+#
+# A FILE THE OBSERVATION CANNOT SPEAK FOR EMITS NO ROW, AND IS COUNTED.
+# A parse refusal, a file with no component, a file whose taint model is
+# INACTIVE (the walk is never reached), and a file the checker REFUSES all
+# make no coverage claim — the last because the walk that would have been
+# observed never completed. They are counted in `_GC_CENSUS` and reported, so
+# a corpus that stopped being observed fails the ratchet rather than passing
+# it vacuously.
+#
+# THE TWO FAILURES THIS SECTION KEEPS APART.
+#
+#   missed-G9-coverage
+#       The checker's walk did not cover the body: the observation succeeded
+#       and disagreed.
+#   missed-G9-coverage-observation
+#       The harness could not observe the walk at all — the parse says the
+#       component has scopes and the recorder captured NONE for it. That is
+#       this harness's OWN blind spot (a renamed or moved seam), and folding
+#       it into `missed-G9-coverage` would report a coverage failure that is
+#       really an instrument failure. It is a distinct fatal bucket, and it
+#       is why `g9coverage_coverage` fails when nothing was observed.
+
+#: One component's coverage obligation as the export carries it:
+#: `rel -> [(component, body scopes, walk scopes)]`, each scope a
+#: `(label, statement count, ["name:qual", ...])` triple. Read by
+#: `g9coverage_coverage`.
+_GC_ROWS: dict = {}
+
+#: How the observation pass classified the corpus. Read by
+#: `g9coverage_coverage` so a corpus that stopped being OBSERVED fails the
+#: ratchet instead of passing it vacuously.
+_GC_CENSUS: dict = {}
+
+#: Files where the parse says a component has scopes and the recorder captured
+#: NONE of them: the harness's own blind spot, bucketed as
+#: `missed-G9-coverage-observation` and never as `missed-G9-coverage`.
+_GC_UNOBSERVED: dict = {}
+
+#: What a seeded origin spells as a qualifier. `retained:<policy>` collapses to
+#: `retained`, because `RevL.Syntax.Scope.origins` compares the QUALIFIER and
+#: the policy is a retention detail the coverage row does not carry. An origin
+#: absent from this map is a fatal finding, never a silent agreement.
+_GC_ORIGIN_QUAL = {"input": "untrusted", "confidential": "secret"}
+
+#: The statement forms a component's activation scope does NOT contain.
+#: `_walk_component_methods` builds `act_steps` with
+#: `s.get("step") != "provide"`, giving each provide method its own scope
+#: instead; `HandoffStmt`, `RouteStmt` and `ModelRouteStmt` lower to NO IR
+#: step at all (`lower.py` `continue`s), so they are absent from `act_steps`
+#: for a different reason. Kept as a tuple of PARSER classes rather than a
+#: count, so a new statement form that the walk skips shows up as a count
+#: mismatch rather than being silently absorbed.
+_GC_NON_ACTIVATION = (ProvideStmt, HandoffStmt, RouteStmt, ModelRouteStmt)
+
+
+def _gc_qual(origin: object) -> str | None:
+    """The qualifier a seeded origin spells, or `None` for one this row does
+    not carry — which the callers file as a finding, never as agreement."""
+    if origin in _GC_ORIGIN_QUAL:
+        return _GC_ORIGIN_QUAL[origin]
+    if isinstance(origin, str) and origin.startswith(ORIGIN_PREFIX):
+        return "retained"
+    return None
+
+
+def gc_provide_keys(prog) -> tuple[dict, list[str]]:
+    """`{component: {method name: provide key}}` read off the PARSE.
+
+    The walk labels a provide scope `"<component>.<method>"` and
+    `RevL.Syntax.Body.scopes` labels it `"<provide key>.<method>"`. The
+    translation between them is BY NAME through this map: a positional
+    translation would make the label conjunct trivially true and the coverage
+    row would then decide nothing. A method two provide blocks claim is a
+    finding, not a coin toss."""
+    out: dict = {}
+    problems: list[str] = []
+    for c in prog.components:
+        if not isinstance(c, ComponentDecl):
+            continue
+        keys = out.setdefault(c.name, {})
+        for stmt in c.body:
+            if not isinstance(stmt, ProvideStmt):
+                continue
+            for m in stmt.methods:
+                if m.name in keys and keys[m.name] != stmt.key:
+                    problems.append(
+                        f"{c.name}.{m.name}: claimed by provide "
+                        f"{keys[m.name]!r} and {stmt.key!r}")
+                    continue
+                keys[m.name] = stmt.key
+    return out, problems
+
+
+def gc_body_scopes(rel: str, prog, model) -> tuple[dict, list[str]]:
+    """The scopes of every component body in `prog`, as the PARSE plus the
+    TAINT MODEL see them: `{component: [(label, stmts, [name:qual, ...])]}` in
+    `RevL.Syntax.Body.scopes` order — the activation first and only when it
+    has a statement, then one scope per provide method, in declaration order.
+
+    Independent of the walk: the parse supplies the activation statements and
+    the provide blocks, and the model supplies which declared parameters carry
+    an origin. Nothing here reads the checker's output, so the two sides of
+    the comparison can only agree by the checker actually walking the body."""
+    out: dict = {}
+    problems: list[str] = []
+    for c in prog.components:
+        if not isinstance(c, ComponentDecl):
+            continue
+        scopes: list = []
+        act = [s for s in c.body if not isinstance(s, _GC_NON_ACTIVATION)]
+        if act:
+            scopes.append(("activation", len(act), []))
+        for stmt in c.body:
+            if not isinstance(stmt, ProvideStmt):
+                continue
+            for m in stmt.methods:
+                seeded = taint._declared_param_origins(model, m.name)
+                params: list[str] = []
+                for i, name in enumerate(m.params or []):
+                    if i not in seeded:
+                        continue
+                    origins = sorted(seeded[i])
+                    if len(origins) != 1:
+                        problems.append(
+                            f"{rel}/{c.name}.{m.name}: parameter {name!r} "
+                            f"carries origins {origins} — the row carries one "
+                            "qualifier per parameter")
+                        continue
+                    qual = _gc_qual(origins[0])
+                    if qual is None:
+                        problems.append(
+                            f"{rel}/{c.name}.{m.name}: parameter {name!r} "
+                            f"origin {origins[0]!r} is not a qualifier this "
+                            "row carries")
+                        continue
+                    params.append(f"{name}:{qual}")
+                scopes.append((f"{stmt.key}.{m.name}", len(m.body or []), params))
+        labels = [s[0] for s in scopes]
+        if len(set(labels)) != len(labels):
+            problems.append(
+                f"{rel}/{c.name}: scopes {labels} are not distinct, so a "
+                "per-scope verdict could not name one")
+            continue
+        out[c.name] = scopes
+    return out, problems
+
+
+class _GCRecorder:
+    """The scopes the SHIPPED checker's walk actually opened.
+
+    Installed only for the duration of one `compile_files` call, over one
+    file, so `component` is that call's own component argument and the
+    recorded `run`s are the real refusal walks. `model` is read off the same
+    call: `lower.py` binds `check_taint` into its own namespace at import
+    time, so patching `revl.taint.check_taint` would never fire."""
+
+    def __init__(self, rel: str, keys: dict):
+        self.rel = rel
+        self.keys = keys
+        self.scopes: dict = {}
+        self.problems: list[str] = []
+        self.component = ""
+        self.depth = 0
+        self.calls = 0
+        self.active: list[bool] = []
+        self.model = None
+
+    def note(self, checker, body, env) -> None:
+        """Record one scope visit. The `endorse_label` spellings are asserted
+        here, against the component being walked."""
+        comp = self.component
+        label = checker.endorse_label
+        if not comp:
+            self.problems.append(
+                f"{self.rel}: the walk opened {label!r} but "
+                "`_walk_component_methods` passed no `component` argument, so "
+                "no body could be named")
+            return
+        if label == f"{comp} activation":
+            scope = "activation"
+        elif label.startswith(comp + "."):
+            method = label[len(comp) + 1:]
+            key = self.keys.get(comp, {}).get(method)
+            if key is None:
+                self.problems.append(
+                    f"{self.rel}/{comp}: the walk opened {label!r} but no "
+                    f"provide block implements {method!r} — the walk's label "
+                    "and the body's cannot be reconciled by name")
+                return
+            scope = f"{key}.{method}"
+        else:
+            self.problems.append(
+                f"{self.rel}: endorse_label {label!r} is neither "
+                f"{(comp + ' activation')!r} nor {comp + '.<method>'!r} — the "
+                "pinned spelling has moved")
+            return
+        params: list[str] = []
+        # Insertion order, not sorted: `_seed_param_env` seeds in declaration
+        # order and `Scope.origins` preserves it, so the two lists are
+        # compared in the order the checker made them.
+        for name, value in env.items():
+            origins = sorted(value.origins)
+            if len(origins) != 1:
+                self.problems.append(
+                    f"{self.rel}/{comp}/{scope}: seeded parameter {name!r} "
+                    f"carries origins {origins} — the row carries one "
+                    "qualifier per parameter")
+                continue
+            qual = _gc_qual(origins[0])
+            if qual is None:
+                self.problems.append(
+                    f"{self.rel}/{comp}/{scope}: seeded parameter {name!r} "
+                    f"origin {origins[0]!r} is not a qualifier this row carries")
+                continue
+            params.append(f"{name}:{qual}")
+        self.scopes.setdefault(comp, []).append((scope, len(body), params))
+
+
+@contextlib.contextmanager
+def _gc_observation(rel: str, keys: dict):
+    """Observe one file's checker run. Both seams are restored on the way out,
+    including when the compile refuses."""
+    rec = _GCRecorder(rel, keys)
+    orig_walk = taint._walk_component_methods
+    orig_cls = taint._FlowChecker
+    sig = inspect.signature(orig_walk)
+
+    def walk(*a, **kw):
+        bound = sig.bind(*a, **kw)
+        bound.apply_defaults()
+        rec.component = bound.arguments.get("component") or ""
+        rec.depth = 0
+        rec.calls += 1
+        rec.model = bound.arguments["model"]
+        rec.active.append(bool(rec.model.active))
+
+        class _Recording(orig_cls):
+            def run(self, body, env):
+                outer = rec.depth == 0
+                rec.depth += 1
+                try:
+                    if outer and getattr(self, "enforce", False):
+                        rec.note(self, body, dict(env))
+                    return super().run(body, env)
+                finally:
+                    rec.depth -= 1
+
+        taint._FlowChecker = _Recording
+        try:
+            return orig_walk(*a, **kw)
+        finally:
+            taint._FlowChecker = orig_cls
+
+    taint._walk_component_methods = walk
+    try:
+        yield rec
+    finally:
+        taint._walk_component_methods = orig_walk
+
+
+def _gc_covers(body: list, walk: list) -> list[tuple[str, str]]:
+    """`RevL.G9Coverage.coversB` at the carried columns, respelled in Python so
+    the reference's verdict is an INDEPENDENT recomputation of the three
+    conjuncts the theorem names — label, statement count, origin-carrying
+    parameters — out to the longer of the two lists, so a walk that opened
+    FEWER scopes still yields a named `fail` for the missing one."""
+    out: list[tuple[str, str]] = []
+    for i in range(max(len(body), len(walk))):
+        s = body[i] if i < len(body) else None
+        w = walk[i] if i < len(walk) else None
+        label = (s[0] if s is not None else (w[0] if w is not None else ""))
+        ok = (s is not None and w is not None and w[0] == s[0]
+              and w[1] == s[1] and w[2] == s[2])
+        out.append((label, "ok" if ok else "fail"))
+    return out
+
+
+def _gc_params(field: str) -> list[str]:
+    """One carried `name:qual,name:qual` column as a list. The empty string is
+    the empty list, and a member that is not `name:qual` stops the run rather
+    than being dropped: the oracle's `parseParams` returns `none` for the same
+    spelling, which would DROP the whole row on that side, so a silent drop
+    here would disagree with a silent drop there."""
+    if not field:
+        return []
+    out: list[str] = []
+    for member in field.split(","):
+        name, sep, qual = member.partition(":")
+        if not sep or not name or not qual or ":" in qual:
+            raise SystemExit(
+                f"differential oracle: malformed G9 coverage parameter "
+                f"{member!r}")
+        out.append(member)
+    return out
+
+
+def g9coverage_rows(rel: str, prog) -> list[str]:
+    """The `GB`/`GP`/`GW` rows of one modeled file (issue #2108).
+
+    `GB`/`GP` come from the parse plus the taint model; `GW` from a real
+    `compile_files` run with the walk observed. Also fills `_GC_ROWS` (the
+    per-component comparison the ratchet re-runs under shortening) and
+    `_GC_CENSUS`/`_GC_UNOBSERVED`.
+
+    A file the checker REFUSES emits no row: the walk that would have been
+    observed never completed, so the row has no subject. That is counted, not
+    dropped, and it is NOT a coverage failure — see `g9coverage_coverage`."""
+    try:
+        with _gc_observation(rel, gc_provide_keys(prog)[0]) as rec:
+            compile_files([str(REPO / rel)])
+    except RevlError:
+        _GC_CENSUS["refused"] = _GC_CENSUS.get("refused", 0) + 1
+        return []
+    if rec.model is None:
+        # The checker short-circuits before the taint pass: no walk, no claim.
+        _GC_CENSUS["no_walk"] = _GC_CENSUS.get("no_walk", 0) + 1
+        return []
+    if not any(rec.active):
+        _GC_CENSUS["inactive"] = _GC_CENSUS.get("inactive", 0) + 1
+        return []
+    _GC_CENSUS["active"] = _GC_CENSUS.get("active", 0) + 1
+    _GC_CENSUS["walk_calls"] = _GC_CENSUS.get("walk_calls", 0) + rec.calls
+    _GC_CENSUS["scopes"] = _GC_CENSUS.get("scopes", 0) + sum(
+        len(v) for v in rec.scopes.values())
+
+    _keys, key_problems = gc_provide_keys(prog)
+    body, problems = gc_body_scopes(rel, prog, rec.model)
+    problems = [f"{rel}: {p}" for p in key_problems] + problems
+    problems.extend(f"{rel}: {p}" for p in rec.problems)
+
+    rows: list[str] = []
+    per_file: list = []
+    for comp, scopes in body.items():
+        walk = rec.scopes.get(comp, [])
+        if scopes and not walk:
+            _GC_UNOBSERVED[rel] = (
+                f"the parse gives {comp} {len(scopes)} scope(s) and the "
+                "recorder captured none")
+        act = next((n for lb, n, _p in scopes if lb == "activation"), 0)
+        rows.append("\t".join(["GB", rel, comp, str(act)]))
+        for label, n, params in scopes:
+            if label == "activation":
+                continue
+            key, _, method = label.partition(".")
+            rows.append("\t".join(["GP", rel, comp, key, method, str(n),
+                                   ",".join(params)]))
+        for label, n, params in walk:
+            rows.append("\t".join(["GW", rel, comp, label, str(n),
+                                   ",".join(params), f"{comp} {label}"]))
+        per_file.append((comp, scopes, walk))
+    _GC_ROWS[rel] = per_file
+    _GC_CENSUS["components"] = _GC_CENSUS.get("components", 0) + len(per_file)
+    _GC_CENSUS.setdefault("findings", []).extend(problems)
+    return rows
+
+
+def g9coverage_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `GB`/`GP`/`GW`/`GC` rows (issue #2108).
+
+    COVERAGE OF THE WALK, which is the half the `TAINT` row cannot state. The
+    ratchet has to fail in three different ways, and each of them has bitten:
+
+      * the corpus must EXERCISE the row — at least one component with a
+        non-empty activation scope and at least one provide scope — and the
+        observation must have RUN (a nonzero active census with scopes
+        recorded), so a corpus that stopped reaching the walk fails here
+        instead of passing vacuously;
+      * the observation must have SUCCEEDED for every component the parse says
+        has scopes: a component the parse gives scopes and the recorder
+        captured none for is `missed-G9-coverage-observation`, this harness's
+        own blind spot, and NOT a coverage failure; and
+      * the verdict must FLIP under each of four SHORTENINGS of the recorded
+        walk — drop the activation scope, bump a count, strip a parameter, and
+        add a scope the body does not have. `RevL.G9Coverage` proves each
+        shortening is a distinct way to fail; this is the corpus half, and a
+        row that returned a constant fails all four.
+
+    A verdict that comes out `fail` on the corpus — the walk genuinely having
+    skipped a scope the body has — is NOT reported here: it is
+    `checker_alignment`'s `missed-G9-coverage` bucket, which names the file
+    beside every other row's disagreement. The split is deliberate. This
+    ratchet is evidence the row BITES; the bucket is the row's verdict.
+
+    Returns findings, treated as gate failures."""
+    findings = [f"g9 coverage observation: {rel}: {why}"
+                for rel, why in sorted(_GC_UNOBSERVED.items())]
+    findings.extend(f"g9 coverage: {p}" for p in _GC_CENSUS.get("findings", []))
+    if not _GC_ROWS:
+        findings.append("g9 coverage: no GB/GP/GW rows at all — the row would "
+                        "decide nothing and agree vacuously")
+        return findings
+    if not _GC_CENSUS.get("active"):
+        findings.append(
+            "g9 coverage: the observation ran over no ACTIVE file — the "
+            "recorder captured nothing, so the row is its own blind spot")
+        return findings
+    if not _GC_CENSUS.get("scopes"):
+        findings.append(
+            "g9 coverage: the observation recorded no SCOPE at all — the "
+            "`_FlowChecker` seam this pins did not fire, so a `fail` row "
+            "would be reporting a coverage failure that is really an "
+            "instrument failure")
+        return findings
+    acts = provs = 0
+    drop_act = bump = strip = extra = 0
+    for rel, per_file in sorted(_GC_ROWS.items()):
+        for comp, body, walk in per_file:
+            if any(lb == "activation" for lb, _n, _p in body):
+                acts += 1
+            if any(lb != "activation" for lb, _n, _p in body):
+                provs += 1
+            if not walk:
+                continue
+            if _gc_covers(body, [w for w in walk if w[0] != "activation"]) \
+                    != _gc_covers(body, walk):
+                drop_act += 1
+            bumped = [(lb, n + 1, p) for lb, n, p in walk]
+            if _gc_covers(body, bumped) != _gc_covers(body, walk):
+                bump += 1
+            stripped = [(lb, n, p[:-1]) for lb, n, p in walk]
+            if _gc_covers(body, stripped) != _gc_covers(body, walk):
+                strip += 1
+            more = walk + [("activation", 1, [])]
+            if _gc_covers(body, more) != _gc_covers(body, walk):
+                extra += 1
+    if not acts:
+        findings.append(
+            "g9 coverage: no component in the corpus has a non-empty "
+            "activation scope, so the row never decides the historical "
+            "activation-skip bug")
+    if not provs:
+        findings.append(
+            "g9 coverage: no component in the corpus has a provide scope, so "
+            "the row never decides a receiver body")
+    if not drop_act:
+        findings.append(
+            "g9 coverage: dropping the activation scope from every recorded "
+            "walk changes no verdict — the row does not read the scope list")
+    if not bump:
+        findings.append(
+            "g9 coverage: bumping a visited-statement count changes no "
+            "verdict — the row does not read the count")
+    if not strip:
+        findings.append(
+            "g9 coverage: stripping a seeded parameter changes no verdict — "
+            "the row does not read the parameters")
+    if not extra:
+        findings.append(
+            "g9 coverage: adding a scope the body does not have changes no "
+            "verdict — the row does not read the label list")
+    if not findings:
+        print(f"g9 coverage: {len(_GC_ROWS)} files over "
+              f"{_GC_CENSUS['components']} components "
+              f"({acts} with an activation scope, {provs} with a provide "
+              f"scope), observation "
+              f"active={_GC_CENSUS['active']} "
+              f"inactive={_GC_CENSUS.get('inactive', 0)} "
+              f"refused={_GC_CENSUS.get('refused', 0)} "
+              f"no-walk={_GC_CENSUS.get('no_walk', 0)}, each verdict flipping "
+              "under dropping the activation scope, bumping a count, "
+              "stripping a parameter and adding a scope — coverage of the "
+              "checker's walk ON THE CORPUS")
+    return findings
 
 # ---------------------------------------- G-RETAIN (issue #1811 group 3)
 #
@@ -1823,10 +2329,13 @@ def g9_rows(rel: str) -> list[str]:
 # COVERS every retained path in the file: a path `taint.py`'s propagation never
 # reaches is a path this row never sees, and no row assembled from the
 # checker's own output can report that. Proving the search itself — growing the
-# L0 bodies so the checker's coverage of the walk is proved — is roadmap item
-# 418 step 9 and is out of this row's reach. `retain_coverage` prints the
-# distinction, `formal/STATUS.md` states it, and the PR that added the row
-# repeats it.
+# L0 bodies so the checker's coverage of the walk is proved — was tracked by
+# issue #2108, which did exactly that for the G9 walk (`RevL.G9Coverage`, the
+# `GB`/`GP`/`GW`/`GC` rows) and NOT for this one: G-RETAIN's own walk coverage
+# is still unclaimed, and #2108 does not reach it. It was never roadmap item
+# 418 step 9 — that step's "after an operational semantics exists" is the
+# precondition, not the obligation. `retain_coverage` prints the distinction,
+# `formal/STATUS.md` states it, and the PR that added the row repeats it.
 #
 # REPRODUCIBILITY. Because the instant is pinned, the verdict is a function of
 # the file plus the pin and not of the wall clock: `retain_coverage` re-decides
@@ -2004,8 +2513,11 @@ def retain_rows(rel: str) -> list[str]:
 # DISCOVERED. It is NOT a proof, and not a test, that the checker's walk
 # COVERS every bracket, every `extern acquire` and every host write in the
 # file: a bracket `lower` never reaches is a bracket this row never sees, and
-# no row assembled from the checker's own refusal can see it. That is roadmap
-# item 418 step 9 and is deliberately unclaimed here and in
+# no row assembled from the checker's own refusal can see it. That coverage
+# obligation is NOT roadmap item 418 step 9 — that step's "after an operational
+# semantics exists" is the precondition for stating such an obligation, not the
+# obligation. Issue #2108 discharged it for the G9 walk alone
+# (`RevL.G9Coverage`); the inverse walk's is still unclaimed, here and in
 # `formal/RevL/Theorems/G4Inverse.lean`.
 
 #: The three arms, as `RevL.G4Inverse.kindOfString` spells them. Spelled HERE
@@ -2316,8 +2828,10 @@ def sw_coverage() -> list[str]:
 
     A rule that returned a constant, or a row set that only ever said one
     thing, fails all three. The other half, that the checker's walk COVERS
-    every witnessed site, is roadmap item 418 step 9 and is deliberately not
-    claimed here or anywhere in this row. What IS enforced elsewhere is that
+    every witnessed site, is still unclaimed here and is not roadmap item 418
+    step 9: that step's "after an operational semantics exists" is the
+    precondition for stating such an obligation. Issue #2108 discharged it for
+    the G9 walk alone (`RevL.G9Coverage`). What IS enforced elsewhere is that
     the rule reaches the checker's OWN refusal: a `G4`/`witnessed` refusal
     whose rows all say `ok` is `missed-G4` in `checker_alignment`, and fatal.
     Returns findings, treated as gate failures."""
@@ -3791,6 +4305,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         tsv.extend(model_role_reach_rows(rel, model_roles, caps_seen))
         tsv.extend(council_rows(rel, prog))
         tsv.extend(g9_rows(rel))
+        tsv.extend(g9coverage_rows(rel, prog))
         tsv.extend(retain_rows(rel))
         tsv.extend(g4inverse_rows(rel, prog))
         tsv.extend(a5_rows(rel, prog))
@@ -5157,7 +5672,10 @@ def g9_coverage() -> list[str]:
     row whose walk is clean to begin with, fails that.
 
     The other half, that the checker's walk COVERS every tainting path, is
-    roadmap item 418 step 9 and is deliberately not claimed here or anywhere
+    NOT roadmap item 418 step 9 — that step's "after an operational semantics
+    exists" is the precondition for stating the obligation, not the
+    obligation. It is issue #2108, and it is discharged by the
+    `GB`/`GP`/`GW`/`GC` rows and `RevL.G9Coverage`, not by this rule row.
     in this row. Returns findings, treated as gate failures."""
     findings = [f"g9 coverage: {rel}: {why}"
                 for rel, why in sorted(_G9_UNREADABLE.items())]
@@ -5222,7 +5740,9 @@ def retain_coverage() -> list[str]:
 
     A rule that returned a constant, or a row whose deadline had not passed,
     fails both. The other half, that the checker's walk COVERS every retained
-    path, is roadmap item 418 step 9 and is deliberately not claimed here or
+    path, is still unclaimed and is NOT roadmap item 418 step 9 — that step's
+    "after an operational semantics exists" is the precondition. Issue #2108
+    discharged it for the G9 walk alone. It is deliberately not claimed here or
     anywhere in this row. Returns findings, treated as gate failures."""
     findings = [f"retain coverage: {rel}: {why}"
                 for rel, why in sorted(_GRETAIN_UNREADABLE.items())]
@@ -5326,7 +5846,10 @@ def g4inverse_coverage() -> list[str]:
         this.
 
     A rule that returned a constant fails all three. The other half, that the
-    checker's walk COVERS every bracket, is roadmap item 418 step 9 and is
+    checker's walk COVERS every bracket, is NOT roadmap item 418 step 9 — that
+    step's "after an operational semantics exists" is the precondition for
+    stating the obligation. Issue #2108 discharged it for the G9 walk alone,
+    and this one is
     deliberately not claimed here or anywhere in this row. Returns findings,
     treated as gate failures."""
     findings = [f"g4inverse coverage: {rel}: {why}"
@@ -5578,7 +6101,10 @@ class Verdicts(NamedTuple):
     extern fills its `compensate` slot and a class with no inverse does not,
     at the declaration's own capability token — the rule ON THE CORPUS, read
     off the declaration the export carries and the refusal the checker
-    REPORTS under `G4`/`reversibility`, issue #2114)."""
+    REPORTS under `G4`/`reversibility`, issue #2114), and `gc` GC rows (G9
+    coverage: the walk the checker PERFORMED visits every statement of the
+    body the parse enumerates and seeds every origin-carrying parameter — the
+    obligation `RevL.G9Coverage.coversBodyB` states, issue #2108)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -5610,6 +6136,7 @@ class Verdicts(NamedTuple):
     inv: dict[str, str]
     sw: dict[tuple[str, str, str], str]
     a5: dict[tuple[str, str, str], str]
+    gc: dict[tuple[str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -5626,7 +6153,7 @@ class Verdicts(NamedTuple):
                 + len(self.places) + len(self.model_reach)
                 + len(self.councils) + len(self.g9) + len(self.retain)
                 + len(self.inv)
-                + len(self.sw) + len(self.a5))
+                + len(self.sw) + len(self.a5) + len(self.gc))
 
 
 
@@ -5669,6 +6196,7 @@ def parse_verdicts(text: str) -> Verdicts:
     inv: dict[str, str] = {}
     sw: dict[tuple[str, str, str], str] = {}
     a5: dict[tuple[str, str, str], str] = {}
+    gc: dict[tuple[str, str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -5817,13 +6345,23 @@ def parse_verdicts(text: str) -> Verdicts:
             # is the DECLARATION AT ITS TOKEN, because one extern may declare
             # several computer-use capabilities and the rule is stated at each.
             a5[(parts[1], parts[2], parts[3])] = parts[5]
+        elif parts[0] == "GC" and len(parts) == 5:
+            # G9 coverage (issue #2108): (file, component, scope) ->
+            # ok|fail. The KEY is the SCOPE, not the file, because a file may
+            # hold several scopes and the obligation is stated per scope — the
+            # projection `RevLOracle.gcVerdicts` makes of the whole-body
+            # `gcRowB`, so a failure names the scope that failed rather than
+            # the body. `fail` here is coverage VIOLATED (the checker's walk
+            # did not visit a statement the body declares), which is what
+            # explains the two historical walk bugs; `ok` is coverage HELD.
+            gc[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-            places, model_reach, councils, g9, retain, inv, sw, a5)
+            places, model_reach, councils, g9, retain, inv, sw, a5, gc)
 
 
 
@@ -6081,7 +6619,10 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     # rule moves the model alone and the reference's `fail` becomes the
     # harness's `missed-G9`. THE RULE ON THE CORPUS: the walk is the one the
     # checker reported, so this recomputes the RULE and says nothing about the
-    # checker's coverage of the walk (roadmap item 418 step 9).
+    # checker's coverage of the walk. That half is the `GB`/`GP`/`GW`/`GC`
+    # rows below (issue #2108), NOT roadmap item 418 step 9 — that step's
+    # "after an operational semantics exists" is the precondition for stating
+    # the obligation, not the obligation.
     #
     # Polarity as for every other row: `ok` is the rule HOLDING (the sink
     # admits the label the checker discovered) and `fail` is the rule VIOLATED
@@ -6107,7 +6648,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     # pinned it (above) and the checker compared against that pin. THE RULE ON
     # THE CORPUS: the sink and the walk are the ones the checker reported, so
     # this recomputes the RULE and says nothing about the checker's coverage of
-    # the walk (roadmap item 418 step 9).
+    # the walk — still unclaimed for RETAIN, and NOT roadmap item 418 step 9;
+    # issue #2108 discharged that obligation for the G9 walk alone.
     #
     # Polarity as for every other row: `ok` is the rule HOLDING (the deadline
     # had not passed at the reported instant) and `fail` is the rule VIOLATED
@@ -6130,7 +6672,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     # the model and the reference's `fail` becomes the harness's `missed-G4`.
     # THE RULE ON THE CORPUS: the site and the demanded spelling are the ones
     # the checker reported, so this recomputes the RULE and says nothing about
-    # the checker's coverage of the walk (roadmap item 418 step 9).
+    # the checker's coverage of the walk — still unclaimed for the inverse
+    # walk, and NOT roadmap item 418 step 9; issue #2108 discharged that
+    # obligation for the G9 walk alone.
     #
     # Polarity as for every other row: `ok` is the rule HOLDING and `fail` is
     # the rule VIOLATED. A refusal at a site that is not the demanded spelling
@@ -6150,8 +6694,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     # changing the model alone moves the model and the reference's `fail`
     # becomes the harness's `missed-G4`. THE RULE ON THE CORPUS: the site is
     # the one the checker's own refusal named, so this recomputes the RULE
-    # and says nothing about the checker's coverage of the site walk
-    # (roadmap item 418 step 9).
+    # and says nothing about the checker's coverage of the site walk —
+    # still unclaimed, and NOT roadmap item 418 step 9; issue #2108
+    # discharged that obligation for the G9 walk alone.
     #
     # Polarity as for every other row: `ok` is the rule HOLDING (the site
     # reaches a head that is not a `witnessed` extern, or spells no `undo`)
@@ -6190,6 +6735,48 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             holds = _a5_holds(cls, has)
             a5[(r[1], r[2], r[3])] = "ok" if holds else "fail"
             _A5_ROWS[(r[1], r[2], r[3])] = (cls, has, holds)
+
+    # GC rows: G9 coverage (issue #2108), the reference's own verdict.
+    #
+    # THE RULE IS THE THREE CONJUNCTS `RevL.G9Coverage.coversBodyB` NAMES —
+    # the walk's scope LABELS, its visited-STATEMENT counts and its seeded
+    # PARAMETERS — recomputed here in Python from the three export rows, so a
+    # model change alone surfaces as a mismatch rather than agreeing with
+    # itself. `GB`/`GP` are the body as the PARSE and the taint model see it;
+    # `GW` is the walk the checker PERFORMED. The verdict is projected per
+    # scope, out to the longer of the two lists, so a walk that opened FEWER
+    # scopes than the body still yields a named `fail` for the missing one.
+    gc: dict[tuple[str, str, str], str] = {}
+    gc_bodies: dict[tuple[str, str], list] = {}
+    gc_walks: dict[tuple[str, str], list] = {}
+    gc_order: list[tuple[str, str]] = []
+    for r in rows:
+        if not r:
+            continue
+        if r[0] == "GB" and len(r) == 4:
+            key = (r[1], r[2])
+            if key not in gc_order:
+                gc_order.append(key)
+            scopes = gc_bodies.setdefault(key, [])
+            if int(r[3]):
+                scopes.append(("activation", int(r[3]), []))
+        elif r[0] == "GP" and len(r) == 7:
+            key = (r[1], r[2])
+            if key not in gc_order:
+                gc_order.append(key)
+            gc_bodies.setdefault(key, []).append(
+                (f"{r[3]}.{r[4]}", int(r[5]), _gc_params(r[6])))
+        elif r[0] == "GW" and len(r) == 7:
+            key = (r[1], r[2])
+            if key not in gc_order:
+                gc_order.append(key)
+            gc_walks.setdefault(key, []).append(
+                (r[3], int(r[4]), _gc_params(r[5])))
+    for key in gc_order:
+        rel, comp = key
+        for label, verdict in _gc_covers(gc_bodies.get(key, []),
+                                         gc_walks.get(key, [])):
+            gc[(rel, comp, label)] = verdict
 
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
@@ -6521,11 +7108,11 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                               calls_by.get(key, set()))
 
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-            places, model_reach, councils, g9, retain, inv, sw, a5)
+                    places, model_reach, councils, g9, retain, inv, sw, a5,
+                    gc)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -6644,11 +7231,25 @@ def a9_coverage() -> list[str]:
 # about that other language. Both are 0 on the corpus, so both are fatal; a
 # genuine fragment gap has `out-of-fragment*` to land in, which is the bucket
 # that says "the model has no fact here" rather than "the model disagrees".
+#
+# `missed-G9-coverage` (issue #2108) is the coverage half of G9 in that same
+# DANGEROUS direction: the body has a scope or a statement the walk never
+# visited, so the checker's search was weaker than the body it was searching.
+# `missed-G9-coverage-observation` is NOT that finding and is kept apart from
+# it on purpose. It fires when the parse gives a component scopes and the
+# recorder that observes the walk captured none — the seam this harness pins
+# (`revl.taint._FlowChecker` subclassed by `_GCRecorder`, entered through
+# `revl.taint._walk_component_methods`) having moved or been renamed. Those
+# two read the same way in a `GC` verdict, because a walk nobody observed and
+# a walk that visited nothing both leave the body's scopes uncovered; folding
+# them together would let a broken instrument read as a coverage regression,
+# or let a real regression hide behind "the harness went blind".
 FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
                  "missed-G6", "missed-A1", "missed-A6", "missed-A9",
                  "missed-A2", "missed-prelude", "missed-intercept",
                  "missed-G-MODEL-PLACE", "missed-G-COUNCIL-SPLIT", "missed-G9",
-                 "missed-G-RETAIN",
+                 "missed-G-RETAIN", "missed-G9-coverage",
+                 "missed-G9-coverage-observation",
                  "formal-strict", "formal-found-other")
 
 
@@ -7000,8 +7601,11 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # rule on the corpus, NOT a statement about the checker's coverage
             # of the walk — a retained path `taint.py` never propagates to is a
             # path no row assembled from the checker's output can see — and NOT
-            # a statement that the checker's walk is proved: roadmap item 418
-            # step 9 is out of this row's reach. Matched on the CATEGORY as
+            # a statement that the checker's walk is proved: that obligation is
+            # still unclaimed for RETAIN, and it is NOT roadmap item 418 step
+            # 9 — that step's "after an operational semantics exists" is the
+            # precondition for stating it. Issue #2108 discharged it for the G9
+            # walk alone. Matched on the CATEGORY as
             # well as the code, and on the FLOW-LEVEL sentence, because
             # `G-RETAIN` also carries the declaration-level refusal
             # (`taint._refuse_retention_declaration`), a different judgment
@@ -7056,6 +7660,29 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
+
+        # G9 COVERAGE (issue #2108). A `fail` here is the checker's walk
+        # having SKIPPED a scope or a statement the body has, which is the
+        # bug class this row exists for (`_walk_component_methods` used to
+        # skip activation bodies entirely), so it is fatal on its own bucket.
+        #
+        # An UNOBSERVED walk takes the OTHER bucket and never this one. The
+        # recorder captures nothing when `_FlowChecker` stops being the
+        # `enforce=True` class the seam wraps, or when the walk moves off
+        # `_walk_component_methods`; the export then carries the body's
+        # `GB`/`GP` rows with no `GW` rows, and the oracle reports `fail`
+        # for every scope it can name. That is the harness having gone
+        # blind, not the checker having skipped a statement, and folding the
+        # two together would let a broken seam read as a coverage regression
+        # (or, worse, hide one behind the other). `_GC_UNOBSERVED` is the
+        # files where the parse says a scope exists and the recorder saw
+        # none, so those files are claimed by the observation bucket alone.
+        if rel in _GC_UNOBSERVED:
+            record("missed-G9-coverage-observation", rel)
+        elif any(x == "fail" for k, x in v.gc.items() if k[0] == rel):
+            record("missed-G9-coverage", rel)
+        elif any(k[0] == rel for k in v.gc):
+            record("agree-G9-coverage", rel)
 
     # Files with no composition to model, and files revl refused at parse:
     # named, not omitted. Neither carries a computed verdict, so neither can
@@ -7640,6 +8267,7 @@ def main() -> int:
             ("council", ref.councils, formal.councils),
             ("g9", ref.g9, formal.g9),
             ("retain", ref.retain, formal.retain),
+            ("g9_coverage", ref.gc, formal.gc),
             ("inv", ref.inv, formal.inv),
             ("sw", ref.sw, formal.sw),
             ("a5", ref.a5, formal.a5)):
@@ -7675,6 +8303,7 @@ def main() -> int:
         f"{len(ref.model_reach)} model reach edges + "
         f"{len(ref.councils)} council tie policies + "
         f"{len(ref.g9)} taint walks + "
+        f"{len(ref.gc)} coverage scopes + "
         f"{len(ref.retain)} retention refusals + "
         f"{len(ref.inv)} inverse refusals + "
         f"{len(ref.sw)} witnessed-site refusals) — "
@@ -7699,6 +8328,7 @@ def main() -> int:
     mismatches.extend(model_coverage())
     mismatches.extend(council_coverage())
     mismatches.extend(g9_coverage())
+    mismatches.extend(g9coverage_coverage())
     mismatches.extend(retain_coverage())
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())
