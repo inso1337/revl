@@ -1,0 +1,37 @@
+{
+  "_about": [
+    "The written disposition of every entry of",
+    "tests/fixtures/oracle_construct_reach_ledger.json that no SIBLING",
+    "reason-first ledger already decides. Reason-first: the reason is the",
+    "entry, the constructs are its evidence. Gated by",
+    "tools/oracle_construct_reach.py --check (roadmap item 533's second half).",
+    "",
+    "An entry needs a line here only when no other file decides it. The",
+    "self-host byte-agreement ledger tests/fixtures/selfhost_blind_spots.json",
+    "(roadmap item 429) is reason-first too, per tier, over the SAME corpora:",
+    "emit_<tier> shares the tier's, and lower_ir's corpus IS the py tier's",
+    "(`_corpus_from_test(\"py\")`). So a construct that appears under one of its",
+    "reasons is already disposed -- DERIVED, and recomputed from that file",
+    "rather than re-asserted here. What is left over is the two oracles no",
+    "tier covers: `compile` (IR sections, not emit.py constructs) and",
+    "`gate_census` (guarantee tags, not IR discriminants).",
+    "",
+    "This file SHRINKS with the ledger it disposes of. A line whose construct",
+    "is no longer an unreached entry of the ledger fails --check and must be",
+    "DELETED, and a reason that is empty disposes of nothing. Never add a line",
+    "to silence a failure you have not read: the fix is a corpus document, or",
+    "a measured statement of why none can exist.",
+    "",
+    "It records NAMES and prose only -- never counts, totals or line numbers."
+  ],
+  "compile": {
+    "tests": "UNPORTED, not a document owed. The `tests` IR section is populated only by in-file `test` bodies, and the native lowerer (selfhost/lower.rvl) has no arm that emits the section at all: the `\"tests\"` key appears in no IR assembly in that file, so the native chain drops a section the reference carries and NO document of this oracle's corpus can agree byte-for-byte on it. Adding one is a port of the section, not a corpus case."
+  },
+  "gate_census": {
+    "BOOT": "REACHED OUT OF CORPUS. The census's own gate issues this tag for a program that is already in tests/test_selfhost_lower.py's in-memory tables (`REJECTED_PROGRAMS`, 'two boot components'), which _census_documents excludes by construction because they are strings, not documents; no corpus document elicits it. Pinned by tests/test_oracle_construct_reach.py::test_the_gate_census_unreached_tags_are_elicitable, which drives the census's gate over those tables and asserts this tag comes back.",
+    "HANDOFF": "REACHED OUT OF CORPUS. The census's own gate issues this tag for programs already in tests/test_selfhost_lower.py's in-memory tables (`REJECTED_PROGRAMS`, 'handoff on a non-provided key is refused' and 'handoff on a non-provided key'), which _census_documents excludes by construction because they are strings, not documents; no corpus document elicits it. Pinned by tests/test_oracle_construct_reach.py::test_the_gate_census_unreached_tags_are_elicitable.",
+    "HOST-ARITY": "REACHED OUT OF CORPUS, and a corpus document is owed. The census's gate issues this tag -- `HOST-ARITY|host builtin `Pool.open` takes 2 arguments, got 1` -- for `fn f() { let p = Pool.open(\"dsn\") }`, a program tests/test_selfhost_lower.py already asserts the gate refuses but that no in-memory table carries and no corpus document elicits. Pinned by tests/test_oracle_construct_reach.py::test_the_gate_census_unreached_tags_are_elicitable, which holds that program itself; a real `.rvl` tripping a host builtin's arity is the document this line still owes.",
+    "ROUTE": "REACHED OUT OF CORPUS. The census's own gate issues this tag for programs already in tests/test_selfhost_lower.py's in-memory tables (`REJECTED_PROGRAMS`, five of them, e.g. 'routing a provision is refused (ROUTE)'), which _census_documents excludes by construction because they are strings, not documents; no corpus document elicits it. Pinned by tests/test_oracle_construct_reach.py::test_the_gate_census_unreached_tags_are_elicitable.",
+    "SPAWN": "REACHED OUT OF CORPUS. The census's own gate issues this tag for programs already in tests/test_selfhost_lower.py's in-memory tables (`REJECTED_PROGRAMS`, 'spawn names an unknown component' and two more), which _census_documents excludes by construction because they are strings, not documents; no corpus document elicits it. Pinned by tests/test_oracle_construct_reach.py::test_the_gate_census_unreached_tags_are_elicitable."
+  }
+}

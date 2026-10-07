@@ -12,6 +12,15 @@
     "every line left in it is a named hole someone still owes a corpus",
     "document or an out-of-scope decision (roadmap item 533's other half).",
     "",
+    "That obligation is gated, not just stated: every entry here must carry a",
+    "written disposition -- DERIVED from the sibling reason-first ledger",
+    "tests/fixtures/selfhost_blind_spots.json, or RECORDED in",
+    "tests/fixtures/oracle_construct_reach_dispositions.json -- and a",
+    "disposition for an entry that is no longer here fails too. An entry with",
+    "neither fails --check. So the number cannot go stale the way it did when",
+    "issue #1203 closed while the row still read STILL OPEN. Run --triage to",
+    "print every entry with the decision that disposes of it.",
+    "",
     "It records NAMES only -- never counts, totals or line numbers -- so it",
     "is identical under CI's python 3.11 and a 3.14 developer venv, and a",
     "`--write` from either is a safe diff."
@@ -27,7 +36,13 @@
     "(`ACCEPTED_PROGRAMS`, `REJECTED_PROGRAMS`, `ADMISSION_PROGRAMS`), and",
     "four of these five families are exercised by those. So each line is",
     "owed a real `.rvl` in the tree that spells it, not a claim the family",
-    "is untested anywhere."
+    "is untested anywhere.",
+    "",
+    "Each of the five is disposed in",
+    "tests/fixtures/oracle_construct_reach_dispositions.json, which names",
+    "the in-memory program that elicits it (or, for `HOST-ARITY`, the",
+    "program the tree already exercises) and the test that pins it.",
+    "`HOST-ARITY` is the one of the five still owed a document."
   ],
   "compile": [
     "tests"

@@ -25,8 +25,37 @@ to it in both directions:
 
 Every remaining entry is a named hole, which is what turns the number into a
 budget.  Triaging those entries into a corpus document to add or a dispatch to
-declare out of scope is the other half of roadmap item 533, and deliberately
-not done by this file: this one only makes sure the number cannot grow.
+declare out of scope is the other half of roadmap item 533, and it is now the
+third thing `--check` gates rather than a debt the file names and walks past.
+`--triage` prints the disposition of every entry.
+
+A NAMED HOLE WITH NO DISPOSITION is that third failure.  The ledger's own
+`_about` says every line left in it is "a named hole someone still owes a corpus
+document or an out-of-scope decision", and for as long as nothing read that
+sentence the count could go stale exactly the way item 533 did: its tracking
+issue #1203 closed on 2026-09-20 while the row still said STILL OPEN, and the
+entries it owed stayed owed with no live owner.  So every ledger entry now
+carries a written disposition, from one of two places, and both are recomputed
+from the tree:
+
+  * DERIVED -- the sibling reason-first ledger `selfhost_blind_spots.json`
+    (roadmap item 429) already decides the construct for a corpus this oracle
+    shares.  That file is reason-first, so it is INVERTED here: a construct
+    under one of its reasons has had a decision written for it, and
+    `tools/selfhost_coverage.py::_closure_problems` already guarantees a
+    construct sits under at most one reason per tier, so the inversion is a
+    function.  These entries are disposed of by a decision that already existed,
+    recomputed rather than re-asserted.
+  * RECORDED -- `oracle_construct_reach_dispositions.json` carries the reason,
+    for the two oracles no tier covers (`compile` and `gate_census`).
+
+A recorded disposition whose construct is no longer an unreached entry is a RED
+and must be DELETED -- the same shrink-only ratchet, one level up -- and an
+empty reason disposes of nothing.  `--check` says which entries are undisposed
+and which dispositions are stale; `--triage` says what each entry's disposition
+IS.  What this cannot check is whether a written reason is a GOOD reason: that
+stays a judgement, and the gate makes it a judgement someone has to write down
+instead of a number nobody owns.
 
 The VACUITY check stays, and is not redundant with the ratchet.  The ratchet
 compares unreached SETS, so it says exactly nothing about an oracle whose
@@ -50,6 +79,7 @@ is a measurement; see `_census_guarantees` and `_census_reach`.
 Usage:
     python3 tools/oracle_construct_reach.py            # the report
     python3 tools/oracle_construct_reach.py --check    # the gate (exit 1)
+    python3 tools/oracle_construct_reach.py --triage   # every entry's reason
     python3 tools/oracle_construct_reach.py --write    # regenerate the ledger
 """
 
@@ -65,6 +95,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER = ROOT / "tests" / "fixtures" / "oracle_construct_reach_ledger.json"
+DISPOSITIONS = ROOT / "tests" / "fixtures" / "oracle_construct_reach_dispositions.json"
+BLIND_SPOTS = ROOT / "tests" / "fixtures" / "selfhost_blind_spots.json"
+
+#: Which tier of the sibling reason-first ledger `BLIND_SPOTS` covers the same
+#: corpus as, per oracle.  `lower_ir` is keyed to `py` because
+#: `_corpus_from_test("py")` IS its corpus, so the py tier's per-construct
+#: decisions are exactly the decisions that apply to it.
+_TIER_OF = {
+    "emit_py": "py",
+    "emit_ts": "ts",
+    "emit_go": "go",
+    "emit_java": "java",
+    "emit_rust": "rust",
+    "emit_wasm": "wasm",
+    "lower_ir": "py",
+}
+
 sys.path.insert(0, str(ROOT / "src"))
 
 
@@ -412,6 +459,96 @@ def _ledger() -> dict[str, list[str]]:
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
+# ------------------------------------------------------------------ triage
+
+def _blind_spots() -> dict[str, dict[str, str]]:
+    """`oracle -> {construct: "kind: reason"}` for every construct the item-429
+    ledger already decides, INVERTED from reason-first to construct-first.
+
+    `tests/fixtures/selfhost_blind_spots.json` is keyed by reason: each entry is
+    a written decision and the constructs under it are its evidence.  So a
+    construct appearing there has had a decision written for it by whoever wrote
+    the reason, and this recomputes which ones rather than restating them.  The
+    inversion is a function because `tools/selfhost_coverage.py::
+    _closure_problems` already fails a construct listed under two reasons in one
+    tier.
+    """
+    raw = json.loads(BLIND_SPOTS.read_text())
+    out: dict[str, dict[str, str]] = {}
+    for oracle, tier in _TIER_OF.items():
+        decided: dict[str, str] = {}
+        for kind in ("blind", "unported"):
+            for reason, constructs in raw.get(tier, {}).get(kind, {}).items():
+                for construct in constructs:
+                    decided.setdefault(construct, f"{kind}: {reason}")
+        out[oracle] = decided
+    return out
+
+
+def _dispositions() -> dict[str, dict[str, str]]:
+    """`oracle -> {construct: reason}` -- the written dispositions of the ledger
+    entries no sibling tier decides."""
+    raw = json.loads(DISPOSITIONS.read_text())
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+def triage(oracle: str, construct: str, decided: dict[str, dict[str, str]],
+           recorded: dict[str, dict[str, str]]) -> tuple[str, str] | None:
+    """`(source, reason)` for one ledger entry, or `None` when nothing disposes
+    of it.  `source` is `"DERIVED"` (the sibling reason-first ledger) or
+    `"RECORDED"` (this tree's dispositions file)."""
+    if construct in decided.get(oracle, {}):
+        return ("DERIVED", decided[oracle][construct])
+    if construct in recorded.get(oracle, {}):
+        return ("RECORDED", recorded[oracle][construct])
+    return None
+
+
+def _triage_problems(ledger: dict[str, list[str]]) -> list[str]:
+    """Every ledger entry carries a written disposition, and none is stale.
+
+    See the module docstring's TRIAGE section: this is what stops the count
+    going stale the way item 533 did, where the tracking issue closed while the
+    row still read STILL OPEN and the entries stayed owed with no owner.  A
+    disposition is DERIVED when the sibling reason-first ledger already decides
+    the construct for a corpus this oracle shares, RECORDED when this tree's
+    dispositions file does; both are read from the tree, so this is a
+    measurement and not an assertion about what someone once wrote down.
+    """
+    problems: list[str] = []
+    decided = _blind_spots()
+    recorded = _dispositions()
+    for oracle, constructs in sorted(ledger.items()):
+        if not isinstance(constructs, list):
+            continue
+        for construct in sorted(constructs):
+            if triage(oracle, construct, decided, recorded) is None:
+                problems.append(
+                    f"{oracle}: `{construct}` is a named hole with NO written "
+                    f"disposition. Decide it -- a corpus document to add, or a "
+                    f"measured reason none can exist -- and record the reason "
+                    f"in {DISPOSITIONS.name}, or in the sibling reason-first "
+                    f"ledger for a tier this oracle shares.")
+    for oracle, rows in sorted(recorded.items()):
+        if not isinstance(rows, dict):
+            problems.append(f"{oracle}: entry in {DISPOSITIONS.name} must map "
+                            f"a construct to a written reason.")
+            continue
+        for construct, reason in sorted(rows.items()):
+            if construct not in (ledger.get(oracle) or []):
+                problems.append(
+                    f"{oracle}: `{construct}` is disposed in "
+                    f"{DISPOSITIONS.name} but is no longer a recorded gap in "
+                    f"{LEDGER.name}. Delete the disposition: this is the same "
+                    f"shrink-only rule as the ledger, one level up.")
+            if not isinstance(reason, str) or not reason.strip():
+                problems.append(
+                    f"{oracle}: `{construct}` has an EMPTY disposition in "
+                    f"{DISPOSITIONS.name}. An empty reason disposes of "
+                    f"nothing; write the decision down.")
+    return problems
+
+
 def _vacuity_problems(data: dict) -> list[str]:
     problems: list[str] = []
     for oracle, report in sorted(data.items()):
@@ -464,6 +601,7 @@ def check(data: dict) -> list[str]:
                 f"{LEDGER.name} but is not unreached any more (the corpus "
                 f"reaches it, or the dispatch is gone). Delete the entry: this "
                 f"ledger only shrinks.")
+    problems += _triage_problems(ledger)
     return problems
 
 
@@ -490,10 +628,48 @@ _ABOUT = [
     "every line left in it is a named hole someone still owes a corpus",
     "document or an out-of-scope decision (roadmap item 533's other half).",
     "",
+    "That obligation is gated, not just stated: every entry here must carry a",
+    "written disposition -- DERIVED from the sibling reason-first ledger",
+    "tests/fixtures/selfhost_blind_spots.json, or RECORDED in",
+    "tests/fixtures/oracle_construct_reach_dispositions.json -- and a",
+    "disposition for an entry that is no longer here fails too. An entry with",
+    "neither fails --check. So the number cannot go stale the way it did when",
+    "issue #1203 closed while the row still read STILL OPEN. Run --triage to",
+    "print every entry with the decision that disposes of it.",
+    "",
     "It records NAMES only -- never counts, totals or line numbers -- so it",
     "is identical under CI's python 3.11 and a 3.14 developer venv, and a",
     "`--write` from either is a safe diff.",
 ]
+
+
+def triage_report(data: dict) -> None:
+    """Every unreached entry and the disposition that disposes of it."""
+    decided = _blind_spots()
+    recorded = _dispositions()
+    sources = {"DERIVED": 0, "RECORDED": 0}
+    undisposed: list[str] = []
+    for oracle, entry in data.items():
+        constructs = entry["unreached"]
+        print(f"{oracle}: {len(constructs)} unreached")
+        for construct in constructs:
+            found = triage(oracle, construct, decided, recorded)
+            if found is None:
+                undisposed.append(f"{oracle}: {construct}")
+                print(f"  UNDISPOSED {construct}")
+                continue
+            source, reason = found
+            sources[source] += 1
+            first = " ".join(reason.split())
+            if len(first) > 96:
+                first = first[:93] + "..."
+            print(f"  {source:8s} {construct}\n           {first}")
+    total = sum(sources.values())
+    print(f"\n{total} disposed: {sources['DERIVED']} DERIVED from "
+          f"{BLIND_SPOTS.name}, {sources['RECORDED']} RECORDED in "
+          f"{DISPOSITIONS.name}; {len(undisposed)} undisposed")
+    for line in undisposed:
+        print(f"UNDISPOSED {line}")
 
 
 def report(data: dict) -> None:
@@ -508,7 +684,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true",
                         help="fail on a newly unreached construct, a stale "
-                             "ledger entry, or a vacuous report")
+                             "ledger entry, an undisposed entry, a stale "
+                             "disposition, or a vacuous report")
+    parser.add_argument("--triage", action="store_true",
+                        help="print every unreached entry with the written "
+                             "disposition that disposes of it")
     parser.add_argument("--write", action="store_true",
                         help="regenerate the unreached ledger from this tree")
     parser.add_argument("--json", type=Path, help="write the report as JSON")
@@ -518,7 +698,9 @@ def main(argv: list[str] | None = None) -> int:
         write_ledger(data)
         print(f"wrote {LEDGER.relative_to(ROOT)}")
         return 0
-    if args.json:
+    if args.triage:
+        triage_report(data)
+    elif args.json:
         args.json.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     else:
         report(data)
@@ -532,7 +714,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"construct reach matches {LEDGER.relative_to(ROOT)}: "
               f"{sum(len(e['unreached']) for e in data.values())} named gaps, "
-              f"none new.")
+              f"none new, every one disposed.")
     return 0
 
 
