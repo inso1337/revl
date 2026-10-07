@@ -593,7 +593,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # (`lower.py::_lower_component_block_arm`), and `selfhost/lower.rvl`
         # has no `do` producer (`cir_expr` has no `do` arm) — but that is one
         # gap of several, so issue #2094's parser node, with or without a `do`
-        # producer, cannot close this entry.
+        # producer, cannot close this entry. #2094 is CLOSED as completed and
+        # delivered none of this, so the entry outlives it: issue #2131 is the
+        # open tracker.
         "branches.rvl",
         # whole-program documents combining several of the above.
         # (`../../../examples/v3_step_scheduler.rvl` left this list with the
@@ -669,7 +671,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # but that is neither the only nor the operative reason this document is
         # withheld — several component-position gaps in `selfhost/lower.rvl`
         # each drop the whole provide class on their own, and the block arm is
-        # one of them (see the py list above),
+        # one of them (see the py list above). Issue #2131 is the open tracker
+        # for the family; #2094, which this entry used to point at, is CLOSED as
+        # completed with the gap intact.
         "../emit_py_corpus/branches.rvl",
         # and the two documents written for this slice, which combine the above.
         "routed_timers.rvl",
