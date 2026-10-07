@@ -16616,7 +16616,14 @@ fn model_reach_at(ts: List[Token], i: Int) -> MReach {
 // `acands` is the whole ORDERED CANDIDATE SET (item 515), head included, so a
 // one-role arm carries a one-element list and everything written against item
 // 512 is walked exactly as it was.
-type MArm = { aorig: Str, arole: Str, aline: Int, acands: List[Str] }
+//
+// `apref` is the arm's trailing `prefer resident` clause (item 2118, decision
+// 12): the author's per-arm opt-in to a residency-aware order, and the only
+// form of it there is. It rides on the ARM - never on the block, the host or a
+// command line - so it can never reorder a second arm and never becomes a
+// default, and an arm that does not write it is ordered exactly as written.
+type MArm = { aorig: Str, arole: Str, aline: Int, acands: List[Str],
+              apref: Bool }
 
 // One `route model on <action> { ... }` block. `bok` is false when the block
 // is not in the arm form this gate reads; see `model_blocks_in`.
@@ -16992,7 +16999,8 @@ fn model_action_names(ts: List[Token], lo: Int, hi: Int) -> List[Str] {
 
 // The arms of one block: `<origin> -> <candidate> | <candidate> | ...`
 // separated by `,` or `;`, with a trailing separator allowed exactly as the
-// reference allows one. `xok` is false for anything else, which is what
+// reference allows one, and an optional trailing `prefer resident` clause
+// (item 2118). `xok` is false for anything else, which is what
 // `mundecided_msg` then refuses by name rather than stepping over — see that
 // function for why the direction matters.
 //
@@ -17001,6 +17009,15 @@ fn model_action_names(ts: List[Token], lo: Int, hi: Int) -> List[Str] {
 // exactly: a scheduler that may pick a role no arm names is the shape item 515
 // exists to remove, and an author who writes it deserves the reason rather
 // than a grammar complaint.
+//
+// The clause is read ONLY on a set of two or more candidates, which is where
+// the reference accepts it. The reference refuses it on an arm that names one
+// candidate ("ranking it by residency rules nothing out") and on an arm that
+// reaches a council, and this reader holds no council table, so both of those
+// arms leave the clause a trailing token it cannot account for and are refused
+// BY NAME. Fail-closed in the one direction that matters: the gate never
+// admits a clause the reference refuses, and it never steps over a token it
+// did not read.
 fn model_arms_in(ts: List[Token], lo: Int, hi: Int) -> MArmR {
   var i = lo
   var out: List[MArm] = []
@@ -17032,8 +17049,17 @@ fn model_arms_in(ts: List[Token], lo: Int, hi: Int) -> MArmR {
         j += 1
         if (atk(ts, j, "|")) { j += 1 } else { more = false }
       }
+      // Both words are CONTEXTUAL identifiers (`at_word`), so a program that
+      // names a role `prefer` or `resident` still compiles: the clause is only
+      // ever the pair that follows a candidate set.
+      var pref = false
+      if (cands.length() > 1 && at_word(ts, j, "prefer")
+          && at_word(ts, j + 1, "resident")) {
+        pref = true
+        j += 2
+      }
       out = out.push({ aorig: orig, arole: cands[0], aline: line,
-                       acands: cands })
+                       acands: cands, apref: pref })
       i = j
     }
   }
@@ -17409,6 +17435,38 @@ fn model_held_str(held: List[Str]) -> Str {
   return text
 }
 
+// `_Search.order` for the residency this gate is handed, which is NONE: it is
+// given a program, not a host, so `held` is empty for every arm and an
+// opted-in arm is tried in the order it wrote, which is that function's own
+// `not self.residency` branch. The clause is read into the comparison here
+// rather than dropped, and the day a residency reaches this fold it is a
+// parameter rather than a rewrite.
+//
+// A residency-free stand-in for `held` would not do instead, and the reason is
+// worth recording: every candidate set this gate DECIDES is RESIDENCE-UNIFORM
+// (item 515's first set rule, `model_candidates_refusal`), so "could this host
+// hold it" answers the same for every candidate of a decidable arm and any
+// such stand-in reorders nothing. The clause's effect on this gate is not an
+// order but an ANSWER: an opted-in arm is read and decided instead of refused
+// by name, and the verdict it gets is the one the reference reaches for EVERY
+// residency, because the fold this feeds raises a refusal when any edge
+// offends and a reorder is a permutation of the same edges.
+fn model_order_roles(a: MArm, held: List[Str]) -> List[Str] {
+  if (!a.apref || held.length() == 0) { return a.acands }
+  var first: List[Str] = []
+  var rest: List[Str] = []
+  var i = 0
+  while (i < a.acands.length()) {
+    if (contains(held, a.acands[i])) {
+      first = first.push(a.acands[i])
+    } else {
+      rest = rest.push(a.acands[i])
+    }
+    i += 1
+  }
+  return push_all(first, rest, 0)
+}
+
 // The roles one arm routes through: every candidate, and a council's member
 // roles in declaration order. "?" marks an arm this fold cannot resolve.
 fn model_arm_roles(a: MArm, rs: List[MRole], cs: List[CDecl]) -> List[Str] {
@@ -17423,7 +17481,7 @@ fn model_arm_roles(a: MArm, rs: List[MRole], cs: List[CDecl]) -> List[Str] {
     }
     return out
   }
-  return a.acands
+  return model_order_roles(a, [])
 }
 
 // `_model_reach_edges`: block edges sorted by action then origin, each arm's
@@ -27303,6 +27361,18 @@ component C requires bus: Bus provides w: W {
   assert v == ""
 }
 
+// Item 2118's surface, pinned from both sides: the clause is READ where the
+// reference accepts it (a set of two or more, no council) and every other
+// trailing shape stays a refusal BY NAME rather than a token stepped over.
+test "a bare prefer with no resident is refused by name, not stepped over" {
+  assert admit_src(mset("* -> fast | small prefer"))
+    == "MODEL|".concat(mundecided_msg("classify", "Classifier"))
+  assert admit_src(mset("* -> fast | small prefer held"))
+    == "MODEL|".concat(mundecided_msg("classify", "Classifier"))
+  assert admit_src(mset("* -> fast | small resident"))
+    == "MODEL|".concat(mundecided_msg("classify", "Classifier"))
+}
+
 test "a block match arm in a provide method is read as the arm's scope" {
   let v = admit_src("""service S { fn go(n: Int) -> Int }
 component C provides s: S {
@@ -27387,6 +27457,19 @@ test "a candidate requires resolves against the running service block" {
   let cand = "service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }"
   assert admit_src(cand) == "G1|unknown service `Store` in `requires` of CacheLayer"
   assert admit_ambient(cand, "Kv/store/;App/app/;App<store;!services;:Store;:AppSvc") == ""
+}
+
+test "a candidate set with the residency clause is decided, not refused" {
+  assert admit_src(mset("* -> fast | small prefer resident")) == ""
+  let three = """model role a on_device device cpu memory 512 quant int8
+model role b on_device device cpu memory 512 quant int8
+model role c on_device device cpu memory 512 quant int8
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { * -> a | b | c prefer resident }
+  provide out { fn classify(text) = text }
+}"""
+  assert admit_src(three) == ""
 }
 
 test "a closure assigning to a capture is refused at parse (G6)" {
@@ -28364,14 +28447,21 @@ component Supervisor provides sup: Sup {
 // quantisation tag is checked against nothing on purpose.
 //
 // What this section does NOT decide, recorded so its silence is not read as an
-// admission: the ORDERED CANDIDATE SET (`confidential -> fast | small`) and
-// item 519's `reaches [...]` fold. An arm written as a candidate set does not
+// admission: WHICH candidate of an ordered set an arm settles on. The set
+// itself is read here (`model_arms_in`) and its membership rules are decided
+// (`model_candidates_refusal`: one council, residence-uniform, every candidate
+// profiled), but the order those candidates are tried in is the reference's
+// `_Search` and the gate carries no verdict for it - the same set admits or is
+// refused whichever way it is ordered. Item 519's `reaches [...]` fold IS
+// decided (`model_reach_comp`), and item 2118's `prefer resident` clause is
+// read and carried on the arm (`apref`) rather than refused: the order it asks
+// for is `_Search.order` with the residency this gate is not handed, so it
+// changes no verdict here - see `model_order_roles`.
+//
+// (The paragraph this replaced read "An arm written as a candidate set does not
 // reach `model_arms_in`'s reader at all - the `|` is neither a separator nor a
-// role name there - so the block is refused BY NAME as one this gate does not
-// decide, which is the direction it is allowed to err in. The reach fold is a
-// capability product over a component's HELD set, the shape item 514's value
-// half has, and this gate raises no objection to it for item 514's own reason.
-
+// role name there". That was already false when it was written: the same commit
+// `6a80e1fe4` added the `|` reader beside it.)
 test "a profiled role admits, and the profile is read rather than stepped over" {
   let v = admit_src("""model role fast on_device device gpu memory 6144 quant q4_k_m
 service Answer { fn classify(text: Str) -> Str }
@@ -28554,6 +28644,42 @@ component C requires List: Lst provides s: S {
   assert v == "G1|requirement key `List` of C shadows the builtin type `List`"
 }
 
+test "a residency clause on a council arm is refused by name" {
+  let head = """model role fast on_device device cpu memory 512 quant int8
+model role small on_device device cpu memory 512 quant int8
+model council Release {
+  proposer -> fast,
+  adversary -> small,
+  aggregate unanimous quorum declared on_tie split
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { * -> Release prefer resident }
+  provide out { fn classify(text) = text }
+}"""
+  let bare = """model role fast on_device device cpu memory 512 quant int8
+model role small on_device device cpu memory 512 quant int8
+model council Release {
+  proposer -> fast,
+  adversary -> small,
+  aggregate unanimous quorum declared on_tie split
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { * -> Release }
+  provide out { fn classify(text) = text }
+}"""
+  // The clause is refused; the same arm without it still admits, so the
+  // refusal is the clause and not the council.
+  assert admit_src(head) == "MODEL|".concat(mundecided_msg("classify", "Classifier"))
+  assert admit_src(bare) == ""
+}
+
+test "a residency clause on one candidate is refused by name" {
+  assert admit_src(mset("* -> fast prefer resident"))
+    == "MODEL|".concat(mundecided_msg("classify", "Classifier"))
+}
+
 test "a role is declared once, and the refusal names both residences" {
   let v = admit_src("""model role local on_device
 model role local off_device
@@ -28562,6 +28688,20 @@ component Classifier provides out: Answer {
   provide out { fn classify(text) = text }
 }""")
   assert v == "MODEL|model role `local` is declared twice (first on line 1, as `on_device`; here as `off_device`)"
+}
+
+test "a role named `prefer` or `resident` is still an ordinary candidate" {
+  let src = """model role fast on_device device cpu memory 512 quant int8
+model role prefer on_device device cpu memory 512 quant int8
+model role resident on_device device cpu memory 512 quant int8
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { * -> fast | prefer | resident prefer resident }
+  provide out { fn classify(text) = text }
+}"""
+  // Both words are CONTEXTUAL identifiers: the set is read, the trailing pair
+  // is the clause, and neither role name is swallowed by it.
+  assert admit_src(src) == ""
 }
 
 test "a role reaching no further than its component is admitted with no block" {
@@ -29648,6 +29788,16 @@ test "an operation named without a parameter list decides nothing about argument
     == "A6|`store.nope` is not a method of service Store"
 }
 
+test "an opted-in arm with no residency is ordered exactly as written" {
+  let a = { aorig: "*", arole: "fast", aline: 1, acands: ["fast", "small"],
+            apref: true }
+  assert model_order_roles(a, []) == a.acands
+  assert model_order_roles(a, ["small"]) == ["small", "fast"]
+  let b = { aorig: "*", arole: "fast", aline: 1, acands: ["fast", "small"],
+            apref: false }
+  assert model_order_roles(b, ["small"]) == b.acands
+}
+
 test "an ordered candidate set of comparable roles admits" {
   assert admit_src(mset("* -> fast | small")) == ""
 }
@@ -30725,6 +30875,18 @@ service Answer { fn classify(text: Str) -> Str }
 component Classifier provides out: Answer {
   provide out { fn classify(text) = text }
 }""") == "MODEL"
+}
+
+test "the residency clause is read on the arm that wrote it, not its sibling" {
+  assert admit_src(mset("confidential -> fast | small prefer resident, * -> fast | slow"))
+    == admit_src(mset("* -> fast | slow"))
+}
+
+test "the residency clause moves no set rule and no memory floor" {
+  assert admit_src(mset("* -> fast | slow prefer resident"))
+    == admit_src(mset("* -> fast | slow"))
+  assert admit_src(mset("* -> bare | small prefer resident"))
+    == admit_src(mset("* -> bare | small"))
 }
 
 test "the role table is decided before any council indexes it" {

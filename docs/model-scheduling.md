@@ -147,14 +147,28 @@ The plan reads what a host holds off the record item 1 landed — the provision'
 that reader at plan time yet: acquisition is item 1's second half, and
 `_model_schedules`'s `residency` parameter is the seam it plugs into.
 
-The self-host gate does not read the clause yet. Its arm reader
-(`model_arms_in` in `selfhost/lower.rvl`) reads `<origin> -> <candidate>` arms
-separated by `,`/`;` and has no place for a trailing clause, so an arm that
-writes one leaves it a token it cannot account for and it refuses the whole
-block **by name** — `` `route model on classify` in Classifier is written in a
-form this gate does not decide`` — rather than stepping over the clause and
-deciding an arm it did not read. Fail-closed, and not the exit item 2 asks for:
-extending that reader is a follow-up owed to §11.6 item 2.
+The self-host gate reads the clause too, and carries it on the arm
+(`apref` in `selfhost/lower.rvl`). Its arm reader (`model_arms_in`) consumes an
+optional trailing `prefer resident` after a candidate set and passes the
+preference to `model_order_roles`, which is `_Search.order` for the residency
+this gate is handed — none, since it is given a program and not a host. An
+opted-in arm is therefore decided rather than refused; every other trailing
+shape (a bare `prefer`, a bare `resident`, the clause on a one-candidate arm, on
+a council arm, or followed by anything else) leaves a token the reader cannot
+account for and the whole block is refused **by name** — `` `route model on
+classify` in Classifier is written in a form this gate does not decide`` —
+rather than stepped over. Fail-closed in the one direction that matters: the
+gate never admits a clause the reference refuses, and it never steps over a
+token it did not read.
+
+Because the gate is handed no residency, the clause moves no verdict here. It
+cannot: the fold it feeds (`model_reach_comp`) refuses when *any* edge offends,
+and a reorder is a permutation of the same edges; and every candidate set the
+gate *decides* is residence-uniform by item 515's own rule, so "could this host
+hold it" answers the same for every candidate of a decidable arm. What the
+clause changes for this gate is the answer it gives — an opted-in arm is read
+and decided instead of refused by name — and `_model_schedules`'s `residency`
+parameter stays the seam a host-aware fold would plug into.
 
 ## The refusal
 
