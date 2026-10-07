@@ -133,6 +133,22 @@ Rules 1 to 5 apply to everything the emitter writes **and to every verbatim
 unchanged. Rule 1 is the one a `@ts` body gets wrong; see #278 for the
 sanctioned door to a host module in the install tree.
 
+One thing is done *to* a body rather than assumed by it: its result is coerced
+to the extern's **declared return type** on the way out. `Int` is a `bigint` on
+this tier and a verbatim JS body naturally yields a `number` — `Math.floor(...)`
+above all — so a body declared `-> Int` is emitted as
+`return revlToBigInt((() => { ... })())`: the body keeps its shape and its own
+`return` statements, and the value that leaves the function is a `bigint`. The
+coercion is the three cases `bridge.ts`'s `toBigInt` uses at the wire seam
+(issue #1566), in the same order, so the two sides of one boundary cannot
+disagree, and it is applied to the declared type rather than to a guessed value
+because nothing at the boundary says which numbers are `Int`s. `Int` is the
+only return type that needs it (`Int32`/`Float` are already a `number`,
+`Bool`/`Str`/`Bytes` are what a body naturally returns, `Unit` yields nothing),
+and the helper is emitted only in a module that has such an extern. Issue #2147;
+without it the emitted function's `bigint` annotation was false and the value
+threw `Cannot mix BigInt and other types` at its first use in arithmetic.
+
 The Temporal emission target (`emit(ir, target="temporal")`) obeys the same
 rules and additionally imports `@temporalio/workflow`, which its own worker
 provides. It is executed against a real dev server in the `temporal-exit` CI

@@ -127,11 +127,14 @@ def produce_typescript() -> dict[str, str]:
     # (tsconfig includes golden/**), which is what pins the type-level claims
     # each one exists for: `Any` -> `any` (item 79), `Promise<T>` at awaited
     # call sites (item 80), async fn-coloring (item 90), async function values
-    # (item 92).
+    # (item 92), a verbatim `@ts` body coerced to its declared `Int` on the
+    # way out (#2147 — the result-side mirror of the argument-side conversion
+    # at the seam, #1566).
     for stem, golden in (("fr3_json", "fr3_json.ts"),
                          ("async_http", "async_http.ts"),
                          ("async_agent_loop", "async_agent_loop.ts"),
-                         ("async_fn_values", "async_fn_values.ts")):
+                         ("async_fn_values", "async_fn_values.ts"),
+                         ("ts_extern_result_int", "ts_extern_result_int.ts")):
         ir = json.loads((fixtures / f"{stem}.ir.json").read_text(encoding="utf-8"))
         out[f"backends/typescript/golden/{golden}"] = emit.emit(ir)
 
@@ -253,6 +256,7 @@ TARGETS: tuple[Target, ...] = (
                "backends/typescript/golden/async_http.ts",
                "backends/typescript/golden/async_agent_loop.ts",
                "backends/typescript/golden/async_fn_values.ts",
+               "backends/typescript/golden/ts_extern_result_int.ts",
                "backends/typescript/golden/temporal_booktrip.ts"),
         produce=produce_typescript,
         gate="pytest tests/test_goldens.py backends/typescript/test_temporal_target.py",

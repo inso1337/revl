@@ -1,0 +1,211 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "functions": [
+    {
+      "name": "civil_date",
+      "params": [
+        {
+          "name": "days",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "z",
+          "value": {
+            "kind": "bin",
+            "op": "+",
+            "left": {
+              "kind": "var",
+              "name": "days"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 719468
+            },
+            "operands": "Int"
+          },
+          "mutable": false
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "z"
+          }
+        }
+      ]
+    },
+    {
+      "name": "iso_date",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "civil_date"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "n"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "plus_one",
+      "params": [],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "bin",
+            "op": "+",
+            "left": {
+              "kind": "call",
+              "callee": {
+                "kind": "var",
+                "name": "day_number_now"
+              },
+              "args": []
+            },
+            "right": {
+              "kind": "lit",
+              "value": 1
+            },
+            "operands": "Int"
+          }
+        }
+      ]
+    },
+    {
+      "name": "halved",
+      "params": [],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "div_trunc",
+            "target": {
+              "kind": "call",
+              "callee": {
+                "kind": "var",
+                "name": "day_number_now"
+              },
+              "args": []
+            },
+            "args": [
+              {
+                "kind": "lit",
+                "value": 2
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "iso_date_now",
+      "params": [],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "iso_date"
+            },
+            "args": [
+              {
+                "kind": "call",
+                "callee": {
+                  "kind": "var",
+                  "name": "day_number_now"
+                },
+                "args": []
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "big_plus_one",
+      "params": [],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "bin",
+            "op": "+",
+            "left": {
+              "kind": "call",
+              "callee": {
+                "kind": "var",
+                "name": "big_day_number"
+              },
+              "args": []
+            },
+            "right": {
+              "kind": "lit",
+              "value": 1
+            },
+            "operands": "Int"
+          }
+        }
+      ]
+    }
+  ],
+  "externs": [
+    {
+      "name": "day_number_now",
+      "class": "pure",
+      "params": [],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n    const now = new globalThis.Date(0)\n    return Math.floor(globalThis.Date.UTC(\n      now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000)\n  "
+      }
+    },
+    {
+      "name": "big_day_number",
+      "class": "pure",
+      "params": [],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n    return 9007199254740994\n  "
+      }
+    }
+  ]
+}
