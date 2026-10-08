@@ -154,10 +154,10 @@
     },
     "user_cache": {
       "capabilities": [
-        "*"
+        "db"
       ],
       "emissions": 1,
-      "manifestHash": "339a2cc50d1277eac596fb03cdecc5cace0ea42cee9021749807407aaef428fe",
+      "manifestHash": "c5ab8e40d59cfaed6c808c7e76a156e6b5d526501b8b0a62413f50ea3dcd4efe",
       "provides": {
         "cache": "Cache"
       },
@@ -178,6 +178,9 @@
               "returns": "Opt[Str]"
             },
             "put": {
+              "capabilities": [
+                "db"
+              ],
               "doc": "`put` writes the cache log through `db` \u2014 a service declaration is an\nupper bound on what its providers may do.",
               "emission": true,
               "params": [
@@ -195,7 +198,7 @@
           }
         }
       },
-      "sourceHash": "b882efdce4fb4930b5a20c65b65dcdc0d89642808b89d8ce807c9af1965c9c2e",
+      "sourceHash": "ec65e3edfb30b02232b5d4eba7e502422be96aecb0caf5de26c98355ca4493ec",
       "version": "1.0.0"
     }
   },
