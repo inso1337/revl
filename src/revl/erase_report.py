@@ -344,6 +344,7 @@ def _crossings(index: Composition, members: list[str],
     witnessed: list[dict] = []
     widenings: list[dict] = []
     relayed: list[dict] = []
+    local: list[dict] = []
     seen_relay: set = set()
     # issue #1707: the service emissions the approval class map relaxed to
     # their target's class (a class-preserving relay). They cross no boundary
@@ -354,6 +355,7 @@ def _crossings(index: Composition, members: list[str],
     seen_emit: set = set()
     seen_host: set = set()
     seen_witnessed: set = set()
+    seen_local: set = set()
     seen_widen: set = set()
     for name in members:
         for scope_id in index.scopes_of.get(name, []):
@@ -441,6 +443,27 @@ def _crossings(index: Composition, members: list[str],
                     # folded into the bare/compensated residue totals, which count
                     # only irreversible crossings. Other non-emission host code
                     # (pure/acquire) is not a boundary crossing at all.
+                    #
+                    # item 2146: a `local` extern (a durable write to local state)
+                    # is the third case this branch now names. It is NOT a
+                    # boundary crossing — nothing leaves the system, so nothing
+                    # pends and there is no irreversible residue — but it IS a
+                    # host surface a reach audit has to enumerate, which is
+                    # exactly the pair the class exists to separate. It gets its
+                    # own bucket for the same reason `witnessed` does: folding it
+                    # into `externs` would count a local write as an irreversible
+                    # boundary crossing, which is the false claim the issue is
+                    # about. No `actionClass`: the (a)/(b)/(c) classes describe
+                    # crossings, and this is not one.
+                    if fact.get("class") == "local":
+                        mark = (name, fact["name"])
+                        if mark not in seen_local:
+                            seen_local.add(mark)
+                            local.append({
+                                "component": name, "scope": scope["kind"],
+                                "name": fact["name"], "class": "local",
+                                "crossing": False,
+                                "token": f"local:{name}:{fact['name']}"})
                     if fact.get("class") == "witnessed":
                         mark = (name, fact["name"])
                         if mark not in seen_witnessed:
@@ -496,6 +519,7 @@ def _crossings(index: Composition, members: list[str],
     relayed.sort(key=lambda e: (e["component"], e["label"]))
     externs.sort(key=lambda e: (e["component"], e["name"]))
     witnessed.sort(key=lambda e: (e["component"], e["name"]))
+    local.sort(key=lambda e: (e["component"], e["name"]))
     widenings.sort(key=lambda e: (e["component"], e["scope"]))
     # a `*` widening is an irreversible (class-(c)) crossing, so it is folded
     # into the bare/compensated totals alongside emissions and host externs,
@@ -529,6 +553,13 @@ def _crossings(index: Composition, members: list[str],
         # the irreversible totals — a reader that wants the auto-approve action
         # class off the aggregation finds it here, tagged actionClass "a".
         "witnessed": witnessed,
+        # item 2146: `local` externs — durable writes to local state that cross
+        # no boundary. Listed (the reach surface the issue asks to be able to
+        # enumerate) and deliberately NOT counted in `total`/`bareCount`/
+        # `compensatedCount`: a local write is not an irreversible crossing, and
+        # nothing left the system for a compensation to offset. Only present
+        # when there is one, so a realm with no local write is byte-identical.
+        **({"local": local} if local else {}),
         # item 414: the `*` first-class-value widenings (class (c), capability
         # `*`), enumerated so an emission reached through a first-class
         # dispatched callable is no longer invisible to the completeness claim.
@@ -851,6 +882,13 @@ def render(report: dict) -> str:
         # item 254: an emission extern that owns a `compensate` slot is
         # compensated, not bare (the network compensate-grade case).
         out.append(f"      {_tag(c):<14} {c['component']}  host {c['name']}()")
+    # item 2146: a `local` extern — a host surface, named here so an audit of
+    # this section sees the durable write, but NOT counted in `total` and NOT
+    # tagged with an (a)/(b)/(c) action class, because it crosses no boundary.
+    for c in cross.get("local") or []:
+        out.append(f"      {'[LOCAL]':<14} {c['component']}  host "
+                   f"{c['name']}()  (durable local write, not a boundary "
+                   "crossing — asks no owner and leaves nothing to revert)")
     # item 414: a `*` widening, an emitting callable escaping in value
     # position, reaching a boundary that cannot be named.
     for c in cross.get("widenings") or []:

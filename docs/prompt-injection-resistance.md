@@ -139,12 +139,13 @@ declaration* — a change to the interface, in scope for review, that a human
 signs off on. The component cannot grant itself the capability.
 
 **The unenumerated-boundary case (G8).** An `extern` — the one escape hatch to
-host code — must classify (`pure` / `acquire` / `emission`). An unclassified one
+host code — must classify (`pure` / `acquire` / `emission` / `witnessed` /
+`local`). An unclassified one
 is refused, because an unenumerated boundary crossing would be invisible to the
 review surface ([examples/rejections/](../examples/rejections/), G8):
 
 ```
-unclassified extern — expected `pure`, `acquire`, or `emission` after `extern`
+unclassified extern — expected `pure`, `acquire`, `emission`, or `witnessed` after `extern`
 ```
 
 Everything that legitimately reaches the host lands on the **G8 boundary

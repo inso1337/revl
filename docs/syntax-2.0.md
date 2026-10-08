@@ -595,7 +595,10 @@ extern emission fn send(sock: Socket, data: Bytes)
   `revl audit` reports the per-backend surface.
 - Classification is mandatory and semantic: `pure` (no observable effect,
   trusted and audited), `acquire` (must carry `undo`), `emission` (may carry
-  `compensate`). An unclassified extern does not parse.
+  `compensate`), `witnessed` (must carry `undo`; its inverse is a transaction
+  inverse that replays on abort only), `local` (a durable write to local state,
+  which takes no `undo`/`compensate` and no capability scope). An unclassified
+  extern does not parse.
 - Inside a host block the model writes *real* TypeScript or Python. The
   place full fluency is wanted is exactly the place checking was never
   promised.
@@ -717,6 +720,74 @@ One ergonomic that *used* to complicate this is gone: a multi-line `@py`/`@ts`
 extern body no longer has to start in column 0. The py and ts emitters
 `textwrap.dedent` the body (roadmap item 78), so `os.open(...)` can sit at a
 natural indent inside the `= @py { … }` block.
+
+### 6.1.1 `local`: a durable write that is not a boundary crossing (item 2146)
+
+`acquire` is a handle held across calls. A single open-write-close against
+local state is neither an acquisition nor a crossing, and before item 2146 the
+classification had no word for it: `pure` is a lie (the write is observable and
+durable), `emission` **asks the owner** (the crossing gate would prompt on every
+local record — asking the owner to approve his own act), and the only shape that
+actually compiled was an `acquire` with a no-argument `pure` teardown, spelled
+at the site as
+
+```revl fragment
+effect w(path, text) undo settled()
+```
+
+which (a) misreads one write as an acquisition, and (b) is **relayed** rather
+than classified — no approval request is raised, so nothing pends, and no record
+of the write is produced either, because `acquire` is not a boundary crossing.
+An audit of crossings therefore did not see it at all.
+
+`local` is the fifth class: a durable write to local state that **is recorded
+without being a crossing**.
+
+```revl
+extern local fn append_line(path: Str, text: Str) -> Unit
+  = @py { ... }
+
+service Journal { fn append(text: Str) -> Unit }
+
+component FileJournal provides journal: Journal {
+  config { path: Str }
+
+  provide journal {
+    // a plain call: no `effect`, no `undo`, no bracket
+    fn append(text) = append_line(config.path, text)
+  }
+}
+```
+
+The rules, each of which is a refusal when broken:
+
+- **No `undo` and no `compensate`.** A local write crosses no boundary, so
+  there is no counterparty to hand an offset to and no remote to revert. `undo`
+  or `compensate` on a `local` extern is refused (G4) with a hint naming the
+  class; an `acquire`/`witnessed` extern is the shape for a write that needs a
+  declared teardown.
+- **No `[capability]` scope.** The two scopable classes (`emission`,
+  `witnessed`) name the boundary token a capability rule targets. `local` names
+  no capability, so `extern local[fs] fn …` is refused.
+- **No `deferred`.** `deferred` is only valid on an `emission` extern, and the
+  refusal says so by name.
+- **Called plainly.** `effect w(path, text)` on a `local` extern is refused with
+  a hint to drop the bracket: a `local` write is an ordinary call statement.
+  Unlike `acquire`/`witnessed`, it is therefore legal in a `fn` body and in a
+  `test` body as well as in a provide-method body.
+- **Never a boundary crossing.** It does not enter `emission_analysis`'s
+  emitting set, it is not relayed, it adds no token to `revl audit --diff`'s
+  `crossings()`, and the per-call approval decision sees no crossing — so it
+  never pends.
+
+What the audit sees that it could not see before: `revl audit --json` names the
+class (`{"name": "append_line", "class": "local", "backends": ["py"]}`) where a
+relayed `acquire` write was indistinguishable from a `pure` read, and the erase
+report lists it in its own `local` bucket — named so an operator can enumerate
+every non-pure extern the realm reaches, and deliberately **outside** the
+compensated/bare counts, because it is not a crossing and carries no (a)/(b)/(c)
+action class. Those classes (docs/design/245-session-commit.md) describe
+*crossings*; a `local` write answers the reach question, not the crossing one.
 
 ### 6.2 `boot component`: the environment contract (item 350)
 

@@ -1618,7 +1618,7 @@ class HostRef:
 @dataclass
 class ExternDecl:
     name: str
-    classification: str  # 'pure' | 'acquire' | 'emission' | 'witnessed'
+    classification: str  # 'pure' | 'acquire' | 'emission' | 'witnessed' | 'local'
     params: list[FnParam]
     returns: str | None
     undo: object | None
@@ -3428,19 +3428,32 @@ class Parser:
     def extern_decl(self, public: bool) -> ExternDecl:
         line = self.expect("kw", "extern").line
         # `pure`/`acquire`/`emission` are reserved keywords; `witnessed` (item
-        # 243) is a CONTEXTUAL keyword recognised only in this classification
-        # slot, so the self-hosted lexer's KEYWORDS set needs no sync and no
-        # program that used `witnessed` as an ordinary name is broken.
-        if self.peek().value not in ("pure", "acquire", "emission", "witnessed") \
-                or (not self.at("kw") and not self.at("ident", "witnessed")):
+        # 243) and `local` (item 2146) are CONTEXTUAL keywords recognised only
+        # in this classification slot, so the self-hosted lexer's KEYWORDS set
+        # needs no sync and no program that used `witnessed` or `local` as an
+        # ordinary name is broken.
+        if self.peek().value not in ("pure", "acquire", "emission", "witnessed",
+                                     "local") \
+                or (not self.at("kw") and not self.at("ident", "witnessed")
+                    and not self.at("ident", "local")):
+            # The MESSAGE enumeration below is GATE-MIRRORED: the self-hosted
+            # admission gate spells it byte for byte (selfhost/lower.rvl's
+            # explicit-extern section) and tests/test_selfhost_lower.py's
+            # `test_rejected_programs_agree` compares the two texts exactly, so
+            # it still names the four classes the gate knows. `local` is named in
+            # the HINT instead — that field is the reference's own and is not
+            # mirrored — and the message catches up in the same slice that
+            # mirrors `local` into the gate.
             raise self.err(
                 line,
                 "unclassified extern — expected `pure`, `acquire`, `emission`, or "
                 "`witnessed` after `extern`",
                 hint="classification is mandatory: `pure` has no observable effect, "
                      "`acquire` must declare `undo`, `emission` may declare `compensate`, "
-                     "and `witnessed` is a reversible mutation whose declared `undo` the "
-                     "accumulator auto-registers (docs/design/243-witnessed-externs.md)",
+                     "`witnessed` is a reversible mutation whose declared `undo` the "
+                     "accumulator auto-registers (docs/design/243-witnessed-externs.md), "
+                     "and `local` is a durable write to local state that crosses no "
+                     "boundary and so asks no owner (docs/syntax-2.0.md §6.1)",
             )
         classification = self.next().value
         # Capability scope, `witnessed[fs]` / `emission[gateway.send]`
@@ -3450,7 +3463,9 @@ class Parser:
         # The declared token, not the extern NAME, is the emission's capability,
         # so a `capability C requires approval` rule and a standing grant target
         # the crossing by token (item 344). `pure`/`acquire` cross no boundary,
-        # so the parse is still refused on them and the surface stays honest.
+        # so the parse is still refused on them and the surface stays honest;
+        # `local` (item 2146) writes durable local state and leaves the system
+        # nowhere either, so it names no capability and is refused alike.
         capabilities: tuple[str, ...] = ()
         if self.at("["):
             if classification not in ("witnessed", "emission"):
@@ -9736,7 +9751,8 @@ def _describe_expr(expr) -> str:
     return "the expression"
 
 
-def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None) -> tuple[str, str]:
+def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
+                         declared_local: bool = False) -> tuple[str, str]:
     """The ONE rendering of G4's bare-acquisition refusal: `(message, hint)`.
 
     Two positions raise it and neither may drift from the other. The parser
@@ -9770,6 +9786,21 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None) -> 
     can never BE a bare-name extern call, which is why the generic wording
     is the right one for every refusal it still raises."""
     spelling = head.strip("`")
+    if declared_local:
+        # item 2146: the callee IS a declared extern, and its class is `local`.
+        # The generic wording below ("{head} is not pure") is true but useless
+        # here — it invites the author to reclassify a durable write as `pure`,
+        # which is the wrong repair. The real repair is to drop the bracket: a
+        # `local` write is not a crossing, so `effect` (the acquisition bracket)
+        # and `undo` (the acquisition's teardown) both have no referent. This is
+        # the position that knows the classification (it runs on the merged,
+        # post-import program), so it is the one that says so.
+        return (
+            f"effect has no `undo` and {head} is a `local` extern",
+            f"a `local` extern writes durable local state and crosses no "
+            f"boundary, so it is called plainly and takes no bracket or "
+            f"inverse: write `{spelling}(...)` as a plain call "
+            f"(docs/syntax-2.0.md §6.1, G4)")
     if declared is not None:
         classification, inverse = declared
         article = "an" if classification[:1].lower() in "aeiou" else "a"

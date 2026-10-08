@@ -41,6 +41,17 @@ read from the same G8 boundary surface `revl audit` prints
 A realm that made no irreversible crossing at all reports zero crossings
 ("fully revertible, G8").
 
+A **`local` extern** (item 2146) is a host surface, not a crossing: it is a
+durable write to local state that leaves the system nowhere, so it asks no owner
+and nothing pends. The report lists it under `local`, as `[LOCAL]` in the text
+form, with a `local:<component>:<name>` token, and leaves it out of `total`,
+`bareCount`, `bareTokens` and the `compensated`/`bare` split — and it carries no
+(a)/(b)/(c) action class, because those classes describe crossings
+(docs/design/245-session-commit.md). It is named so that an audit can enumerate
+every non-pure extern the realm reaches, which is exactly what the relayed
+`acquire` workaround it replaces could not offer. `local` is absent from a
+report that has no such write.
+
 A **relay** is not a crossing of its own (issue #1707). An `emit key.method(...)`
 whose target is one operation of the composition, with a reach made only of
 witnessed or deferred crossings, is the class-preserving relay the approval

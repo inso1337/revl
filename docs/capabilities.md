@@ -56,7 +56,15 @@ through**, drawn from a single flat namespace of wiring names:
 | an `extern emission fn send`, directly or through a chain of `fn`s | `send` |
 | an `extern emission[db] fn pg_write`, likewise                  | `db` |
 | an `extern witnessed[fs] fn stash` (items 243/343)              | `fs` |
+| an `extern local fn append_line` (item 2146)                    | *none — it names no boundary, because it crosses none* |
 | a boundary with no reachable name (defensive; unreachable today) | `*` |
+
+The `local` row is the one entry that contributes nothing, and that is the
+point: a `local` extern is a durable write to **local** state (a file, a row in
+this process's own store) that crosses no boundary, so there is no counterparty
+to hand a token to and no approval to ask for. It is still enumerated — `revl
+audit` names the class and the erase report lists it — but it is not a crossing
+and it seeds no capability (docs/syntax-2.0.md §6.1.1).
 
 Three deliberate choices:
 
@@ -152,6 +160,7 @@ something that emits. The capability version is the same fixed point over
 caps(extern emission fn e)       = { e }
 caps(extern emission[C] fn e)    = C
 caps(extern witnessed[C] fn e)   = C
+caps(extern local fn e)          = {}      // item 2146: crosses no boundary
 caps(fn f)                       = ⋃ { caps(g) | f calls g }
 ```
 

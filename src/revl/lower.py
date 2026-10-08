@@ -3262,7 +3262,7 @@ def _check_deferred_extern(decl, filename: str) -> None:
 
     1. `deferred` only on an `emission`. `pure` has nothing to defer; `acquire`
        and `witnessed` must run mid-session (their return is the resource or the
-       witness).
+       witness); `local` (item 2146) has no remote to hand a queued action to.
     2. A deferred emission returns `Unit`. The call completes before the action
        fires, so no value can flow back; a non-Unit return would be a lie the
        program could branch on. This is also the mechanical (b)/(c) boundary: an
@@ -3278,7 +3278,8 @@ def _check_deferred_extern(decl, filename: str) -> None:
             filename, decl.line,
             f"`deferred` is only valid on an `emission` extern; `{decl.name}` is "
             f"`{decl.classification}`",
-            hint="a `pure` extern has nothing to defer, and an `acquire` or "
+            hint="a `pure` extern has nothing to defer, a `local` extern writes "
+                 "local state and has no remote to queue to, and an `acquire` or "
                  "`witnessed` extern must run mid-session — its return is the "
                  "resource or the witness (docs/design/245-session-commit.md)",
             code="G4", category="deferred")
@@ -4851,6 +4852,27 @@ def _lower_externs(program: Program, filename: str, types: dict,
                 filename, decl.line,
                 f"pure extern `{decl.name}` cannot declare `undo` or `compensate`",
                 hint="`pure` means no observable effect, so there is nothing to invert or compensate",
+            )
+        # item 2146: a `local` extern is a durable write to LOCAL state, and
+        # local state is not a boundary. `undo` and `compensate` are both claims
+        # about a crossing — `undo` says "the far side can be put back", and
+        # `compensate` says "a one-way effect can be offset" — so neither has a
+        # referent here. The store's own transaction is what makes the write
+        # durable and reversible-or-not, and revl must not let an author spell a
+        # teardown the runtime could not honour. Refused rather than ignored, so
+        # the claim cannot be silently dropped (the same discipline 243 rule 3
+        # applies to a non-emission inverse).
+        if decl.classification == "local" and (decl.undo is not None or decl.compensate is not None):
+            raise RevlError(
+                filename, decl.line,
+                f"local extern `{decl.name}` cannot declare `undo` or "
+                f"`compensate`",
+                hint="a `local` extern writes durable local state and crosses no "
+                     "boundary, so there is no far side to invert and no one-way "
+                     "effect to offset — the write's own transaction is its "
+                     "durability guarantee. An `acquire`/`witnessed` extern is "
+                     "the shape for a write that needs a declared teardown",
+                code="G4", category="boundary",
             )
         if decl.classification == "emission" and decl.undo is not None:
             raise RevlError(
@@ -12161,9 +12183,16 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
         callee = _bare_callee_name(raw_acquire)
         inverse = env.extern_undo.get(callee) if callee is not None else None
         declared = None
+        declared_local = False
         if inverse is not None:
             declared = (env.extern_class.get(callee) or "acquire", inverse)
-        message, hint = missing_undo_refusal(head, declared)
+        elif callee is not None and env.extern_class.get(callee) == "local":
+            # item 2146: a `local` extern declares no inverse, so it has no
+            # entry in `extern_undo` and the branch above cannot see it. Name
+            # the class so the refusal tells the author to drop the bracket
+            # rather than to reclassify the write `pure`.
+            declared_local = True
+        message, hint = missing_undo_refusal(head, declared, declared_local)
         raise RevlError(
             filename, line, message, hint=hint,
             code="G4", category="witnessed",
