@@ -21,10 +21,32 @@
 # `site/js/examples.js` is regenerated here for the same reason and at the same
 # cost — its committed copy lags `examples/*.rvl` by the same mechanism.
 #
-# The one new way to be wrong is this job silently ceasing to build the wheel,
-# or building one under a name the page does not fetch. `tools/check_site_wheel.py`
-# reads this file for exactly that (and `site-wheel.yml` still runs it post-merge
-# on main and weekly), so deleting the build step below is a red, not a 404.
+# THE GATE/REFERENCE CENSUS IS PUBLISHED HERE TOO (issue #1268), AND IS ALSO
+# NOT COMMITTED.
+#
+# `tools/publish_census_artifact.py` renders `site/census-artifact/` — an HTML
+# page, a markdown copy, the `EVAL-REPORT-1` JSON, and a sha256 manifest — from
+# `docs/census-artifact/`, the committed census records. The records are the
+# input; the edition is a function of the sha being deployed, so a reader always
+# lands on the numbers of the tree that is up, and nothing has to be remembered
+# or refreshed by hand. One consequence worth stating: `--verify --strict`'s
+# guarantee is inherited rather than duplicated — rendering hydrates the records
+# against the checkout and refuses (`StaleRecords`) when a pinned input moved, so
+# this job fails loudly instead of publishing numbers the tree no longer
+# produces. The `census-artifact` job in `ci.yml` is what holds that on the way
+# in.
+#
+# Unlike the wheel build this step is not stdlib-only, and the one `pip install`
+# below is why: the edition is rendered by the same code path `--verify --strict`
+# runs, which imports the reference classifier from `tests/test_selfhost_lower.py`
+# rather than copying it, and that module imports pytest.
+#
+# The one new way to be wrong is this job silently ceasing to build the wheel or
+# the census edition, or building one under a name the page does not fetch.
+# `tools/check_site_wheel.py` reads this file for exactly that (and
+# `site-wheel.yml` still runs it post-merge on main and weekly), and
+# `tests/test_publish_census_artifact.py` reads it for the census step, so
+# deleting a build step below is a red, not a 404.
 name: pages
 
 on:
@@ -67,6 +89,22 @@ jobs:
         run: |
           python3 tools/check_site_wheel.py --write
           python3 site/gen_examples.py
+      # The census edition, built from the sha being deployed (see the header).
+      # `--verify --strict` runs FIRST and is the point of the step: the page
+      # then publishes numbers this job recomputed from this tree, not numbers
+      # it merely re-serialised from records that a moved input has quietly
+      # outlived. It costs about two minutes, it is the same verdict
+      # `ci.yml`'s `census-artifact` job holds on the way in, and its exit 0 is
+      # what makes the published `reproduced` a claim about the deployed sha.
+      # The `pip install` is the only install in this job: the reference
+      # classifier is imported from `tests/test_selfhost_lower.py` rather than
+      # copied, and that module imports pytest. It installs into the runner's
+      # site-packages, outside `site/`, so nothing it adds is uploaded.
+      - name: build the gate/reference census edition into site/
+        run: |
+          python3 -m pip install --quiet -e . pytest
+          python3 tools/census_artifact.py --verify --strict
+          python3 tools/publish_census_artifact.py --write
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5.0.0
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3.0.1
         with:

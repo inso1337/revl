@@ -78,3 +78,12 @@ bench/inprocess_gate_rust/Cargo.lock
 # clone, not this tree, so it cannot be built at deploy time.)
 playground/vendor/revl-*.whl
 site/vendor/revl-*.whl
+
+# the published gate/reference census edition (issue #1268). NOT committed, for
+# the wheel's reason and one more: it is an edition of the numbers the tree in
+# front of you produces, so a committed copy is a claim about some other sha.
+# `.github/workflows/pages.yml` builds it from the sha being deployed, after
+# `tools/census_artifact.py --verify --strict` has recomputed it there.
+# Render it into a checkout with:
+#   python3 tools/publish_census_artifact.py --write
+site/census-artifact/

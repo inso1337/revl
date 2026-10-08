@@ -52,6 +52,42 @@ to render records that pin a file or carry a program the checkout does not have.
 A copy published outside the repository is the `--json` output, and a reader
 checks it with `--verify path/to/census-artifact.json`.
 
+## The published edition
+
+A reader outside this repository should not have to clone anything, so the
+census is also published as a static edition at
+<https://inso1337.github.io/revl/census-artifact/>. It is built by the `deploy`
+job in `.github/workflows/pages.yml`, from the records above and the sha being
+deployed, and it is not committed: it is a rendering, and a second copy in git
+would be one more thing to keep in step. The step runs
+`tools/census_artifact.py --verify --strict` before it writes, so a page whose
+records do not reproduce is not deployed.
+
+`tools/publish_census_artifact.py` renders it into `site/census-artifact/`. The
+edition states `n`, the checker version and the standing allowance with each
+residual named, and it carries the corpus provenance fraction beside them by
+`tools/corpus_provenance.py`. It adds no claim this repository does not already
+make: it is a copy of the records, so a reader checks it rather than believing
+it. Download the `census-artifact.json` the edition serves and run
+
+```
+/tmp/revl-venv/bin/python tools/census_artifact.py --verify census-artifact.json
+```
+
+Three commands ask three different questions, and only the third is the verdict:
+
+| command | the question it answers |
+|---|---|
+| `tools/census_artifact.py --moved-inputs` | given a diff, does it touch an input this census hashes? Exit 0 means yes. CI asks this to decide whether to run the slow check at all |
+| `tools/census_artifact.py --check` | have the committed records drifted from what today's tree produces? Cheap, and it answers only that: a missing per-checker-version crate reproduction is not drift, and `--check` cannot see one |
+| `tools/census_artifact.py --verify --strict` | the verdict: the records, the pins, the crate reproduction at this checker version, and the strict flags, all of them, on this tree |
+
+That venv is outside the checkout on purpose. The census measures its inputs
+through an audit hook on every file the run opens, so a `.venv` inside a clone
+puts pytest's own modules into the pin set and `--check` then fails on
+`pins.jsonl` over files that are the reader's environment and not the census.
+Anywhere outside the clone works, and the edition's own page says the same.
+
 ## Keeping it current
 
 CI's `census-artifact` job runs `python3 tools/census_artifact.py --verify
