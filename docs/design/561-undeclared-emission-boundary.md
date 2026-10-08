@@ -314,16 +314,30 @@ written:
 * **The composition half, on the declined files.** `examples/user_cache.rvl`,
   `examples/migrator.rvl`, `examples/async_timer.rvl` and
   `examples/heartbeat.rvl` name the boundary each shipped reach actually
-  crosses, and the two hand-maintained reference IRs
-  (`examples/user_cache.ir.json`, `examples/migrator.ir.json`) gain the
-  corresponding `capabilities` entries additively, in key order after
-  `emission`. The claim that the reference IR blocked this turned out to be
-  false: the backends ignore the key, and the byte-for-byte pin is satisfied by
-  inserting it rather than by regenerating. `stdlib/server.rvl`'s synthesizer is
-  the item recorded as its own in §Residuals above. **The registry components
-  needed no version bump**: every `emission` in
-  `src/revl/truc/components/*.rvl` already names its tokens, which is why the
-  clause had no content to take.
+  crosses, and the hand-maintained reference IRs (`examples/user_cache.ir.json`,
+  `examples/migrator.ir.json`) gain the corresponding `capabilities` entries
+  additively, in key order after `emission`. The claim that the reference IR
+  blocked this turned out to be false: the backends ignore the key, and the
+  byte-for-byte pin is satisfied by inserting it rather than by regenerating.
+  The reference IR has three copies — `examples/user_cache.ir.json`,
+  `backends/python/tests/user_cache.ir.json` and the vendored
+  `backends/typescript/tests/fixtures/user_cache.ir.json`, which
+  `backends/typescript/tests/emitter.test.ts` pins byte-identical to the first
+  and which no tool writes (`tools/regen_goldens.py` only reads it), so it is a
+  manual copy and that assertion is its only guard. `stdlib/server.rvl`'s
+  synthesizer is the item recorded as its own in §Residuals above.
+* **The seed registry, which CI found and the design did not.** Declaring the
+  reach on `examples/user_cache.rvl` made four CI tests red on the first pushed
+  head: `registry/components/{pg,mysql,audited}_database/component.rvl` and the
+  `tests/test_search_as_admission.py` corpus still spelled `emission` bare, so
+  hot-swapping them against the example **widened** `[db]` to `any` and the §5
+  gate refused them — the arm working, on candidates that had been admitted by
+  accident. They now declare `emission[db]`, `registry/index.json` is
+  regenerated from them, and `tests/test_manifest.py::test_boundary_report`'s
+  pin moved from `{'db.execute': ['*']}` to `{'db.execute': ['db']}`. A fourth
+  component, `registry/components/user_cache`, is the example's own
+  `UserCache` and had the same staleness with no test covering it; it was found
+  by probing the swap by hand.
 * **The de-conflation.** The arm asks the DECLARATIONS, not the `svc:`
   namespace: `lower._undeclared_elements(services)` is the set of services with
   at least one `emission` method and no `capabilities`, computed where the
@@ -344,12 +358,17 @@ written:
 
 Re-measured after the change, at this head:
 
+Each row names the file set it counted, so a later reader can re-run it; the
+before side is `origin/main`'s tip at the time of the last re-measurement, the
+after side this branch's head.
+
 | surface | before | after |
 |---|---|---|
 | `docs/census-artifact/cases/stdlib/server.rvl.json` bucket | `agree-admit` | `agree-admit` |
-| bare `emission` on the declined shipped surface | 10 | 1 |
-| bare `emission` on the whole shipped surface (declined files + the three idiom snippets) | 15 | 1 |
-| bare `emission` tree-wide (`.rvl` sources parsed) | 350 across 246 of 851 | 336 across 238 of 851 |
+| bare `emission` on the declined surface — `examples/{user_cache,migrator,async_timer,heartbeat}.rvl`, `stdlib/server.rvl` | 11 | 0 |
+| bare `emission` on that surface plus the three idiom snippets (`src/revl/idioms/{component-setup,emission-method,timer}.rvl`) | 14 | 0 |
+| bare `emission` on the whole shipped surface (`src/ examples/ demo/ stdlib/`, `examples/rejections/` excluded) | 15 | 1 |
+| bare `emission` tree-wide (every `.rvl` the parser accepts) | 350 across 246 of 853 | 336 across 238 of 853 |
 | `emission` methods that DO declare | 234 | 248 |
 
 The one that remains is `examples/tenant_attenuation.rvl`'s `Worker.tenant`,
@@ -359,11 +378,13 @@ the only service-level token is wider than either provider. Nothing requires
 `worker: Worker` in that file, so no undeclared element is produced for it and
 the arm does not fire on it; naming it is a separate item, not this one.
 
-The issue quotes 345 across 242 for the tree-wide number at its own head; the
-difference is baseline drift between that head and this one (main has since
-landed #2149), not a disagreement about the arm. The shipped-surface number is
-the one that decides the item, and it re-measures to the 10 the issue quotes,
-then to the 1 above.
+The issue quotes 345 across 242 for the tree-wide number and 10 for the declined
+shipped surface, both at its own head. Neither is reproducible as a named
+subset today: the tree-wide difference is baseline drift between that head and
+this one (main has since landed #2149 and the two `str-*` idioms), and the
+declined surface re-measures to 11, not 10, on the four files #1292 declined
+plus `stdlib/server.rvl` — `examples/user_cache.rvl` alone carries two of them.
+The surface that decides the item is the declined one, and it is zero above.
 
 What the item deliberately did **not** take:
 
