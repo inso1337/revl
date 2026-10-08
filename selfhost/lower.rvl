@@ -3766,6 +3766,45 @@ fn emit_caps_reach(fs: List[FnD], include_values: Bool) -> CapsT {
 // argument is coerced into (lower.py's `_is_async_fn_type` over each signature).
 // Built once and read by BOTH the async coloring (which prunes a coerced arrow)
 // and the arrow-color leak check (which admits one).
+// --------------------------------------------------- small list/map helpers
+
+fn join_strs(xs: List[Str], sep: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < xs.length()) {
+    if (i > 0) { out = out.concat(sep) }
+    out = out.concat(xs[i])
+    i += 1
+  }
+  return out
+}
+
+// Order-preserving `List` difference: `xs` without the members of `ys`.
+fn without_strs(xs: List[Str], ys: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    if (!contains(ys, xs[i])) { out = out.push(xs[i]) }
+    i += 1
+  }
+  return out
+}
+
+fn mget_str(m: Map[Str, Str], k: Str) -> Str {
+  return match m.lookup(k) { Some(v) => v, None => "" }
+}
+
+fn mget_strs(m: Map[Str, List[Str]], k: Str) -> List[Str] {
+  return match m.lookup(k) { Some(v) => v, None => [] }
+}
+
+fn append_binds(xs: List[Bind], ys: List[Bind]) -> List[Bind] {
+  var out = xs
+  var i = 0
+  while (i < ys.length()) { out = out.push(ys[i])  i += 1 }
+  return out
+}
+
 fn async_slots_map(fs: List[FnD]) -> Map[Str, List[Int]] {
   var m: Map[Str, List[Int]] = Map.empty()
   var i = 0
@@ -3788,13 +3827,23 @@ fn async_slots_map(fs: List[FnD]) -> Map[Str, List[Int]] {
 // only inside a coerced (async-stamped) arrow does not color the body that
 // constructs it. `FnD.callees` stays unpruned for the emission fixed point,
 // which deliberately keeps bubbling through those arrows.
-fn async_colored(fs: List[FnD], slots: Map[Str, List[Int]]) -> List[Str] {
+// Issue #2092: the same closure with a per-`fn` callee EXCLUSION. The reference
+// runs it over a throwaway copy of the fns whose every liftable polymorphic call
+// has already been redirected to a `_revl_sync` clone, which is how it decides
+// whether a caller is still genuinely async once that redirect is in place
+// (`_monomorphize_free_fn_calls`). A `fn` whose colour came only from such a
+// call loses it; one that reaches a real suspension of its own (an `async`
+// extern, or an `async` arrow into its own loop) keeps it and keeps its async
+// loop - item 92's coercion.
+fn async_colored_excl(fs: List[FnD], slots: Map[Str, List[Int]],
+                      excl: Map[Str, List[Str]]) -> List[Str] {
   var colored: List[Str] = []
   var reach: List[List[Str]] = []
   var i = 0
   while (i < fs.length()) {
     if (fs[i].isAsyncExtern) { colored = colored.push(fs[i].name) }
-    reach = reach.push(abody_callees(fs[i].body, 0, slots, []))
+    reach = reach.push(without_strs(abody_callees(fs[i].body, 0, slots, []),
+                                    mget_strs(excl, fs[i].name)))
     i += 1
   }
   var changed = true
@@ -3813,6 +3862,10 @@ fn async_colored(fs: List[FnD], slots: Map[Str, List[Int]]) -> List[Str] {
     }
   }
   return colored
+}
+
+fn async_colored(fs: List[FnD], slots: Map[Str, List[Int]]) -> List[Str] {
+  return async_colored_excl(fs, slots, Map.empty())
 }
 
 fn any_in(xs: List[Str], set: List[Str]) -> Bool {
@@ -19628,7 +19681,8 @@ type IrRes    = { ok: Bool, js: Str }
 type IrSvcR   = { js: Str, v3: Bool }
 type IrCompR  = { js: Str, v3: Bool, v2: Bool }
 type IrMethR  = { js: Str, i: Int, v3: Bool }
-type IrAcc    = { svcs: Str, comps: Str, v3: Bool, v2: Bool }
+type IrAcc    = { svcs: Str, comps: Str, v3: Bool, v2: Bool, col: List[Str],
+                  sl: Map[Str, List[Int]] }
 
 fn mk_irres(ok: Bool, js: Str) -> IrRes { return { ok: ok, js: js } }
 fn mk_irsvcr(js: Str, v3: Bool) -> IrSvcR { return { js: js, v3: v3 } }
@@ -19638,8 +19692,9 @@ fn mk_ircompr(js: Str, v3: Bool, v2: Bool) -> IrCompR {
 fn mk_irmethr(js: Str, i: Int, v3: Bool) -> IrMethR {
   return { js: js, i: i, v3: v3 }
 }
-fn mk_iracc(svcs: Str, comps: Str, v3: Bool, v2: Bool) -> IrAcc {
-  return { svcs: svcs, comps: comps, v3: v3, v2: v2 }
+fn mk_iracc(svcs: Str, comps: Str, v3: Bool, v2: Bool,
+            col: List[Str], sl: Map[Str, List[Int]]) -> IrAcc {
+  return { svcs: svcs, comps: comps, v3: v3, v2: v2, col: col, sl: sl }
 }
 
 fn empty_prog() -> Prog { return { fns: [], svcs: [], comps: [], bad: "" } }
@@ -21125,7 +21180,8 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 // The program-global facts a component expression lowering needs beyond its
 // lexical scope. They are all functions of the token stream, read once per
 // component rather than threaded from `ir_walk`, so the walk's signature (and
-// every other lane's edits to it) is untouched:
+// every other lane's edits to it) is untouched — with ONE exception (`col`
+// below, whose whole-program fixed point is threaded rather than recomputed):
 //
 //   reqs   the component's required-service roots
 //   cases  the ADT case table (`case <C>` -> its ADT, `payload <C>` -> its type),
@@ -21143,6 +21199,19 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 //          `realms` and a later `instance-get`'s `service` are BOTH read off
 //   cfg    this component's `config { … }` block as one structural type
 //          spelling, so `config.<field>` infers through `struct_field`
+//   aops   the required-key service ops the program DECLARES `async`, as
+//          "<key>.<op>" — issue #2092's rule 3, the req-target half of the
+//          async-reach a timer step's colour is read off
+//   col    the program's async-colored callables, the SAME closure `fns_walk`
+//          stamps `"async": true` from — issue #2092's rule 1, the name half of
+//          that reach. Threaded rather than derived here because it is a fixed
+//          point over the whole call graph: `ir_component` has no way to reach
+//          it, and recomputing it per component would re-run that fixed point
+//          once per component.
+//   sl     the module callables' `Async[T]` parameter slots, the same table the
+//          colour fixed point is built over — read by the name half of the
+//          timer reach above, which is `abody_callees` and so prunes an arrow
+//          at one of those slots exactly as the fixed point does
 //
 // One row is POSITIONAL rather than program-global:
 //
@@ -21156,14 +21225,15 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 type CCtx = { reqs: List[Str], cases: List[Bind], fns: List[Bind],
               fnps: List[Bind], wit: List[Str], al: Map[Str, Str],
               cprovs: List[Bind], cfg: Str, ln: Int, reqops: List[Bind],
-              handles: Bool, xundo: Map[Str, Str], strreqs: List[Bind] }
+              handles: Bool, xundo: Map[Str, Str], strreqs: List[Bind],
+              col: List[Str], sl: Map[Str, List[Int]], aops: List[Str] }
 
 // `cx` re-stamped with the line of the statement now being lowered.
 fn cx_at(cx: CCtx, n: Int) -> CCtx {
   return { reqs: cx.reqs, cases: cx.cases, fns: cx.fns, fnps: cx.fnps,
            wit: cx.wit, al: cx.al, cprovs: cx.cprovs, cfg: cx.cfg, ln: n,
            reqops: cx.reqops, handles: cx.handles, xundo: cx.xundo,
-           strreqs: cx.strreqs }
+           strreqs: cx.strreqs, col: cx.col, sl: cx.sl, aops: cx.aops }
 }
 
 // Membership in a lexical scope, INDEPENDENT of whether the name's type is
@@ -21773,6 +21843,27 @@ fn req_op_returns(ts: List[Token], reqs: List[Bind], al: Map[Str, Str],
   return out
 }
 
+// The `reqop <key>.<op>` keys whose operation its service declares `async` —
+// the req-target half of the async-reach a timer step is coloured from (issue
+// #2092). `req_op_returns` is not enough: a reach reads the DECLARATION's
+// `async`, and a return type does not carry it.
+fn req_async_ops(ts: List[Token], reqs: List[Bind], acc: List[Str]) -> List[Str] {
+  var out = acc
+  var r = 0
+  while (r < reqs.length()) {
+    let ops = svc_op_names(ts, reqs[r].ty)
+    var o = 0
+    while (o < ops.length()) {
+      if (svc_method_async(ts, reqs[r].ty, ops[o])) {
+        out = out.push(reqs[r].name.concat(".").concat(ops[o]))
+      }
+      o += 1
+    }
+    r += 1
+  }
+  return out
+}
+
 fn svc_op_names(ts: List[Token], svc: Str) -> List[Str] {
   var out: List[Str] = []
   var j = 0
@@ -21816,6 +21907,37 @@ fn svc_method_ret(ts: List[Token], svc: Str, meth: Str, al: Map[Str, Str]) -> St
     j += 1
   }
   return ""
+}
+
+// Whether one service operation is declared `async`. The service flags may
+// appear in ANY order before `fn` (`p_methods`'s loop), so the block is walked
+// head by head and the marker is whichever of them the `fn` that names `meth`
+// followed: `emission async fn send` and `async emission fn send` both answer
+// true, and a head that names another operation resets the flag rather than
+// leaking it forward.
+fn svc_method_async(ts: List[Token], svc: Str, meth: Str) -> Bool {
+  var j = 0
+  while (j < ts.length() && !atk(ts, j, "eof")) {
+    if (atw(ts, j, "service") && tkc(ts, j + 1).text == svc && atk(ts, j + 2, "{")) {
+      let end = close_brace(ts, j + 2)
+      let hi = end == 0 - 1 ? j + 3 : end - 1
+      var k = j + 3
+      var asy = false
+      while (k < hi) {
+        if (at_route_clause(ts, k)) { k += 3 } else {
+          if (atw(ts, k, "async")) { asy = true }
+          if (atw(ts, k, "fn")) {
+            if (tkc(ts, k + 1).text == meth) { return asy }
+            asy = false
+          }
+          k += 1
+        }
+      }
+      return false
+    }
+    j += 1
+  }
+  return false
 }
 
 // lower.py `_mark_widen` on a provide method's `return` (issue #1894, the
@@ -22925,6 +23047,29 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
     return cir_method_stmts(ts, em.i, hi, cx, sc, hostSc, nacc, top)
   }
+  // `await <expr>` in a provide METHOD body -> `{step: "await", expr}` (the
+  // reference's `AwaitStmt` arm). The reference reads this form the same way in
+  // both positions — `await <expr>` — but the ACTIVATION parser folds
+  // `await emit <call>` into the ordinary EMIT statement with `is_async` set
+  // (item 131 §2) while the METHOD parser does not: `emit` is a prefix unary
+  // there, so the suspension's payload is an `EmitExpr` and the step is the
+  // plain `await` over its operand. `cir_expr` drops the `Emit` marker exactly
+  // as the reference's component-pure `EmitExpr` arm does (the marker gates the
+  // emission CHECK, not the node), so `await emit later(x)` here lowers to the
+  // call node, byte-identical to the reference.
+  // issue #2092: without this arm the FIRST suspension refused the whole method
+  // body (`mk_irres(false, "")`), and a method body that withholds drops the
+  // enclosing component's `body` with it — so every document with one async
+  // provide method lost its entire activation.
+  if (atw(ts, lo, "await")) {
+    let r = expr_at(ts, lo + 1)
+    if (is_bad(r.e) || r.i <= lo + 1) { return mk_irres(false, "") }
+    let ae = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
+    if (!ae.ok) { return mk_irres(false, "") }
+    let astep = "{\"step\": \"await\", \"expr\": ".concat(ae.js).concat("}")
+    let aacc = acc == "" ? astep : acc.concat(", ").concat(astep)
+    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, aacc, top)
+  }
   if (atw(ts, lo, "if")) {
     let c = expr_at(ts, lo + 1)
     if (is_bad(c.e) || !atk(ts, c.i, "{")) { return mk_irres(false, "") }
@@ -23037,8 +23182,17 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (!ue.ok) { return mk_irres(false, "") }
     let caps = inverse_captures(ue.js, sc)
     if (!caps.ok) { return mk_irres(false, "") }
-    var step = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
-      .concat(", \"acquire\": ").concat(ae.js).concat(", \"undo\": ").concat(ue.js)
+    // issue #2092: the reference's key order and provenance, both of which the
+    // activation-body emitter already keeps. `_lower_effect_step` builds the
+    // step as `{"step": …, "acquire": …, "undo": …}` and appends `bind` LAST
+    // (`step["bind"] = bind`), so the method form is `step, acquire, undo,
+    // bind`; the ownership walk then stamps `inverse` on the closed step
+    // (issue #1945) and `_pin_inverse_captures` pins `undo_captures` after it.
+    let inv = is_hole_expr(und.e) ? ""
+      : ", \"inverse\": ".concat(jstr(method_inverse(acq.e, und.e, hostSc, cx)))
+    var step = "{\"step\": \"let-effect\", \"acquire\": ".concat(ae.js)
+      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name))
+      .concat(inv)
     if (caps.js != "") {
       step = step.concat(", \"undo_captures\": [").concat(caps.js).concat("]")
     }
@@ -23064,7 +23218,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     // the mutable set without a second threaded parameter. A `let` that SHADOWS
     // a `var` writes the key back, and `tenv_get`'s last-wins scan makes the
     // shadow win.
-    let sc2 = env_mut_put(sc.push({ name: name, ty: infer(r.e, cenv(cx, sc)) }),
+    let sc2 = env_mut_put(sc.push({ name: name, ty: value_ty(r.e, cenv(cx, sc)) }),
                           name, mutable)
     return cir_method_stmts(ts, r.i, hi, cx, sc2, hostSc, nacc, top)
   }
@@ -23311,7 +23465,7 @@ fn cir_setup_stmt(ts: List[Token], lo: Int, cx: CCtx, sc: List[Bind],
              js: "{\"step\": \"let\", \"name\": ".concat(jstr(name))
                    .concat(", \"value\": ").concat(ve.js).concat("}"),
              e: Bad(""), isExpr: false,
-             sc: sc.push({ name: name, ty: infer(r.e, cenv(cx, sc)) }),
+             sc: sc.push({ name: name, ty: value_ty(r.e, cenv(cx, sc)) }),
              muts: mutable ? muts.push(name) : muts, i: r.i }
   }
   if (atw(ts, lo, "assert")) {
@@ -23681,6 +23835,140 @@ fn ev_contract(ts: List[Token], evn: Str, al: Map[Str, Str]) -> IrRes {
     .concat(", \"schema\": ").concat(sc_json_spec(d.ty, env, [evn])).concat("}"))
 }
 
+// ------------------------------------------------------------- timer colour
+//
+// The `"async": true` a timer step carries when its body reaches a suspension
+// (issue #2092; reference `_lower_timer_step` + `_timer_body_reaches_async`).
+// Two halves, ORed, both read off the same tables the body lowering reads:
+//
+//   rule 3  a required key's operation the program DECLARES `async`
+//           (`emit relay.send("tick")`) — `_async_service_op`'s req-receiver
+//           shape, matched here against `cx.aops` (`"<key>.<op>"`)
+//   rule 1  a call of an async-COLORED callable — `_calls_in`'s name channel
+//           intersected with `env.async_callables`, matched here against
+//           `cx.col`
+//
+// The halves prune DIFFERENTLY, and the difference is the reference's: the req
+// half descends into everything ("a timer body is a list of `emit` steps with
+// no intervening arrow value, so nothing is pruned"), while the name half is
+// `_calls_in(…, stop_async_arrows=True)`. The name half here is `acalls_in`,
+// which prunes an arrow at one of its callee's `Async[T]` slots — the same
+// prune the colour fixed point itself is built over (`async_colored` reads
+// `abody_callees`), so the two agree by construction.
+fn timer_reaches_async(ts: List[Token], lo: Int, hi: Int, cx: CCtx) -> Bool {
+  return timer_scan_req(ts, lo, hi, cx)
+      || any_in(timer_scan_calls(ts, lo, hi, cx.sl, []), cx.col)
+}
+
+// The req half, one `emit` step at a time. The `compensate` clause is walked
+// too: it is a value of the very step node the reference's `walk` descends
+// into, so an async op reached only from a compensation still colours.
+fn timer_scan_req(ts: List[Token], lo: Int, hi: Int, cx: CCtx) -> Bool {
+  if (lo >= hi || atk(ts, lo, "}")) { return false }
+  if (!atw(ts, lo, "emit")) { return false }
+  let r = expr_at(ts, lo + 1)
+  if (is_bad(r.e)) { return false }
+  if (timer_expr_req(r.e, cx)) { return true }
+  var nx = r.i
+  if (atw(ts, nx, "compensate")) {
+    let c = expr_at(ts, nx + 1)
+    if (is_bad(c.e)) { return false }
+    if (timer_expr_req(c.e, cx)) { return true }
+    nx = c.i
+  }
+  return timer_scan_req(ts, nx, hi, cx)
+}
+
+fn timer_exprs_req(xs: List[Expr], i: Int, cx: CCtx) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (timer_expr_req(xs[i], cx)) { return true }
+  return timer_exprs_req(xs, i + 1, cx)
+}
+
+fn timer_inits_req(xs: List[InitN], i: Int, cx: CCtx) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (timer_expr_req(xs[i].value, cx)) { return true }
+  return timer_inits_req(xs, i + 1, cx)
+}
+
+fn timer_arms_req(xs: List[ArmN], i: Int, cx: CCtx) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (timer_expr_req(xs[i].body, cx)) { return true }
+  return timer_arms_req(xs, i + 1, cx)
+}
+
+fn timer_parts_req(xs: List[PartN], i: Int, cx: CCtx) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (timer_expr_req(xs[i].e, cx)) { return true }
+  return timer_parts_req(xs, i + 1, cx)
+}
+
+// A call whose receiver is a required key and whose operation the program
+// declares `async`. The emitter's own req dispatch is the guard (`cir_call`: a
+// `Var` root in `cx.reqs`), and it reads the root BEFORE the scope — a local
+// shadowing a required key still lowers to the `req` node, so the shadow is
+// deliberately not consulted here either.
+fn timer_call_req(tg: Expr, args: List[Expr], cx: CCtx) -> Bool {
+  let hit = match tg {
+    Field(fl) => match fl.target {
+      Var(k) => contains(cx.aops, k.concat(".").concat(fl.name)),
+      _      => false,
+    },
+    _ => false,
+  }
+  if (hit) { return true }
+  if (timer_expr_req(tg, cx)) { return true }
+  return timer_exprs_req(args, 0, cx)
+}
+
+fn timer_expr_req(e: Expr, cx: CCtx) -> Bool {
+  return match e {
+    IntLit(_)   => false,
+    FloatLit(_) => false,
+    StrLit(_)   => false,
+    BoolLit(_)  => false,
+    NullLit     => false,
+    Var(_)      => false,
+    Hole(_)     => false,
+    Asset(_)    => false,
+    Bad(_)      => false,
+    Bin(b)      => timer_expr_req(b.r, cx) || timer_expr_req(b.l, cx),
+    Un(u)       => timer_expr_req(u.e, cx),
+    Emit(u)     => timer_expr_req(u.e, cx),
+    Call(c)     => timer_call_req(c.target, c.args, cx),
+    Field(f)    => timer_expr_req(f.target, cx),
+    OptField(f) => timer_expr_req(f.target, cx),
+    OptCall(c)  => timer_call_req(c.target, c.args, cx),
+    Index(x)    => timer_expr_req(x.idx, cx) || timer_expr_req(x.target, cx),
+    If(x)       => timer_expr_req(x.els, cx) || timer_expr_req(x.then_, cx)
+                     || timer_expr_req(x.cond, cx),
+    Rec(r)      => timer_inits_req(r.fields, 0, cx),
+    Lst(l)      => timer_exprs_req(l.items, 0, cx),
+    Arrow(a)    => timer_expr_req(a.body, cx),
+    Match(m)    => timer_arms_req(m.arms, 0, cx) || timer_expr_req(m.scrut, cx),
+    Templ(t)    => timer_parts_req(t.parts, 0, cx),
+    RecUpd(r)   => timer_inits_req(r.upds, 0, cx) || timer_expr_req(r.base, cx),
+  }
+}
+
+// The name half: the arrow-pruned callee names the timer body reaches, the
+// same accumulation `abody_callees` makes over a `Stmt` list.
+fn timer_scan_calls(ts: List[Token], lo: Int, hi: Int,
+                    sl: Map[Str, List[Int]], acc: List[Str]) -> List[Str] {
+  if (lo >= hi || atk(ts, lo, "}")) { return acc }
+  if (!atw(ts, lo, "emit")) { return acc }
+  let r = expr_at(ts, lo + 1)
+  if (is_bad(r.e)) { return acc }
+  var acc2 = acalls_in(r.e, sl, acc)
+  var nx = r.i
+  if (atw(ts, nx, "compensate")) {
+    let c = expr_at(ts, nx + 1)
+    if (!is_bad(c.e)) { acc2 = acalls_in(c.e, sl, acc2) }
+    nx = c.i
+  }
+  return timer_scan_calls(ts, nx, hi, sl, acc2)
+}
+
 // A component activation body -> its `body` step list. `config` is a header
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
@@ -24043,9 +24331,14 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (bend == 0 - 1) { return mk_irres(false, "") }
     let bodyR = cir_emit_steps(ts, i + 4, bend - 1, cx, sc, hostSc, "")
     if (!bodyR.ok) { return mk_irres(false, "") }
-    let step = "{\"step\": \"timer\", \"mode\": ".concat(jstr(mode))
+    var step = "{\"step\": \"timer\", \"mode\": ".concat(jstr(mode))
       .concat(", \"interval_ms\": ").concat(ims)
       .concat(", \"body\": [").concat(bodyR.js).concat("]}")
+    // async colouring (issue #2092, item 170): a timer body reaching a
+    // suspension is ADMITTED and coloured async, not refused — the firing opens
+    // an `Async[T]` in-flight window and the runtime cancels a pending firing
+    // on unload. A sync timer body carries no key and stays byte-identical.
+    if (timer_reaches_async(ts, i + 4, bend - 1, cx)) { step = step_async(step) }
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, bend, end, cx, provs, sc, hostSc, nacc)
   }
@@ -24236,7 +24529,8 @@ fn comp_has_kw(ts: List[Token], lo: Int, hi: Int, w: Str) -> Bool {
 // not readable out of the component. It is threaded from `lower_to_ir_at`
 // rather than invented here, so the key is the caller's answer and not this
 // file's guess.
-fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCompR {
+fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str],
+                col: List[Str], sl: Map[Str, List[Int]]) -> IrCompR {
   let nm = tkc(ts, i + 1).text
   var j = i + 2
   var reqs: List[Bind] = []
@@ -24277,7 +24571,8 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
              cfg: comp_config_struct(ts, lo, hi, al), ln: 0,
              handles: program_names_handles(ts),
              xundo: extern_undo_names(ts),
-             strreqs: stream_req_binds(reqs, 0, []) }
+             strreqs: stream_req_binds(reqs, 0, []),
+             col: col, sl: sl, aops: req_async_ops(ts, reqs, []) }
   let sc0: List[Bind] = []
   let bodyRes = cir_body(ts, lo, hi, cx, provs, sc0, [], "")
   let isoJs = ir_isolate(ts, lo, hi, "")
@@ -24826,6 +25121,19 @@ fn reads_free_parts(xs: List[PartN], i: Int, names: List[Str], bound: List[Str])
   return reads_free_parts(xs, i + 1, names, bound)
 }
 
+// The type of a component/method BINDING's value. The reference types such a
+// binding from its LOWERED value (`_sweep` = `infer_ir` over what
+// `_lower_component_pure_expr` produced), and that lowering STRIPS an `emit`
+// marker down to the call it covers — so `let got = emit fetch(p)` is typed by
+// the call's return, not by the marker (issue #2092: the marker inferred to ""
+// and the unknown then propagated into every `Some(got)` arm payload).
+fn value_ty(e: Expr, env: List[Bind]) -> Str {
+  return match e {
+    Emit(u) => infer(u.e, env),
+    _       => infer(e, env),
+  }
+}
+
 // Best-effort static type of a pure expression ("" = unknown). The covered
 // projection of `infer_ast`: enough to reproduce the IR's type annotations.
 fn infer(e: Expr, env: List[Bind]) -> Str {
@@ -24939,6 +25247,298 @@ fn lir_args(args: List[Expr], env: List[Bind], al: Map[Str, Str]) -> Str {
 // Like `lir_args`, but marks each argument's Int/Int32 -> Float / Int32 -> Int
 // widen against the callee's declared parameter types (`_mark_widen` at a call
 // site). A missing parameter type (defaults, varargs) leaves its argument bare.
+// ------------------------------------------------------- #2092 sync monomorphs
+//
+// `_colour_polymorphic_fns`: a module `fn` that is async-colored, declares an
+// `Async[T]` parameter, and whose arrow-pruned body reaches no OTHER colored
+// name. A caller that hands such a `fn` only arrows which themselves reach no
+// async callable is a SYNC caller, and the reference redirects its call to a
+// `_revl_sync` clone of the callee whose async-typed parameters are stripped
+// back to plain fn types (`_strip_async_fn_return`). The clone is appended to
+// `functions` last, in sorted monomorph order (`_synthesize_sync_monomorphs`).
+//
+// The redirect is decided in `mono_plan` (over the whole program, before the
+// walk) and consumed by `lir_call` off the caller's body environment, because a
+// call and the colour its own body is stamped with must be the same decision.
+
+// `(Str) -> Async[Str]` -> `(Str) -> Str`; a non-async fn type is returned
+// unchanged (`_strip_async_fn_return`).
+fn strip_async_fn_ret(ty: Str) -> Str {
+  if (!is_async_fn_ty(ty)) { return ty }
+  return "(".concat(join_strs(fn_param_types(ty), ", ")).concat(") -> ")
+    .concat(type_arg1(function_return_ty(ty)))
+}
+
+fn strip_async_ptypes(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    out = out.push(strip_async_fn_ret(xs[i]))
+    i += 1
+  }
+  return out
+}
+
+// The monomorph a caller's redirect row maps `n` to, or "" when the call is left
+// alone. The row is `|origin=mono|...`, so the leading `|` and the trailing `=`
+// anchor the name against a longer one that shares its prefix.
+fn mono_lookup(row: Str, n: Str) -> Str {
+  if (row == "") { return "" }
+  let key = "|".concat(n).concat("=")
+  let at = row.indexOf(key)
+  if (at == 0 - 1) { return "" }
+  let rest = row.slice(at + key.length(), row.length())
+  let end = rest.indexOf("|")
+  if (end == 0 - 1) { return rest }
+  return rest.slice(0, end)
+}
+
+// `_colour_polymorphic_fns`.
+fn poly_fns(fs: List[FnD], colored: List[Str], slots: Map[Str, List[Int]]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < fs.length()) {
+    let f = fs[i]
+    if (contains(colored, f.name) && f.asyncParams.length() > 0
+        && !any_in(abody_callees(f.body, 0, slots, []), colored)) {
+      out = out.push(f.name)
+    }
+    i += 1
+  }
+  return out
+}
+
+// An arrow handed to an `Async[T]` slot that reaches NO async callable - the
+// reference's `_arrow_reaches_async` minus its service-operation half, which no
+// module `fn` body can reach (a module `fn` declares no `requires`).
+fn mono_arg_sync(e: Expr, sl: Map[Str, List[Int]], colored: List[Str]) -> Bool {
+  return match e {
+    Arrow(a) => !any_in(acalls_in(a.body, sl, []), colored),
+    _        => false,
+  }
+}
+
+// Every `Async[T]` slot of the callee carries a sync arrow (`liftable`).
+fn mono_call_liftable(args: List[Expr], asl: List[Int], i: Int,
+                      sl: Map[Str, List[Int]], colored: List[Str]) -> Bool {
+  if (i >= asl.length()) { return true }
+  if (asl[i] >= args.length()) { return false }
+  if (!mono_arg_sync(args[asl[i]], sl, colored)) { return false }
+  return mono_call_liftable(args, asl, i + 1, sl, colored)
+}
+
+fn mt_args(xs: List[Expr], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+           colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return mt_args(xs, i + 1, sl, poly, colored, mt_in(xs[i], sl, poly, colored, acc))
+}
+
+fn mt_inits(xs: List[InitN], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+            colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return mt_inits(xs, i + 1, sl, poly, colored, mt_in(xs[i].value, sl, poly, colored, acc))
+}
+
+fn mt_arms(xs: List[ArmN], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+           colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return mt_arms(xs, i + 1, sl, poly, colored, mt_in(xs[i].body, sl, poly, colored, acc))
+}
+
+fn mt_parts(xs: List[PartN], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+            colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return mt_parts(xs, i + 1, sl, poly, colored, mt_in(xs[i].e, sl, poly, colored, acc))
+}
+
+// The polymorphic callees this call hands ONLY sync arrows. The callee is always
+// descended into, so a polymorphic call nested inside an argument is seen too.
+fn mt_call(tg: Expr, args: List[Expr], sl: Map[Str, List[Int]], poly: List[Str],
+           colored: List[Str], acc: List[Str]) -> List[Str] {
+  let cn = callee_name(tg)
+  var a2 = mt_in(tg, sl, poly, colored, acc)
+  if (contains(poly, cn) && mono_call_liftable(args, acalls_slots(sl, cn), 0, sl, colored)) {
+    a2 = a2.push(cn)
+  }
+  return mt_args(args, 0, sl, poly, colored, a2)
+}
+
+fn mt_in(e: Expr, sl: Map[Str, List[Int]], poly: List[Str], colored: List[Str],
+         acc: List[Str]) -> List[Str] {
+  return match e {
+    IntLit(_)   => acc,
+    FloatLit(_) => acc,
+    StrLit(_)   => acc,
+    BoolLit(_)  => acc,
+    NullLit     => acc,
+    Var(_)      => acc,
+    Hole(_)     => acc,
+    Asset(_)    => acc,
+    Bad(_)      => acc,
+    Bin(b)      => mt_in(b.r, sl, poly, colored, mt_in(b.l, sl, poly, colored, acc)),
+    Un(u)       => mt_in(u.e, sl, poly, colored, acc),
+    Emit(u)     => mt_in(u.e, sl, poly, colored, acc),
+    Call(c)     => mt_call(c.target, c.args, sl, poly, colored, acc),
+    Field(f)    => mt_in(f.target, sl, poly, colored, acc),
+    OptField(f) => mt_in(f.target, sl, poly, colored, acc),
+    OptCall(c)  => mt_args(c.args, 0, sl, poly, colored, mt_in(c.target, sl, poly, colored, acc)),
+    Index(x)    => mt_in(x.idx, sl, poly, colored, mt_in(x.target, sl, poly, colored, acc)),
+    If(x)       => mt_in(x.els, sl, poly, colored,
+                         mt_in(x.then_, sl, poly, colored, mt_in(x.cond, sl, poly, colored, acc))),
+    Rec(r)      => mt_inits(r.fields, 0, sl, poly, colored, acc),
+    Lst(l)      => mt_args(l.items, 0, sl, poly, colored, acc),
+    Arrow(a)    => mt_in(a.body, sl, poly, colored, acc),
+    Match(m)    => mt_arms(m.arms, 0, sl, poly, colored, mt_in(m.scrut, sl, poly, colored, acc)),
+    Templ(t)    => mt_parts(t.parts, 0, sl, poly, colored, acc),
+    RecUpd(r)   => mt_inits(r.upds, 0, sl, poly, colored, mt_in(r.base, sl, poly, colored, acc)),
+  }
+}
+
+fn mt_body(ss: List[Stmt], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+           colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  return mt_body(ss, i + 1, sl, poly, colored, mt_in(ss[i].e, sl, poly, colored, acc))
+}
+
+// The liftable polymorphic callees of every module `fn`, keyed by name - the
+// probe `_monomorphize_free_fn_calls` runs over a throwaway copy of the fns.
+fn mono_by_fn(fs: List[FnD], poly: List[Str], sl: Map[Str, List[Int]],
+              colored: List[Str]) -> Map[Str, List[Str]] {
+  var m: Map[Str, List[Str]] = Map.empty()
+  var i = 0
+  while (i < fs.length()) {
+    let hit = mt_body(fs[i].body, 0, sl, poly, colored, [])
+    if (hit.length() > 0) { m = m.set(fs[i].name, hit) }
+    i += 1
+  }
+  return m
+}
+
+type MonoPlan = { colored: List[Str], monos: Map[Str, Str], origins: List[Str],
+                  al: Map[Str, Str] }
+
+// `_monomorphize_free_fn_calls` followed by `_synthesize_sync_monomorphs`: the
+// colour the walk stamps, the origins to clone, and the caller -> redirect rows
+// the body environments carry.
+fn mono_plan(fs: List[FnD], colored: List[Str], sl: Map[Str, List[Int]],
+             al: Map[Str, Str]) -> MonoPlan {
+  let poly = poly_fns(fs, colored, sl)
+  if (poly.length() == 0) {
+    return { colored: colored, monos: Map.empty(), origins: [], al: al }
+  }
+  let lift = mono_by_fn(fs, poly, sl, colored)
+  let genuinely = async_colored_excl(fs, sl, lift)
+  var syncfns: List[Str] = []
+  var excl: Map[Str, List[Str]] = Map.empty()
+  var i = 0
+  while (i < fs.length()) {
+    let hit = mget_strs(lift, fs[i].name)
+    if (hit.length() > 0 && !contains(genuinely, fs[i].name)) {
+      syncfns = syncfns.push(fs[i].name)
+      excl = excl.set(fs[i].name, hit)
+    }
+    i += 1
+  }
+  if (syncfns.length() == 0) {
+    return { colored: colored, monos: Map.empty(), origins: [], al: al }
+  }
+  let colored2 = async_colored_excl(fs, sl, excl)
+  var callables: List[Str] = []
+  i = 0
+  while (i < fs.length()) { callables = callables.push(fs[i].name)  i += 1 }
+  var origins: List[Str] = []
+  i = 0
+  while (i < syncfns.length()) {
+    let hit = mget_strs(excl, syncfns[i])
+    var j = 0
+    while (j < hit.length()) {
+      if (!contains(origins, hit[j])) { origins = origins.push(hit[j]) }
+      j += 1
+    }
+    i += 1
+  }
+  origins = sort_strs(origins)
+  var monos: Map[Str, Str] = Map.empty()
+  var taken: List[Str] = []
+  i = 0
+  while (i < origins.length()) {
+    var name = origins[i].concat("_revl_sync")
+    while (contains(callables, name) || contains(taken, name)) { name = name.concat("_") }
+    monos = monos.set(origins[i], name)
+    taken = taken.push(name)
+    i += 1
+  }
+  var al2 = al
+  i = 0
+  while (i < syncfns.length()) {
+    let hit = sort_strs(mget_strs(excl, syncfns[i]))
+    var row = ""
+    var j = 0
+    while (j < hit.length()) {
+      row = row.concat("|").concat(hit[j]).concat("=").concat(mget_str(monos, hit[j])).concat("|")
+      j += 1
+    }
+    al2 = al2.set("@mono:".concat(syncfns[i]), row)
+    i += 1
+  }
+  return { colored: colored2, monos: monos, origins: origins, al: al2 }
+}
+
+// The DECLARED return type of module callable `fn <nm>` - the other half of the
+// signature `module_callable_fnty` renders.
+fn decl_ret_of(ts: List[Token], nm: Str, al: Map[Str, Str]) -> Str {
+  var j = 0
+  while (j < ts.length() && !atk(ts, j, "eof")) {
+    if (atw(ts, j, "fn") && tkc(ts, j + 1).text == nm && atk(ts, j + 2, "(")) {
+      let ps = params_at(ts, j + 3)
+      if (atk(ts, ps.i, "arrow")) { return alias_subst(type_at(ts, ps.i + 1).ty, al) }
+      return ""
+    }
+    j += 1
+  }
+  return ""
+}
+
+// The DECLARED fn-type spelling of every module callable, `(p1, p2) -> ret`. The
+// reference lowers a module body with the program's whole `env.types` in hand,
+// so a call to a sibling `fn` is checked against its declared signature: that is
+// what gives an unannotated lambda argument the `param_types` and `returns` the
+// declaration promised, and what the redirect above reads when it de-asyncs the
+// argument of a redirected call. Seeded only into a document that HAS a sync
+// monomorph, so every other document's bodies see the environment they saw
+// before.
+fn module_callable_fnty(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
+  let fs = parse_prog_ts(ts).fns
+  var out: List[Bind] = []
+  var i = 0
+  while (i < fs.length()) {
+    let ps = decl_params_of(ts, fs[i].name)
+    var tys: List[Str] = []
+    var k = 0
+    while (k < ps.length()) { tys = tys.push(alias_subst(ps[k].ty, al))  k += 1 }
+    out = out.push({ name: fs[i].name,
+                     ty: "(".concat(join_strs(tys, ", ")).concat(") -> ")
+                           .concat(decl_ret_of(ts, fs[i].name, al)) })
+    i += 1
+  }
+  return out
+}
+
+// `_synthesize_sync_monomorphs`'s parameter rewrite: every `Async[T]` slot of a
+// clone is stripped back to a plain fn type, so the clone is checkable against
+// the sync arrow the redirected call hands it.
+fn ir_fn_params_json_strip(ps: List[ParamN]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ps.length()) {
+    let e = "{\"name\": ".concat(jstr(predeclared_mangle(ps[i].name)))
+      .concat(", \"type\": ").concat(jstr(strip_async_fn_ret(taint_strip(ps[i].ty)))).concat("}")
+    out = out == "" ? e : out.concat(", ").concat(e)
+    i += 1
+  }
+  return out
+}
+
 fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind], al: Map[Str, Str]) -> Str {
   var out = ""
   var i = 0
@@ -25417,9 +26017,18 @@ fn lir_call(callee: Expr, args: List[Expr], env: List[Bind], al: Map[Str, Str]) 
   // emits the conversion. The callee's declared parameter types drive it; only
   // a `Var` callee names a signature (the reference's `ExprVar` guard), so a
   // higher-order callee keeps its arguments un-marked.
-  let ptypes = match callee { Var(n) => fn_param_types(tenv_get(env, n)), _ => [], }
+  let ptypes0 = match callee { Var(n) => fn_param_types(tenv_get(env, n)), _ => [], }
+  // Issue #2092: a SYNC caller's call to a colour-polymorphic `fn` goes to the
+  // `_revl_sync` clone `mono_plan` synthesized for it, and the clone's async
+  // slots are already stripped, so the arrow argument is checked against the
+  // plain fn type - which is what makes it a sync arrow rather than a coerced
+  // one (`_monomorphize_sync_callback_calls`).
+  let mono = match callee { Var(n) => mono_lookup(tenv_get(env, "@mono"), n), _ => "", }
+  let ptypes = mono == "" ? ptypes0 : strip_async_ptypes(ptypes0)
   let argsjs = ptypes.length() == 0 ? lir_args(args, env, al) : lir_call_args(args, ptypes, env, al)
-  return "{\"kind\":\"call\",\"callee\":".concat(lir_expr(callee, env, al))
+  let calleejs = mono == "" ? lir_expr(callee, env, al)
+    : "{\"kind\":\"var\",\"name\":".concat(jstr(mono)).concat("}")
+  return "{\"kind\":\"call\",\"callee\":".concat(calleejs)
     .concat(",\"args\":[").concat(argsjs).concat("]}")
 }
 
@@ -27480,6 +28089,17 @@ fn params_env(ps: List[ParamN], acc: List[Bind], tps: List[Str]) -> List[Bind] {
 // One module `fn` -> its `functions` entry. Advances past the whole fn.
 fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
                 colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str]) -> LirFn {
+  return lir_function_named(ts, i, cases, public_fn, colored, sm, al, "", false, [])
+}
+
+// `nmOut` overrides the emitted name (a `_revl_sync` clone re-renders its
+// origin's span under the monomorph's name) and `strip` drops both the `async`
+// stamp and the async half of every parameter's type, which is the whole of
+// `_synthesize_sync_monomorphs`. `fnty` carries the module callables' declared
+// signatures; it is empty unless this document has a sync monomorph.
+fn lir_function_named(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
+                      colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str],
+                      nmOut: Str, strip: Bool, fnty: List[Bind]) -> LirFn {
   let nm = tkc(ts, i + 1).text
   let ps0 = params_at(ts, fn_params_i(ts, i))
   // the declaration is read through the alias table, so the IR spelling, the
@@ -27514,36 +28134,47 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
   // ownership marks are keyed by token index, so no key can collide): a `try`
   // names its fresh locals off the identifiers spelled inside it
   let tmarks = om.marks.set("@try_fn", i).set("@try_end", bend)
-  let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
-                         params_env(ps.ps, cases, tps), [], retTy, tmarks, om.births, al)
-  let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_fn_params_json(ps.ps))
+  // the caller's own redirect row rides the body environment under a reserved
+  // key no identifier can spell, the way `mut_key` and `local_key` already do.
+  let benv = append_binds(params_env(ps.ps, cases, tps), fnty)
+    .push({ name: "@mono", ty: mget_str(al, "@mono:".concat(nm)) })
+  let bodyjs = lir_stmts(ts, reti + 1, bend - 1, benv, [], retTy, tmarks, om.births, al)
+  let js = "{\"name\":".concat(jstr(nmOut == "" ? nm : nmOut))
+    .concat(",\"params\":[").concat(strip ? ir_fn_params_json_strip(ps.ps) : ir_fn_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
     .concat(bodyjs).concat("]")
     .concat(cache_pure ? ",\"cache\":{\"class\":\"pure_fn\"}" : "")
-    .concat(contains(colored, nm) ? ",\"async\":true" : "").concat("}")
+    .concat(strip ? "" : (contains(colored, nm) ? ",\"async\":true" : "")).concat("}")
   return { js: js, i: bend }
 }
 
 // Collect every top-level `fn` into the `functions` list; skip other decls
 // wholesale (a nested `fn` inside a component is not a module function).
+// The module `functions` array and, separately, the `_revl_sync` clones it
+// appends last: a clone is a re-render of its origin's span, so it is collected
+// under the monomorph's name and joined on in `origins` order at the end.
+type FnsOut = { js: Str, clones: Map[Str, Str] }
+
 fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
-            colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str]) -> Str {
-  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+            colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str],
+            monos: Map[Str, Str], origins: List[Str], fnty: List[Bind],
+            clones: Map[Str, Str]) -> FnsOut {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return { js: acc, clones: clones } }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al) }
-  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored, sm, al) }
+  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones) }
   if (at_qual_test(ts, i)) {
     let qe = qual_test_end(ts, i)
-    if (qe != 0 - 1) { return fns_walk(ts, qe, acc, cases, colored, sm, al) }
-    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
+    if (qe != 0 - 1) { return fns_walk(ts, qe, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones)
   }
-  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al) }
-  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al) }
+  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored, sm, al) }
-    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
+    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones)
   }
   if (t.text == "type") {
   // a `type` is stepped over to the end of the DECLARATION, not of its first
@@ -27552,23 +28183,30 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
   // top-level declaration head to this walker: `type Envelope = {` then
   // `component: Int,` on its own line minted a component named ":". Same span
   // `type_ctors` and `p_top` already read.
-    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored, sm, al)
+    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored, sm, al, monos, origins, fnty, clones)
   }
-  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
+  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
   let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
   if (t.text == "fn" || public_fn) {
-    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn, colored, sm, al)
+    let fi = public_fn ? i + 1 : i
+    let f = lir_function_named(ts, fi, cases, public_fn, colored, sm, al, "", false, fnty)
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
-    return fns_walk(ts, f.i, acc2, cases, colored, sm, al)
+    let mname = mget_str(monos, tkc(ts, fi + 1).text)
+    var cl = clones
+    if (mname != "") {
+      let g = lir_function_named(ts, fi, cases, public_fn, colored, sm, al, mname, true, fnty)
+      if (g.js != "") { cl = cl.set(mname, g.js) }
+    }
+    return fns_walk(ts, f.i, acc2, cases, colored, sm, al, monos, origins, fnty, cl)
   }
   // the remaining `pub` forms (`pub type` / `pub service` / `pub extern`) carry
   // nothing this walker reads, so the prefix is stepped over and the declaration
   // it heads dispatches above. `pub fn` cannot reach here: it is the one form
   // whose prefix IS data (the `"public"` stamp), handled with the `fn` branch.
-  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al) }
-  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
-  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
-  return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
+  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones)
 }
 
 // ================================================================ externs IR
@@ -28863,7 +29501,7 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st:
   if (at_qual_test(ts, i)) {
     let qe = qual_test_end(ts, i)
     if (qe != 0 - 1) {
-      return ir_walk(ts, qe, mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
+      return ir_walk(ts, qe, mk_iracc(a.svcs, a.comps, true, a.v2, a.col, a.sl), fname, al, st)
     }
     return ir_walk(ts, skip_line(ts, i), a, fname, al, st)
   }
@@ -28871,7 +29509,7 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st:
   if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname, al, st) }
   if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname, al, st) }
   if (t.text == "test") {
-    let na = mk_iracc(a.svcs, a.comps, true, a.v2)
+    let na = mk_iracc(a.svcs, a.comps, true, a.v2, a.col, a.sl)
     let e = test_block_end(ts, i)
     if (e != 0 - 1) { return ir_walk(ts, e, na, fname, al, st) }
     return ir_walk(ts, skip_line(ts, i), na, fname, al, st)
@@ -28888,27 +29526,27 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st:
     // `ir_version`; only one that survives the erasure is.
     let survives = !al.has(tkc(ts, i + 1).text)
     return ir_walk(ts, type_decl_end(ts, i + 1),
-                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2), fname, al, st)
+                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2, a.col, a.sl), fname, al, st)
   }
   if (t.text == "extern") {
     return ir_walk(ts, p_extern(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
+                   mk_iracc(a.svcs, a.comps, true, a.v2, a.col, a.sl), fname, al, st)
   }
   if (t.text == "fn") {
     return ir_walk(ts, p_fn(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
+                   mk_iracc(a.svcs, a.comps, true, a.v2, a.col, a.sl), fname, al, st)
   }
   if (t.text == "service") {
     let sv = ir_service(ts, i, al, st)
     let svcs2 = a.svcs == "" ? sv.js : a.svcs.concat(", ").concat(sv.js)
     return ir_walk(ts, p_service(ts, i, empty_prog()).i,
-                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname, al, st)
+                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2, a.col, a.sl), fname, al, st)
   }
   if (t.text == "component") {
-    let cp = ir_component(ts, i, fname, al)
+    let cp = ir_component(ts, i, fname, al, a.col, a.sl)
     let comps2 = a.comps == "" ? cp.js : a.comps.concat(", ").concat(cp.js)
     return ir_walk(ts, p_component(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname, al, st)
+                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2, a.col, a.sl), fname, al, st)
   }
   return ir_walk(ts, skip_line(ts, i), a, fname, al, st)
 }
@@ -28967,17 +29605,36 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   // checker, for the same reason: an alias that reached either of them would be
   // an undeclared type name.
   let al = alias_map(ts)
-  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname, al, src_text(src))
-  let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   // The async COLOUR is a whole-program property, so the streaming function
   // producer cannot decide it one declaration at a time: the reference runs the
   // fixed point over the call graph and only then stamps `"async": true` on each
   // coloured entry (`check_and_lower`). The gate half of this file already
   // computes that same closure for its A1/composition verdicts, so the producer
-  // reads it rather than deriving a second one.
+  // reads it rather than deriving a second one. The component reader reads it
+  // too — issue #2092: a timer whose body reaches a coloured callable is itself
+  // coloured — so it is computed ahead of the walk and threaded through `IrAcc`
+  // rather than derived a second time per component.
   let pg = parse_prog_ts(ts)
-  let colored = async_colored(pg.fns, async_slots_map(pg.fns))
-  let fnsjs = fns_walk(ts, 0, "", case_binds(ts, al), colored, own_program_summary(ts), al)
+  let slots = async_slots_map(pg.fns)
+  let colored = async_colored(pg.fns, slots)
+  // Issue #2092: the sync monomorphs, decided over the whole program BEFORE the
+  // walk, so that the colour a body is stamped with and the redirect its calls
+  // take are one decision (`_monomorphize_free_fn_calls` then
+  // `_synthesize_sync_monomorphs`). The recolour reaches the component reader
+  // too, which reads the same `colored`.
+  let plan = mono_plan(pg.fns, colored, slots, al)
+  let fnty = plan.origins.length() == 0 ? [] : module_callable_fnty(ts, plan.al)
+  let a = ir_walk(ts, 0, mk_iracc("", "", false, false, plan.colored, slots), fname, al, src_text(src))
+  let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
+  let fo = fns_walk(ts, 0, "", case_binds(ts, plan.al), plan.colored, own_program_summary(ts),
+                    plan.al, plan.monos, plan.origins, fnty, Map.empty())
+  var fnsjs = fo.js
+  var ci = 0
+  while (ci < plan.origins.length()) {
+    let cjs = mget_str(fo.clones, mget_str(plan.monos, plan.origins[ci]))
+    if (cjs != "") { fnsjs = fnsjs == "" ? cjs : fnsjs.concat(", ").concat(cjs) }
+    ci += 1
+  }
   let typesjs = types_walk(ts, 0, "", al)
   // The bound-secret table is computed once, ahead of the extern walk, because
   // the walk needs it: a secret bound to a capability stamps the NAME onto every

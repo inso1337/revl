@@ -558,21 +558,29 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # and without the imports that trailer pulls in. They now reproduce
         # byte-for-byte through the fully-native chain.)
         #
-        # item 391: the await-seed slice. Both are emitter-exact from the
-        # reference IR. async_timer.rvl's `tests` section is byte-exact now too
-        # (issue #2088 above), so what withholds it is the OTHER half of this
+        # item 391: the await-seed slice. Both were emitter-exact from the
+        # reference IR. async_timer.rvl's `tests` section was byte-exact too
+        # (issue #2088 above), so what withheld it was the OTHER half of this
         # slice: its timer bodies `emit counter.tick()` through a required key
         # and `Counter.tick` is an `emission async fn`, but the native IR
-        # producer stamps no `"async": true` on that timer step (item 170's
-        # `_timer_body_reaches_async` colouring), so the emitter omits the
+        # producer stamped no `"async": true` on that timer step (item 170's
+        # `_timer_body_reaches_async` colouring), so the emitter omitted the
         # in-flight window and its teardown. That is a different family from
-        # #2088's — the same one that withholds emit_py_async_shapes.rvl, which
+        # #2088's — the same one that withheld emit_py_async_shapes.rvl, which
         # reaches the frontend's sync instance of a fn with an async-typed
         # parameter (`drive_revl_sync`) and the async-coloured timer flag,
-        # neither of which the native IR producer emits, so the native chain
-        # also loses the `extern_emit` and `asyncio` imports.
-        "../../../examples/async_timer.rvl",
-        "../emit_py_async_shapes.rvl",
+        # neither of which the native IR producer emitted, so the native chain
+        # also lost the `extern_emit` and `asyncio` imports.
+        # (issue #2092: both left this list when `selfhost/lower.rvl` grew the
+        # timer-step async stamp — `timer_reaches_async`, the `_timer_body_
+        # reaches_async` port that ORs a directly-reached async required op
+        # against the arrow-pruned call set — and the sync monomorph family —
+        # `mono_plan`, `_monomorphize_free_fn_calls` then `_synthesize_sync_
+        # monomorphs`: a sync caller's call to a colour-polymorphic `fn` is
+        # redirected to a synthesized `_revl_sync` clone whose async-typed
+        # parameters are stripped back to plain fn types, the clone being
+        # appended to `functions` last. Both documents now reproduce
+        # byte-for-byte through the fully-native chain.)
         # item 391: the stream slice. All five were emitter-exact from the
         # reference IR; what the native IR producer used to drop was the body's
         # stream steps (the `Stream.source()` acquisition, as in
@@ -671,12 +679,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # its component's `Err(_)` arm binds `__`, the reference's `_safe_name`
         # spelling of the soft keyword `_`.)
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-        # component edge shapes. Everything this document spells is byte-exact
-        # through the native chain except its ONE async provide method: the
-        # guard `if`/`fail` pair, the bare `fn` effect bracket, the `emit …
-        # compensate …` step with its `compensate_captures`, the host-map
-        # bracket and the per-invocation method bracket all reproduce.
-        "component_edges.rvl",
+        # (issue #2092: `component_edges.rvl` left this list with the py entry
+        # above. Its ONE async provide method was withheld by a producer that
+        # had the `await` step for an ACTIVATION body but not for a provide
+        # METHOD body, so the first suspension inside the method returned "not
+        # reproduced" and took the whole method body — and with it the
+        # component's `body` — with it. The one native `selfhost/lower.rvl`
+        # producer fix closes the residual for BOTH tiers.)
         # (`property_edges.rvl` left this list when the `.length` PROPERTY form
         # on a sized receiver started carrying `sized_length`, and
         # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
@@ -702,7 +711,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # in `selfhost/lower.rvl`, so `lifecycle_cache.rvl`, the item 280
         # Opt-gap document and the scenario `advance.rvl` left this list.)
         # timers inside a lifecycle-tested document,
-        "../../../examples/async_timer.rvl",
+        # (issue #2092: `../../../examples/async_timer.rvl` left this list with
+        # the py entry above — the native producer now stamps the timer step
+        # `"async": true` when its body reaches an async callable
+        # (`timer_reaches_async`), which is the one `selfhost/lower.rvl` producer
+        # fix both tiers needed.)
         # (issue #2087: the stream surface (`subscribe`, `merge`, `every ... in`,
         # `on ... as`) closed with the py entries above — `stream_130.rvl` and
         # `comp_stream.rvl` left this list too, the one native `selfhost/lower.rvl`
