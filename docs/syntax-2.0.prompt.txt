@@ -1,4 +1,4 @@
-revl 2.0 — complete grammar (pin this verbatim; full prose: docs/syntax-2.0.md)
+revl 2.0 — complete grammar (pin this verbatim; prose summary: revl_grammar)
 
 PRINCIPLE: same meaning -> same syntax (TypeScript, verbatim). Different
 meaning (effects, inverses, provisions, boundaries) -> distinct revl syntax.
