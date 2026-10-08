@@ -2253,6 +2253,35 @@ fn ui_crossing_wrapper(ext: Any, name: Str, impl: Str, params: Str, arg_list: St
           "}", ""]
 }
 
+// `_ts_extern_body_lines`: the verbatim `@ts` body, spliced at the extern's own
+// indentation. `body` is already dedented and its own `return` statements are
+// its own — that is the whole point of a verbatim body, so the coercion cannot
+// be a rewrite of them. issue #2147 wraps the body in an immediately-invoked
+// ARROW instead: the body keeps its shape and its returns, and `revlToBigInt`
+// coerces whatever they produced. An arrow, not a function expression, so the
+// body's `this`, `arguments` and `new.target` still refer to the extern the
+// author is writing — the wrapper is invisible to it. `async` is applied only
+// on the async extern path, where the body may `await`; the `await` that
+// follows resolves it before the coercion.
+// Mirrors `_ts_extern_body_lines` in backends/typescript/emit.py.
+fn extern_body_lines(body: Str, coerce_int: Bool, is_async: Bool) -> List[Str] {
+  var out = []
+  let lines = py_splitlines(body)
+  if (!coerce_int) {
+    for (line of lines) { out = out.push("  ".concat(line)) }
+    return out
+  }
+  var head = "  return revlToBigInt("
+  if (is_async) { head = head.concat("await ") }
+  head = head.concat("(")
+  if (is_async) { head = head.concat("async ") }
+  head = head.concat("() => {")
+  out = out.push(head)
+  for (line of lines) { out = out.push("    ".concat(line)) }
+  out = out.push("  })())")
+  return out
+}
+
 // `_emit_ts_externs`: each `extern fn` as an exported TS `function` carrying its
 // verbatim `@ts` body (dedented, each line re-indented two spaces). An `async`
 // extern (item 80) emits `export async function …: Promise<T>` — its body may
@@ -2297,6 +2326,11 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str]) -> List[Str] {
     // Absent unless the author declared it, so every other module stays
     // byte-identical.
     let secret_return = value_bool(value_field(ext, "secret_return"))
+    // issue #2147: whether this extern's verbatim `@ts` body has to be coerced
+    // to its DECLARED return type on the way out (see
+    // `extern_needs_int_coercion`). False for every extern whose declared
+    // return is not `Int`, so those modules stay byte-identical.
+    let coerce_int = extern_needs_int_coercion(ext)
     // issue #1369: a computer-use extern's EXPORTED name is its `uiCrossing`
     // wrapper; everything below renders the implementation that wrapper wraps,
     // and that implementation is not exported (the wrapper is).
@@ -2355,8 +2389,8 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str]) -> List[Str] {
       if (body == "") {
         out = out.push("  // (empty @ts body)")
       } else {
-        for (line of py_splitlines(body)) {
-          out = out.push("  ".concat(line))
+        for (line of extern_body_lines(body, coerce_int, value_bool(value_field(ext, "async")))) {
+          out = out.push(line)
         }
       }
       out = out.push("}")
@@ -3499,6 +3533,20 @@ fn revl_show_helper() -> Str {
   return o.join(newline())
 }
 
+// issue #2147: the result-side coercion of a verbatim `@ts` body. The mirror of
+// `_REVL_TO_BIGINT_HELPER` in backends/typescript/emit.py, and of the seam's
+// `toBigInt` (#1566): bigint in, integral number widened, anything else passed
+// through for the caller to refuse loudly.
+fn revl_to_bigint_helper() -> Str {
+  var o = []
+  o = o.push("function revlToBigInt(v: unknown): bigint {")
+  o = o.push("  if (typeof v === 'bigint') return v")
+  o = o.push("  if (typeof v === 'number' && Number.isInteger(v)) return BigInt(v)")
+  o = o.push("  return v as bigint // not an integer: leave it for the caller to refuse loudly")
+  o = o.push("}")
+  return o.join(newline())
+}
+
 fn revl_i64_helper() -> Str {
   var o = []
   o = o.push("const REVL_I64_MIN = -(2n ** 63n)")
@@ -4069,6 +4117,31 @@ fn uses_bounded_int32(n: Any) -> Bool {
   return false
 }
 
+// issue #2147: does this extern's verbatim `@ts` body cross the RESULT boundary
+// as `Int`? The tier's `Int` is a `bigint` (the type map) while a verbatim JS
+// body naturally yields a `number` — `Math.floor(...)` above all. Nothing at the
+// boundary says which numbers are `Int`s, so the coercion follows the DECLARED
+// return type, exactly as the seam does (#1566). `Int` is the only declared type
+// for which that is needed. One predicate, shared by the wrapper and by the
+// helper's own emission gate, so the two cannot disagree — a helper emitted for
+// a module with no wrapper is a `noUnusedLocals` error under `tsc`.
+// Mirrors `_ts_extern_needs_int_coercion` in backends/typescript/emit.py.
+fn extern_needs_int_coercion(ext: Any) -> Bool {
+  let bodies = value_field(ext, "bodies")
+  // a `@ts ref` extern emits a lazy import thunk: no body, nothing to coerce
+  if (!value_has(bodies, "ts")) { return false }
+  // an empty body produces no value; the emitter already says so in place
+  if (py_strip(value_str(value_field(bodies, "ts"))).length() == 0) { return false }
+  return ts_return_type(value_field(ext, "returns")) == "bigint"
+}
+
+fn uses_extern_int_coercion(ir: Any) -> Bool {
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (extern_needs_int_coercion(ext)) { return true }
+  }
+  return false
+}
+
 fn is_int_arith_method(m: Str) -> Bool {
   if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod") { return true }
   return m == "checked_div_trunc" || m == "checked_div_floor" || m == "checked_div_euclid" || m == "checked_mod"
@@ -4182,6 +4255,10 @@ fn revl_helpers(ir: Any) -> List[Str] {
   if (uses_equality(ir) || uses_str_methods(ir)) { out = out.push(revl_eq_helper()); out = out.push("") }
   if (uses_assert(ir)) { out = out.push(revl_show_helper()); out = out.push("") }
   if (uses_bounded_int(ir) || uses_int_arith(ir)) { out = out.push(revl_i64_helper()); out = out.push("") }
+  // issue #2147: the result-side coercion of a verbatim `@ts` body declared
+  // `Int`. Gated by the same predicate the wrapper itself uses, and emitted at
+  // the reference's position (after `revlI64`, before `revlI32`).
+  if (uses_extern_int_coercion(ir)) { out = out.push(revl_to_bigint_helper()); out = out.push("") }
   if (uses_bounded_int32(ir)) { out = out.push(revl_i32_helper()); out = out.push("") }
   if (uses_int_arith(ir)) { out = out.push(revl_int_arith_helper()); out = out.push("") }
   if (uses_str_methods(ir)) { out = out.push(revl_str_helper()); out = out.push("") }

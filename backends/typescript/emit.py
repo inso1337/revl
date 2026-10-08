@@ -4134,6 +4134,24 @@ function revlI64(v: bigint): bigint {
   return v
 }"""
 
+# issue #2147: a verbatim `@ts` body's result is coerced to the extern's
+# DECLARED return type — the result-side mirror of the argument-side seam
+# conversion (#1566, `toBigInt` in bridge.ts, the same three cases in the same
+# order, so the two sides of one boundary cannot disagree). A JS body that
+# computes `Math.floor(...)` yields a `number`, the declared `Int` is a
+# `bigint` on this tier (TYPE_MAP), and JS refuses to mix the two: the emitted
+# function was annotated `bigint` and returned a `number`, so the lie surfaced
+# only at the first use, inside the language's own helpers, as `Cannot mix
+# BigInt and other types`. Nothing at the boundary says which numbers are
+# `Int`s, so the fix follows the declared type, exactly as the seam does.
+# A value that is not an integer number is passed through unchanged, for the
+# caller to refuse loudly — the seam's own choice, not a new one.
+_REVL_TO_BIGINT_HELPER = """function revlToBigInt(v: unknown): bigint {
+  if (typeof v === 'bigint') return v
+  if (typeof v === 'number' && Number.isInteger(v)) return BigInt(v)
+  return v as bigint // not an integer: leave it for the caller to refuse loudly
+}"""
+
 # Int32 is a `number`; the bound is imposed the same way, at 32 bits. The
 # double holds every i32 sum/product exactly, so only the range check is needed
 # (docs/arithmetic.md).
@@ -4317,6 +4335,52 @@ function revlRouter(
 }"""
 
 
+def _ts_extern_needs_int_coercion(ext: dict) -> bool:
+    """issue #2147: does this extern's verbatim `@ts` body cross the RESULT
+    boundary as `Int`?
+
+    The tier's `Int` is a `bigint` (TYPE_MAP) while a verbatim JS body
+    naturally yields a `number` — `Math.floor(...)` above all. Nothing at the
+    boundary says which numbers are `Int`s, so the coercion follows the
+    DECLARED return type, exactly as the seam does (#1566). `Int` is the only
+    declared type for which that is needed: `Int32` and `Float` are already a
+    `number`, `Bool`/`Str`/`Bytes` are the JS values a body naturally returns,
+    and `Unit` yields nothing to convert. One predicate, shared by the wrapper
+    and by the helper's own emission gate, so the two cannot disagree — a
+    helper emitted for a module with no wrapper is a `noUnusedLocals` error
+    under `tsc`.
+    """
+    bodies = ext.get("bodies") or {}
+    # a `@ts ref` extern emits a lazy import thunk: no body, nothing to coerce
+    if "ts" not in bodies:
+        return False
+    # an empty body produces no value; the emitter already says so in place
+    if not (bodies.get("ts") or "").strip():
+        return False
+    return _ts_v3_type(ext.get("returns")) == "bigint"
+
+
+def _ts_extern_body_lines(body: str, coerce_int: bool, is_async: bool) -> list[str]:
+    """The verbatim `@ts` body, spliced at the extern's own indentation.
+
+    `body` is already dedented and its own `return` statements are its own —
+    that is the whole point of a verbatim body, so the coercion cannot be a
+    rewrite of them. issue #2147 wraps the body in an immediately-invoked
+    ARROW instead: the body keeps its shape and its returns, and
+    `revlToBigInt` coerces whatever they produced. An arrow, not a function
+    expression, so the body's `this`, `arguments` and `new.target` still refer
+    to the extern the author is writing — the wrapper is invisible to it.
+    `async` is applied only on the async extern path, where the body may
+    `await`; the `await` that follows resolves it before the coercion.
+    """
+    lines = body.splitlines() or [""]
+    if not coerce_int:
+        return ["  " + line for line in lines]
+    kw = "async " if is_async else ""
+    head = "  return revlToBigInt(" + ("await " if is_async else "") + f"({kw}() => {{"
+    return [head, *["    " + line for line in lines], "  })())"]
+
+
 def _revl_helpers(ir: dict) -> list[str]:
     """The helper functions this document actually needs, in dependency order.
 
@@ -4341,6 +4405,10 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_SHOW_HELPER, ""])
     if _uses_bounded_int(ir) or _uses_int_arith(ir):
         out.extend([_REVL_I64_HELPER, ""])
+    # issue #2147: the result-side coercion of a verbatim `@ts` body declared
+    # `Int`. Gated by the same predicate the wrapper itself uses.
+    if any(_ts_extern_needs_int_coercion(e) for e in ir.get("externs") or []):
+        out.extend([_REVL_TO_BIGINT_HELPER, ""])
     if _uses_bounded_int32(ir):
         out.extend([_REVL_I32_HELPER, ""])
     if _uses_int_arith(ir):
@@ -5293,6 +5361,11 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
         # every call site is covered without the body being rewritten. Absent
         # unless the author declared it, so every other module is byte-identical.
         secret_return = bool(ext.get("secret_return"))
+        # issue #2147: whether this extern's verbatim `@ts` body has to be
+        # coerced to its DECLARED return type on the way out (see
+        # `_ts_extern_needs_int_coercion`). False for every extern whose
+        # declared return is not `Int`, so those modules stay byte-identical.
+        coerce_int = _ts_extern_needs_int_coercion(ext)
         # issue #1369: a computer-use extern's exported name is its
         # `uiCrossing` wrapper; everything below renders the implementation it
         # wraps, unexported
@@ -5318,8 +5391,7 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
                 lines.append("  " + config_bind)
             body = textwrap.dedent(bodies["ts"].strip("\n"))
             if body:
-                for line in body.splitlines() or [""]:
-                    lines.append("  " + line)
+                lines.extend(_ts_extern_body_lines(body, coerce_int, True))
             else:
                 lines.append("  // (empty @ts body)")
             lines.append("}")
@@ -5337,8 +5409,7 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
             lines.append("  " + config_bind)
         body = textwrap.dedent(bodies["ts"].strip("\n"))
         if body:
-            for line in body.splitlines() or [""]:
-                lines.append("  " + line)
+            lines.extend(_ts_extern_body_lines(body, coerce_int, False))
         else:
             lines.append("  // (empty @ts body)")
         lines.append("}")
