@@ -22332,6 +22332,17 @@ fn cir_expr(e: Expr, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     // [name, value] PAIRS, not the fn path's object — a different node for the
     // same surface, so it is written out here rather than shared.
     Rec(r)      => cir_record(r.fields, 0, sc, hostSc, cx, ""),
+    // A functional record update. The reference spells the SAME node in both
+    // dialects — `record_update`, with `updates` as [name, value] pairs, the
+    // pair spelling `cir_record` already writes for a literal's `fields` — so
+    // this is the fn path's node, not a component-specific one. Without the
+    // arm the wildcard below swallowed the whole enclosing provide method.
+    RecUpd(r)   => cir_rec_upd(r, sc, hostSc, cx),
+    // `p?.x` and `s?.to_int()`: the optional-access pair, again the fn path's
+    // nodes. `?.` is how a receiver of declared type `Opt[T]` is read at all,
+    // so dropping the node dropped the method that read one.
+    OptField(f) => cir_opt_field(f, sc, hostSc, cx),
+    OptCall(c)  => cir_opt_call(c, sc, hostSc, cx),
     Arrow(a)    => cir_arrow(a, sc, hostSc, cx),
     _           => mk_irres(false, ""),
   }
@@ -22424,6 +22435,43 @@ fn cir_index(x: IndexN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     .concat(", \"index\": ").concat(ix.js).concat("}"))
 }
 
+// The `updates` pairs of a functional record update (`{ base | f = e, … }`).
+fn cir_updates(xs: List[InitN], i: Int, sc: List[Bind], hostSc: List[Str],
+               cx: CCtx, acc: Str) -> IrRes {
+  if (i >= xs.length()) { return mk_irres(true, acc) }
+  let v = cir_expr(xs[i].value, sc, hostSc, cx)
+  if (!v.ok) { return mk_irres(false, "") }
+  let e = "[".concat(jstr(xs[i].name)).concat(", ").concat(v.js).concat("]")
+  return cir_updates(xs, i + 1, sc, hostSc, cx,
+                     acc == "" ? e : acc.concat(", ").concat(e))
+}
+
+fn cir_rec_upd(r: RecUpdN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  let b = cir_expr(r.base, sc, hostSc, cx)
+  if (!b.ok) { return mk_irres(false, "") }
+  let u = cir_updates(r.upds, 0, sc, hostSc, cx, "")
+  if (!u.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"record_update\", \"base\": ".concat(b.js)
+    .concat(", \"updates\": [").concat(u.js).concat("]}"))
+}
+
+fn cir_opt_field(f: FieldN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  let t = cir_expr(f.target, sc, hostSc, cx)
+  if (!t.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"optfield\", \"target\": ".concat(t.js)
+    .concat(", \"name\": ").concat(jstr(f.name)).concat("}"))
+}
+
+fn cir_opt_call(c: OptCallN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  let t = cir_expr(c.target, sc, hostSc, cx)
+  if (!t.ok) { return mk_irres(false, "") }
+  let a = cir_args(c.args, 0, sc, hostSc, cx, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"optcall\", \"target\": ".concat(t.js)
+    .concat(", \"method\": ").concat(jstr(c.name))
+    .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
 // `match <scrut> { <Case>(<bind>) => <body>, … }` in a component position.
 //
 // The binder is NOT renamed here. The reference mangles a binder that collides
@@ -22442,7 +22490,8 @@ fn cir_match(m: MatchN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     if (a.bind != "" && scope_has(sc, a.bind)) { return mk_irres(false, "") }
     let pay = arm_payload(scrutTy, a.pat, env)
     let inner = a.bind == "" ? sc : sc.push({ name: a.bind, ty: pay })
-    let b = cir_expr(a.body, inner, hostSc, cx)
+    let b = a.isBlk ? cir_block_arm(a, inner, hostSc, cx)
+                    : cir_expr(a.body, inner, hostSc, cx)
     if (!b.ok) { return mk_irres(false, "") }
     var arm = "{\"pattern\": ".concat(jstr(a.pat))
       .concat(", \"bind\": ").concat(a.bind == "" ? "null" : jstr(cir_safe_binder(a.bind)))
@@ -22464,6 +22513,44 @@ fn cir_match(m: MatchN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
 // that `_safe_name` would rename is still written as the author spelled it,
 // as before.
 fn cir_safe_binder(n: Str) -> Str { return n == "_" ? "__" : n }
+
+// A statement-block match arm in a COMPONENT position (`=> { let x = …  expr }`).
+//
+// The reference lowers this INLINE as a `do` node holding the bindings and the
+// tail (`_lower_component_block_arm`) — not by lambda-lifting it the way the
+// fn-body path does, because a provide method may read component `config` or a
+// required service that a synthetic module `fn` cannot hold. Each tier renders
+// the node as an awaited walrus sequence, so the node is all that is missing.
+//
+// A binding takes `_safe_name`'s escape and the scope carries it to the reads
+// as a `rename` row, the way every other binder here does; its type is the
+// annotation when one was written and the INFERRED type otherwise, because the
+// reference types a component binding by inference and never by the checker.
+fn cir_block_arm(a: ArmN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  var inner = sc
+  var stmts = ""
+  var i = 0
+  while (i < a.blk.length()) {
+    let s = a.blk[i]
+    let v = cir_expr(s.value, inner, hostSc, cx)
+    if (!v.ok) { return mk_irres(false, "") }
+    let safe = safe_name(s.name, inner, hostSc)
+    let ty = s.ty != "" ? s.ty : infer(s.value, cenv_ir(cx, inner))
+    inner = inner.push({ name: s.name, ty: ty })
+    if (safe != s.name) {
+      inner = inner.push({ name: "rename ".concat(s.name), ty: safe })
+    }
+    let st = "{\"step\": \"let\", \"name\": ".concat(jstr(safe))
+      .concat(", \"value\": ").concat(v.js)
+      .concat(", \"mutable\": ").concat(s.mutable ? "true" : "false").concat("}")
+    stmts = i == 0 ? st : stmts.concat(", ").concat(st)
+    i += 1
+  }
+  let t = cir_expr(a.blkTail, inner, hostSc, cx)
+  if (!t.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"do\", \"stmts\": [".concat(stmts)
+    .concat("], \"tail\": ").concat(t.js).concat("}"))
+}
 
 // Every literal `$` in a template's TEXT is doubled, so a `$` the author wrote
 // can never be read back as a positional slot (A4). The reference spells this
@@ -22781,7 +22868,14 @@ fn arrow_param_binds(ps: List[ParamN], al: Map[Str, Str]) -> List[Bind] {
 // stepped aside here instead of being given a host node it is not.
 fn cir_hostacq(root: Str, meth: Str, args: List[Expr], sc: List[Bind],
                hostSc: List[Str], cx: CCtx) -> IrRes {
-  if (root == "Map" && meth == "empty") { return mk_irres(false, "") }
+  // `Map.empty()` is the Map VALUE constructor rather than an acquisition, and
+  // the reference lowers it to `maplit` (`_lower_postfix`). Only the EMPTY
+  // literal reaches that node: an argument list is a reference refusal, so it
+  // is declined here rather than silently dropped.
+  if (root == "Map" && meth == "empty") {
+    if (args.length() != 0) { return mk_irres(false, "") }
+    return mk_irres(true, "{\"kind\": \"maplit\", \"entries\": []}")
+  }
   let a = cir_args(args, 0, sc, hostSc, cx, "")
   if (!a.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"host\", \"fn\": "
@@ -22821,11 +22915,19 @@ fn cir_field(f: FieldN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   // Gated on the receiver's type exactly as the reference gates it, so a record
   // whose field is literally named `length` still reads its slot — and a
   // receiver whose type the scope cannot answer infers to "" and stays unmarked.
-  let sized = f.name == "length"
-    && tk_sized_head(parse_head(infer(f.target, cenv_ir(cx, sc))))
+  let tty = cenv_ir(cx, sc)
+  let sized = f.name == "length" && tk_sized_head(parse_head(infer(f.target, tty)))
+  // A field whose DECLARED type is `Opt[…]` reads back an optional, which every
+  // tier spells as its own absence value, so the node carries the mark
+  // (`_field_is_opt`). Gated exactly as the reference gates it: `sized_length`
+  // is the `if` and this is the `elif`, and a receiver whose type the scope
+  // cannot answer carries neither.
+  let opt = !sized
+    && parse_head(infer_field(infer(f.target, tty), f.name, tty)) == "Opt"
   return mk_irres(true, "{\"kind\": \"field\", \"target\": ".concat(t.js)
     .concat(", \"name\": ").concat(jstr(f.name))
-    .concat(sized ? ", \"sized_length\": true" : "").concat("}"))
+    .concat(sized ? ", \"sized_length\": true" : "")
+    .concat(opt ? ", \"opt\": true" : "").concat("}"))
 }
 
 fn cir_bin(b: BinN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
@@ -24281,8 +24383,11 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (atw(ts, j, "in")) {
       let subj = cir_sub_src(ts, j + 1, sc, hostSc, cx)
       if (!subj.ok) { return mk_irres(false, "") }
-      headJs = subj.sub
-      subjJs = subj.sub
+      // one read of the field into a local: two reads of `subj.sub` would
+      // move the `Str` out twice in the rust mirror (E0382).
+      let sub = subj.sub
+      headJs = sub
+      subjJs = sub
       j = subj.at
     } else {
       let key = ev_req_key(cx.strreqs, 0, evn, "")
@@ -25045,8 +25150,11 @@ fn arrow_fn_ty(a: ArrowN, env: List[Bind]) -> Str {
     // shadows an outer name of the same spelling (`bind_local`), so the entry
     // goes in empty rather than being left out.
     inner = tenv_put(inner, p.name, p.ty)
-    pts = pts.push(p.ty == "" ? "Any" : p.ty)
     if (p.ty == "") { unknown = unknown.push(p.name) }
+    // the ternary MOVES `p.ty` (a `Str` field), so it is written after every
+    // other read of it: a later read would be a borrow after move in the rust
+    // mirror (E0382).
+    pts = pts.push(p.ty == "" ? "Any" : p.ty)
     i += 1
   }
   var ps = ""
@@ -26248,6 +26356,12 @@ fn lir_match(m: MatchN, env: List[Bind], al: Map[Str, Str]) -> Str {
   var i = 0
   while (i < m.arms.length()) {
     let a = m.arms[i]
+    // The fn-body path lowers a statement-block arm by lambda-LIFTING it into a
+    // synthetic helper `fn` (`_lift_block_arm`, reached only from the fn-body
+    // lowering) — a rewrite this producer has no sink for. The whole `match` is
+    // therefore the `bad` node it already was, rather than a plausible-looking
+    // match whose arm body reads bindings that were never emitted.
+    if (a.isBlk) { return "{\"kind\":\"bad\"}" }
     let pay = arm_payload(scrutTy, a.pat, env)
     var inner = a.bind == "" ? env : env_mut_put(env, a.bind, false)
     if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }

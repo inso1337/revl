@@ -614,31 +614,22 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `../emit_ts_refusals/validated_emission_operation.rvl` and
         # `../emit_py_validated_shapes.rvl` now reproduce byte-for-byte through
         # the fully-native chain.)
-        # component branch shapes. `selfhost/parser.rvl` reads an arm body as an
-        # expression, so it has no node for a statement-block match arm
-        # (`Some(n) => { let doubled = n * 2 doubled + 1 }`). That node is NOT
-        # what withholds this document, and it is not the only reason the
-        # document is here. Measured on this fixture: replacing the block arm
-        # with a plain one (`Some(n) => n * 2 + 1`) leaves the native output
-        # BYTE-IDENTICAL (4440 bytes, `_Values` still absent) while the
-        # reference moves 6542 -> 6514, and deleting the `block_match` method
-        # outright still diverges (4379 vs 6240). Five of the fourteen provide
-        # methods drop the whole `_Values` class on their own — `record`
-        # (record update), `optional` and `parse` (optional chain), `new_map`
-        # (`Map.empty()`), `block_match` — and `read_optional` diverges on its
-        # own without dropping it (3994 vs 4004). Deleting all six makes the
-        # document byte-exact. In one-method components a record update, an
-        # optional chain and `Map.empty()` each drop the class by itself, while
-        # the same constructs in an ordinary `fn` are fine: these are several
-        # independent component-position gaps in `selfhost/lower.rvl`. The
-        # reference lowers the block arm inline as a `do` expression
-        # (`lower.py::_lower_component_block_arm`), and `selfhost/lower.rvl`
-        # has no `do` producer (`cir_expr` has no `do` arm) — but that is one
-        # gap of several, so issue #2094's parser node, with or without a `do`
-        # producer, cannot close this entry. #2094 is CLOSED as completed and
-        # delivered none of this, so the entry outlives it: issue #2131 is the
-        # open tracker.
-        "branches.rvl",
+        # (issue #2131: the component branch shapes left this list when
+        # `selfhost/lower.rvl` grew the six producers they were waiting on.
+        # Five were component-position gaps in the pure-expression walk:
+        # `cir_expr` gained `RecUpd` (`record_update`), `OptField` (`optfield`)
+        # and `OptCall` (`optcall`), `cir_hostacq` gained `Map.empty()`'s
+        # `maplit`, and `cir_field` gained the `"opt": true` mark — each spelled
+        # identically by the reference in both dialects, so the fn path already
+        # had them and only the component path dropped them. The sixth is the
+        # statement-block match arm: `selfhost/parser.rvl` reads an arm body as
+        # an expression, so it had no node for `Some(n) => { let doubled =
+        # n * 2 doubled + 1 }`; `ArmN` now carries `blk`/`blkTail`/`isBlk`
+        # (read by `p_blk_arm`, with `body` left `null` so the arm walkers that
+        # cannot see the bindings never read one) and `cir_match` routes the
+        # block to `cir_block_arm`, which emits the reference's inline
+        # `_lower_component_block_arm` `do` node. `branches.rvl` is byte-exact
+        # (6542) through the fully-native chain.)
         # whole-program documents combining several of the above.
         # (`../../../examples/v3_step_scheduler.rvl` left this list with the
         # spawn/instance surface: it is the one py document whose components
@@ -721,14 +712,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `comp_stream.rvl` left this list too, the one native `selfhost/lower.rvl`
         # producer fix covering both tiers because selfhost/emit_ts.rvl already
         # reproduced the reference bytes from the reference IR.)
-        # the statement-block match arm: the parser has no node for the block,
-        # but that is neither the only nor the operative reason this document is
-        # withheld — several component-position gaps in `selfhost/lower.rvl`
-        # each drop the whole provide class on their own, and the block arm is
-        # one of them (see the py list above). Issue #2131 is the open tracker
-        # for the family; #2094, which this entry used to point at, is CLOSED as
-        # completed with the gap intact.
-        "../emit_py_corpus/branches.rvl",
+        # (issue #2131: `../emit_py_corpus/branches.rvl` left this list with the
+        # py entry above — one `selfhost/lower.rvl` producer fix covers both
+        # tiers, since `selfhost/emit_ts.rvl` already reproduced the reference
+        # bytes from the reference IR. The six component-position producers are
+        # named in the py list above.)
         # and the two documents written for this slice, which combine the above.
         # (issue #2086: `ref_externs.rvl` left this list — a declaration whose
         # ONLY body arms are HOST REFS (`= @ts ref sym from "path"`) used to fail
@@ -736,9 +724,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `externs` section. The reference's `_lower_externs` has no body-count
         # gate at all and the PARSER already refuses a declaration with no arm of
         # either kind, so the gate now also accepts a ref-only declaration.)
-        # `routed_timers.rvl` stays: the routed component reproduces, but its
-        # `Tally.total()` is a statement-block match arm, which is issue #2131.
-        "routed_timers.rvl",
+        # (issue #2131: `routed_timers.rvl` left this list with the entry above.
+        # Its `Tally.total()` is the statement-block match arm, so the same
+        # block-arm producer that closed the py document closed this one.)
         # (issue #2096: `extern_compensate.rvl` left this list with the
         # `async_timer.rvl` entry above. Re-measured against `main`: the
         # extern's declared `compensate` slot was ALREADY lowered (`ir_extern`'s
