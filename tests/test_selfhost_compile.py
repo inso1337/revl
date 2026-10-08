@@ -573,13 +573,18 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # issue #1646 follow-up: emitter-exact; the native IR producer drops
         # the body's stream steps, as for the stream slice's documents above.
         "../emit_py_stream_builtin_bind.rvl",
-        # item 391: the validated slice. Both are emitter-exact from the
-        # reference IR. The native IR producer drops every operation declared
-        # `validated`, as it drops a `commutative` or `idempotent` one (see
-        # emit_py_placement.rvl above), so the service comes out empty: no
-        # grammar registry, no validate seam, and the call renders raw.
-        "../emit_ts_refusals/validated_emission_operation.rvl",
-        "../emit_py_validated_shapes.rvl",
+        # (issue #2085: the validated slice left this list when
+        # `selfhost/lower.rvl` grew the validated operation producer. The
+        # producer now reads the `validated` and `retry` modifiers off the
+        # method header and, for a `validated` operation, derives the response
+        # contract from the declared return exactly as the reference does:
+        # `_validated_response_ir`'s stripped return type becomes a JSON Schema
+        # (`type_schema.json_schema_for`), and that schema becomes the decoding
+        # grammar (`decode_grammar.decode_grammar_for`) — so the service carries
+        # its grammar registry and validate seam and the call renders through it.
+        # `../emit_ts_refusals/validated_emission_operation.rvl` and
+        # `../emit_py_validated_shapes.rvl` now reproduce byte-for-byte through
+        # the fully-native chain.)
         # component branch shapes. `selfhost/parser.rvl` reads an arm body as an
         # expression, so it has no node for a statement-block match arm
         # (`Some(n) => { let doubled = n * 2 doubled + 1 }`). That node is NOT

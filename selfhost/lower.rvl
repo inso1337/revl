@@ -20246,7 +20246,8 @@ fn ir_doc_key(st: SrcText, line: Int, starts: Bool) -> Str {
 // pairs. Mirrors the reference's per-method dict (check_and_lower's `services`
 // comprehension): `capabilities` present iff a SCOPED `emission[..]`, `async`
 // iff the op is `async` (each of which also bumps `ir_version` to 3).
-fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str], st: SrcText) -> IrMethR {
+fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str],
+              st: SrcText, env: ScEnv) -> IrMethR {
   if (i >= end || atk(ts, i, "}")) { return mk_irmethr(acc, i, v3) }
   // the operation's first token line, captured before the modifier loop — the
   // anchor the reference reads off `self.peek().line` for the doc block above.
@@ -20261,8 +20262,13 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   var scoped = false
   var isAsync = false
   var isIdempotent = false
+  // `validated` and `retry` are CONTEXTUAL keywords (ordinary idents read as
+  // clause words), which is why they are matched with `ati` rather than `atw`.
+  var isValidated = false
+  var retryN = 0
   var caps: List[Str] = []
-  while (atw(ts, j, "emission") || atw(ts, j, "async") || atw(ts, j, "idempotent")) {
+  while (atw(ts, j, "emission") || atw(ts, j, "async") || atw(ts, j, "idempotent")
+         || ati(ts, j, "validated") || ati(ts, j, "retry")) {
     if (atw(ts, j, "emission")) {
       em = true
       j += 1
@@ -20278,6 +20284,15 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
     } else if (atw(ts, j, "idempotent")) {
       isIdempotent = true
       j += 1
+    } else if (ati(ts, j, "validated")) {
+      isValidated = true
+      j += 1
+    } else if (ati(ts, j, "retry")) {
+      // `retry N`: the budget is a positive int literal the reference reads in
+      // `_retry_budget`. Legal only alongside `validated`, which it checks;
+      // a non-int here is what the reference raises on.
+      retryN = match tkc(ts, j + 1).text.to_int() { Some(n) => n, None => 0 }
+      j += 2
     } else {
       isAsync = true
       j += 1
@@ -20297,12 +20312,14 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   var term = ""
   // issue #1937: the qualifier stripped off the return (`Untrusted`/`Secret`)
   var retQual = ""
+  // the declared return, for the validated response derivation below
+  var rawRet = ""
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
     let rq = taint_top_qualifier(tr.ty)
     if (rq == "Untrusted" || rq == "Secret") { retQual = rq }
-    let rawRet = taint_strip(alias_subst(tr.ty, al))
+    rawRet = taint_strip(alias_subst(tr.ty, al))
     if (rawRet == "Criterion") {
       term = "criterion"
       retJson = jstr("Opt[Bool]")
@@ -20330,16 +20347,29 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   }
   if (isAsync) { mj = mj.concat(", \"async\": true") }
   if (isIdempotent) { mj = mj.concat(", \"idempotent\": true") }
+  // `_method_validated_ir` + `_validated_retry_ir`: the delivery class and the
+  // response contract derived from the declared return. A `retry` budget without
+  // `validated` is what the reference raises on, so it is only emitted alongside
+  // the keys (and only when positive — `_validated_retry_ir` returns `{}` at 0).
+  if (isValidated) {
+    mj = mj.concat(sc_validated_json(rawRet, env))
+    if (retryN > 0) { mj = mj.concat(", \"retry\": ").concat(retryN.to_str()) }
+  }
   mj = mj.concat("}")
   let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al, st)
+  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al, st, env)
 }
 
 fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str], st: SrcText) -> IrSvcR {
   let nm = tkc(ts, i + 1).text
   let end = close_brace(ts, i + 2)
   let hi = end == 0 - 1 ? i + 3 : end - 1
-  let ms = ir_methods(ts, i + 3, hi, "", false, al, st)
+  // The record/variant table a validated response derives its schema from. Only
+  // built for a service that declares one — every other service would pay a
+  // second full token walk for nothing.
+  var env: ScEnv = Map.empty()
+  if (svc_needs_schema(ts, i + 3, hi)) { env = schema_env(ts, 0, Map.empty(), al) }
+  let ms = ir_methods(ts, i + 3, hi, "", false, al, st, env)
   return mk_irsvcr(jstr(nm).concat(": {\"methods\": {").concat(ms.js).concat("}}"),
                    ms.v3)
 }
@@ -20361,6 +20391,694 @@ fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str], st: SrcText) -> IrSvcR
 // Names accumulate a lexical `sc` scope: activation-body `let-effect` binds, and
 // provide-method params/`let` binds. `config` is a header declaration, so it is
 // skipped structurally rather than emitted as a step.
+
+// ==================================================== validated responses
+//
+// Issue #2085. A `validated` operation carries four extra keys in the reference
+// IR: `validated`, `response_schema`, `response_grammar` and, when a retry
+// budget is declared, `retry`. The producer emitted none of them, so the
+// crossing lost `_revl_validate` and the emitted service came out empty.
+//
+// Two reference algorithms are ported byte-for-byte:
+//   * `type_schema.py::json_schema_for` with `validated=True` (so every variant
+//     renders TAGGED), plus its `admits_json_null` / `fully_expressible` guards;
+//   * `decode_grammar.py::_Deriver` / `gbnf_from_schema` / `grammar_digest`,
+//     memoised on the schema TEXT — canonical here, because `json_schema_for` is
+//     a pure function of the type name, so a shape reached twice mints one rule
+//     exactly as the reference does.
+//
+// The type table is read off the TOKEN stream rather than the emitter-side
+// `types` JSON: `types_walk` renders that as text, and the derivation needs the
+// field map itself.
+
+type ScField = { name: Str, ty: Str }
+type ScCase = { name: Str, payload: Str }
+type ScTy = { kind: Str, fields: List[ScField], cases: List[ScCase] }
+type ScTyR = { ty: ScTy, i: Int }
+type ScEnv = Map[Str, ScTy]
+type ScMem = { name: Str, js: Str }
+
+fn sc_none() -> ScTy { return { kind: "", fields: [], cases: [] } }
+fn sc_rec(fs: List[ScField]) -> ScTy { return { kind: "record", fields: fs, cases: [] } }
+fn sc_var(cs: List[ScCase]) -> ScTy { return { kind: "variant", fields: [], cases: cs } }
+
+fn sc_at(env: ScEnv, nm: Str) -> ScTy {
+  return match env.lookup(nm) { Some(t) => t, None => sc_none() }
+}
+
+// `{ name: Type, ... }` up to the closing brace, read exactly as
+// `ir_type_fields` reads it (the field names share the reference's
+// `_record_key_name`, so `config` counts as a field).
+fn sc_fields(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[ScField] {
+  var out: List[ScField] = []
+  var k = lo
+  while (k < hi && !atk(ts, k, "}")) {
+    if (is_record_key(tkc(ts, k)) && atk(ts, k + 1, ":")) {
+      let tr = type_at(ts, k + 2)
+      out = out.push({ name: tkc(ts, k).text, ty: alias_subst(tr.ty, al) })
+      k = tr.i
+      if (atk(ts, k, ",")) { k += 1 }
+    } else { k += 1 }
+  }
+  return out
+}
+
+// `Final(Str) | ToolCalls(List[Call])` -> the two cases, in declaration order.
+fn sc_cases(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[ScCase] {
+  var out: List[ScCase] = []
+  var k = lo
+  while (k < hi) {
+    if (atk(ts, k, "ident")) {
+      var payload = ""
+      var nk = k + 1
+      if (atk(ts, k + 1, "(")) {
+        let tr = type_at(ts, k + 2)
+        payload = alias_subst(tr.ty, al)
+        nk = tr.i
+        if (atk(ts, nk, ")")) { nk += 1 }
+      }
+      out = out.push({ name: tkc(ts, k).text, payload: payload })
+      k = nk
+    } else { k += 1 }
+  }
+  return out
+}
+
+// `ir_type_decl`'s shape decisions, kept in step by hand: a transparent alias
+// contributes nothing, an empty field table is the empty variant, a `|`/`(`
+// right-hand side is a variant, and a bare right-hand side is the one-case
+// nominal variant.
+fn sc_type_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> ScTyR {
+  let lineHi = type_decl_end(ts, i + 1)
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  if (!atk(ts, j, "=")) { return { ty: sc_none(), i: lineHi } }
+  j += 1
+  if (al.has(nm)) { return { ty: sc_none(), i: lineHi } }
+  if (atk(ts, j, "{")) {
+    let bend = close_brace(ts, j)
+    if (bend == 0 - 1) { return { ty: sc_none(), i: lineHi } }
+    let fs = sc_fields(ts, j + 1, bend - 1, al)
+    if (fs.length() == 0) { return { ty: sc_var([]), i: bend } }
+    return { ty: sc_rec(fs), i: bend }
+  }
+  if (is_variant_rhs(ts, j, lineHi)) {
+    return { ty: sc_var(sc_cases(ts, j, lineHi, al)), i: lineHi }
+  }
+  let cs = sc_cases(ts, j, lineHi, al)
+  if (cs.length() == 0) { return { ty: sc_none(), i: lineHi } }
+  return { ty: sc_var(cs), i: lineHi }
+}
+
+// A typed `event` is a record with a contract clause (`ir_event_decl`), so its
+// fields are in scope for a validated response exactly as a `type`'s are.
+fn sc_event_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> ScTyR {
+  let hi = event_decl_end(ts, i)
+  var j = i + 2
+  if (atk(ts, j, "(")) { j = close_paren(ts, j) }
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return { ty: sc_none(), i: hi } }
+  let bend = close_brace(ts, j)
+  if (bend == 0 - 1) { return { ty: sc_none(), i: hi } }
+  let fs = sc_fields(ts, j + 1, bend - 1, al)
+  if (fs.length() == 0) { return { ty: sc_none(), i: hi } }
+  return { ty: sc_rec(fs), i: bend }
+}
+
+// Every record/variant declaration in the module, keyed by name. `types_walk`'s
+// walk, over a map instead of a JSON string.
+fn schema_env(ts: List[Token], i: Int, env: ScEnv, al: Map[Str, Str]) -> ScEnv {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return env }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return schema_env(ts, i + 1, env, al) }
+  if (at_event(ts, i)) {
+    let d = sc_event_decl(ts, i, al)
+    let e2 = d.ty.kind == "" ? env : env.set(tkc(ts, i + 1).text, d.ty)
+    return schema_env(ts, d.i, e2, al)
+  }
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return schema_env(ts, qe, env, al) }
+    return schema_env(ts, skip_line(ts, i), env, al)
+  }
+  if (t.kind != "kw") { return schema_env(ts, skip_line(ts, i), env, al) }
+  if (at_pub_prefix(ts, i)) { return schema_env(ts, i + 1, env, al) }
+  if (t.text == "type") {
+    let d = sc_type_decl(ts, i, al)
+    let e3 = d.ty.kind == "" ? env : env.set(tkc(ts, i + 1).text, d.ty)
+    return schema_env(ts, d.i, e3, al)
+  }
+  if (t.text == "test") {
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return schema_env(ts, e, env, al) }
+    return schema_env(ts, skip_line(ts, i), env, al)
+  }
+  if (t.text == "extern") { return schema_env(ts, p_extern(ts, i, empty_prog()).i, env, al) }
+  if (t.text == "fn") { return schema_env(ts, p_fn(ts, i, empty_prog()).i, env, al) }
+  if (t.text == "service") { return schema_env(ts, p_service(ts, i, empty_prog()).i, env, al) }
+  if (t.text == "component") { return schema_env(ts, p_component(ts, i, empty_prog()).i, env, al) }
+  return schema_env(ts, skip_line(ts, i), env, al)
+}
+
+// The table is only worth building for a service that declares a validated
+// operation; every other service would pay a second full token walk for nothing.
+fn svc_needs_schema(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var k = lo
+  while (k < hi) {
+    if (at_word(ts, k, "validated")) { return true }
+    k += 1
+  }
+  return false
+}
+
+// ------------------------------------------------------ JSON schema shape
+
+fn sc_scalar(ty: Str) -> Bool {
+  return ty == "Str" || ty == "Int" || ty == "Float" || ty == "Bool"
+    || ty == "Bytes" || ty == "Unit"
+}
+
+fn sc_admits_null(ty: Str) -> Bool {
+  if (ty == "") { return false }
+  if (ty == "Unit") { return true }
+  let p = ty_parse(ty)
+  return p.head == "Opt" && p.args.length() > 0
+}
+
+fn sc_expressible(ty: Str, env: ScEnv, seen: List[Str]) -> Bool {
+  if (ty == "") { return false }
+  if (sc_scalar(ty)) { return true }
+  let p = ty_parse(ty)
+  if (p.head == "List" && p.args.length() == 1) { return sc_expressible(p.args[0], env, seen) }
+  if (p.head == "Opt" && p.args.length() == 1) {
+    if (sc_admits_null(p.args[0])) { return false }
+    return sc_expressible(p.args[0], env, seen)
+  }
+  if (p.head == "Map" && p.args.length() == 2) {
+    return p.args[0] == "Str" && sc_expressible(p.args[1], env, seen)
+  }
+  if (p.head == "Result" && p.args.length() == 2) { return false }
+  if (contains(seen, ty)) { return false }
+  return sc_expressible_spec(sc_at(env, ty), env, seen.concat([ty]))
+}
+
+fn sc_expressible_spec(sp: ScTy, env: ScEnv, seen: List[Str]) -> Bool {
+  if (sp.kind == "record") {
+    var i = 0
+    while (i < sp.fields.length()) {
+      if (!sc_expressible(sp.fields[i].ty, env, seen)) { return false }
+      i += 1
+    }
+    return true
+  }
+  if (sp.kind == "variant") {
+    var i = 0
+    while (i < sp.cases.length()) {
+      if (sp.cases[i].payload != "" && !sc_expressible(sp.cases[i].payload, env, seen)) {
+        return false
+      }
+      i += 1
+    }
+    return true
+  }
+  return false
+}
+
+fn sc_stub(ty: Str) -> Str { return "{\"x-revlType\": ".concat(jstr(ty)).concat("}") }
+
+fn sc_json(ty: Str, env: ScEnv, seen: List[Str]) -> Str {
+  if (ty == "") { return "{}" }
+  if (ty == "Str") { return "{\"type\": \"string\"}" }
+  if (ty == "Int") { return "{\"type\": \"integer\"}" }
+  if (ty == "Float") { return "{\"type\": \"number\"}" }
+  if (ty == "Bool") { return "{\"type\": \"boolean\"}" }
+  if (ty == "Bytes") { return "{\"type\": \"string\", \"contentEncoding\": \"base64\"}" }
+  if (ty == "Unit") { return "{\"type\": \"null\"}" }
+  let p = ty_parse(ty)
+  if (p.head == "List" && p.args.length() == 1) {
+    return "{\"type\": \"array\", \"items\": ".concat(sc_json(p.args[0], env, seen)).concat("}")
+  }
+  if (p.head == "Opt" && p.args.length() == 1) {
+    if (sc_admits_null(p.args[0])) { return sc_stub(ty) }
+    let inner = sc_json(p.args[0], env, seen)
+    if (inner == "{}") { return "{\"nullable\": true}" }
+    return inner.slice(0, inner.length() - 1).concat(", \"nullable\": true}")
+  }
+  if (p.head == "Map" && p.args.length() == 2) {
+    return "{\"type\": \"object\", \"additionalProperties\": "
+      .concat(sc_json(p.args[1], env, seen)).concat("}")
+  }
+  if (p.head == "Result" && p.args.length() == 2) {
+    return "{\"oneOf\": [".concat(sc_json(p.args[0], env, seen)).concat(", ")
+      .concat(sc_json(p.args[1], env, seen)).concat("]}")
+  }
+  if (contains(seen, ty)) { return sc_stub(ty) }
+  return sc_json_spec(sc_at(env, ty), env, seen.concat([ty]))
+}
+
+// The `properties` order is the declaration order and `required` is SORTED —
+// `json_schema_for` builds a Python dict and `sorted(fields)` a list.
+fn sc_json_spec(sp: ScTy, env: ScEnv, seen: List[Str]) -> Str {
+  if (sp.kind == "record") {
+    var props = ""
+    var names: List[Str] = []
+    var i = 0
+    while (i < sp.fields.length()) {
+      let seg = jstr(sp.fields[i].name).concat(": ").concat(sc_json(sp.fields[i].ty, env, seen))
+      props = i == 0 ? seg : props.concat(", ").concat(seg)
+      names = names.push(sp.fields[i].name)
+      i += 1
+    }
+    return "{\"type\": \"object\", \"properties\": {".concat(props)
+      .concat("}, \"required\": [").concat(str_list_json(sort_strs(names))).concat("]}")
+  }
+  if (sp.kind == "variant") {
+    var arms = ""
+    var i = 0
+    while (i < sp.cases.length()) {
+      let arm = sc_arm(sp.cases[i], env, seen)
+      arms = i == 0 ? arm : arms.concat(", ").concat(arm)
+      i += 1
+    }
+    return "{\"oneOf\": [".concat(arms).concat("]}")
+  }
+  return "{}"
+}
+
+fn sc_arm(c: ScCase, env: ScEnv, seen: List[Str]) -> Str {
+  if (c.payload != "") {
+    return "{\"type\": \"object\", \"properties\": {\"tag\": {\"const\": "
+      .concat(jstr(c.name)).concat("}, \"value\": ").concat(sc_json(c.payload, env, seen))
+      .concat("}, \"required\": [\"tag\", \"value\"], \"additionalProperties\": false}")
+  }
+  return "{\"type\": \"object\", \"properties\": {\"tag\": {\"const\": "
+    .concat(jstr(c.name)).concat("}}, \"required\": [\"tag\"], \"additionalProperties\": false}")
+}
+
+// --------------------------------------------------------- the GBNF rules
+
+type GbRule = { name: Str, defn: Str }
+type GbState = { rules: List[GbRule], memo: Map[Str, Str], lex: List[Str], n: Int }
+type GbRes = { name: Str, st: GbState }
+type GbBody = { txt: Str, st: GbState }
+
+fn gb_lex_order() -> List[Str] {
+  return ["ws", "hex", "schar", "string", "integer", "number", "boolean",
+          "nullv", "b64c", "b64q", "b64tail", "b64string"]
+}
+
+fn gb_lex_deps(nm: Str) -> List[Str] {
+  if (nm == "string") { return ["schar"] }
+  if (nm == "schar") { return ["hex"] }
+  if (nm == "number") { return ["integer"] }
+  if (nm == "b64string") { return ["b64q", "b64tail"] }
+  if (nm == "b64q") { return ["b64c"] }
+  if (nm == "b64tail") { return ["b64c"] }
+  return []
+}
+
+fn gb_lex_rule(nm: Str) -> Str {
+  if (nm == "ws") { return "ws ::= [ \\t\\n\\r]*" }
+  if (nm == "hex") { return "hex ::= [0-9a-fA-F]" }
+  if (nm == "schar") { return "schar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" [\"\\\\/bfnrt] | \"\\\\u\" hex hex hex hex" }
+  if (nm == "string") { return "string ::= \"\\\"\" schar* \"\\\"\"" }
+  if (nm == "integer") { return "integer ::= \"-\"? (\"0\" | [1-9] [0-9]*)" }
+  if (nm == "number") { return "number ::= integer (\".\" [0-9]+)? ([eE] [-+]? [0-9]+)?" }
+  if (nm == "boolean") { return "boolean ::= \"true\" | \"false\"" }
+  if (nm == "nullv") { return "nullv ::= \"null\"" }
+  if (nm == "b64c") { return "b64c ::= [A-Za-z0-9+/]" }
+  if (nm == "b64q") { return "b64q ::= b64c b64c b64c b64c" }
+  if (nm == "b64tail") { return "b64tail ::= b64c b64c \"==\" | b64c b64c b64c \"=\"" }
+  if (nm == "b64string") { return "b64string ::= \"\\\"\" b64q* b64tail? \"\\\"\"" }
+  return ""
+}
+
+fn gb_lex(nm: Str, st: GbState) -> GbRes {
+  if (contains(st.lex, nm)) { return { name: nm, st: st } }
+  var cur: GbState = { rules: st.rules, memo: st.memo, lex: st.lex.push(nm), n: st.n }
+  let deps = gb_lex_deps(nm)
+  var i = 0
+  while (i < deps.length()) {
+    cur = gb_lex(deps[i], cur).st
+    i += 1
+  }
+  return { name: nm, st: cur }
+}
+
+// `_lit`: the JSON string of `text`, then every backslash doubled and every
+// quote escaped — so `Final` becomes `"\"Final\""` and a raw backslash survives.
+fn gbnf_lit(text: Str) -> Str {
+  let body = jstr(text)
+  var inner = ""
+  var i = 0
+  while (i < body.length()) {
+    let c = body.charAt(i)
+    if (c == "\\") { inner = inner.concat("\\\\") }
+    else { if (c == "\"") { inner = inner.concat("\\\"") } else { inner = inner.concat(c) } }
+    i += 1
+  }
+  return "\"".concat(inner).concat("\"")
+}
+
+fn gb_define(key: Str, body: Str, st: GbState) -> GbRes {
+  let nm = "t".concat((st.n + 1).to_str())
+  return { name: nm, st: { rules: st.rules.push({ name: nm, defn: body }),
+                           memo: st.memo.set(key, nm), lex: st.lex, n: st.n + 1 } }
+}
+
+fn gb_ref(s: Str, st: GbState) -> GbRes {
+  if (st.memo.has(s)) {
+    return { name: match st.memo.lookup(s) { Some(v) => v, None => "" }, st: st }
+  }
+  let r = gb_render(s, st)
+  return { name: r.name, st: { rules: r.st.rules, memo: r.st.memo.set(s, r.name),
+                               lex: r.st.lex, n: r.st.n } }
+}
+
+// A nullable schema is `{**base, "nullable": true}` in the reference; here the
+// base is the same TEXT minus that one member, so it memoises to the same rule
+// the un-nullable shape would.
+fn gb_nullable_base(s: Str) -> Str {
+  let ms = jv_members(s)
+  var out = "{"
+  var first = true
+  var i = 0
+  while (i < ms.length()) {
+    if (ms[i].name != "nullable") {
+      out = first ? out : out.concat(", ")
+      out = out.concat(jstr(ms[i].name)).concat(": ").concat(ms[i].js)
+      first = false
+    }
+    i += 1
+  }
+  return out.concat("}")
+}
+
+fn gb_render(s: Str, st: GbState) -> GbRes {
+  if (jv_mem(s, "const") != "") {
+    return gb_define(s, gbnf_lit(jv_val(jv_mem(s, "const"))), st)
+  }
+  if (jv_mem(s, "nullable") != "") {
+    let base = gb_nullable_base(s)
+    if (base == "{}") { return gb_lex("nullv", st) }
+    let inner = gb_ref(base, st)
+    let nv = gb_lex("nullv", inner.st)
+    return gb_define(s, inner.name.concat(" | ").concat(nv.name), nv.st)
+  }
+  let arms = jv_items(jv_mem(s, "oneOf"))
+  if (arms.length() > 0) {
+    var cur = st
+    var body = ""
+    var i = 0
+    while (i < arms.length()) {
+      let r = gb_ref(arms[i], cur)
+      body = i == 0 ? r.name : body.concat(" | ").concat(r.name)
+      cur = r.st
+      i += 1
+    }
+    return gb_define(s, body, cur)
+  }
+  let nt = jv_val(jv_mem(s, "type"))
+  if (nt == "string") {
+    if (jv_val(jv_mem(s, "contentEncoding")) == "base64") { return gb_lex("b64string", st) }
+    return gb_lex("string", st)
+  }
+  if (nt == "integer") { return gb_lex("integer", st) }
+  if (nt == "number") { return gb_lex("number", st) }
+  if (nt == "boolean") { return gb_lex("boolean", st) }
+  if (nt == "null") { return gb_lex("nullv", st) }
+  if (nt == "array") {
+    let it = gb_ref(jv_mem(s, "items"), st)
+    let w = gb_lex("ws", it.st)
+    return gb_define(s, "\"[\" ".concat(w.name).concat(" \"]\" | \"[\" ").concat(w.name)
+      .concat(" ").concat(it.name).concat(" (").concat(w.name).concat(" \",\" ")
+      .concat(w.name).concat(" ").concat(it.name).concat(")* ").concat(w.name)
+      .concat(" \"]\""), w.st)
+  }
+  if (nt == "object") {
+    let ap = jv_mem(s, "additionalProperties")
+    if (ap != "" && jv_mem(s, "properties") == "") {
+      let v = gb_ref(ap, st)
+      let w = gb_lex("ws", v.st)
+      let sc = gb_lex("string", w.st)
+      let entry = sc.name.concat(" ").concat(w.name).concat(" \":\" ").concat(w.name)
+        .concat(" ").concat(v.name)
+      return gb_define(s, "\"{\" ".concat(w.name).concat(" \"}\" | \"{\" ").concat(w.name)
+        .concat(" ").concat(entry).concat(" (").concat(w.name).concat(" \",\" ")
+        .concat(w.name).concat(" ").concat(entry).concat(")* ").concat(w.name)
+        .concat(" \"}\""), sc.st)
+    }
+    if (jv_mem(s, "properties") != "") {
+      let rb = gb_record_body(s, st)
+      return gb_define(s, rb.txt, rb.st)
+    }
+  }
+  // The reference raises here; nothing `fully_expressible` admits reaches it.
+  return gb_lex("string", st)
+}
+
+fn gb_record_body(s: Str, st: GbState) -> GbBody {
+  let props = jv_members(jv_mem(s, "properties"))
+  let w = gb_lex("ws", st)
+  if (props.length() == 0) { return { txt: "\"{\" ".concat(w.name).concat(" \"}\""), st: w.st } }
+  var text = "\"{\" ".concat(w.name)
+  var cur = w.st
+  var i = 0
+  while (i < props.length()) {
+    if (i > 0) { text = text.concat(" ").concat(w.name).concat(" \",\" ").concat(w.name) }
+    let r = gb_ref(props[i].js, cur)
+    text = text.concat(" ").concat(gbnf_lit(props[i].name)).concat(" ").concat(w.name)
+      .concat(" \":\" ").concat(w.name).concat(" ").concat(r.name)
+    cur = r.st
+    i += 1
+  }
+  return { txt: text.concat(" ").concat(w.name).concat(" \"}\""), st: cur }
+}
+
+fn gb_text(root: Str, st: GbState) -> Str {
+  var lines: List[Str] = ["root ::= ".concat(root)]
+  var i = 0
+  while (i < st.rules.length()) {
+    lines = lines.push(st.rules[i].name.concat(" ::= ").concat(st.rules[i].defn))
+    i += 1
+  }
+  let order = gb_lex_order()
+  var k = 0
+  while (k < order.length()) {
+    if (contains(st.lex, order[k])) { lines = lines.push(gb_lex_rule(order[k])) }
+    k += 1
+  }
+  return lines.join(sc_nl()).concat(sc_nl())
+}
+
+fn gb_from_schema(schema: Str) -> Str {
+  let st0: GbState = { rules: [], memo: Map.empty(), lex: [], n: 0 }
+  let r = gb_ref(schema, st0)
+  return gb_text(r.name, r.st)
+}
+
+fn gb_grammar_json(text: Str) -> Str {
+  return "{\"format\": \"gbnf\", \"root\": \"root\", \"text\": ".concat(jstr(text))
+    .concat(", \"digest\": ").concat(jstr(sc_sha256(text))).concat("}")
+}
+
+// ------------------------------------------------- a raw JSON reader
+//
+// The schema is built as TEXT (that is the IR's own spelling), so the grammar
+// derivation reads it back with these. Every reader is total: a malformed node
+// yields "" rather than an error, which the reference raises on and which no
+// `fully_expressible` type can produce.
+
+fn jv_str_end(s: Str, i: Int) -> Int {
+  var k = i + 1
+  while (k < s.length()) {
+    let c = s.charAt(k)
+    if (c == "\\") { k += 2 }
+    else { if (c == "\"") { return k + 1 } else { k += 1 } }
+  }
+  return s.length()
+}
+
+fn jv_close(s: Str, i: Int, open: Str, close: Str) -> Int {
+  var depth = 0
+  var k = i
+  while (k < s.length()) {
+    let c = s.charAt(k)
+    if (c == "\"") { k = jv_str_end(s, k) }
+    else {
+      if (c == open) { depth += 1 }
+      else { if (c == close) { depth -= 1  if (depth == 0) { return k + 1 } } }
+      k += 1
+    }
+  }
+  return s.length()
+}
+
+fn jv_span(s: Str, i: Int) -> Int {
+  var k = i
+  while (k < s.length() && s.charAt(k) == " ") { k += 1 }
+  if (k >= s.length()) { return s.length() }
+  let c = s.charAt(k)
+  if (c == "{") { return jv_close(s, k, "{", "}") }
+  if (c == "[") { return jv_close(s, k, "[", "]") }
+  if (c == "\"") { return jv_str_end(s, k) }
+  var j = k
+  while (j < s.length()) {
+    let d = s.charAt(j)
+    if (d == "," || d == "}" || d == "]" || d == " ") { return j }
+    j += 1
+  }
+  return s.length()
+}
+
+fn jv_val(raw: Str) -> Str {
+  if (raw.length() < 2 || raw.charAt(0) != "\"") { return raw }
+  var out = ""
+  var i = 1
+  while (i < raw.length() - 1) {
+    let c = raw.charAt(i)
+    if (c == "\\") {
+      if (raw.charAt(i + 1) == "\"") { out = out.concat("\"") } else { out = out.concat("\\") }
+      i += 2
+    } else { out = out.concat(c)  i += 1 }
+  }
+  return out
+}
+
+// The raw text of `key`'s value in the object `s`, or "".
+fn jv_mem(s: Str, key: Str) -> Str {
+  let end = s.length()
+  var k = 1
+  while (k < end) {
+    if (s.charAt(k) == "\"") {
+      let e = jv_str_end(s, k)
+      let name = s.slice(k + 1, e - 1)
+      var j = e
+      while (j < end && s.charAt(j) == " ") { j += 1 }
+      if (j < end && s.charAt(j) == ":") {
+        var v = j + 1
+        while (v < end && s.charAt(v) == " ") { v += 1 }
+        let ve = jv_span(s, v)
+        if (name == key) { return s.slice(v, ve) }
+        k = ve
+      } else { k = e }
+    } else { k += 1 }
+  }
+  return ""
+}
+
+fn jv_items(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  let end = s.length()
+  var k = 1
+  while (k < end) {
+    while (k < end && (s.charAt(k) == " " || s.charAt(k) == ",")) { k += 1 }
+    if (k >= end || s.charAt(k) == "]") { return out }
+    let e = jv_span(s, k)
+    out = out.push(s.slice(k, e))
+    k = e
+  }
+  return out
+}
+
+fn jv_members(s: Str) -> List[ScMem] {
+  var out: List[ScMem] = []
+  let end = s.length()
+  var k = 1
+  while (k < end) {
+    while (k < end && (s.charAt(k) == " " || s.charAt(k) == ",")) { k += 1 }
+    if (k >= end || s.charAt(k) == "}") { return out }
+    if (s.charAt(k) == "\"") {
+      let e = jv_str_end(s, k)
+      let name = s.slice(k + 1, e - 1)
+      var j = e
+      while (j < end && s.charAt(j) == " ") { j += 1 }
+      if (j < end && s.charAt(j) == ":") {
+        var v = j + 1
+        while (v < end && s.charAt(v) == " ") { v += 1 }
+        let ve = jv_span(s, v)
+        out = out.push({ name: name, js: s.slice(v, ve) })
+        k = ve
+      } else { k = e }
+    } else { k += 1 }
+  }
+  return out
+}
+
+// A real newline. revl plain strings and template literals carry no escapes at
+// all (`"\n"` and `` `\n` `` are both a literal backslash-n), so the grammar's
+// line SEPARATOR is sourced here — the one place a genuine U+000A is needed.
+fn sc_nl() -> Str {
+  return `
+`
+}
+
+// Lower-case hex SHA-256 of the UTF-8 bytes of `text` (`grammar_digest`).
+// Declared here rather than `use`d from `stdlib/crypto.rvl` because that module
+// is outside `tools/build_gate_crate.py`'s `SELFHOST_CLOSURE` and pulling it in
+// would grow the generated crate. The `@rs` body mirrors the crate's own
+// `build.rs::sha256` so no Rust dependency is added.
+extern pure fn sc_sha256(data: Str) -> Str
+  = @py {
+    import hashlib
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+  }
+  = @rs {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let bytes = data.as_bytes();
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let mut msg = bytes.to_vec();
+    let bits = (bytes.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 { msg.push(0); }
+    msg.extend_from_slice(&bits.to_be_bytes());
+    for block in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let mut v = h;
+        for i in 0..64 {
+            let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+            let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+            let t1 = v[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+            let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+            let t2 = s0.wrapping_add(maj);
+            v = [t1.wrapping_add(t2), v[0], v[1], v[2], v[3].wrapping_add(t1), v[4], v[5], v[6]];
+        }
+        for i in 0..8 { h[i] = h[i].wrapping_add(v[i]); }
+    }
+    let mut out = String::with_capacity(64);
+    for b in h.iter() { out.push_str(&format!("{:08x}", b)); }
+    out
+  }
+
+// The four keys a validated operation adds, in the reference's order, or "".
+fn sc_validated_json(ty: Str, env: ScEnv) -> Str {
+  if (ty == "" || ty == "Unit") { return "" }
+  if (!sc_expressible(ty, env, [])) { return "" }
+  let schema = sc_json(ty, env, [])
+  if (str_has(schema, "x-revlType")) { return "" }
+  return ", \"validated\": true, \"response_schema\": ".concat(schema)
+    .concat(", \"response_grammar\": ").concat(gb_grammar_json(gb_from_schema(schema)))
+}
 
 fn str_has(s: Str, sub: Str) -> Bool { return s.indexOf(sub) != 0 - 1 }
 

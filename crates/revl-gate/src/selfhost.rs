@@ -832,6 +832,59 @@ pub struct SrcText {
     nl: String,
 }
 
+pub type ScField = Bind;
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScCase {
+    name: String,
+    payload: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScTy {
+    kind: String,
+    fields: Vec<ScField>,
+    cases: Vec<ScCase>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScTyR {
+    ty: ScTy,
+    i: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ScMem {
+    name: String,
+    js: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GbRule {
+    name: String,
+    defn: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GbState {
+    rules: Vec<GbRule>,
+    memo: std::collections::HashMap<String, String>,
+    lex: Vec<String>,
+    n: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GbRes {
+    name: String,
+    st: GbState,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GbBody {
+    txt: String,
+    st: GbState,
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CCtx {
     reqs: Vec<String>,
@@ -1507,6 +1560,53 @@ fn camel(name: String) -> String {
                 }
             }
         }
+        out
+}
+
+fn sc_sha256(data: String) -> String {
+    const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        ];
+        let bytes = data.as_bytes();
+        let mut h: [u32; 8] = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        ];
+        let mut msg = bytes.to_vec();
+        let bits = (bytes.len() as u64).wrapping_mul(8);
+        msg.push(0x80);
+        while msg.len() % 64 != 56 { msg.push(0); }
+        msg.extend_from_slice(&bits.to_be_bytes());
+        for block in msg.chunks(64) {
+            let mut w = [0u32; 64];
+            for i in 0..16 {
+                w[i] = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
+            }
+            for i in 16..64 {
+                let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+                let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+                w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            }
+            let mut v = h;
+            for i in 0..64 {
+                let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+                let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+                let t1 = v[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+                let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+                let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+                let t2 = s0.wrapping_add(maj);
+                v = [t1.wrapping_add(t2), v[0], v[1], v[2], v[3].wrapping_add(t1), v[4], v[5], v[6]];
+            }
+            for i in 0..8 { h[i] = h[i].wrapping_add(v[i]); }
+        }
+        let mut out = String::with_capacity(64);
+        for b in h.iter() { out.push_str(&format!("{:08x}", b)); }
         out
 }
 
@@ -23781,7 +23881,7 @@ fn ir_doc_key(st: SrcText, line: i64, starts: bool) -> String {
     return if (n == 0i64) { String::from("") } else { String::from(", \"doc\": ").revl_concat(&jstr(&out)) };
 }
 
-fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::collections::HashMap<String, String>, st: SrcText) -> IrMethR {
+fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::collections::HashMap<String, String>, st: SrcText, env: std::collections::HashMap<String, ScTy>) -> IrMethR {
     if ((i >= end) || atk(&ts, i, "}")) {
         return mk_irmethr(acc.clone(), i, v3);
     }
@@ -23792,8 +23892,10 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     let mut scoped = false;
     let mut isAsync = false;
     let mut isIdempotent = false;
+    let mut isValidated = false;
+    let mut retryN = 0i64;
     let mut caps: Vec<String> = vec![];
-    while ((atw(&ts, j, "emission") || atw(&ts, j, "async")) || atw(&ts, j, "idempotent")) {
+    while ((((atw(&ts, j, "emission") || atw(&ts, j, "async")) || atw(&ts, j, "idempotent")) || ati(&ts, j, "validated")) || ati(&ts, j, "retry")) {
         if atw(&ts, j, "emission") {
             em = true;
             j = (j).checked_add(1i64).expect("revl: Int overflow");
@@ -23813,8 +23915,22 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
                 isIdempotent = true;
                 j = (j).checked_add(1i64).expect("revl: Int overflow");
             } else {
-                isAsync = true;
-                j = (j).checked_add(1i64).expect("revl: Int overflow");
+                if ati(&ts, j, "validated") {
+                    isValidated = true;
+                    j = (j).checked_add(1i64).expect("revl: Int overflow");
+                } else {
+                    if ati(&ts, j, "retry") {
+                        retryN = match { let _s = (tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text); if _s.starts_with('+') { None } else { _s.parse::<i64>().ok() } } {
+    Some(n) => n,
+    None => 0i64,
+    _ => unreachable!(),
+};
+                        j = (j).checked_add(2i64).expect("revl: Int overflow");
+                    } else {
+                        isAsync = true;
+                        j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    }
+                }
             }
         }
     }
@@ -23826,6 +23942,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     let mut retJson = String::from("null");
     let mut term = String::from("");
     let mut retQual = String::from("");
+    let mut rawRet = String::from("");
     let mut nexti = ps.i;
     if atk(&ts, ps.i, "arrow") {
         let tr = type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
@@ -23833,7 +23950,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
         if ((rq == "Untrusted") || (rq == "Secret")) {
             retQual = rq.clone();
         }
-        let rawRet = taint_strip(alias_subst(tr.ty.clone(), al.clone()));
+        rawRet = taint_strip(alias_subst(tr.ty.clone(), al.clone()));
         if (rawRet == "Criterion") {
             term = String::from("criterion");
             retJson = jstr("Opt[Bool]");
@@ -23865,17 +23982,806 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     if isIdempotent {
         mj.push_str(", \"idempotent\": true");
     }
+    if isValidated {
+        mj.push_str(&sc_validated_json(rawRet.clone(), env.clone()));
+        if (retryN > 0i64) {
+            mj = (mj.revl_concat(", \"retry\": ")).revl_concat(&(retryN).to_string());
+        }
+    }
     mj.push_str("}");
     let nacc = if (acc == "") { mj.clone() } else { (acc.revl_concat(", ")).revl_concat(&mj) };
-    return ir_methods(ts.clone(), nexti, end, nacc, ((v3 || isAsync) || isIdempotent), al.clone(), st.clone());
+    return ir_methods(ts.clone(), nexti, end, nacc, ((v3 || isAsync) || isIdempotent), al.clone(), st.clone(), env.clone());
 }
 
 fn ir_service(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>, st: SrcText) -> IrSvcR {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let end = close_brace(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
     let hi = if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (i).checked_add(3i64).expect("revl: Int overflow") } else { (end).checked_sub(1i64).expect("revl: Int overflow") };
-    let ms = ir_methods(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), hi, String::from(""), false, al.clone(), st.clone());
+    let mut env = std::collections::HashMap::new();
+    if svc_needs_schema(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), hi.clone()) {
+        env = schema_env(ts.clone(), 0i64, std::collections::HashMap::new(), al.clone());
+    }
+    let ms = ir_methods(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), hi.clone(), String::from(""), false, al.clone(), st.clone(), env.clone());
     return mk_irsvcr(((jstr(&nm).revl_concat(": {\"methods\": {")).revl_concat(&ms.js)).revl_concat("}}"), ms.v3);
+}
+
+fn sc_none() -> ScTy {
+    return ScTy { kind: String::from(""), fields: vec![], cases: vec![] };
+}
+
+fn sc_rec(fs: Vec<ScField>) -> ScTy {
+    return ScTy { kind: String::from("record"), fields: fs.clone(), cases: vec![] };
+}
+
+fn sc_var(cs: Vec<ScCase>) -> ScTy {
+    return ScTy { kind: String::from("variant"), fields: vec![], cases: cs.clone() };
+}
+
+fn sc_at(env: std::collections::HashMap<String, ScTy>, nm: String) -> ScTy {
+    return match env.get(&nm).cloned() {
+    Some(t) => t,
+    None => sc_none(),
+    _ => unreachable!(),
+};
+}
+
+fn sc_fields(ts: Vec<Token>, lo: i64, hi: i64, al: std::collections::HashMap<String, String>) -> Vec<ScField> {
+    let mut out: Vec<ScField> = vec![];
+    let mut k = lo;
+    while ((k < hi) && (!atk(&ts, k, "}"))) {
+        if (is_record_key(tkc(&ts, k)) && atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), ":")) {
+            let tr = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
+            out.push(Bind { name: tkc(&ts, k).text, ty: alias_subst(tr.ty.clone(), al.clone()) });
+            k = tr.i;
+            if atk(&ts, k, ",") {
+                k = (k).checked_add(1i64).expect("revl: Int overflow");
+            }
+        } else {
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn sc_cases(ts: Vec<Token>, lo: i64, hi: i64, al: std::collections::HashMap<String, String>) -> Vec<ScCase> {
+    let mut out: Vec<ScCase> = vec![];
+    let mut k = lo;
+    while (k < hi) {
+        if atk(&ts, k, "ident") {
+            let mut payload = String::from("");
+            let mut nk = (k).checked_add(1i64).expect("revl: Int overflow");
+            if atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), "(") {
+                let tr = type_at(ts.clone(), (k).checked_add(2i64).expect("revl: Int overflow"));
+                payload = alias_subst(tr.ty.clone(), al.clone());
+                nk = tr.i;
+                if atk(&ts, nk, ")") {
+                    nk = (nk).checked_add(1i64).expect("revl: Int overflow");
+                }
+            }
+            out.push(ScCase { name: tkc(&ts, k).text, payload: payload.clone() });
+            k = nk;
+        } else {
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn sc_type_decl(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>) -> ScTyR {
+    let lineHi = type_decl_end(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+    if atk(&ts, j.clone(), "[") {
+        j = skip_brackets(&ts, j.clone());
+    }
+    if (!atk(&ts, j, "=")) {
+        return ScTyR { ty: sc_none(), i: lineHi };
+    }
+    j = (j).checked_add(1i64).expect("revl: Int overflow");
+    if al.contains_key(&nm) {
+        return ScTyR { ty: sc_none(), i: lineHi };
+    }
+    if atk(&ts, j, "{") {
+        let bend = close_brace(&ts, j);
+        if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return ScTyR { ty: sc_none(), i: lineHi };
+        }
+        let fs = sc_fields(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), al.clone());
+        if (fs.revl_length() == 0i64) {
+            return ScTyR { ty: sc_var(vec![]), i: bend };
+        }
+        return ScTyR { ty: sc_rec(fs.clone()), i: bend };
+    }
+    if is_variant_rhs(&ts, j, lineHi) {
+        return ScTyR { ty: sc_var(sc_cases(ts.clone(), j, lineHi, al.clone())), i: lineHi };
+    }
+    let cs = sc_cases(ts.clone(), j, lineHi, al.clone());
+    if (cs.revl_length() == 0i64) {
+        return ScTyR { ty: sc_none(), i: lineHi };
+    }
+    return ScTyR { ty: sc_var(cs.clone()), i: lineHi };
+}
+
+fn sc_event_decl(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>) -> ScTyR {
+    let hi = event_decl_end(&ts, i);
+    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+    if atk(&ts, j.clone(), "(") {
+        j = close_paren(&ts, j.clone());
+    }
+    if ((j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) || (!atk(&ts, j, "{"))) {
+        return ScTyR { ty: sc_none(), i: hi };
+    }
+    let bend = close_brace(&ts, j);
+    if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return ScTyR { ty: sc_none(), i: hi };
+    }
+    let fs = sc_fields(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), al.clone());
+    if (fs.revl_length() == 0i64) {
+        return ScTyR { ty: sc_none(), i: hi };
+    }
+    return ScTyR { ty: sc_rec(fs.clone()), i: bend };
+}
+
+fn schema_env(ts: Vec<Token>, i: i64, env: std::collections::HashMap<String, ScTy>, al: std::collections::HashMap<String, String>) -> std::collections::HashMap<String, ScTy> {
+    if ((i >= ts.revl_length()) || atk(&ts, i, "eof")) {
+        return env;
+    }
+    let t = tkc(&ts, i);
+    if at_boot(&ts, i) {
+        return schema_env(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), env.clone(), al.clone());
+    }
+    if at_event(&ts, i) {
+        let d = sc_event_decl(ts.clone(), i, al.clone());
+        let e2 = if (d.ty.kind == "") { env.clone() } else { { let mut c = env.clone(); c.insert(tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, d.ty.clone()); c } };
+        return schema_env(ts.clone(), d.i, e2, al.clone());
+    }
+    if at_qual_test(&ts, i) {
+        let qe = qual_test_end(&ts, i);
+        if (qe != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return schema_env(ts.clone(), qe, env.clone(), al.clone());
+        }
+        return schema_env(ts.clone(), skip_line(&ts, i), env.clone(), al.clone());
+    }
+    if (t.kind != "kw") {
+        return schema_env(ts.clone(), skip_line(&ts, i), env.clone(), al.clone());
+    }
+    if at_pub_prefix(&ts, i) {
+        return schema_env(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), env.clone(), al.clone());
+    }
+    if (t.text == "type") {
+        let d = sc_type_decl(ts.clone(), i, al.clone());
+        let e3 = if (d.ty.kind == "") { env.clone() } else { { let mut c = env.clone(); c.insert(tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text, d.ty.clone()); c } };
+        return schema_env(ts.clone(), d.i, e3, al.clone());
+    }
+    if (t.text == "test") {
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return schema_env(ts.clone(), e, env.clone(), al.clone());
+        }
+        return schema_env(ts.clone(), skip_line(&ts, i), env.clone(), al.clone());
+    }
+    if (t.text == "extern") {
+        return schema_env(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, env.clone(), al.clone());
+    }
+    if (t.text == "fn") {
+        return schema_env(ts.clone(), p_fn(ts.clone(), i, empty_prog()).i, env.clone(), al.clone());
+    }
+    if (t.text == "service") {
+        return schema_env(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, env.clone(), al.clone());
+    }
+    if (t.text == "component") {
+        return schema_env(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, env.clone(), al.clone());
+    }
+    return schema_env(ts.clone(), skip_line(&ts, i), env.clone(), al.clone());
+}
+
+fn svc_needs_schema(ts: &[Token], lo: i64, hi: i64) -> bool {
+    let mut k = lo;
+    while (k < hi) {
+        if at_word(ts, k, "validated") {
+            return true;
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn sc_scalar(ty: &str) -> bool {
+    return ((((((ty == "Str") || (ty == "Int")) || (ty == "Float")) || (ty == "Bool")) || (ty == "Bytes")) || (ty == "Unit"));
+}
+
+fn sc_admits_null(ty: String) -> bool {
+    if (ty == "") {
+        return false;
+    }
+    if (ty == "Unit") {
+        return true;
+    }
+    let p = ty_parse(ty.clone());
+    return ((p.head == "Opt") && (p.args.revl_length() > 0i64));
+}
+
+fn sc_expressible(ty: String, env: std::collections::HashMap<String, ScTy>, seen: &[String]) -> bool {
+    if (ty == "") {
+        return false;
+    }
+    if sc_scalar(&ty) {
+        return true;
+    }
+    let p = ty_parse(ty.clone());
+    if ((p.head == "List") && (p.args.revl_length() == 1i64)) {
+        return sc_expressible((p.args)[(0i64) as usize].clone(), env.clone(), seen);
+    }
+    if ((p.head == "Opt") && (p.args.revl_length() == 1i64)) {
+        if sc_admits_null((p.args)[(0i64) as usize].clone()) {
+            return false;
+        }
+        return sc_expressible((p.args)[(0i64) as usize].clone(), env.clone(), seen);
+    }
+    if ((p.head == "Map") && (p.args.revl_length() == 2i64)) {
+        return (((p.args)[(0i64) as usize] == "Str") && sc_expressible((p.args)[(1i64) as usize].clone(), env.clone(), seen));
+    }
+    if ((p.head == "Result") && (p.args.revl_length() == 2i64)) {
+        return false;
+    }
+    if contains__m2(seen, &ty) {
+        return false;
+    }
+    return sc_expressible_spec(sc_at(env.clone(), ty.clone()), env.clone(), &(seen.revl_concat(&vec![ty.clone()])));
+}
+
+fn sc_expressible_spec(sp: ScTy, env: std::collections::HashMap<String, ScTy>, seen: &[String]) -> bool {
+    if (sp.kind == "record") {
+        let mut i = 0i64;
+        while (i < sp.fields.revl_length()) {
+            if (!sc_expressible((sp.fields)[(i) as usize].ty.clone(), env.clone(), seen)) {
+                return false;
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return true;
+    }
+    if (sp.kind == "variant") {
+        let mut i = 0i64;
+        while (i < sp.cases.revl_length()) {
+            if (((sp.cases)[(i) as usize].payload != "") && (!sc_expressible((sp.cases)[(i) as usize].payload.clone(), env.clone(), seen))) {
+                return false;
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return true;
+    }
+    return false;
+}
+
+fn sc_stub(ty: &str) -> String {
+    return (String::from("{\"x-revlType\": ").revl_concat(&jstr(ty))).revl_concat("}");
+}
+
+fn sc_json(ty: String, env: std::collections::HashMap<String, ScTy>, seen: &[String]) -> String {
+    if (ty == "") {
+        return String::from("{}");
+    }
+    if (ty == "Str") {
+        return String::from("{\"type\": \"string\"}");
+    }
+    if (ty == "Int") {
+        return String::from("{\"type\": \"integer\"}");
+    }
+    if (ty == "Float") {
+        return String::from("{\"type\": \"number\"}");
+    }
+    if (ty == "Bool") {
+        return String::from("{\"type\": \"boolean\"}");
+    }
+    if (ty == "Bytes") {
+        return String::from("{\"type\": \"string\", \"contentEncoding\": \"base64\"}");
+    }
+    if (ty == "Unit") {
+        return String::from("{\"type\": \"null\"}");
+    }
+    let p = ty_parse(ty.clone());
+    if ((p.head == "List") && (p.args.revl_length() == 1i64)) {
+        return (String::from("{\"type\": \"array\", \"items\": ").revl_concat(&sc_json((p.args)[(0i64) as usize].clone(), env.clone(), seen))).revl_concat("}");
+    }
+    if ((p.head == "Opt") && (p.args.revl_length() == 1i64)) {
+        if sc_admits_null((p.args)[(0i64) as usize].clone()) {
+            return sc_stub(&ty);
+        }
+        let inner = sc_json((p.args)[(0i64) as usize].clone(), env.clone(), seen);
+        if (inner == "{}") {
+            return String::from("{\"nullable\": true}");
+        }
+        return (inner.revl_slice(0i64, (inner.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(", \"nullable\": true}");
+    }
+    if ((p.head == "Map") && (p.args.revl_length() == 2i64)) {
+        return (String::from("{\"type\": \"object\", \"additionalProperties\": ").revl_concat(&sc_json((p.args)[(1i64) as usize].clone(), env.clone(), seen))).revl_concat("}");
+    }
+    if ((p.head == "Result") && (p.args.revl_length() == 2i64)) {
+        return (((String::from("{\"oneOf\": [").revl_concat(&sc_json((p.args)[(0i64) as usize].clone(), env.clone(), seen))).revl_concat(", ")).revl_concat(&sc_json((p.args)[(1i64) as usize].clone(), env.clone(), seen))).revl_concat("]}");
+    }
+    if contains__m2(seen, &ty) {
+        return sc_stub(&ty);
+    }
+    return sc_json_spec(sc_at(env.clone(), ty.clone()), env.clone(), &(seen.revl_concat(&vec![ty.clone()])));
+}
+
+fn sc_json_spec(sp: ScTy, env: std::collections::HashMap<String, ScTy>, seen: &[String]) -> String {
+    if (sp.kind == "record") {
+        let mut props = String::from("");
+        let mut names: Vec<String> = vec![];
+        let mut i = 0i64;
+        while (i < sp.fields.revl_length()) {
+            let seg = (jstr(&(sp.fields)[(i) as usize].name).revl_concat(": ")).revl_concat(&sc_json((sp.fields)[(i) as usize].ty.clone(), env.clone(), seen));
+            props = if (i == 0i64) { seg.clone() } else { (props.revl_concat(", ")).revl_concat(&seg) };
+            names.push((sp.fields)[(i) as usize].name.clone());
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return (((String::from("{\"type\": \"object\", \"properties\": {").revl_concat(&props)).revl_concat("}, \"required\": [")).revl_concat(&str_list_json(&sort_strs(&names)))).revl_concat("]}");
+    }
+    if (sp.kind == "variant") {
+        let mut arms = String::from("");
+        let mut i = 0i64;
+        while (i < sp.cases.revl_length()) {
+            let arm = sc_arm((sp.cases)[(i) as usize].clone(), env.clone(), seen);
+            arms = if (i == 0i64) { arm.clone() } else { (arms.revl_concat(", ")).revl_concat(&arm) };
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return (String::from("{\"oneOf\": [").revl_concat(&arms)).revl_concat("]}");
+    }
+    return String::from("{}");
+}
+
+fn sc_arm(c: ScCase, env: std::collections::HashMap<String, ScTy>, seen: &[String]) -> String {
+    if (c.payload != "") {
+        return (((String::from("{\"type\": \"object\", \"properties\": {\"tag\": {\"const\": ").revl_concat(&jstr(&c.name))).revl_concat("}, \"value\": ")).revl_concat(&sc_json(c.payload.clone(), env.clone(), seen))).revl_concat("}, \"required\": [\"tag\", \"value\"], \"additionalProperties\": false}");
+    }
+    return (String::from("{\"type\": \"object\", \"properties\": {\"tag\": {\"const\": ").revl_concat(&jstr(&c.name))).revl_concat("}}, \"required\": [\"tag\"], \"additionalProperties\": false}");
+}
+
+fn gb_lex_order() -> Vec<String> {
+    return vec![String::from("ws"), String::from("hex"), String::from("schar"), String::from("string"), String::from("integer"), String::from("number"), String::from("boolean"), String::from("nullv"), String::from("b64c"), String::from("b64q"), String::from("b64tail"), String::from("b64string")];
+}
+
+fn gb_lex_deps(nm: &str) -> Vec<String> {
+    if (nm == "string") {
+        return vec![String::from("schar")];
+    }
+    if (nm == "schar") {
+        return vec![String::from("hex")];
+    }
+    if (nm == "number") {
+        return vec![String::from("integer")];
+    }
+    if (nm == "b64string") {
+        return vec![String::from("b64q"), String::from("b64tail")];
+    }
+    if (nm == "b64q") {
+        return vec![String::from("b64c")];
+    }
+    if (nm == "b64tail") {
+        return vec![String::from("b64c")];
+    }
+    return vec![];
+}
+
+fn gb_lex_rule(nm: &str) -> String {
+    if (nm == "ws") {
+        return String::from("ws ::= [ \\t\\n\\r]*");
+    }
+    if (nm == "hex") {
+        return String::from("hex ::= [0-9a-fA-F]");
+    }
+    if (nm == "schar") {
+        return String::from("schar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" [\"\\\\/bfnrt] | \"\\\\u\" hex hex hex hex");
+    }
+    if (nm == "string") {
+        return String::from("string ::= \"\\\"\" schar* \"\\\"\"");
+    }
+    if (nm == "integer") {
+        return String::from("integer ::= \"-\"? (\"0\" | [1-9] [0-9]*)");
+    }
+    if (nm == "number") {
+        return String::from("number ::= integer (\".\" [0-9]+)? ([eE] [-+]? [0-9]+)?");
+    }
+    if (nm == "boolean") {
+        return String::from("boolean ::= \"true\" | \"false\"");
+    }
+    if (nm == "nullv") {
+        return String::from("nullv ::= \"null\"");
+    }
+    if (nm == "b64c") {
+        return String::from("b64c ::= [A-Za-z0-9+/]");
+    }
+    if (nm == "b64q") {
+        return String::from("b64q ::= b64c b64c b64c b64c");
+    }
+    if (nm == "b64tail") {
+        return String::from("b64tail ::= b64c b64c \"==\" | b64c b64c b64c \"=\"");
+    }
+    if (nm == "b64string") {
+        return String::from("b64string ::= \"\\\"\" b64q* b64tail? \"\\\"\"");
+    }
+    return String::from("");
+}
+
+fn gb_lex(nm: String, st: GbState) -> GbRes {
+    if contains__m2(&st.lex, &nm) {
+        return GbRes { name: nm.clone(), st: st.clone() };
+    }
+    let mut cur = GbState { rules: st.rules.clone(), memo: st.memo.clone(), lex: st.lex.revl_push(nm.clone()), n: st.n };
+    let deps = gb_lex_deps(&nm);
+    let mut i = 0i64;
+    while (i < deps.revl_length()) {
+        cur = gb_lex((deps)[(i) as usize].clone(), cur.clone()).st;
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return GbRes { name: nm.clone(), st: cur.clone() };
+}
+
+fn gbnf_lit(text: &str) -> String {
+    let body = jstr(text);
+    let mut inner = String::from("");
+    let mut i = 0i64;
+    while (i < body.revl_length()) {
+        let c = { body.chars().nth((i) as usize).unwrap().to_string() };
+        if (c == "\\") {
+            inner.push_str("\\\\");
+        } else {
+            if (c == "\"") {
+                inner.push_str("\\\"");
+            } else {
+                inner.push_str(&c);
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return (String::from("\"").revl_concat(&inner)).revl_concat("\"");
+}
+
+fn gb_define(key: String, body: String, st: GbState) -> GbRes {
+    let nm = String::from("t").revl_concat(&(((st.n).checked_add(1i64).expect("revl: Int overflow"))).to_string());
+    return GbRes { name: nm.clone(), st: GbState { rules: st.rules.revl_push(GbRule { name: nm.clone(), defn: body.clone() }), memo: { let mut c = st.memo.clone(); c.insert(key, nm.clone()); c }, lex: st.lex.clone(), n: (st.n).checked_add(1i64).expect("revl: Int overflow") } };
+}
+
+fn gb_ref(s: String, st: GbState) -> GbRes {
+    if st.memo.contains_key(&s) {
+        return GbRes { name: match st.memo.get(&s).cloned() {
+    Some(v) => v,
+    None => String::from(""),
+    _ => unreachable!(),
+}, st: st.clone() };
+    }
+    let r = gb_render(s.clone(), st.clone());
+    return GbRes { name: r.name.clone(), st: GbState { rules: r.st.rules.clone(), memo: { let mut c = r.st.memo.clone(); c.insert(s.clone(), r.name.clone()); c }, lex: r.st.lex.clone(), n: r.st.n } };
+}
+
+fn gb_nullable_base(s: &str) -> String {
+    let ms = jv_members(s);
+    let mut out = String::from("{");
+    let mut first = true;
+    let mut i = 0i64;
+    while (i < ms.revl_length()) {
+        if ((ms)[(i) as usize].name != "nullable") {
+            out = if first { out.clone() } else { out.revl_concat(", ") };
+            out = ((out.revl_concat(&jstr(&(ms)[(i) as usize].name))).revl_concat(": ")).revl_concat(&(ms)[(i) as usize].js);
+            first = false;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out.revl_concat("}");
+}
+
+fn gb_render(s: String, st: GbState) -> GbRes {
+    if (jv_mem(&s, "const") != "") {
+        return gb_define(s.clone(), gbnf_lit(&jv_val(jv_mem(&s, "const"))), st.clone());
+    }
+    if (jv_mem(&s, "nullable") != "") {
+        let base = gb_nullable_base(&s);
+        if (base == "{}") {
+            return gb_lex(String::from("nullv"), st.clone());
+        }
+        let inner = gb_ref(base.clone(), st.clone());
+        let nv = gb_lex(String::from("nullv"), inner.st.clone());
+        return gb_define(s.clone(), (inner.name.revl_concat(" | ")).revl_concat(&nv.name), nv.st.clone());
+    }
+    let arms = jv_items(&jv_mem(&s, "oneOf"));
+    if (arms.revl_length() > 0i64) {
+        let mut cur = st.clone();
+        let mut body = String::from("");
+        let mut i = 0i64;
+        while (i < arms.revl_length()) {
+            let r = gb_ref((arms)[(i) as usize].clone(), cur.clone());
+            body = if (i == 0i64) { r.name } else { (body.revl_concat(" | ")).revl_concat(&r.name) };
+            cur = r.st;
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return gb_define(s.clone(), body.clone(), cur.clone());
+    }
+    let nt = jv_val(jv_mem(&s, "type"));
+    if (nt == "string") {
+        if (jv_val(jv_mem(&s, "contentEncoding")) == "base64") {
+            return gb_lex(String::from("b64string"), st.clone());
+        }
+        return gb_lex(String::from("string"), st.clone());
+    }
+    if (nt == "integer") {
+        return gb_lex(String::from("integer"), st.clone());
+    }
+    if (nt == "number") {
+        return gb_lex(String::from("number"), st.clone());
+    }
+    if (nt == "boolean") {
+        return gb_lex(String::from("boolean"), st.clone());
+    }
+    if (nt == "null") {
+        return gb_lex(String::from("nullv"), st.clone());
+    }
+    if (nt == "array") {
+        let it = gb_ref(jv_mem(&s, "items"), st.clone());
+        let w = gb_lex(String::from("ws"), it.st.clone());
+        return gb_define(s.clone(), (((((((((((((String::from("\"[\" ").revl_concat(&w.name)).revl_concat(" \"]\" | \"[\" ")).revl_concat(&w.name)).revl_concat(" ")).revl_concat(&it.name)).revl_concat(" (")).revl_concat(&w.name)).revl_concat(" \",\" ")).revl_concat(&w.name)).revl_concat(" ")).revl_concat(&it.name)).revl_concat(")* ")).revl_concat(&w.name)).revl_concat(" \"]\""), w.st.clone());
+    }
+    if (nt == "object") {
+        let ap = jv_mem(&s, "additionalProperties");
+        if ((ap != "") && (jv_mem(&s, "properties") == "")) {
+            let v = gb_ref(ap.clone(), st.clone());
+            let w = gb_lex(String::from("ws"), v.st.clone());
+            let sc = gb_lex(String::from("string"), w.st.clone());
+            let entry = (((((sc.name.revl_concat(" ")).revl_concat(&w.name)).revl_concat(" \":\" ")).revl_concat(&w.name)).revl_concat(" ")).revl_concat(&v.name);
+            return gb_define(s.clone(), (((((((((((((String::from("\"{\" ").revl_concat(&w.name)).revl_concat(" \"}\" | \"{\" ")).revl_concat(&w.name)).revl_concat(" ")).revl_concat(&entry)).revl_concat(" (")).revl_concat(&w.name)).revl_concat(" \",\" ")).revl_concat(&w.name)).revl_concat(" ")).revl_concat(&entry)).revl_concat(")* ")).revl_concat(&w.name)).revl_concat(" \"}\""), sc.st.clone());
+        }
+        if (jv_mem(&s, "properties") != "") {
+            let rb = gb_record_body(&s, st.clone());
+            return gb_define(s.clone(), rb.txt.clone(), rb.st.clone());
+        }
+    }
+    return gb_lex(String::from("string"), st.clone());
+}
+
+fn gb_record_body(s: &str, st: GbState) -> GbBody {
+    let props = jv_members(&jv_mem(s, "properties"));
+    let w = gb_lex(String::from("ws"), st.clone());
+    if (props.revl_length() == 0i64) {
+        return GbBody { txt: (String::from("\"{\" ").revl_concat(&w.name)).revl_concat(" \"}\""), st: w.st.clone() };
+    }
+    let mut text = String::from("\"{\" ").revl_concat(&w.name);
+    let mut cur = w.st;
+    let mut i = 0i64;
+    while (i < props.revl_length()) {
+        if (i > 0i64) {
+            text = (((text.revl_concat(" ")).revl_concat(&w.name)).revl_concat(" \",\" ")).revl_concat(&w.name);
+        }
+        let r = gb_ref((props)[(i) as usize].js.clone(), cur.clone());
+        text = (((((((text.revl_concat(" ")).revl_concat(&gbnf_lit(&(props)[(i) as usize].name))).revl_concat(" ")).revl_concat(&w.name)).revl_concat(" \":\" ")).revl_concat(&w.name)).revl_concat(" ")).revl_concat(&r.name);
+        cur = r.st;
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return GbBody { txt: ((text.revl_concat(" ")).revl_concat(&w.name)).revl_concat(" \"}\""), st: cur.clone() };
+}
+
+fn gb_text(root_: &str, st: GbState) -> String {
+    let mut lines = vec![String::from("root ::= ").revl_concat(&root_)];
+    let mut i = 0i64;
+    while (i < st.rules.revl_length()) {
+        lines.push(((st.rules)[(i) as usize].name.revl_concat(" ::= ")).revl_concat(&(st.rules)[(i) as usize].defn));
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let order = gb_lex_order();
+    let mut k = 0i64;
+    while (k < order.revl_length()) {
+        if contains__m2(&st.lex, &(order)[(k) as usize]) {
+            lines.push(gb_lex_rule(&(order)[(k) as usize]));
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return (lines.revl_join(&sc_nl())).revl_concat(&sc_nl());
+}
+
+fn gb_from_schema(schema: String) -> String {
+    let st0 = GbState { rules: vec![], memo: std::collections::HashMap::new(), lex: vec![], n: 0i64 };
+    let r = gb_ref(schema.clone(), st0.clone());
+    return gb_text(&r.name, r.st.clone());
+}
+
+fn gb_grammar_json(text: String) -> String {
+    return (((String::from("{\"format\": \"gbnf\", \"root\": \"root\", \"text\": ").revl_concat(&jstr(&text))).revl_concat(", \"digest\": ")).revl_concat(&jstr(&sc_sha256(text.clone())))).revl_concat("}");
+}
+
+fn jv_str_end(s: &str, i: i64) -> i64 {
+    let mut k = (i).checked_add(1i64).expect("revl: Int overflow");
+    while (k < s.revl_length()) {
+        let c = { s.chars().nth((k.clone()) as usize).unwrap().to_string() };
+        if (c == "\\") {
+            k = (k).checked_add(2i64).expect("revl: Int overflow");
+        } else {
+            if (c == "\"") {
+                return (k).checked_add(1i64).expect("revl: Int overflow");
+            } else {
+                k = (k).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
+    }
+    return s.revl_length();
+}
+
+fn jv_close(s: &str, i: i64, open: &str, close: &str) -> i64 {
+    let mut depth = 0i64;
+    let mut k = i;
+    while (k < s.revl_length()) {
+        let c = { s.chars().nth((k) as usize).unwrap().to_string() };
+        if (c == "\"") {
+            k = jv_str_end(s, k);
+        } else {
+            if (c == open) {
+                depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            } else {
+                if (c == close) {
+                    depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+                    if (depth == 0i64) {
+                        return (k).checked_add(1i64).expect("revl: Int overflow");
+                    }
+                }
+            }
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return s.revl_length();
+}
+
+fn jv_span(s: &str, i: i64) -> i64 {
+    let mut k = i;
+    while ((k < s.revl_length()) && ({ s.chars().nth((k) as usize).unwrap().to_string() } == " ")) {
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (k >= s.revl_length()) {
+        return s.revl_length();
+    }
+    let c = { s.chars().nth((k) as usize).unwrap().to_string() };
+    if (c == "{") {
+        return jv_close(s, k, "{", "}");
+    }
+    if (c == "[") {
+        return jv_close(s, k, "[", "]");
+    }
+    if (c == "\"") {
+        return jv_str_end(s, k);
+    }
+    let mut j = k;
+    while (j < s.revl_length()) {
+        let d = { s.chars().nth((j) as usize).unwrap().to_string() };
+        if ((((d == ",") || (d == "}")) || (d == "]")) || (d == " ")) {
+            return j;
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return s.revl_length();
+}
+
+fn jv_val(raw: String) -> String {
+    if ((raw.revl_length() < 2i64) || ({ raw.chars().nth((0i64) as usize).unwrap().to_string() } != "\"")) {
+        return raw;
+    }
+    let mut out = String::from("");
+    let mut i = 1i64;
+    while (i < (raw.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) {
+        let c = { raw.chars().nth((i) as usize).unwrap().to_string() };
+        if (c == "\\") {
+            if ({ raw.chars().nth(((i).checked_add(1i64).expect("revl: Int overflow")) as usize).unwrap().to_string() } == "\"") {
+                out.push_str("\"");
+            } else {
+                out.push_str("\\");
+            }
+            i = (i).checked_add(2i64).expect("revl: Int overflow");
+        } else {
+            out.push_str(&c);
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn jv_mem(s: &str, key: &str) -> String {
+    let end = s.revl_length();
+    let mut k = 1i64;
+    while (k < end) {
+        if ({ s.chars().nth((k) as usize).unwrap().to_string() } == "\"") {
+            let e = jv_str_end(s, k);
+            let name = s.revl_slice((k).checked_add(1i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"));
+            let mut j = e;
+            while ((j < end) && ({ s.chars().nth((j) as usize).unwrap().to_string() } == " ")) {
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if ((j < end) && ({ s.chars().nth((j) as usize).unwrap().to_string() } == ":")) {
+                let mut v = (j).checked_add(1i64).expect("revl: Int overflow");
+                while ((v < end) && ({ s.chars().nth((v.clone()) as usize).unwrap().to_string() } == " ")) {
+                    v = (v).checked_add(1i64).expect("revl: Int overflow");
+                }
+                let ve = jv_span(s, v.clone());
+                if (name == key) {
+                    return s.revl_slice(v.clone(), ve);
+                }
+                k = ve;
+            } else {
+                k = e;
+            }
+        } else {
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return String::from("");
+}
+
+fn jv_items(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let end = s.revl_length();
+    let mut k = 1i64;
+    while (k < end) {
+        while ((k < end) && (({ s.chars().nth((k) as usize).unwrap().to_string() } == " ") || ({ s.chars().nth((k) as usize).unwrap().to_string() } == ","))) {
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if ((k >= end) || ({ s.chars().nth((k) as usize).unwrap().to_string() } == "]")) {
+            return out;
+        }
+        let e = jv_span(s, k);
+        out.push(s.revl_slice(k, e));
+        k = e;
+    }
+    return out;
+}
+
+fn jv_members(s: &str) -> Vec<ScMem> {
+    let mut out: Vec<ScMem> = vec![];
+    let end = s.revl_length();
+    let mut k = 1i64;
+    while (k < end) {
+        while ((k < end) && (({ s.chars().nth((k) as usize).unwrap().to_string() } == " ") || ({ s.chars().nth((k) as usize).unwrap().to_string() } == ","))) {
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if ((k >= end) || ({ s.chars().nth((k) as usize).unwrap().to_string() } == "}")) {
+            return out;
+        }
+        if ({ s.chars().nth((k) as usize).unwrap().to_string() } == "\"") {
+            let e = jv_str_end(s, k);
+            let name = s.revl_slice((k).checked_add(1i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"));
+            let mut j = e;
+            while ((j < end) && ({ s.chars().nth((j) as usize).unwrap().to_string() } == " ")) {
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if ((j < end) && ({ s.chars().nth((j) as usize).unwrap().to_string() } == ":")) {
+                let mut v = (j).checked_add(1i64).expect("revl: Int overflow");
+                while ((v < end) && ({ s.chars().nth((v.clone()) as usize).unwrap().to_string() } == " ")) {
+                    v = (v).checked_add(1i64).expect("revl: Int overflow");
+                }
+                let ve = jv_span(s, v.clone());
+                out.push(ScMem { name: name.clone(), js: s.revl_slice(v.clone(), ve) });
+                k = ve;
+            } else {
+                k = e;
+            }
+        } else {
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn sc_nl() -> String {
+    return format!("\n");
+}
+
+fn sc_validated_json(ty: String, env: std::collections::HashMap<String, ScTy>) -> String {
+    if ((ty == "") || (ty == "Unit")) {
+        return String::from("");
+    }
+    if (!sc_expressible(ty.clone(), env.clone(), &(vec![]))) {
+        return String::from("");
+    }
+    let schema = sc_json(ty.clone(), env.clone(), &(vec![]));
+    if str_has(&schema, "x-revlType") {
+        return String::from("");
+    }
+    return ((String::from(", \"validated\": true, \"response_schema\": ").revl_concat(&schema)).revl_concat(", \"response_grammar\": ")).revl_concat(&gb_grammar_json(gb_from_schema(schema.clone())));
 }
 
 fn str_has(s: &str, sub: &str) -> bool {
