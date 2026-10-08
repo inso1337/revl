@@ -20,16 +20,19 @@ next:
    narrowness (item 519, PR #1253). Both resolve to `*`, which is disjoint from
    nothing.
 
-The residual this slice does NOT refuse is pinned too (`test_the_key_namespaced
-_residual_is_still_admitted`), because a gap that is written down stays visible
-and a gap that is assumed away does not. Beside it, issue #1265's lane pinned
-the two things that decide whether it can be closed: that the `svc:` namespace
-cannot decide it on its own, and that the blocker is `revl_load` on the default
-trust level rather than any test count.
+The residual this slice did NOT refuse is closed by issue #2105, which took
+docs/design/561-undeclared-emission-boundary.md's follow-up exit. Its two pins
+are flipped rather than deleted: `test_the_key_namespaced_residual_is_now_
+refused` holds the arm, and `test_the_shipped_example_still_loads_under_the_
+agent_profile` holds the composition half that had to land with it. Beside
+them, issue #1265's lane's pin stays as it was, because it is the reason the
+closure is a set of services and not a namespace: the `svc:` token cannot
+decide the residual on its own.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -341,21 +344,20 @@ def test_an_undeclared_surrogate_refuses_the_compile_end_to_end(monkeypatch):
 
 # ----------------------------------------------------------- 5. the residual
 
-def test_the_key_namespaced_residual_is_still_admitted():
-    """PINNED, not assumed away (`kernel_boundary._undeclared`).
+def test_the_key_namespaced_residual_is_now_refused():
+    """FLIPPED by issue #2105: this used to pin the residual as ADMITTED.
 
     A service method that declares `emission` with no capability list yields a
     reserved-namespace fold element: a declared WIRING with an undeclared
-    REACH. Refusing it is the stronger answer and this slice does not, because
-    on this tree it is the ordinary spelling. This test fails if that ever
-    changes silently, which is the only thing standing between a stated
-    residual and a forgotten one.
+    REACH. `kernel_boundary._undeclared` now refuses it, but the element alone
+    still cannot say so - it is the same token for the two shapes
+    `_held_capabilities_pairs` builds (the test below pins that conflation).
+    What closes it is the SET of services whose declaration leaves the reach
+    undeclared, computed by `lower._undeclared_elements` against the
+    declarations and handed to the decider.
 
-    Item 561 moved that element off the consumer's wiring key and onto the
-    SERVICE the method is declared on (`lower._undeclared_cap`), which is what
-    it is named BY and not whether it is undeclared. The element below is built
-    by the reference rather than spelled as a literal, so this pin tracks the
-    real one instead of a namespace that has moved out from under it."""
+    docs/design/561-undeclared-emission-boundary.md's residual was the arm's
+    absence; this is the arm."""
     src = _TASK + """
 service Bare { emission fn cross(row: Str) -> Int }
 
@@ -369,11 +371,31 @@ component Candidate requires b: Bare provides task: Task {
 }
 """
     profile = AdmissionProfile.untrusted_author({"Bare", "Task"})
-    compile_source(src, "candidate.rvl", profile=profile)
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "candidate.rvl", profile=profile)
+    assert excinfo.value.code == "G8"
+
     element = lower._undeclared_cap("Bare")
     assert element.token == lower._UNDECLARED_NS + "Bare"
+    # the element is unchanged; what changed is the caller's second argument
     assert not kb._undeclared(element)
-    assert not kb.offending({element}, undeclared_reaches_kernel=True)
+    assert kb._undeclared(element, undeclared={element.token})
+    assert kb.offending({element}, undeclared_reaches_kernel=True,
+                        undeclared={element.token})
+
+    # and the set is DERIVED from the declarations rather than read off the
+    # namespace - this is the value `_check_kernel_boundary` passes. `Task` is
+    # in it too: the contract the candidate implements is itself bare, so
+    # reaching `b.cross` is reaching an undeclared boundary either way.
+    from revl.parser import Parser  # noqa: PLC0415
+
+    services = {s.name: s for s in Parser(src, "candidate.rvl").parse().services}
+    assert lower._undeclared_elements(services) == {
+        element.token, lower._undeclared_cap("Task").to_str()}
+
+    # the same source is still ordinary first-party code: the arm reads
+    # admission, not the spelling
+    compile_source(src, "composition.rvl")
 
 
 def test_the_namespace_alone_cannot_decide_the_residual():
@@ -426,32 +448,38 @@ component PlainProvider requires f: Fs provides p: Plain {
     assert excinfo.value.code == "G4"
 
 
-def test_the_residual_is_blocked_by_revl_load_not_by_a_test_count():
-    """What actually stops the residual being closed, pinned on the tree.
+def test_the_shipped_example_still_loads_under_the_agent_profile():
+    """The COMPOSITION half of the exit, pinned on the tree.
 
     `revl.mcp.server.AuthoringTrust.profile()` compiles ALL agent-authored
     source under `untrusted_author` on the DEFAULT trust level, with only the
-    reach allowlist left off. So closing the residual would change what
-    `revl_load` and `revl_swap` accept, not only `revl_admit`, and
-    `examples/user_cache.rvl` - this repository's primary demo composition,
-    which PR #1292 declined to give tokens because it is pinned byte-for-byte
-    to a hand-maintained reference IR - declares `Database.execute` and
-    `Cache.put` bare.
+    reach allowlist left off. So the kernel arm changes what `revl_load` and
+    `revl_swap` accept, not only `revl_admit`, and the arm cannot land on its
+    own: the shipped examples would stop loading the moment a bare `emission`
+    is refused.
 
-    This asserts the two facts that make the step a composition-side item: the
-    default profile is the untrusted one, and the shipped example still loads
-    under it. It fails the day someone closes the residual without doing the
-    composition half first, which is the failure this pin exists for."""
+    Issue #1265's lane pinned `examples/user_cache.rvl` as the blocker. Issue
+    #2105 took it, by giving every shipped example's services their tokens.
+    This asserts the two facts that make the pair land together: the default
+    profile is the untrusted one, and the shipped examples still load under it
+    while no longer spelling `emission` bare."""
     from dataclasses import replace  # noqa: PLC0415
 
     # exactly what `AuthoringTrust.profile()` builds when nothing is granted
     default_profile = replace(AdmissionProfile.untrusted_author(()),
                               granted=None)
-    source = (ROOT / "examples" / "user_cache.rvl").read_text(encoding="utf-8")
-    assert "emission fn execute" in source, (
-        "the fixture this pin is about has changed spelling; re-read "
-        "docs/design/561-undeclared-emission-boundary.md before editing")
-    compile_source(source, "user_cache.rvl", profile=default_profile)
+    for rel, declared in (
+        ("examples/user_cache.rvl", "emission[db] fn execute"),
+        ("examples/migrator.rvl", "emission[db] fn execute"),
+        ("examples/heartbeat.rvl", "emission[log] fn write"),
+        ("examples/async_timer.rvl", "emission[counter] async fn tick"),
+    ):
+        source = (ROOT / rel).read_text(encoding="utf-8")
+        assert declared in source, (
+            f"the fixture this pin is about has changed spelling; re-read "
+            f"docs/design/561-undeclared-emission-boundary.md before editing "
+            f"({rel})")
+        compile_source(source, os.path.basename(rel), profile=default_profile)
 
 
 def test_the_host_extern_routes_to_star_are_closed_before_this_check():

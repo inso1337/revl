@@ -42,14 +42,30 @@
 // boundary crossing (it mutates the server's route table), so a plain `fn` would
 // be refused as unhostable — G4 read at the host boundary (item 457 S3, the same
 // rule `remote` reads at the client, 424 D-424c.2).
+//
+// Each method DECLARES that boundary rather than spelling `emission` bare
+// (issue #2105, taking docs/design/561-undeclared-emission-boundary.md's
+// composition half). The token names the host operation — the export the
+// shipped shim `backends/typescript/revl_server_ts.ts` binds, one per verb,
+// enumerated in `synthesize.HOST_SHIMS["Server"]["caps"]` — which is the SAME
+// crossing for every `host` row: the row's label names the WIRING (the extern
+// name, the key, the isolate realm), never the boundary, so one fixed token per
+// verb is true for every composition. `synthesize._host_source` spells that
+// token as the synthesized extern's declared scope, and `check_hostable` refuses
+// a service whose declaration names anything else, so the claim is checked
+// against the shim rather than believed. Bare, this service's reach was the
+// unnameable boundary, and a component that wired `server: Server` could not be
+// told apart from one that reached the kernel (issue #1223's rule, read at the
+// fold). What is still conflated is two `host` rows behind one service name —
+// the residual §561:184 records as its own item, untouched here.
 
 // The host HTTP server (`@cordisjs/server`'s `ctx.server`). One registration
 // method per verb `stdlib/http.rvl`'s `Method` variant admits.
 service Server {
-  emission fn get(path: Str) -> Unit
-  emission fn post(path: Str) -> Unit
-  emission fn put(path: Str) -> Unit
-  emission fn patch(path: Str) -> Unit
-  emission fn delete(path: Str) -> Unit
-  emission fn head(path: Str) -> Unit
+  emission[host.server.get] fn get(path: Str) -> Unit
+  emission[host.server.post] fn post(path: Str) -> Unit
+  emission[host.server.put] fn put(path: Str) -> Unit
+  emission[host.server.patch] fn patch(path: Str) -> Unit
+  emission[host.server.delete] fn delete(path: Str) -> Unit
+  emission[host.server.head] fn head(path: Str) -> Unit
 }
