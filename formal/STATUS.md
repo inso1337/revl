@@ -45,7 +45,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 
 | Code | Formal status | Theorems | Oracle | The gap, and what kind of gap it is |
 |---|---|---|---|---|
-| **G1** declared access | partial | 2 + 6 | **yes** (one G1 row per component; 21 agree-G1) | `declared_only_access` is real and witnessed, but its content is the shape of `Typed`/`ReachIn`: it says an undeclared access cannot be *written*, not that the checker *visits* every statement of a real component body. **Modelling limit** — L0 has no component bodies. Since issue #1807 the `G1` row decides `RevL.G1Access.AccessOK` over each component's ACCESS roots (`GA`): every call head's root and every name read in value position, at every nesting depth (after and inside `if`/`else`/`while`/`for`/guard blocks, in conditions), less the roots the checker resolves without a requirement, plus `intercept` targets. So the visiting half is measured against the checker on the corpus, through the exporter's walk, while the classification of a root as local, callable, import, host family or constructor is the exporter's and component-wide, not per scope |
+| **G1** declared access | partial | 2 + 6 | **yes** (one G1 row per component; 21 agree-G1) | `declared_only_access` is real and witnessed, but its content is the shape of `Typed`/`ReachIn`: it says an undeclared access cannot be *written*, not that the checker *visits* every statement of a real component body. **Modelling limit** — L0 grew component bodies in issue #2108, so the shape is expressible at last, but this theorem still does not prove the visiting half: what does is `RevL.G9Coverage.coversBodyB`, stated over a body's own scopes and decided on the corpus by the `GC` row, and that is G9's row rather than this one. Since issue #1807 the `G1` row decides `RevL.G1Access.AccessOK` over each component's ACCESS roots (`GA`): every call head's root and every name read in value position, at every nesting depth (after and inside `if`/`else`/`while`/`for`/guard blocks, in conditions), less the roots the checker resolves without a requirement, plus `intercept` targets. So the visiting half is measured against the checker on the corpus, through the exporter's walk, while the classification of a root as local, callable, import, host family or constructor is the exporter's and component-wide, not per scope |
 | **G2** provision disjointness | full | 4 | **yes** (V rows, 2 agree-G2) | stated over `(key, realm)` slots from the incremental `LinkOK`, and the oracle bites: change `Manifest.needs` to ignore the realm and four corpus files mismatch |
 | **G3** acyclic dependencies | full | 9 | **yes** (V rows, 1 agree-G3) | the layering certificate is *derived* from `LinkOK`, so nothing is assumed. No known gap |
 | **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 + 10 | **yes** (182 G rows, 25 P rows, 6 agree-G4; one AP row per marked crossing for the approval floor, whose 36 refusals file under agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits. The approval floor (item 246, issue #1455) is `RevL.G4Approval.CrossingOK` over three exported facts: the approval-required capability TOKENS (`AR`, keyed by token as `lower._approval_index` keys them), the tokens one marked crossing reaches (`AX`, as `lower._approval_crossed_caps` resolves them, a `compensate` slot's crossings included) and its `with` edge (`AE`, none for the value form); `crossingB_iff` bridges the printed verdict, and `approval_coverage` fails the gate unless the corpus carries a covered crossing, one refused under another edge, one refused with no edge and an unrequired one admitted. Not modelled there: a `[...]` class in a glob scope, an edge the exporter cannot name (read as none, fail-closed), and a required token declared in a `use`d module |
@@ -53,8 +53,8 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G6** purity outside effect forms, binding uniqueness | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 + 8 | **yes** (one C row per reconstructed statement, one BU row per binding scope; the gate prints the count) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on every one of them. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe. Binding uniqueness (issue #1812) is `RevL.G6Binding.BindingOK` over each scope's `BE` steps, decided by the `BU` row (`bindingB_iff`), and the corpus's one G6 binding refusal is `agree-G6` |
 | **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | **yes** (267 D rows) | the row RUNS `backends/python/runtime.py` over an enumerated scenario corpus and diffs the reference's observed disposition against the model's predicted one, with a coverage ratchet (`teardown_coverage`) that fails the gate if the corpus stops distinguishing LIFO from FIFO, Phase 2 from Phase 1, or the three dispositions from one another. Still deliberately not modelled, and so not under the row: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. The cordis LIFO unwind of the activation-body stack is supplied by the harness, not observed — only `drain`'s own `reversed` loop (item 369) is revl's own ordering code. **Modelling limit, scoped on purpose** |
 | **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 9 | **yes** (one S8 row per reconstructed statement; the gate prints the count) | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. The oracle now decides `RevL.G8Classified.stmtSurface` over each reconstructed statement's heads against the file's `Prog` (`Oracle.stmtSurfaceB`, `stmtSurfaceB_iff`); the reference recomputes the same reach caps independently from the `EX`/`FN` rows, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries both a non-empty and an empty surface, and `g8_row_not_vacuous` proves the surface goes empty when the wrapping fn stops reaching the crossing. First-class dispatch (`star`) is `n/a` on both sides |
-| **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable**; the rule is now decided on the corpus, on the sink the checker REPORTS | 18 | **partial** (one TAINT row per checker-reported taint refusal; the gate prints the count; 4 agree-G9) | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Still the one **UNPROVED** row in the table for *coverage*. Since issue #1811 group 2 the oracle's `TAINT` row decides the rule at the sink and on the label the checker itself reports, via `RevL.G9Flow.g9RowB` — route B of the issue, and explicitly **the rule on the corpus, not the coverage of the walk** |
-| **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | **partial** (the same TAINT row; 1 agree-G9) | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*; they inherit G9's coverage gap exactly. The disclosure rule is now decided on the corpus through the same TAINT row, and **that is the rule on the corpus, not coverage of the checker's walk** — the same caveat G9 carries. The `G-SECRET-FLOW` refusal carries no `navigate`, so the exporter reads its sink out of the refusal message and its origin out of a table spelled in the harness, not out of the hint's prose |
+| **G9** no authority from untrusted | full for the rule at the sink and the coverage of the walk; coverage is stated over an L0 component body since issue #2108, and the rule is decided on the corpus, on the sink the checker REPORTS | 18 + 16 | **yes** (one TAINT row per checker-reported taint refusal, and one COVERAGE row per component the checker's walk actually visited — 15 files over 21 components today; the gate prints both counts; 4 agree-G9) | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **The modelling limit is closed** (issue #2108): L0 grew component bodies with the provide/activation distinction and typed parameters, so the obligation is a theorem rather than prose — `RevL.G9Coverage.coversBodyB` decides the walk against the body's own scopes on the **label**, the **statement count** and the **origin-carrying parameters**, one conjunct per bug that actually occurred, and `coversB_refuses_a_shortened_walk` is the witness that stops elaborating if the walk skips a statement. This is no longer the one **UNPROVED** row for coverage. Still not proved, and named rather than smuggled: the *interprocedural fixed point* (`_Signature`, `_infer_signatures`) that discovers **which** paths exist — the theorem is stated over the scopes a component's own body induces, so a path the walk never learns of is outside it. Since issue #1811 group 2 the oracle's `TAINT` row decides the rule at the sink and on the label the checker itself reports, via `RevL.G9Flow.g9RowB` — route B of the issue, and explicitly **the rule on the corpus, not the coverage of the walk**; the `GC` row below is what carries the coverage half |
+| **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | **partial** (the same TAINT row, plus the G9 COVERAGE row; 1 agree-G9) | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*. The coverage gap those three inherited is closed the same way G9's is (issue #2108): the walk-coverage theorem's **parameter** conjunct is exactly the `Secret[T]`-strip bug, so `RevL.G9Coverage.coversB_refuses_a_walk_that_strips_a_secret_param` is stated over the receiver body's own scope. The disclosure rule is now decided on the corpus through the same TAINT row, and **that is the rule on the corpus, not coverage of the checker's walk** — the same caveat G9 carries. The `G-SECRET-FLOW` refusal carries no `navigate`, so the exporter reads its sink out of the refusal message and its origin out of a table spelled in the harness, not out of the hint's prose |
 | **G-MODEL-PLACE** model placement and model reach | partial: the placement and reach rules | 6 | **yes** (one MPV row per routed component, one MAV row per consulted role; 9 agree-G-MODEL-PLACE) | since issue #1811 `RevL.ModelPlace.PlaceOK` decides that a confidentiality origin is placed on the device only, through a council member that receives it too (`placeB_iff`), and the model-reach rule of item 519 (a consulted role's `reaches [...]` within what the component holds) is decided with the spawn rule's proved `attenuatesB`. Which roles a component consults, and whether it consults a model at all, are the exporter's, read as `lower._model_reach_edges` / `_consults_a_model` read them. Not modelled: the route-block shape rules and the value-level origin ceiling (item 514) |
 | **G-COUNCIL-SPLIT** tie policy | partial: the tie-outcome rule | 7 | **yes** (one CTV row per declared council; 1 agree-G-COUNCIL-SPLIT) | since issue #1811 `RevL.ModelCouncil.SplitOK` decides that no declared council admits when its members disagree, over the tie outcome the checker reads for each council — the declared `on_tie`, or the `split` default an omitted clause resolves to (`splitB_iff`). This is a finite check over declarations with no reach, so it needs no component body; the exporter reads `prog.model_councils` and nothing else. The other `model-council` refusals are different rules with the same code and this row is deliberately silent on them: the unknown tie outcome, the aggregation vocabulary and its totality on the declared member set, the member functions and their uniqueness, `quorum` bases other than `declared`, and "exactly one aggregate rule". A council declaring no aggregation emits no `CV` row at all, so its refusal lands in `out-of-fragment` rather than being read as an agreement this row cannot make |
 | **G-RETAIN** retained data at a persistence sink | partial: the deadline rule | 9 | **yes** (one RETAIN row per checker-reported retention refusal; 1 agree-G-RETAIN) | since issue #1811 group 3 `RevL.GRetain.retainRowB` decides that a `Retained[T, P]` value does not reach a persistence sink after `P`'s deadline, over the scope, the sink and the walk the checker itself REPORTS and at the instant the checker itself COMPARED — the harness pins that instant with `REVL_RETENTION_AS_OF`, so the verdict is reproducible rather than wall-clock. The rule is the checker's own strict `as_of > until` with its three escapes (erase and keep the receipt, extend `until`, declare a `hold`); the `hold` override is proved as `hold_clears_the_deadline`. **This row is the rule on the corpus, not the coverage of the checker's walk** — the same caveat G9 carries. The `G-RETAIN` refusal carries no `navigate`, so the exporter reads its sink, scope, policy, `until`, `now` and chain out of the refusal message and hint, not out of structured fields. The declaration-level `G-RETAIN` refusal (`taint._refuse_retention_declaration`) needs no flow at all and is a different judgment; it emits no row and falls through to `out-of-fragment` |
@@ -96,8 +96,17 @@ Three summary readings of that map:
   `reversibility`, not an A5 code. A9 left this list in issue 1167, A2 in
   issue 1166, A1's async-colour rules in issue #1808 and A6's call-site
   half in issue #1809: each rule is now a theorem and a differential row.
-- **One row is UNPROVED by construction** (G9 path coverage) and says so
-  in the table, rather than being absent.
+- **No row is UNPROVED by construction any more.** G9 path coverage was
+  the last one, and it said so in the table rather than being absent:
+  `UNPROVED, unstatable`, because L0 had no component bodies and the
+  obligation could not be written down at all. Issue #2108 grew L0 —
+  `RevL.Syntax.Body` with its `provide`/activation distinction and typed
+  parameters — and stated the obligation as `RevL.G9Coverage.coversBodyB`,
+  decided against the walk the harness *observes* by the oracle's `GC`
+  row, so the differential oracle can disagree with it. The residue it
+  does **not** reach — the interprocedural fixed point that discovers
+  *which* paths exist — is named in the G9 section rather than left for a
+  reader to infer.
 
 ## Theorem status
 
@@ -200,7 +209,22 @@ Three summary readings of that map:
 | `RevL.G9.authority_refusal_is_not_universal` | G9 — anti-tautology (item 418) | **proved** | `propext` | one flow, admitted at a disclosure sink and refused at an authority sink |
 | `RevL.G9.sink_rules_are_distinct` | G9 — anti-tautology (item 418) | **proved** | `propext` | the four `Admits` rules separated pairwise; not one predicate four times |
 | `RevL.G9.secret_refusal_is_load_bearing` | item 256 — anti-tautology (418) | **proved** | `propext` | the algebra CAN clear a `secret`; `taint.py`'s two refusals are what stop it |
-| **G9 — path coverage** | G9 — the attested `G1..G9` set | **UNPROVED, unstatable** | — | see *G9* below: the checker must WALK every path; not expressible against the current L0 |
+| `RevL.G9Coverage.coversB_iff` | G9 — path coverage (issue #2108) | **proved** | `propext` | `coversB` is exactly the three projections being equal out to the LONGER list, so a walk that drops, shortens, re-seeds or pads a scope flips the Bool |
+| `RevL.G9Coverage.coversBodyB_iff` | G9 — path coverage (issue #2108) | **proved** | `propext` | `coversBodyB_iff` is `coversB_iff` at the body's own scopes: the printed `coverage` verdict is this Bool, so the oracle cannot print `ok` for a walk the theorem refuses |
+| `RevL.G9Coverage.coversB_self` | G9 — path coverage (issue #2108) | **proved** | `propext` | a scope list covers itself — the base case every refusal witness is measured against, so those are not satisfied by a `coversB` that always returned `false` |
+| `RevL.G9Coverage.walk_covers` | G9 — path coverage (issue #2108) | **proved** | `propext` | **every** body is covered by the walk it induces — the positive direction. Together with the five refusals below this pins `coversBodyB` to be neither constant-`true` nor constant-`false` |
+| `RevL.G9Coverage.reachIn_callSvc` | G9 — path coverage (issue #2108) | **proved** | `propext` | the witness body's activation step reaches `svc`, a name the witness context holds: the body is inside L0's `ReachIn`, not a shape L0 cannot admit |
+| `RevL.G9Coverage.scope_origins_exclude_plain_and_trusted` | G9 — path coverage (issue #2108) | **proved** | none | `Scope.origins` carries exactly the parameters whose qualifier SEEDS an origin — `Secret` and `Untrusted`, never a plain or `Trusted` one. The strip-the-`Secret[T]` bug, stated as the filter that decides it |
+| `RevL.G9Coverage.witnessBody_scopes` | G9 — path coverage (issue #2108) | **proved** | `propext` | the witness body's scope list, spelled out: an activation scope with its statement count and no parameters, then the provide scopes with their counts and their `Secret`/`Untrusted` parameters in declaration order |
+| `RevL.G9Coverage.witnessBody_is_admitted` | G9 — path coverage (issue #2108) | **proved** | `propext` | the witness body typechecks in the witness context, so `Body.TypedIn` is **inhabited** by a body with an activation scope and a provide block: the L0 growth is not an empty grammar |
+| `RevL.G9Coverage.walkOf_is_the_walk` | G9 — path coverage (issue #2108) | **proved** | `propext` | `walkOf` on the witness body, unfolded: four scopes, `activation` then `<key>.<method>`, with the counts and the seeded parameters the body declares |
+| `RevL.G9Coverage.coversB_admits_the_full_walk` | G9 — path coverage (issue #2108) — non-vacuity | **proved** | `propext` | the walk the witness body induces is ADMITTED. The positive half of the non-vacuity witness |
+| `RevL.G9Coverage.coversB_refuses_a_walk_that_drops_the_activation_scope` | G9 — path coverage (issue #2108) — non-vacuity | **proved** | `propext` | delete the activation scope from the walk and the verdict flips. **The historical `_walk_component_methods` bug — a component activation body never taint-checked — as a theorem** |
+| `RevL.G9Coverage.coversB_refuses_a_shortened_walk` | G9 — path coverage (issue #2108) — non-vacuity | **proved** | `propext` | visit one of the activation body's two statements instead of both and the verdict flips: the statement-count conjunct is load-bearing, and **this is the witness that bites when the walk is shortened** |
+| `RevL.G9Coverage.coversB_refuses_a_walk_that_strips_a_secret_param` | G9 — path coverage (issue #2108) — non-vacuity | **proved** | `propext` | a walk that seeds nothing for the witness body's `Secret` parameter is refused — the `Secret[T]`-stripped-inside-its-own-receiver bug, as a theorem |
+| `RevL.G9Coverage.coversB_refuses_a_walk_that_seeds_a_trusted_param` | G9 — path coverage (issue #2108) — non-vacuity | **proved** | `propext` | a walk that seeds a `Trusted` parameter is refused: the row is tight in the other direction, and a `Qual.seedsOrigin` widened to `Trusted` stops this elaborating |
+| `RevL.G9Coverage.coversB_refuses_a_scope_the_body_does_not_have` | G9 — path coverage (issue #2108) — non-vacuity | **proved** | `propext` | a walk carrying one scope the body does not have is refused rather than truncated away: the label conjunct cannot be met by a prefix |
+| `RevL.G9Coverage.g9Coverage_not_vacuous` | G9 — path coverage (issue #2108) — non-vacuity | **proved** | `propext` | **the witness**: the body's own walk admitted AND four distinct shortenings of it refused — drop the activation scope, shorten a count, strip a `Secret` parameter, add a scope. A `coversBodyB` that returned a constant fails all five |
 | `RevL.A8.revert_on_failure` | TODO 3 / A8 — L-Raise reverts | **proved** | `propext` | over the small-step semantics: the abort restores the world the body inherited |
 | `RevL.A8.trace_reads_back_as_abort` | TODO 3 / A8 | **proved** | `propext` | no body step writes a session marker, so a crashed run rolls back |
 | `RevL.A8.committed_transaction_is_retained` | TODO 3 / A8 — the central safety claim | **proved** | `propext` | a durable `discharge` record is never rolled back |
@@ -656,47 +680,115 @@ antidote to "G1 and G6 are literally the same theorem"); and
 not because the datatype lacks a constructor. Delete either refusal from
 `kindOK` and the theorem becomes false.
 
-### What G9 does NOT cover — the open obligation
+### G9 path coverage — closed by issue #2108, and the residue it leaves
 
-**Path coverage is not proved, and it is where the real bugs are.**
+**Path coverage was the obligation, and it is where the real bugs were.**
 `Flow` starts from a path that is *given*. That the checker *walks* every
 path a program contains is a separate obligation, and it is the one that
-actually broke: `taint._walk_component_methods` descends only into
+actually broke: `taint._walk_component_methods` descended only into
 `provide` steps, so a component's **activation body was never
 taint-checked at all**, and a `Secret[T]` parameter was stripped inside
 its own receiver body (both fixed on
-`fix/taint-activation-body-and-secret-receiver`). Nothing in this file
-would have caught either.
+`fix/taint-activation-body-and-secret-receiver`). Until issue #2108
+nothing in this file would have caught either — and the reason was
+structural rather than a gap in effort: L0 had no component bodies, no
+`provide`/activation distinction and no typed parameters, so the
+obligation could not be **stated**, let alone proved. It was carried as
+the `UNPROVED, unstatable` row rather than as a `sorry` on a statement
+that does not typecheck.
 
-That obligation cannot be *stated* against the current L0, let alone
-proved: L0 has no component bodies, no `provide`/activation distinction,
-and no typed parameters — the exact structure both bugs live in. It is
-therefore carried as the **UNPROVED, unstatable** row in the table above
-rather than as a `sorry` on a statement that does not typecheck, and it
-is why `attest.py:117-118`'s `G1..G9` claim is only partly backed for G9:
-the flow *rule* is proved, the *coverage* of the walk is not. Closing it
-needs L0 to grow component bodies with the provide/activation
-distinction and typed parameters — item 418's ordered exit puts G9 at
-step 9, after an operational semantics exists, and this is exactly why.
+**Issue #2108 removed the structural obstacle rather than restating the
+row.** L0 grew the syntax to express a body — `RevL.Syntax.Body` holding
+`Item`s, `Item.provide` holding `Provide` blocks, `Method` holding typed
+`Param`s, and `Body.scopes` projecting the three things the walk must
+agree on (label, statement count, seeded parameters) **together**, so the
+projections cannot drift apart — and `RevL.Typing` admits it. On top of
+that, `RevL.Theorems.G9Coverage` states the coverage obligation:
+`RevL.G9Coverage.coversBodyB` says the walk the body induces covers the
+body's own scopes, and `RevL.G9Coverage.coversB_iff` unfolds it into the
+three projections.
+
+Each conjunct is one of the bugs that actually occurred, which is the test
+of whether a coverage theorem is worth having:
+
+* **the label** —
+  `RevL.G9Coverage.coversB_refuses_a_scope_the_body_does_not_have`: a
+  walk cannot satisfy the row by being a prefix of the body, so a scope
+  the walk never enters is visible;
+* **the statement count** —
+  `RevL.G9Coverage.coversB_refuses_a_shortened_walk` and
+  `RevL.G9Coverage.coversB_refuses_a_walk_that_drops_the_activation_scope`:
+  entering a scope but not visiting every statement in it flips the
+  verdict, which is precisely the activation-body bug;
+* **the origin-carrying parameters** —
+  `RevL.G9Coverage.coversB_refuses_a_walk_that_strips_a_secret_param` and
+  `RevL.G9Coverage.coversB_refuses_a_walk_that_seeds_a_trusted_param`: the
+  `Secret[T]`-strip bug, and its converse, so the filter
+  (`RevL.Syntax.Scope.origins`, i.e. `RevL.Syntax.Qual.seedsOrigin`) is
+  tight in both directions rather than merely non-empty.
+
+`RevL.G9Coverage.g9Coverage_not_vacuous` is the witness the issue asks
+for: the body's own walk is **admitted** and four distinct shortenings of
+it are **refused**, so the row is mutation-sensitive in every direction it
+names, and a `coversBodyB` that returned a constant fails five theorems.
+The witness body is a real one —
+`RevL.G9Coverage.witnessBody_is_admitted` proves it typechecks — so the L0
+growth is not an empty grammar.
+
+**What the theorem does not reach, named rather than smuggled.** The
+statement is over the scopes a component's **own body** induces. It is not
+a claim about the interprocedural fixed point (`_Signature`,
+`_infer_signatures`) that discovers *which* paths exist in the first
+place: a path the walk never learns of is outside the theorem's reach, and
+so is a component whose body the exporter never reconstructs. The oracle
+side is what keeps that honest — `RevLOracle.gcRowB` decides
+`RevL.G9Coverage.coversB` against the walk the harness **observes** on the
+corpus (the `GB`/`GP`/`GW` rows), so the formal side and the shipped
+checker can disagree, and do so loudly. `diff_corpus.py` files a
+disagreement under the fatal `missed-G9-coverage`, and — separately, so
+that an instrument failure can never be misread as a coverage regression —
+a run whose recorder observed **no** scope for a component the parse side
+says has one files under the distinct fatal
+`missed-G9-coverage-observation`. Both buckets were shown reachable and
+disjoint by adversarial probes. Silencing the recorder puts all 15 files in
+the observation bucket. Dropping only the activation scope touches 5 files,
+and they split: 1 (`examples/app/notes.rvl`, whose three components each
+keep a provide scope) files under the genuine coverage `fail`, while the
+other 4 file under observation — those are single-component fixtures whose
+*only* scope is the activation, so shortening the walk leaves the recorder
+with no scope at all for a component the parse side says has one, which is
+indistinguishable from its own blindness. That is the conservative reading
+by design: both buckets are fatal, so the run fails either way, but the
+harness only claims a coverage *disagreement* where it has a walk to
+disagree with. The theorem itself is sharper than the harness — `coversB`
+compares lengths, so an empty walk against a one-scope body is already
+`false` in `RevL.G9Coverage`.
+
+**A naming trap, corrected here.** The roadmap marker and this file used
+to disagree about who owns this work: `docs/v2.0-roadmap.md` marked item
+418 as `LANDED` with "all nine exit steps", while step 9's text ("after an
+operational semantics exists") is this work's **precondition**, not this
+work — and this row stayed `UNPROVED`. Issue #2108 resolved that by
+correcting the marker and naming the residue, rather than by stretching
+the theorem to fit the marker. The theorem was not widened: the
+interprocedural fixed point is still outside it, and still named.
 
 Also out of scope, documented rather than smuggled as axioms: the runtime
 tag (Slice B, item 243) — nothing here claims a runtime property; the
-interprocedural fixed point (`_Signature`, `_infer_signatures`) that
-discovers *which* paths exist, the model proving what follows once a path
-is exhibited; and that the checker labels the right positions as sinks,
-which is extraction, not theorem. The origin half of that labelling **is**
-proved: `taint_surface_within_declared_context` composes with G6 to show
-every origin a statement can mint is one its declared context already
-declares.
+model proving what follows once a path is exhibited; and that the checker
+labels the right positions as sinks, which is extraction, not theorem. The
+origin half of that labelling **is** proved:
+`taint_surface_within_declared_context` composes with G6 to show every
+origin a statement can mint is one its declared context already declares.
 
 ### What the differential-oracle `TAINT` row does and does not add
 
 Issue #1811 group 2 bound this development to the differential oracle — as
 **route B**, the sanctioned fallback, and the distinction is the point.
 `RevL.G9Flow` adds no rule: `Flow`, `Admits`, `Sink` and the label algebra
-are reused, and `g9RowB_iff` pins the oracle's decider to `Admits`. What
-changed is that the four rejection documents the rule exists for
-(`g9_closure_capture_launders_taint.rvl`,
+are reused, and `RevL.G9Flow.g9RowB_iff` pins the oracle's decider to
+`Admits`. What changed is that the four rejection documents the rule exists
+for (`g9_closure_capture_launders_taint.rvl`,
 `g9_service_return_launders_taint.rvl`,
 `g9_spawn_config_launders_taint.rvl`,
 `gsecret_service_return_discloses.rvl`) now land in `agree-G9` instead of
@@ -707,10 +799,79 @@ rather than green.
 It is still **the rule on the corpus, not the coverage of the walk**: the
 row's premises are the checker's own refusal, so it cannot distinguish "the
 rule holds at the sink the checker reached" from "the checker never reached
-the sink". The open obligation above is untouched, and `reported_walk_reaches_the_reported_label`
-states exactly the positive half — the reported label is reachable from the
-reported step count, at every count — and no more. Route A (item 418,
-step 9) is what would close it, and nothing here substitutes for it.
+the sink". `RevL.G9Flow.reported_walk_reaches_the_reported_label` states
+exactly the positive half — the reported label is reachable from the
+reported step count, at every count — and no more. The coverage half is a
+**different row** (the `GC` row below, issue #2108) resting on a different
+theorem (`RevL.G9Coverage.coversBodyB`); this `TAINT` row is unchanged by
+that and still substitutes for nothing.
+
+### What the differential-oracle `GC` row does and does not add
+
+The `GC` row is the coverage half, and it is the row issue #2108 asks for:
+one row per **component the checker's walk actually visited**, decided by
+`RevLOracle.gcRowB` — `RevL.G9Coverage.coversB` — against the walk the
+harness **observes**. It is not a second reading of the refusal: the
+exporter wraps `revl.taint._walk_component_methods` and records, for each
+scope the checker's own `_FlowChecker` is handed, the label it was given,
+the number of statements it was handed and the origins it seeded. Those
+three columns are the `GW` rows; the parse side derives the body's own
+scopes from the source (the `GB`/`GP` rows). The verdict is `ok` exactly
+when the two agree on all three, which is what makes the row able to
+disagree with the theorem rather than merely echo it.
+
+The exporter **pins private seams** and hard-fails rather than adapting if
+any of them moves — a silently-adapted exporter would report agreement it
+never measured:
+
+* `revl.taint._walk_component_methods` as the entry point. The checker's
+  taint walk is *not* observable at `revl.taint.check_taint` (the lowering
+  binds `check_taint` into its own namespace at import), and a recorder on
+  `_FlowChecker` alone would also capture `_infer_scope_env`'s internal
+  checkers — 548 spurious scopes on today's corpus. Wrapping the walk
+  itself is what makes "the walk" the unit of observation;
+* `revl.taint._FlowChecker.run`'s `(body, env)` call signature and its
+  `enforce` attribute. Only a call with `enforce` true is a walk step, and
+  only the **outermost** call per label counts — `run` recurses into nested
+  bodies under the *same* `endorse_label`, so the recorder tracks depth and
+  records at depth zero;
+* the `endorse_label` **spelling**: `"<C> activation"` for the activation
+  body and `"<C>.<method>"` for each provide method. The parse side names
+  the same scopes `<provide key>.<method>`, so the exporter translates **by
+  name** rather than by position; an unexpected label is a hard failure;
+* `revl.taint._seed_param_env`'s seeding rule and **declaration order**:
+  only the parameter indices the model declares an origin for are seeded,
+  and `Scope.origins` reads them in the order they were declared. The
+  `GP` rows carry the *effective* seeding qualifiers for this reason — a
+  parameter declared plain can still be seeded `untrusted` when the route
+  that binds it says so, and the row has to say what the checker did, not
+  what the declaration looks like.
+
+**Four observation states, and two fatal buckets.** A file is `active`
+(the walk ran and the recorder saw scopes), `inactive` (the walk ran and
+the component genuinely has no scopes), `refused` (the checker refused the
+file before any walk) or — the case that must never be confused with a
+coverage regression — **unobserved**: the parse side says a component has
+scopes and the recorder captured none. A genuine disagreement files under
+the fatal `missed-G9-coverage`; an unobserved walk files under the distinct
+fatal `missed-G9-coverage-observation`, and `checker_alignment` tests the
+observation bucket **first**, so a blind spot can never be filed as a
+coverage failure. The two were shown reachable and disjoint by adversarial
+probes: silencing the recorder puts all 15 files in the observation bucket,
+while dropping only the activation scope touches 5 files and splits them —
+1 (`examples/app/notes.rvl`) under a genuine coverage `fail`, the other 4
+under observation, because those four are single-component fixtures whose
+only scope is the activation, so the shortened walk leaves the recorder no
+scope at all to compare. On today's corpus: 15 files active over 21
+components, 7 with an activation scope and 17 with a provide scope, 0
+disagreements.
+
+What this row does **not** claim: that the checker's walk is *complete*
+across components. It decides coverage for the components whose bodies the
+exporter reconstructs from the parse — a component it never reconstructs
+is outside the row, exactly as it is outside
+`RevL.G9Coverage.coversBodyB`, and the interprocedural fixed point that
+decides *which* paths exist is outside both.
 
 ## G-RETAIN — retained data at a persistence sink (`RevL.Theorems.GRetain`)
 
@@ -763,8 +924,9 @@ checker's walk complete, and it says nothing about whether the checker
 visits every path that could carry a retained value to a durable sink. The
 open obligation G9 carries is inherited unchanged: the row cannot
 distinguish "the rule holds at the sink the checker reached" from "the
-checker never reached the sink". Route A (item 418, step 9) is what would
-close it, and nothing here substitutes for it.
+checker never reached the sink". That coverage is **still open for this
+row**: the `GC` row added by issue #2108 decides the *taint* walk's
+coverage, not the retention walk's, so nothing here substitutes for it.
 
 One further limit, stated rather than hidden: the exporter reads the row's
 columns out of the refusal's **prose**, because the `G-RETAIN` refusal
@@ -859,9 +1021,12 @@ NOT coverage of the checker's walk.** The four documents are all
 refusals, so the row's non-vacuity is a mutation-sensitivity ratchet, not
 an admitted/refused pair: it cannot distinguish "the rule holds at the
 bracket the checker reached" from "the checker never reached the bracket".
-Roadmap item 418 step 9 (route A) is deliberately **unclaimed** here, in
-the module docstring, in the row's own printed coverage line, and in this
-section. Nothing here substitutes for it.
+Route A — growing L0 so the checker's coverage is itself proved — is
+**not** item 418 step 9 (that step's "after an operational semantics
+exists" is route A's *precondition*). It landed for the **taint** walk in
+issue #2108, and it is deliberately **unclaimed** for this row's bracket
+walk here, in the module docstring, in the row's own printed coverage
+line, and in this section. Nothing here substitutes for it.
 
 Two further limits, stated rather than hidden. The exporter recognises only
 the three canonical refusal sentences; a `G4`/`inverse` refusal in another
@@ -1334,7 +1499,9 @@ Verdicts:
   scope: the row's premises ARE the checker's own refusal, so it cannot tell
   "the rule holds here" from "the checker looked here and found nothing".
   Route A of the issue — growing the L0 bodies so the checker's *coverage* is
-  itself proved — is untouched, and `RevL.G9`'s coverage row stays UNPROVED.
+  itself proved — landed in issue #2108 (`RevL.G9Coverage.coversBodyB`), so
+  `RevL.G9`'s coverage row is no longer UNPROVED; but **this** row still does
+  not carry it, and the `GC` row is what does.
 
   What the exporter reads out of the refusal, and from where:
 
@@ -1377,8 +1544,9 @@ Verdicts:
   COMPARED. **This row is the rule on the corpus, NOT the coverage of the
   checker's walk**, exactly as the `TAINT` row is: its premises ARE the
   checker's own refusal, so it cannot tell "the rule holds at this sink" from
-  "the checker never reached the sink". Roadmap item 418 step 9 — proving
-  the checker's coverage — is untouched and out of this row's reach.
+  "the checker never reached the sink". The coverage of the *retention* walk
+  is still unproved and out of this row's reach; the `GC` row that issue
+  #2108 adds covers the **taint** walk, not this one.
 
   **The `now` fact, and how the harness pins it.** The rule's verdict depends
   on the wall clock, and the refusal carries the instant it used. The
@@ -1625,7 +1793,14 @@ is the list of unbuilt work. `out-of-scope` is informational too and is
 not a hole: a type-checker refusal (T1, T2, T3) or name resolution of
 declarations and of the lifecycle test DSL, routed by an explicit rule
 (`out_of_scope`), so it grows with corpus work that never touched this
-layer.
+layer. The G9 coverage axis (issue #2108) is not a bucket either: it is
+a SECOND reading of a file the chain has already bucketed — whether the
+checker's walk of its bodies is complete — so the gate prints its
+agreeing count on its own line, and its two disagreements are the FATAL
+`missed-G9-coverage` and `missed-G9-coverage-observation` rows below.
+Recording the agreement as a bucket would give one file two of them,
+which is what the one-bucket-per-file maps the fatal list, the ratchets
+and the census total are built on.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1661,6 +1836,8 @@ layer.
 | `missed-G5` | 0 | **FATAL** |
 | `missed-G6` | 0 | **FATAL** |
 | `missed-G9` | 0 | **FATAL** |
+| `missed-G9-coverage` | 0 | **FATAL** |
+| `missed-G9-coverage-observation` | 0 | **FATAL** |
 | `missed-intercept` | 0 | **FATAL** |
 | `missed-prelude` | 0 | **FATAL** |
 | `out-of-fragment` | printed by the gate | informational |
@@ -2066,13 +2243,15 @@ carry non-vacuity evidence". So every theorem registered in
 `CheckAxioms.lean` now has a row in `scripts/nonvacuity.tsv` naming the
 evidence, in one of four kinds:
 
-- **instance** (112 rows): the hypotheses are jointly satisfiable, and the
-  named witness theorems exhibit a concrete instance satisfying them.
-- **necessity** (10 rows): the theorem refuses, so joint satisfiability is
+- **instance** (188 rows): the hypotheses are jointly satisfiable, and the
+  named witness theorems exhibit a concrete instance satisfying them. The
+  sixteen `RevL.G9Coverage.*` rows added by issue #2108 are of this kind or
+  the next.
+- **necessity** (29 rows): the theorem refuses, so joint satisfiability is
   precisely what it denies. The witnesses show each hypothesis satisfiable
   on its own and the refusal not universal. `G3.linkOK_no_cycles` and
   `R4.abort_leaves_no_residue` are the shape.
-- **concrete** (73 rows): the theorem is itself a computation on concrete
+- **concrete** (123 rows): the theorem is itself a computation on concrete
   data, so it has no hypotheses to satisfy. The gate accepts this label
   **only** when some other row cites the theorem as its witness, so it
   cannot be used to opt out.

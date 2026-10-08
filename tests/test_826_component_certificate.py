@@ -22,8 +22,10 @@ These tests pin the definition of done, in the order the claim is made:
     is not the module agreeing with itself;
   * the boundaries travel with the coverage: a caveat for every row that is not
     proved, a caveat naming the qualification of every proved row that is
-    qualified, and the G9 admission that its coverage is unproved and
-    unstatable;
+    qualified, and the admission of an obligation that cannot be stated at all —
+    G9 was that row until issue #2108 closed its coverage, so the machinery is
+    exercised by re-injecting the section into a copy of the ledger rather than
+    by leaving the row where it was;
   * sign and verify round-trip through the `revl` console script, and the
     verifier re-derives its evidence instead of reading the statuses out of the
     document it is checking;
@@ -307,19 +309,52 @@ def test_a_partial_row_carries_its_gap_and_a_caveat(tmp_path):
 
 
 def test_the_unstatable_obligation_is_admitted_rather_than_hidden(tmp_path):
-    """G9 is the one row whose obligation cannot even be stated. Its coverage is
-    not merely unproved, and a certificate that flattened that to `unproved`
-    would be claiming the document says less than it does."""
+    """G9 used to be the one row whose obligation could not even be stated:
+    coverage of the checker's walk was `UNPROVED, unstatable` because L0 had no
+    component bodies. Issue #2108 grew L0 until a body is expressible and stated
+    the coverage as `RevL.G9Coverage.coversBodyB`, so the real ledger admits no
+    unstatable obligation for G9 any more — it is `proved`, and a certificate
+    that still reported `partial` would be reading a constant in `src/revl`
+    rather than the document.
+
+    The machinery is the half that must not rot along with the row. The
+    admission is optional by design (`docs/design/474-component-certificates.md`
+    says so), so the guard is exercised by putting the section back into a COPY
+    of the ledger: the obligation must return as a caveat and as a re-derivable
+    requirement, never as a silent drop."""
     cert = _cert(tmp_path)
     row = _row(cert, "G9")
+    rows = _map_rows()
 
-    assert row["status"] == C.PARTIAL
-    assert "unstatable" in row["status_cell"]
-    caveats = [caveat for caveat in cert["caveats"] if caveat.startswith("G9: ")]
+    assert row["status"] == C.PROVED, row["status_cell"]
+    assert "unstatable" not in row["status_cell"], row["status_cell"]
+    assert "coverage is stated over an L0 component body since issue #2108" in (
+        row["status_cell"]), row["status_cell"]
+    assert row["status_cell"] == rows["G9"]["status"], row["status_cell"]
+    assert not any(requirement["kind"] == C.REQ_UNSTATABLE
+                   for requirement in cert["requirements"]), (
+        "the ledger admits no unstatable obligation, so a certificate over it "
+        "must not re-derive one")
+
+    formal = _formal_copy(tmp_path)
+    path = formal / "STATUS.md"
+    text = path.read_text(encoding="utf-8")
+    assert C.UNSTATABLE_HEADING not in text, (
+        "the real ledger admits the obligation again; this test is about a "
+        "document that does not")
+    path.write_text(
+        text.rstrip("\n") + "\n\n### " + C.UNSTATABLE_HEADING + "\n\n"
+        "Coverage of the walk is **UNPROVED, unstatable**: L0 has no component\n"
+        "bodies.\n",
+        encoding="utf-8")
+    readmitted = _cert(tmp_path, formal=formal)
+
+    caveats = [caveat for caveat in readmitted["caveats"]
+               if caveat.startswith("G9: ")]
     assert caveats, "the certificate does not carry G9's open obligation"
     assert any("unstatable" in caveat for caveat in caveats), caveats
     assert any(requirement["kind"] == C.REQ_UNSTATABLE
-               for requirement in cert["requirements"]), (
+               for requirement in readmitted["requirements"]), (
         "the unstatable obligation is carried as a caveat but not as a "
         "requirement, so nothing re-derives it")
 
@@ -383,16 +418,19 @@ def test_the_conditional_guarantees_of_the_catalogue_are_carried_too(tmp_path):
 
 def test_the_secret_guarantees_inherit_g9s_gap_rather_than_a_green_check(tmp_path):
     """`G-SECRET` and `G-SECRET-FLOW` are the case worth spelling out: the rule
-    is proved and the coverage is G9's, which is the row the ledger calls
-    unproved and unstatable. Both codes are `partial`, and the reason that is so
-    travels with them."""
+    is proved and the coverage is G9's. Both codes are `partial`, and the reason
+    that is so travels with them. Since issue #2108 the reason is no longer an
+    open coverage gap — that gap is closed the same way G9's is — so what the
+    caveat has to carry is the closed gap and the residue that keeps the row
+    conditional."""
     cert = _cert(tmp_path)
 
     for code in ("G-SECRET", "G-SECRET-FLOW"):
         row = _named_row(cert, code)
         assert row["status"] == C.PARTIAL, (code, row["status_cell"])
         assert "inside the G9 development" in row["status_cell"], row["status_cell"]
-        assert "inherit G9's coverage gap" in row["gap"], row["gap"]
+        assert "closed the same way G9's is" in row["gap"], row["gap"]
+        assert "#2108" in row["gap"], row["gap"]
         caveats = [caveat for caveat in cert["caveats"]
                    if caveat.startswith(f"{code}: ")]
         assert caveats, f"{code} is partial and the certificate carries no caveat"
@@ -450,21 +488,26 @@ def test_a_code_the_ledger_says_nothing_about_is_named_rather_than_dropped(tmp_p
     [
         ("G1", "| **G1** declared access | partial |",
          "| **G1** declared access | full |", C.PARTIAL, C.PROVED),
-        ("G9", "rule proved; **coverage unproved and unstatable**",
-         "full for every path", C.PARTIAL, C.PROVED),
+        ("G9", "| full for the rule at the sink and the coverage of the walk;",
+         "| rule proved; **coverage unproved and unstatable**;",
+         C.PROVED, C.PARTIAL),
         ("G-SECRET", "| partial, inside the G9 development |",
          "| full over the lattice |", C.PARTIAL, C.PROVED),
     ],
-    ids=["a partial row promoted", "the unproved row promoted",
+    ids=["a partial row promoted", "a proved row demoted to a mixed cell",
          "a conditional row promoted"])
 def test_a_ledger_edit_changes_the_certificate(tmp_path, code, old, new, was, now):
     """The binding that keeps the certificate from drifting away from the
     proofs. The status is not a constant in `src/revl`: rewrite the ledger row
     and the certificate reports the rewritten row, for the numbered rules, for
-    the one row the ledger calls unproved, and for a conditional guarantee
-    alike. A build that kept saying `partial` after the document said `full`
-    would be evidence that the coverage is written in the code rather than read
-    out of the proofs, which is the failure this item exists to prevent.
+    the mixed cell that a proved rule beside an unproved obligation reads as,
+    and for a conditional guarantee alike. A build that kept saying `partial`
+    after the document said `full` would be evidence that the coverage is
+    written in the code rather than read out of the proofs, which is the failure
+    this item exists to prevent — and the reverse direction is the same binding
+    read backwards, so it is exercised here too: G9 is `proved` since issue
+    #2108, and demoting its cell back to the mixed form has to move the
+    certificate back to `partial`.
 
     The caveat is the other half: a row that stops being qualified stops
     carrying a reason, so the caveat list follows the document too."""

@@ -437,6 +437,37 @@ import RevL
 #print axioms RevL.G9Flow.corpus_rows_decided
 #print axioms RevL.G9Flow.escape_moves_the_label
 #print axioms RevL.G9Flow.g9_not_vacuous
+-- Issue #2108: G9 COVERAGE of the checker's own walk. The L0 `Body` grew a
+-- provide/activation distinction and typed parameters so that "the checker
+-- visits every statement of a real body" became a STATEMENT rather than a
+-- `sorry` on a false one; see RevL/Theorems/G9Coverage.lean. The walk the
+-- theorem is stated over is the one the harness OBSERVES
+-- (`RevLOracle.gcRowB` over the exported `GB`/`GP`/`GW` rows), so the
+-- differential oracle can disagree with it.
+--
+-- The four DECIDERS (`Walked.matches`, `coversB`, `coversBodyB`, `walkOf`)
+-- are deliberately absent from this list, as every other `def` in the layer
+-- is: a definition is not a claim, so a non-vacuity row for one would be a
+-- name that cannot fail. What is registered is the theorem that PINS each
+-- decider — `coversB_iff`, `coversBodyB_iff`, `walkOf_is_the_walk` — and
+-- `#print axioms` reads those transitively through the definitions they
+-- unfold, so a `sorry` hidden in a decider still surfaces here.
+#print axioms RevL.G9Coverage.coversB_iff
+#print axioms RevL.G9Coverage.coversBodyB_iff
+#print axioms RevL.G9Coverage.coversB_self
+#print axioms RevL.G9Coverage.walk_covers
+#print axioms RevL.G9Coverage.reachIn_callSvc
+#print axioms RevL.G9Coverage.scope_origins_exclude_plain_and_trusted
+#print axioms RevL.G9Coverage.witnessBody_scopes
+#print axioms RevL.G9Coverage.witnessBody_is_admitted
+#print axioms RevL.G9Coverage.walkOf_is_the_walk
+#print axioms RevL.G9Coverage.coversB_admits_the_full_walk
+#print axioms RevL.G9Coverage.coversB_refuses_a_walk_that_drops_the_activation_scope
+#print axioms RevL.G9Coverage.coversB_refuses_a_shortened_walk
+#print axioms RevL.G9Coverage.coversB_refuses_a_walk_that_strips_a_secret_param
+#print axioms RevL.G9Coverage.coversB_refuses_a_walk_that_seeds_a_trusted_param
+#print axioms RevL.G9Coverage.coversB_refuses_a_scope_the_body_does_not_have
+#print axioms RevL.G9Coverage.g9Coverage_not_vacuous
 -- Issue #1811 group 3: G-RETAIN. The retention rule is decided by the oracle's
 -- `RETAIN` row on the sink, scope and TWO INSTANTS the CHECKER reports — the
 -- harness pins the instant (`REVL_RETENTION_AS_OF`) so the verdict is
