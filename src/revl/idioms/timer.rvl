@@ -1,10 +1,10 @@
 // idiom: timer
 // summary: run a body on a schedule while the component is active
 // rule: G4: a timer is a revertible schedule: unloading the component cancels it
-// rule: a firing crosses the boundary only through the component's declared requirements
+// rule: a firing crosses the boundary only through the component's declared requirements, each naming the capability it reaches
 // fill: every 30s { emit log.write("tick") }
 
-service Log { emission fn write(msg: Str) }
+service Log { emission[log] fn write(msg: Str) }
 
 component Heartbeat requires log: Log {
   every 30s { emit log.write("tick") }

@@ -185,11 +185,18 @@ fourth corner of that fixture family: one key, two services, no declaration.
   `host` row and binds an extern named from the row's label, so two rows are two
   boundaries behind one service name. The element conflates them, exactly as the
   wiring key did and exactly as `*` would. Naming them apart means changing what
-  the synthesizer spells, which is its own item.
+  the synthesizer spells, which is its own item. **Taken** by the follow-up
+  item: `revl.synthesize` now carries a `caps` column beside each `HOST_SHIMS`
+  entry, `_host_source` spells `emission[<cap>]` on each synthesized verb, and
+  `check_hostable` refuses a `host` declaration whose shim reaches a boundary
+  the row does not name. The token is read from the shim, not from the row
+  label, so the two rows are no longer conflated — they were already distinct
+  boundaries, and now they are named as such.
 * **The kernel-boundary arm is still open.** Issue #1265's exit asks for one
   more step after this one, and it is still not taken. The cost this note
   quoted for it was wrong in both directions, which is the subject of the
-  section below.
+  section below. **Taken** by the follow-up item — see §"The kernel arm,
+  taken" below for what landed and what deliberately did not.
 * **The G4 upper bound on a bare method is still absent.** A provider of a
   service whose method declares no token may emit through anything, and nothing
   in this note changes that: `_method_emissions`'s subset check runs only when
@@ -298,6 +305,124 @@ reach to the fold, so the undeclared-ness is not load-bearing there. That would
 admit `examples/user_cache.rvl`, which provides its own `Database`. It is a new
 rule, it has not been checked against either predicate, and it is named here as
 a starting point for that item rather than as a conclusion.
+
+### The kernel arm, taken
+
+Issue #2105 took the exit list above. What landed, in the order the list is
+written:
+
+* **The composition half, on the declined files.** `examples/user_cache.rvl`,
+  `examples/migrator.rvl`, `examples/async_timer.rvl` and
+  `examples/heartbeat.rvl` name the boundary each shipped reach actually
+  crosses, and the hand-maintained reference IRs (`examples/user_cache.ir.json`,
+  `examples/migrator.ir.json`) gain the corresponding `capabilities` entries
+  additively, in key order after `emission`. The claim that the reference IR
+  blocked this turned out to be false: the backends ignore the key, and the
+  byte-for-byte pin is satisfied by inserting it rather than by regenerating.
+  The reference IR has three copies — `examples/user_cache.ir.json`,
+  `backends/python/tests/user_cache.ir.json` and the vendored
+  `backends/typescript/tests/fixtures/user_cache.ir.json`, which
+  `backends/typescript/tests/emitter.test.ts` pins byte-identical to the first
+  and which no tool writes (`tools/regen_goldens.py` only reads it), so it is a
+  manual copy and that assertion is its only guard. `stdlib/server.rvl`'s
+  synthesizer is the item recorded as its own in §Residuals above.
+* **The seed registry, which CI found and the design did not.** Declaring the
+  reach on `examples/user_cache.rvl` made four CI tests red on the first pushed
+  head: `registry/components/{pg,mysql,audited}_database/component.rvl` and the
+  `tests/test_search_as_admission.py` corpus still spelled `emission` bare, so
+  hot-swapping them against the example **widened** `[db]` to `any` and the §5
+  gate refused them — the arm working, on candidates that had been admitted by
+  accident. They now declare `emission[db]`, `registry/index.json` is
+  regenerated from them, and `tests/test_manifest.py::test_boundary_report`'s
+  pin moved from `{'db.execute': ['*']}` to `{'db.execute': ['db']}`. A fourth
+  component, `registry/components/user_cache`, is the example's own
+  `UserCache` and had the same staleness with no test covering it; it was found
+  by probing the swap by hand.
+* **The de-conflation.** The arm asks the DECLARATIONS, not the `svc:`
+  namespace: `lower._undeclared_elements(services)` is the set of services with
+  at least one `emission` method and no `capabilities`, computed where the
+  service table is, and passed to `kernel_boundary._undeclared` /
+  `offending` as a second argument. A `svc:` element alone still cannot decide
+  it — the two occasions `_held_capabilities_pairs` builds one are still one
+  token — which is what `test_the_namespace_alone_cannot_decide_the_residual`
+  pins, and it stays.
+* **Its own operator-facing announcement.** `CHANGELOG.md`, under 3.0.0.
+* **A measurement with `cordis` installed.** Taken: the arm's blast radius on
+  the cordis-guarded half is **7 reds across 2 files**
+  (`tests/test_334_propose_handle_binding.py`, `tests/test_gate_surface.py`),
+  not the 8 the note predicted and not the 9 the declarations-based count
+  predicted. All seven were composition-half reds in fixtures whose provider
+  body crosses a `witnessed` extern; each fixture now names the boundary its
+  body reaches, and the two modules are green. The third module the note named
+  (`tests/test_replay.py`) was not red at all.
+
+Re-measured after the change, at this head:
+
+Each row names the file set it counted, so a later reader can re-run it; the
+before side is `origin/main`'s tip at the time of the last re-measurement, the
+after side this branch's head.
+
+| surface | before | after |
+|---|---|---|
+| `docs/census-artifact/cases/stdlib/server.rvl.json` bucket | `agree-admit` | `agree-admit` |
+| bare `emission` on the declined surface — `examples/{user_cache,migrator,async_timer,heartbeat}.rvl`, `stdlib/server.rvl` | 11 | 0 |
+| bare `emission` on that surface plus the three idiom snippets (`src/revl/idioms/{component-setup,emission-method,timer}.rvl`) | 14 | 0 |
+| bare `emission` on the whole shipped surface (`src/ examples/ demo/ stdlib/`, `examples/rejections/` excluded) | 15 | 1 |
+| bare `emission` tree-wide (every `.rvl` the parser accepts) | 350 across 246 of 853 | 336 across 238 of 853 |
+| `emission` methods that DO declare | 234 | 248 |
+
+The one that remains is `examples/tenant_attenuation.rvl`'s `Worker.tenant`,
+which is §Residuals' fourth bullet and is declined there for the reason PR
+#1292 §2 declined it: two providers of one service reaching two boundaries, so
+the only service-level token is wider than either provider. Nothing requires
+`worker: Worker` in that file, so no undeclared element is produced for it and
+the arm does not fire on it; naming it is a separate item, not this one.
+
+The issue quotes 345 across 242 for the tree-wide number and 10 for the declined
+shipped surface, both at its own head. Neither is reproducible as a named
+subset today: the tree-wide difference is baseline drift between that head and
+this one (main has since landed #2149 and the two `str-*` idioms), and the
+declined surface re-measures to 11, not 10, on the four files #1292 declined
+plus `stdlib/server.rvl` — `examples/user_cache.rvl` alone carries two of them.
+The surface that decides the item is the declined one, and it is zero above.
+
+What the item deliberately did **not** take:
+
+* **The G4 upper bound on a bare method.** Still absent, unchanged by this
+  item, and still the separate question §Residuals records.
+* **Two providers of one service reaching two boundaries.** Still one name for
+  both, unchanged.
+* **The "scope the arm to a service the candidate does not provide" design.**
+  Still recorded unmeasured, still not adopted — `examples/user_cache.rvl`
+  provides its own `Database`, and the declarations-based predicate is what
+  makes it admissible without a second rule.
+
+### How this reconciled with #1938's declared dimensions
+
+The item landed on a `main` that had since taken issue #1938 (declared
+capability resource dimensions: `capability mail.send(account: discrete,
+folder: path)`), which rewrote both `src/revl/kernel_boundary.py` and
+`src/revl/lower.py`. The two properties are kept, not traded:
+
+* #1938 taught every fold that reads a **stored** capability spelling to use
+  `cap_order.parse_stored_cap` rather than `parse_cap`, so a declared dimension
+  is not mistaken for a ceiling. The arm's own element is unaffected and needs
+  no such call: `lower._undeclared_cap` builds a `Cap` **directly**
+  (`Cap("svc:" + service, ())`) because there is no stored spelling to read —
+  that is what "the declaration names no token" means. The one bridge the arm
+  does share, `_cap_keyed`, is #1938's and keeps its `parse_stored_cap`.
+* The two namespaces stay disjoint, which is what lets both hold at once. A
+  declared capability token is a dotted identifier, so a token carrying `:` is
+  unspellable in source; a declared **dimension** is a parenthesized argument,
+  so it never reaches the token's `:`-free part either. `_UNDECLARED_NS` cannot
+  collide with a dimensioned token, and a dimensioned token cannot be read as
+  an undeclared element.
+* The arm is decided against the **declarations** (`_undeclared_elements`),
+  which is a property of the service table; #1938's `_declarations` map is a
+  property of the capability declarations. Both are threaded from
+  `_check_and_lower` and neither reads the other, so an undeclared reach on a
+  service whose other methods declare dimensioned capabilities is refused for
+  the undeclared method and admitted for the declared ones.
 
 ### The two predicates, since the arm turns on them
 

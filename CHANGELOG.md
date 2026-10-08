@@ -55,6 +55,21 @@ release also folds in the full agent story and the standing correctness debt.
 - Crash recovery: the WAL is the gate's authority. Recovery replays inverses,
   re-prompts a class (c) crossing rather than re-firing it, and refuses to
   resume a policy-recorded snapshot into a policy-less session.
+- **An agent-authored source that wires a service whose `emission` names no
+  token is now refused — by `revl_load` and `revl_swap`, not only by
+  `revl_admit`.** A method that spells `emission` bare declares an effect and
+  declines to say what it reaches, so nothing in the composition states that it
+  stops short of the admission kernel, and the kernel-boundary fold can no
+  longer read it as provably disjoint from the kernel. This is the arm issue
+  #1265 sequenced behind the composition half (PR #1292) and issue #2105 took:
+  the refusal asks the declarations, not the token namespace, so a candidate
+  that composes only pure services is unaffected. The repair on the operator's
+  side is one word — write `emission[<token>]`, naming the boundary the body
+  crosses — and every shipped service already does: `stdlib/server.rvl`'s
+  per-row `Server` included, whose synthesized externs now carry the shim's own
+  boundary token rather than the row's label. First-party compiles are
+  unchanged; only the untrusted-author profile the agent verbs ride is
+  tightened.
 
 ### Placement and interop
 

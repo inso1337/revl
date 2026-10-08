@@ -11,7 +11,12 @@
 // clock is a coeffect the harness provides, so each firing is a deterministic
 // timeline step rather than a wall-clock race.
 
-service Log { emission fn write(msg: Str) }
+// `write` declares the boundary it reaches rather than spelling `emission`
+// bare: a bare reach is an undeclared one, and under the agent profile
+// (`revl_load`/`revl_swap`) an undeclared reach is not read as provably
+// disjoint from the kernel (issue #2105, docs/design/561-undeclared-emission-
+// boundary.md).
+service Log { emission[log] fn write(msg: Str) }
 
 component Heartbeat requires log: Log {
   // a periodic timer: fires every 30 seconds for as long as the component lives

@@ -146,10 +146,15 @@ composition Notes {
     assert ir["host"]["package"] == "@cordisjs/server"
 
     # the synthesized provider binds every Server method to a `@ts ref` of the
-    # shim — the reviewed host-reference door, not a globalThis reach.
+    # shim — the reviewed host-reference door, not a globalThis reach. The extern
+    # NAME is the row's label (the wiring) and its declared SCOPE is the shim's
+    # own boundary token for that export (issue #2105): the two are spelled
+    # differently because the row's label does not change which export of which
+    # module is reached, and the scope is what the fold reads.
     src = rt.sources[row.source]
     for verb in ("get", "post", "put", "patch", "delete", "head"):
-        assert (f'extern emission fn host_server_{verb}(path: Str) -> Unit '
+        assert (f'extern emission[host.server.{verb}] '
+                f'fn host_server_{verb}(path: Str) -> Unit '
                 f'= @ts ref {verb} from '
                 f'"../backends/typescript/revl_server_ts.ts"') in src
     # and it is ordinary, valid revl source (re-parses cleanly)
@@ -224,6 +229,60 @@ def test_shipped_server_service_is_hostable():
         "doc": "server.rvl", "line": 1})
     assert comp == "HostServerProvider"
     assert text.count("@ts ref") == 6 + 2  # 6 externs + 2 header mentions
+
+
+def test_the_boundary_token_does_not_depend_on_the_row_label():
+    """Issue #2105: a host row's extern NAME comes from the row's label, so it
+    differs row by row; the DECLARED SCOPE comes from the shim's export, so it
+    does not. That split is what lets `stdlib/server.rvl` declare one fixed token
+    per verb and be right for every composition — before it, the declaration
+    could only have named one label, which is why PR #1292 declined to give the
+    service tokens at all."""
+    prog = Parser(SERVER_RVL, "server.rvl").parse()
+    server = next(s for s in prog.services if s.name == "Server")
+    _, text = synthesize_provider(server, "host", {
+        "label": "edge", "key": "server", "realm": None,
+        "doc": "server.rvl", "line": 1})
+    # the wiring moved with the label ...
+    assert "fn host_edge_get(path: Str) -> Unit" in text
+    assert "host_server_get" not in text
+    # ... and the boundary did not
+    for verb in ("get", "post", "put", "patch", "delete", "head"):
+        assert f"extern emission[host.server.{verb}] fn host_edge_{verb}" in text
+
+
+def test_every_shipped_shim_enumerates_the_boundary_it_reaches():
+    """`HOST_SHIMS` is the authority `check_hostable` compares a declaration
+    against, so an entry that names no boundary would make that comparison
+    vacuous. Each one enumerates one token per export of the module it binds."""
+    for name, shim in HOST_SHIMS.items():
+        caps = shim.get("caps")
+        assert caps, f"host shim `{name}` enumerates no capability tokens"
+        assert set(caps.values()) == {
+            f"host.{name.lower()}.{verb}" for verb in caps}
+        assert all(token.startswith("host.") for token in caps.values())
+
+
+def test_a_host_declaration_must_name_the_shims_boundary():
+    """The two halves are held together rather than left to agree by hand: the
+    extern's declared scope is what the fold reads, so a declaration naming a
+    boundary the shim does not reach — or naming none, which is the bare
+    `emission` docs/design/561-undeclared-emission-boundary.md exists to close —
+    is refused at synthesis, before any fold sees it."""
+    for declared, why in (
+        ("emission", "none"),
+        ("emission[host.server.WRONG]", "`host.server.WRONG`"),
+        ("emission[host.server.get, db]", "`db`, `host.server.get`"),
+    ):
+        src = f"service Server {{ {declared} fn get(path: Str) -> Unit }}"
+        svc = Parser(src, "t.rvl").parse().services[0]
+        with pytest.raises(RevlError) as excinfo:
+            synthesize_provider(svc, "host", {
+                "label": "server", "key": "server", "realm": None,
+                "doc": "t.rvl", "line": 1})
+        assert "not hostable" in str(excinfo.value)
+        assert why in str(excinfo.value)
+        assert "host.server.get" in str(excinfo.value)
 
 
 def test_host_fact_is_absent_for_an_ordinary_composition(tmp_path):

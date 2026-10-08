@@ -163,6 +163,28 @@ _DECLARED = {
     "src/revl/truc/components/cli.rvl": [("Cli", "run", ("asm", "ship"))],
     "demo/components/services.rvl": [("Cache", "put", ("db",)),
                                     ("Database", "execute", ("db",))],
+    # issue #2105 took the residual these two files carried: both were the
+    # shipped surface still spelling `emission` bare, so the kernel arm had
+    # nothing to decide against them (docs/design/561, section Residuals).
+    "examples/user_cache.rvl": [("Cache", "put", ("db",)),
+                                ("Database", "execute", ("db",))],
+    "examples/migrator.rvl": [("Database", "execute", ("db",))],
+    # The other two shipped examples the arm reached: both were admitted under
+    # the agent profile before it and refused after, which is the surface the
+    # note's composition half exists to keep loading.
+    "examples/async_timer.rvl": [("Counter", "tick", ("counter",))],
+    "examples/heartbeat.rvl": [("Log", "write", ("log",))],
+    # The host row is the other shape of the same residual: the boundary is the
+    # shim's export, not the row's label, so the token is fixed here even though
+    # the extern it bounds is named per row (see synthesize.HOST_SHIMS).
+    "stdlib/server.rvl": [
+        ("Server", "get", ("host.server.get",)),
+        ("Server", "post", ("host.server.post",)),
+        ("Server", "put", ("host.server.put",)),
+        ("Server", "patch", ("host.server.patch",)),
+        ("Server", "delete", ("host.server.delete",)),
+        ("Server", "head", ("host.server.head",)),
+    ],
 }
 
 

@@ -2,10 +2,12 @@
 // evolution: a consumer type-checked against the smaller Database still
 // type-checks against this superset, so §5 admits it — but it is not an exact
 // match, so it ranks below the exact providers (docs/registry.md §2.2).
+// `execute` declares the same `[db]` scope as the exact providers, so `ping()`
+// is the only thing that distinguishes it from them.
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission fn execute(sql: Str) -> Int
+  emission[db] fn execute(sql: Str) -> Int
   fn ping() -> Bool
 }
 
