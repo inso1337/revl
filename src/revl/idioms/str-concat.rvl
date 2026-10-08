@@ -1,0 +1,11 @@
+// idiom: str-concat
+// summary: join two strings with `+`, or `.concat` as the method form
+// rule: T1: `+` joins two `Str`; an `Int`/`Float` operand is refused ("operand of string `+` expects `Str`, got `Int`"), so convert it first with `.to_str()` or interpolate it (idiom `str-format`)
+// rule: T2: `a.concat(b)` is the same join written as a method, and chains: `a.concat(b).concat(c)`; there is no `++` operator in revl
+// fill: "hi " + name
+
+fn greet(name: Str) -> Str = "hi " + name
+
+fn tag(name: Str) -> Str = "<".concat(name).concat(">")
+
+fn count(n: Int) -> Str = "n=" + n.to_str()

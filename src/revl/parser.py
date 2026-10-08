@@ -31,7 +31,7 @@ import re
 import sys
 
 from . import ui_family
-from .errors import RevlError
+from .errors import RevlError, foreign_increment_refusal
 from .lexer import Token, lex
 
 
@@ -8868,6 +8868,32 @@ class Parser:
     def _bin(self, operand, ops):
         left = operand()
         while True:
+            if self.at("+") and self.peek_ahead(1).kind == "+":
+                # `a ++ b` (issue #2150). `++` lexes as two adjacent `+`
+                # tokens, and revl has no unary `+`, so this is an author
+                # asking for an operator revl does not have. It is still
+                # refused, but not before the right operand is read and the
+                # node is built, so the refusal can see BOTH operand types and
+                # name the concatenation spelling when one is `Str`
+                # (typecheck._binop_type) instead of answering every author
+                # with the numeric-increment text. The node never survives the
+                # checker. Read before the operator scan because `++` is
+                # refused wherever it appears, including under an operator this
+                # level does not have (`a * b ++ c`).
+                second = self.peek_ahead(1)
+                mark = self.pos + 1
+                self.next()
+                self.next()
+                try:
+                    right = operand()
+                except RevlError:
+                    # no right operand at all — the postfix `i++` shape, where
+                    # nothing is known about the operands: today's redirect.
+                    self.pos = mark
+                    self._reject_incr_decr(second)
+                    raise
+                left = ExprBin("++", left, right, second.line)
+                continue
             op = None
             for candidate in ops:
                 if self.at(candidate):
@@ -9489,17 +9515,11 @@ class Parser:
             sign = "-"
         if sign is None:
             return
-        word = "increment" if sign == "+" else "decrement"
         # postfix `--` errors on the token PAST the operator pair; point the
         # diagnostic back at the operator itself.
         line = toks[i - 1].line if sign == "-" else tok.line
-        raise self.err(
-            line,
-            f"revl has no `{sign}{sign}` {word} operator — expressions are pure "
-            "(syntax-2.0 §3.3)",
-            hint=f"mutate a `var` with `{sign}= 1` (write `i {sign}= 1`), inside "
-                 "a `while`/`for` loop body",
-        )
+        raise foreign_increment_refusal(
+            self.filename, line, f"{sign}{sign}")
 
     def _arrow_body(self):
         """The body of an arrow `=> …`. A closure body is a single pure

@@ -22,7 +22,8 @@ the example, so it carries the example's own free names (`store.drop()` names
 **`exampleExpression`** (`served`), never under `fill`. `type` is the type a
 hole there has. Every construct a fillSpec names
 (`mcp.fillspec.CONSTRUCTS`) has an idiom with a `type`; a few more (`spawn`,
-`subscribe`, `match`, `timer`, `try`) are served by name only and carry none. The files are revl source like any other, so
+`subscribe`, `match`, `timer`, `try`, `str-concat`, `str-format`) are served by
+name only and carry none. The files are revl source like any other, so
 the corpus sweeps compile and parse them with the rest of the tree, and
 tests/test_idioms_1701.py checks each one three ways:
 it compiles and admits; with its `fill` replaced by `hole[<type>]` the fillSpec

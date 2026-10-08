@@ -1,0 +1,9 @@
+// idiom: str-format
+// summary: interpolate any value into a string with a template
+// rule: T1: `` `text ${expr}` `` renders `expr` whatever its type, so no `+` and no `.to_str()` are needed
+// rule: T2: `"n=" + n` is refused: `+` joins `Str` to `Str` only, so a non-`Str` value goes in a template or through `.to_str()`
+// fill: `hi ${name}`
+
+fn greet(name: Str) -> Str = `hi ${name}`
+
+fn count(n: Int) -> Str = `${n} times`
