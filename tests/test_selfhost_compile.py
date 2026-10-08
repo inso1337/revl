@@ -510,14 +510,16 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # module loses its `Stream` import. The `Map`/`Pool`/`Job` host calls
         # in services_host.rvl go through the native chain byte-exact.
         "services_host_stream.rvl",
-        # item 391: the placement shapes selfhost/emit_py.rvl used to drop. The
-        # EMITTER half is byte-exact on the reference IR; the native IR producer
-        # drops three things the reference IR carries: the `routes` entry of a
-        # routed require (so no router, no `realm_label`, and the key back in
-        # the inject gate), every operation declared with a `commutative` or
-        # `idempotent` modifier (the Ledger service comes out empty), and the
-        # `undo_captures` pin on a method-body effect.
-        "../emit_py_placement.rvl",
+        # (issue #2086: `../emit_py_placement.rvl` left this list — the
+        # placement shapes `selfhost/emit_py.rvl` used to drop. The native IR
+        # producer used to drop three things the reference IR carries: the
+        # `routes` entry of a routed require (so no router, no `realm_label`,
+        # and the key back in the inject gate), every operation declared with a
+        # `commutative` or `idempotent` modifier (the Ledger service came out
+        # empty), and the `undo_captures` pin on a method-body effect. The
+        # producer now reads all three, plus the `let-effect` step's key order
+        # (`bind` after `acquire`/`undo`), so the document is byte-exact through
+        # the fully-native chain.)
         # item 391: another EMITTER-exact document the native IR producer
         # reproduces wrongly. emit_py_builtin_shadow.rvl: the reference frontend
         # escapes a parameter named `len_` to `len__` (and every read of it) and
@@ -642,7 +644,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # compile byte-exact through the fully-native chain.)
         # (realm placement metadata — isolate / intercept / routes — left this
         # list when lower.rvl grew the component-header prelude; the four ts
-        # realm documents now compile byte-exact through the native chain.)
+        # realm documents now compile byte-exact through the native chain. See
+        # the issue #2086 note on `../../../stdlib/router.rvl` below for the
+        # `routes` half, which the prelude did not cover.)
         # whole-program documents combining several of the above.
         # (`../../../examples/java_match.rvl` left this list with issue #1845:
         # its component's `Err(_)` arm binds `__`, the reference's `_safe_name`
@@ -666,9 +670,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # issue #106: the families selfhost/emit_ts.rvl learned in one slice.
         # The emitter half of each is byte-exact on the REFERENCE IR (asserted
         # above for every document); the native chain is not, because
-        # selfhost/lower.rvl does not produce the IR these documents need:
-        # a routed require's header (the whole component set drops),
-        "../../../stdlib/router.rvl",
+        # selfhost/lower.rvl does not produce the IR these documents need.
+        # (issue #2086: `../../../stdlib/router.rvl` — a routed require's header
+        # — left this list with the py entry above. The native producer now
+        # emits the component's `routes` entry, so the router, the `realm_label`
+        # and the inject-gate key all come back.)
         # (issue #2089: stdlib/fs.rvl left this list with the py entry above —
         # an extern's host `refs` used to drop, taking the thunks and their
         # imports with them. The one native `selfhost/lower.rvl` producer fix
@@ -690,8 +696,15 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # completed with the gap intact.
         "../emit_py_corpus/branches.rvl",
         # and the two documents written for this slice, which combine the above.
+        # (issue #2086: `ref_externs.rvl` left this list — a declaration whose
+        # ONLY body arms are HOST REFS (`= @ts ref sym from "path"`) used to fail
+        # the producer's `bcount == 0` exit gate, which dropped the whole
+        # `externs` section. The reference's `_lower_externs` has no body-count
+        # gate at all and the PARSER already refuses a declaration with no arm of
+        # either kind, so the gate now also accepts a ref-only declaration.)
+        # `routed_timers.rvl` stays: the routed component reproduces, but its
+        # `Tally.total()` is a statement-block match arm, which is issue #2131.
         "routed_timers.rvl",
-        "ref_externs.rvl",
         # Issue #1592: an extern that declares its own `compensate`. The
         # emitter half agrees byte for byte on the reference IR; lower.rvl
         # does not yet lower an extern's declared `compensate` slot.

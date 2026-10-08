@@ -20262,12 +20262,19 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   var scoped = false
   var isAsync = false
   var isIdempotent = false
+  // issue #2086: `commutative` (Def. 39 order-independence opt-in) was read
+  // past, and because the modifier loop below ended on the first token it did
+  // not recognise, the whole OPERATION dropped — the Ledger service came out
+  // with `"methods": {}`. `commutative` is a RESERVED keyword (parser.py:8), so
+  // it is matched with `atw` like `emission`/`async`/`idempotent`.
+  var isCommutative = false
   // `validated` and `retry` are CONTEXTUAL keywords (ordinary idents read as
   // clause words), which is why they are matched with `ati` rather than `atw`.
   var isValidated = false
   var retryN = 0
   var caps: List[Str] = []
   while (atw(ts, j, "emission") || atw(ts, j, "async") || atw(ts, j, "idempotent")
+         || atw(ts, j, "commutative")
          || ati(ts, j, "validated") || ati(ts, j, "retry")) {
     if (atw(ts, j, "emission")) {
       em = true
@@ -20283,6 +20290,9 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
       }
     } else if (atw(ts, j, "idempotent")) {
       isIdempotent = true
+      j += 1
+    } else if (atw(ts, j, "commutative")) {
+      isCommutative = true
       j += 1
     } else if (ati(ts, j, "validated")) {
       isValidated = true
@@ -20346,6 +20356,9 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
     mj = mj.concat(", \"capabilities\": [").concat(ir_caps_json(caps)).concat("]")
   }
   if (isAsync) { mj = mj.concat(", \"async\": true") }
+  // issue #2086: `async`, `commutative`, `idempotent` — the reference's own key
+  // order (lower.py:9217-9221).
+  if (isCommutative) { mj = mj.concat(", \"commutative\": true") }
   if (isIdempotent) { mj = mj.concat(", \"idempotent\": true") }
   // `_method_validated_ir` + `_validated_retry_ir`: the delivery class and the
   // response contract derived from the declared return. A `retry` budget without
@@ -20357,7 +20370,8 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   }
   mj = mj.concat("}")
   let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al, st, env)
+  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isCommutative || isIdempotent,
+                    al, st, env)
 }
 
 fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str], st: SrcText) -> IrSvcR {
@@ -22868,9 +22882,9 @@ fn cir_if_end(ts: List[Token], i: Int) -> Int {
 // as the method's params and grows with each `let`; a loop's binder is pushed
 // for its body alone. A body whose bindings would need the reference's
 // method-wide `_alloc_safe` mangling is refused by the caller.
-fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], acc: Str) -> IrRes {
+fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], acc: Str, top: Bool) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
-  if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, acc) }
+  if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, acc, top) }
   if (atw(ts, lo, "effect")) {
     if (atw(ts, lo + 1, "spawn")) { return mk_irres(false, "") }
     let acq = expr_at(ts, lo + 1)
@@ -22881,7 +22895,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
       if (!is_witnessed_acq(acq.e, cx)) { return mk_irres(false, "") }
       let wstep = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js).concat("}")
       let wacc = acc == "" ? wstep : acc.concat(", ").concat(wstep)
-      return cir_method_stmts(ts, acq.i, hi, cx, sc, hostSc, wacc)
+      return cir_method_stmts(ts, acq.i, hi, cx, sc, hostSc, wacc, top)
     }
     let und = expr_at(ts, acq.i + 1)
     if (is_bad(und.e)) { return mk_irres(false, "") }
@@ -22892,16 +22906,23 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     // it is filled, so it carries none)
     let inv = is_hole_expr(und.e) ? ""
       : ", \"inverse\": ".concat(jstr(method_inverse(acq.e, und.e, hostSc, cx)))
+    // issue #2086: the by-value captures of the derived inverse. The reference
+    // pins them in a post-pass over the method body (`_pin_inverse_captures`),
+    // which walks the body's TOP-LEVEL steps only — so a nested `if`/`while`/
+    // `for` interior carries none, and neither does a nested one here.
+    let caps = top ? inverse_captures(ue.js, sc) : mk_irres(true, "")
+    if (!caps.ok) { return mk_irres(false, "") }
+    let capjs = caps.js == "" ? "" : ", \"undo_captures\": [".concat(caps.js).concat("]")
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
-      .concat(", \"undo\": ").concat(ue.js).concat(inv).concat("}")
+      .concat(", \"undo\": ").concat(ue.js).concat(inv).concat(capjs).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, und.i, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, und.i, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "emit")) {
     let em = cir_emit_step(ts, lo, cx, sc, hostSc)
     if (!em.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
-    return cir_method_stmts(ts, em.i, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, em.i, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "if")) {
     let c = expr_at(ts, lo + 1)
@@ -22910,7 +22931,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (tend == 0 - 1) { return mk_irres(false, "") }
     let ce = cir_expr(c.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
     if (!ce.ok) { return mk_irres(false, "") }
-    let tb = cir_method_stmts(ts, c.i + 1, tend - 1, cx, sc, hostSc, "")
+    let tb = cir_method_stmts(ts, c.i + 1, tend - 1, cx, sc, hostSc, "", false)
     if (!tb.ok) { return mk_irres(false, "") }
     var js = "{\"step\": \"if\", \"cond\": ".concat(ce.js)
       .concat(", \"then\": [").concat(tb.js).concat("]")
@@ -22918,7 +22939,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
       let eend = close_brace(ts, tend + 1)
       if (eend == 0 - 1) { return mk_irres(false, "") }
-      let eb = cir_method_stmts(ts, tend + 2, eend - 1, cx, sc, hostSc, "")
+      let eb = cir_method_stmts(ts, tend + 2, eend - 1, cx, sc, hostSc, "", false)
       if (!eb.ok) { return mk_irres(false, "") }
       js = js.concat(", \"else\": [").concat(eb.js).concat("]")
       nexti = eend
@@ -22926,7 +22947,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
       if (atw(ts, tend, "else") && atw(ts, tend + 1, "if")) {
         let eend = cir_if_end(ts, tend + 1)
         if (eend == 0 - 1) { return mk_irres(false, "") }
-        let eb = cir_method_stmts(ts, tend + 1, eend, cx, sc, hostSc, "")
+        let eb = cir_method_stmts(ts, tend + 1, eend, cx, sc, hostSc, "", false)
         if (!eb.ok) { return mk_irres(false, "") }
         js = js.concat(", \"else\": [").concat(eb.js).concat("]")
         nexti = eend
@@ -22936,7 +22957,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     }
     let step = js.concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, nexti, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, nexti, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "while")) {
     let c = expr_at(ts, lo + 1)
@@ -22945,12 +22966,12 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (wend == 0 - 1) { return mk_irres(false, "") }
     let ce = cir_expr(c.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
     if (!ce.ok) { return mk_irres(false, "") }
-    let wb = cir_method_stmts(ts, c.i + 1, wend - 1, cx, sc, hostSc, "")
+    let wb = cir_method_stmts(ts, c.i + 1, wend - 1, cx, sc, hostSc, "", false)
     if (!wb.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"while\", \"cond\": ".concat(ce.js)
       .concat(", \"body\": [").concat(wb.js).concat("]}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, wend, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, wend, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "for")) {
     if (!atk(ts, lo + 1, "(")) { return mk_irres(false, "") }
@@ -22961,33 +22982,33 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (bend == 0 - 1) { return mk_irres(false, "") }
     let ie = cir_expr(it.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 4).line))
     if (!ie.ok) { return mk_irres(false, "") }
-    let fb = cir_method_stmts(ts, it.i + 2, bend - 1, cx, sc.push({ name: bind, ty: "" }), hostSc, "")
+    let fb = cir_method_stmts(ts, it.i + 2, bend - 1, cx, sc.push({ name: bind, ty: "" }), hostSc, "", false)
     if (!fb.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"for\", \"bind\": ".concat(jstr(bind))
       .concat(", \"iterable\": ").concat(ie.js)
       .concat(", \"body\": [").concat(fb.js).concat("]}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, bend, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, bend, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "break") || atw(ts, lo, "continue")) {
     let step = "{\"step\": ".concat(jstr(tkc(ts, lo).text))
       .concat(", \"line\": ").concat(tkc(ts, lo).line.to_str()).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "return")) {
     let r = expr_at(ts, lo + 1)
     if (is_bad(r.e) || r.i <= lo + 1) {
       let step0 = "{\"step\": \"return\", \"expr\": null}"
       let nacc0 = acc == "" ? step0 : acc.concat(", ").concat(step0)
-      return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc0)
+      return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc0, top)
     }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
     if (!ve.ok) { return mk_irres(false, "") }
     let wj = cir_widen(ve.js, tenv_get(sc, "returns "), infer(r.e, cenv_ir(cx, sc)))
     let step = "{\"step\": \"return\", \"expr\": ".concat(wj).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc, top)
   }
   // `let <h> = effect <acquire> undo <inverse>` INSIDE a provide method: the
   // per-invocation bracket. The same step as the activation body's, and the one
@@ -23022,7 +23043,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     }
     step = step.concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, und.i, hi, cx, sc2, hostSc2, nacc)
+    return cir_method_stmts(ts, und.i, hi, cx, sc2, hostSc2, nacc, top)
   }
   if (atw(ts, lo, "let") || atw(ts, lo, "var")) {
     let mutable = atw(ts, lo, "var")
@@ -23044,7 +23065,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     // shadow win.
     let sc2 = env_mut_put(sc.push({ name: name, ty: infer(r.e, cenv(cx, sc)) }),
                           name, mutable)
-    return cir_method_stmts(ts, r.i, hi, cx, sc2, hostSc, nacc)
+    return cir_method_stmts(ts, r.i, hi, cx, sc2, hostSc, nacc, top)
   }
   // `<name> = <expr>` — a reassignment of a local the method declared.
   if (atk(ts, lo, "ident") && atk(ts, lo + 1, "=")) {
@@ -23057,7 +23078,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     let step = "{\"step\": \"assign\", \"name\": ".concat(jstr(name))
       .concat(", \"value\": ").concat(ve.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc, top)
   }
   return mk_irres(false, "")
 }
@@ -23241,7 +23262,7 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
     }
     let br = cir_method_stmts(ts, h + 1, bend - 1, cx,
                               tenv_put(concat_binds(sc, pbinds), "returns ", mret),
-                              hostSc, "")
+                              hostSc, "", true)
     if (!br.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
       .concat("], \"body\": [").concat(br.js).concat("]")
@@ -23471,8 +23492,10 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     // issue #1859: a spawn's `undo` is the author's own disposer call — no
     // table proves it reverts — so the step records `asserted` rather than
     // tearing down behind a bare `noResidue: true`.
-    let step = with_inverse("{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
-      .concat(", \"acquire\": ").concat(sp.js).concat(", \"undo\": ").concat(ue.js).concat("}"),
+    // issue #2086: `bind` is appended LAST, after the inverse's own keys, as
+    // `_lower_effect_step` does (`step["bind"] = bind` after the body is built).
+    let step = with_inverse("{\"step\": \"let-effect\", \"acquire\": ".concat(sp.js)
+      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name)).concat("}"),
       "asserted")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, und.i, end, cx, provs, sc2, hostSc, nacc)
@@ -23536,8 +23559,8 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (is_bad(und.e)) { return mk_irres(false, "") }
     let ue = cir_expr(und.e, sc2, hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line))
     if (!ue.ok) { return mk_irres(false, "") }
-    let step0 = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
-      .concat(", \"acquire\": ").concat(ae.js).concat(", \"undo\": ").concat(ue.js).concat("}")
+    let step0 = "{\"step\": \"let-effect\", \"acquire\": ".concat(ae.js)
+      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name)).concat("}")
     let step1 = with_inverse(step0, site_effect_inverse(acq.e, ae.js, und.e, ue.js,
       hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line)))
     let step = isAsync ? step_async(step1) : step1
@@ -23617,17 +23640,25 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, r.i, end, cx, provs, sc, hostSc, nacc)
   }
-  // `isolate <key> in realm("<label>")` and `intercept <key> with { … }` are
-  // PRELUDE declarations, not activation steps: the reference records them on
-  // the component (`isolate`/`intercept`) and emits no body step for either, so
-  // the walk steps over them structurally. The multi-realm ROUTING spelling
-  // (`in realms(...)`, item 162) is a different declaration with a different
-  // key (`routes`) and is deliberately NOT matched here — it keeps refusing.
+  // `isolate <key> in realm("<label>")`, `isolate <key> in realms(…) [strategy(…)]`
+  // and `intercept <key> with { … }` are PRELUDE declarations, not activation
+  // steps: the reference records them on the component (`isolate`/`routes`/
+  // `intercept`) and emits no body step for either, so the walk steps over them
+  // structurally. The multi-realm ROUTING spelling (`in realms(...)`, item 162)
+  // used to keep refusing here — issue #2086 — which dropped the whole `Router`
+  // body (and, with it, the `provide` step) on every routed document.
   if (atw(ts, i, "isolate")) {
-    if (!(atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
-          && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")
-          && atk(ts, i + 6, ")"))) { return mk_irres(false, "") }
-    return cir_body(ts, i + 7, end, cx, provs, sc, hostSc, acc)
+    if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
+        && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")
+        && atk(ts, i + 6, ")")) {
+      return cir_body(ts, i + 7, end, cx, provs, sc, hostSc, acc)
+    }
+    if (atw(ts, i + 2, "in") && ati(ts, i + 3, "realms")) {
+      let rp = p_route_clause(ts, i + 3)
+      if (!rp.ok) { return mk_irres(false, "") }
+      return cir_body(ts, rp.i, end, cx, provs, sc, hostSc, acc)
+    }
+    return mk_irres(false, "")
   }
   if (atw(ts, i, "intercept")) {
     var k = i + 1
@@ -23766,6 +23797,37 @@ fn ir_isolate(ts: List[Token], lo: Int, hi: Int, acc: Str) -> Str {
   return ir_isolate(ts, j + 1, hi, acc)
 }
 
+// `isolate <key> in realms("w1", "w2") [strategy(<name>)]` -> `"<key>":
+// {"realms": [...], "strategy": "<name>"|null}` entries, in declaration order.
+// Issue #2086: the multi-realm ROUTING spelling is the PLURAL of `ir_isolate`'s
+// pin — the same `isolate <key> in` head with a different tail, recorded under a
+// different component key (`routes`, item 162). Nothing read it, so the whole
+// component header came out without its router and the emitter lost the
+// `_revl_route_<key>` proxy with it.
+//
+// `strategy` is rendered as JSON `null` when the clause omits it, NOT omitted:
+// the reference stores `{"realms": …, "strategy": stmt.strategy}`
+// (lower.py:13849) and `stmt.strategy` is `None`, so the key is always present.
+fn ir_routes(ts: List[Token], lo: Int, hi: Int, acc: Str) -> IrRes {
+  var j = lo
+  while (j < hi && !atw(ts, j, "isolate")) { j += 1 }
+  if (j >= hi) { return mk_irres(true, acc) }
+  if (atw(ts, j + 2, "in") && ati(ts, j + 3, "realms")) {
+    let rp = p_route_clause(ts, j + 3)
+    // A malformed clause is a reference refusal, so there is nothing to compare
+    // against — but the component HEADER still has to stay byte-identical, which
+    // is why this reports `ok:false` (the caller omits the key) rather than
+    // failing the component.
+    if (!rp.ok) { return mk_irres(false, "") }
+    let e = jstr(tkc(ts, j + 1).text)
+      .concat(": {\"realms\": [").concat(ir_caps_json(rp.rlms))
+      .concat("], \"strategy\": ").concat(rp.strat == "" ? "null" : jstr(rp.strat))
+      .concat("}")
+    return ir_routes(ts, rp.i, hi, acc == "" ? e : acc.concat(", ").concat(e))
+  }
+  return ir_routes(ts, j + 1, hi, acc)
+}
+
 // The `config { field: Type [= <literal>] … }` block -> `[{name, type, default}]`.
 fn ir_config(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
   var j = lo
@@ -23856,6 +23918,7 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
   let bodyRes = cir_body(ts, lo, hi, cx, provs, sc0, [], "")
   let isoJs = ir_isolate(ts, lo, hi, "")
   let iceptRes = ir_intercept(ts, lo, hi, "")
+  let rtRes = ir_routes(ts, lo, hi, "")
   var js = "{\"name\": ".concat(jstr(nm))
     .concat(", \"source\": ").concat(jstr(fname))
     .concat(", \"config\": [").concat(ir_config(ts, lo, hi, al))
@@ -23871,6 +23934,10 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
   if (iceptRes.ok && iceptRes.js != "") {
     js = js.concat(", \"intercept\": {").concat(iceptRes.js).concat("}")
   }
+  // ...then `routes` (item 162), the routed-require half of the same prelude.
+  if (rtRes.ok && rtRes.js != "") {
+    js = js.concat(", \"routes\": {").concat(rtRes.js).concat("}")
+  }
   js = js.concat("}")
   // a body-level stdlib builtin (or tagged ADT) construction is the reference's
   // body-only v3 trigger (`_has_builtin`); now that the body is lowered, the
@@ -23881,6 +23948,7 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
     || comp_has_kw(ts, lo, hi, "every") || comp_has_kw(ts, lo, hi, "after")
     || comp_has_kw(ts, lo, hi, "spawn")
   let v2 = comp_has_kw(ts, lo, hi, "isolate") || comp_has_kw(ts, lo, hi, "intercept")
+    || (rtRes.ok && rtRes.js != "")
   return mk_ircompr(js, v3, v2)
 }
 
@@ -27354,8 +27422,8 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str],
   // every `stdlib/fs.rvl` extern pairs a `@py` block with a `@ts ref` arm, which
   // is why the old `atk(ts, k + 1, "hostbody")` guard ended the loop at the ref
   // arm and the entry lost its `refs` (issue #2089). The ref arm contributes no
-  // body, so the loop's exit stays `bcount == 0` — the reference's own gate, and
-  // the reason a ref-only extern is still out of the covered surface.
+  // body, so the exit gate below has to accept a declaration whose ONLY arms are
+  // refs.
   while (atk(ts, k, "=")
          && (atk(ts, k + 1, "hostbody") || atk(ts, k + 1, "@"))) {
     if (atk(ts, k + 1, "hostbody")) {
@@ -27379,14 +27447,21 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str],
       k = k + 7
     }
   }
-  if (bcount == 0) { return mk_irres(false, "") }
+  // issue #2086: a declaration whose only arms are HOST REFS (`= @ts ref sym from
+  // "path"`) is in the covered surface — the reference's `_lower_externs` has no
+  // body-count gate at all, and the PARSER already guarantees at least one arm of
+  // either kind (`extern_decl`'s `if not bodies` refusal, parser.py:3689), so
+  // `bcount == 0` here can only mean "every arm was a ref". Gating on `bcount`
+  // alone dropped the whole `externs` section for such a document, which is
+  // silent: the IR stays well formed, it just has no externs in it.
+  let refsJson = rw_refs_json(rows, nm)
+  if (bcount == 0 && refsJson == "") { return mk_irres(false, "") }
   var js = "{\"name\": ".concat(jstr(nm)).concat(", \"class\": ").concat(jstr(cls))
     .concat(", \"params\": [").concat(ir_params_json(alias_subst_params(ps.ps, al)))
     .concat("], \"returns\": ").concat(retJson)
     .concat(", \"bodies\": {").concat(bodies).concat("}")
   // issue #2089: the extern's host `refs`, keyed by backend, spliced in the
   // reference's own position (right after `bodies`) and key order.
-  let refsJson = rw_refs_json(rows, nm)
   if (refsJson != "") { js = js.concat(", \"refs\": ").concat(refsJson) }
   // The RETURN-side half of the marking (the counterpart of a parameter's
   // `secret`). `returns` above is stripped, so these two flags are the only

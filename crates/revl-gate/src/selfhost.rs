@@ -23892,10 +23892,11 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     let mut scoped = false;
     let mut isAsync = false;
     let mut isIdempotent = false;
+    let mut isCommutative = false;
     let mut isValidated = false;
     let mut retryN = 0i64;
     let mut caps: Vec<String> = vec![];
-    while ((((atw(&ts, j, "emission") || atw(&ts, j, "async")) || atw(&ts, j, "idempotent")) || ati(&ts, j, "validated")) || ati(&ts, j, "retry")) {
+    while (((((atw(&ts, j, "emission") || atw(&ts, j, "async")) || atw(&ts, j, "idempotent")) || atw(&ts, j, "commutative")) || ati(&ts, j, "validated")) || ati(&ts, j, "retry")) {
         if atw(&ts, j, "emission") {
             em = true;
             j = (j).checked_add(1i64).expect("revl: Int overflow");
@@ -23915,20 +23916,25 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
                 isIdempotent = true;
                 j = (j).checked_add(1i64).expect("revl: Int overflow");
             } else {
-                if ati(&ts, j, "validated") {
-                    isValidated = true;
+                if atw(&ts, j, "commutative") {
+                    isCommutative = true;
                     j = (j).checked_add(1i64).expect("revl: Int overflow");
                 } else {
-                    if ati(&ts, j, "retry") {
-                        retryN = match { let _s = (tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text); if _s.starts_with('+') { None } else { _s.parse::<i64>().ok() } } {
+                    if ati(&ts, j, "validated") {
+                        isValidated = true;
+                        j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    } else {
+                        if ati(&ts, j, "retry") {
+                            retryN = match { let _s = (tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text); if _s.starts_with('+') { None } else { _s.parse::<i64>().ok() } } {
     Some(n) => n,
     None => 0i64,
     _ => unreachable!(),
 };
-                        j = (j).checked_add(2i64).expect("revl: Int overflow");
-                    } else {
-                        isAsync = true;
-                        j = (j).checked_add(1i64).expect("revl: Int overflow");
+                            j = (j).checked_add(2i64).expect("revl: Int overflow");
+                        } else {
+                            isAsync = true;
+                            j = (j).checked_add(1i64).expect("revl: Int overflow");
+                        }
                     }
                 }
             }
@@ -23979,6 +23985,9 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     if isAsync {
         mj.push_str(", \"async\": true");
     }
+    if isCommutative {
+        mj.push_str(", \"commutative\": true");
+    }
     if isIdempotent {
         mj.push_str(", \"idempotent\": true");
     }
@@ -23990,7 +23999,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     }
     mj.push_str("}");
     let nacc = if (acc == "") { mj.clone() } else { (acc.revl_concat(", ")).revl_concat(&mj) };
-    return ir_methods(ts.clone(), nexti, end, nacc, ((v3 || isAsync) || isIdempotent), al.clone(), st.clone(), env.clone());
+    return ir_methods(ts.clone(), nexti, end, nacc, (((v3 || isAsync) || isCommutative) || isIdempotent), al.clone(), st.clone(), env.clone());
 }
 
 fn ir_service(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>, st: SrcText) -> IrSvcR {
@@ -26329,12 +26338,12 @@ fn cir_if_end(ts: Vec<Token>, i: i64) -> i64 {
     return tend;
 }
 
-fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, hostSc: Vec<String>, acc: String) -> IrRes {
+fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, hostSc: Vec<String>, acc: String, top: bool) -> IrRes {
     if ((lo >= hi) || atk(&ts, lo, "}")) {
         return mk_irres(true, acc.clone());
     }
     if atk(&ts, lo, ";") {
-        return cir_method_stmts(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"), hi, cx.clone(), sc.clone(), hostSc.clone(), acc.clone());
+        return cir_method_stmts(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"), hi, cx.clone(), sc.clone(), hostSc.clone(), acc.clone(), top);
     }
     if atw(&ts, lo, "effect") {
         if atw(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "spawn") {
@@ -26354,7 +26363,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
             }
             let wstep = (String::from("{\"step\": \"effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat("}");
             let wacc = if (acc == "") { wstep.clone() } else { (acc.revl_concat(", ")).revl_concat(&wstep) };
-            return cir_method_stmts(ts.clone(), acq.i, hi, cx.clone(), sc.clone(), hostSc.clone(), wacc);
+            return cir_method_stmts(ts.clone(), acq.i, hi, cx.clone(), sc.clone(), hostSc.clone(), wacc, top);
         }
         let und = expr_at(ts.clone(), (acq.i).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(und.e.clone()) {
@@ -26365,9 +26374,14 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
             return mk_irres(false, String::from(""));
         }
         let inv = if is_hole_expr(und.e.clone()) { String::from("") } else { String::from(", \"inverse\": ").revl_concat(&jstr(&method_inverse(acq.e.clone(), und.e.clone(), &hostSc, cx.clone()))) };
-        let step = ((((String::from("{\"step\": \"effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat(&inv)).revl_concat("}");
+        let caps = if top { inverse_captures(&ue.js, sc.clone()) } else { mk_irres(true, String::from("")) };
+        if (!caps.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        let capjs = if (caps.js == "") { String::from("") } else { (String::from(", \"undo_captures\": [").revl_concat(&caps.js)).revl_concat("]") };
+        let step = (((((String::from("{\"step\": \"effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat(&inv)).revl_concat(&capjs)).revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        return cir_method_stmts(ts.clone(), und.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), und.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if atw(&ts, lo, "emit") {
         let em = cir_emit_step(ts.clone(), lo, cx.clone(), sc.clone(), hostSc.clone());
@@ -26375,7 +26389,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
             return mk_irres(false, String::from(""));
         }
         let nacc = if (acc == "") { em.js } else { (acc.revl_concat(", ")).revl_concat(&em.js) };
-        return cir_method_stmts(ts.clone(), em.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), em.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if atw(&ts, lo, "if") {
         let c = expr_at(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"));
@@ -26390,7 +26404,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         if (!ce.ok) {
             return mk_irres(false, String::from(""));
         }
-        let tb = cir_method_stmts(ts.clone(), (c.i).checked_add(1i64).expect("revl: Int overflow"), (tend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), sc.clone(), hostSc.clone(), String::from(""));
+        let tb = cir_method_stmts(ts.clone(), (c.i).checked_add(1i64).expect("revl: Int overflow"), (tend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), sc.clone(), hostSc.clone(), String::from(""), false);
         if (!tb.ok) {
             return mk_irres(false, String::from(""));
         }
@@ -26401,7 +26415,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
             if (eend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 return mk_irres(false, String::from(""));
             }
-            let eb = cir_method_stmts(ts.clone(), (tend).checked_add(2i64).expect("revl: Int overflow"), (eend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), sc.clone(), hostSc.clone(), String::from(""));
+            let eb = cir_method_stmts(ts.clone(), (tend).checked_add(2i64).expect("revl: Int overflow"), (eend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), sc.clone(), hostSc.clone(), String::from(""), false);
             if (!eb.ok) {
                 return mk_irres(false, String::from(""));
             }
@@ -26413,7 +26427,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
                 if (eend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     return mk_irres(false, String::from(""));
                 }
-                let eb = cir_method_stmts(ts.clone(), (tend).checked_add(1i64).expect("revl: Int overflow"), eend, cx.clone(), sc.clone(), hostSc.clone(), String::from(""));
+                let eb = cir_method_stmts(ts.clone(), (tend).checked_add(1i64).expect("revl: Int overflow"), eend, cx.clone(), sc.clone(), hostSc.clone(), String::from(""), false);
                 if (!eb.ok) {
                     return mk_irres(false, String::from(""));
                 }
@@ -26425,7 +26439,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         }
         let step = js.revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        return cir_method_stmts(ts.clone(), nexti, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), nexti, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if atw(&ts, lo, "while") {
         let c = expr_at(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"));
@@ -26440,13 +26454,13 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         if (!ce.ok) {
             return mk_irres(false, String::from(""));
         }
-        let wb = cir_method_stmts(ts.clone(), (c.i).checked_add(1i64).expect("revl: Int overflow"), (wend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), sc.clone(), hostSc.clone(), String::from(""));
+        let wb = cir_method_stmts(ts.clone(), (c.i).checked_add(1i64).expect("revl: Int overflow"), (wend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), sc.clone(), hostSc.clone(), String::from(""), false);
         if (!wb.ok) {
             return mk_irres(false, String::from(""));
         }
         let step = (((String::from("{\"step\": \"while\", \"cond\": ").revl_concat(&ce.js)).revl_concat(", \"body\": [")).revl_concat(&wb.js)).revl_concat("]}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        return cir_method_stmts(ts.clone(), wend, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), wend, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if atw(&ts, lo, "for") {
         if (!atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "(")) {
@@ -26465,25 +26479,25 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         if (!ie.ok) {
             return mk_irres(false, String::from(""));
         }
-        let fb = cir_method_stmts(ts.clone(), (it.i).checked_add(2i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), sc.revl_push(Bind { name: bind.clone(), ty: String::from("") }), hostSc.clone(), String::from(""));
+        let fb = cir_method_stmts(ts.clone(), (it.i).checked_add(2i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), sc.revl_push(Bind { name: bind.clone(), ty: String::from("") }), hostSc.clone(), String::from(""), false);
         if (!fb.ok) {
             return mk_irres(false, String::from(""));
         }
         let step = (((((String::from("{\"step\": \"for\", \"bind\": ").revl_concat(&jstr(&bind))).revl_concat(", \"iterable\": ")).revl_concat(&ie.js)).revl_concat(", \"body\": [")).revl_concat(&fb.js)).revl_concat("]}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        return cir_method_stmts(ts.clone(), bend, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), bend, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if (atw(&ts, lo, "break") || atw(&ts, lo, "continue")) {
         let step = (((String::from("{\"step\": ").revl_concat(&jstr(&tkc(&ts, lo).text))).revl_concat(", \"line\": ")).revl_concat(&(tkc(&ts, lo).line).to_string())).revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        return cir_method_stmts(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"), hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"), hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if atw(&ts, lo, "return") {
         let r = expr_at(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"));
         if (is_bad(r.e.clone()) || (r.i <= (lo).checked_add(1i64).expect("revl: Int overflow"))) {
             let step0 = String::from("{\"step\": \"return\", \"expr\": null}");
             let nacc0 = if (acc == "") { step0.clone() } else { (acc.revl_concat(", ")).revl_concat(&step0) };
-            return cir_method_stmts(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"), hi, cx.clone(), sc.clone(), hostSc.clone(), nacc0);
+            return cir_method_stmts(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"), hi, cx.clone(), sc.clone(), hostSc.clone(), nacc0, top);
         }
         let ve = cir_expr(r.e.clone(), sc.clone(), hostSc.clone(), cx_at(cx.clone(), tkc(&ts, (lo).checked_add(1i64).expect("revl: Int overflow")).line));
         if (!ve.ok) {
@@ -26492,7 +26506,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         let wj = cir_widen(ve.js.clone(), tenv_get(&sc, "returns "), infer(r.e.clone(), cenv_ir(cx.clone(), sc.clone())));
         let step = (String::from("{\"step\": \"return\", \"expr\": ").revl_concat(&wj)).revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        return cir_method_stmts(ts.clone(), r.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), r.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if (((atw(&ts, lo, "let") || atw(&ts, lo, "var")) && atk(&ts, (lo).checked_add(2i64).expect("revl: Int overflow"), "=")) && atw(&ts, (lo).checked_add(3i64).expect("revl: Int overflow"), "effect")) {
         if atw(&ts, lo, "var") {
@@ -26533,7 +26547,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         }
         step.push_str("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        return cir_method_stmts(ts.clone(), und.i, hi, cx.clone(), sc2.clone(), hostSc2.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), und.i, hi, cx.clone(), sc2.clone(), hostSc2.clone(), nacc.clone(), top);
     }
     if (atw(&ts, lo, "let") || atw(&ts, lo, "var")) {
         let mutable = atw(&ts, lo, "var");
@@ -26556,7 +26570,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         let step = (((((String::from("{\"step\": \"let\", \"name\": ").revl_concat(&jstr(&name))).revl_concat(", \"value\": ")).revl_concat(&ve.js)).revl_concat(", \"mutable\": ")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
         let sc2 = env_mut_put(&(sc.revl_push(Bind { name: name.clone(), ty: infer(r.e.clone(), cenv(cx.clone(), sc.clone())) })), &name, mutable);
-        return cir_method_stmts(ts.clone(), r.i, hi, cx.clone(), sc2.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), r.i, hi, cx.clone(), sc2.clone(), hostSc.clone(), nacc.clone(), top);
     }
     if (atk(&ts, lo, "ident") && atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "=")) {
         let name = tkc(&ts, lo).text;
@@ -26573,7 +26587,7 @@ fn cir_method_stmts(ts: Vec<Token>, lo: i64, hi: i64, cx: CCtx, sc: Vec<Bind>, h
         }
         let step = (((String::from("{\"step\": \"assign\", \"name\": ").revl_concat(&jstr(&name))).revl_concat(", \"value\": ")).revl_concat(&ve.js)).revl_concat("}");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
-        return cir_method_stmts(ts.clone(), r.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone());
+        return cir_method_stmts(ts.clone(), r.i, hi, cx.clone(), sc.clone(), hostSc.clone(), nacc.clone(), top);
     }
     return mk_irres(false, String::from(""));
 }
@@ -26748,7 +26762,7 @@ fn cir_prov_methods(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, sc: Vec<Bind>, h
         if (cir_has_control(&ts, (h).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow")) && cir_method_rebinds(&ts, (h).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), &concat_binds(sc.clone(), pbinds.clone()))) {
             return mk_irres(false, String::from(""));
         }
-        let br = cir_method_stmts(ts.clone(), (h).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), tenv_put(&concat_binds(sc.clone(), pbinds.clone()), String::from("returns "), mret.clone()), hostSc.clone(), String::from(""));
+        let br = cir_method_stmts(ts.clone(), (h).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), tenv_put(&concat_binds(sc.clone(), pbinds.clone()), String::from("returns "), mret.clone()), hostSc.clone(), String::from(""), true);
         if (!br.ok) {
             return mk_irres(false, String::from(""));
         }
@@ -26962,7 +26976,7 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
         if (!ue.ok) {
             return mk_irres(false, String::from(""));
         }
-        let step = with_inverse((((((String::from("{\"step\": \"let-effect\", \"bind\": ").revl_concat(&jstr(&name))).revl_concat(", \"acquire\": ")).revl_concat(&sp.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat("}"), "asserted");
+        let step = with_inverse((((((String::from("{\"step\": \"let-effect\", \"acquire\": ").revl_concat(&sp.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat(", \"bind\": ")).revl_concat(&jstr(&name))).revl_concat("}"), "asserted");
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
         return cir_body(ts.clone(), und.i, end, cx.clone(), provs.clone(), sc2.clone(), hostSc.clone(), nacc.clone());
     }
@@ -27032,7 +27046,7 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
         if (!ue.ok) {
             return mk_irres(false, String::from(""));
         }
-        let step0 = (((((String::from("{\"step\": \"let-effect\", \"bind\": ").revl_concat(&jstr(&name))).revl_concat(", \"acquire\": ")).revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat("}");
+        let step0 = (((((String::from("{\"step\": \"let-effect\", \"acquire\": ").revl_concat(&ae.js)).revl_concat(", \"undo\": ")).revl_concat(&ue.js)).revl_concat(", \"bind\": ")).revl_concat(&jstr(&name))).revl_concat("}");
         let step1 = with_inverse(step0.clone(), &site_effect_inverse(acq.e.clone(), &ae.js, und.e.clone(), &ue.js, &hostSc2, cx_at(cx.clone(), tkc(&ts, (acq.i).checked_add(1i64).expect("revl: Int overflow")).line)));
         let step = if isAsync { step_async(&step1) } else { step1.clone() };
         let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
@@ -27127,10 +27141,17 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
         return cir_body(ts.clone(), r.i, end, cx.clone(), provs.clone(), sc.clone(), hostSc.clone(), nacc.clone());
     }
     if atw(&ts, i, "isolate") {
-        if (!((((atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in") && atw(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realm")) && atk(&ts, (i).checked_add(4i64).expect("revl: Int overflow"), "(")) && atk(&ts, (i).checked_add(5i64).expect("revl: Int overflow"), "string")) && atk(&ts, (i).checked_add(6i64).expect("revl: Int overflow"), ")"))) {
-            return mk_irres(false, String::from(""));
+        if ((((atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in") && atw(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realm")) && atk(&ts, (i).checked_add(4i64).expect("revl: Int overflow"), "(")) && atk(&ts, (i).checked_add(5i64).expect("revl: Int overflow"), "string")) && atk(&ts, (i).checked_add(6i64).expect("revl: Int overflow"), ")")) {
+            return cir_body(ts.clone(), (i).checked_add(7i64).expect("revl: Int overflow"), end, cx.clone(), provs.clone(), sc.clone(), hostSc.clone(), acc.clone());
         }
-        return cir_body(ts.clone(), (i).checked_add(7i64).expect("revl: Int overflow"), end, cx.clone(), provs.clone(), sc.clone(), hostSc.clone(), acc.clone());
+        if (atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in") && ati(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realms")) {
+            let rp = p_route_clause(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"));
+            if (!rp.ok) {
+                return mk_irres(false, String::from(""));
+            }
+            return cir_body(ts.clone(), rp.i, end, cx.clone(), provs.clone(), sc.clone(), hostSc.clone(), acc.clone());
+        }
+        return mk_irres(false, String::from(""));
     }
     if atw(&ts, i, "intercept") {
         let mut k = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -27293,6 +27314,25 @@ fn ir_isolate(ts: &[Token], lo: i64, hi: i64, acc: String) -> String {
     return ir_isolate(ts, (j).checked_add(1i64).expect("revl: Int overflow"), hi, acc.clone());
 }
 
+fn ir_routes(ts: Vec<Token>, lo: i64, hi: i64, acc: String) -> IrRes {
+    let mut j = lo;
+    while ((j < hi) && (!atw(&ts, j, "isolate"))) {
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (j >= hi) {
+        return mk_irres(true, acc.clone());
+    }
+    if (atw(&ts, (j).checked_add(2i64).expect("revl: Int overflow"), "in") && ati(&ts, (j).checked_add(3i64).expect("revl: Int overflow"), "realms")) {
+        let rp = p_route_clause(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
+        if (!rp.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        let e = ((((jstr(&tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text).revl_concat(": {\"realms\": [")).revl_concat(&ir_caps_json(&rp.rlms))).revl_concat("], \"strategy\": ")).revl_concat(&if (rp.strat == "") { String::from("null") } else { jstr(&rp.strat) })).revl_concat("}");
+        return ir_routes(ts.clone(), rp.i, hi, if (acc == "") { e.clone() } else { (acc.revl_concat(", ")).revl_concat(&e) });
+    }
+    return ir_routes(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), hi, acc.clone());
+}
+
 fn ir_config(ts: Vec<Token>, lo: i64, hi: i64, al: std::collections::HashMap<String, String>) -> String {
     let mut j = lo;
     while ((j < hi) && (!(atw(&ts, j, "config") && atk(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "{")))) {
@@ -27369,6 +27409,7 @@ fn ir_component(ts: Vec<Token>, i: i64, fname: &str, al: std::collections::HashM
     let bodyRes = cir_body(ts.clone(), lo.clone(), hi.clone(), cx.clone(), provs.clone(), sc0.clone(), vec![], String::from(""));
     let isoJs = ir_isolate(&ts, lo.clone(), hi.clone(), String::from(""));
     let iceptRes = ir_intercept(ts.clone(), lo.clone(), hi.clone(), String::from(""));
+    let rtRes = ir_routes(ts.clone(), lo.clone(), hi.clone(), String::from(""));
     let mut js = (((((((((String::from("{\"name\": ").revl_concat(&jstr(&nm))).revl_concat(", \"source\": ")).revl_concat(&jstr(fname))).revl_concat(", \"config\": [")).revl_concat(&ir_config(ts.clone(), lo.clone(), hi.clone(), al.clone()))).revl_concat("], \"requires\": {")).revl_concat(&ir_binds_json(&reqs))).revl_concat("}, \"provides\": {")).revl_concat(&ir_binds_json(&provs))).revl_concat("}");
     if (bodyRes.ok && iceptRes.ok) {
         js = ((js.revl_concat(", \"body\": [")).revl_concat(&bodyRes.js)).revl_concat("]");
@@ -27379,10 +27420,13 @@ fn ir_component(ts: Vec<Token>, i: i64, fname: &str, al: std::collections::HashM
     if (iceptRes.ok && (iceptRes.js != "")) {
         js = ((js.revl_concat(", \"intercept\": {")).revl_concat(&iceptRes.js)).revl_concat("}");
     }
+    if (rtRes.ok && (rtRes.js != "")) {
+        js = ((js.revl_concat(", \"routes\": {")).revl_concat(&rtRes.js)).revl_concat("}");
+    }
     js.push_str("}");
     let bodyV3 = ((bodyRes.ok && iceptRes.ok) && (str_has(&bodyRes.js, "\"kind\": \"builtin\"") || str_has(&bodyRes.js, "\"kind\": \"adt\"")));
     let v3 = (((((bodyV3 || comp_has_kw(&ts, lo.clone(), hi.clone(), "if")) || comp_has_kw(&ts, lo.clone(), hi.clone(), "fail")) || comp_has_kw(&ts, lo.clone(), hi.clone(), "every")) || comp_has_kw(&ts, lo.clone(), hi.clone(), "after")) || comp_has_kw(&ts, lo.clone(), hi.clone(), "spawn"));
-    let v2 = (comp_has_kw(&ts, lo.clone(), hi.clone(), "isolate") || comp_has_kw(&ts, lo.clone(), hi.clone(), "intercept"));
+    let v2 = ((comp_has_kw(&ts, lo.clone(), hi.clone(), "isolate") || comp_has_kw(&ts, lo.clone(), hi.clone(), "intercept")) || (rtRes.ok && (rtRes.js != "")));
     return mk_ircompr(js.clone(), v3, v2);
 }
 
@@ -30716,11 +30760,11 @@ fn ir_extern(ts: Vec<Token>, i: i64, decls: Vec<TaintDecl>, al: std::collections
             k = (k).checked_add(7i64).expect("revl: Int overflow");
         }
     }
-    if (bcount == 0i64) {
+    let refsJson = rw_refs_json(&rows, &nm);
+    if ((bcount == 0i64) && (refsJson == "")) {
         return mk_irres(false, String::from(""));
     }
     let mut js = (((((((((String::from("{\"name\": ").revl_concat(&jstr(&nm))).revl_concat(", \"class\": ")).revl_concat(&jstr(&cls))).revl_concat(", \"params\": [")).revl_concat(&ir_params_json(&alias_subst_params(ps.ps.clone(), al.clone())))).revl_concat("], \"returns\": ")).revl_concat(&retJson)).revl_concat(", \"bodies\": {")).revl_concat(&bodies)).revl_concat("}");
-    let refsJson = rw_refs_json(&rows, &nm);
     if (refsJson != "") {
         js = (js.revl_concat(", \"refs\": ")).revl_concat(&refsJson);
     }
