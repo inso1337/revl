@@ -431,6 +431,105 @@ class TierGrant:
                 "evidence_required": self.evidence_required}
 
 
+def _split_tier_flag(value: Any, flag: str) -> tuple[str, str]:
+    """`NAME=rest`, split on the FIRST `=` only.
+
+    Not the last: a capability argument may contain `=` (`fs.read(path="/d")`)
+    and a rung name never does. Splitting on the last would read the rung name
+    off the end of a capability."""
+    name, sep, rest = str(value).partition("=")
+    if not sep or not name:
+        raise PoolError(f"{flag} {value!r} is not NAME=VALUE")
+    return name, rest
+
+
+def _tier_evidence(values) -> dict[str, int]:
+    """`--tier-evidence NAME=N` -> {name: N}.
+
+    A negative count is refused rather than clamped. `promote` admits a member
+    when `counted < required` is FALSE, so a negative requirement would be
+    satisfied by a member with no evidence at all: that is the fail-open
+    direction, and it is refused at the door."""
+    out: dict[str, int] = {}
+    for value in values:
+        name, amount = _split_tier_flag(value, "--tier-evidence")
+        try:
+            parsed = int(amount)
+        except ValueError:
+            raise PoolError(
+                f"--tier-evidence {value!r}: {amount!r} is not an integer "
+                f"count of receipts") from None
+        if parsed < 0:
+            raise PoolError(
+                f"--tier-evidence {value!r}: a count of receipts is a "
+                f"non-negative integer")
+        out[name] = parsed
+    return out
+
+
+def _tier_caps(values) -> dict[str, list[str]]:
+    """`--tier-caps NAME=CAP`, repeatable per rung -> {name: [cap, ...]}."""
+    out: dict[str, list[str]] = {}
+    for value in values:
+        name, cap = _split_tier_flag(value, "--tier-caps")
+        out.setdefault(name, []).append(cap)
+    return out
+
+
+def _declared_tiers(args) -> dict[str, TierGrant]:
+    """The ladder a `pool init` declares, from the `--tier*` flags.
+
+    `--entry-caps` has declared the entry rung since slice 1; `--tier` and its
+    companions generalise that one flag to the rungs ABOVE it. Nothing else
+    about a charter changes, and the rung NAMES are not validated here:
+    `PoolCharter.__post_init__` already refuses a name outside `TIER_ORDER`,
+    and `init` constructs a `PoolCharter` directly, so the refusal is REACHED
+    from these flags rather than reimplemented beside it.
+
+    `--tier-evidence` is REQUIRED for every `--tier`, and that is the
+    load-bearing part. A rung's evidence requirement is the number of attested
+    receipts a member must have accumulated before it moves, and there is no
+    safe default for it: 0 would make the rung free, and any other number would
+    be this module inventing a threshold. Requiring the operator to state it is
+    also what leaves a CLI-side threshold table nowhere to live.
+
+    Budgets are deliberately not declarable per rung. `_budget_widenings`
+    treats a key the delegator does not hold as unheld, so granting any
+    positive amount of it widens -- and `pool init` has no `--ceiling-budgets`,
+    so the ceiling holds none. A `--tier-budgets` flag would therefore be
+    refused `grant-ceiling` on every possible use. A flag that cannot be used
+    correctly is worse than an absent one."""
+    declared = list(getattr(args, "tier", None) or ())
+    evidence = _tier_evidence(getattr(args, "tier_evidence", None) or ())
+    caps = _tier_caps(getattr(args, "tier_caps", None) or ())
+
+    for name in declared:
+        if name == ENTRY_TIER:
+            raise PoolError(
+                f"--tier {name!r} is the entry rung, and entry is not a "
+                f"promotion: a pool's entry tier is declared by --entry-caps")
+        if name not in evidence:
+            raise PoolError(
+                f"--tier {name!r} states no evidence requirement; add "
+                f"--tier-evidence {name}=N. A rung's cost is not defaulted: 0 "
+                f"would make the rung free, and any other number would be this "
+                f"tool inventing a threshold")
+    for given, flag in ((evidence, "--tier-evidence"), (caps, "--tier-caps")):
+        for name in given:
+            if name not in declared:
+                raise PoolError(
+                    f"{flag} names {name!r}, which no --tier declares"
+                    + (f" (`{ENTRY_TIER}` is declared by --entry-caps)"
+                       if name == ENTRY_TIER else ""))
+
+    tiers = {ENTRY_TIER: TierGrant(
+        caps=tuple(getattr(args, "entry_caps", None) or ()))}
+    for name in declared:
+        tiers[name] = TierGrant(caps=tuple(caps.get(name, ())),
+                                evidence_required=evidence[name])
+    return tiers
+
+
 @dataclass(frozen=True)
 class PoolCharter:
     """A declared private pool: its identity, its ceiling, its ladder, and the
@@ -1701,6 +1800,28 @@ def _outstanding_note(roster: Roster, peer_id: str) -> str:
     return f" outstanding={len(owed)}" if owed else ""
 
 
+def _ladder_line(charter: PoolCharter) -> str:
+    """The rungs this pool actually offers, in ladder order, with the cost of
+    each.
+
+    Only DECLARED rungs appear, and that is the operator fact worth rendering:
+    a pool that declares only the entry tier offers no promotion at all, so
+    `pool promote --tier replayable` refuses `unknown-tier` here and the
+    operator can see why without reading charter.json. The cost is the
+    `--tier-evidence` count the operator wrote, shown beside the caps the rung
+    hands over, so what a promotion buys is legible before it is spent."""
+    rungs = []
+    for name in TIER_ORDER:
+        grant = charter.tiers.get(name)
+        if grant is None:
+            continue
+        cost = "entry" if name == ENTRY_TIER else (
+            f"evidence>={grant.evidence_required}")
+        caps = ", ".join(sorted(grant.caps)) or "(none)"
+        rungs.append(f"{name}({cost}, caps={caps})")
+    return "  ladder    " + " -> ".join(rungs)
+
+
 def render_status(charter_record: Mapping[str, Any], roster: Roster,
                   directory: Optional[IdentityDirectory] = None,
                   health: Optional[Mapping[str, str]] = None) -> str:
@@ -1721,6 +1842,7 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster,
     lines = [f"pool {charter.pool_id}",
              f"  charter   {canonical_digest(charter_record)[:16]}",
              f"  ceiling   {', '.join(sorted(charter.ceiling)) or '(none)'}",
+             _ladder_line(charter),
              f"  floor     trust >= {charter.trust_floor}",
              "  authority",
              f"    admit   {', '.join(charter.admit_key_ids) or '(nobody)'}",
@@ -1923,26 +2045,41 @@ def pool_command(args) -> int:
             except RevlError as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 2
-        charter = PoolCharter(
-            pool_id=args.pool_id,
-            ceiling=tuple(args.ceiling or ()),
-            tiers={ENTRY_TIER: TierGrant(caps=tuple(args.entry_caps or ()))},
-            admit_key_ids=(key_id(key),),
-            revoke_key_ids=(key_id(key),) + tuple(
-                peer_identity.load_public_identity(path).key_id
-                for path in (args.revoke_identity or ())),
-            # The shared key's fingerprint, plus any identity fingerprints the
-            # operator pinned. An execution receipt is an ASYMMETRIC record
-            # (`pool_receipt`), so without at least one `--attest-identity` no
-            # receipt can ever count and the ladder above the entry tier is
-            # unreachable. That is deliberate rather than a default: evidence
-            # the verifier could have manufactured is not evidence.
-            attest_key_ids=(key_id(key),) + tuple(
-                peer_identity.load_public_identity(path).key_id
-                for path in (getattr(args, "attest_identity", None) or ())),
-            artifact_digests=tuple(args.artifact or ()),
-            trust_floor=args.trust_floor,
-            identity_mode=args.identity)
+        # The declared ladder is read out of argv BEFORE the charter is built,
+        # so a mistyped `--tier` is a named CLI error rather than a traceback
+        # out of a constructor. What `_declared_tiers` checks is only the SHAPE
+        # of the flags (a rung with no evidence requirement, a rung named by a
+        # companion flag but never declared). Whether the rung NAMES are rungs
+        # and whether the caps parse stays `PoolCharter.__post_init__`'s call,
+        # so there is one authority on the ladder's grammar and it is the
+        # charter's -- its refusal is reported here rather than reimplemented
+        # beside it.
+        try:
+            tiers = _declared_tiers(args)
+            charter = PoolCharter(
+                pool_id=args.pool_id,
+                ceiling=tuple(args.ceiling or ()),
+                tiers=tiers,
+                admit_key_ids=(key_id(key),),
+                revoke_key_ids=(key_id(key),) + tuple(
+                    peer_identity.load_public_identity(path).key_id
+                    for path in (args.revoke_identity or ())),
+                # The shared key's fingerprint, plus any identity fingerprints
+                # the operator pinned. An execution receipt is an ASYMMETRIC
+                # record (`pool_receipt`), so without at least one
+                # `--attest-identity` no receipt can ever count and the ladder
+                # above the entry tier is unreachable. That is deliberate
+                # rather than a default: evidence the verifier could have
+                # manufactured is not evidence.
+                attest_key_ids=(key_id(key),) + tuple(
+                    peer_identity.load_public_identity(path).key_id
+                    for path in (getattr(args, "attest_identity", None) or ())),
+                artifact_digests=tuple(args.artifact or ()),
+                trust_floor=args.trust_floor,
+                identity_mode=args.identity)
+        except PoolError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
         record = sign_charter(charter, key)
         with pool_state.locked(args.dir):
             _write_json(f"{args.dir}/{CHARTER_FILE}", record)
@@ -2052,6 +2189,24 @@ def _gate_command(args, verb: str, *, key: bytes, identity) -> int:
                                revoking_identity=identity,
                                revoking_key_id=None if identity is not None
                                else key_id(key))
+        elif verb == "promote":
+            # The one thing this branch does NOT do is decide. It reads the
+            # signed `(receipt, attestation)` pairs the delivery ledger already
+            # holds for this peer -- `evidence_pairs` is a read accessor and
+            # selects on nothing but the peer id -- and hands them to
+            # `promote`, which recounts them itself through
+            # `pool_receipt.count_evidence`. There is no count, no threshold
+            # and no rung name literal in this function: the threshold is the
+            # one `pool init --tier-evidence` wrote into the charter, and the
+            # rung must be one the charter declares. A second, weaker policy
+            # engine would live exactly here, as `if len(pairs) >= N:` or as a
+            # filter on `counts_as_evidence`, and both are the fail-open this
+            # verb exists to avoid.
+            from .pool_dispatch import evidence_pairs, load_ledger  # noqa: PLC0415
+            pairs = evidence_pairs(load_ledger(args.dir), peer_id=args.peer)
+            receipt = promote(charter_record, args.peer, args.tier,
+                              charter_key=key, roster=roster,
+                              receipts=pairs, directory=identities)
         else:  # pragma: no cover - argparse constrains the verb set
             raise AssertionError(f"unknown pool verb {verb!r}")
 

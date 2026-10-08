@@ -2077,6 +2077,30 @@ def build_parser() -> argparse.ArgumentParser:
              "ASYMMETRIC record, so without at least one of these no receipt "
              "a peer signs can ever count as evidence and no member can rise "
              "above the entry tier")
+    pool_init.add_argument(
+        "--tier", action="append", metavar="NAME",
+        help="declare a rung of the ladder ABOVE the entry tier. Repeatable. "
+             "A rung no pool declares is a rung no member can be moved to, "
+             "so `revl pool promote --tier NAME` refuses `unknown-tier` "
+             "unless init declared it. The rungs are probation, replayable "
+             "and durable; probation is the entry rung and is declared by "
+             "--entry-caps instead")
+    pool_init.add_argument(
+        "--tier-evidence", action="append", metavar="NAME=N",
+        help="how many attested execution receipts a member must have "
+             "accumulated before `pool promote` will move it to rung NAME. "
+             "REQUIRED for every --tier, and deliberately not defaulted: 0 "
+             "would make the rung free and any other number would be this "
+             "tool inventing a threshold. The count is re-derived from the "
+             "signed receipts at promote time, so this states a COST, not a "
+             "credit a member can carry")
+    pool_init.add_argument(
+        "--tier-caps", action="append", metavar="NAME=CAP",
+        help="a capability rung NAME hands a member promoted onto it, in the "
+             "capability grammar. Repeatable per rung. Every grant is diffed "
+             "against --ceiling by the same monotonicity check spawn "
+             "attenuation runs, so a rung that widens is refused "
+             "`grant-ceiling` at promote time rather than silently narrowed")
 
     pool_keygen = pool_sub.add_parser(
         "keygen",
@@ -2254,6 +2278,34 @@ def build_parser() -> argparse.ArgumentParser:
              "then signed with it, so any holder of the matching public key "
              "can check who removed whom. Its fingerprint must be in the "
              "charter's revoke authority (see `pool init --revoke-identity`)")
+
+    pool_promote = pool_sub.add_parser(
+        "promote",
+        help="move a member up the ladder, by RECOUNTING the signed "
+             "execution receipts the delivery ledger already holds for it. "
+             "Reads the ledger; states no threshold of its own")
+    pool_promote.add_argument("--dir", required=True, metavar="DIR",
+                              help="the pool directory")
+    pool_promote.add_argument("--peer", required=True, metavar="ID",
+                              help="the member to move up the ladder")
+    pool_promote.add_argument("--tier", required=True, metavar="NAME",
+                              help="the rung to move it to. Must be a rung "
+                                   "`pool init --tier` declared, so the cost "
+                                   "of the rung was stated by the operator "
+                                   "who owns the pool, not by the peer")
+    pool_promote.add_argument("--key", metavar="PATH",
+                              help="the operator signing key; its fingerprint "
+                                   "must be in the charter's admit authority. "
+                                   "Promotion is an ADMISSION decision and "
+                                   "uses the admitting key, so a peer that "
+                                   "compromised the attesting key cannot "
+                                   "walk itself up the ladder")
+    pool_promote.add_argument(
+        "--identity-key", metavar="PATH",
+        help="an operator private identity file, so the promotion receipt is "
+             "signed with a key pair any holder of the matching public key "
+             "can check. Its fingerprint must be in the charter's admit "
+             "authority (see `pool init`)")
 
     pool_serve = pool_sub.add_parser(
         "serve",
