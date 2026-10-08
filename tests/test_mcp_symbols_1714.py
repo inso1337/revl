@@ -195,7 +195,9 @@ def test_revl_source_is_advertised_read_only():
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     assert tools["revl_source"]["annotations"]["readOnlyHint"] is True
-    assert tools["revl_source"]["inputSchema"]["required"] == ["symbol"]
+    # `symbol` is optional since #2173: with nothing loaded and no `symbol`
+    # the verb answers with the packaged stdlib's modules and symbols.
+    assert tools["revl_source"]["inputSchema"]["required"] == []
     edit_items = tools["revl_edit"]["inputSchema"]["properties"]["edits"]["items"]
     assert "symbol" in edit_items["properties"]
 

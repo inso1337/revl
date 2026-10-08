@@ -91,6 +91,7 @@ from . import quorum as _quorum
 from . import repair as _repair
 from . import runtime_gate as _runtime_gate
 from . import ship as _ship
+from . import stdlib as _stdlib
 from . import undo_record as _undo_record
 from . import deploy as _mcp_deploy
 from .persist import (ORIGIN_DEPENDENCIES, RestoreError,
@@ -1434,22 +1435,73 @@ def _with_touched(result: dict, before: dict) -> dict:
     return result
 
 
+#: The arguments that name a source to read: a call carrying one of these
+#: reads that source, never the stdlib (#2173).
+_SOURCE_KEYS = ("source", "files", "modules", "proposal")
+
+#: What a call can ask for. A call carrying any of these — a source, or a
+#: modifier such as `with`/`comments` — and no `symbol` keeps the refusal it
+#: has always had; only a call that carries none of them gets the stdlib index
+#: (#2173).
+_ASKING_KEYS = _SOURCE_KEYS + ("with", "comments")
+
+
+def _names_no_source(arguments: dict) -> bool:
+    """True when the call names no source of its own: no `files`, `source`,
+    `modules` or `proposal`."""
+    return not any(arguments.get(key) for key in _SOURCE_KEYS)
+
+
+def _stdlib_only(arguments: dict) -> bool:
+    """True when a `symbol` should be resolved against the packaged stdlib:
+    the call names no source to read from and the session holds nothing, so
+    the stdlib is the only source there is (#2173).
+
+    A loaded composition, a held draft and a `files`/`source`/`modules`/
+    `proposal` argument all name a working set of their own, and the stdlib is
+    then reached the way it always was — through a `use` that puts its module
+    in that working set. This decides the *reading* half of #2173 only."""
+    return (_names_no_source(arguments) and not SESSION.loaded
+            and _draft.pending(SESSION) is None)
+
+
+def _bare_call(arguments: dict) -> bool:
+    """True when the call asks for nothing at all: no source, no modifier.
+
+    Only a call like that — `revl_source {}` — is answered with the stdlib's
+    own index (#2173). A caller that names a source, a modifier or a proposal
+    and no `symbol` gets the refusal it has always had, so a missing symbol is
+    still reported as a missing symbol rather than silently answered with a
+    catalogue the caller did not ask for. A key carrying `None` is not an
+    argument — a client that serialises an omitted optional as `null` is
+    asking for nothing, and is answered like one."""
+    return all(arguments.get(key) is None for key in _ASKING_KEYS)
+
+
 def _tool_source(arguments: dict) -> dict:
     """One declaration of the server-side source, by symbol (issue #1714).
 
     Reads what the session holds (inline source, modules, or the loaded files
-    as last swapped in), or, with nothing loaded, the `files`/`source` given."""
+    as last swapped in), or, with nothing loaded, the `files`/`source` given.
+    With no `symbol` and nothing else asked for it answers with the packaged
+    stdlib's own index instead, and with a `symbol` and nothing loaded it
+    resolves that name against the packaged stdlib (#2173): the vocabulary is
+    then readable without having to know a name in it first."""
     from . import symbols as _symbols  # noqa: PLC0415
 
     symbol = arguments.get("symbol")
+    if not symbol and _bare_call(arguments):
+        return {"ok": True, **_stdlib.catalogue()}
     if not symbol:
         return _session_error("`symbol` is required: a declaration name, "
                               "`<buffer>:Name`, or `<buffer>:<line>`")
+    stdlib = _stdlib_only(arguments)
+    deps = "deps" in (arguments.get("with") or [])
+    comments = arguments.get("comments", True) is not False
     try:
-        vs = _source_set(arguments)
-        result = _symbols.read(vs, symbol,
-                               deps="deps" in (arguments.get("with") or []),
-                               comments=arguments.get("comments", True) is not False)
+        vs = _stdlib.working_set() if stdlib else _source_set(arguments)
+        reader = _stdlib.read if stdlib else _symbols.read
+        result = reader(vs, symbol, deps=deps, comments=comments)
     except RevlError as error:
         # a path that cannot be opened is a PATH error, reported by the same
         # `report`/`classify` the check and load verbs use, so `revl_source`
@@ -4213,7 +4265,14 @@ TOOLS = [
                        "(its services, the functions and types it uses), and "
                        "`comments: false` returns the code alone in canonical form. "
                        "Reads the running composition, or, with nothing loaded, "
-                       "`files`/`source`. The `disk` block reports whether the "
+                       "`files`/`source`. With nothing loaded and no `symbol` it "
+                       "answers with the PACKAGED STDLIB instead: every "
+                       "`stdlib/*.rvl` module and its symbols, and the base type "
+                       "surface (`Str`, `List`, `Map`, ...) as `builtin` — the "
+                       "vocabulary, without having to know a name in it first. A "
+                       "`symbol` given with nothing loaded resolves against that same "
+                       "stdlib (`Str.concat`, `list_sort`, `str.rvl:trim`). The "
+                       "`disk` block reports whether the "
                        "held source still matches the bytes on disk, so a re-read "
                        "is not mistaken for persistence; `revl_export` is the one "
                        "verb that writes the held source out (issue #2032). Pairs "
@@ -4224,7 +4283,8 @@ TOOLS = [
             "properties": {
                 "symbol": {"type": "string",
                            "description": "`Name`, `<buffer>:Name` or "
-                                          "`<buffer>:<line>`"},
+                                          "`<buffer>:<line>`; omit, with nothing "
+                                          "loaded, for the packaged stdlib"},
                 "with": {"type": "array", "items": {"type": "string",
                                                     "enum": ["deps", "knowledge"]},
                          "description": "`deps`: also the declarations it names; "
@@ -4241,7 +4301,7 @@ TOOLS = [
                              "description": "true: read your speculative proposal "
                                             "instead of the running source"},
             },
-            "required": ["symbol"],
+            "required": [],
         },
         "annotations": {"readOnlyHint": True},
         "handler": _tool_source,

@@ -151,7 +151,7 @@ was corrected by hand and had drifted back within a day.
 | mcp-bridge.md | needs-work | 77 |  |
 | mcp-http-transport.md | current | 0 |  |
 | mcp-proxy.md | current | 0 |  |
-| mcp-reference.md | current | 13 |  |
+| mcp-reference.md | current | 18 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
 | model-scheduling.md | needs-work | 8 |  |
 | namespacing.md | needs-work | 16 |  |

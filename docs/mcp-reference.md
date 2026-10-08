@@ -217,7 +217,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_knowledge` | no | no | `op` |
 | `revl_export` | no | yes | - |
 | `revl_change` | no | yes | - (source) |
-| `revl_source` | yes | no | `symbol` (source) |
+| `revl_source` | yes | no | - (source) |
 | `revl_gauntlet` | yes | no | - (source) |
 | `revl_quarantine` | yes | no | - (source) |
 | `revl_repair` | no | yes | `component` |
@@ -1065,6 +1065,36 @@ names and no comments is about 300.
 - Reads the running composition as the session holds it (edits included).
   With nothing loaded, pass `files` or `source` to read from.
 
+**The packaged stdlib (issue #2173).** `stdlib/` ships in the wheel — 20
+modules — but it is not a loaded buffer, so the only declaration reader could
+not reach it: `revl_source {}` asked for a symbol name, and a name the session
+does not hold answered "nothing is loaded". The vocabulary was therefore
+readable only by an agent that already knew it.
+
+- With no `symbol` and nothing else asked for, `revl_source` answers with the
+  stdlib itself: `{kind: "stdlib", root, packaged, modules, builtin, hint}`,
+  where each module carries its `path` (`stdlib/<name>.rvl`), `packaged: true`,
+  and its exported `symbols` by kind (`fn`, `type`, `service`, `component`,
+  `extern`, ...). That is the whole vocabulary in one call — which modules
+  exist and what each one declares.
+- The `builtin` entry is the base type surface (`Str`, `List`, `Map`, `Int`,
+  `Value`, ...) as `typecheck` admits it. Those methods are built into the
+  language and declared by no file ([stdlib-2.0.md](stdlib-2.0.md), §The
+  surface), so they are indexed under a buffer named `builtin` rather than a
+  module.
+- With a `symbol` and nothing loaded, the name resolves against that same
+  stdlib: a bare name when it is unique (`list_sort`), `<module>.rvl:Name`
+  (`str.rvl:trim`), or a base type's method as `Str.concat` or
+  `builtin:Str.concat`. A name the stdlib does not declare is refused by
+  naming the stdlib, its root and its module count — never with "nothing is
+  loaded", which would send the caller back to the search this ends.
+- A call that names a source (`files`, `source`, `modules`), a modifier
+  (`with`, `comments`) or `proposal` and no `symbol` keeps the refusal it has
+  always had (`symbol` is required), so a caller that meant to read something
+  else is never handed a catalogue instead. The stdlib branch is for a session
+  that holds nothing; a loaded composition is read from its own working set,
+  and reaches the stdlib the way it always has, through a `use`.
+
 A declaration's span runs from its first line to the line before the next
 top-level declaration, less the blank and comment lines between them, and is
 used only when it parses on its own as exactly that declaration.
@@ -1085,9 +1115,10 @@ changed. A member that shares a line with anything else (`provide p { fn a() =
 edit still reaches it. The answer is
 `{symbol, kind, buffer, line, text}`, plus `deps` as a list of the same shape.
 
-- Inputs: `symbol` (required); `with`; `comments`; `proposal` (true: read
-  your speculative proposal, issue #1696); `files` / `source` when nothing is
-  loaded.
+- Inputs: `symbol` (optional — with no `symbol` and nothing else asked for,
+  it answers with the packaged stdlib's modules and symbols); `with`;
+  `comments`; `proposal` (true: read your speculative proposal, issue #1696);
+  `files` / `source` when nothing is loaded.
 
 ### `revl_unload`
 
