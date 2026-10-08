@@ -141,11 +141,34 @@ clause reads as a requirement without being one:
 - on an arm that reaches a council, which is one candidate whose aggregation
   the council declares.
 
-The plan reads what a host holds off the record item 1 landed — the provision's
-`timeline`, through `Provisions.residency()`, which
-`model_schedule.resident_roles()` turns into `{role: device}`. Nothing calls
-that reader at plan time yet: acquisition is item 1's second half, and
-`_model_schedules`'s `residency` parameter is the seam it plugs into.
+The plan reads what a host holds at plan time: acquisition, item 1's second
+half. When `--providers` names the bindings **and** an arm this placement
+schedules wrote the clause, `revl.providers.plan_time_residency()` asks each
+bound server's own `/api/ps` what it holds for the candidate roles of those
+arms, and derives the device **class** from the server's own memory report.
+`run_placement` hands that to `_model_schedules`, which is the seam the clause
+ranks through. Nothing is asked otherwise, not one request and not even the
+configuration read, so a composition that does not use the clause plans
+exactly as it did, and `--providers` on its own moves no verdict.
+
+A server that cannot be asked is a **refusal**, not a default: the run exits
+non-zero before anything spawns, naming the host, the server and the role.
+
+Two limits are worth stating plainly. The read is a report about a moment, and
+revl cannot tell who loaded what, so a model another client loaded is
+indistinguishable from one revl provisioned; that is why the printed note says
+the decision is not reproducible from the composition alone. And `/api/ps`
+names memory, not a device, so what a server read yields is a device class.
+Only the keys of a residency are read, which is what lets the two producers
+(a landed provision's `timeline` through `resident_roles()`, and a plan-time
+server report) be interchangeable. The schedule a host ranked on carries that
+residency into the spec, so the child re-derives the **same** decision instead
+of a second one.
+
+The provision-record reader (`Provisions.residency()` through
+`model_schedule.resident_roles()`) still has no plan-time caller: it reads a
+timeline that already happened, so it serves a re-plan over live provisions
+rather than a fresh plan, which is why the plan-time read is a separate one.
 
 The self-host gate reads the clause too, and carries it on the arm
 (`apref` in `selfhost/lower.rvl`). Its arm reader (`model_arms_in`) consumes an
@@ -168,7 +191,8 @@ gate *decides* is residence-uniform by item 515's own rule, so "could this host
 hold it" answers the same for every candidate of a decidable arm. What the
 clause changes for this gate is the answer it gives — an opted-in arm is read
 and decided instead of refused by name — and `_model_schedules`'s `residency`
-parameter stays the seam a host-aware fold would plug into.
+parameter, which the placement conductor does now fill, stays the seam a
+host-aware fold would plug into.
 
 ## The refusal
 

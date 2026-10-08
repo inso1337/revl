@@ -341,7 +341,7 @@ def test_a_malformed_residency_is_refused(tmp_path):
     entry["residency"] = {"small": 1}
     with pytest.raises(ms.ScheduleRefusal) as excinfo:
         ms.verify_handoff([app], "edge", ["Classifier"], entry)
-    assert "must map role names to device names" in str(excinfo.value)
+    assert "must map role names to the device" in str(excinfo.value)
 
 
 def test_a_tampered_residency_is_refused(tmp_path):
@@ -503,7 +503,8 @@ def test_a_composition_without_route_model_spawns_exactly_as_before(
     def run_once(disable: bool):
         if disable:
             monkeypatch.setattr(_placement, "_model_schedules",
-                                lambda files, processes: (None, {}))
+                                lambda files, processes, residency=None:
+                                (None, {}))
         written = _capture_specs(monkeypatch)
         work = tmp_path / ("off" if disable else "on")
         work.mkdir()

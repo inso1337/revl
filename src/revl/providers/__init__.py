@@ -37,7 +37,8 @@ from .host import (ModelHost, PlacementRefused, build_hosts, close_hosts,
 from .placement import (Placement, Refusal, check_bindings, model_keys,
                         model_operations, placement_of_files,
                         placement_of_program)
-from .provision import ProvisionRefused, Provisions, RoleProvision
+from .provision import (ProvisionRefused, Provisions, RoleProvision,
+                        gpu_share)
 from .transport import ProviderError, redact, request_json
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "load_config",
     "missing_credentials", "model_keys", "model_operations", "open_hosts",
     "parse_config", "placement_of_files", "placement_of_program",
+    "plan_time_residency",
     "provision_residue", "provision_summaries", "read_credential",
     "rebind_problem", "redact",
     "request_json",
@@ -79,6 +81,61 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
             "not set: " + ", ".join(f"`{env}` (role `{role}`)"
                                     for role, env in missing))
     return hosts
+
+
+def plan_time_residency(config, wanted: dict) -> dict:
+    """`{host: {role: device}}`: what each host already holds, asked of the
+    servers at plan time (item 515 / issue #1189 - the acquisition half of
+    §11.6 item 1).
+
+    `wanted` is `{host: (role, ...)}` from
+    `revl.model_schedule.residency_candidates()`: the candidate roles of the
+    arms that wrote `prefer resident`, per host. Only those roles are asked
+    about, each through its own binding, so a placement that ranks nothing
+    makes no request and a host that ranks nothing is not asked. A role whose
+    binding is not managed (or not configured) is skipped: revl does not load
+    it, so what a server holds for it is not something this placement can
+    reuse.
+
+    The device is the CLASS the server's own report implies, read the way
+    `provision.gpu_share` reads the server's own accounting: a member the
+    server reports holding entirely in GPU memory is on a `gpu`, one it
+    reports holding none of there is on a `cpu`. The class is what a
+    ranking reads (a residency is keyed by role and only its keys are
+    compared, `model_schedule._Search.order`), and it is also carried into
+    the host's spec, so a member whose share the server does not report is
+    left OUT rather than guessed at: a guess would be re-derived as a fact by
+    the child that verifies the spec.
+
+    Raises `ProviderError` naming the host and the server when a server
+    cannot be asked. A host whose arm wrote `prefer resident` is planned
+    against what it holds, so a plan that cannot see that is refused rather
+    than decided on an assumption.
+    """
+    held: dict = {}
+    for host, roles in sorted(wanted.items()):
+        for role in roles:
+            binding = config.binding(role)
+            if binding is None or not binding.managed:
+                continue
+            try:
+                entry = Adapter(binding).residency()
+            except (ProviderError, OSError) as exc:
+                raise ProviderError(
+                    f"host `{host}`: cannot ask {binding.base_url} what it "
+                    f"holds for model role `{role}`. The arm placed here "
+                    f"wrote `prefer resident`, so the placement is ranked "
+                    f"against what the host holds and cannot be decided "
+                    f"without it; start the server, or drop the clause from "
+                    f"that arm ({exc})") from None
+            if entry is None:
+                continue
+            share = gpu_share(entry)
+            if share == 100:
+                held.setdefault(host, {})[role] = "gpu"
+            elif share == 0:
+                held.setdefault(host, {})[role] = "cpu"
+    return held
 
 
 def rebind_problem(ir, files, config_path, hosts) -> str | None:
