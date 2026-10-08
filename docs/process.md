@@ -430,6 +430,23 @@ What is still not covered is the publish job's own runtime environment, its
 on a tag build and cannot be rehearsed without publishing. Run
 `gh workflow run "release dry run"` and read it green before pushing a tag.
 
+`.github/workflows/release-dryrun-crate.yml` is the same rehearsal for the rust
+tier. `crates/revl-gate` carries the gate's portable admission surface, and
+nothing built it the way a publish would: `backend-rust` compiles it as a
+workspace member, which is a different file set from the one cargo would upload,
+and a `path` dependency or an untracked source file would have gone unnoticed
+until the tag. The workflow runs `tools/check_crate_package.py`, which asserts
+the manifest's preconditions, diffs `cargo package --list` against
+`git ls-files --cached --others --exclude-standard` in both directions, then
+builds the `.crate` and reads the tarball back to confirm the members the
+archive declares are the members it contains. Its `--self-test` is cargo-free
+and runs as the first step of that workflow, before anything is built; the
+cargo half runs weekly, on `workflow_dispatch`, and on a PR that edits the
+crate, the checker or the workflow. It has no upload step either and names no
+registry credential, so it cannot publish by accident. What is *not* covered
+here is the same residue as the wheel's: the registry account, the token, and
+whatever crates.io validates on upload.
+
 ## Merging main into a PR branch
 
 Update an open PR by merging `origin/main` into it, never by rebasing and

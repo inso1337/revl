@@ -471,12 +471,18 @@ with no Python on the machine, so a rust consumer can depend on it via a path
 dependency today (see the example's `README.md`); what is NOT done is the
 PUBLISH step. `revl-gate` is not on crates.io, so `cargo add revl-gate` is
 the shape a consumer gets once revl's release path cuts it, not a command
-that works right now. The wasm tier is in the same position one step further
-along: the component builds from committed crate source and transpiles to a
-JS module that runs in a browser, a worker or `wasmtime` today
+that works right now. That release path is no longer latent: the
+`release dry run (crate)` workflow runs the real `cargo package` and checks
+the tarball it produces, and stops there (see the publish status below). The
+wasm tier is in the same position one step further back: the component builds
+from committed crate source and transpiles to a JS module that runs in a
+browser, a worker or `wasmtime` today
 (`python3 tools/build_gate_js.py --out DIR`, or `npm run build` inside
 `examples/ecosystem-consumer-js/`), and what is NOT done is again the PUBLISH
-step. Nothing is on npm, so `npm i` the gate is the shape a consumer gets
+step — behind it by one more step, because no npm package of the gate exists
+to publish: the example transpiles the component into its own `dist/` and is
+`private`, and nothing in this repository ships a `package.json` for the gate
+itself. Nothing is on npm, so `npm i` the gate is the shape a consumer gets
 once revl's release path cuts it, not a command that works right now. Neither
 publish changes a line of the contract above; both are packaging.
 
@@ -491,20 +497,22 @@ import section. It carries the same no-admission asymmetry as the rust crate's
 verdict surface: `no-objection` is the non-refusing arm, not an admission, and
 the crate's separate admission surface is not on this world.
 
-## Publish status: the only remaining step
+## Publish status: built and rehearsed; the upload is the owner's step
 
 All three dependency forms are built and verified from the committed source in
 CI today; what none of them has yet is a copy on a public registry. That last
 act is the one thing this repository deliberately does not do for itself,
 because putting a version on a registry is irreversible and is the project
 owner's decision, not a merge's. So the honest state of "revl as a dependency"
-is: code-complete on every tier, awaiting one owner-run publish per registry.
+is: code-complete on every tier, the py and rust release paths rehearsed
+without an upload, and one owner-run publish per registry still to come — plus,
+on the wasm/js tier, the packaging itself, which does not exist yet.
 
-| tier | dependency form | built + checked from source in CI | the only step that remains |
+| tier | dependency form | built, checked and rehearsed from source in CI | the step that remains |
 |---|---|---|---|
 | py | `pip install revl`, then `from revl.gate import ...` | wheel built and installed into a fresh venv by `release dry run`, manifest-gated by `tools/check_wheel_manifest.py`, surface-gated by `tests/test_gate_compat.py` | push a `v*` tag: `publish.yml` runs the full matrix on the tag and uploads to **PyPI** by Trusted Publishing (the one-time PyPI publisher config is noted inline in `publish.yml`) |
-| rust | `cargo add revl-gate` | `crates/revl-gate` regenerated and drift-gated by `tests/test_gate_crate_drift.py`; the example depends on it by path and its verdicts are gated by `tests/test_gate_consumer_example_rs.py` | `cargo publish` the crate to **crates.io** with an owner token |
-| wasm / js | `npm i` the jco-transpiled gate | `crates/revl-gate-wasm` built by `tools/build_gate_wasm.py`, transpiled by `tools/build_gate_js.py`, drift/import/vector-gated by the three `test_gate_wasm_*` suites and exercised by `tests/test_gate_consumer_example_js.py` | `npm publish` the transpiled package to **npm** with an owner token |
+| rust | `cargo add revl-gate` | `crates/revl-gate` regenerated and drift-gated by `tests/test_gate_crate_drift.py`; the example depends on it by path and its verdicts are gated by `tests/test_gate_consumer_example_rs.py`; `release dry run (crate)` runs the real `cargo package` and `tools/check_crate_package.py` compares the tarball's members against `git ls-files crates/revl-gate` | `cargo publish` the crate to **crates.io** with an owner token |
+| wasm / js | `npm i` the jco-transpiled gate | `crates/revl-gate-wasm` built by `tools/build_gate_wasm.py`, transpiled by `tools/build_gate_js.py`, drift/import/vector-gated by the three `test_gate_wasm_*` suites and exercised by `tests/test_gate_consumer_example_js.py`. **No rehearsal: there is no package to rehearse.** | write the npm package for the transpiled gate — nothing in this repository ships a `package.json` for it today, and `docs/design/335-wasm-edge-gate.md` defers that packaging here — then `npm publish` it to **npm** with an owner token |
 
 Nothing above is a code change. Each remaining step is an owner running a
 publish against a registry with a credential this repository does not hold, and
@@ -512,8 +520,10 @@ none of them alters a line of the contract stated at the top of this document:
 a refusal stays authoritative and fail-closed, an admission stays a
 frontier-scoped compile-time judgment, and the registry a consumer fetches from
 changes only where the bytes came from, never what a verdict means.
-`tests/test_gate_dependency_publish_ready.py` pins this readiness so the "only a
-publish remains" claim cannot quietly rot back into a code gap.
+`tests/test_gate_dependency_publish_ready.py` pins this readiness, and
+`tests/test_gate_crate_release_path.py` pins the rust rehearsal, so neither the
+"only a publish remains" claim nor the rehearsal itself can quietly rot back
+into a code gap.
 
 See also: [`docs/design/338-revl-as-dependency.md`](design/338-revl-as-dependency.md)
 for the full design and its adversarial review;

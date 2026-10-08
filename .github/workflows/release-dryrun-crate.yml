@@ -1,0 +1,105 @@
+# Everything the crate release does, except the part that cannot be undone.
+#
+# WHY (item 338, the crate tier of "revl as a dependency"). `cargo add
+# revl-gate` is the epic's headline sentence, and until this job existed the
+# crate had never been *packaged*: nothing in `.github/workflows` or `tools/`
+# had run the packager, let alone a registry upload. The `backend-rust` job
+# in ci.yml compiles the CHECKOUT, which is a different artifact from the one
+# cargo would upload -- cargo selects its files by its own rule, rewrites the
+# manifest, and will happily build a tree here that a consumer cannot resolve.
+# The wheel tier paid for that lesson already (issue #191) and rehearses itself
+# in `release-dryrun.yml`; this is the same job for the crate.
+#
+# WHAT IT DOES. Runs the real `cargo package` -- the tarball, built from the
+# package, not a dry report about it -- and reads the `.crate` back, asserting
+# its member list against the crate's git file list in both directions. It also
+# asserts the preconditions cargo and crates.io enforce (name, version,
+# description, license, edition, no `publish = false`, no unversioned path or
+# workspace dependency) and the offline-first resolution policy
+# `tools/validate.py` uses. `tools/check_crate_package.py` is the whole gate;
+# this file is only where the half that needs cargo gets to run.
+#
+# There is NO upload step here, not even a skipped one and not one pointed at a
+# local registry: the publisher takes a registry token and has no dry-run mode,
+# and a publish step that is merely `if:`-guarded is one edited condition away
+# from being a release nobody meant to cut. No registry credential is named
+# anywhere in this file, so it cannot be used by accident.
+#
+# WHAT IT DOES NOT COVER. The registry account, the token, and crates.io's own
+# server-side validation, none of which can be rehearsed without uploading --
+# the first release is where those get tested. Nor the crate's identity digest
+# (`build.rs` hashes the manifest and sources into `REVL_GATE_IDENTITY`), which
+# is the census artifact's business, not packaging's.
+#
+# NO TEST SUITE RUNS HERE, deliberately: the cargo-free half of this gate is
+# `tests/test_gate_crate_release_path.py`, which the root suite collects like
+# any other test file. A step running it again from this workflow would buy
+# nothing and would need its own pairing audit.
+name: release dry run (crate)
+
+on:
+  # A maintainer runs this by hand before tagging a crate release, the same way
+  # `release dry run` is run before tagging the wheel: `gh workflow run
+  # "release dry run (crate)"`, read it green, then tag.
+  workflow_dispatch:
+  # And on a schedule, so packaging rot is found by the calendar rather than by
+  # a release. Weekly, off-hours, one job -- runner concurrency is this
+  # project's throughput limit, so this deliberately does NOT run on every PR.
+  schedule:
+    - cron: "40 6 * * 1"
+  # The exception to that: a PR that edits the crate, the gate, or this file
+  # gets the dry run, because those are the changes that can break it. The
+  # paths filter keeps this off the other 99% of PRs. This is not a required
+  # check.
+  pull_request:
+    paths:
+      - "crates/revl-gate/**"
+      - "tools/check_crate_package.py"
+      - ".github/workflows/release-dryrun-crate.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dryrun-crate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-and-check:
+    runs-on: ubuntu-latest
+    # A runaway here would hold this group's slot; `cancel-in-progress` is false
+    # for pushes, so bound it explicitly. `cargo package` builds the crate and
+    # its dependencies from a cold cache, which is minutes, not hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable branch @ 2026-08-05; still installs the stable toolchain
+
+      # The half that needs no rust toolchain, and the only half that can run
+      # everywhere: a gate nobody has seen fail is a gate nobody can trust, so
+      # the checks are driven against synthetic bad artifacts first. If this
+      # step is red, the `--build` step below is not evidence of anything.
+      - name: The crate checks bite
+        run: python3 tools/check_crate_package.py --self-test
+
+      # The rehearsal proper. `--build` runs the real `cargo package` (no
+      # `--no-verify`: the crate must compile from the package it produces,
+      # which is the failure a consumer would hit and this checkout cannot see)
+      # and then reads the `.crate` tarball back, comparing its members against
+      # `git ls-files crates/revl-gate` both ways. Over-inclusion ships a stray
+      # file to every consumer forever, because crates.io versions are
+      # immutable; under-inclusion ships a crate that builds here and not for
+      # them. The same step asserts the preconditions crates.io enforces, so a
+      # red names the reason here instead of surfacing as an upload that does
+      # not happen.
+      - name: Package the crate and check the package
+        run: python3 tools/check_crate_package.py --build
+
+      - name: This job does not publish
+        run: |
+          echo "Packaged the crate, built it from the package and checked its members."
+          echo "Nothing was uploaded: this workflow holds no registry credential."
+          echo "The real release is the maintainer's registry upload, on a tag."

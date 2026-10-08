@@ -54,7 +54,7 @@ USES = re.compile(
     re.MULTILINE,
 )
 
-# The 14 workflow files that constitute the CI surface. Named so that a workflow
+# The 10 workflow files that constitute the CI surface. Named so that a workflow
 # moved out of the scanned directory cannot silently leave the check's scope.
 EXPECTED_WORKFLOWS = frozenset({
     "arm64-smoke.yml",
@@ -63,6 +63,7 @@ EXPECTED_WORKFLOWS = frozenset({
     "pages.yml",
     "publish.yml",
     "release-dryrun.yml",
+    "release-dryrun-crate.yml",
     "site-wheel.yml",
     "windows-smoke.yml",
     "x64-smoke.yml",
