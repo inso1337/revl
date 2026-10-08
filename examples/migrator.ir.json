@@ -21,7 +21,10 @@
             }
           ],
           "returns": "Int",
-          "emission": true
+          "emission": true,
+          "capabilities": [
+            "db"
+          ]
         }
       }
     }

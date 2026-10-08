@@ -3,17 +3,22 @@
 // canonical Cache provider — the `revl_resolve` exit test finds it from a
 // Cache-shaped need whose service is declared under a different name, proving
 // the match is structural, not textual (docs/registry.md §6).
+//
+// Both reaches declare the `[db]` scope the example's manifest declares
+// (#2105). This component IS `examples/user_cache.rvl`'s `UserCache`, so a bare
+// `emission` here would widen `[db]` to any and the §5 gate would refuse the
+// hot-swap the file exists to demonstrate.
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission fn execute(sql: Str) -> Int
+  emission[db] fn execute(sql: Str) -> Int
 }
 
 service Cache {
   fn get(key: Str) -> Opt[Str]
   // `put` writes the cache log through `db` — a service declaration is an
   // upper bound on what its providers may do.
-  emission fn put(key: Str, value: Str)
+  emission[db] fn put(key: Str, value: Str)
 }
 
 component UserCache requires db: Database provides cache: Cache {
