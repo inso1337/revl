@@ -30,6 +30,8 @@ from pathlib import Path
 from .. import _paths
 from ..typecheck import _BUILTIN_SIG, _SIZED_HEADS
 from . import symbols as _symbols
+from .persist import (ORIGIN_DEPENDENCIES, ORIGIN_FILES, ORIGIN_MODULES,
+                      ORIGIN_SOURCE)
 
 #: The buffer key the base type surface is read under. Not a path: the base
 #: surface is not a file on disk, so it has no `<module>.rvl` to be named by.
@@ -136,8 +138,13 @@ def working_set() -> dict:
     `<buffer>:Name` prefix resolves by module path or basename and a bare name
     resolves against all of them. Nothing here is writable: `_set_text` refuses
     a dependency buffer by name, and this working set never reaches the
-    session."""
-    return {"source": None, "files": [], "modules": {}, "dependencies": _texts()}
+    session.
+
+    The four keys are the origin vocabulary itself, imported rather than
+    re-spelled: `edit.py::compile_virtual` consumes this same mapping, so the
+    names are declared once, in `persist` (issues #1690, #1285)."""
+    return {ORIGIN_SOURCE: None, ORIGIN_FILES: [], ORIGIN_MODULES: {},
+            ORIGIN_DEPENDENCIES: _texts()}
 
 
 def _builtin_symbols() -> dict[str, str]:
