@@ -327,3 +327,149 @@ def test_an_over_claiming_report_is_not_published(publisher, monkeypatch,
         "the edition was written despite the report failing "
         "tools/check_eval_report.py"
     )
+
+
+# --- a missing record is a named problem, not a crash (issue #2166) -------- #
+def test_a_missing_reproduction_record_renders_a_named_problem(publisher,
+                                                               monkeypatch):
+    """`census["reproduction"]` is None when no record is at the current
+    checker version (`tools/census_artifact.py` reports that as a problem, not
+    an error), and `_reproduction` used to subscript it — so on such a tree
+    `publisher.render()` + `edition()` died with `TypeError: 'NoneType' object
+    is not subscriptable` and every test using the `rendered` fixture errored
+    at setup. The section stays, because a reader has to learn the crate claim
+    is unbacked, and it names the command that makes the record."""
+    artifact = publisher._load("tools/census_artifact.py",
+                              "publish_no_record_artifact")
+    monkeypatch.setattr(artifact, "load_reproduction", lambda *a, **k: None)
+    report = artifact.report_from_records()
+    assert report["census"]["reproduction"] is None, (
+        "this test needs a tree with no record at the current checker version"
+    )
+    version = report["census"]["checker_version"]
+
+    files = publisher.edition(artifact, report)
+    assert set(files) == set(publisher.FILES)
+    section = files["index.html"].split('<section id="reproduction">')[1]
+    section = section.split("</section>")[0]
+    assert "No crate reproduction is recorded at this checker version" in section
+    assert version in section, (
+        "the missing-record message does not name the checker version it is "
+        "missing a record for"
+    )
+    assert "python3 tools/regen_generated.py --only census" in section, (
+        "the missing-record message does not name the command that makes the "
+        "record"
+    )
+    assert "cannot make this record" in section, (
+        "the section offers no account of why `--write` is not the fix here"
+    )
+    stale = report["census"]["stale_reproduction_records"]
+    assert ("lift no claim" in section) == bool(stale), (
+        "the section names the earlier records at versions this run has moved "
+        "past exactly when there are any"
+    )
+
+    checker = publisher._load("tools/check_eval_report.py",
+                              "publish_no_record_checker")
+    assert checker.check_report(report) == [], (
+        "a report with no reproduction at this checker version still has to "
+        "pass the eval-honesty checker: the rung is computed, not declared"
+    )
+
+
+# --- the strict hint names only commands that can clear the failure -------- #
+def test_the_strict_hint_offers_write_only_for_write_problems(publisher):
+    """`--write` writes `docs/census-artifact/` and nothing else, so the
+    trailing hint must not be appended to every strict failure: the crate
+    reproduction is written by the cargo-backed
+    `tools/regen_generated.py --only census` (issue #2166)."""
+    artifact = publisher._load("tools/census_artifact.py",
+                              "publish_strict_hint_artifact")
+    crate = ("no crate reproduction is recorded at the current checker version "
+             "GATE-CENSUS-1+deadbeef0000; re-record it (cargo, minutes): "
+             "python3 tools/regen_generated.py --only census")
+    record = ("docs/census-artifact/pins.jsonl differs from a fresh run; it was "
+              "hand-edited, merged by hand, or the corpus, the checker or the "
+              "baseline moved under it")
+
+    only_write = artifact.strict_hint([record], [])
+    assert any("tools/census_artifact.py --write" in ln for ln in only_write)
+    assert not any("regen_generated.py" in ln for ln in only_write)
+
+    only_crate = artifact.strict_hint([], [crate])
+    assert not any("tools/census_artifact.py --write" in ln for ln in only_crate), (
+        "the crate reproduction is not a `--write` record, so a failure whose "
+        "only problem is that record must not be sent to `--write` (#2166)"
+    )
+    assert any("python3 tools/regen_generated.py --only census" in ln
+               for ln in only_crate)
+
+    both = artifact.strict_hint([record], [crate])
+    assert any("tools/census_artifact.py --write" in ln for ln in both)
+    assert any("python3 tools/regen_generated.py --only census" in ln
+               for ln in both)
+
+
+def _verify_with(publisher, monkeypatch, path, *, records, crate):
+    """`verify(..., strict=True)` on `path`, with the census run and the
+    committed-record reads replaced by `records`/`crate` so the hint the
+    failure carries can be read without a census."""
+    artifact = publisher._load("tools/census_artifact.py",
+                              "publish_verify_hint_artifact")
+    pins = {"decides_verdicts": {"a.rvl": "sha"},
+            "reference": {"b.rvl": "sha"}, "report_inputs": {}}
+    published = {
+        "schema": artifact.CENSUS_SCHEMA,
+        "pins": pins,
+        "cases": [["a.rvl", "sha", "agree-admit"]],
+        "buckets": [{"bucket": "agree-admit", "count": 1}],
+        "false_admission": {"members": [], "mechanism": {"holds": True}},
+    }
+    measured = {"pins": pins, "cases": [("a.rvl", "sha")],
+                "case_rows": [("a.rvl", "sha", "agree-admit")]}
+    monkeypatch.setattr(artifact, "_published",
+                        lambda path, *rest: (published, ""))
+    monkeypatch.setattr(artifact, "measure_pinned",
+                        lambda engine: (None, measured))
+    monkeypatch.setattr(artifact, "probe_never_baselined",
+                        lambda census: {"holds": True})
+    monkeypatch.setattr(artifact, "record_texts", lambda m, p: {})
+    monkeypatch.setattr(artifact, "record_problems", lambda fresh, base: list(records))
+    monkeypatch.setattr(artifact, "reproduction_problems",
+                        lambda *a, **k: list(crate))
+    return artifact.verify(path, strict=True)
+
+
+def test_verify_still_exits_3_and_offers_no_write_for_a_missing_record(
+        publisher, tmp_path, monkeypatch):
+    """The missing record is still a strict failure (exit 3) and the publisher
+    still refuses — what changes is that the hint no longer names `--write`,
+    which cannot write that record (issue #2166)."""
+    code, text = _verify_with(publisher, monkeypatch, tmp_path, records=[],
+                              crate=["no crate reproduction is recorded at the "
+                                     "current checker version "
+                                     "GATE-CENSUS-1+deadbeef0000; re-record it "
+                                     "(cargo, minutes): python3 "
+                                     "tools/regen_generated.py --only census"])
+    assert code == 3, "a missing crate reproduction must still fail strict"
+    assert "the committed artifact is NOT current" in text
+    assert "no crate reproduction is recorded at the current checker version" in text
+    assert "tools/census_artifact.py --write" not in text, (
+        "the hint names `--write`, which writes docs/census-artifact/ only and "
+        "cannot make the crate record (#2166)"
+    )
+    assert "python3 tools/regen_generated.py --only census" in text
+
+
+def test_verify_still_offers_write_for_a_record_problem(publisher, tmp_path,
+                                                        monkeypatch):
+    """The other direction: a record problem is what `--write` fixes, so the
+    hint is still there — and it is not replaced by the crate command."""
+    code, text = _verify_with(
+        publisher, monkeypatch, tmp_path,
+        records=["docs/census-artifact/pins.jsonl differs from a fresh run"],
+        crate=[])
+    assert code == 3
+    assert "python3 tools/census_artifact.py --write" in text
+    assert "regen_generated.py --only census" not in text

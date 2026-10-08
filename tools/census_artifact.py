@@ -1976,6 +1976,27 @@ def _published(path: Path, sources: dict[str, list[str]] | None = None
     return published, ""
 
 
+def strict_hint(write_problems: list[str],
+                crate_problems: list[str]) -> list[str]:
+    """The closing advice for a `--verify --strict` failure: one line per
+    remedy, and only for the problems that remedy can clear.
+
+    `--write` calls `write_records(..., base=RECORDS)` and rewrites
+    `docs/census-artifact/` and nothing else, so it is named only when a record
+    problem needs it. The crate reproduction at the current checker version is
+    written by the cargo-backed `tools/regen_generated.py --only census`, so a
+    failure whose only problem is that record is not sent to `--write` (issue
+    #2166)."""
+    hint = []
+    if write_problems:
+        hint.append("  regenerate it in this pull request: "
+                    "python3 tools/census_artifact.py --write")
+    if crate_problems:
+        hint.append("  the crate reproduction is not a --write record: "
+                    "python3 tools/regen_generated.py --only census")
+    return hint
+
+
 def verify(path: Path, engine: str = "selfhost",
            strict: bool = False) -> tuple[int, str]:
     """Re-measure this checkout and judge the published copy at `path`, the
@@ -2011,16 +2032,24 @@ def verify(path: Path, engine: str = "selfhost",
         code = result["exit"] or 3
     if not strict:
         return code, text
+    # `--write` rewrites the records under docs/census-artifact/ and nothing
+    # else, so the closing hint is chosen from the problems that need it: the
+    # crate reproduction is written by a different, cargo-backed command
+    # (issue #2166).
+    write_problems = list(problems)
+    crate_problems: list[str] = []
     if Path(path).is_dir():
-        problems += record_problems(record_texts(measured, probe), Path(path))
-        problems += reproduction_problems()
+        records_here = record_problems(record_texts(measured, probe), Path(path))
+        write_problems += records_here
+        problems += records_here
+        crate_problems = reproduction_problems()
+        problems += crate_problems
     if not problems:
         return 0, text + "\ncensus verify --strict: the committed artifact is current."
     lines = [text, "census verify --strict: the committed artifact is NOT "
              "current:"]
     lines += [f"  {p}" for p in problems]
-    lines.append("  regenerate it in this pull request: "
-                 "python3 tools/census_artifact.py --write")
+    lines += strict_hint(write_problems, crate_problems)
     return code, "\n".join(lines)
 
 

@@ -94,11 +94,23 @@ CI's `census-artifact` job runs `python3 tools/census_artifact.py --verify
 --strict` whenever a pull request moves an input of the artifact. It re-runs the
 census and fails unless every committed verdict reproduces, no program is
 missing, the run read exactly the pinned files, and each record file is byte for
-byte what the run writes. The fix is the same in every case:
+byte what the run writes. For those, the fix is the same:
 
 ```
 python3 tools/census_artifact.py --write
 ```
+
+`--write` rewrites `docs/census-artifact/` and nothing else, so it is named in
+the failure's closing hint only when one of those records is the problem. The
+crate reproduction at the current checker version is not a `--write` record: it
+is keyed by checker version, produced by the cargo build, and written only by:
+
+```
+python3 tools/regen_generated.py --only census
+```
+
+A failure whose only problem is that record names that command and not
+`--write`.
 
 ## Resolving a merge conflict
 
