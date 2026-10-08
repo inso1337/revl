@@ -145,8 +145,30 @@ def _pip_install_index(tokens):
     return None
 
 
+def _unquote(tok):
+    """Strip one layer of matching shell quotes from a target token.
+
+    Targets arrive here as whitespace-split tokens, so `pytest "$T"` yields
+    the token `"$T"` -- this scan is deliberately not a shell parser (see
+    `_statements`), so the quotes are part of the token. Shell quoting means
+    the literal string, so a target written bare, double-quoted or
+    single-quoted must classify and resolve identically. Without this it did
+    not: `"$T"` does not start with `$`, so it read as a static path that
+    then resolved to nothing, leaving it out of BOTH `covered` and `dynamic`
+    -- invisible to `_DYNAMIC_STEPS`, bypassing the "list it explicitly, not
+    silently" rule -- and a quoted literal path like `"tests/x.py"` was never
+    credited as coverage.
+    """
+    while len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+        tok = tok[1:-1]
+    return tok
+
+
 def _pytest_statements(run_text):
     """(cwd, target_tokens) for every pytest INVOCATION in one step's `run`.
+
+    Targets are unquoted (`_unquote`) so that quoting cannot change how one is
+    classified or whether one resolves.
 
     A `pip install` statement is not an invocation: `pip install pytest` (and
     `python3 -m pip install --quiet -e . pytest`) names the pytest PACKAGE, so
@@ -161,7 +183,7 @@ def _pytest_statements(run_text):
             continue
         for i, tok in enumerate(tokens):
             if tok == "pytest" or tok.rstrip(";").endswith("/pytest"):
-                rest = [t.rstrip(";") for t in tokens[i + 1:]]
+                rest = [_unquote(t.rstrip(";")) for t in tokens[i + 1:]]
                 targets = [t for t in rest if not t.startswith("-")]
                 out.append((cwd, targets))
     return out
@@ -207,14 +229,20 @@ def _invocation_facts(run_text):
     """-> (static, dynamic) for one step's `run`.
 
     `static` is every (cwd, target) pair the scan can resolve on disk.
-    `dynamic` is every (cwd, targets) invocation it cannot: a shell-variable
-    target, or a bare `pytest` from a cwd with no modelled testpaths. A
-    `pip install` of the package contributes to neither (issue #2160).
+    `dynamic` is every (cwd, targets) invocation it cannot: a shell expansion
+    (whole-token or embedded, quoted or not), or a bare `pytest` from a cwd
+    with no modelled testpaths. A `pip install` of the package contributes to
+    neither (issue #2160).
     """
     static = []
     dynamic = []
+    # `$` ANYWHERE, not `startswith("$")`: an expansion can be embedded
+    # (`tests/$SUITE/test_x.py`), and testing the whole token for `$` rather
+    # than its first character is what makes quoting irrelevant here, since
+    # `_pytest_statements` has already unquoted. A `$` in a real path is
+    # never legitimate, so this over-approximates nothing.
     for cwd, targets in _pytest_statements(run_text):
-        if any(t.startswith("$") for t in targets):
+        if any("$" in t for t in targets):
             dynamic.append((cwd, list(targets)))
             continue
         if not targets:
@@ -350,6 +378,42 @@ def test_a_genuine_pytest_invocation_is_still_reported():
     # the modelled bare case still resolves rather than going dynamic
     assert _invocation_facts("cd backends/python && pytest") == (
         [("backends/python", ["tests"])], [])
+
+
+def test_quoting_does_not_change_how_a_target_is_classified():
+    """A target must classify the same however it is quoted.
+
+    Before this, the expansion test was `tok.startswith("$")` and targets
+    were never unquoted, so `pytest "$TARGET"` produced the token
+    `"$TARGET"` -- which does not start with `$`, so it read as a STATIC path
+    that then resolved to nothing. That dropped the step out of both `static`
+    and `dynamic`, so `_DYNAMIC_STEPS` never required it be named: the "list
+    it explicitly, not silently" rule was bypassable by adding a pair of
+    quotes. An expansion can also be embedded (`tests/$SUITE/test_x.py`) or
+    braced, and a quoted LITERAL path was not credited as coverage either.
+    One root cause -- targets were not unquoted -- so the pin is the
+    equivalence itself, over every legal spelling.
+
+    `_scan` resolves paths from exactly these targets, so pinning the token
+    `_invocation_facts` returns pins resolution too.
+    """
+    # a whole-token expansion cannot be resolved, however it is quoted
+    for form in ("$TEST_TARGET", '"$TEST_TARGET"', "'$TEST_TARGET'",
+                 '"${TEST_TARGET}"'):
+        static, dynamic = _invocation_facts(f"pytest {form} -q")
+        assert static == [], f"{form!r} was credited as a static resolution"
+        assert dynamic == [(".", [_unquote(form)])], f"{form!r} was not dynamic"
+
+    # an embedded expansion is unresolvable too, and used to be static
+    assert _invocation_facts("pytest tests/$SUITE/test_x.py") == (
+        [], [(".", ["tests/$SUITE/test_x.py"])])
+
+    # ...and a quoted literal path must resolve exactly as its bare spelling
+    bare = _invocation_facts("pytest tests/test_manifest.py")
+    assert bare == ([(".", ["tests/test_manifest.py"])], [])
+    for form in ('"tests/test_manifest.py"', "'tests/test_manifest.py'"):
+        assert _invocation_facts(f"pytest {form}") == bare, (
+            f"{form!r} did not resolve to the same target as the bare spelling")
 
 
 def test_the_install_only_workflow_on_disk_needs_no_bookkeeping():
