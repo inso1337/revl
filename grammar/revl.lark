@@ -1639,7 +1639,7 @@ g_3524: r__reach_clause_nn | ""
 g_3526: g_3524 g_3523
 g_3527: r__capability_list_nn | ""
 g_3530: g_3527 g_3526
-g_3531: NL? w_pure | NL? w_acquire | NL? w_emission | NL? w_witnessed
+g_3531: NL? w_pure | NL? w_acquire | NL? w_emission | NL? w_witnessed | NL? w_local
 g_3532: g_3531 g_3530
 g_3534: s_3107_nn g_204
 g_3535: NL? "{"
@@ -1809,6 +1809,7 @@ w_let: "let" | WORD NEVER
 w_lifecycle: "lifecycle" | WORD NEVER
 w_liveness: "liveness" | WORD NEVER
 w_load: "load" | WORD NEVER
+w_local: "local" | WORD NEVER
 w_long_running: "long_running" | WORD NEVER
 w_m: "m" | WORD NEVER
 w_map: "map" | WORD NEVER

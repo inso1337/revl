@@ -4077,7 +4077,7 @@ g-8122 ::= ""
 g-8123 ::= r--reach-clause-nn | ""
 g-8124 ::= g-8123 g-8119
 g-8127 ::= g-8122 g-8121 | r--capability-list-wn g-8124
-g-8128 ::= ws1 "pure" | ws1 "acquire" | ws1 "emission" | ws1 "witnessed"
+g-8128 ::= ws1 "pure" | ws1 "acquire" | ws1 "emission" | ws1 "witnessed" | ws1 "local"
 g-8129 ::= g-8128 g-8127
 g-8131 ::= s-7357-nw g-1211 | s-7357-nn g-1212
 g-8132 ::= ws "{"
@@ -4292,7 +4292,7 @@ g-8440 ::= ""
 g-8441 ::= r--reach-clause-nn | ""
 g-8442 ::= g-8441 g-8437
 g-8445 ::= g-8440 g-8439 | r--capability-list-wn g-8442
-g-8446 ::= ws1 "pure" | ws1 "acquire" | ws1 "emission" | ws1 "witnessed"
+g-8446 ::= ws1 "pure" | ws1 "acquire" | ws1 "emission" | ws1 "witnessed" | ws1 "local"
 g-8447 ::= g-8446 g-8445
 g-8450 ::= ws "="
 g-8451 ::= g-8450 r-type--nw
