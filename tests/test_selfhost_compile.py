@@ -739,10 +739,15 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `routed_timers.rvl` stays: the routed component reproduces, but its
         # `Tally.total()` is a statement-block match arm, which is issue #2131.
         "routed_timers.rvl",
-        # Issue #1592: an extern that declares its own `compensate`. The
-        # emitter half agrees byte for byte on the reference IR; lower.rvl
-        # does not yet lower an extern's declared `compensate` slot.
-        "extern_compensate.rvl",
+        # (issue #2096: `extern_compensate.rvl` left this list with the
+        # `async_timer.rvl` entry above. Re-measured against `main`: the
+        # extern's declared `compensate` slot was ALREADY lowered (`ir_extern`'s
+        # `compensate` clause, issue #1592) and the native ts bytes matched the
+        # reference everywhere except the `Pulse` timer step — the `emit
+        # ledger.tick()` firing had no `"async": true`, so the emitter omitted
+        # the in-flight window and its teardown. The timer stamp closed it, so
+        # the entry this issue named is byte-exact for a cause other than the
+        # one the issue's body named.)
         # Issue #1954 (item 256) / issue #2012: the capability-bound secret
         # seam. This entry is CLOSED — `selfhost/lower.rvl` now reads
         # `secret NAME for CAP` at the top level, lowers it to the reference's
