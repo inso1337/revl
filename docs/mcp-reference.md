@@ -512,6 +512,13 @@ context while generating. With no inputs it returns that prose summary
   filling a hole can constrain its decoder to that slot (each hole's
   `fillSpec.grammarCategory` names it). `category` without
   `format`, or a value outside these lists, is refused.
+- `prompt` (`true`) returns instead the **complete** grammar - the dense,
+  prompt-pinnable artifact, byte-for-byte the text `revl grammar --prompt`
+  prints ([commands-reference.md](commands-reference.md#revl-grammar)) - as
+  `{ok, prompt, grammar}`. It is meant to be pinned verbatim into an authoring
+  system prompt, and it is the artifact to ask for when the prose summary does
+  not answer a syntax question. `prompt` with `format` or `category` is
+  refused (issue #2167).
 
 ### `revl_idiom`
 

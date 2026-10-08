@@ -3416,6 +3416,12 @@ def _tool_tools(arguments: dict) -> dict:
 # machinery just to print a string.
 _GRAMMAR = _grammar_summary.PROSE_GRAMMAR
 
+# issue #2167: the complete grammar was reachable only through the CLI, so an
+# MCP-only agent had no way to obtain the artifact built to be pinned into an
+# authoring prompt. `revl_grammar {prompt: true}` serves this constant — the
+# same text `revl grammar --prompt` prints — byte for byte.
+_PROMPT_GRAMMAR = _grammar_summary.PROMPT_GRAMMAR
+
 
 def _resolve_registry_dir(arguments: dict) -> str:
     """Where the git-backed registry lives: an explicit `registry` argument,
@@ -3540,9 +3546,20 @@ def _tool_idiom(arguments: dict) -> dict:
 def _tool_grammar(arguments: dict) -> dict:
     """revl_grammar: the prose summary by default; with `format`, the grammar
     of revl source derived from the parser (issue #1661, the MCP twin of
-    `revl grammar --format/--category`), for a grammar-constrained decoder."""
+    `revl grammar --format/--category`), for a grammar-constrained decoder;
+    with `prompt`, the complete prompt-pinnable grammar (issue #2167, the MCP
+    twin of `revl grammar --prompt`), byte-identical to `PROMPT_GRAMMAR`."""
     fmt = arguments.get("format")
     category = arguments.get("category")
+    if arguments.get("prompt"):
+        # `format` is the parser-derived decoder set (`_GRAMMAR_FORMATS`), a
+        # different axis from this artifact, so the flag is separate rather
+        # than a fourth value in an enum the CLI also offers.
+        if fmt is not None or category is not None:
+            return _session_error(
+                "`prompt` returns the complete grammar and takes no `format` "
+                "or `category` — drop one or the other")
+        return {"ok": True, "prompt": True, "grammar": _PROMPT_GRAMMAR}
     if fmt is None and category is None:
         # `fixes` is the `revl explain` payload: for every guarantee, the
         # rewrite that satisfies it, so an agent that gets a code back can act
@@ -5273,7 +5290,9 @@ TOOLS = [
                        "`format`, instead a grammar of revl source derived from "
                        "the parser, for a grammar-constrained decoder: `lark` "
                        "(llguidance), `gbnf` (llama.cpp server, XGrammar) or "
-                       "`ebnf`; `category` scopes it to one hole's slot.",
+                       "`ebnf`; `category` scopes it to one hole's slot. With "
+                       "`prompt`, instead the complete grammar, the text to pin "
+                       "verbatim into an authoring system prompt.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -5283,6 +5302,11 @@ TOOLS = [
                 "category": {"type": "string", "enum": list(_GRAMMAR_CATEGORIES),
                              "description": "with `format`: the syntactic slot "
                                             "to constrain to (default `program`)"},
+                "prompt": {"type": "boolean",
+                           "description": "return the complete prompt-pinnable "
+                                          "grammar (the text `revl grammar "
+                                          "--prompt` prints) instead of the "
+                                          "summary"},
             },
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
