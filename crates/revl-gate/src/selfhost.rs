@@ -28875,8 +28875,12 @@ fn mut_key(n: &str) -> String {
     return String::from("mut ").revl_concat(&n);
 }
 
+fn local_key(n: &str) -> String {
+    return String::from("local ").revl_concat(&n);
+}
+
 fn env_mut_put(env: &[Bind], n: &str, mutable: bool) -> Vec<Bind> {
-    return tenv_put(env, mut_key(n), if mutable { String::from("1") } else { String::from("") });
+    return tenv_put(&tenv_put(env, mut_key(n), if mutable { String::from("1") } else { String::from("") }), local_key(n), String::from("1"));
 }
 
 fn env_mut_clear_params(env: Vec<Bind>, ps: Vec<ParamN>, i: i64) -> Vec<Bind> {
@@ -29040,7 +29044,7 @@ fn lir_expr(e: Expr, env: Vec<Bind>, al: std::collections::HashMap<String, Strin
     Expr::BoolLit(v) => (String::from("{\"kind\":\"lit\",\"value\":").revl_concat(&v)).revl_concat("}"),
     Expr::StrLit(v) => (String::from("{\"kind\":\"lit\",\"value\":").revl_concat(&jstr(&v))).revl_concat("}"),
     Expr::NullLit => String::from("{\"kind\":\"lit\",\"value\":null}"),
-    Expr::Var(n) => if ((((tagged_case_adt(&env, &n) != "") && (tenv_get(&env, &(String::from("payload ").revl_concat(&n))) == "")) && (!tagged_case_adt(&env, &n).revl_starts_with("Result"))) && (!tagged_case_adt(&env, &n).revl_starts_with("Opt"))) { lir_adt(&tagged_case_adt(&env, &n), &n, vec![], env.clone(), al.clone()) } else { (String::from("{\"kind\":\"var\",\"name\":").revl_concat(&jstr(&(if (tenv_get(&env, &n) != "") { predeclared_mangle(n.clone()) } else { n.clone() })))).revl_concat("}") },
+    Expr::Var(n) => if ((((tagged_case_adt(&env, &n) != "") && (tenv_get(&env, &(String::from("payload ").revl_concat(&n))) == "")) && (!tagged_case_adt(&env, &n).revl_starts_with("Result"))) && (!tagged_case_adt(&env, &n).revl_starts_with("Opt"))) { lir_adt(&tagged_case_adt(&env, &n), &n, vec![], env.clone(), al.clone()) } else { (String::from("{\"kind\":\"var\",\"name\":").revl_concat(&jstr(&(if (tenv_get(&env, &local_key(&n)) != "") { predeclared_mangle(n.clone()) } else { n.clone() })))).revl_concat("}") },
     Expr::Bin(b) => { let b = *b; lir_bin(b, env.clone(), al.clone()) },
     Expr::Un(u) => { let u = *u; lir_un(u, env.clone(), al.clone()) },
     Expr::Emit(u) => { let u = *u; String::from("{\"kind\":\"bad\"}") },
@@ -30784,6 +30788,7 @@ fn params_env(ps: Vec<ParamN>, acc: Vec<Bind>, tps: Vec<String>) -> Vec<Bind> {
     let mut env = acc;
     let mut i = 0i64;
     while (i < ps.revl_length()) {
+        env = tenv_put(&env, local_key(&(ps)[(i) as usize].name), String::from("1"));
         if ((ps)[(i) as usize].ty != "") {
             env = tenv_put(&env, (ps)[(i) as usize].name.clone(), mark_tparams__m2(taint_strip((ps)[(i) as usize].ty.clone()), &tps));
         }

@@ -25448,8 +25448,23 @@ fn is_host_root_recv(recv: Expr) -> Bool {
 // the shadow win.
 fn mut_key(n: Str) -> Str { return "mut ".concat(n) }
 
+// The LOCAL marker. This module path's `env` is one list holding three
+// different things — the case table, every module `fn`'s own name (bound to its
+// function type), and the body's locals — while the reference keeps its locals
+// in `scope` and its module callables in a separate `callables`. The
+// distinction is load-bearing at exactly one decision: `_lower_expr`'s
+// `ExprVar` arm mangles a name iff it is in `scope`, and leaves a CALLABLE
+// reference verbatim, so the body of `fn len` calls itself as `len` and not as
+// `len_`. `local_key` is the row that tells the two apart: written by every
+// local-binding site (they all funnel through `env_mut_put`, plus `params_env`
+// for a declaration's parameters) and read by the `var` arm. A name that is
+// only a module callable carries no row and stays verbatim; a local that
+// SHADOWS one carries it and is mangled, which is what the reference answers
+// too. Issue #2090.
+fn local_key(n: Str) -> Str { return "local ".concat(n) }
+
 fn env_mut_put(env: List[Bind], n: Str, mutable: Bool) -> List[Bind] {
-  return tenv_put(env, mut_key(n), mutable ? "1" : "")
+  return tenv_put(tenv_put(env, mut_key(n), mutable ? "1" : ""), local_key(n), "1")
 }
 
 fn env_mut_clear_params(env: List[Bind], ps: List[ParamN], i: Int) -> List[Bind] {
@@ -25678,7 +25693,7 @@ fn lir_expr(e: Expr, env: List[Bind], al: Map[Str, Str]) -> Str {
                     && !tagged_case_adt(env, n).startsWith("Opt"))
                      ? lir_adt(tagged_case_adt(env, n), n, [], env, al)
                      : "{\"kind\":\"var\",\"name\":".concat(
-                         jstr(tenv_get(env, n) != "" ? predeclared_mangle(n) : n)).concat("}"),
+                         jstr(tenv_get(env, local_key(n)) != "" ? predeclared_mangle(n) : n)).concat("}"),
     Bin(b)      => lir_bin(b, env, al),
     Un(u)       => lir_un(u, env, al),
     Emit(u)     => "{\"kind\":\"bad\"}",
@@ -27445,6 +27460,12 @@ fn params_env(ps: List[ParamN], acc: List[Bind], tps: List[Str]) -> List[Bind] {
   var env = acc
   var i = 0
   while (i < ps.length()) {
+    // A parameter is a local binding in the reference's `scope` whatever its
+    // declared type, so it carries the LOCAL marker whether or not a type row
+    // is written; the escape rule then reads the declaration's own spelling
+    // (`ir_fn_params_json` mangles the same name) rather than treating the
+    // parameter as a module callable. Issue #2090.
+    env = tenv_put(env, local_key(ps[i].name), "1")
     // stripped: past the declaration a `Secret[T]` parameter IS a `T` (the
     // qualifier is orthogonal to the base type), and the marking lives on in
     // the IR flag rather than in the type the body is checked against.

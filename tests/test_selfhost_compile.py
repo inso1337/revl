@@ -522,13 +522,25 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # producer now reads all three, plus the `let-effect` step's key order
         # (`bind` after `acquire`/`undo`), so the document is byte-exact through
         # the fully-native chain.)
-        # item 391: another EMITTER-exact document the native IR producer
-        # reproduces wrongly. emit_py_builtin_shadow.rvl: the reference frontend
-        # escapes a parameter named `len_` to `len__` (and every read of it) and
-        # leaves a call of the user's `fn len` as `len`. The native IR escapes
-        # the reads but not the parameter, and escapes the call, so the native
-        # chain emits `def ladder(len__, sorted__)` over a body that reads
-        # `len___` and calls `len__`.
+        # item 391: another EMITTER-exact document the native IR producer used
+        # to reproduce wrongly — the reference frontend escapes a parameter
+        # named `len_` to `len__` (and every read of it) and leaves a call of
+        # the user's `fn len` as `len`. The native IR escaped the reads but not
+        # the parameter, and escaped the call, so the native chain emitted
+        # `def ladder(len__, sorted__)` over a body that read `len___` and
+        # called `len__`.
+        # (issue #2090: it left this list. The native env answered
+        # `tenv_get(env, n) != ""` — "is this name bound at all" — where the
+        # reference asks `n in scope` — "is this name a LOCAL". The module
+        # path's env holds the case table and every module `fn`'s own name as
+        # well as the body's locals, so `fn len`'s own name counted as bound
+        # and its CALL site was mangled to `len_` while the reference left it
+        # verbatim. `env_mut_put` now also writes a `local ` marker and
+        # `params_env` writes one per parameter, and the `var` arm reads that
+        # marker instead, so a local is mangled at its declaration and at every
+        # read while a callable reference stays verbatim. The declaration/read
+        # half of this entry already agreed before the change; only the call
+        # diverged.)
         # (issue #2089: stdlib/fs.rvl left this list — the native IR producer
         # used to drop the extern's host `refs`, so the module lost its
         # `import inspect` / `_REVL_REFS` header. `lower_to_ir_refs` now reads
@@ -536,7 +548,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # in the reference's own position and key order, so the document
         # reproduces byte-for-byte through the fully-native chain on both the
         # py and ts tiers.)
-        "../emit_py_builtin_shadow.rvl",
         # (issue #2088: the six in-file test documents left this list when
         # `selfhost/lower.rvl` grew the `tests`/`fault_tests` producers —
         # `test_secs_walk` over `lir_plain_test`/`lir_lifecycle_test`/
