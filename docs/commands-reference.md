@@ -848,7 +848,7 @@ taken over, run the composition → schedule → gate walk over them, and print 
 verdict ([558-shadow-scheduling.md](design/558-shadow-scheduling.md)).
 
 The verb decides; it does not land. Exit 0 means a `PROMOTE` whose replay
-comparison actually ran — every other outcome (`REFUSE`, `REVERT`, a
+comparison actually ran; every other outcome (`REFUSE`, `REVERT`, a
 malformed document, an unresolvable generation) exits non-zero.
 
 - `FILES` - the running (incumbent) composition's `.rvl` files; the window's
@@ -869,6 +869,12 @@ malformed document, an unresolvable generation) exits non-zero.
 The comparison is item 496's replay walk over the two generations' recorded
 worlds, so a divergence is attributed to an exact (component, realm) step and
 named; a stated metric is never what promotes.
+
+Not to be confused with the peer pool's `promote`, the verb issue #1198 adds as
+`revl pool promote` (item 546,
+[550-private-peer-pool.md](design/550-private-peer-pool.md)). That one raises a
+*peer*'s tier inside a private pool; this one promotes a *generation*. The two
+share only the word.
 
 ### `revl repair`
 

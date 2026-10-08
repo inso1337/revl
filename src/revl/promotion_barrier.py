@@ -483,6 +483,34 @@ SWEEP_EXEMPT = {
         "`authority` precondition gates entry to the `observe` stage that "
         "those same scorecards are the evidence for, and that module is "
         "registered above",
+    "src/revl/__main__.py":
+        "it DISPATCHES on `args.command` and renders no verdict: the token the "
+        "sweep matches is the comparison `args.command == \"promote\"`, one "
+        "line of the same chain that routes `canary`, `quarantine` and "
+        "`contract` to their handlers. The verdict is rendered by "
+        "`src/revl/cli/promote.py`, which decides nothing of its own either -- "
+        "it runs `shadow_runtime.decide` -> `shadow_promotion.decide`, the "
+        "path registered above -- so the authority precondition still gates "
+        "the measured stage on every promotion this chain can reach. What "
+        "would make it a promotion path is a decision inside the branch, and "
+        "that is pinned by `tests/test_promote_cli_1192.py::"
+        "test_the_dispatch_of_promote_is_one_return_and_not_a_decision`, "
+        "which reads the branch and refuses anything but a single "
+        "`return _run_promote(args)`",
+    "src/revl/cli/parser.py":
+        "it DECLARES verbs and their flags, and renders no verdict: the token "
+        "the sweep matches is a subcommand's own name in "
+        "`add_parser(\"promote\", ...)`. Every value this module accepts is a "
+        "path, a boolean or a repeat count, handed to a handler in "
+        "`src/revl/cli/`; the decision is the handler's, and the handler for "
+        "this verb runs the registered path above. What would make this "
+        "module a second policy engine is a threshold, a decision word or a "
+        "default that makes a required document optional in the block that "
+        "builds the verb, and that is pinned by "
+        "`tests/test_promote_cli_1192.py::"
+        "test_the_promote_subparser_declares_no_number_and_no_decision_word`, "
+        "which reads the block and refuses any numeric constant and any "
+        "decision word other than the verb's own name",
 }
 
 
@@ -493,10 +521,12 @@ def renders_promotion(source: str) -> bool:
     renders a promotion when it contains a string constant whose value is
     exactly ``promote``, in any case. That is what a module that decides
     promotions has and what one that merely discusses them does not. Measured
-    over `origin/main` at d41ee937, it selects six modules: the four in
-    :data:`REGISTRY` (`src/revl/mcp/canary.py`,
-    `tools/evolution_controller.py`, `src/revl/peer_pool.py`,
-    `src/revl/shadow_promotion.py`) and the two in :data:`SWEEP_EXEMPT`.
+    over this tree, it selects eight modules: the four in :data:`REGISTRY`
+    (`src/revl/mcp/canary.py`, `tools/evolution_controller.py`,
+    `src/revl/peer_pool.py`, `src/revl/shadow_promotion.py`) and the four in
+    :data:`SWEEP_EXEMPT` (`src/revl/promotion_barrier.py`,
+    `tools/evolution_progress.py`, `src/revl/__main__.py`,
+    `src/revl/cli/parser.py`).
 
     It errs WIDE, and that is the direction to err in. A module that renders a
     verdict conferring no authority is selected and has to be argued out by

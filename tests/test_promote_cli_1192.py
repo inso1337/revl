@@ -59,6 +59,8 @@ from revl.mcp import canary  # noqa: E402
 from revl.mcp.session import replay_module  # noqa: E402
 
 MODULE_PATH = ROOT / "src" / "revl" / "cli" / "promote.py"
+MAIN_PATH = ROOT / "src" / "revl" / "__main__.py"
+CLI_PARSER_PATH = ROOT / "src" / "revl" / "cli" / "parser.py"
 
 #: The published verb name, spelled once. Every test that runs the verb runs it
 #: through `build_parser`, so this is the name a user types and not a helper's.
@@ -988,3 +990,118 @@ def test_the_verb_invents_no_link_and_no_decision_word():
     named = {node.attr for node in ast.walk(tree)
              if isinstance(node, ast.Attribute)}
     assert not named & {"LINKS", "WINDOW_LINKS", "PRECONDITION_LINKS", "STAGES"}
+
+
+def _promote_declaration_block(tree):
+    """The statements that build the `promote` subparser, as one list.
+
+    The assignment and the `promote_cmd.add_argument(...)` calls that follow
+    it, and nothing else: a later statement about a different verb is where
+    this block ends.
+    """
+    for parent in ast.walk(tree):
+        body = getattr(parent, "body", None)
+        if not isinstance(body, list):
+            continue
+        for index, statement in enumerate(body):
+            if not (isinstance(statement, ast.Assign)
+                    and any(isinstance(target, ast.Name)
+                            and target.id == "promote_cmd"
+                            for target in statement.targets)):
+                continue
+            block = [statement]
+            for later in body[index + 1:]:
+                call = later.value if isinstance(later, ast.Expr) else None
+                if not (isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Attribute)
+                        and isinstance(call.func.value, ast.Name)
+                        and call.func.value.id == "promote_cmd"):
+                    break
+                block.append(later)
+            return block
+    return None
+
+
+def test_the_promote_subparser_declares_no_number_and_no_decision_word():
+    """`src/revl/cli/parser.py` is exempt from the 543 sweep because it
+    DECLARES the verb and decides nothing.
+
+    The exemption argues that the token the sweep matches is the subcommand's
+    own name and that every value the module accepts is handed to a handler.
+    That argument is a claim about this block, so the claim is pinned: the
+    block that builds `promote` carries no numeric constant -- a threshold, a
+    share, a sample size -- and no decision word other than the verb's own
+    name. A flag that took a number would be this module deciding, and the
+    sweep would then be exempting a policy engine.
+
+    Mutation: `promote_cmd.add_argument("--threshold", type=float,
+    default=0.9)` in the block, or a `REFUSE = "refuse"` constant beside it."""
+    block = _promote_declaration_block(
+        ast.parse(CLI_PARSER_PATH.read_text(encoding="utf-8")))
+    assert block is not None, "the promote subparser is not built by name"
+
+    numbers = [node.value for statement in block
+               for node in ast.walk(statement)
+               if isinstance(node, ast.Constant)
+               and isinstance(node.value, (int, float))
+               and not isinstance(node.value, bool)]
+    assert numbers == [], \
+        f"the promote declaration carries a number: {numbers}"
+
+    words = {node.value for statement in block for node in ast.walk(statement)
+             if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    assert not words & {"refuse", "revert", "REFUSE", "REVERT", "PROMOTE"}, \
+        f"the promote declaration carries a decision word: {sorted(words)}"
+    assert "promote" in words, "the verb's own name is not in its declaration"
+
+
+def test_the_dispatch_of_promote_is_one_return_and_not_a_decision():
+    """`src/revl/__main__.py` is exempt from the 543 sweep because it
+    DISPATCHES.
+
+    The exemption argues that the token the sweep matches is the comparison
+    `args.command == "promote"` and that the verdict is rendered elsewhere, by
+    a module that runs the registered path. So the branch is pinned to be
+    exactly that: a bare comparison against the verb's name, whose whole body
+    is one `return` of the handler's call. A second condition on the branch, a
+    status computed in it, or a call to anything else is this module deciding
+    -- and it is the place a decision would be cheapest to hide.
+
+    Mutation: `return 0 if _run_promote(args) == 0 else 1`, or
+    `if args.command == "promote" and args.force:`."""
+    tree = ast.parse(MAIN_PATH.read_text(encoding="utf-8"))
+    branch = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if (isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Attribute)
+                and test.left.attr == "command"
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == VERB):
+            branch = node
+            break
+    assert branch is not None, f"no `args.command == {VERB!r}` dispatch"
+
+    assert len(branch.body) == 1, \
+        f"the dispatch is {len(branch.body)} statements, not one"
+    statement = branch.body[0]
+    assert isinstance(statement, ast.Return), \
+        f"the dispatch does not return: {ast.dump(statement)[:60]}"
+    assert isinstance(statement.value, ast.Call), \
+        "the dispatch returns something it computed"
+    assert isinstance(statement.value.func, ast.Name) \
+        and statement.value.func.id == "_run_promote", \
+        "the dispatch returns something other than the handler's verdict"
+
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+            imported.update(alias.name for alias in node.names)
+    assert not any("shadow_register" in name for name in imported), \
+        "the dispatch chain imports the arm that LANDS"

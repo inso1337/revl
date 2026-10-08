@@ -102,7 +102,7 @@ was corrected by hand and had drifted back within a day.
 | census-artifact.md | current | 0 |  |
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 15 |  |
+| commands-reference.md | current | 14 |  |
 | component-leases.md | needs-work | 33 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 20 |  |
