@@ -1,10 +1,11 @@
 // A MySQL-backed Database provider — identical interface to PgDatabase, a
 // different body. A second §5-compatible candidate for a Database need, so the
-// resolve exit test has more than one provider to rank.
+// resolve exit test has more than one provider to rank. `execute` declares the
+// `[db]` scope it reaches, matching the running manifest.
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission fn execute(sql: Str) -> Int
+  emission[db] fn execute(sql: Str) -> Int
 }
 
 component MysqlDatabase provides db: Database {
