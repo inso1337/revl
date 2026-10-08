@@ -284,6 +284,24 @@ def _buckets(census: dict) -> str:
 
 def _reproduction(census: dict) -> str:
     rep = census["reproduction"]
+    stale = census["stale_reproduction_records"]
+    if rep is None:
+        # No record at the current checker version: the section stays, because
+        # a reader has to learn the crate claim is unbacked, and the fix is
+        # named because `--write` does not write this record (issue #2166).
+        version = _esc(census["checker_version"])
+        return (
+            f'<p>No crate reproduction is recorded at this checker version '
+            f'<code>{version}</code>, so the fast engine\'s python mirror of '
+            f'the native gate\'s guards is unbacked and every claim in this '
+            f'report stands at <code>measured</code> and no higher.</p>'
+            f'<p>Re-record it (cargo, minutes): '
+            f'<code>python3 tools/regen_generated.py --only census</code>. '
+            f'<code>tools/census_artifact.py --write</code> cannot make this '
+            f'record: it writes only <code>docs/census-artifact/</code>.</p>'
+            + (f'<p>{len(stale)} earlier reproduction record(s) are recorded '
+               f'at a checker version this run has moved past, and lift no '
+               f'claim.</p>' if stale else ""))
     current = rep["current_checker_version"] == census["checker_version"]
     rows = [
         ("programs", _esc(rep.get("programs", "not recorded"))),
@@ -296,7 +314,6 @@ def _reproduction(census: dict) -> str:
          f'<code>{_esc(rep["current_checker_version"])}</code>'),
         ("current for this run", "yes" if current else "<strong>no</strong>"),
     ]
-    stale = census["stale_reproduction_records"]
     return (f'<p>The fast engine is a python mirror of the native gate\'s guards, '
             f'so it could be wrong in the same direction as the thing it mirrors. '
             f'The reproduction asks the real crate, built by cargo: '
