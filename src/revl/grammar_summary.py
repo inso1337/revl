@@ -1,19 +1,26 @@
 """The revl surface grammar, small enough to carry in a prompt — two views.
 
 `PROSE_GRAMMAR` is the short human-readable summary `revl_grammar` (the MCP
-tool) has always returned: one component, one function, and a one-line list
+tool) returns by default: one component, one function, and a one-line list
 of the guarantees that reject code. `PROMPT_GRAMMAR` is the roadmap item 346
 artifact: a dense, complete EBNF-style grammar covering every construct in
 docs/syntax-2.0.md (plus fault tests, docs/fault-tests.md) — meant to be
 pinned verbatim into an authoring system prompt rather than read by a human.
-Both live here, not in `mcp/server.py`, so `revl grammar --prompt` (a plain
-CLI command) does not have to import the MCP session machinery to print a
-string.
+Both are served, and both live here, not in `mcp/server.py`, so
+`revl grammar --prompt` (a plain CLI command) does not have to import the MCP
+session machinery to print a string: `revl_grammar {prompt: true}` returns
+`PROMPT_GRAMMAR` (issue #2167), the MCP twin of `revl grammar --prompt`, so an
+agent with no checkout can still obtain the complete grammar.
+
+Neither payload defers to a path the wheel omits. `docs/` is not packaged
+(unlike `backends/`/`stdlib/`; see pyproject.toml), so a payload that tells an
+agent to go read `docs/syntax-2.0.md` sends it somewhere an installed
+deployment does not have (issue #2167). Each view names the reachable surface
+that serves the other instead.
 
 `PROMPT_GRAMMAR` is mirrored byte-for-byte at `docs/syntax-2.0.prompt.txt`
 (the file `tests/test_grammar_prompt.py` guards against drift) — the file is
-the reviewable artifact, this constant is what ships in the wheel (`docs/`
-is not packaged, unlike `backends/`/`stdlib/`; see pyproject.toml).
+the reviewable artifact, this constant is what ships in the wheel.
 """
 
 from __future__ import annotations
@@ -55,7 +62,7 @@ test "name" { assert f([]) == 0 }
 """
 
 PROSE_GRAMMAR = """\
-revl 2.0 — surface summary (full spec: docs/syntax-2.0.md)
+revl 2.0 — surface summary (complete grammar: revl_grammar {prompt: true} / revl grammar --prompt)
 
 """ + PROSE_EXAMPLE + """
 Rules that reject code: mutation needs `undo` or `emit` (G4); reads must be
@@ -65,7 +72,7 @@ absence is Opt[T]; declared types are checked at every boundary.
 """
 
 PROMPT_GRAMMAR = """\
-revl 2.0 — complete grammar (pin this verbatim; full prose: docs/syntax-2.0.md)
+revl 2.0 — complete grammar (pin this verbatim; prose summary: revl_grammar)
 
 PRINCIPLE: same meaning -> same syntax (TypeScript, verbatim). Different
 meaning (effects, inverses, provisions, boundaries) -> distinct revl syntax.
