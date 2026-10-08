@@ -23949,6 +23949,11 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> Ca
                       "decl ".concat(tkc(ts, i + 1).text), "1")
     return case_binds_walk(ts, event_decl_end(ts, i), { binds: eb, amb: a.amb }, al)
   }
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return case_binds_walk(ts, qe, a, al) }
+    return case_binds_walk(ts, skip_line(ts, i), a, al)
+  }
   if (t.kind != "kw") { return case_binds_walk(ts, skip_line(ts, i), a, al) }
   if (at_pub_prefix(ts, i)) { return case_binds_walk(ts, i + 1, a, al) }
   if (t.text == "type") {
@@ -25513,6 +25518,11 @@ fn own_fns_walk(ts: List[Token], i: Int, acc: List[FnOwn]) -> List[FnOwn] {
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return own_fns_walk(ts, i + 1, acc) }
   if (at_event(ts, i)) { return own_fns_walk(ts, event_decl_end(ts, i), acc) }
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return own_fns_walk(ts, qe, acc) }
+    return own_fns_walk(ts, skip_line(ts, i), acc)
+  }
   if (t.kind != "kw") { return own_fns_walk(ts, skip_line(ts, i), acc) }
   if (t.text == "use") { return own_fns_walk(ts, skip_line(ts, i), acc) }
   if (t.text == "test") {
@@ -26246,6 +26256,11 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al) }
   if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored, sm, al) }
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return fns_walk(ts, qe, acc, cases, colored, sm, al) }
+    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
+  }
   if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al) }
   if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al) }
   if (t.text == "test") {
@@ -26625,6 +26640,11 @@ fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al, bnd, rows) }
   if (at_event(ts, i)) { return externs_walk(ts, event_decl_end(ts, i), acc, ok, decls, al, bnd, rows) }
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return externs_walk(ts, qe, acc, ok, decls, al, bnd, rows) }
+    return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd, rows)
+  }
   if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls, al, bnd, rows) }
   if (at_pub_prefix(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls, al, bnd, rows) }
   if (t.text == "extern") {
@@ -27098,6 +27118,14 @@ fn types_walk(ts: List[Token], i: Int, acc: Str, al: Map[Str, Str]) -> Str {
     let acc3 = d.js == "" ? acc : (acc == "" ? d.js : acc.concat(", ").concat(d.js))
     return types_walk(ts, d.i, acc3, al)
   }
+  // a `lifecycle`/`fault`/`prop` test head lexes as an ordinary identifier, so
+  // it has to be answered before the `t.kind != "kw"` fall-through or the body
+  // is walked as top level one line at a time.
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return types_walk(ts, qe, acc, al) }
+    return types_walk(ts, skip_line(ts, i), acc, al)
+  }
   if (t.kind != "kw") { return types_walk(ts, skip_line(ts, i), acc, al) }
   if (at_pub_prefix(ts, i)) { return types_walk(ts, i + 1, acc, al) }
   if (t.text == "type") {
@@ -27117,6 +27145,426 @@ fn types_walk(ts: List[Token], i: Int, acc: Str, al: Map[Str, Str]) -> Str {
   return types_walk(ts, skip_line(ts, i), acc, al)
 }
 
+// ============================================ the `tests` sections (item 2088)
+//
+// The producer carried neither `tests` nor `fault_tests`, so a document with a
+// test in it diverged on the WHOLE section rather than on a node inside one:
+// the reference lowers both (`lower._lower_tests` / `_lower_fault_tests`) and
+// every tier's emitter reads them. These two producers close that.
+//
+// A plain `test` body IS a pure statement body — `_lower_tests` runs exactly
+// the `_lower_pure_stmt` ladder a `fn` body does — so `let`/`var`/`for`/
+// `while`/`if`/`assign`/`assert` are already byte-exact through `lir_stmts` and
+// nothing about them is re-derived here. The one thing a test body does NOT
+// share with a `fn` body is its STARTING environment: a test has no parameters
+// and no declared return, so it starts from the module's ADT constructor table
+// alone (`case_binds`), which is what makes `let s = FirstTime` and `Ok(1)`
+// resolve as values exactly as they do inside a `fn`.
+
+// `lifecycle test STR { … }` — the body brace sits at a fixed offset from the
+// qualifier (parser.py `test_decl` after the `lifecycle` head), so the span
+// `qual_test_end` walks is only needed for the step-over and this reader
+// re-walks the body itself.
+fn lifecycle_body_i(ts: List[Token], i: Int) -> Int {
+  if (!at_qual_test(ts, i) || tkc(ts, i).text != "lifecycle") { return 0 - 1 }
+  if (!atk(ts, i + 2, "string") || !atk(ts, i + 3, "{")) { return 0 - 1 }
+  return i + 3
+}
+
+// One lifecycle step plus the index it stopped at and the binding environment it
+// leaves behind (`let x = call …` extends it; nothing else does).
+type LifeStep = { js: Str, i: Int, env: List[Bind], ok: Bool }
+
+fn life_step(js: Str, i: Int, env: List[Bind]) -> LifeStep {
+  return { js: js, i: i, env: env, ok: true }
+}
+
+fn life_fail(env: List[Bind]) -> LifeStep {
+  return { js: "", i: 0 - 1, env: env, ok: false }
+}
+
+// The `load C with { field: expr, … }` config map. Unlike a fault test's config
+// — which the reference keeps as RAW literals — this one is a map of LOWERED
+// expressions (`_lower_lifecycle_config` runs `_lower_pure_expr` per value), so
+// `{"start": {"kind": "lit", "value": 5}}` is the shape here.
+fn lir_life_config(ts: List[Token], lo: Int, hi: Int, env: List[Bind],
+                   al: Map[Str, Str]) -> Str {
+  var i = lo
+  var out = ""
+  while (i < hi) {
+    if (atk(ts, i, ",")) { i += 1 }
+    else {
+      if (!atk(ts, i, "ident") || !atk(ts, i + 1, ":")) { return out }
+      let r = expr_at(ts, i + 2)
+      if (is_bad(r.e) || r.i <= i + 2) { return out }
+      let one = jstr(tkc(ts, i).text).concat(": ").concat(lir_expr(r.e, env, al))
+      out = out == "" ? one : out.concat(", ").concat(one)
+      i = r.i
+    }
+  }
+  return out
+}
+
+// The comma-separated `pure_expr` argument list of a `call` step, in the
+// environment the steps before it built.
+fn lir_life_args(ts: List[Token], lo: Int, hi: Int, env: List[Bind],
+                 al: Map[Str, Str]) -> Str {
+  var i = lo
+  var out = ""
+  while (i < hi) {
+    if (atk(ts, i, ",")) { i += 1 }
+    else {
+      let r = expr_at(ts, i)
+      if (is_bad(r.e) || r.i <= i) { return out }
+      out = out == "" ? lir_expr(r.e, env, al)
+                      : out.concat(", ").concat(lir_expr(r.e, env, al))
+      i = r.i
+    }
+  }
+  return out
+}
+
+type LifeCall = { js: Str, i: Int, ok: Bool }
+
+// `call key.op(args)` -> the `call` step. `bind` is `""` for the bare form and
+// the source name for `let x = call …`; the reference stamps the binding through
+// `_predeclared_mangle` and the key itself through nothing (`_provision_key`
+// keeps `ns::key` verbatim).
+fn lir_life_call(ts: List[Token], i: Int, bind: Str, env: List[Bind],
+                 al: Map[Str, Str]) -> LifeCall {
+  if (!ati(ts, i, "call")) { return { js: "", i: i, ok: false } }
+  if (!atk(ts, i + 1, "ident")) { return { js: "", i: i, ok: false } }
+  var k = i + 2
+  var key = tkc(ts, i + 1).text
+  if (atk(ts, k, ":") && atk(ts, k + 1, ":")) {
+    if (!atk(ts, k + 2, "ident")) { return { js: "", i: i, ok: false } }
+    key = key.concat("::").concat(tkc(ts, k + 2).text)
+    k += 3
+  }
+  if (!atk(ts, k, ".") || !atk(ts, k + 1, "ident")) { return { js: "", i: i, ok: false } }
+  let method = tkc(ts, k + 1).text
+  k += 2
+  if (!atk(ts, k, "(")) { return { js: "", i: i, ok: false } }
+  let pe = close_paren(ts, k)
+  if (pe == 0 - 1) { return { js: "", i: i, ok: false } }
+  let args = lir_life_args(ts, k + 1, pe - 1, env, al)
+  let js = "{\"step\": \"call\", \"key\": ".concat(jstr(key))
+    .concat(", \"method\": ").concat(jstr(method))
+    .concat(", \"args\": [").concat(args).concat("]")
+    .concat(bind == "" ? "" : ", \"bind\": ".concat(jstr(predeclared_mangle(bind))))
+    .concat("}")
+  return { js: js, i: pe, ok: true }
+}
+
+// One step of a lifecycle script (`_lower_lifecycle_body`'s statement set):
+// `load`, `unload`, `call` / `let x = call`, `advance`, `abort`,
+// `assert no_residue`, `assert <expr>`. A `var` binding is refused by the
+// reference here — a lifecycle body is straight-line — so only `let` reads.
+fn lir_life_step(ts: List[Token], i: Int, hi: Int, env: List[Bind],
+                 al: Map[Str, Str]) -> LifeStep {
+  let t = tkc(ts, i)
+  if (ati(ts, i, "load")) {
+    if (!atk(ts, i + 1, "ident")) { return life_fail(env) }
+    var j = i + 2
+    var cfg = ""
+    if (atw(ts, j, "with")) {
+      if (!atk(ts, j + 1, "{")) { return life_fail(env) }
+      let ce = close_brace(ts, j + 1)
+      if (ce == 0 - 1) { return life_fail(env) }
+      cfg = lir_life_config(ts, j + 2, ce - 1, env, al)
+      j = ce
+    }
+    return life_step("{\"step\": \"load\", \"component\": ".concat(jstr(tkc(ts, i + 1).text))
+      .concat(", \"config\": {").concat(cfg).concat("}}"), j, env)
+  }
+  if (ati(ts, i, "unload")) {
+    if (!atk(ts, i + 1, "ident")) { return life_fail(env) }
+    return life_step("{\"step\": \"unload\", \"component\": "
+      .concat(jstr(tkc(ts, i + 1).text)).concat("}"), i + 2, env)
+  }
+  // `advance <int><unit>` — the reference folds the unit through
+  // `_DURATION_UNITS` and stamps MILLISECONDS, so `35000` and `35s` are the
+  // same step.
+  if (ati(ts, i, "advance")) {
+    if (!atk(ts, i + 1, "int") || !atk(ts, i + 2, "ident")) { return life_fail(env) }
+    let ms = duration_ms_str(tkc(ts, i + 1).text, tkc(ts, i + 2).text)
+    if (ms == "") { return life_fail(env) }
+    return life_step("{\"step\": \"advance\", \"ms\": ".concat(ms).concat("}"), i + 3, env)
+  }
+  if (ati(ts, i, "abort")) {
+    return life_step("{\"step\": \"abort\"}", i + 1, env)
+  }
+  if (t.kind == "kw" && t.text == "let") {
+    if (!atk(ts, i + 1, "ident") || !atk(ts, i + 2, "=")) { return life_fail(env) }
+    let nm = tkc(ts, i + 1).text
+    let c = lir_life_call(ts, i + 3, nm, env, al)
+    if (!c.ok) { return life_fail(env) }
+    return life_step(c.js, c.i, env_mut_put(env, nm, false))
+  }
+  if (ati(ts, i, "call")) {
+    let c = lir_life_call(ts, i, "", env, al)
+    if (!c.ok) { return life_fail(env) }
+    return life_step(c.js, c.i, env)
+  }
+  if (t.kind == "kw" && t.text == "assert") {
+    if (ati(ts, i + 1, "no_residue")) {
+      return life_step("{\"step\": \"assert_no_residue\"}", i + 2, env)
+    }
+    let r = expr_at(ts, i + 1)
+    if (is_bad(r.e) || r.i <= i + 1) { return life_fail(env) }
+    return life_step("{\"step\": \"assert\", \"expr\": "
+      .concat(lir_expr(r.e, env, al)).concat("}"), r.i, env)
+  }
+  return life_fail(env)
+}
+
+fn lir_life_steps(ts: List[Token], lo: Int, hi: Int, env0: List[Bind],
+                  al: Map[Str, Str]) -> Str {
+  var i = lo
+  var env = env0
+  var out = ""
+  while (i < hi && !atk(ts, i, "}")) {
+    if (atk(ts, i, ";")) { i += 1 }
+    else {
+      let st = lir_life_step(ts, i, hi, env, al)
+      if (!st.ok || st.i <= i) { i = hi }
+      else {
+        if (st.js != "") { out = out == "" ? st.js : out.concat(", ").concat(st.js) }
+        env = st.env
+        i = st.i
+      }
+    }
+  }
+  return out
+}
+
+// `test "name" { … }` -> `{"name": …, "body": […]}`. `_lower_tests` lowers the
+// body as a pure statement list with no declared return, so the starting
+// environment is the module's ADT constructor table and nothing else.
+fn lir_plain_test(ts: List[Token], i: Int, e: Int, cases: List[Bind],
+                  sm: Map[Str, Str], al: Map[Str, Str]) -> Str {
+  let nm = atk(ts, i + 1, "string") ? tkc(ts, i + 1).text : ""
+  let bend = atk(ts, i + 1, "{") ? i + 1 : i + 2
+  let om = own_marks(ts, bend + 1, e - 1, sm)
+  let tmarks = om.marks.set("@try_fn", i).set("@try_end", e)
+  let body = lir_stmts(ts, bend + 1, e - 1, cases, [], "", tmarks, om.births, al)
+  return "{\"name\": ".concat(jstr(nm)).concat(", \"body\": [").concat(body).concat("]}")
+}
+
+// `lifecycle test STR { … }` -> `{"name": …, "lifecycle": true, "body": […]}`.
+// The `lifecycle` flag is what tells an emitter this body is a live-composition
+// script rather than a pure one.
+fn lir_lifecycle_test(ts: List[Token], i: Int, e: Int, cases: List[Bind],
+                      al: Map[Str, Str]) -> Str {
+  let bend = lifecycle_body_i(ts, i)
+  if (bend == 0 - 1) { return "" }
+  let body = lir_life_steps(ts, bend + 1, e - 1, cases, al)
+  return "{\"name\": ".concat(jstr(tkc(ts, i + 2).text))
+    .concat(", \"lifecycle\": true, \"body\": [").concat(body).concat("]}")
+}
+
+// A JSON literal as `parser.literal()` reads one: an int, a float, a string, a
+// `true`/`false`/`null`, and a `-` sign in front of a number. An `int` token's
+// text is already normalised by the lexer, so the digits go out as they are.
+type JsonLit = { js: Str, i: Int }
+
+fn json_literal_at(ts: List[Token], i: Int) -> JsonLit {
+  if (atk(ts, i, "int") || atk(ts, i, "float")) {
+    return { js: tkc(ts, i).text, i: i + 1 }
+  }
+  if (atk(ts, i, "string")) { return { js: jstr(tkc(ts, i).text), i: i + 1 } }
+  if (atw(ts, i, "true") || atw(ts, i, "false") || atw(ts, i, "null")) {
+    return { js: tkc(ts, i).text, i: i + 1 }
+  }
+  if (atk(ts, i, "-") && (atk(ts, i + 1, "int") || atk(ts, i + 1, "float"))) {
+    return { js: "-".concat(tkc(ts, i + 1).text), i: i + 2 }
+  }
+  return { js: "", i: i }
+}
+
+// `with { k: <literal>, … }` -> the RAW-literal config map. `_lower_fault_tests`
+// stores `self.literal()`'s Python value and re-renders it, so `{"start": 1}`
+// is the shape and `{"start": {"kind": "lit", "value": 1}}` is not.
+fn lir_fault_config(ts: List[Token], lo: Int, hi: Int) -> Str {
+  var i = lo
+  var out = ""
+  while (i < hi) {
+    if (atk(ts, i, ",")) { i += 1 }
+    else {
+      if (!atk(ts, i, "ident") || !atk(ts, i + 1, ":")) { return out }
+      let lit = json_literal_at(ts, i + 2)
+      if (lit.js == "") { return out }
+      let one = jstr(tkc(ts, i).text).concat(": ").concat(lit.js)
+      out = out == "" ? one : out.concat(", ").concat(one)
+      i = lit.i
+    }
+  }
+  return out
+}
+
+// `failed` | `no residue` | `no emissions` | `inverses lifo` |
+// `siblings unaffected` — every word a contextual identifier, matched by
+// spelling exactly as `_fault_assertion` matches it.
+type FaultAssert = { kind: Str, i: Int }
+
+fn fault_assert_at(ts: List[Token], i: Int) -> FaultAssert {
+  if (!atk(ts, i, "ident")) { return { kind: "", i: i } }
+  let w = tkc(ts, i).text
+  if (w == "failed") { return { kind: "failed", i: i + 1 } }
+  if (w == "no") {
+    if (ati(ts, i + 1, "residue")) { return { kind: "no-residue", i: i + 2 } }
+    if (ati(ts, i + 1, "emissions")) { return { kind: "no-emissions", i: i + 2 } }
+    return { kind: "", i: i }
+  }
+  if (w == "inverses") {
+    if (ati(ts, i + 1, "lifo")) { return { kind: "inverses-lifo", i: i + 2 } }
+    return { kind: "", i: i }
+  }
+  if (w == "siblings") {
+    if (ati(ts, i + 1, "unaffected")) { return { kind: "siblings-unaffected", i: i + 2 } }
+    return { kind: "", i: i }
+  }
+  return { kind: "", i: i }
+}
+
+type FaultBody = { at: Str, asserts: List[Str], ok: Bool }
+
+// The `{ fail at … assert … }` block: the injection point plus the assertion
+// list, de-duplicated in first-seen order the way `_lower_fault_tests` builds it.
+//
+// Only the `fail at step N` form is read here. `fail at effect NAME` lowers to
+// `{"step": N, "effect": NAME}` where N is the 1-based index of the `let-effect`
+// step in the component's LOWERED body — a lookup that needs the component
+// lowering this walk does not have, so that form yields no unit and its document
+// stays short of byte-exact (declared, not silently mis-stamped).
+fn lir_fault_body(ts: List[Token], lo: Int, hi: Int) -> FaultBody {
+  var at = ""
+  var asserts: List[Str] = []
+  var i = lo
+  var ok = true
+  while (i < hi && !atk(ts, i, "}") && ok) {
+    if (atk(ts, i, ";")) { i += 1 }
+    else {
+      let t = tkc(ts, i)
+      if (t.kind == "kw" && t.text == "fail") {
+        if (!ati(ts, i + 1, "at")) { ok = false }
+        else {
+          if (ati(ts, i + 2, "step") && atk(ts, i + 3, "int")) {
+            at = "{\"step\": ".concat(tkc(ts, i + 3).text).concat("}")
+            i = i + 4
+          } else {
+            ok = false
+          }
+        }
+      } else {
+        if (t.kind == "kw" && t.text == "assert") {
+          let a = fault_assert_at(ts, i + 1)
+          if (a.kind == "") { ok = false }
+          else {
+            if (!contains(asserts, a.kind)) { asserts = asserts.push(a.kind) }
+            i = a.i
+          }
+        } else {
+          ok = false
+        }
+      }
+    }
+  }
+  if (!ok || at == "") { return { at: "", asserts: [], ok: false } }
+  return { at: at, asserts: asserts, ok: true }
+}
+
+fn fault_asserts_json(xs: List[Str], i: Int, acc: Str) -> Str {
+  if (i >= xs.length()) { return acc }
+  let acc2 = acc == "" ? jstr(xs[i]) : acc.concat(", ").concat(jstr(xs[i]))
+  return fault_asserts_json(xs, i + 1, acc2)
+}
+
+// `fault test STR for C [with { k: lit, … }] { … }` -> one fault unit.
+fn lir_fault_test(ts: List[Token], i: Int, e: Int) -> Str {
+  if (!at_qual_test(ts, i) || tkc(ts, i).text != "fault") { return "" }
+  if (!atk(ts, i + 2, "string")) { return "" }
+  if (!atw(ts, i + 3, "for") || !atk(ts, i + 4, "ident")) { return "" }
+  var j = i + 5
+  var cfg = ""
+  if (atw(ts, j, "with")) {
+    if (!atk(ts, j + 1, "{")) { return "" }
+    let ce = close_brace(ts, j + 1)
+    if (ce == 0 - 1) { return "" }
+    cfg = lir_fault_config(ts, j + 2, ce - 1)
+    j = ce
+  }
+  if (!atk(ts, j, "{")) { return "" }
+  let b = lir_fault_body(ts, j + 1, e - 1)
+  if (!b.ok) { return "" }
+  return "{\"name\": ".concat(jstr(tkc(ts, i + 2).text))
+    .concat(", \"component\": ").concat(jstr(tkc(ts, i + 4).text))
+    .concat(", \"at\": ").concat(b.at)
+    .concat(", \"assert\": [").concat(fault_asserts_json(b.asserts, 0, "")).concat("]")
+    .concat(cfg == "" ? "" : ", \"config\": {".concat(cfg).concat("}"))
+    .concat("}")
+}
+
+// The two sections in ONE top-level pass. They are separate keys in the IR but
+// the same walk, so the declaration-skipping ladder — which is what keeps a
+// `test` nested inside a `component` from being read as a top-level one — exists
+// once.
+type TestSecs = { tests: Str, faults: Str }
+
+fn sec_add(acc: Str, js: Str) -> Str {
+  if (js == "") { return acc }
+  return acc == "" ? js : acc.concat(", ").concat(js)
+}
+
+fn test_secs_walk(ts: List[Token], i: Int, acc: TestSecs, cases: List[Bind],
+                  sm: Map[Str, Str], al: Map[Str, Str]) -> TestSecs {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return test_secs_walk(ts, i + 1, acc, cases, sm, al) }
+  if (at_event(ts, i)) {
+    return test_secs_walk(ts, event_decl_end(ts, i), acc, cases, sm, al)
+  }
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe == 0 - 1) { return test_secs_walk(ts, skip_line(ts, i), acc, cases, sm, al) }
+    if (t.text == "lifecycle") {
+      let js = lir_lifecycle_test(ts, i, qe, cases, al)
+      return test_secs_walk(ts, qe, { tests: sec_add(acc.tests, js), faults: acc.faults },
+                            cases, sm, al)
+    }
+    if (t.text == "fault") {
+      let js = lir_fault_test(ts, i, qe)
+      return test_secs_walk(ts, qe, { tests: acc.tests, faults: sec_add(acc.faults, js) },
+                            cases, sm, al)
+    }
+    return test_secs_walk(ts, qe, acc, cases, sm, al)
+  }
+  if (t.kind != "kw") { return test_secs_walk(ts, skip_line(ts, i), acc, cases, sm, al) }
+  if (at_pub_prefix(ts, i)) { return test_secs_walk(ts, i + 1, acc, cases, sm, al) }
+  if (t.text == "use") { return test_secs_walk(ts, skip_line(ts, i), acc, cases, sm, al) }
+  if (t.text == "test") {
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) {
+      let js = lir_plain_test(ts, i, e, cases, sm, al)
+      return test_secs_walk(ts, e, { tests: sec_add(acc.tests, js), faults: acc.faults },
+                            cases, sm, al)
+    }
+    return test_secs_walk(ts, skip_line(ts, i), acc, cases, sm, al)
+  }
+  if (t.text == "type") { return test_secs_walk(ts, type_decl_end(ts, i + 1), acc, cases, sm, al) }
+  if (t.text == "extern") {
+    return test_secs_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, sm, al)
+  }
+  if (t.text == "fn") { return test_secs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, cases, sm, al) }
+  if (t.text == "service") {
+    return test_secs_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, sm, al)
+  }
+  if (t.text == "component") {
+    return test_secs_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, sm, al)
+  }
+  return test_secs_walk(ts, skip_line(ts, i), acc, cases, sm, al)
+}
+
 // ---------------------------------------------------------------- top level
 
 fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st: SrcText) -> IrAcc {
@@ -27124,6 +27572,17 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st:
   let t = tkc(ts, i)
   if (at_boot(ts, i)) { return ir_walk(ts, i + 1, a, fname, al, st) }
   if (at_event(ts, i)) { return ir_walk(ts, event_decl_end(ts, i), a, fname, al, st) }
+  // item 2088: a qualified test head is an `ident`, so without this the walker
+  // fell through to `skip_line` and never reached the `}` — which is also the
+  // only reason `ir_version` stayed 1 on a document whose reference IR is 3
+  // (`uses_v3` is true for ANY non-empty `tests`/`fault_tests`).
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) {
+      return ir_walk(ts, qe, mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
+    }
+    return ir_walk(ts, skip_line(ts, i), a, fname, al, st)
+  }
   if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a, fname, al, st) }
   if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname, al, st) }
   if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname, al, st) }
@@ -27247,6 +27706,16 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   if (fnsjs != "") { out = out.concat(", \"functions\": [").concat(fnsjs).concat("]") }
   if (exres.ok && exres.js != "") { out = out.concat(", \"externs\": [").concat(exres.js).concat("]") }
   if (bnd.rows.length() > 0) { out = out.concat(", \"secrets\": [").concat(sec_rows_json(bnd.rows)).concat("]") }
+  // item 2088: `tests` then `fault_tests`, in the reference's key order — the
+  // section sits after `secrets` and before the closing brace, and an EMPTY
+  // section writes no key at all (a document with no test in it stays
+  // byte-identical to what this producer emitted before).
+  let secs = test_secs_walk(ts, 0, { tests: "", faults: "" }, case_binds(ts, al),
+                            own_program_summary(ts), al)
+  if (secs.tests != "") { out = out.concat(", \"tests\": [").concat(secs.tests).concat("]") }
+  if (secs.faults != "") {
+    out = out.concat(", \"fault_tests\": [").concat(secs.faults).concat("]")
+  }
   return out.concat("}")
 }
 
@@ -30314,9 +30783,10 @@ test "lower_to_ir emits the services table for a simple provider" {
 
 test "lower_to_ir keeps both fns around a one-line named test block" {
   // fns_walk is one of the eight top-level walkers: before the skip covered the
-  // named spelling this dropped `two` from the IR entirely, silently.
+  // named spelling this dropped `two` from the IR entirely, silently. The
+  // `tests` section is now emitted too, byte-identical to the reference.
   assert lower_to_ir("""fn one() -> Int { return 1 } test "t" { assert one() == 1 } fn two() -> Int { return 2 }""")
-    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}]}"""
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}], "tests": [{"name": "t", "body": [{"step":"assert","expr":{"kind":"bin","op":"==","left":{"kind":"call","callee":{"kind":"var","name":"one"},"args":[]},"right":{"kind":"lit","value":1}}}]}]}"""
 }
 
 test "lower_to_ir lowers a config read in a provide method (component spine)" {

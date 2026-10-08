@@ -533,25 +533,29 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # reproduces byte-for-byte through the fully-native chain on both the
         # py and ts tiers.)
         "../emit_py_builtin_shadow.rvl",
-        # item 391: the in-file test sections. selfhost/emit_py.rvl emits all
-        # three byte-exact from the reference IR; the native IR producer
-        # carries no `tests` or `fault_tests` section at all, so the native
-        # chain emits each of these documents without its REVL_TESTS /
-        # lifecycle harness / REVL_FAULT_TESTS trailer and without the imports
-        # that trailer pulls in.
-        "../../../examples/regressions/fuzz_go_e6afacd3.rvl",
-        "../../../examples/uxprobe2_jobs.rvl",
-        "../../../backends/go/scenarios/advance.rvl",
-        "../../../examples/model_store_sqlite.rvl",
-        "../../../examples/uxprobe2_fault.rvl",
-        "../emit_py_test_sections.rvl",
+        # (issue #2088: the six in-file test documents left this list when
+        # `selfhost/lower.rvl` grew the `tests`/`fault_tests` producers —
+        # `test_secs_walk` over `lir_plain_test`/`lir_lifecycle_test`/
+        # `lir_fault_test`. selfhost/emit_py.rvl already emitted all three
+        # byte-exact from the reference IR; only the producer was missing the
+        # section, so the native chain used to emit each of these documents
+        # without its REVL_TESTS / lifecycle harness / REVL_FAULT_TESTS trailer
+        # and without the imports that trailer pulls in. They now reproduce
+        # byte-for-byte through the fully-native chain.)
+        #
         # item 391: the await-seed slice. Both are emitter-exact from the
-        # reference IR. async_timer.rvl carries lifecycle tests (the native IR
-        # has no `tests` section). emit_py_async_shapes.rvl reaches the
-        # frontend's sync instance of a fn with an async-typed parameter
-        # (`drive_revl_sync`) and the async-coloured timer flag, neither of
-        # which the native IR producer emits, so the native chain also loses
-        # the `extern_emit` and `asyncio` imports.
+        # reference IR. async_timer.rvl's `tests` section is byte-exact now too
+        # (issue #2088 above), so what withholds it is the OTHER half of this
+        # slice: its timer bodies `emit counter.tick()` through a required key
+        # and `Counter.tick` is an `emission async fn`, but the native IR
+        # producer stamps no `"async": true` on that timer step (item 170's
+        # `_timer_body_reaches_async` colouring), so the emitter omits the
+        # in-flight window and its teardown. That is a different family from
+        # #2088's — the same one that withholds emit_py_async_shapes.rvl, which
+        # reaches the frontend's sync instance of a fn with an async-typed
+        # parameter (`drive_revl_sync`) and the async-coloured timer flag,
+        # neither of which the native IR producer emits, so the native chain
+        # also loses the `extern_emit` and `asyncio` imports.
         "../../../examples/async_timer.rvl",
         "../emit_py_async_shapes.rvl",
         # item 391: the stream slice. All five are emitter-exact from the
@@ -664,12 +668,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # an extern's host `refs` used to drop, taking the thunks and their
         # imports with them. The one native `selfhost/lower.rvl` producer fix
         # closes the residual for BOTH tiers.)
-        # the in-file `tests` section, plain and lifecycle,
-        "../../../examples/lifecycle_cache.rvl",
-        "../../../backends/go/testdata/opt_gaps_280.rvl",
+        # (issue #2088: the in-file `tests` section, plain and lifecycle, landed
+        # in `selfhost/lower.rvl`, so `lifecycle_cache.rvl`, the item 280
+        # Opt-gap document and the scenario `advance.rvl` left this list.)
         # timers inside a lifecycle-tested document,
         "../../../examples/async_timer.rvl",
-        "../../../backends/go/scenarios/advance.rvl",
         # the stream surface (`subscribe`, `merge`, `every ... in`),
         "../../../backends/go/testdata/stream_130.rvl",
         "../emit_rust_corpus/comp_stream.rvl",
@@ -704,59 +707,28 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `false-reject` waiver. The gate now refuses it with the reference's
         # message, so that waiver was never needed.
 
-        # issue #1911: the `abort` lifecycle STEP, on a document that is nothing
-        # but a lifecycle test. It sits at its own place in this tuple, because
-        # the comparison above is order-sensitive — `diverged` is built by
-        # walking CORPUS, so a ts residual entry belongs at that document's place
-        # in the enumeration, and tests/test_selfhost_emit_ts.py appends it to
-        # CORPUS.
-        #
-        # The emitter half of item 146 holds here in the strongest form the split
-        # allows: selfhost/emit_ts.rvl fed the REFERENCE IR produces this
-        # document's bytes exactly, `abort` arm and `frameForCtx` import
-        # included. That is what the assertion above measures, and it is the
-        # reason this entry is NOT an emitter gap — the ts emitter is not
-        # absorbing a construct lower.rvl should own, it is emitting a step that
-        # is the emitter's job on every tier (selfhost/emit_py.rvl carries the
-        # same arm). What the fully-native chain cannot do is reach that IR: the
-        # document's entire payload is its `tests` section, and
-        # selfhost/lower.rvl carries no `tests`/`fault_tests` section at all, so
-        # the native chain emits the component's 1,057 bytes and no test. The
-        # same pre-existing lower.rvl gap as `lifecycle_cache.rvl` above.
-        "lifecycle_abort.rvl",
-        # Issue #2009: the py #1945 part 2 host-map write journal, ported into
-        # the ts lifecycle harness. The EMITTER half of item 146 holds here in
-        # its strongest form: selfhost/emit_ts.rvl fed the REFERENCE IR produces
-        # this document's bytes exactly, `journalBegin()`/`guard()` pair
-        # included, and this is the only corpus document that reaches them (its
-        # `provide`-method bracket is the one shape where no activation-body
-        # bracket ever created the `Frame`). What the fully-native chain cannot
-        # do is reach that IR: the document's payload is its `lifecycle test
-        # "a method-body write is reversed" { … assert no_residue }`, and
-        # selfhost/lower.rvl carries no `tests`/`fault_tests` section at all, so
-        # the native chain emits the component's bytes and no test — the same
-        # pre-existing lower.rvl gap as `lifecycle_cache.rvl` and
-        # `lifecycle_abort.rvl` above, NOT an emitter gap. It sits here because
-        # that is its place in tests/test_selfhost_emit_ts.py's CORPUS, which
-        # the order-sensitive comparison above walks.
-        "host_map_journal.rvl",
+        # (issue #2088: the `abort` lifecycle STEP document and the issue #2009
+        # py #1945 part 2 host-map write journal left this list when the
+        # `tests`/`fault_tests` producers landed in `selfhost/lower.rvl`. Both
+        # were never emitter gaps — selfhost/emit_ts.rvl fed the REFERENCE IR
+        # reproduced each byte-exactly, `abort` arm / `frameForCtx` import and
+        # `journalBegin()`/`guard()` pair included; what the fully-native chain
+        # could not do was REACH that IR, because each document's whole payload
+        # was its `tests` section and the producer carried none. host_map_journal
+        # is the only corpus document that reaches `journalBegin()`/`guard()` —
+        # its `provide`-method bracket is the one shape where no activation-body
+        # bracket ever created the `Frame`.)
     ),
     "go": (
-        # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the
-        # reference bytes from the reference IR, and selfhost/lower.rvl does not
-        # produce the IR `tests` section, so the fully-native chain emits the
-        # functions without the test functions or the `testing` import. Every
-        # other go corpus document, the stdlib/Opt/Result/Map surface included,
-        # is byte-exact through the native chain.
-        "in_file_tests.rvl",
-        # the same `tests` section gap, on the item 280 Opt-gap document
-        "../../../backends/go/testdata/opt_gaps_280.rvl",
-        # ... and on the issue #1631 erased-Result document
-        "../../../backends/go/testdata/result_erased_1631.rvl",
-        # issue #106, the combined path's first slice: the same `tests` section
-        # gap (the issue #1823 provide-block drop is fixed, #1867). The other
-        # combined documents are byte-exact through the native chain.
-        "comp_provide_pure.rvl",
+        # (issue #2088: in-file `test` blocks. selfhost/emit_go.rvl already
+        # reproduced the reference bytes from the reference IR; the producer was
+        # the missing half, so the fully-native chain used to emit the functions
+        # without the test functions or the `testing` import. With the
+        # `tests`/`fault_tests` producers in `selfhost/lower.rvl` all four
+        # documents below left this list — `in_file_tests.rvl`, the item 280
+        # Opt-gap document, the issue #1631 erased-Result document, and the
+        # combined path's `comp_provide_pure.rvl`.)
+        # no residual: the fully-native chain reproduces the whole go corpus.
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -796,10 +768,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "comp_stream.rvl",
         # (`bridge_types.rvl`, item 391's bridge marshalling document, left with
         # issue #1818: `fn weight(name) = None` dropped the component body.)
-        # item 391: in-file `test` blocks. Emitter-exact from the reference IR;
-        # the native IR producer carries no `tests` section, so the native chain
-        # emits the functions and drops every `#[test] fn`.
-        "in_file_tests.rvl",
+        # (issue #2088: in-file `test` blocks left this list when the
+        # `tests`/`fault_tests` producers landed in `selfhost/lower.rvl`.
+        # selfhost/emit_rust.rvl already reproduced the reference bytes from the
+        # reference IR; the producer was the missing half, so the native chain
+        # used to emit the functions and drop every `#[test] fn`. The other
+        # rust documents in this tuple are unrelated gaps and stay.)
         # item 391: the by-value reuse document. Emitter-exact from the
         # reference IR; the native IR producer does not type the result of a
         # call to a `let`-bound arrow (`i = bump(i) + 1`), so it writes the `+`
