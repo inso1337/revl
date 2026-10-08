@@ -6,7 +6,7 @@ LIBRARY three ways — the py wheel (`pip install revl`,
 jco-transpiled wasm component (`npm i` the gate) — each with a real out-of-tree
 consumer that admits or pre-filters agent-authored code against the packaged
 surface (docs/design/338-revl-as-dependency.md; docs/gate-dependency-contract.md
-"Publish status: the only remaining step").
+"Publish status: built and rehearsed; the upload is the owner's step").
 
 Every part of that except the registry upload is built and gated from the
 committed source in CI already, each by its own suite:
@@ -16,7 +16,9 @@ committed source in CI already, each by its own suite:
   packaged-shaped copy), `tests/test_packaging.py` (the wheel manifest and the
   stability metadata);
 * rust — `tests/test_gate_crate_drift.py` and
-  `tests/test_gate_consumer_example_rs.py`;
+  `tests/test_gate_consumer_example_rs.py`, with the crate's release path
+  rehearsed by `.github/workflows/release-dryrun-crate.yml` and pinned by
+  `tests/test_gate_crate_release_path.py`;
 * wasm/js — `tests/test_gate_wasm_drift.py`, `tests/test_gate_wasm_vector.py`
   and `tests/test_gate_consumer_example_js.py`.
 
@@ -31,7 +33,8 @@ would red here, loudly, rather than being discovered at a release.
 
 Deliberately dependency-free (no PyYAML): the workflow assertions are made
 against the file text with stable structural anchors, so this suite runs the
-same in a minimal environment as it does in the full CI matrix.
+same in a minimal environment as it does in the full CI matrix. The crate
+rehearsal's own structure is parsed in `tests/test_gate_crate_release_path.py`.
 """
 
 from __future__ import annotations
@@ -108,7 +111,10 @@ def test_rust_crate_is_committed_generated_source():
     """`cargo add revl-gate` is one `cargo publish` away because the crate is
     committed, generated source (built by `tools/build_gate_crate.py`, drift
     gated by `tests/test_gate_crate_drift.py`). The only missing thing is the
-    crates.io copy."""
+    crates.io copy — and, since this slice, that release path is rehearsed
+    rather than latent: `release-dryrun-crate.yml` runs the real `cargo package`
+    through `tools/check_crate_package.py` and holds no registry credential, so
+    the upload is still only the owner's."""
     cargo = CRATES / "revl-gate" / "Cargo.toml"
     assert cargo.exists(), "crates/revl-gate is missing"
     text = cargo.read_text(encoding="utf-8")
@@ -118,6 +124,18 @@ def test_rust_crate_is_committed_generated_source():
         "the crate's hand-written layer-1 shim (src/lib.rs) is missing")
     assert (REPO / "tools" / "build_gate_crate.py").exists()
     assert (REPO / "tests" / "test_gate_crate_drift.py").exists()
+
+    # The rehearsal, and the negative that makes it a rehearsal: a token-free
+    # workflow that packages the crate and cannot upload it.
+    rehearsal = WORKFLOWS / "release-dryrun-crate.yml"
+    assert rehearsal.exists(), (
+        "the crate's release path must be exercised by a dry run, the way the "
+        "wheel's is (issue #191), not discovered on the day of a release")
+    rehearsal_text = rehearsal.read_text(encoding="utf-8")
+    assert "tools/check_crate_package.py --build" in rehearsal_text
+    assert "cargo publish" not in rehearsal_text
+    assert "CARGO_REGISTRY_TOKEN" not in rehearsal_text
+    assert (REPO / "tools" / "check_crate_package.py").exists()
 
 
 def test_wasm_component_and_js_transpile_are_built_from_source():
@@ -188,13 +206,18 @@ def test_contract_doc_states_the_publish_only_remainder_for_all_three_registries
     not only in docs/design/."""
     doc = DOCS / "gate-dependency-contract.md"
     text = doc.read_text(encoding="utf-8")
-    assert "Publish status: the only remaining step" in text
+    assert "Publish status: built and rehearsed; the upload is the owner's step" in text
     for registry in ("PyPI", "crates.io", "npm"):
         assert registry in text, (
             f"the publish-status section must name {registry} as a registry "
             f"whose upload is the remaining owner step")
     # It points back at this test as the pin, closing the loop both ways.
     assert "test_gate_dependency_publish_ready.py" in text
+    # The rehearsal is part of the honest status, not a footnote: the doc names
+    # it for the tier that has one, and names the tier that does not.
+    assert "release dry run (crate)" in text
+    assert "tests/test_gate_crate_release_path.py" in text
+    assert "No rehearsal: there is no package to rehearse." in text
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience only

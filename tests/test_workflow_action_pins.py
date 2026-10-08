@@ -54,19 +54,17 @@ USES = re.compile(
     re.MULTILINE,
 )
 
-# The 14 workflow files that constitute the CI surface. Named so that a workflow
-# moved out of the scanned directory cannot silently leave the check's scope.
-EXPECTED_WORKFLOWS = frozenset({
-    "arm64-smoke.yml",
-    "ci.yml",
-    "codeql.yml",
-    "pages.yml",
-    "publish.yml",
-    "release-dryrun.yml",
-    "site-wheel.yml",
-    "windows-smoke.yml",
-    "x64-smoke.yml",
-})
+# The CI surface, read from the directory rather than enumerated: a workflow file
+# is inside this check's scope the moment it exists, so adding one cannot leave
+# the scan silently short and cannot need a second edit here to be covered. The
+# count is deliberately not restated in a comment -- a comment that counts files
+# goes stale without anything failing, and this file's job is to fail.
+#
+# Deriving the set does not make `test_the_scan_covers_every_workflow_file` a
+# tautology: `_workflow_files()` reads `*.y*ml` recursively, so a workflow that
+# is moved out of this directory, or a `.yaml`/nested one the `*.yml` read below
+# cannot see, still differs from this set and still fails the test.
+EXPECTED_WORKFLOWS = frozenset(p.name for p in WORKFLOWS.glob("*.yml"))
 
 # Every external action reference in the tree today, so the scan cannot pass by
 # matching nothing. Grow this when a workflow adds an action.
