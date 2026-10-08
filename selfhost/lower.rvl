@@ -23569,6 +23569,109 @@ fn infer_list_ty(items: List[Expr], env: List[Bind]) -> Str {
   return "List[".concat(elem).concat("]")
 }
 
+// issue #2095 (the self-host port of `infer_ast`'s `ExprArrow` arm and
+// `_resolve_arrow`, src/revl/typecheck.py): an arrow ALWAYS types, as the
+// function type `(<params>) -> <returns>` — arity is purely syntactic and never
+// in doubt, so even an arrow over unknown parameters has one. `infer` answered
+// "" for every arrow, and a `let`-bound arrow is where that shows: the binding
+// reached the environment with no type, so a call to it read back "" and
+// `let bump = (k: Int) => k + size` followed by `i = bump(i) + 1` lost the
+// `operands` annotation the reference stamps on typed arithmetic — rust emitted
+// `i = (bump(i) + 1i64)` where the reference emits the checked add.
+//
+// Each parameter is its written annotation or `Any` (the reference's ⊥,
+// rendered), and the return is the written annotation or, only when no
+// unknown-typed parameter occurs FREE in the body (§3.2,
+// `arrow_depends_on_unknown_param`), what the body infers to — otherwise `Any`.
+// Inferring a result from a body typed under an unknown parameter is not sound,
+// so `(x) => x + 1` must stay `(Any) -> Any` and not become `(Any) -> Int`.
+fn arrow_fn_ty(a: ArrowN, env: List[Bind]) -> Str {
+  var inner = env
+  var pts: List[Str] = []
+  var unknown: List[Str] = []
+  var i = 0
+  while (i < a.params.length()) {
+    let p = a.params[i]
+    // a bare parameter is ⊥, not absent: it is still this body's local, and it
+    // shadows an outer name of the same spelling (`bind_local`), so the entry
+    // goes in empty rather than being left out.
+    inner = tenv_put(inner, p.name, p.ty)
+    pts = pts.push(p.ty == "" ? "Any" : p.ty)
+    if (p.ty == "") { unknown = unknown.push(p.name) }
+    i += 1
+  }
+  var ps = ""
+  var k = 0
+  while (k < pts.length()) {
+    ps = k == 0 ? pts[k] : ps.concat(", ").concat(pts[k])
+    k += 1
+  }
+  var rt = a.ret
+  if (rt == "" && !reads_free(a.body, unknown, [])) { rt = infer(a.body, inner) }
+  return "(".concat(ps).concat(") -> ").concat(rt == "" ? "Any" : rt)
+}
+
+// The reference's `_free_names` walk (src/revl/typecheck.py): is any name in
+// `names` READ in `e` outside an inner binder? §3.2 asks it of an arrow's
+// unknown-typed parameters, and the walk errs towards visiting too much —
+// missing an occurrence would name a return the reference leaves `Any`. The
+// binder set is the reference's: a nested arrow's parameters and a match arm's
+// payload binding.
+fn reads_free(e: Expr, names: List[Str], bound: List[Str]) -> Bool {
+  return match e {
+    Var(n)      => contains(names, n) && !contains(bound, n),
+    Bin(b)      => reads_free(b.l, names, bound) || reads_free(b.r, names, bound),
+    Un(u)       => reads_free(u.e, names, bound),
+    Emit(u)     => reads_free(u.e, names, bound),
+    Call(c)     => reads_free(c.target, names, bound)
+                   || reads_free_all(c.args, 0, names, bound),
+    Field(f)    => reads_free(f.target, names, bound),
+    OptField(f) => reads_free(f.target, names, bound),
+    OptCall(c)  => reads_free(c.target, names, bound)
+                   || reads_free_all(c.args, 0, names, bound),
+    Index(x)    => reads_free(x.target, names, bound)
+                   || reads_free(x.idx, names, bound),
+    If(f)       => reads_free(f.cond, names, bound)
+                   || reads_free(f.then_, names, bound)
+                   || reads_free(f.els, names, bound),
+    Rec(r)      => reads_free_inits(r.fields, 0, names, bound),
+    Lst(l)      => reads_free_all(l.items, 0, names, bound),
+    Arrow(a)    => reads_free(a.body, names, union_into(bound, param_names(a.params))),
+    Match(m)    => reads_free(m.scrut, names, bound)
+                   || reads_free_arms(m.arms, 0, names, bound),
+    Templ(t)    => reads_free_parts(t.parts, 0, names, bound),
+    RecUpd(r)   => reads_free(r.base, names, bound)
+                   || reads_free_inits(r.upds, 0, names, bound),
+    _           => false,
+  }
+}
+
+fn reads_free_all(xs: List[Expr], i: Int, names: List[Str], bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (reads_free(xs[i], names, bound)) { return true }
+  return reads_free_all(xs, i + 1, names, bound)
+}
+
+fn reads_free_inits(xs: List[InitN], i: Int, names: List[Str], bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (reads_free(xs[i].value, names, bound)) { return true }
+  return reads_free_inits(xs, i + 1, names, bound)
+}
+
+fn reads_free_arms(xs: List[ArmN], i: Int, names: List[Str], bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  let a = xs[i]
+  let inner = a.bind == "" ? bound : bound.push(a.bind)
+  if (reads_free(a.body, names, inner)) { return true }
+  return reads_free_arms(xs, i + 1, names, bound)
+}
+
+fn reads_free_parts(xs: List[PartN], i: Int, names: List[Str], bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (reads_free(xs[i].e, names, bound)) { return true }
+  return reads_free_parts(xs, i + 1, names, bound)
+}
+
 // Best-effort static type of a pure expression ("" = unknown). The covered
 // projection of `infer_ast`: enough to reproduce the IR's type annotations.
 fn infer(e: Expr, env: List[Bind]) -> Str {
@@ -23591,7 +23694,7 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     If(f)       => join_ty(infer(f.then_, env), infer(f.els, env)),
     Rec(r)      => infer_record_ty(r.fields, env),
     Lst(l)      => infer_list_ty(l.items, env),
-    Arrow(a)    => "",
+    Arrow(a)    => arrow_fn_ty(a, env),
     Match(m)    => infer_match_ty(m, env),
     Templ(t)    => "Str",
     // a record update yields the BASE's type with one field replaced, so the

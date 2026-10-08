@@ -26953,6 +26953,97 @@ fn infer_list_ty(items: Vec<Expr>, env: Vec<Bind>) -> String {
     return (String::from("List[").revl_concat(&elem)).revl_concat("]");
 }
 
+fn arrow_fn_ty(a: ArrowN, env: Vec<Bind>) -> String {
+    let mut inner = env;
+    let mut pts: Vec<String> = vec![];
+    let mut unknown: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < a.params.revl_length()) {
+        let p = (a.params)[(i) as usize].clone();
+        inner = tenv_put(&inner, p.name.clone(), p.ty.clone());
+        pts.push(if (p.ty == "") { String::from("Any") } else { p.ty });
+        if (p.ty == "") {
+            unknown.push(p.name.clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut ps = String::from("");
+    let mut k = 0i64;
+    while (k < pts.revl_length()) {
+        ps = if (k == 0i64) { (pts)[(k) as usize].clone() } else { (ps.revl_concat(", ")).revl_concat(&(pts)[(k) as usize]) };
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut rt = a.ret;
+    if ((rt == "") && (!reads_free(a.body.clone(), unknown.clone(), vec![]))) {
+        rt = infer(a.body.clone(), inner.clone());
+    }
+    return ((String::from("(").revl_concat(&ps)).revl_concat(") -> ")).revl_concat(&if (rt == "") { String::from("Any") } else { rt.clone() });
+}
+
+fn reads_free(e: Expr, names: Vec<String>, bound: Vec<String>) -> bool {
+    return match e {
+    Expr::Var(n) => (contains__m2(&names, &n) && (!contains__m2(&bound, &n))),
+    Expr::Bin(b) => { let b = *b; (reads_free(b.l.clone(), names.clone(), bound.clone()) || reads_free(b.r.clone(), names.clone(), bound.clone())) },
+    Expr::Un(u) => { let u = *u; reads_free(u.e.clone(), names.clone(), bound.clone()) },
+    Expr::Emit(u) => { let u = *u; reads_free(u.e.clone(), names.clone(), bound.clone()) },
+    Expr::Call(c) => { let c = *c; (reads_free(c.target.clone(), names.clone(), bound.clone()) || reads_free_all(c.args.clone(), 0i64, names.clone(), bound.clone())) },
+    Expr::Field(f) => { let f = *f; reads_free(f.target.clone(), names.clone(), bound.clone()) },
+    Expr::OptField(f) => { let f = *f; reads_free(f.target.clone(), names.clone(), bound.clone()) },
+    Expr::OptCall(c) => { let c = *c; (reads_free(c.target.clone(), names.clone(), bound.clone()) || reads_free_all(c.args.clone(), 0i64, names.clone(), bound.clone())) },
+    Expr::Index(x) => { let x = *x; (reads_free(x.target.clone(), names.clone(), bound.clone()) || reads_free(x.idx.clone(), names.clone(), bound.clone())) },
+    Expr::If(f) => { let f = *f; ((reads_free(f.cond.clone(), names.clone(), bound.clone()) || reads_free(f.then_.clone(), names.clone(), bound.clone())) || reads_free(f.els.clone(), names.clone(), bound.clone())) },
+    Expr::Rec(r) => reads_free_inits(r.fields.clone(), 0i64, names.clone(), bound.clone()),
+    Expr::Lst(l) => reads_free_all(l.items, 0i64, names.clone(), bound.clone()),
+    Expr::Arrow(a) => { let a = *a; reads_free(a.body.clone(), names.clone(), union_into(bound.clone(), param_names(&a.params))) },
+    Expr::Match(m) => { let m = *m; (reads_free(m.scrut.clone(), names.clone(), bound.clone()) || reads_free_arms(m.arms.clone(), 0i64, names.clone(), bound.clone())) },
+    Expr::Templ(t) => reads_free_parts(t.parts, 0i64, names.clone(), bound.clone()),
+    Expr::RecUpd(r) => { let r = *r; (reads_free(r.base.clone(), names.clone(), bound.clone()) || reads_free_inits(r.upds.clone(), 0i64, names.clone(), bound.clone())) },
+    _ => false,
+};
+}
+
+fn reads_free_all(xs: Vec<Expr>, i: i64, names: Vec<String>, bound: Vec<String>) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if reads_free((xs)[(i) as usize].clone(), names.clone(), bound.clone()) {
+        return true;
+    }
+    return reads_free_all(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), names.clone(), bound.clone());
+}
+
+fn reads_free_inits(xs: Vec<InitN>, i: i64, names: Vec<String>, bound: Vec<String>) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if reads_free((xs)[(i) as usize].value.clone(), names.clone(), bound.clone()) {
+        return true;
+    }
+    return reads_free_inits(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), names.clone(), bound.clone());
+}
+
+fn reads_free_arms(xs: Vec<ArmN>, i: i64, names: Vec<String>, bound: Vec<String>) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    let a = (xs)[(i) as usize].clone();
+    let inner = if (a.bind == "") { bound.clone() } else { bound.revl_push(a.bind.clone()) };
+    if reads_free(a.body.clone(), names.clone(), inner) {
+        return true;
+    }
+    return reads_free_arms(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), names.clone(), bound.clone());
+}
+
+fn reads_free_parts(xs: Vec<PartN>, i: i64, names: Vec<String>, bound: Vec<String>) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if reads_free((xs)[(i) as usize].e.clone(), names.clone(), bound.clone()) {
+        return true;
+    }
+    return reads_free_parts(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), names.clone(), bound.clone());
+}
+
 fn infer(e: Expr, env: Vec<Bind>) -> String {
     return match e {
     Expr::IntLit(v) => String::from("Int"),
@@ -26972,7 +27063,7 @@ fn infer(e: Expr, env: Vec<Bind>) -> String {
     Expr::If(f) => { let f = *f; join_ty(infer(f.then_.clone(), env.clone()), infer(f.els.clone(), env.clone())) },
     Expr::Rec(r) => infer_record_ty(r.fields.clone(), env.clone()),
     Expr::Lst(l) => infer_list_ty(l.items, env.clone()),
-    Expr::Arrow(a) => { let a = *a; String::from("") },
+    Expr::Arrow(a) => { let a = *a; arrow_fn_ty(a, env.clone()) },
     Expr::Match(m) => { let m = *m; infer_match_ty(m, env.clone()) },
     Expr::Templ(t) => String::from("Str"),
     Expr::RecUpd(r) => { let r = *r; infer(r.base.clone(), env.clone()) },

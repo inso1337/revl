@@ -774,11 +774,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # reference IR; the producer was the missing half, so the native chain
         # used to emit the functions and drop every `#[test] fn`. The other
         # rust documents in this tuple are unrelated gaps and stay.)
-        # item 391: the by-value reuse document. Emitter-exact from the
-        # reference IR; the native IR producer does not type the result of a
-        # call to a `let`-bound arrow (`i = bump(i) + 1`), so it writes the `+`
-        # without the reference's `"operands": "Int"` annotation.
-        "by_value_reuse.rvl",
+        # (issue #2095: the by-value reuse document left this list when the
+        # native producer learned to type an arrow at all (`arrow_fn_ty`, the
+        # port of `infer_ast`'s `ExprArrow` arm). The `let`-bound `bump` used to
+        # reach the environment with no type, so the call to it read back "" and
+        # `i = bump(i) + 1` was written without the reference's
+        # `"operands": "Int"` annotation. The other rust documents in this tuple
+        # are unrelated gaps and stay.)
         # item 391: the provide-method control-flow document. Emitter-exact from
         # the reference IR; the native IR producer drops the whole component
         # `body` of a component whose provide method holds a control-flow step,
