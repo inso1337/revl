@@ -2196,6 +2196,101 @@ jobs:
       - run: backends/python/.venv/bin/python demo/live_systems/run_demo.py
         env:
           REVL_DEMO_REQUIRE: "1"
+      # Issue #2153: a cancelled job's log ends at `##[error]The operation was
+      # canceled` and names no cause. The 180/60 job-level caps above are what
+      # bounds `main`; this step is legibility only, so the next person to reach
+      # for `gh run cancel` can read why a job stopped without a re-run. It is
+      # the surviving ask of #2153, not the retracted dead-runner claim: the two
+      # non-signatures (the logs endpoint's `BlobNotFound` for any job that has
+      # not completed, and a mid-line log stop) are named in the timeout comment
+      # above and are deliberately not read here as anything.
+      #
+      # `if: cancelled()` -- the `cancelled()` status check, documented as
+      # "Returns true if the workflow was canceled". Every other step in this
+      # job carries the default `success()` condition, so on a cancellation they
+      # are all SKIPPED and this is the only step that can still observe the
+      # runner before teardown. It is deliberately NOT `always()`: `always()`
+      # also runs after a superseded PR run's cancellation, which is exactly the
+      # runner time the `!cancelled()` conditions in `frontend` above exist to
+      # stop spending. `cancelled()` fires on that one state and no other.
+      #
+      # The cancellation path this covers, and why it is reachable here: a HAND
+      # CANCEL (`gh run cancel`) of a run whose `conformance` job is executing,
+      # plus the 180-minute job timeout above, which ends a job in the same
+      # `cancelled` state. `conformance` never runs on a pull request, and for
+      # every non-pull_request event `cancel-in-progress` is false, so a
+      # `conformance` job is only ever cancelled by one of those two -- or by an
+      # external reaper, which cancels the run and reaches the same state. NOT
+      # covered, deliberately: the pull-request supersession path. That
+      # cancellation is cheap and intended, and its diagnostics would have to
+      # sit in the jobs it does exercise (`frontend`, the backends), where they
+      # would spend runner minutes on every superseded push.
+      #
+      # Cheap, bounded, harmless. No network. The whole step is one wall-clock
+      # bound of 60s (`timeout -k 5s 60s`, GNU coreutils on ubuntu-latest), each
+      # section is capped at 40-60 lines, `set +e` and the trailing `exit 0`
+      # mean a failure here cannot fail the step, and `sudo -n` is the one
+      # privileged read (the kernel ring buffer) and cannot block on a prompt.
+      - name: cancelled-run diagnostics
+        if: ${{ cancelled() }}
+        run: |
+          set +e
+          cat > /tmp/ci-cancelled-diag.sh <<'DIAG'
+          #!/usr/bin/env bash
+          # Runs only on a cancelled job (see the step's `if:`). Best-effort
+          # only: nothing here may fail the step or outlive the 60s outer bound.
+          ROOT="$PWD"
+          note() { printf '\n=== %s ===\n' "$1"; }
+
+          note 'runner: uptime, cpus'
+          uptime || true
+          nproc || true
+
+          note 'process tree: ps, heaviest first'
+          ps -eo pid,ppid,etime,stat,pcpu,rss,args --sort=-pcpu 2>/dev/null | head -n 60 || true
+
+          note 'process tree: pstree'
+          if command -v pstree >/dev/null 2>&1; then
+            pstree -apl 2>/dev/null | head -n 40 || true
+          else
+            echo '(pstree not installed; the ps listing above carries ppid)'
+          fi
+
+          note 'open FDs under tests/fixtures and backends/'
+          fds=/tmp/ci-cancelled-fds.txt
+          : > "$fds"
+          for fd in /proc/[0-9]*/fd/*; do
+            target=$(readlink -f "$fd" 2>/dev/null) || continue
+            case "$target" in
+              "$ROOT"/tests/fixtures/*|"$ROOT"/backends/*)
+                printf '%s -> %s\n' "$fd" "$target" >> "$fds" ;;
+            esac
+          done
+          printf 'matching open FDs: %s\n' "$(wc -l < "$fds")"
+          head -n 40 "$fds"
+
+          note 'toolchain versions'
+          python3 --version 2>&1 || true
+          node --version 2>&1 || true
+          npm --version 2>&1 || true
+          java --version 2>&1 | head -n 1 || true
+          go version 2>&1 || true
+          rustc --version 2>&1 || true
+          cargo --version 2>&1 || true
+          uv --version 2>&1 || true
+          wasmtime --version 2>&1 || true
+
+          note 'kernel ring buffer tail (dmesg)'
+          if dmesg --ctime >/tmp/ci-cancelled-dmesg.txt 2>/dev/null \
+             || sudo -n dmesg --ctime >/tmp/ci-cancelled-dmesg.txt 2>/dev/null; then
+            tail -n 40 /tmp/ci-cancelled-dmesg.txt
+          else
+            echo '(dmesg unreadable by this user; non-interactive sudo unavailable)'
+          fi
+          DIAG
+          timeout -k 5s 60s bash /tmp/ci-cancelled-diag.sh \
+            || echo "::warning::cancelled-run diagnostics were killed at their 60s bound"
+          exit 0
 
   # Roadmap item 253's exit test: the derived saga on a REAL Temporal server.
   # Every other check on the Temporal target reads emitted TEXT, which proves

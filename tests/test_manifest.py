@@ -166,8 +166,10 @@ def test_boundary_report():
     assert boundary["PgDatabase"] == {"emissions": [], "capabilities": {},
                                      "compensated": 0, "awaits": 0, "externs": []}
     assert boundary["UserCache"]["emissions"] == ["db.execute"]
-    # `Database.execute` is declared bare `emission`, so its scope is "any"
-    assert boundary["UserCache"]["capabilities"] == {"db.execute": ["*"]}
+    # `Database.execute` declares `emission[db]` (#2105: a bare emission is
+    # refused against the declarations), so its scope is `db`, not the whole
+    # `any` surface
+    assert boundary["UserCache"]["capabilities"] == {"db.execute": ["db"]}
 
 
 def test_audit_cli_json(capsys):

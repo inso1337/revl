@@ -51,9 +51,11 @@ REPLACING = ("PgDatabase",)   # the provider we hot-swap; UserCache stays runnin
 _ADMISSIBLE = {
     "MysqlDatabase": """
         // identical interface, different provider body -> the plain hot-swap
+        // (`emission[db]`: the same scope the running UserCache manifest
+        // declares, so the swap widens nothing)
         service Database {
           fn query(sql: Str) -> List[Row]
-          emission fn execute(sql: Str) -> Int
+          emission[db] fn execute(sql: Str) -> Int
         }
         component MysqlDatabase provides db: Database {
           config { url: Str = "mysql://", pool_size: Int = 4 }
@@ -69,7 +71,7 @@ _ADMISSIBLE = {
         // against the old interface still type-checks against a superset.
         service Database {
           fn query(sql: Str) -> List[Row]
-          emission fn execute(sql: Str) -> Int
+          emission[db] fn execute(sql: Str) -> Int
           fn ping() -> Bool
         }
         component AuditedDatabase provides db: Database {
@@ -116,10 +118,12 @@ _INCOMPATIBLE = {
     "EmittingQueryDatabase": """
         // INTRODUCES an emission on `query` -> UserCache calls `db.query(...)`
         // from a pure position; an unmarked call site would silently cross the
-        // effect boundary (G4/G8). The gate refuses.
+        // effect boundary (G4/G8). The gate refuses. (`emission[db]` on both
+        // methods, so the refusal is the purity widening and not an undeclared
+        // scope.)
         service Database {
-          emission fn query(sql: Str) -> List[Row]
-          emission fn execute(sql: Str) -> Int
+          emission[db] fn query(sql: Str) -> List[Row]
+          emission[db] fn execute(sql: Str) -> Int
         }
         component EmittingQueryDatabase provides db: Database {
           config { url: Str = "e://", pool_size: Int = 4 }

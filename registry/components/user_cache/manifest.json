@@ -4,7 +4,7 @@
       "awaits": 0,
       "capabilities": {
         "db.execute": [
-          "*"
+          "db"
         ]
       },
       "compensated": 0,

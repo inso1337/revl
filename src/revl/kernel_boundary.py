@@ -45,11 +45,15 @@ defaulted:
   `lower._spawn_emission_surface` already makes for a method that declares
   `emission` with no capability list, where `None` becomes `*` and not
   `set()`.
-* A `key:`-namespaced element - a boundary whose service method declares
-  `emission` with no capability list - is ALSO an undeclared reach, and it is
-  the one this slice does not refuse. `_undeclared` says what the measurement
-  was and §7 of the design carries it as the named residual. It is written
-  down rather than silently assumed away.
+* A `svc:`-namespaced element - a boundary whose service method declares
+  `emission` with no capability list - is also an undeclared reach, and it is
+  refused by the same switch. It cannot be decided from the element: the same
+  token spells a service with a bare `emission` method (an undeclared reach)
+  and a service with no emission method at all (a proof of the opposite, which
+  the coverage fold needs as a boundary identity). The fact lives in the
+  declarations, so the set is computed there (`lower._undeclared_elements`) and
+  passed to `offending`. `_undeclared` says why, and what the three
+  measurements of the namespace-wide arm disagreed about.
 
 WHAT IS ON THE KERNEL SIDE, AND WHY RETENTION IS
 ------------------------------------------------
@@ -209,49 +213,61 @@ def is_kernel_token(token: str) -> bool:
     return token == KERNEL_NAMESPACE or token.startswith(KERNEL_NAMESPACE + ".")
 
 
-def _undeclared(cap) -> bool:
-    """Whether a fold element is an UNNAMEABLE boundary rather than a named one.
+def _undeclared(cap, undeclared=()) -> bool:
+    """Whether a fold element is an UNDECLARED reach rather than a declared one.
 
-    `*` is the whole of it: a host emission or a first-class dispatch that no
-    `requires` key can name. `cap_order.disjoint` already answers False for it,
-    by its own rule and not by anything invented here - "it may reach any
-    boundary, so it is never provably independent of anything" - and that is
-    exactly the reading the kernel question needs.
+    Two elements answer yes, and the second is the arm issue #1265's exit asked
+    for (taken by issue #2105):
 
-    It is also where an omitted `reaches [...]` clause on a `model role` lands:
-    `effective_from_model_reach` resolves `reach_declared: false` to `*` rather
-    than to the reach the record happens to render, so an absent declaration is
-    not read as a proof of narrowness. That is item 519's own resolution of the
-    same question, and `lower._spawn_emission_surface`'s precedent of mapping
-    `None` to `*` rather than `set()`.
+    * `*` - a host emission or a first-class dispatch that no `requires` key
+      can name. `cap_order.disjoint` already answers False for it, by its own
+      rule and not by anything invented here - "it may reach any boundary, so
+      it is never provably independent of anything" - and that is exactly the
+      reading the kernel question needs. It is also where an omitted
+      `reaches [...]` clause on a `model role` lands:
+      `effective_from_model_reach` resolves `reach_declared: false` to `*`
+      rather than to the reach the record happens to render, so an absent
+      declaration is not read as a proof of narrowness. That is item 519's own
+      resolution of the same question, and `lower._spawn_emission_surface`'s
+      precedent of mapping `None` to `*` rather than `set()`.
+    * a `svc:`-namespaced element - `lower._undeclared_cap`'s stand-in for a
+      boundary whose service method declares `emission` with no capability
+      list - when `undeclared` names it. Item 561 moved that element off the
+      consumer's wiring key and onto the SERVICE the method is declared on,
+      which changed what it is named BY and not whether it is undeclared: it is
+      a nameable token either way, so `cap_order.disjoint` still answers True
+      against every kernel token and the `*` arm alone admits it. Item 545
+      measured the namespace-wide arm at 14 tests across 7 files and item 561
+      re-measured 17 and then 9; the measurements disagreed because the
+      namespace alone is not the rule.
 
-    WHAT IS DELIBERATELY NOT HERE, measured rather than assumed. A
-    `svc:`-namespaced element - `lower._undeclared_cap`'s stand-in for a
-    boundary whose service method declares `emission` with no capability list -
-    is also an undeclared reach, and reading it as provably disjoint from the
-    kernel is the weaker answer. Item 561 moved that element off the consumer's
-    wiring key and onto the SERVICE the method is declared on, which changes
-    what it is named BY and not whether it is undeclared: it is a nameable
-    token either way, so `cap_order.disjoint` still answers True against every
-    kernel token and this arm still admits it.
+    WHY THE SET IS A PARAMETER, and not read off the token. `lower._held_
+    capabilities_pairs` builds a `svc:` element on TWO occasions and only one of
+    them is an undeclared reach:
 
-    It is not refused in this slice, and the reason is a measurement, not a
-    preference: on this tree it is the ORDINARY spelling, so refusing it turns
-    tests red and changes what `mcp.session.admit` accepts on every turn whose
-    granted services spell `emission` bare. Item 545 measured 14 tests across 7
-    files; re-measured at item 561's head, after PR #1292 declared the shipped
-    compositions' tokens, it is 13 across the same 7. That is a
-    composition-side change - the operator's services are the ones that would
-    have to declare their tokens - and it is not this item's to make.
-    `docs/design/545-kernel-boundary-capability.md` §7 carries it as the named
-    residual, `docs/design/561-undeclared-emission-boundary.md` carries the
-    re-measurement, and `tests/test_kernel_boundary_544.py` pins it so it stays
-    visible.
+    =======================================  ==============================
+    a required service with a bare `emission`  an effect is declared, its reach
+    method                                     is not - undeclared
+    a required service with NO emission        there is no effect - a proof of
+    method at all                              the opposite
+    =======================================  ==============================
+
+    The second exists only so the coverage fold has a boundary identity to
+    compare, and the tree enforces it: a provider of a plain `fn` that emits is
+    refused under G4 with `` `Kv.get` is declared plain, but this implementation
+    reaches `fs.write` ``. Once both are `Cap`s the token cannot tell them
+    apart, so a predicate reading the namespace alone refuses a candidate
+    composing only PURE services - the ordinary admitted turn, and 16 of the 17
+    reds the namespace-wide arm measured. The fact lives in the DECLARATIONS, so
+    it is computed there (`lower._undeclared_elements`, where the service table
+    is) and passed here. The default is empty, so a caller that has no
+    declarations to consult gets the `*` arm and nothing else.
     """
-    return cap.token == "*"
+    return cap.token == "*" or cap.token in undeclared
 
 
-def offending(effective, *, undeclared_reaches_kernel: bool) -> list:
+def offending(effective, *, undeclared_reaches_kernel: bool,
+              undeclared=()) -> list:
     """The kernel capabilities `effective` is NOT provably disjoint from.
 
     `effective` is a component's effective ceiling as `cap_order.Cap`s: what it
@@ -269,6 +285,12 @@ def offending(effective, *, undeclared_reaches_kernel: bool) -> list:
     states the same boundary for its file fence: the fence is the judge, never
     the subject. A DECLARED kernel token is refused on both sides.
 
+    `undeclared` is the second half of the same scope decision and is the
+    caller's to supply, because it is a fact about the DECLARATIONS rather than
+    about the element (`_undeclared`): the `svc:` elements whose service leaves
+    the reach undeclared. A caller with no service table passes nothing, and
+    then only `*` is an undeclared reach.
+
     Returns a list of `(KernelCap, Cap)`: the kernel member, and the element of
     `effective` that reaches it."""
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
@@ -277,7 +299,7 @@ def offending(effective, *, undeclared_reaches_kernel: bool) -> list:
     for kernel_cap in held:
         member = BY_TOKEN.get(kernel_cap.token)
         for element in sorted(effective, key=lambda c: c.to_str()):
-            if _undeclared(element):
+            if _undeclared(element, undeclared):
                 if undeclared_reaches_kernel:
                     hits.append((member, element))
                     break

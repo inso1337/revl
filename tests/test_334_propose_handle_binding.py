@@ -79,10 +79,14 @@ _OPS_PROVIDER = (
 )
 
 _DECLS = (
-    "service Ops { emission fn stash(p: Str) }\n"
+    # The tokens name the boundary each provider body crosses, and they are
+    # load-bearing since issue #2105 (the kernel-boundary arm): `Ops.stash`
+    # reaches the `witnessed[fs]` extern, and a `Tool` implementation reaches
+    # the `Ops` service it requires.
+    "service Ops { emission[fs] fn stash(p: Str) }\n"
     "service Tool {\n"
     "  fn describe() -> Str\n"
-    "  emission fn run(p: Str)\n"
+    "  emission[ops] fn run(p: Str)\n"
     "}\n"
 )
 
