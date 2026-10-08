@@ -479,7 +479,7 @@ from committed crate source and transpiles to a JS module that runs in a
 browser, a worker or `wasmtime` today
 (`python3 tools/build_gate_js.py --out DIR`, or `npm run build` inside
 `examples/ecosystem-consumer-js/`), and what is NOT done is again the PUBLISH
-step — behind it by one more step, because no npm package of the gate exists
+step, one step further back, because no npm package of the gate exists
 to publish: the example transpiles the component into its own `dist/` and is
 `private`, and nothing in this repository ships a `package.json` for the gate
 itself. Nothing is on npm, so `npm i` the gate is the shape a consumer gets
@@ -505,14 +505,14 @@ act is the one thing this repository deliberately does not do for itself,
 because putting a version on a registry is irreversible and is the project
 owner's decision, not a merge's. So the honest state of "revl as a dependency"
 is: code-complete on every tier, the py and rust release paths rehearsed
-without an upload, and one owner-run publish per registry still to come — plus,
-on the wasm/js tier, the packaging itself, which does not exist yet.
+without an upload, and one owner-run publish per registry still to come, plus
+the packaging itself on the wasm/js tier, which does not exist yet.
 
 | tier | dependency form | built, checked and rehearsed from source in CI | the step that remains |
 |---|---|---|---|
 | py | `pip install revl`, then `from revl.gate import ...` | wheel built and installed into a fresh venv by `release dry run`, manifest-gated by `tools/check_wheel_manifest.py`, surface-gated by `tests/test_gate_compat.py` | push a `v*` tag: `publish.yml` runs the full matrix on the tag and uploads to **PyPI** by Trusted Publishing (the one-time PyPI publisher config is noted inline in `publish.yml`) |
 | rust | `cargo add revl-gate` | `crates/revl-gate` regenerated and drift-gated by `tests/test_gate_crate_drift.py`; the example depends on it by path and its verdicts are gated by `tests/test_gate_consumer_example_rs.py`; `release dry run (crate)` runs the real `cargo package` and `tools/check_crate_package.py` compares the tarball's members against `git ls-files crates/revl-gate` | `cargo publish` the crate to **crates.io** with an owner token |
-| wasm / js | `npm i` the jco-transpiled gate | `crates/revl-gate-wasm` built by `tools/build_gate_wasm.py`, transpiled by `tools/build_gate_js.py`, drift/import/vector-gated by the three `test_gate_wasm_*` suites and exercised by `tests/test_gate_consumer_example_js.py`. **No rehearsal: there is no package to rehearse.** | write the npm package for the transpiled gate — nothing in this repository ships a `package.json` for it today, and `docs/design/335-wasm-edge-gate.md` defers that packaging here — then `npm publish` it to **npm** with an owner token |
+| wasm / js | `npm i` the jco-transpiled gate | `crates/revl-gate-wasm` built by `tools/build_gate_wasm.py`, transpiled by `tools/build_gate_js.py`, drift/import/vector-gated by the three `test_gate_wasm_*` suites and exercised by `tests/test_gate_consumer_example_js.py`. **No rehearsal: there is no package to rehearse.** | write the npm package for the transpiled gate (nothing in this repository ships a `package.json` for it today, and `docs/design/335-wasm-edge-gate.md` defers that packaging here), then `npm publish` it to **npm** with an owner token |
 
 Nothing above is a code change. Each remaining step is an owner running a
 publish against a registry with a credential this repository does not hold, and
