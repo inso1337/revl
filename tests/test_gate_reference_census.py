@@ -254,7 +254,7 @@ def test_the_line_ratchet_fails_in_all_three_directions(census):
 # deliberate -- a false refusal over the corpus is the regression the census
 # exists to catch, while leaving a widening unfolded only re-opens the gap this
 # section records -- and `test_the_model_reach_spawn_corpus_is_decided_by_both`
-# below pins all four documents, so the two directions cannot be confused.
+# below pins all six documents, so the two directions cannot be confused.
 KNOWN_BYPASSES: set[str] = set()
 
 
@@ -381,7 +381,7 @@ def test_every_model_reach_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(MODEL_REACH_CROSSING.glob("*.rvl"))
-    assert len(docs) == 13, f"the model-reach corpus has {len(docs)} documents"
+    assert len(docs) == 15, f"the model-reach corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))
@@ -417,6 +417,19 @@ MODEL_REACH_SPAWN_WIDENING = (
 MODEL_REACH_SPAWN_CONTROLS = (
     "tests/fixtures/model_reach_spawn/ok_role_within_the_spawner.rvl",
     "tests/fixtures/model_reach_spawn/ok_spawner_holds_the_role_reach.rvl",
+    "tests/fixtures/model_reach_spawn/ok_net_child_role_reach.rvl",
+)
+
+# Issue #1193 slice 6 (the consult predicate): the child that holds no
+# `model.`-spelled token. Before the correction the fold skipped it, so the
+# spawn granted exactly what the spawner held while the child reached
+# `shell.exec` through its role. Both engines now decide it, but the refusal is
+# the COMPONENT's (`MODEL`), not the spawn statement's (`G4`): the child's own
+# product is reached first, and the lineage inherits the reach rather than
+# re-deriving it. Kept as its own list, by name, because the bucket it must
+# land in is the point.
+MODEL_REACH_SPAWN_PRODUCT_WIDENING = (
+    "tests/fixtures/model_reach_spawn/model_net_child_role_reach.rvl",
 )
 
 
@@ -426,11 +439,14 @@ def test_the_model_reach_spawn_corpus_is_decided_by_both(measured):
     docs = sorted(str(doc.relative_to(ROOT))
                   for doc in MODEL_REACH_SPAWN.glob("*.rvl"))
     assert docs == sorted(MODEL_REACH_SPAWN_WIDENING
+                          + MODEL_REACH_SPAWN_PRODUCT_WIDENING
                           + MODEL_REACH_SPAWN_CONTROLS), \
         f"the model-reach spawn corpus is {docs}"
     wrong = [f"{case}: {got.get(case)}, expected {want}"
              for case, want in (
                  [(c, "agree-refuse/G4") for c in MODEL_REACH_SPAWN_WIDENING]
+                 + [(c, "agree-refuse/MODEL")
+                    for c in MODEL_REACH_SPAWN_PRODUCT_WIDENING]
                  + [(c, "agree-admit") for c in MODEL_REACH_SPAWN_CONTROLS])
              if got.get(case) != want]
     assert not wrong, "\n  ".join(["model-reach spawn documents moved:"] + wrong)

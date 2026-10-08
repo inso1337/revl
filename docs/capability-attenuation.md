@@ -190,9 +190,14 @@ can spell, so the refusal says the component holds service `Model`'s
 unscoped emission and names the fix: give the method a scoped capability and
 reach that (issue #1451).
 
-The question is asked only of a component that holds a boundary which could be
-a model call, because a role can only steer an action that reaches a boundary.
-An admitted composition records the product per edge under
+The question is asked only of a component that reaches a boundary, because a
+role can only steer an action that reaches a boundary and a component that
+reaches none has no ceiling for a role to widen. The held token's SPELLING does
+not decide it: a component holding `net.request` that routes through a model
+reaching `shell.exec` is refused, and was not before issue #1193's
+consult-predicate correction — `model.*`, the unnameable `*` and a `svc:`
+element are sufficient shapes for the predicate, never necessary ones. An
+admitted composition records the product per edge under
 `manifest.model_reach`, including `attenuated` — what the component holds that
 the role does not reach. A crossing edge's row also carries `crossing`, the
 `model.<role>` token that placed it. The section is role-only: a composition that declares

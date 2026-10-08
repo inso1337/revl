@@ -18,6 +18,23 @@ refusal rendered as the bare service name, so `reaches [Model]` against it
 printed `Model` on both sides of the "but". It now names the unscoped emission
 and the fix.
 
+Issue #1193 slice 6 (the consult predicate). The fold ran only for a component
+that HELD a token spelled `model.` anything, the unnameable `*`, or a `svc:`
+element. That is a proxy for the design note's real exemption - "a component
+that reaches none has no ceiling for a role to widen"
+(docs/design/541-model-in-attenuation.md, section 3.1) - and it is wrong for
+the issue's own example: a component holding `net.request` that routes through
+a model reaching `shell.exec` was accounted for what it held, not for what the
+pair could reach. `_consults_a_model` is now `bool(held)`, so `model.*`, `*`
+and `svc:` remain SUFFICIENT shapes but are no longer NECESSARY ones.
+
+The corpus is token-contaminated by construction: every routed component in
+this directory holds a `model.`-spelled token, so before the correction neither
+engine could be reddened on the gap. `model_net_holder.rvl` and its control are
+the first documents here that are not, and
+`test_the_token_test_admits_this_widening` is the falsifier that keeps the
+predicate from silently regressing to the token reading.
+
 tests/fixtures/model_reach_crossing/ holds the corpus: `model_` is refused,
 `ok_` is the admitted control. tests/test_gate_reference_census.py holds the
 self-host gate to the same verdicts, byte for byte.
@@ -38,10 +55,10 @@ TAIL = (" - a component's effective ceiling is the pair's, so a model may not "
         "reach past the component that consults it (G-MODEL-PLACE)")
 
 REFUSED = ("extern_block_value", "extern_no_block", "helper_no_block",
-           "req_block", "req_no_block", "undeclared_no_block",
+           "net_holder", "req_block", "req_no_block", "undeclared_no_block",
            "unscoped_emission")
 ADMITTED = ("extern_block_value", "extern_no_block", "helper_no_block",
-            "req_block", "req_no_block", "scoped_emission")
+            "net_holder", "req_block", "req_no_block", "scoped_emission")
 
 _CROSSES = "`Classifier` crosses `model.tool`, placed on model role `tool`"
 _ROUTES = "`Classifier` routes `classify` (*) through model role `tool`"
@@ -52,6 +69,9 @@ MESSAGE = {
                         "`Classifier` holds only `*`" + TAIL),
     "helper_no_block": (_CROSSES + ", which reaches `shell.exec`, but "
                         "`Classifier` holds only `*`" + TAIL),
+    "net_holder": ("`Classifier` routes `classify` (*) through model role "
+                   "`cloud`, which reaches `shell.exec`, but `Classifier` "
+                   "holds only `net.request`" + TAIL),
     "req_block": (_ROUTES + ", which reaches `shell.exec`, but `Classifier` "
                   "holds only `model.tool`" + TAIL),
     "req_no_block": (_CROSSES + ", which reaches `shell.exec`, but "
@@ -142,3 +162,59 @@ def test_a_crossing_edge_cites_the_component_line():
     err = _refusal("model_req_no_block")
     line = _src("model_req_no_block").split("\n")[err.line - 1]
     assert line.startswith("component Classifier ")
+
+
+def _token_test(held):
+    """The predicate this slice replaced: a held boundary counts only when its
+    declared token PROVES it is some other boundary. Kept here, not in
+    `lower`, because it is the MUTATION the two tests below are against."""
+    for cap in held:
+        token = cap.token
+        if token == "*" or token.startswith("svc:"):
+            return True
+        if token == "model" or token.startswith("model."):
+            return True
+    return False
+
+
+def test_a_component_holding_no_model_token_is_still_in_the_product():
+    """Issue #1193's own example. `Classifier` holds `net.request` through
+    `llm` and routes `classify` through role `cloud`, which reaches
+    `shell.exec`. Nothing it holds is spelled `model.`, nothing is the
+    unnameable `*`, nothing is a `svc:` element - so the token-keyed predicate
+    exempted it and the pair was never compared. The exemption is a component
+    that reaches NOTHING, and this one reaches `net.request`."""
+    err = _refusal("model_net_holder")
+    assert err.code == CODE
+    assert err.message == MESSAGE["net_holder"]
+    assert err.line == 18
+
+
+def test_the_token_test_admits_this_widening(monkeypatch):
+    """F1 - the falsifier. Restore the token-keyed predicate and the document
+    above is ADMITTED whole, with no `model_reach` row: the widening is the
+    predicate and nothing else. Without this the slice could regress to the
+    token reading and every other test in this file would still pass."""
+    from revl import lower
+    src = _src("model_net_holder")
+    # the document really is token-clean, so it is the predicate under test
+    assert "net.request" in src
+    assert "model." not in src.split("component Classifier", 1)[1]
+    monkeypatch.setattr(lower, "_consults_a_model", _token_test)
+    ir = compile_source(src, "model_net_holder.rvl")
+    assert not ir["manifest"].get("model_reach")
+
+
+def test_the_control_keeps_its_row_and_the_token_test_drops_it(monkeypatch):
+    """F6 - the same mutation against the ADMITTED control, where the verdict
+    does not move and only the audit row does. `ok_net_holder.rvl` is admitted
+    either way; the difference is whether item 544's kernel check has a
+    `model_reach` row to read at all, which is a silent fail-open."""
+    from revl import lower
+    src = _src("ok_net_holder")
+    rows = compile_source(src, "ok_net_holder.rvl")["manifest"]["model_reach"]
+    assert [r["holds"] for r in rows] == [["net.request"]]
+    assert rows[0]["reaches"] == ["net.request"]
+    monkeypatch.setattr(lower, "_consults_a_model", _token_test)
+    ir = compile_source(src, "ok_net_holder.rvl")
+    assert not ir["manifest"].get("model_reach")

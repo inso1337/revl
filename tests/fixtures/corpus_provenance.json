@@ -1181,6 +1181,7 @@
    "tests/fixtures/model_reach_crossing/model_extern_block_value.rvl",
    "tests/fixtures/model_reach_crossing/model_extern_no_block.rvl",
    "tests/fixtures/model_reach_crossing/model_helper_no_block.rvl",
+   "tests/fixtures/model_reach_crossing/model_net_holder.rvl",
    "tests/fixtures/model_reach_crossing/model_req_block.rvl",
    "tests/fixtures/model_reach_crossing/model_req_no_block.rvl",
    "tests/fixtures/model_reach_crossing/model_undeclared_no_block.rvl",
@@ -1188,6 +1189,7 @@
    "tests/fixtures/model_reach_crossing/ok_extern_block_value.rvl",
    "tests/fixtures/model_reach_crossing/ok_extern_no_block.rvl",
    "tests/fixtures/model_reach_crossing/ok_helper_no_block.rvl",
+   "tests/fixtures/model_reach_crossing/ok_net_holder.rvl",
    "tests/fixtures/model_reach_crossing/ok_req_block.rvl",
    "tests/fixtures/model_reach_crossing/ok_req_no_block.rvl",
    "tests/fixtures/model_reach_crossing/ok_scoped_emission.rvl",
@@ -1319,6 +1321,8 @@
    "tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl",
    "tests/fixtures/model_reach_spawn/model_child_role_reach.rvl",
    "tests/fixtures/model_reach_spawn/model_grandchild_role_reach.rvl",
+   "tests/fixtures/model_reach_spawn/model_net_child_role_reach.rvl",
+   "tests/fixtures/model_reach_spawn/ok_net_child_role_reach.rvl",
    "tests/fixtures/model_reach_spawn/ok_role_within_the_spawner.rvl",
    "tests/fixtures/model_reach_spawn/ok_spawner_holds_the_role_reach.rvl"
   ]

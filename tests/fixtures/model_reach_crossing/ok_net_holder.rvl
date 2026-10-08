@@ -1,0 +1,17 @@
+// ADMITTED: the same component as `model_net_holder.rvl`, but role `cloud`
+// reaches only `net.request`, which `Classifier` holds. The control that keeps
+// the widening honest in the other direction: bringing a `net`-holding
+// component into the product must not refuse it for consulting a model whose
+// role stays inside what it holds. The file name's prefix is the expected
+// verdict (`model_` refused under G-MODEL-PLACE, `ok_` admitted);
+// tests/test_model_reach_crossing.py holds it.
+
+model role cloud off_device reaches [net.request]
+
+service Net { emission[net.request] fn fetch(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Net provides out: Answer {
+  route model on classify { * -> cloud }
+  provide out { fn classify(text) = emit llm.fetch(text) }
+}
