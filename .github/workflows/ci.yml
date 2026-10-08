@@ -1223,6 +1223,44 @@ jobs:
           fi
       - if: steps.decide.outputs.run == 'true'
         run: pip install -e ".[test]"
+      # Issue #2165. `decide` answers "does this diff move an input?" from the
+      # diff against the base ref's CURRENT tip. That is not the same question
+      # as "is the tree this run verified the tree that will land": the base
+      # tip can move again between this run's base sha and the merge, and
+      # GitHub does not rebuild `refs/pull/N/merge` or re-run this job when it
+      # does. Two landings that each moved a `CHECKER_SOURCES` member landed in
+      # sequence that way (#2159 then #2162), and main was red at a version no
+      # run had ever verified, invisibly to both authors.
+      #
+      # This step is the narrow half of that: it fires only when THIS diff
+      # moves a `CHECKER_SOURCES` member (so the obligation is this pull
+      # request's to repair) AND the base tip's checker version differs from
+      # the one at this run's own base sha. A base that moved for unrelated
+      # reasons leaves the digest alone and stays silent, so a lane that is
+      # merely behind gets no false red.
+      #
+      # pull_request only: `base.sha` does not exist on any other event, and on
+      # push/merge_group the checked-out tree IS the tree that lands. The base
+      # ref is dynamic because a stacked pull request's base is not always
+      # `main`. It sits here rather than in `decide` because `decide` runs on
+      # every event and its exit 1 is a "do not check" signal, not a failure.
+      - name: the base branch has not moved a census input under this run
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.decide.outputs.run == 'true'
+        env:
+          # attacker-controllable text reaches the shell through env: only,
+          # the same rule `changes`, `held-out` and `decide` follow.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          python3 tools/census_stale_base.py \
+            --base-sha "$BASE_SHA" \
+            --base-tip "origin/${BASE_REF}" \
+            --base-ref "$BASE_REF"
       - name: the committed census artifact is current
         if: steps.decide.outputs.run == 'true'
         run: python3 tools/census_artifact.py --verify --strict
