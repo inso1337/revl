@@ -674,10 +674,167 @@ refused at share `0/1` (`evidence-missing`) and at full share
    the other five tiers get the same seam. Provisioning the model behind a
    role (device profile, load and unload, one shared provision) is item 515's,
    not 518's.
-2. **No CLI and no item 520 adapter.** `revl promote` and the `shadow` stage
-   record for the evolution controller are still unbuilt.
+2. **No item 520 adapter.** The `shadow` stage record for the evolution
+   controller is still unbuilt. `revl promote` now exists (section 18); what
+   remains for 520 is the stage that carries its verdict into a schedule.
 3. **Section 16 items 1, 2, 4 and 5 are unchanged.** Five tiers are unwired,
    no cordis activation drives the component, a window is one activation, and
    the static walk's premise stands.
 4. **No self-host port is needed.** Nothing here is parsed, checked, lowered
    or emitted: no language surface, no IR key and no emitter changed.
+
+## 18. `revl promote`: the decision, taken from artifacts
+
+Sections 11 through 17 built the whole decision inside the test suite: a
+composition, a schedule, a recorded window, the gate, the verdict. What no
+section built was a way for an operator to reach that verdict from *files*.
+A promotion was decidable only by writing Python against the test harness. This
+section adds the smallest surface that closes that gap and nothing else.
+
+### 18.1. Two documents, and why both
+
+The gate's input is a `ShadowPlan` and a `ShadowLedger`. Neither had a
+serialized form, so `revl promote` could not be given them from outside the
+process. This section adds exactly two:
+
+- **`revl.shadow-window` 1.0** (`src/revl/shadow_routing.py`,
+  `ShadowLedger.as_window()` and `window_from_dict()`): the *recorded* half —
+  the schedule (component, action, realm, both roles, the share as a rational,
+  the salt, whether the route was live), the accumulated crossings with both
+  sides' sealed model-decision records, which crossings were served to the
+  successor, the candidate call count, and any refusal the drive ended on.
+- **`revl.shadow-plan` 1.0** (`src/revl/shadow_promotion.py`,
+  `ShadowPlan.as_dict()` and `plan_from_dict()`): the *declared* half — the
+  route table by value, the roles, the authority diff, the layer classes, the
+  stated threshold and the minimum observations, and whether the route is
+  live.
+
+Both readers are strict and total: a missing member is `window-truncated`
+(or `plan-malformed`), a wrong-shaped one is `window-malformed`, and nothing
+is defaulted. `live` is validated as a boolean rather than coerced, because its
+default is the fail-open direction — a truthy string must not read as a live
+route.
+
+The links the window reader can reach are a *separate* tuple,
+`WINDOW_LINKS = (WINDOW_MALFORMED, WINDOW_TRUNCATED)`, and `LINKS` is
+unchanged. `tests/test_shadow_routing_518.py` proves `LINKS` is exactly the set
+`shadow_routing.decide` can reach, and `tests/test_shadow_runtime_518.py`
+proves `shadow_runtime.LINKS` is disjoint from it; a document reader's refusals
+are not gate refusals and must not enter either set.
+
+### 18.2. The window records no worlds, and that is measured
+
+The natural design is for the window document to carry the two recorded worlds,
+so the comparison runs over what was recorded. That design is wrong here, and
+the reason is a measurement, not a preference.
+
+Section 4's comparison is item 496's walk over two worlds that
+`shadow_runtime.world_for` *derives* from two compositions by replaying them
+statically. A live activation does not produce a timeline that is
+step-for-step comparable with that walk: a shadowed crossing whose candidate
+callback issues a real nested model call records emissions at indices
+`inc, cand, inc`, while the static walk over the same two compositions visits
+one step per crossing. Recording those worlds and comparing them would compare
+a timeline against a walk that never had that shape.
+
+So `as_window()` carries the *records* and no worlds, and `revl promote`
+derives both worlds from the two compositions the window names — the running
+`FILES` and the `--candidate` generation — and runs the same
+`compare_timelines` the gate runs. What the window is for is the evidence: the
+crossings, both sides' sealed answers, the share actually served, and the
+schedule the pairs are claimed to have come from.
+
+The consequence is stated plainly because it is the honest limit of this
+surface: **a correctly-sealed window is indistinguishable from a window that
+was never driven.** The verb checks the schedule and the crossings against the
+composition, checks the seals against the evidence key, and compares the
+worlds; it does not and cannot prove that a shadow ran. `worlds_recorded` is
+therefore `0` for a window this verb reads, and the new test file asserts that
+rather than leaving it to be inferred.
+
+### 18.3. What is checked against what, and in what order
+
+The verb refuses in the composition stage before any world exists, which
+matters because a generation that cannot be resolved has no world to compare
+and a comparison that could not run must be named rather than skipped:
+
+1. both documents read (`_read_document`) — a missing or non-object file is
+   refused;
+2. the plan and the window are read (`plan_from_dict`, `window_from_dict`);
+3. the running composition compiles, and the candidate generation compiles;
+4. **both** generations resolve against the window's schedule
+   (`runtime.resolve`), so `realm-unknown`, `component-unknown`,
+   `action-uncrossed` and `stamp-underived` are reached before any world;
+5. the window's crossings and share are checked against the running
+   composition's crossings for that (component, action) — a window stamped
+   `summarize` whose indices are `classify`'s anchor is `stamp-underived`,
+   because the indices are derived from the composition rather than trusted;
+6. the two worlds are derived and the gate runs (`shadow_routing.decide` over
+   the composition → schedule → gate walk);
+7. the verdict is printed (`routing.render`, or `verdict.as_dict()` for
+   `--json`) and the exit status follows `verdict.decision`.
+
+`_refused` builds a refusal verdict with the gate's own
+`shadow_promotion.refused`, so the verb owns no vocabulary: it cannot print a
+fourth decision word or a link nobody can look up, and the one decision word it
+compares against is `shadow_promotion.PROMOTE`. That is pinned by an AST
+ratchet over the verb's module rather than by reading its text, because the
+words appear in its prose.
+
+### 18.4. The falsifier
+
+Section 4's claim is that the *worlds* decide, not the *records*. The falsifier
+is a pair of generations that agree on every recorded answer and still diverge
+in the world, so that a comparison over the records promotes and the real
+comparison reverts.
+
+The incumbent's own `summarize` with one extra `emit model.complete("extra")
+compensate model.cancel("extra")` spliced in front of it is that generation.
+All twenty of the window's pairs name the same completion on both sides — the
+new test file asserts the agreement pairwise rather than assuming it — and the
+two derived worlds differ at replay step 2, attributed to `(Classifier,
+tenant_a)`, with the divergence named as
+`emission model.complete('p0') -> emission model.complete('extra')`. On a live
+route the verb `REVERT`s and exits 1.
+
+Mutation: make `_world_divergence` return `None`. Twenty agreeing pairs,
+`PROMOTE`, exit 0 — the row fails.
+
+The moved generation (`CANDIDATE_MOVED_SRC`) is the second falsifier and it
+lands in the same place from the other side: it relocates `summarize`'s
+crossings into `classify` without changing a kind or a label, so its world
+diverges too, but it also leaves `summarize` crossing no boundary — the route
+does not resolve and the verb refuses it as a composition precondition naming
+`action-uncrossed`, before any world exists. The row asserts both the refusal
+*and* that its world really does differ, so the refusal is not hiding a
+comparison that would have passed.
+
+### 18.5. What this does not prove
+
+1. **That a shadow ran.** Section 18.2. A sealed window is evidence of a
+   schedule and of answers, not of an activation.
+2. **Anything about a live activation's trace.** The comparison is over the
+   declared worlds, which is item 496's static walk; section 16 item 4 is
+   unchanged.
+3. **That the other five tiers are any closer.** Nothing in this section
+   touches a tier. Item 518 stays open.
+4. **That a `REFUSE` means no divergence.** A refusal is a statement about the
+   evidence, not about the models.
+5. **That a metric could not have promoted.** `slo_reads` is `0` on this path,
+   which proves the metric was not consulted, not that it could not be.
+6. **That anything was landed.** The verb decides and stops; section 5's
+   "promotion is an admission decision with a verdict" is intact, and the
+   register is still written by whatever the operator runs next.
+
+### 18.6. Non-vacuity
+
+The new test file drives the verb to all three outcomes and asserts the exit
+status of each: `PROMOTE` exit 0, `REFUSE` exit 1, `REVERT` exit 1. It also
+pins that a keyless run refuses (`evidence-unverifiable`) while a *tampered*
+window refuses (`evidence-unverified`) — a verifier that ran and said no is a
+different link from no verifier at all — that the metric is not read on either
+the refusing or the promoting side, that the window carries no world while the
+two derived worlds are the two compositions, and that a shadowed drive's WAL
+writes 21 `model-decision` records for 20 pairs with no member that
+distinguishes the two sides. That last one is why the substrate is the window
+document and not the WAL.

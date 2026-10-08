@@ -189,6 +189,14 @@ PROMOTION_KIND = "revl.shadow-promotion"
 #: MAJOR.MINOR, additive within a MAJOR.
 PROMOTION_VERSION = "1.0"
 
+#: The self-identifying tag of a PLAN DOCUMENT: the serialized form of a
+#: :class:`ShadowPlan`, so the declaration a promotion is judged against can
+#: be handed to an operator as an artifact instead of living only in a test.
+PLAN_KIND = "revl.shadow-plan"
+
+#: MAJOR.MINOR, additive within a MAJOR.
+PLAN_VERSION = "1.0"
+
 #: The terminal shapes, and there are exactly three. Not a score: under any
 #: weighting with positive weight on the measured side, a candidate with a
 #: marginally non-empty authority diff and perfect agreement clears a
@@ -410,6 +418,144 @@ class ShadowPlan:
         records that as the one correlation this slice does not derive."""
         return (self.component, self.action)
 
+    def as_dict(self) -> dict:
+        """The declaration as a PLAN DOCUMENT, which is what
+        :func:`plan_from_dict` reads back.
+
+        ``route_table`` is written out BY VALUE rather than re-derived from a
+        composition at read time. That is the point of
+        `docs/design/531-model-placement.md` section 9: the table is
+        `model_route.check()`'s answer about the composition the promotion was
+        declared against, and re-deriving it would silently judge the
+        promotion against whatever the composition says LATER, which is the
+        drift the plan exists to pin."""
+        return {
+            "kind": PLAN_KIND, "version": PLAN_VERSION,
+            "component": self.component, "action": self.action,
+            "incumbent_role": self.incumbent_role,
+            "candidate_role": self.candidate_role,
+            "route_table": _plain(self.route_table),
+            "authority_diff": _plain(self.authority_diff),
+            "layers": _plain(self.layers),
+            "compensations": _plain(self.compensations),
+            "threshold": self.threshold,
+            "min_observations": self.min_observations,
+            "live": self.live,
+        }
+
+
+def _plain(value: Any) -> Any:
+    """A JSON-safe copy of a declared value: mappings to dicts, sequences to
+    lists, leaves unchanged. A plan document is written by a caller who may
+    hold its tables as any `Mapping`, and what is written has to be what is
+    read back."""
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _plan_member(document: Any, name: str) -> tuple:
+    """``(value, refusal)`` for one required member of a plan document.
+
+    Absence is a refusal and not a default, for the reason the class docstring
+    gives: a default is how a gate ends up passing on evidence that was never
+    supplied."""
+    if name not in document:
+        return (None, Refusal(
+            PLAN_MALFORMED,
+            f"the plan document has no {name!r} member. Nothing in a plan is "
+            f"defaulted, because a default is how a gate ends up passing on "
+            f"a declaration that was never made"))
+    return (document[name], None)
+
+
+def plan_from_dict(document: Any) -> tuple:
+    """``(plan, refusal)`` from a plan document: exactly one is ``None``.
+
+    The reader counterpart of :meth:`ShadowPlan.as_dict`, and the reason a
+    promotion can be decided by an operator: the declaration a verdict is
+    judged against travels as an artifact rather than living only inside a
+    test.
+
+    It checks SHAPE. Whether the declaration is a declaration — a threshold in
+    range, a layer class in the vocabulary, a route table that names both
+    roles — is :func:`_check_plan` and the precondition walk's question, and
+    this function deliberately does not answer it twice.
+
+    ``live`` is the one member checked here rather than there, because it is
+    the member whose default is the fail-open direction: ``live=False``
+    reports a shadow, in which the first attributed divergence only lowers
+    agreement instead of reverting, so a document that failed to say which of
+    the two rules applies must not be read as the one that reverts less."""
+    if not isinstance(document, Mapping):
+        return (None, Refusal(PLAN_MALFORMED,
+                              f"the plan document is {document!r}, which is "
+                              f"not an object"))
+    kind, refusal = _plan_member(document, "kind")
+    if refusal is not None:
+        return (None, refusal)
+    if kind != PLAN_KIND:
+        return (None, Refusal(
+            PLAN_MALFORMED,
+            f"the document's kind is {kind!r} and a plan is {PLAN_KIND!r}; a "
+            f"window read as a plan is a promotion judged against the "
+            f"evidence it was supposed to be decided from"))
+    version, refusal = _plan_member(document, "version")
+    if refusal is not None:
+        return (None, refusal)
+    if version != PLAN_VERSION:
+        return (None, Refusal(
+            PLAN_MALFORMED,
+            f"the document's version is {version!r} and this reader writes "
+            f"and reads {PLAN_VERSION!r}"))
+    names = {}
+    for name in ("component", "action", "incumbent_role", "candidate_role"):
+        value, refusal = _plan_member(document, name)
+        if refusal is not None:
+            return (None, refusal)
+        if not isinstance(value, str) or not value:
+            return (None, Refusal(PLAN_MALFORMED,
+                                  f"the plan document's {name} is {value!r}, "
+                                  f"which is not a name"))
+        names[name] = value
+    tables = {}
+    for name in ("route_table", "authority_diff", "layers", "compensations"):
+        value, refusal = _plan_member(document, name)
+        if refusal is not None:
+            return (None, refusal)
+        if not isinstance(value, Mapping):
+            return (None, Refusal(PLAN_MALFORMED,
+                                  f"the plan document's {name} is {value!r}, "
+                                  f"which is not a mapping"))
+        tables[name] = dict(value)
+    live, refusal = _plan_member(document, "live")
+    if refusal is not None:
+        return (None, refusal)
+    if not isinstance(live, bool):
+        return (None, Refusal(
+            PLAN_MALFORMED,
+            f"the plan document's live is {live!r}, which is not a boolean; "
+            f"`live` selects whether the first attributed divergence reverts "
+            f"or only lowers agreement, so it is not a question with a "
+            f"default"))
+    threshold, refusal = _plan_member(document, "threshold")
+    if refusal is not None:
+        return (None, refusal)
+    sample, refusal = _plan_member(document, "min_observations")
+    if refusal is not None:
+        return (None, refusal)
+    return (ShadowPlan(component=names["component"], action=names["action"],
+                       incumbent_role=names["incumbent_role"],
+                       candidate_role=names["candidate_role"],
+                       route_table=tables["route_table"],
+                       authority_diff=tables["authority_diff"],
+                       layers=tables["layers"],
+                       compensations=tables["compensations"],
+                       threshold=threshold, min_observations=sample,
+                       live=live), None)
+
 
 # ---------------------------------------------------------------------------
 # the observation, and the metric tripwire
@@ -471,6 +617,19 @@ class Observation:
         SLO evidence and the gate refused anyway", and asking that question
         must not itself trip the counter the claim rests on."""
         return self._slo is not None
+
+    @property
+    def slo_supplied(self) -> Optional[Mapping[str, Any]]:
+        """The metric block AS SUPPLIED, for a serializer, without a read.
+
+        :attr:`slo_reads` counts CONSULTATIONS on the promotion path. Writing
+        the block into a window document is not consulting it, and a
+        serializer that dropped it would silently turn a window that carries
+        metric evidence into one that carries none — which is the difference
+        between "the gate declined to read a metric" and "there was no metric
+        to read". The accessor that must not trip the counter is named, so a
+        serializer does not reach for the private field to get it."""
+        return self._slo
 
     @property
     def has_world(self) -> bool:

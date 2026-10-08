@@ -803,6 +803,38 @@ def build_parser() -> argparse.ArgumentParser:
                             help="skip the runtime teardown proof (static survivors "
                                  "proof only; use where cordis is unavailable)")
 
+    promote_cmd = sub.add_parser(
+        "promote",
+        help="decide a promotion from RECORDED evidence: read a declared plan "
+             "and a recorded shadow window, run the composition -> schedule -> "
+             "gate walk over them, print the verdict (issue #1192, "
+             "docs/design/558-shadow-scheduling.md). Decides; does not land")
+    promote_cmd.add_argument("files", nargs="+",
+                             help="the running (incumbent) composition's .rvl "
+                                  "files; the window's worlds are derived from "
+                                  "these and the candidate generation")
+    promote_cmd.add_argument("--candidate", action="append", required=True,
+                             metavar="FILE",
+                             help="the successor generation of the slice's "
+                                  "provider; repeatable")
+    promote_cmd.add_argument("--plan", required=True, metavar="PLAN.json",
+                             help="the declared plan document (revl.shadow-plan): "
+                                  "the roles, the authority diff, the layer "
+                                  "classes and the stated threshold the "
+                                  "promotion is judged against")
+    promote_cmd.add_argument("--window", required=True, metavar="WINDOW.json",
+                             help="the recorded shadow window document "
+                                  "(revl.shadow-window): the schedule, the "
+                                  "accumulated crossings and both sides' sealed "
+                                  "model-decision records")
+    promote_cmd.add_argument("--evidence-key", default=None, metavar="PATH",
+                             help="the model-decision evidence key, for checking "
+                                  "the window's seals. Omit to run without one: "
+                                  "an unverifiable record is REFUSED, never "
+                                  "admitted unchecked")
+    promote_cmd.add_argument("--json", action="store_true",
+                             help="machine-readable, versioned verdict document")
+
 
     query = sub.add_parser(
         "query", help="ask the composition a question (docs/queries.md)")
