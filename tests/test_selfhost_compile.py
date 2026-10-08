@@ -505,11 +505,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # refusing and dropping the whole component.)
         # item 391: a component-body `Stream.source()` acquisition (a `host`
         # node). The EMITTER half is byte-exact on the reference IR; the native
-        # IR producer drops the whole `let src = effect Stream.source() undo
-        # src.close()` step, so the component emits an empty body and the
-        # module loses its `Stream` import. The `Map`/`Pool`/`Job` host calls
-        # in services_host.rvl go through the native chain byte-exact.
-        "services_host_stream.rvl",
+        # IR producer used to drop the whole `let src = effect Stream.source()
+        # undo src.close()` step, so the component emitted an empty body and the
+        # module lost its `Stream` import. The `Map`/`Pool`/`Job` host calls in
+        # services_host.rvl went through the native chain byte-exact already.
+        # (issue #2087: it left this list with the stream slice below — the
+        # native producer now reads the `subscribe` bracket, the combinator
+        # chain, the fan-in and the qualifier tail.)
         # (issue #2086: `../emit_py_placement.rvl` left this list — the
         # placement shapes `selfhost/emit_py.rvl` used to drop. The native IR
         # producer used to drop three things the reference IR carries: the
@@ -560,21 +562,27 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # also loses the `extern_emit` and `asyncio` imports.
         "../../../examples/async_timer.rvl",
         "../emit_py_async_shapes.rvl",
-        # item 391: the stream slice. All five are emitter-exact from the
-        # reference IR. The native IR producer drops the body's stream steps
-        # (the `Stream.source()` acquisition, as in services_host_stream.rvl,
-        # the `Pool.open` one beside it, and the `subscribe` that reads the
-        # source), so the native chain emits a sync body with no `Stream`
-        # import. stream_event_130.rvl also comes out as `ir_version 1` where
-        # the reference IR of a typed-event handler carries 3.
-        "streams.rvl",
-        "../../../backends/go/testdata/stream_130.rvl",
-        "../../../backends/go/testdata/stream_event_130.rvl",
-        "../../../backends/rust/scenarios/stream.rvl",
-        "../emit_rust_corpus/comp_stream.rvl",
-        # issue #1646 follow-up: emitter-exact; the native IR producer drops
-        # the body's stream steps, as for the stream slice's documents above.
-        "../emit_py_stream_builtin_bind.rvl",
+        # item 391: the stream slice. All five were emitter-exact from the
+        # reference IR; what the native IR producer used to drop was the body's
+        # stream steps (the `Stream.source()` acquisition, as in
+        # services_host_stream.rvl, the `Pool.open` one beside it, and the
+        # `subscribe` that reads the source), so the native chain emitted a sync
+        # body with no `Stream` import. stream_event_130.rvl also came out as
+        # `ir_version 1` where the reference IR of a typed-event handler carries
+        # 3.
+        # (issue #2087: all seven py entries of the stream slice — the five
+        # documents named just above, services_host_stream.rvl and
+        # emit_py_stream_builtin_bind.rvl below — left this list when
+        # `selfhost/lower.rvl` grew the stream statement forms: the `subscribe`
+        # bracket (its `subscribe: true`/`policy` step keys, the combinator
+        # `stages` and the `buffer`/`drain` qualifier tail), the `every <x> in
+        # <sub>` iteration, and the `on <Event> as <x> [in <sub>]` handler with
+        # its contract object and its desugared `sub_<requirement>` bracket. The
+        # native producer also had to admit a bare read of a required `Stream[T]`
+        # (a `req` node) and stop reading `on` as an ordinary ident, and the
+        # document version now carries the same `stream-iter` trigger the
+        # reference's `uses_timers` does.)
+        # issue #1646 follow-up: emitter-exact, and closed with the slice above.
         # (issue #2085: the validated slice left this list when
         # `selfhost/lower.rvl` grew the validated operation producer. The
         # producer now reads the `validated` and `retry` modifiers off the
@@ -684,9 +692,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # Opt-gap document and the scenario `advance.rvl` left this list.)
         # timers inside a lifecycle-tested document,
         "../../../examples/async_timer.rvl",
-        # the stream surface (`subscribe`, `merge`, `every ... in`),
-        "../../../backends/go/testdata/stream_130.rvl",
-        "../emit_rust_corpus/comp_stream.rvl",
+        # (issue #2087: the stream surface (`subscribe`, `merge`, `every ... in`,
+        # `on ... as`) closed with the py entries above — `stream_130.rvl` and
+        # `comp_stream.rvl` left this list too, the one native `selfhost/lower.rvl`
+        # producer fix covering both tiers because selfhost/emit_ts.rvl already
+        # reproduced the reference bytes from the reference IR.)
         # the statement-block match arm: the parser has no node for the block,
         # but that is neither the only nor the operative reason this document is
         # withheld — several component-position gaps in `selfhost/lower.rvl`
@@ -776,14 +786,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `Job`, the body walk had no `await` step to carry that, and a refused
         # step drops the WHOLE component `body` — so the native chain emitted
         # 7,067 bytes against the reference's 11,094, the module with no
-        # `Job`/`JobHandle` runtime in it. `comp_stream.rvl` is no longer
+        # `Job`/`JobHandle` runtime in it. `comp_stream.rvl` was no longer
         # refused before any rust is built either: the item-130 stream statement
         # forms landed in `selfhost/lower.rvl` (#1139) and the native gate now
-        # ADMITS it, so its residual is measured in bytes by the same comparison
-        # as every document above. It is `selfhost/lower.rvl`'s, and it is NAMED
-        # rather than skipped, so the day lower.rvl grows that surface this list
-        # shrinks instead of quietly keeping a waiver nobody rereads.
-        "comp_stream.rvl",
+        # ADMITS it, so its residual was measured in bytes by the same comparison
+        # as every document above. It was `selfhost/lower.rvl`'s, and it was
+        # NAMED rather than skipped, so the day lower.rvl grew that surface this
+        # list shrank instead of quietly keeping a waiver nobody rereads — which
+        # is what happened: issue #2087's stream statement forms closed it.
         # (`bridge_types.rvl`, item 391's bridge marshalling document, left with
         # issue #1818: `fn weight(name) = None` dropped the component body.)
         # (issue #2088: in-file `test` blocks left this list when the

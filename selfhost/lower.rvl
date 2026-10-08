@@ -21156,13 +21156,14 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 type CCtx = { reqs: List[Str], cases: List[Bind], fns: List[Bind],
               fnps: List[Bind], wit: List[Str], al: Map[Str, Str],
               cprovs: List[Bind], cfg: Str, ln: Int, reqops: List[Bind],
-              handles: Bool, xundo: Map[Str, Str] }
+              handles: Bool, xundo: Map[Str, Str], strreqs: List[Bind] }
 
 // `cx` re-stamped with the line of the statement now being lowered.
 fn cx_at(cx: CCtx, n: Int) -> CCtx {
   return { reqs: cx.reqs, cases: cx.cases, fns: cx.fns, fnps: cx.fnps,
            wit: cx.wit, al: cx.al, cprovs: cx.cprovs, cfg: cx.cfg, ln: n,
-           reqops: cx.reqops, handles: cx.handles, xundo: cx.xundo }
+           reqops: cx.reqops, handles: cx.handles, xundo: cx.xundo,
+           strreqs: cx.strreqs }
 }
 
 // Membership in a lexical scope, INDEPENDENT of whether the name's type is
@@ -22497,7 +22498,7 @@ fn cir_var(n: Str, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     return cir_adt(tagged_case_adt(cx.cases, n), n, [], sc, hostSc, cx)
   }
   if (scope_has(sc, n)) {
-    return mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
+    return mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(cir_safe_of(sc, n))).concat("}"))
   }
   // Out of scope, the reference answers a name in `callables`, which holds
   // `_BUILTIN_CONSTRUCTORS`, with a `var` node: `None` is the one constructor
@@ -22675,7 +22676,7 @@ fn cir_hostverb(root: Str, meth: Str, args: List[Expr], sc: List[Bind],
   if (!a.ok) { return mk_irres(false, "") }
   return mk_irres(true,
     "{\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": "
-      .concat(jstr(root)).concat("}, \"method\": ").concat(jstr(meth))
+      .concat(jstr(cir_safe_of(sc, root))).concat("}, \"method\": ").concat(jstr(meth))
       .concat(", \"args\": [").concat(a.js).concat("]}"))
 }
 
@@ -23443,6 +23444,243 @@ fn with_inverse(js: Str, inv: Str) -> Str {
     .concat(", \"inverse\": ").concat(jstr(inv)).concat("}")
 }
 
+// =============================================================== streams (130)
+//
+// issue #2087: the body's stream steps. `subscribe` (the Slice 1 bracket, the
+// Slice 2 combinator chain, the Slice 3 fan-in and the Slice 4.4 qualifier
+// tail), `every <x> in <sub>` (Slice 4) and `on <Event> as <x> [in <sub>]`
+// (Slice 5) are all parsed by the reference BEFORE its expression grammar runs
+// — `subscribe` is a statement form, `merge` and the combinators are not calls,
+// and `on` is a contextual word in neither lexer's table — so the component
+// reader has to read them at the token level here. Without these arms the first
+// one refused the body outright, and `ir_component` dropped the whole
+// activation.
+
+// The requirement rows whose declared type is a `Stream[T]` — item 130's
+// coeffect surface. A bare read of one lowers to a `req` node in a `subscribe`
+// head and nowhere else, and an `on <Event> as <x>` with no `in` clause
+// resolves its source from them BY ELEMENT TYPE (§6b).
+fn stream_req_binds(rs: List[Bind], i: Int, acc: List[Bind]) -> List[Bind] {
+  if (i >= rs.length()) { return acc }
+  if (rs[i].ty.startsWith("Stream[")) { return stream_req_binds(rs, i + 1, acc.push(rs[i])) }
+  return stream_req_binds(rs, i + 1, acc)
+}
+
+// The IR id an in-scope name lowers to. A binder whose spelling had to be
+// escaped (`safe_name`) records `rename <surface>` -> id in the scope, so the
+// declaration and every read of it agree — the reference's `env.locals`.
+fn cir_safe_of(sc: List[Bind], n: Str) -> Str {
+  let s = tenv_get(sc, "rename ".concat(n))
+  return s == "" ? n : s
+}
+
+// The host namespace a binder may not enter (`_HOST_RESERVED`,
+// src/revl/lower.py:601). Spelled out rather than derived: the set is a host
+// ABI fact, and a name in it is already a live binding at every emit target.
+fn is_host_reserved(n: Str) -> Bool {
+  return contains(["ctx", "config", "frame", "fiber", "self", "rawConfig",
+                   "host", "Context", "function", "var", "let", "const", "new",
+                   "class", "this", "typeof", "delete", "in", "of",
+                   "instanceof", "void", "export", "default", "require",
+                   "module", "exports", "import", "yield", "async", "await",
+                   "true", "false", "null", "undefined", "NaN"], n)
+}
+
+// The python keyword / soft-keyword union (`keyword.iskeyword` plus
+// `issoftkeyword`, src/revl/lower.py:673). `_safe_name` escapes against this
+// too, so a binder spelled `class` or `match` ladders exactly as the reference
+// ladders it.
+fn is_py_keyword(n: Str) -> Bool {
+  return contains(["False", "None", "True", "and", "as", "assert", "async",
+                   "await", "break", "class", "continue", "def", "del",
+                   "elif", "else", "except", "finally", "for", "from",
+                   "global", "if", "import", "in", "is", "lambda", "nonlocal",
+                   "not", "or", "pass", "raise", "return", "try", "while",
+                   "with", "yield", "_", "case", "match", "type"], n)
+}
+
+// The reference's `_safe_name` (src/revl/lower.py:745): the escape a BINDER
+// takes when its spelling collides with the host namespace, a python keyword,
+// or a name already taken in this component. Distinct from
+// `predeclared_mangle`, which is a pure ladder-shift re-derived at every read:
+// this one depends on what is already bound, so the binder computes it once and
+// the scope carries it to the reads as a `rename` row.
+fn safe_name(n: Str, sc: List[Bind], hostSc: List[Str]) -> Str {
+  var cand = n
+  var i = 0
+  while (i < 16) {
+    if (!is_host_reserved(cand) && !is_host_predeclared(cand)
+        && !is_py_keyword(cand) && !scope_has(sc, cand)
+        && !contains(hostSc, cand)) {
+      return cand
+    }
+    cand = cand.concat("_")
+    i += 1
+  }
+  return cand
+}
+
+// --------------------------------------------------------------- subscribe
+
+type SubR = { sub: Str, at: Int, ok: Bool }
+type SubQ = { pol: Str, buf: Str, drn: Str, at: Int, ok: Bool }
+
+// One `subscribe` head source, or one fan-in operand: a bare stream name (a
+// bound stream, or a required `Stream[T]`) or a nested `merge`.
+fn cir_sub_src(ts: List[Token], k: Int, sc: List[Bind], hostSc: List[Str],
+               cx: CCtx) -> SubR {
+  if (ati(ts, k, "merge") && atk(ts, k + 1, "(")) {
+    return cir_sub_merge(ts, k + 2, sc, hostSc, cx, [])
+  }
+  if (!atk(ts, k, "ident")) { return { sub: "", at: k, ok: false } }
+  let n = tkc(ts, k).text
+  if (scope_has(sc, n)) {
+    return { sub: "{\"kind\": \"name\", \"id\": ".concat(jstr(cir_safe_of(sc, n))).concat("}"),
+             at: k + 1, ok: true }
+  }
+  // a required stream is a CAPABILITY, not a value: the `req` node is the only
+  // shape a bare read of one lowers to at all (item 130 §1).
+  if (bind_lookup(cx.strreqs, n, 0) != "") {
+    return { sub: "{\"kind\": \"req\", \"name\": ".concat(jstr(n)).concat("}"),
+             at: k + 1, ok: true }
+  }
+  return { sub: "", at: k, ok: false }
+}
+
+// `merge(a, b)` — the Slice 3 fan-in. Exactly two sources; a merged stream is
+// itself a stream, so a nested `merge` recurses and no extra machinery is
+// needed for a three-source fan-in.
+fn cir_sub_merge(ts: List[Token], k: Int, sc: List[Bind], hostSc: List[Str],
+                 cx: CCtx, acc: List[Str]) -> SubR {
+  let a = cir_sub_src(ts, k, sc, hostSc, cx)
+  if (!a.ok || !atk(ts, a.at, ",")) { return { sub: "", at: k, ok: false } }
+  let b = cir_sub_src(ts, a.at + 1, sc, hostSc, cx)
+  if (!b.ok || !atk(ts, b.at, ")")) { return { sub: "", at: k, ok: false } }
+  if (contains(acc, a.sub) || a.sub == b.sub) { return { sub: "", at: k, ok: false } }
+  return { sub: "{\"kind\": \"stream-merge\", \"sources\": [".concat(a.sub)
+    .concat(", ").concat(b.sub).concat("]}"), at: b.at + 1, ok: true }
+}
+
+// The Slice 2 combinator chain, as the `stages` array the stream node carries.
+// `take` carries a raw int count; `map`/`filter` carry a lowered arrow, which
+// is the same component-position arrow node `cir_arrow` writes.
+fn cir_sub_stages(ts: List[Token], k: Int, sc: List[Bind], hostSc: List[Str],
+                  cx: CCtx, acc: Str) -> SubR {
+  if (!atk(ts, k, ".")) { return { sub: acc, at: k, ok: true } }
+  if (!atk(ts, k + 1, "ident") || !atk(ts, k + 2, "(")) { return { sub: "", at: k, ok: false } }
+  let name = tkc(ts, k + 1).text
+  if (!(name == "map" || name == "filter" || name == "take")) {
+    return { sub: "", at: k, ok: false }
+  }
+  var seg = ""
+  var nx = 0
+  if (name == "take") {
+    if (!atk(ts, k + 3, "int") || !atk(ts, k + 4, ")")) { return { sub: "", at: k, ok: false } }
+    seg = "{\"stage\": \"take\", \"count\": ".concat(tkc(ts, k + 3).text).concat("}")
+    nx = k + 5
+  } else {
+    let r = expr_at(ts, k + 3)
+    if (is_bad(r.e) || !atk(ts, r.i, ")")) { return { sub: "", at: k, ok: false } }
+    let fr = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, k + 3).line))
+    if (!fr.ok) { return { sub: "", at: k, ok: false } }
+    seg = "{\"stage\": ".concat(jstr(name)).concat(", \"fn\": ").concat(fr.js).concat("}")
+    nx = r.i + 1
+  }
+  return cir_sub_stages(ts, nx, sc, hostSc, cx,
+                        acc == "" ? seg : acc.concat(", ").concat(seg))
+}
+
+// `[policy <name>] [buffer <n>] [drain <n><unit>]` — the Slice 4.4 tail. Bare
+// words, order-free, each at most once (`_subscribe_quals`,
+// src/revl/parser.py:7045). `drain` is a duration, normalized to ms.
+fn at_sub_qual(ts: List[Token], i: Int) -> Bool {
+  return ati(ts, i, "policy") || ati(ts, i, "buffer") || ati(ts, i, "drain")
+}
+
+fn cir_sub_quals(ts: List[Token], k: Int, pol: Str, buf: Str, drn: Str) -> SubQ {
+  if (!at_sub_qual(ts, k)) { return { pol: pol, buf: buf, drn: drn, at: k, ok: true } }
+  let bad = { pol: "", buf: "", drn: "", at: k, ok: false }
+  let w = tkc(ts, k).text
+  if (w == "policy") {
+    if (pol != "" || !atk(ts, k + 1, "ident")) { return bad }
+    let p = tkc(ts, k + 1).text
+    if (!(p == "error" || p == "drop_newest" || p == "drop_oldest" || p == "block")) {
+      return bad
+    }
+    return cir_sub_quals(ts, k + 2, p, buf, drn)
+  }
+  if (w == "buffer") {
+    if (buf != "" || !atk(ts, k + 1, "int")) { return bad }
+    return cir_sub_quals(ts, k + 2, pol, tkc(ts, k + 1).text, drn)
+  }
+  if (drn != "" || !atk(ts, k + 1, "int") || !atk(ts, k + 2, "ident")) { return bad }
+  let d = duration_ms_str(tkc(ts, k + 1).text, tkc(ts, k + 2).text)
+  if (d == "") { return bad }
+  return cir_sub_quals(ts, k + 3, pol, buf, d)
+}
+
+// ------------------------------------------------------------- event contract
+
+// The `event` declaration named `evn`, as a token index, or -1. Events are
+// top-level declarations and the reference resolves a handler's contract by
+// name against the module's event table (`_event_contract`, lower.py:15820).
+fn ev_decl_at(ts: List[Token], evn: Str) -> Int {
+  var k = 0
+  while (k < ts.length()) {
+    if (atk(ts, k, "eof")) { return 0 - 1 }
+    if (at_event(ts, k) && tkc(ts, k + 1).text == evn) { return k }
+    k += 1
+  }
+  return 0 - 1
+}
+
+// The requirement whose declared `Stream[T]` element type is the event `evn`,
+// or "" when none or more than one does. §6b resolves an `on … as …` with no
+// `in` clause against the component's required streams BY ELEMENT TYPE, and an
+// ambiguous or missing match has no source to acquire.
+fn ev_req_key(rs: List[Bind], i: Int, evn: Str, hit: Str) -> Str {
+  if (i >= rs.length()) { return hit }
+  let ty = rs[i].ty
+  if (ty.startsWith("Stream[") && ty.slice(7, ty.length() - 1) == evn) {
+    if (hit != "") { return "" }
+    return ev_req_key(rs, i + 1, evn, rs[i].name)
+  }
+  return ev_req_key(rs, i + 1, evn, hit)
+}
+
+// `{"name", "key", "window", "schema"}` — the contract a Slice 5 handler
+// carries (item 130 §6). `window` defaults to 64 (`_EVENT_DEDUP_WINDOW`), and
+// the schema is the RAW record schema — `sc_json_spec`, not the `validated`
+// wrapper a service operation adds. An undeclared event name has no contract
+// and the reference refuses the handler, so the body is withheld here.
+fn ev_contract(ts: List[Token], evn: Str, al: Map[Str, Str]) -> IrRes {
+  let k = ev_decl_at(ts, evn)
+  if (k == 0 - 1) { return mk_irres(false, "") }
+  if (!atk(ts, k + 2, "(") || !ati(ts, k + 3, "key") || !atk(ts, k + 4, ":")
+      || !atk(ts, k + 5, "ident")) {
+    return mk_irres(false, "")
+  }
+  let key = tkc(ts, k + 5).text
+  var win = 64
+  var h = k + 6
+  if (atk(ts, h, ",")) {
+    if (!ati(ts, h + 1, "window") || !atk(ts, h + 2, ":") || !atk(ts, h + 3, "int")) {
+      return mk_irres(false, "")
+    }
+    win = match tkc(ts, h + 3).text.to_int() { Some(v) => v, None => 0 - 1 }
+    if (win < 1) { return mk_irres(false, "") }
+    h = h + 4
+  }
+  if (!atk(ts, h, ")")) { return mk_irres(false, "") }
+  let d = sc_event_decl(ts, k, al)
+  if (d.ty.kind == "") { return mk_irres(false, "") }
+  let env = schema_env(ts, 0, Map.empty(), al)
+  return mk_irres(true, "{\"name\": ".concat(jstr(evn))
+    .concat(", \"key\": ").concat(jstr(key))
+    .concat(", \"window\": ").concat(win.to_str())
+    .concat(", \"schema\": ").concat(sc_json_spec(d.ty, env, [evn])).concat("}"))
+}
+
 // A component activation body -> its `body` step list. `config` is a header
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
@@ -23667,6 +23905,131 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let ce = close_brace(ts, k)
     if (ce == 0 - 1) { return mk_irres(false, "") }
     return cir_body(ts, ce, end, cx, provs, sc, hostSc, acc)
+  }
+  // `let <h> = subscribe <stream> [.<combinator>(…)]… [policy P] [buffer N]
+  // [drain <dur>] undo <h>.close()` — item 130 §5's bracket. The step is an
+  // ordinary `let-effect` carrying `subscribe: true` and the backpressure
+  // `policy`, with the Slice 2 `stages` and the Slice 4.4 `buffer`/`drain`
+  // additive onto the acquire node and `buffer`/`drain` repeated on the step
+  // AFTER `bind` (`_lower_subscribe_step`, src/revl/lower.py:11653-11675). The
+  // bracket is a HOST local of the reserved `Subscription` family, so
+  // `h.next()`/`h.close()` lower as host verbs, not through the stdlib table.
+  if (atw(ts, i, "let") && atk(ts, i + 2, "=") && atw(ts, i + 3, "subscribe")) {
+    let name = tkc(ts, i + 1).text
+    let head = cir_sub_src(ts, i + 4, sc, hostSc, cx)
+    if (!head.ok) { return mk_irres(false, "") }
+    let stg = cir_sub_stages(ts, head.at, sc, hostSc, cx, "")
+    if (!stg.ok) { return mk_irres(false, "") }
+    let q = cir_sub_quals(ts, stg.at, "", "", "")
+    if (!q.ok) { return mk_irres(false, "") }
+    let pol = q.pol == "" ? "error" : q.pol
+    // The `undo` is required by the surface (rule 3.2) and is read
+    // STRUCTURALLY: the reference shape-checks the lowered expression against
+    // the desugared bracket's own `close` call, so only that spelling reaches
+    // an IR document and a step is never emitted with a hand-written undo.
+    if (!atw(ts, q.at, "undo") || !ati(ts, q.at + 1, name)
+        || !atk(ts, q.at + 2, ".") || !ati(ts, q.at + 3, "close")
+        || !atk(ts, q.at + 4, "(") || !atk(ts, q.at + 5, ")")) {
+      return mk_irres(false, "")
+    }
+    let safe = safe_name(name, sc, hostSc)
+    let sc2 = sc.push({ name: name, ty: "Subscription" })
+      .push({ name: "rename ".concat(name), ty: safe })
+    var acq = "{\"kind\": \"subscribe\", \"stream\": ".concat(head.sub)
+      .concat(", \"policy\": ").concat(jstr(pol))
+    if (stg.sub != "") { acq = acq.concat(", \"stages\": [").concat(stg.sub).concat("]") }
+    if (q.buf != "") { acq = acq.concat(", \"buffer\": ").concat(q.buf) }
+    if (q.drn != "") { acq = acq.concat(", \"drain\": ").concat(q.drn) }
+    acq = acq.concat("}")
+    var step = "{\"step\": \"let-effect\", \"subscribe\": true, \"policy\": "
+      .concat(jstr(pol)).concat(", \"acquire\": ").concat(acq)
+      .concat(", \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": ")
+      .concat(jstr(safe)).concat("}, \"method\": \"close\", \"args\": []}")
+      .concat(", \"bind\": ").concat(jstr(safe))
+    if (q.buf != "") { step = step.concat(", \"buffer\": ").concat(q.buf) }
+    if (q.drn != "") { step = step.concat(", \"drain\": ").concat(q.drn) }
+    step = step.concat("}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_body(ts, q.at + 6, end, cx, provs, sc2, hostSc.push(name), nacc)
+  }
+  // `every <x> in <sub> { … }` — Slice 4's iteration. It shares the `every`
+  // keyword with the timer and is told apart by one token of lookahead: a
+  // timer's next token is a duration's int, an iteration's is its item name.
+  if (atw(ts, i, "every") && atk(ts, i + 1, "ident") && atw(ts, i + 2, "in")) {
+    let subj = cir_sub_src(ts, i + 3, sc, hostSc, cx)
+    if (!subj.ok || !atk(ts, subj.at, "{")) { return mk_irres(false, "") }
+    let bend = close_brace(ts, subj.at)
+    if (bend == 0 - 1) { return mk_irres(false, "") }
+    let item = tkc(ts, i + 1).text
+    let safe = safe_name(item, sc, hostSc)
+    let isc = sc.push({ name: item, ty: "" })
+      .push({ name: "rename ".concat(item), ty: safe })
+    let bodyR = cir_emit_steps(ts, subj.at + 1, bend - 1, cx, isc, hostSc, "")
+    if (!bodyR.ok) { return mk_irres(false, "") }
+    let step = "{\"step\": \"stream-iter\", \"bind\": ".concat(jstr(safe))
+      .concat(", \"subject\": ").concat(subj.sub)
+      .concat(", \"body\": [").concat(bodyR.js).concat("]}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_body(ts, bend, end, cx, provs, isc, hostSc, nacc)
+  }
+  // `on <Event> as <x> [in <sub>] { … }` — Slice 5's typed-event handler. `on`
+  // is a CONTEXTUAL word (neither lexer's KEYWORDS table), so the arm matches
+  // an ident. With no `in <sub>` clause (§6b) the source is the component's
+  // required `Stream[<Event>]`, and the reference DESUGARS the handler into a
+  // synthesized `subscribe` bracket named `sub_<requirement>` plus the
+  // iteration — the same two steps the explicit spelling lowers to, so the
+  // bracket needs no separate arm (`_lower_required_stream_handler`,
+  // src/revl/lower.py:15661).
+  if (ati(ts, i, "on") && atk(ts, i + 1, "ident") && atw(ts, i + 2, "as")
+      && atk(ts, i + 3, "ident")) {
+    let evn = tkc(ts, i + 1).text
+    let item = tkc(ts, i + 3).text
+    var j = i + 4
+    var headJs = ""
+    var subjJs = ""
+    var sc2 = sc
+    var hostSc2 = hostSc
+    var pre = ""
+    if (atw(ts, j, "in")) {
+      let subj = cir_sub_src(ts, j + 1, sc, hostSc, cx)
+      if (!subj.ok) { return mk_irres(false, "") }
+      headJs = subj.sub
+      subjJs = subj.sub
+      j = subj.at
+    } else {
+      let key = ev_req_key(cx.strreqs, 0, evn, "")
+      if (key == "") { return mk_irres(false, "") }
+      let safe = safe_name("sub_".concat(key), sc, hostSc)
+      headJs = "{\"kind\": \"req\", \"name\": ".concat(jstr(key)).concat("}")
+      // the iteration reads the BRACKET the desugaring synthesized, not the
+      // requirement: the requirement is the bracket's `acquire` source, and a
+      // `req` node in `subject` would re-acquire the capability per item.
+      subjJs = "{\"kind\": \"name\", \"id\": ".concat(jstr(safe)).concat("}")
+      sc2 = sc.push({ name: "rename ".concat(safe), ty: safe })
+      hostSc2 = hostSc.push(safe)
+      pre = "{\"step\": \"let-effect\", \"subscribe\": true, \"policy\": \"error\""
+        .concat(", \"acquire\": {\"kind\": \"subscribe\", \"stream\": ").concat(headJs)
+        .concat(", \"policy\": \"error\"}")
+        .concat(", \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": ")
+        .concat(jstr(safe)).concat("}, \"method\": \"close\", \"args\": []}")
+        .concat(", \"bind\": ").concat(jstr(safe)).concat("}, ")
+    }
+    if (!atk(ts, j, "{")) { return mk_irres(false, "") }
+    let bend = close_brace(ts, j)
+    if (bend == 0 - 1) { return mk_irres(false, "") }
+    let evc = ev_contract(ts, evn, cx.al)
+    if (!evc.ok) { return mk_irres(false, "") }
+    let isafe = safe_name(item, sc2, hostSc2)
+    let isc = sc2.push({ name: item, ty: "" })
+      .push({ name: "rename ".concat(item), ty: isafe })
+    let bodyR = cir_emit_steps(ts, j + 1, bend - 1, cx, isc, hostSc2, "")
+    if (!bodyR.ok) { return mk_irres(false, "") }
+    let step = pre.concat("{\"step\": \"stream-iter\", \"bind\": ").concat(jstr(isafe))
+      .concat(", \"subject\": ").concat(subjJs)
+      .concat(", \"body\": [").concat(bodyR.js).concat("]")
+      .concat(", \"event\": ").concat(evc.js).concat("}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_body(ts, bend, end, cx, provs, isc, hostSc2, nacc)
   }
   if (atw(ts, i, "every") || atw(ts, i, "after")) {
     let mode = tkc(ts, i).text
@@ -23913,7 +24276,8 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
              cprovs: program_provisions(ts),
              cfg: comp_config_struct(ts, lo, hi, al), ln: 0,
              handles: program_names_handles(ts),
-             xundo: extern_undo_names(ts) }
+             xundo: extern_undo_names(ts),
+             strreqs: stream_req_binds(reqs, 0, []) }
   let sc0: List[Bind] = []
   let bodyRes = cir_body(ts, lo, hi, cx, provs, sc0, [], "")
   let isoJs = ir_isolate(ts, lo, hi, "")
@@ -23941,9 +24305,13 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
   js = js.concat("}")
   // a body-level stdlib builtin (or tagged ADT) construction is the reference's
   // body-only v3 trigger (`_has_builtin`); now that the body is lowered, the
-  // lowered node's presence is the same signal a token scan cannot see.
+  // lowered node's presence is the same signal a token scan cannot see. A
+  // `stream-iter` step is the same kind of signal for the `on <Event> as <x>`
+  // handler: `on` is a CONTEXTUAL word, so a token scan for it would fire on a
+  // variable that merely happens to be spelled `on` (issue #2087).
   let bodyV3 = bodyRes.ok && iceptRes.ok
-    && (str_has(bodyRes.js, "\"kind\": \"builtin\"") || str_has(bodyRes.js, "\"kind\": \"adt\""))
+    && (str_has(bodyRes.js, "\"kind\": \"builtin\"") || str_has(bodyRes.js, "\"kind\": \"adt\"")
+        || str_has(bodyRes.js, "\"step\": \"stream-iter\""))
   let v3 = bodyV3 || comp_has_kw(ts, lo, hi, "if") || comp_has_kw(ts, lo, hi, "fail")
     || comp_has_kw(ts, lo, hi, "every") || comp_has_kw(ts, lo, hi, "after")
     || comp_has_kw(ts, lo, hi, "spawn")
@@ -24121,7 +24489,7 @@ fn is_builtin_method(m: Str) -> Bool {
 }
 
 fn is_host_root(n: Str) -> Bool {
-  return n == "Map" || n == "Pool" || n == "Job"
+  return n == "Map" || n == "Pool" || n == "Job" || n == "Stream"
 }
 
 // The stdlib method result type (the checker's `_BUILTIN_SIG` return, non-

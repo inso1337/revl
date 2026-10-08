@@ -899,6 +899,7 @@ pub struct CCtx {
     reqops: Vec<Bind>,
     handles: bool,
     xundo: std::collections::HashMap<String, String>,
+    strreqs: Vec<Bind>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -954,6 +955,22 @@ pub struct BlkR {
     acq: String,
     acqE: Expr,
     wit: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SubR {
+    sub: String,
+    at: i64,
+    ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SubQ {
+    pol: String,
+    buf: String,
+    drn: String,
+    at: i64,
+    ok: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -24839,7 +24856,7 @@ fn duration_ms_str(numText: &str, unit: &str) -> String {
 }
 
 fn cx_at(cx: CCtx, n: i64) -> CCtx {
-    return CCtx { reqs: cx.reqs.clone(), cases: cx.cases.clone(), fns: cx.fns.clone(), fnps: cx.fnps.clone(), wit: cx.wit.clone(), al: cx.al.clone(), cprovs: cx.cprovs.clone(), cfg: cx.cfg.clone(), ln: n, reqops: cx.reqops.clone(), handles: cx.handles, xundo: cx.xundo.clone() };
+    return CCtx { reqs: cx.reqs.clone(), cases: cx.cases.clone(), fns: cx.fns.clone(), fnps: cx.fnps.clone(), wit: cx.wit.clone(), al: cx.al.clone(), cprovs: cx.cprovs.clone(), cfg: cx.cfg.clone(), ln: n, reqops: cx.reqops.clone(), handles: cx.handles, xundo: cx.xundo.clone(), strreqs: cx.strreqs.clone() };
 }
 
 fn scope_has(sc: &[Bind], n: &str) -> bool {
@@ -25782,7 +25799,7 @@ fn cir_expr(e: Expr, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     Expr::FloatLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&v)).revl_concat("}")),
     Expr::BoolLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&v)).revl_concat("}")),
     Expr::StrLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&jstr(&v))).revl_concat("}")),
-    Expr::Var(n) => cir_var(&n, sc.clone(), hostSc.clone(), cx.clone()),
+    Expr::Var(n) => cir_var(n, sc.clone(), hostSc.clone(), cx.clone()),
     Expr::Bin(b) => { let b = *b; cir_bin(b, sc.clone(), hostSc.clone(), cx.clone()) },
     Expr::Un(u) => { let u = *u; cir_un(u.clone(), sc.clone(), hostSc.clone(), cx.clone()) },
     Expr::If(f) => { let f = *f; cir_if_expr(f.clone(), sc.clone(), hostSc.clone(), cx.clone()) },
@@ -25991,7 +26008,7 @@ fn cir_builtin_recv(tg: Expr, meth: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc
 fn cir_call(tg: Expr, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     return match tg {
     Expr::Field(fl) => { let fl = *fl; if is_instance_call(fl.clone(), &sc) { cir_instance_call(fl.clone(), args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { match fl.target.clone() {
-    Expr::Var(root_) => if contains__m2(&cx.reqs, &root_) { cir_reqcall(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if contains__m2(&hostSc, &root_) { cir_hostverb(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if is_host_root(&root_) { cir_hostacq(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (instance_comp(&sc, fl.target.clone()) != "") { cir_hostverb(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (scope_has(&sc, &root_) && is_builtin_method(&fl.name)) { cir_builtin(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { mk_irres(false, String::from("")) } } } } },
+    Expr::Var(root_) => if contains__m2(&cx.reqs, &root_) { cir_reqcall(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if contains__m2(&hostSc, &root_) { cir_hostverb(root_.clone(), &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if is_host_root(&root_) { cir_hostacq(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (instance_comp(&sc, fl.target.clone()) != "") { cir_hostverb(root_.clone(), &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if (scope_has(&sc, &root_) && is_builtin_method(&fl.name)) { cir_builtin(&root_, &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { mk_irres(false, String::from("")) } } } } },
     _ => if is_builtin_method(&fl.name) { cir_builtin_recv(fl.target.clone(), &fl.name, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { mk_irres(false, String::from("")) },
 } } },
     Expr::Var(nm) => if (tagged_case_adt(&cx.cases, &nm) != "") { cir_adt(&tagged_case_adt(&cx.cases, &nm), &nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { if cir_calls_a_value(&nm, &sc, cx.clone()) { cir_value_call(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } else { cir_fncall(&nm, args.clone(), sc.clone(), hostSc.clone(), cx.clone()) } },
@@ -25999,12 +26016,12 @@ fn cir_call(tg: Expr, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: C
 };
 }
 
-fn cir_var(n: &str, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
-    if cir_nullary_case(n, cx.clone()) {
-        return cir_adt(&tagged_case_adt(&cx.cases, n), n, vec![], sc.clone(), hostSc.clone(), cx.clone());
+fn cir_var(n: String, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
+    if cir_nullary_case(&n, cx.clone()) {
+        return cir_adt(&tagged_case_adt(&cx.cases, &n), &n, vec![], sc.clone(), hostSc.clone(), cx.clone());
     }
-    if scope_has(&sc, n) {
-        return mk_irres(true, (String::from("{\"kind\": \"name\", \"id\": ").revl_concat(&jstr(n))).revl_concat("}"));
+    if scope_has(&sc, &n) {
+        return mk_irres(true, (String::from("{\"kind\": \"name\", \"id\": ").revl_concat(&jstr(&cir_safe_of(&sc, n.clone())))).revl_concat("}"));
     }
     if (n == "None") {
         return mk_irres(true, String::from("{\"kind\": \"var\", \"name\": \"None\"}"));
@@ -26116,12 +26133,12 @@ fn cir_hostacq(root_: &str, meth: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: 
     return mk_irres(true, (((String::from("{\"kind\": \"host\", \"fn\": ").revl_concat(&jstr(&((root_.revl_concat(".")).revl_concat(&meth))))).revl_concat(", \"args\": [")).revl_concat(&a.js)).revl_concat("]}"));
 }
 
-fn cir_hostverb(root_: &str, meth: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
+fn cir_hostverb(root_: String, meth: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     let a = cir_args(args.clone(), 0i64, sc.clone(), hostSc.clone(), cx.clone(), String::from(""));
     if (!a.ok) {
         return mk_irres(false, String::from(""));
     }
-    return mk_irres(true, (((((String::from("{\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": ").revl_concat(&jstr(root_))).revl_concat("}, \"method\": ")).revl_concat(&jstr(meth))).revl_concat(", \"args\": [")).revl_concat(&a.js)).revl_concat("]}"));
+    return mk_irres(true, (((((String::from("{\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": ").revl_concat(&jstr(&cir_safe_of(&sc, root_.clone())))).revl_concat("}, \"method\": ")).revl_concat(&jstr(meth))).revl_concat(", \"args\": [")).revl_concat(&a.js)).revl_concat("]}"));
 }
 
 fn cir_field(f: FieldN, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
@@ -26929,6 +26946,208 @@ fn with_inverse(js: String, inv: &str) -> String {
     return (((js.revl_slice(0i64, (js.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(", \"inverse\": ")).revl_concat(&jstr(inv))).revl_concat("}");
 }
 
+fn stream_req_binds(rs: Vec<Bind>, i: i64, acc: Vec<Bind>) -> Vec<Bind> {
+    if (i >= rs.revl_length()) {
+        return acc;
+    }
+    if (rs)[(i) as usize].ty.revl_starts_with("Stream[") {
+        return stream_req_binds(rs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.revl_push((rs)[(i) as usize].clone()));
+    }
+    return stream_req_binds(rs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone());
+}
+
+fn cir_safe_of(sc: &[Bind], n: String) -> String {
+    let s = tenv_get(sc, &(String::from("rename ").revl_concat(&n)));
+    return if (s == "") { n.clone() } else { s.clone() };
+}
+
+fn is_host_reserved(n: &str) -> bool {
+    return contains__m2(&(vec![String::from("ctx"), String::from("config"), String::from("frame"), String::from("fiber"), String::from("self"), String::from("rawConfig"), String::from("host"), String::from("Context"), String::from("function"), String::from("var"), String::from("let"), String::from("const"), String::from("new"), String::from("class"), String::from("this"), String::from("typeof"), String::from("delete"), String::from("in"), String::from("of"), String::from("instanceof"), String::from("void"), String::from("export"), String::from("default"), String::from("require"), String::from("module"), String::from("exports"), String::from("import"), String::from("yield"), String::from("async"), String::from("await"), String::from("true"), String::from("false"), String::from("null"), String::from("undefined"), String::from("NaN")]), n);
+}
+
+fn is_py_keyword(n: &str) -> bool {
+    return contains__m2(&(vec![String::from("False"), String::from("None"), String::from("True"), String::from("and"), String::from("as"), String::from("assert"), String::from("async"), String::from("await"), String::from("break"), String::from("class"), String::from("continue"), String::from("def"), String::from("del"), String::from("elif"), String::from("else"), String::from("except"), String::from("finally"), String::from("for"), String::from("from"), String::from("global"), String::from("if"), String::from("import"), String::from("in"), String::from("is"), String::from("lambda"), String::from("nonlocal"), String::from("not"), String::from("or"), String::from("pass"), String::from("raise"), String::from("return"), String::from("try"), String::from("while"), String::from("with"), String::from("yield"), String::from("_"), String::from("case"), String::from("match"), String::from("type")]), n);
+}
+
+fn safe_name(n: String, sc: &[Bind], hostSc: &[String]) -> String {
+    let mut cand = n;
+    let mut i = 0i64;
+    while (i < 16i64) {
+        if (((((!is_host_reserved(&cand)) && (!is_host_predeclared(&cand))) && (!is_py_keyword(&cand))) && (!scope_has(sc, &cand))) && (!contains__m2(hostSc, &cand))) {
+            return cand;
+        }
+        cand.push_str("_");
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return cand;
+}
+
+fn cir_sub_src(ts: &[Token], k: i64, sc: &[Bind], hostSc: &[String], cx: CCtx) -> SubR {
+    if (ati(ts, k, "merge") && atk(ts, (k).checked_add(1i64).expect("revl: Int overflow"), "(")) {
+        return cir_sub_merge(ts, (k).checked_add(2i64).expect("revl: Int overflow"), sc, hostSc, cx.clone(), &(vec![]));
+    }
+    if (!atk(ts, k, "ident")) {
+        return SubR { sub: String::from(""), at: k, ok: false };
+    }
+    let n = tkc(ts, k).text;
+    if scope_has(sc, &n) {
+        return SubR { sub: (String::from("{\"kind\": \"name\", \"id\": ").revl_concat(&jstr(&cir_safe_of(sc, n.clone())))).revl_concat("}"), at: (k).checked_add(1i64).expect("revl: Int overflow"), ok: true };
+    }
+    if (bind_lookup(&cx.strreqs, &n, 0i64) != "") {
+        return SubR { sub: (String::from("{\"kind\": \"req\", \"name\": ").revl_concat(&jstr(&n))).revl_concat("}"), at: (k).checked_add(1i64).expect("revl: Int overflow"), ok: true };
+    }
+    return SubR { sub: String::from(""), at: k, ok: false };
+}
+
+fn cir_sub_merge(ts: &[Token], k: i64, sc: &[Bind], hostSc: &[String], cx: CCtx, acc: &[String]) -> SubR {
+    let a = cir_sub_src(ts, k, sc, hostSc, cx.clone());
+    if ((!a.ok) || (!atk(ts, a.at, ","))) {
+        return SubR { sub: String::from(""), at: k, ok: false };
+    }
+    let b = cir_sub_src(ts, (a.at).checked_add(1i64).expect("revl: Int overflow"), sc, hostSc, cx.clone());
+    if ((!b.ok) || (!atk(ts, b.at, ")"))) {
+        return SubR { sub: String::from(""), at: k, ok: false };
+    }
+    if (contains__m2(acc, &a.sub) || (a.sub == b.sub)) {
+        return SubR { sub: String::from(""), at: k, ok: false };
+    }
+    return SubR { sub: (((String::from("{\"kind\": \"stream-merge\", \"sources\": [").revl_concat(&a.sub)).revl_concat(", ")).revl_concat(&b.sub)).revl_concat("]}"), at: (b.at).checked_add(1i64).expect("revl: Int overflow"), ok: true };
+}
+
+fn cir_sub_stages(ts: Vec<Token>, k: i64, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx, acc: String) -> SubR {
+    if (!atk(&ts, k, ".")) {
+        return SubR { sub: acc.clone(), at: k, ok: true };
+    }
+    if ((!atk(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), "ident")) || (!atk(&ts, (k).checked_add(2i64).expect("revl: Int overflow"), "("))) {
+        return SubR { sub: String::from(""), at: k, ok: false };
+    }
+    let name = tkc(&ts, (k).checked_add(1i64).expect("revl: Int overflow")).text;
+    if (!(((name == "map") || (name == "filter")) || (name == "take"))) {
+        return SubR { sub: String::from(""), at: k, ok: false };
+    }
+    let mut seg = String::from("");
+    let mut nx = 0i64;
+    if (name == "take") {
+        if ((!atk(&ts, (k).checked_add(3i64).expect("revl: Int overflow"), "int")) || (!atk(&ts, (k).checked_add(4i64).expect("revl: Int overflow"), ")"))) {
+            return SubR { sub: String::from(""), at: k, ok: false };
+        }
+        seg = (String::from("{\"stage\": \"take\", \"count\": ").revl_concat(&tkc(&ts, (k).checked_add(3i64).expect("revl: Int overflow")).text)).revl_concat("}");
+        nx = (k).checked_add(5i64).expect("revl: Int overflow");
+    } else {
+        let r = expr_at(ts.clone(), (k).checked_add(3i64).expect("revl: Int overflow"));
+        if (is_bad(r.e.clone()) || (!atk(&ts, r.i, ")"))) {
+            return SubR { sub: String::from(""), at: k, ok: false };
+        }
+        let fr = cir_expr(r.e.clone(), sc.clone(), hostSc.clone(), cx_at(cx.clone(), tkc(&ts, (k).checked_add(3i64).expect("revl: Int overflow")).line));
+        if (!fr.ok) {
+            return SubR { sub: String::from(""), at: k, ok: false };
+        }
+        seg = (((String::from("{\"stage\": ").revl_concat(&jstr(&name))).revl_concat(", \"fn\": ")).revl_concat(&fr.js)).revl_concat("}");
+        nx = (r.i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return cir_sub_stages(ts.clone(), nx, sc.clone(), hostSc.clone(), cx.clone(), if (acc == "") { seg.clone() } else { (acc.revl_concat(", ")).revl_concat(&seg) });
+}
+
+fn at_sub_qual(ts: &[Token], i: i64) -> bool {
+    return ((ati(ts, i, "policy") || ati(ts, i, "buffer")) || ati(ts, i, "drain"));
+}
+
+fn cir_sub_quals(ts: &[Token], k: i64, pol: String, buf: String, drn: String) -> SubQ {
+    if (!at_sub_qual(ts, k)) {
+        return SubQ { pol: pol.clone(), buf: buf.clone(), drn: drn.clone(), at: k, ok: true };
+    }
+    let bad = SubQ { pol: String::from(""), buf: String::from(""), drn: String::from(""), at: k, ok: false };
+    let w = tkc(ts, k).text;
+    if (w == "policy") {
+        if ((pol != "") || (!atk(ts, (k).checked_add(1i64).expect("revl: Int overflow"), "ident"))) {
+            return bad;
+        }
+        let p = tkc(ts, (k).checked_add(1i64).expect("revl: Int overflow")).text;
+        if (!((((p == "error") || (p == "drop_newest")) || (p == "drop_oldest")) || (p == "block"))) {
+            return bad;
+        }
+        return cir_sub_quals(ts, (k).checked_add(2i64).expect("revl: Int overflow"), p.clone(), buf.clone(), drn.clone());
+    }
+    if (w == "buffer") {
+        if ((buf != "") || (!atk(ts, (k).checked_add(1i64).expect("revl: Int overflow"), "int"))) {
+            return bad;
+        }
+        return cir_sub_quals(ts, (k).checked_add(2i64).expect("revl: Int overflow"), pol.clone(), tkc(ts, (k).checked_add(1i64).expect("revl: Int overflow")).text, drn.clone());
+    }
+    if (((drn != "") || (!atk(ts, (k).checked_add(1i64).expect("revl: Int overflow"), "int"))) || (!atk(ts, (k).checked_add(2i64).expect("revl: Int overflow"), "ident"))) {
+        return bad;
+    }
+    let d = duration_ms_str(&tkc(ts, (k).checked_add(1i64).expect("revl: Int overflow")).text, &tkc(ts, (k).checked_add(2i64).expect("revl: Int overflow")).text);
+    if (d == "") {
+        return bad;
+    }
+    return cir_sub_quals(ts, (k).checked_add(3i64).expect("revl: Int overflow"), pol.clone(), buf.clone(), d.clone());
+}
+
+fn ev_decl_at(ts: &[Token], evn: &str) -> i64 {
+    let mut k = 0i64;
+    while (k < ts.revl_length()) {
+        if atk(ts, k, "eof") {
+            return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if (at_event(ts, k) && (tkc(ts, (k).checked_add(1i64).expect("revl: Int overflow")).text == evn)) {
+            return k;
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+}
+
+fn ev_req_key(rs: &[Bind], i: i64, evn: &str, hit: String) -> String {
+    if (i >= rs.revl_length()) {
+        return hit;
+    }
+    let ty = (rs)[(i) as usize].ty.clone();
+    if (ty.revl_starts_with("Stream[") && (ty.revl_slice(7i64, (ty.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) == evn)) {
+        if (hit != "") {
+            return String::from("");
+        }
+        return ev_req_key(rs, (i).checked_add(1i64).expect("revl: Int overflow"), evn, (rs)[(i) as usize].name.clone());
+    }
+    return ev_req_key(rs, (i).checked_add(1i64).expect("revl: Int overflow"), evn, hit.clone());
+}
+
+fn ev_contract(ts: Vec<Token>, evn: String, al: std::collections::HashMap<String, String>) -> IrRes {
+    let k = ev_decl_at(&ts, &evn);
+    if (k == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return mk_irres(false, String::from(""));
+    }
+    if ((((!atk(&ts, (k).checked_add(2i64).expect("revl: Int overflow"), "(")) || (!ati(&ts, (k).checked_add(3i64).expect("revl: Int overflow"), "key"))) || (!atk(&ts, (k).checked_add(4i64).expect("revl: Int overflow"), ":"))) || (!atk(&ts, (k).checked_add(5i64).expect("revl: Int overflow"), "ident"))) {
+        return mk_irres(false, String::from(""));
+    }
+    let key = tkc(&ts, (k).checked_add(5i64).expect("revl: Int overflow")).text;
+    let mut win = 64i64;
+    let mut h = (k).checked_add(6i64).expect("revl: Int overflow");
+    if atk(&ts, h.clone(), ",") {
+        if (((!ati(&ts, (h).checked_add(1i64).expect("revl: Int overflow"), "window")) || (!atk(&ts, (h).checked_add(2i64).expect("revl: Int overflow"), ":"))) || (!atk(&ts, (h).checked_add(3i64).expect("revl: Int overflow"), "int"))) {
+            return mk_irres(false, String::from(""));
+        }
+        win = match { let _s = (tkc(&ts, (h).checked_add(3i64).expect("revl: Int overflow")).text); if _s.starts_with('+') { None } else { _s.parse::<i64>().ok() } } {
+    Some(v) => v,
+    None => (0i64).checked_sub(1i64).expect("revl: Int overflow"),
+    _ => unreachable!(),
+};
+        if (win < 1i64) {
+            return mk_irres(false, String::from(""));
+        }
+        h = (h).checked_add(4i64).expect("revl: Int overflow");
+    }
+    if (!atk(&ts, h.clone(), ")")) {
+        return mk_irres(false, String::from(""));
+    }
+    let d = sc_event_decl(ts.clone(), k, al.clone());
+    if (d.ty.kind == "") {
+        return mk_irres(false, String::from(""));
+    }
+    let env = schema_env(ts.clone(), 0i64, std::collections::HashMap::new(), al.clone());
+    return mk_irres(true, (((((((String::from("{\"name\": ").revl_concat(&jstr(&evn))).revl_concat(", \"key\": ")).revl_concat(&jstr(&key))).revl_concat(", \"window\": ")).revl_concat(&(win).to_string())).revl_concat(", \"schema\": ")).revl_concat(&sc_json_spec(d.ty.clone(), env.clone(), &(vec![evn.clone()])))).revl_concat("}"));
+}
+
 fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Vec<Bind>, hostSc: Vec<String>, acc: String) -> IrRes {
     if ((i >= end) || atk(&ts, i, "}")) {
         return mk_irres(true, acc.clone());
@@ -27167,6 +27386,118 @@ fn cir_body(ts: Vec<Token>, i: i64, end: i64, cx: CCtx, provs: Vec<Bind>, sc: Ve
         }
         return cir_body(ts.clone(), ce, end, cx.clone(), provs.clone(), sc.clone(), hostSc.clone(), acc.clone());
     }
+    if ((atw(&ts, i, "let") && atk(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "=")) && atw(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "subscribe")) {
+        let name = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+        let head = cir_sub_src(&ts, (i).checked_add(4i64).expect("revl: Int overflow"), &sc, &hostSc, cx.clone());
+        if (!head.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        let stg = cir_sub_stages(ts.clone(), head.at, sc.clone(), hostSc.clone(), cx.clone(), String::from(""));
+        if (!stg.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        let q = cir_sub_quals(&ts, stg.at, String::from(""), String::from(""), String::from(""));
+        if (!q.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        let pol = if (q.pol == "") { String::from("error") } else { q.pol };
+        if ((((((!atw(&ts, q.at, "undo")) || (!ati(&ts, (q.at).checked_add(1i64).expect("revl: Int overflow"), &name))) || (!atk(&ts, (q.at).checked_add(2i64).expect("revl: Int overflow"), "."))) || (!ati(&ts, (q.at).checked_add(3i64).expect("revl: Int overflow"), "close"))) || (!atk(&ts, (q.at).checked_add(4i64).expect("revl: Int overflow"), "("))) || (!atk(&ts, (q.at).checked_add(5i64).expect("revl: Int overflow"), ")"))) {
+            return mk_irres(false, String::from(""));
+        }
+        let safe = safe_name(name.clone(), &sc, &hostSc);
+        let sc2 = (sc.revl_push(Bind { name: name.clone(), ty: String::from("Subscription") })).revl_push(Bind { name: String::from("rename ").revl_concat(&name), ty: safe.clone() });
+        let mut acq = ((String::from("{\"kind\": \"subscribe\", \"stream\": ").revl_concat(&head.sub)).revl_concat(", \"policy\": ")).revl_concat(&jstr(&pol));
+        if (stg.sub != "") {
+            acq = ((acq.revl_concat(", \"stages\": [")).revl_concat(&stg.sub)).revl_concat("]");
+        }
+        if (q.buf != "") {
+            acq = (acq.revl_concat(", \"buffer\": ")).revl_concat(&q.buf);
+        }
+        if (q.drn != "") {
+            acq = (acq.revl_concat(", \"drain\": ")).revl_concat(&q.drn);
+        }
+        acq.push_str("}");
+        let mut step = (((((((String::from("{\"step\": \"let-effect\", \"subscribe\": true, \"policy\": ").revl_concat(&jstr(&pol))).revl_concat(", \"acquire\": ")).revl_concat(&acq)).revl_concat(", \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": ")).revl_concat(&jstr(&safe))).revl_concat("}, \"method\": \"close\", \"args\": []}")).revl_concat(", \"bind\": ")).revl_concat(&jstr(&safe));
+        if (q.buf != "") {
+            step = (step.revl_concat(", \"buffer\": ")).revl_concat(&q.buf);
+        }
+        if (q.drn != "") {
+            step = (step.revl_concat(", \"drain\": ")).revl_concat(&q.drn);
+        }
+        step.push_str("}");
+        let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
+        return cir_body(ts.clone(), (q.at).checked_add(6i64).expect("revl: Int overflow"), end, cx.clone(), provs.clone(), sc2.clone(), hostSc.revl_push(name.clone()), nacc.clone());
+    }
+    if ((atw(&ts, i, "every") && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) && atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in")) {
+        let subj = cir_sub_src(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), &sc, &hostSc, cx.clone());
+        if ((!subj.ok) || (!atk(&ts, subj.at, "{"))) {
+            return mk_irres(false, String::from(""));
+        }
+        let bend = close_brace(&ts, subj.at);
+        if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return mk_irres(false, String::from(""));
+        }
+        let item = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+        let safe = safe_name(item.clone(), &sc, &hostSc);
+        let isc = (sc.revl_push(Bind { name: item.clone(), ty: String::from("") })).revl_push(Bind { name: String::from("rename ").revl_concat(&item), ty: safe.clone() });
+        let bodyR = cir_emit_steps(ts.clone(), (subj.at).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), isc.clone(), hostSc.clone(), String::from(""));
+        if (!bodyR.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        let step = (((((String::from("{\"step\": \"stream-iter\", \"bind\": ").revl_concat(&jstr(&safe))).revl_concat(", \"subject\": ")).revl_concat(&subj.sub)).revl_concat(", \"body\": [")).revl_concat(&bodyR.js)).revl_concat("]}");
+        let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
+        return cir_body(ts.clone(), bend, end, cx.clone(), provs.clone(), isc.clone(), hostSc.clone(), nacc.clone());
+    }
+    if (((ati(&ts, i, "on") && atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "ident")) && atw(&ts, (i).checked_add(2i64).expect("revl: Int overflow"), "as")) && atk(&ts, (i).checked_add(3i64).expect("revl: Int overflow"), "ident")) {
+        let evn = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+        let item = tkc(&ts, (i).checked_add(3i64).expect("revl: Int overflow")).text;
+        let mut j = (i).checked_add(4i64).expect("revl: Int overflow");
+        let mut headJs = String::from("");
+        let mut subjJs = String::from("");
+        let mut sc2 = sc.clone();
+        let mut hostSc2 = hostSc.clone();
+        let mut pre = String::from("");
+        if atw(&ts, j.clone(), "in") {
+            let subj = cir_sub_src(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), &sc, &hostSc, cx.clone());
+            if (!subj.ok) {
+                return mk_irres(false, String::from(""));
+            }
+            headJs = subj.sub;
+            subjJs = subj.sub;
+            j = subj.at;
+        } else {
+            let key = ev_req_key(&cx.strreqs, 0i64, &evn, String::from(""));
+            if (key == "") {
+                return mk_irres(false, String::from(""));
+            }
+            let safe = safe_name(String::from("sub_").revl_concat(&key), &sc, &hostSc);
+            headJs = (String::from("{\"kind\": \"req\", \"name\": ").revl_concat(&jstr(&key))).revl_concat("}");
+            subjJs = (String::from("{\"kind\": \"name\", \"id\": ").revl_concat(&jstr(&safe))).revl_concat("}");
+            sc2 = sc.revl_push(Bind { name: String::from("rename ").revl_concat(&safe), ty: safe.clone() });
+            hostSc2 = hostSc.revl_push(safe.clone());
+            pre = ((((((((String::from("{\"step\": \"let-effect\", \"subscribe\": true, \"policy\": \"error\"").revl_concat(", \"acquire\": {\"kind\": \"subscribe\", \"stream\": ")).revl_concat(&headJs)).revl_concat(", \"policy\": \"error\"}")).revl_concat(", \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": ")).revl_concat(&jstr(&safe))).revl_concat("}, \"method\": \"close\", \"args\": []}")).revl_concat(", \"bind\": ")).revl_concat(&jstr(&safe))).revl_concat("}, ");
+        }
+        if (!atk(&ts, j, "{")) {
+            return mk_irres(false, String::from(""));
+        }
+        let bend = close_brace(&ts, j);
+        if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return mk_irres(false, String::from(""));
+        }
+        let evc = ev_contract(ts.clone(), evn.clone(), cx.al.clone());
+        if (!evc.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        let isafe = safe_name(item.clone(), &sc2, &hostSc2);
+        let isc = (sc2.revl_push(Bind { name: item.clone(), ty: String::from("") })).revl_push(Bind { name: String::from("rename ").revl_concat(&item), ty: isafe.clone() });
+        let bodyR = cir_emit_steps(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), cx.clone(), isc.clone(), hostSc2.clone(), String::from(""));
+        if (!bodyR.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        let step = (((((((((pre.revl_concat("{\"step\": \"stream-iter\", \"bind\": ")).revl_concat(&jstr(&isafe))).revl_concat(", \"subject\": ")).revl_concat(&subjJs)).revl_concat(", \"body\": [")).revl_concat(&bodyR.js)).revl_concat("]")).revl_concat(", \"event\": ")).revl_concat(&evc.js)).revl_concat("}");
+        let nacc = if (acc == "") { step.clone() } else { (acc.revl_concat(", ")).revl_concat(&step) };
+        return cir_body(ts.clone(), bend, end, cx.clone(), provs.clone(), isc.clone(), hostSc2.clone(), nacc.clone());
+    }
     if (atw(&ts, i, "every") || atw(&ts, i, "after")) {
         let mode = tkc(&ts, i).text;
         if (!atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "int")) {
@@ -27404,7 +27735,7 @@ fn ir_component(ts: Vec<Token>, i: i64, fname: &str, al: std::collections::HashM
     let lo = (j).checked_add(1i64).expect("revl: Int overflow");
     let hi = if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { (j).checked_add(1i64).expect("revl: Int overflow") } else { (end).checked_sub(1i64).expect("revl: Int overflow") };
     let reqSet = bind_names(reqs.clone(), 0i64, vec![]);
-    let cx = CCtx { reqs: reqSet.clone(), cases: case_binds(ts.clone(), al.clone()), reqops: req_op_returns(ts.clone(), reqs.clone(), al.clone(), vec![]), fns: module_callable_sigs(ts.clone()), fnps: module_callable_ptypes(ts.clone(), al.clone()), wit: witnessed_extern_names(&ts), al: al.clone(), cprovs: program_provisions(ts.clone()), cfg: comp_config_struct(ts.clone(), lo.clone(), hi.clone(), al.clone()), ln: 0i64, handles: program_names_handles(&ts), xundo: extern_undo_names(ts.clone()) };
+    let cx = CCtx { reqs: reqSet.clone(), cases: case_binds(ts.clone(), al.clone()), reqops: req_op_returns(ts.clone(), reqs.clone(), al.clone(), vec![]), fns: module_callable_sigs(ts.clone()), fnps: module_callable_ptypes(ts.clone(), al.clone()), wit: witnessed_extern_names(&ts), al: al.clone(), cprovs: program_provisions(ts.clone()), cfg: comp_config_struct(ts.clone(), lo.clone(), hi.clone(), al.clone()), ln: 0i64, handles: program_names_handles(&ts), xundo: extern_undo_names(ts.clone()), strreqs: stream_req_binds(reqs.clone(), 0i64, vec![]) };
     let sc0: Vec<Bind> = vec![];
     let bodyRes = cir_body(ts.clone(), lo.clone(), hi.clone(), cx.clone(), provs.clone(), sc0.clone(), vec![], String::from(""));
     let isoJs = ir_isolate(&ts, lo.clone(), hi.clone(), String::from(""));
@@ -27424,7 +27755,7 @@ fn ir_component(ts: Vec<Token>, i: i64, fname: &str, al: std::collections::HashM
         js = ((js.revl_concat(", \"routes\": {")).revl_concat(&rtRes.js)).revl_concat("}");
     }
     js.push_str("}");
-    let bodyV3 = ((bodyRes.ok && iceptRes.ok) && (str_has(&bodyRes.js, "\"kind\": \"builtin\"") || str_has(&bodyRes.js, "\"kind\": \"adt\"")));
+    let bodyV3 = ((bodyRes.ok && iceptRes.ok) && ((str_has(&bodyRes.js, "\"kind\": \"builtin\"") || str_has(&bodyRes.js, "\"kind\": \"adt\"")) || str_has(&bodyRes.js, "\"step\": \"stream-iter\"")));
     let v3 = (((((bodyV3 || comp_has_kw(&ts, lo.clone(), hi.clone(), "if")) || comp_has_kw(&ts, lo.clone(), hi.clone(), "fail")) || comp_has_kw(&ts, lo.clone(), hi.clone(), "every")) || comp_has_kw(&ts, lo.clone(), hi.clone(), "after")) || comp_has_kw(&ts, lo.clone(), hi.clone(), "spawn"));
     let v2 = ((comp_has_kw(&ts, lo.clone(), hi.clone(), "isolate") || comp_has_kw(&ts, lo.clone(), hi.clone(), "intercept")) || (rtRes.ok && (rtRes.js != "")));
     return mk_ircompr(js.clone(), v3, v2);
@@ -27601,7 +27932,7 @@ fn is_builtin_method(m: &str) -> bool {
 }
 
 fn is_host_root(n: &str) -> bool {
-    return (((n == "Map") || (n == "Pool")) || (n == "Job"));
+    return ((((n == "Map") || (n == "Pool")) || (n == "Job")) || (n == "Stream"));
 }
 
 fn builtin_ret(method: &str, recvTy: String) -> String {
