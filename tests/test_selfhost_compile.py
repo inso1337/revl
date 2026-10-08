@@ -638,6 +638,26 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # rest of it. `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
         # left it when the component dialect grew its `Arrow` arm, issue #1844:
         # its provide method passes an arrow to `run_loop`.)
+        # (issue #2091, DIAGNOSED and split out as issue #2181: this entry is
+        # NOT a whole-program combination of the families above — it is ONE
+        # cause, and it is the only py entry left. `fr3_json_int.rvl` declares
+        # no externs of its own; it imports them (`use "stdlib/json.rvl"
+        # { json_parse, json_stringify }`). The reference's `compile_files`
+        # merges every module in the import closure into one `Program`, and
+        # `src/revl/compiler.py:1127` appends each module's extern declarations
+        # to it — so the document's IR carries that module's WHOLE `pub extern`
+        # section: `json_parse`, `json_stringify` and `json_try_parse`, which
+        # the `use` list does not even name. The native chain links imports in
+        # the DRIVER, not in `lower_to_ir`: `selfhost/compile.rvl`'s
+        # `ul_link_uses` appends only the resolved target's `services[name]`
+        # row, and `lower_to_ir` never sees the used module at all, so a
+        # document that declares no `extern` of its own produces no `externs`
+        # key — and the emitted module loses those three extern bodies (py ref
+        # 3902 bytes vs native 958; ts ref 8540 vs native 1092). The emitter
+        # half is byte-exact when fed the REFERENCE IR, as asserted above. The
+        # native producer also emits no top-level `manifest` key; that is NOT
+        # this cause — every other document here is byte-exact without it, so
+        # no tier emitter reads it.)
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
     ),
     "ts": (
@@ -669,6 +689,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # (`../../../examples/java_match.rvl` left this list with issue #1845:
         # its component's `Err(_)` arm binds `__`, the reference's `_safe_name`
         # spelling of the soft keyword `_`.)
+        # (issue #2091, split out as issue #2181: the SAME single cause as the
+        # py entry above — the native import linker carries a `use`d module's
+        # `services` rows but not its `pub extern` declarations. It is named in
+        # full on the py entry; one producer fix closes the residual on both
+        # tiers.)
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
         # (issue #2092: `component_edges.rvl` left this list with the py entry
         # above. Its ONE async provide method was withheld by a producer that
