@@ -199,7 +199,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
 | swap.md | needs-work | 19 |  |
-| syntax-2.0.md | needs-work | 16 |  |
+| syntax-2.0.md | needs-work | 18 |  |
 | tee-attestation-root.md | current | 0 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |

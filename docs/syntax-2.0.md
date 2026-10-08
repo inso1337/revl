@@ -780,6 +780,13 @@ The rules, each of which is a refusal when broken:
   `crossings()`, and the per-call approval decision sees no crossing — so it
   never pends.
 
+One wording lags deliberately. The G8 "unclassified extern" **message** — the
+one that enumerates the classes — is mirrored byte for byte by the self-hosted
+admission gate, and `tests/test_selfhost_lower.py` forces the two texts to
+agree, so it still enumerates the gate's four. The **hint** beside it is the
+reference's own field and does name `local`; the message catches up in the slice
+that mirrors the class into `selfhost/lower.rvl`.
+
 What the audit sees that it could not see before: `revl audit --json` names the
 class (`{"name": "append_line", "class": "local", "backends": ["py"]}`) where a
 relayed `acquire` write was indistinguishable from a `pure` read, and the erase
