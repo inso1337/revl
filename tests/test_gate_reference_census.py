@@ -413,6 +413,10 @@ MODEL_REACH_SPAWN = ROOT / "tests" / "fixtures" / "model_reach_spawn"
 MODEL_REACH_SPAWN_WIDENING = (
     "tests/fixtures/model_reach_spawn/model_child_role_reach.rvl",
     "tests/fixtures/model_reach_spawn/model_grandchild_role_reach.rvl",
+    # issue #1193 slice 6: the child holds the role's reach itself, so only the
+    # spawn fold can refuse it, and before the consult-predicate correction the
+    # fold skipped a child whose tokens are not spelled `model.` anything
+    "tests/fixtures/model_reach_spawn/model_net_child_key_reach.rvl",
 )
 MODEL_REACH_SPAWN_CONTROLS = (
     "tests/fixtures/model_reach_spawn/ok_role_within_the_spawner.rvl",

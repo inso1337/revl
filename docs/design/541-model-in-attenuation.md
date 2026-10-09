@@ -3,7 +3,7 @@
 Roadmap: item 519 (issue #1193), from the 2026-09-19 external review. Slices 1
 and 2 are LANDED with this note and since, slice 3 is now landed in BOTH
 engines, slice 4 landed upstream ahead of this note, slice 5 is partial, and
-slice 6 — the consult predicate, which corrects slice 1's — is LANDED (section
+slice 6 (the consult predicate, which corrects slice 1's) is LANDED (section
 8).
 
 Design-doc number: 541. Numbers 531 to 538 were already taken on 2026-09-20,
@@ -183,12 +183,12 @@ the model-role sibling of the `dropped` column in the item-66 audit chain.
 
 ### 3.1 When the product is asked
 
-The product is computed for a component that holds a boundary that could be a
-model call AND either declares a `route model` block or makes a crossing a
-`model.<role>` token places on a role (slice 2, section 8). `_consults_a_model`
-decides the second, and its question is the exemption itself: a component that
-reaches ANY boundary is in the product, and one that reaches none is out of it
-— `bool(held)`, nothing more. `model.*`, the unnameable `*` and a `svc:`
+The product is computed for a component that reaches at least one boundary AND
+either declares a `route model` block or makes a crossing a `model.<role>`
+token places on a role (slice 2, section 8). `_consults_a_model` decides the
+FIRST of those, and its question is the exemption itself: a component that
+reaches ANY boundary is in the product, and one that reaches none is out of it.
+It is `bool(held)`, nothing more. `model.*`, the unnameable `*` and a `svc:`
 element (a boundary whose declaration names no token at all) are SUFFICIENT
 shapes for a held boundary to matter, and none of them is NECESSARY; reading
 the tokens instead of the emptiness was the gap issue #1193 slice 6 closed.
@@ -404,8 +404,8 @@ The gate half landed with the reference half, in PR #2119 (commit 1bb7e86f4,
 2026-10-07), which is what unblocked it: `selfhost/lower.rvl`'s
 `model_reach_spawn_base` is now the surface the spawn closure STARTS from, so
 `check_spawn` folds the same reach and both widening documents are refused with
-the reference's own sentence. No bypass is left for this corpus —
-`tests/test_gate_reference_census.py`'s `KNOWN_BYPASSES` is `set()` — and that
+the reference's own sentence. No bypass is left for this corpus
+(`tests/test_gate_reference_census.py`'s `KNOWN_BYPASSES` is `set()`), and that
 file's `MODEL_REACH_SPAWN` section pins every document by name in both
 directions, so a document that stops being decided alike is a failure rather
 than a new baseline entry. The fold stays inert for every program that declares
@@ -414,7 +414,7 @@ unfolded, keeping the gate's previous answer rather than guessing at a reach the
 fold cannot justify; that direction is deliberate, because a false refusal over
 the corpus is the regression the census exists to catch.
 
-S3's own predicate half was still wrong when it landed — see S6, which is the
+S3's own predicate half was still wrong when it landed; S6 is the
 correction. `model_consults` skipped a child holding no `model.`-spelled token
 in BOTH engines, so the fold S3 added was never asked about that child.
 
@@ -440,7 +440,7 @@ member is a question this slice does not ask.
 is "reaches nothing", and S1 wrote it as a token proxy: a held boundary counted
 only when its declared token was `model.*`, the unnameable `*`, or a `svc:`
 element. Each of those is SUFFICIENT and none is NECESSARY, and the difference
-is the issue's own motivating example — a component holding `net.request` that
+is the issue's own motivating example: a component holding `net.request` that
 routes through a model reaching `shell.exec` was accounted for what it HELD
 rather than for what the pair could reach. `_consults_a_model` is `bool(held)`
 in the reference and `model_consults` is `held.length() > 0` in the gate, so
@@ -452,12 +452,15 @@ wrong answer, in the same direction: a held set that is not empty and not
 `model.`-spelled took the `_model_consult` early return, so no edge existed for
 `_check_model_attenuation` or `_spawn_base_with_model` to fold and no
 `model_reach` row was emitted. Agreement was total, so
-`tests/test_gate_reference_census.py` could not redden it — it was a coverage
+`tests/test_gate_reference_census.py` could not redden it. It was a coverage
 hole and not a gate bypass. What closes it is a corpus that reaches the case:
 `tests/fixtures/model_reach_crossing/model_net_holder.rvl` (refused) with
 `ok_net_holder.rvl` (admitted, and it must keep its `model_reach` row) and
 `tests/fixtures/model_reach_spawn/model_net_child_role_reach.rvl` (refused,
-`MODEL` and not `G4`) with `ok_net_child_role_reach.rvl`. Three modules carry
+`MODEL` and not `G4`) with `ok_net_child_role_reach.rvl`, and
+`tests/fixtures/model_reach_spawn/model_net_child_key_reach.rvl` (refused,
+`G4`), where the child holds the role's reach itself so only the spawn fold
+can refuse it. Three modules carry
 the predicate's OLD body as an in-module `_token_test` and monkeypatch the fold
 back onto it, so the mutation that reopens the hole is executable and the
 tests go red rather than resting on the argument. The spawn widening lands in
@@ -477,7 +480,7 @@ whether the set is COMPLETE is section 9's second bullet and is unchanged.
   or cannot do. It is a declared claim, checked against the components that
   route to it, and nothing measures a member (section 5).
 * That `_consults_a_model` is complete. It asks the design note's question now
-  — does the component reach anything? — rather than the token proxy it used
+  (does the component reach anything?) rather than the token proxy it used
   before issue #1193 slice 6, so the shape this bullet used to name (a
   component reaching a model through a boundary whose declared token is neither
   `model.*`, `*`, nor untokened) is gated in. What is still unverified is the

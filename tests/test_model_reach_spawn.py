@@ -63,7 +63,7 @@ HINT = ("a spawned child's capability set must be covered by its spawner's "
         "holds what it grants, or narrow the capability on `{child}` (monotone "
         "shrinkage: narrowing is sound, widening is not)")
 
-REFUSED = ("child_role_reach", "grandchild_role_reach")
+REFUSED = ("child_role_reach", "grandchild_role_reach", "net_child_key_reach")
 ADMITTED = ("role_within_the_spawner", "spawner_holds_the_role_reach",
             "net_child_role_reach")
 # issue #1193's consult-predicate correction: refused by the COMPONENT's
@@ -79,10 +79,18 @@ MESSAGE = {
     # the same reach, one spawn edge further up
     "grandchild_role_reach": ("`Top` spawns `Mid`, granting it `shell.exec`, "
                               "but `Top` holds only `model.complete`" + TAIL),
+    # issue #1193's consult-predicate correction, on the spawn fold alone: the
+    # child holds the role's reach itself, so its own product admits it
+    "net_child_key_reach": ("`Supervisor` spawns `Worker`, granting it "
+                            "`shell.exec`, but `Supervisor` holds only "
+                            "`net.request`" + TAIL),
 }
-SPAWNER = {"child_role_reach": "Supervisor", "grandchild_role_reach": "Top"}
-CHILD = {"child_role_reach": "Worker", "grandchild_role_reach": "Mid"}
-LINE = {"child_role_reach": 24, "grandchild_role_reach": 18}
+SPAWNER = {"child_role_reach": "Supervisor", "grandchild_role_reach": "Top",
+           "net_child_key_reach": "Supervisor"}
+CHILD = {"child_role_reach": "Worker", "grandchild_role_reach": "Mid",
+         "net_child_key_reach": "Worker"}
+LINE = {"child_role_reach": 24, "grandchild_role_reach": 18,
+        "net_child_key_reach": 29}
 
 
 def _src(stem: str) -> str:
@@ -247,3 +255,21 @@ def test_the_control_keeps_its_row_and_the_token_test_drops_it(monkeypatch):
     monkeypatch.setattr(lower, "_consults_a_model", _token_test)
     assert not compile_source(src, "ok_net_child_role_reach.rvl")[
         "manifest"].get("model_reach")
+
+
+def test_the_token_test_admits_the_child_that_holds_the_role_reach(monkeypatch):
+    """The spawn-fold half of the mutation, isolated. In
+    `model_net_child_key_reach.rvl` `Worker` holds `shell.exec` itself, so its
+    own model product admits it and only the spawn fold can refuse. Restore the
+    token-keyed predicate and the fold skips `Worker`, whose held tokens are
+    `net.request` and `shell.exec`, neither spelled `model.` anything: the
+    spawn grants only `net.request`, what `Supervisor` holds, and the program
+    is ADMITTED while the child reaches `shell.exec` through role `tool`."""
+    from revl import lower
+    src = _src("model_net_child_key_reach")
+    assert "model." not in src.split("component Worker", 1)[1]
+    monkeypatch.setattr(lower, "_consults_a_model", _token_test)
+    ir = compile_source(src, "model_net_child_key_reach.rvl")
+    inst = ir["manifest"]["instances"][0]
+    assert inst["granted"] == ["net.request"]
+    assert inst["attenuated"] == []

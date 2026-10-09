@@ -1,0 +1,30 @@
+// REFUSED G4 (item 519, issue #1193 slice 6): the spawn-fold half of the
+// consult-predicate correction, isolated from the component's own product.
+// `Worker` holds `net.request` and `shell.exec` (it requires the `Shell`
+// service) but crosses only `net`, and routes `go` through model role `tool`,
+// which reaches `shell.exec`. `Worker` holds that reach itself, so its own
+// model product admits it. `Supervisor` holds only `net.request`.
+//
+// No token `Worker` holds is spelled `model.` anything, so before this slice
+// the spawn fold never asked what the role could reach: the spawn granted
+// `net.request`, exactly what the supervisor holds, and the program was
+// ADMITTED whole while the child reached `shell.exec` through its role. The
+// role's reach is now folded into the surface the spawn closure starts from,
+// and the monotone-shrinkage refusal fires at the spawn statement. The file
+// name's prefix is the expected verdict (`model_` refused, `ok_` admitted);
+// tests/test_model_reach_spawn.py holds it.
+
+model role tool on_device reaches [shell.exec]
+
+service Shell { emission[shell.exec] fn run(c: Str) -> Str }
+service Net { emission[net.request] fn fetch(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+
+component Worker requires net: Net requires sh: Shell provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit net.fetch("x") return "x" } }
+}
+
+component Supervisor requires net: Net {
+  let w = effect spawn Worker with { } undo w.dispose()
+}

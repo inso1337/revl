@@ -1321,6 +1321,7 @@
    "tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl",
    "tests/fixtures/model_reach_spawn/model_child_role_reach.rvl",
    "tests/fixtures/model_reach_spawn/model_grandchild_role_reach.rvl",
+   "tests/fixtures/model_reach_spawn/model_net_child_key_reach.rvl",
    "tests/fixtures/model_reach_spawn/model_net_child_role_reach.rvl",
    "tests/fixtures/model_reach_spawn/ok_net_child_role_reach.rvl",
    "tests/fixtures/model_reach_spawn/ok_role_within_the_spawner.rvl",

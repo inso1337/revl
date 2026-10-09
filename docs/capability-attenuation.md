@@ -195,7 +195,7 @@ role can only steer an action that reaches a boundary and a component that
 reaches none has no ceiling for a role to widen. The held token's SPELLING does
 not decide it: a component holding `net.request` that routes through a model
 reaching `shell.exec` is refused, and was not before issue #1193's
-consult-predicate correction — `model.*`, the unnameable `*` and a `svc:`
+consult-predicate correction: `model.*`, the unnameable `*` and a `svc:`
 element are sufficient shapes for the predicate, never necessary ones. An
 admitted composition records the product per edge under
 `manifest.model_reach`, including `attenuated` — what the component holds that
