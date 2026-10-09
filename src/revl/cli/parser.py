@@ -1585,6 +1585,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "FILE` rolls forward or back and states a checked verdict "
                           "(docs/crash-recovery.md). With --placement, each process "
                           "writes FILE.<process> and FILE is the run's index")
+    run.add_argument("--require-settled-wal", action="store_true",
+                     help="refuse a new run while the WAL contains unresolved emissions")
     run.add_argument("--trace", default=None, metavar="FILE",
                      help="write a causal lifecycle trace (JSONL) — every "
                           "transition carries the cause chain behind it, "
