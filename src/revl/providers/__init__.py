@@ -83,8 +83,11 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
     return hosts
 
 
-#: The longest the plan waits for a server to say what it holds, in seconds.
-#: A completion timeout (default 120s) is sized for generating text; this
+#: The longest the plan waits on any one network operation (the connect, or
+#: one read of the answer) when asking a server what it holds, in seconds.
+#: It is a per-read socket timeout, not a deadline for the whole answer: a
+#: server that keeps sending a byte at a time can hold the plan longer. A
+#: completion timeout (default 120s) is sized for generating text; this
 #: question is a listing, and a plan that waits on it blocks every host.
 PLAN_PROBE_TIMEOUT = 10.0
 
@@ -149,10 +152,12 @@ def plan_time_residency(config, wanted: dict) -> dict:
     that cannot see that is refused rather than decided on an assumption.
 
     Each server (base URL and credential) is asked once per plan, so every
-    host is ranked against the same snapshot, and each question waits at most
-    `PLAN_PROBE_TIMEOUT` seconds (or the binding's own timeout, if shorter):
-    an unanswering server costs a plan one bounded wait, not one completion
-    timeout per host and role.
+    host is ranked against the same snapshot, and each network read of that
+    question waits at most `PLAN_PROBE_TIMEOUT` seconds (or the binding's own
+    timeout, if shorter): a server that does not answer costs a plan one
+    bounded wait, not one completion timeout per host and role. The bound is
+    per read, not overall, so a server that answers a byte at a time is not
+    cut off by it.
     """
     held: dict = {}
     reports: dict = {}

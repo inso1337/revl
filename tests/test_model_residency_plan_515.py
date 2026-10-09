@@ -453,9 +453,10 @@ def test_each_server_is_asked_once_per_plan(tmp_path, server):
 def test_the_plan_time_question_waits_a_bounded_time(tmp_path, server,
                                                      monkeypatch):
     """The binding's completion timeout (120s by default) is sized for
-    generating text; the plan-time listing waits at most
-    `PLAN_PROBE_TIMEOUT`, and a server that does not answer within it is the
-    same named refusal as one that is down."""
+    generating text; each read of the plan-time listing waits at most
+    `PLAN_PROBE_TIMEOUT` (a per-read bound, not an overall deadline), and a
+    server that does not answer within it is the same named refusal as one
+    that is down."""
     monkeypatch.setattr(_providers_mod, "PLAN_PROBE_TIMEOUT", 0.3)
     files, processes = _program(tmp_path)
     path = _providers(tmp_path, {"small": _role(server.base)})
@@ -465,6 +466,67 @@ def test_the_plan_time_question_waits_a_bounded_time(tmp_path, server,
     assert time.monotonic() - started < 1.5
     assert residency == {}
     assert problem and "host `edge`" in problem and server.base in problem
+
+
+class RawServer:
+    """A socket server that answers every connection with `reply`, bytes
+    verbatim, then closes: the malformed HTTP a real server can send and
+    the fake above cannot."""
+
+    def __init__(self, reply: bytes) -> None:
+        self.reply = reply
+        self.hits = 0
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                self.hits += 1
+                conn.settimeout(2.0)
+                try:
+                    conn.recv(65536)
+                    conn.sendall(self.reply)
+                except OSError:
+                    pass
+
+    @property
+    def base(self) -> str:
+        return f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+@pytest.mark.parametrize("reply", [
+    # a body shorter than its Content-Length: http.client.IncompleteRead
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+    b"Content-Length: 100\r\n\r\n{\"models\": [",
+    # a status line that is not HTTP: http.client.BadStatusLine
+    b"NOT-HTTP garbage\r\n\r\n",
+], ids=["truncated-body", "bad-status-line"])
+def test_a_malformed_http_answer_refuses_by_name(tmp_path, reply):
+    """`http.client.HTTPException` is not an `OSError`, so a malformed answer
+    used to escape as a traceback, skipping the conductor's abort. It is the
+    same named refusal as a server that is down."""
+    raw = RawServer(reply)
+    base = raw.base
+    try:
+        files, processes = _program(tmp_path)
+        path = _providers(tmp_path, {"small": _role(base)})
+        residency, problem = _read(files, processes, path)
+    finally:
+        raw.close()
+    assert residency == {}
+    assert problem and "host `edge`" in problem and base in problem
+    assert "malformed HTTP response" in problem
+    assert raw.hits == 1
 
 
 def test_a_providers_file_that_cannot_be_read_refuses(tmp_path, server):

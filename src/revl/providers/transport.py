@@ -30,6 +30,7 @@ THE THREE RULES THIS FILE ENFORCES
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -125,6 +126,11 @@ def request_json(url: str, *, body: dict | None = None,
         raise fail(f"timed out after {timeout}s waiting for {url}") from None
     except OSError as exc:
         raise fail(f"connection to {url} failed: {exc}") from None
+    except http.client.HTTPException as exc:
+        # not an OSError: a body shorter than its Content-Length
+        # (IncompleteRead), a status line that is not HTTP (BadStatusLine)
+        raise fail(f"malformed HTTP response from {url}: "
+                   f"{type(exc).__name__}") from None
 
     if status != 200:
         raise fail(f"HTTP {status} from {url}: "
