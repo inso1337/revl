@@ -68,6 +68,16 @@ if str(GATE_DIR) not in sys.path:
     sys.path.insert(0, str(GATE_DIR))
 gate = load_by_path("gate_under_test", TOOL)
 
+
+def _roadmap_text() -> str:
+    """The main file plus docs/roadmap-archive/, as the gate reads it. A gate
+    from before the archive (`$RVL_ROADMAP_GATE_DIR` pointed at an older
+    tools/) has no loader and reads the one file it knew."""
+    loader = getattr(gate, "read_roadmap", None)
+    if loader is None:
+        return ROADMAP.read_text(encoding="utf-8")
+    return loader(ROADMAP).text
+
 ROADMAP = REPO_ROOT / "docs" / "v2.0-roadmap.md"
 
 # The argv `.github/workflows/ci.yml`'s `lint` job runs, with `--no-fetch` so a
@@ -481,7 +491,7 @@ def test_the_audit_catches_rows_the_citation_gate_cannot_see():
     them anything. Asserted as a lower bound: the roadmap is a living document
     and other lanes add rows to it.
     """
-    text = gate.read_roadmap(ROADMAP).text  # main file + docs/roadmap-archive/
+    text = _roadmap_text()
     records = gate.inprogress_records(text)
     inflight = [r for r in records if r["glyph"] in gate.INFLIGHT_GLYPHS]
     assert len(inflight) >= 20, (
@@ -515,7 +525,7 @@ def test_item_523_is_no_longer_an_in_progress_row():
     contradicted its body. The two REAL residuals (items 534 and 535) are
     deliberately left alone: their residuals are still in the tree.
     """
-    text = gate.read_roadmap(ROADMAP).text  # main file + docs/roadmap-archive/
+    text = _roadmap_text()
     assert not [r for r in gate.inprogress_records(text) if r["number"] == "523"]
     row = [it for it in gate.items(text) if it["number"] == "523"]
     assert len(row) == 1

@@ -68,7 +68,7 @@ class RoadmapSource:
         def sub(m: re.Match) -> str:
             n = int(m.group(1))
             return self.label(n) if n > self.main_lines else m.group(0)
-        return re.sub(r"(?<![\w/.:-])L(\d+)\b", sub, report)
+        return re.sub(r"(?<![\w.:])L(\d+)\b", sub, report)
 
 
 def read_roadmap(roadmap: Path) -> RoadmapSource:

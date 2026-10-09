@@ -67,6 +67,9 @@ def test_the_archive_joins_from_its_first_section_heading(tmp_path):
     assert src.label(5) == "L5"
     assert src.relabel(f"L5: x; L{closed_line}: y; L2 stays") == (
         "L5: x; roadmap-archive/01-open.md:L7: y; L2 stays")
+    # The duplicate-block finding joins labels with "/".
+    assert src.relabel(f"L5/L{closed_line}") == (
+        "L5/roadmap-archive/01-open.md:L7")
 
 
 def test_every_archived_item_is_closed_and_keeps_its_section():
