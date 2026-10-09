@@ -836,8 +836,11 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
     last_run_complete = next(
         (i for i in range(len(tail) - 1, -1, -1)
          if tail[i].get("record") == "run-complete"), -1)
+    settled = {r.get("seq") for r in records
+               if r.get("record") in ("emission-complete", "operator-resolved")}
     steady = [r for r in tail[last_run_complete + 1:]
-              if r.get("record") == "effect"]
+              if r.get("record") == "effect"
+              and not (r.get("kind") == "emission" and r.get("seq") in settled)]
     steady, steady_nested = _split_nested(steady, records, wal.get("callers"))
     steady_residue = _steady_state_residue(steady)
     steady_residue["nested"] = _nested_entries(steady_nested)
