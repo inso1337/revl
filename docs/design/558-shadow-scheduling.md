@@ -765,13 +765,22 @@ and a comparison that could not run must be named rather than skipped:
 4. **both** generations resolve against the window's schedule
    (`runtime.resolve`), so `realm-unknown`, `component-unknown`,
    `action-uncrossed` and `stamp-underived` are reached before any world;
-5. the window's crossings and share are checked against the running
+5. the authority diff is MEASURED from the two compositions
+   (`canary.judge_authority`, the `audit_diff` surface, fail-closed) and a
+   candidate that moved any axis is refused `authority-widened` (or
+   `diff-unmeasured` when the diff could not be built), whatever the plan's
+   `authority_diff` says. The plan is operator-written and the gate reads only
+   the plan and the running composition, so without this step a plan that
+   declared every axis empty would promote a candidate that widened reach
+   (issue #1222). A plan that declares a widening the compositions do not show
+   is still refused by the gate's own authority stage;
+6. the window's crossings and share are checked against the running
    composition's crossings for that (component, action) — a window stamped
    `summarize` whose indices are `classify`'s anchor is `stamp-underived`,
    because the indices are derived from the composition rather than trusted;
-6. the two worlds are derived and the gate runs (`shadow_routing.decide` over
+7. the two worlds are derived and the gate runs (`shadow_routing.decide` over
    the composition → schedule → gate walk);
-7. the verdict is printed (`routing.render`, or `verdict.as_dict()` for
+8. the verdict is printed (`routing.render`, or `verdict.as_dict()` for
    `--json`) and the exit status follows `verdict.decision`.
 
 `_refused` builds a refusal verdict with the gate's own
@@ -788,8 +797,13 @@ is a pair of generations that agree on every recorded answer and still diverge
 in the world, so that a comparison over the records promotes and the real
 comparison reverts.
 
-The incumbent's own `summarize` with one extra `emit model.complete("extra")
-compensate model.cancel("extra")` spliced in front of it is that generation.
+The incumbent's own `summarize` with its first completion relabelled
+(`emit model.complete("p0")` becomes `emit model.complete("extra")`) is that
+generation: the same kinds and the same counts, so the measured authority diff
+is empty on every axis. (Splicing an EXTRA completion in front of the body is
+not this generation: it raises the emission ceiling of `model.complete` and
+`model.cancel`, which is a budget widening, and step 5 refuses it before any
+world is compared.)
 All twenty of the window's pairs name the same completion on both sides — the
 new test file asserts the agreement pairwise rather than assuming it — and the
 two derived worlds differ at replay step 2, attributed to `(Classifier,

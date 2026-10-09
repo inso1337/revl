@@ -12,7 +12,9 @@ artifacts:
   by `ShadowLedger.as_window` and read back by `routing.window_from_dict`.
 
 It adds NO decision logic. It reads the two documents, resolves the recorded
-schedule against the two compositions the window was taken over, attaches item
+schedule against the two compositions the window was taken over, measures
+their authority diff with the canary's own judge (the plan's is operator-written
+and is not trusted for it), attaches item
 496's two recorded worlds (derived, not carried — see
 `docs/design/558-shadow-scheduling.md`), and calls the same
 composition -> schedule -> gate walk the tests call. It decides; it does not
@@ -143,6 +145,7 @@ def _run_promote(args) -> int:
     from .. import shadow_runtime as runtime
     from ..compiler import compile_files
     from ..errors import RevlError
+    from ..mcp import canary
     from ..model_evidence import resolve_key
 
     window, failure = _read_document(args.window, "window")
@@ -181,6 +184,21 @@ def _run_promote(args) -> int:
                  ("the candidate composition", successor)))
     if refused is not None:
         return _refused(plan, refused[0], refused[1], refused[2])
+
+    # The plan's `authority_diff` is operator-written, and the gate reads only
+    # the plan and the running composition, so a plan that says "nothing
+    # widened" would be believed. The diff is MEASURED here from the two
+    # compositions with the canary's own judge (`audit_diff`, fail-closed),
+    # and a candidate that moved any axis is refused whatever the plan says
+    # (issue #1222). A plan that declares a widening the compositions do not
+    # show is still refused by the gate's own authority stage.
+    judged = canary.judge_authority(running, successor)
+    if not judged["ok"]:
+        link = (promotion.AUTHORITY_WIDENED if "diff" in judged
+                else promotion.DIFF_UNMEASURED)
+        return _refused(plan, link, f"measured from the two compositions: "
+                                    f"{judged['reason']}",
+                        runtime.COMPOSITION_STAGE)
 
     worlded = replace(ledger, entries=_with_recorded_worlds(
         ledger.entries, running, successor))

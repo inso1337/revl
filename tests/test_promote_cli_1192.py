@@ -646,6 +646,87 @@ def test_a_candidate_that_does_not_declare_the_component_is_refused_before_any_w
     assert "the candidate composition" in out
 
 
+#: A sibling component that emits a capability the incumbent never reaches.
+#: It is outside the shadowed slice, so the slice's two worlds still compare
+#: identical and every recorded pair still agrees: on the evidence alone this
+#: candidate promotes. Only the authority diff of the two compositions sees it.
+WIDENING_SIBLING = """
+service Net {
+  emission[net.fetch] fn fetch(url: Str) -> Str
+}
+
+service Fetch {
+  emission fn get(url: Str) -> Str
+}
+
+component Fetcher requires net: Net provides out: Fetch {
+  provide out {
+    fn get(url) {
+      emit net.fetch(url)
+      return url
+    }
+  }
+}
+"""
+
+
+def test_a_candidate_that_widens_authority_is_refused_whatever_the_plan_says(
+        sources, tmp_path, running_ir, capsys):
+    """The authority diff is MEASURED from the two compositions, not read
+    from the plan (issue #1222, item 543).
+
+    The plan document is operator-written, and its `authority_diff` says every
+    axis is empty. The candidate adds an `emit net.fetch` crossing in a
+    sibling component, which `canary.authority_diff` reports on the taint
+    axis. The window agrees on every pair and the slice's worlds are
+    identical, so without the measurement the verb prints `PROMOTE` and exits
+    0 on a candidate that widened reach.
+
+    Mutation: drop the `canary.judge_authority` call in `_run_promote`. The
+    verb promotes, exit 0, and both assertions go red."""
+    ledger = window_ledger(running_ir)
+    window = write_json(tmp_path / "window.json", ledger.as_window())
+    document = plan_document(ledger)
+    assert not any(document["authority_diff"].values())
+    plan = write_json(tmp_path / "plan.json", document)
+    widening = tmp_path / "widening.rvl"
+    widening.write_text(live.CANDIDATE_SAME_SRC + WIDENING_SIBLING,
+                        encoding="utf-8")
+    judged = canary.judge_authority(running_ir, compile_source(
+        live.CANDIDATE_SAME_SRC + WIDENING_SIBLING, "widening.rvl"))
+    assert not judged["ok"] and judged["diff"]["taint"]
+
+    assert run_verb(sources, window=window, plan=plan,
+                    candidate=widening) == 1
+    out = capsys.readouterr().out
+    assert sp.AUTHORITY_WIDENED in out
+    assert "decision: PROMOTE" not in out
+    assert "net.fetch" in out
+
+
+def test_a_candidate_that_adds_a_completion_is_a_budget_widening(
+        sources, tmp_path, running_ir, capsys):
+    """The same measurement on the budget axis, inside the shadowed slice.
+
+    One extra `emit model.complete(...) compensate model.cancel(...)` in front
+    of `summarize` raises both capabilities' emission ceilings. The plan says
+    nothing widened, every recorded pair agrees, and the verb refuses on the
+    measured diff before it compares a world."""
+    ledger = window_ledger(running_ir)
+    window = write_json(tmp_path / "window.json", ledger.as_window())
+    plan = write_json(tmp_path / "plan.json", plan_document(ledger))
+    added = tmp_path / "candidate_added.rvl"
+    added.write_text(live.source().replace(
+        "    fn summarize(text) {\n",
+        '    fn summarize(text) {\n      emit model.complete("extra")'
+        ' compensate model.cancel("extra")\n', 1), encoding="utf-8")
+
+    assert run_verb(sources, window=window, plan=plan, candidate=added) == 1
+    out = capsys.readouterr().out
+    assert sp.AUTHORITY_WIDENED in out
+    assert "cardinality:Classifier:model.complete" in out
+
+
 # ==========================================================================
 # 8. the two compositions ARE the two worlds, and the document carries none
 # ==========================================================================
@@ -705,11 +786,19 @@ def test_a_world_that_diverges_reverts_a_live_window_that_agrees_on_every_answer
     agree.
 
     The successor generation here is the incumbent's own `summarize` body with
-    ONE extra `model.complete` in front of it. Every one of the window's
+    its first completion relabelled (`model.complete("p0")` becomes
+    `model.complete("extra")`): the same kinds and the same counts, so the
+    measured authority diff is empty on every axis. Every one of the window's
     twenty pairs names the same completion on both sides -- so a comparison
     over the RECORDS finds nothing -- and the two generations' recorded worlds
     differ at replay step 2, which is what item 496's walker compares. A live
     route REVERTS and names the field.
+
+    An earlier version of this row ADDED a completion in front of the body.
+    That generation raises the per-capability emission ceiling of
+    `model.complete` and `model.cancel`, which is a budget widening, and the
+    verb now refuses it as `authority-widened` before any world is compared
+    (see the authority row above).
 
     Mutation: compare the records instead of the worlds (`_world_divergence`
     returning `None`). Twenty agreeing pairs, `PROMOTE`, exit 0.
@@ -721,9 +810,7 @@ def test_a_world_that_diverges_reverts_a_live_window_that_agrees_on_every_answer
     extra = tmp_path / "candidate_extra.rvl"
     extra.write_text(
         live.source().replace(
-            "    fn summarize(text) {\n",
-            '    fn summarize(text) {\n      emit model.complete("extra")'
-            ' compensate model.cancel("extra")\n', 1),
+            'emit model.complete("p0")', 'emit model.complete("extra")', 1),
         encoding="utf-8")
 
     # the records agree, pairwise, on all twenty pairs

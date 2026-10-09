@@ -851,6 +851,10 @@ The verb decides; it does not land. Exit 0 means a `PROMOTE` whose replay
 comparison actually ran; every other outcome (`REFUSE`, `REVERT`, a
 malformed document, an unresolvable generation) exits non-zero.
 
+The authority diff is measured from `FILES` and `--candidate`, not taken from
+the plan: a candidate that widens any authority axis is refused
+`authority-widened` even when the plan's `authority_diff` is empty.
+
 - `FILES` - the running (incumbent) composition's `.rvl` files; the window's
   worlds are derived from these and the candidate generation (required).
 - `--candidate FILE` - the successor generation of the slice's provider;
