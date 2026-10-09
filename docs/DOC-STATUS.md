@@ -153,7 +153,7 @@ was corrected by hand and had drifted back within a day.
 | mcp-proxy.md | current | 0 |  |
 | mcp-reference.md | current | 18 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
-| model-scheduling.md | needs-work | 8 |  |
+| model-scheduling.md | needs-work | 7 |  |
 | namespacing.md | needs-work | 16 |  |
 | network-path.md | needs-work | 24 |  |
 | network-placement.md | needs-work | 4 |  |

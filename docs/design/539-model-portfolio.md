@@ -847,12 +847,22 @@ needs, and where each stands:
    reports it (a new line or spec channel back to the conductor), or the
    conductor asks each managed binding's server `/api/ps` at plan time for
    what is resident now. That second half — the conductor *consuming* the
-   residency at plan time — waits behind #2118.
-2. **A ranking rule.** Deferred to #2118. Decision 12 stands unchanged: the
-   written order is the preference, and residency or measured load cost may
-   never implicitly reorder candidates. Whether a resident fallback should
-   beat a cold first choice is a program author's question, so it needs its
-   own surface — a per-arm opt-in, never a global flag and never a default.
+   residency at plan time — is built: `revl.providers.plan_time_residency()`
+   asks each managed binding's server `/api/ps` for what it holds, and the
+   conductor hands that to the scheduler it already had. Nothing is asked —
+   not even the configuration read — unless `--providers` names the bindings
+   and an arm this placement schedules wrote the clause, so a composition that
+   does not use it plans byte for byte as it did; a server that cannot be
+   asked refuses by host and server before anything spawns rather than
+   defaulting. The recorded-`timeline` reader stays the route a re-plan over
+   live provisions uses, because a timeline that already happened is not a
+   fresh plan. See `docs/model-scheduling.md`.
+2. **A ranking rule.** Built, via #2118 (merge `da44b7ab3`): the per-arm
+   `prefer resident` opt-in, read by the reference and by the self-host gate
+   (`fb1a9916e`). Decision 12 stands unchanged: the written order is the
+   preference, and residency or measured load cost may never implicitly
+   reorder candidates. The clause is on one arm, never a global flag and never
+   a default, and it is refused where it would rank nothing.
 3. **A cost on the profile.** Decided out of scope: item 538's measured cost
    covers it, and S1's grammar gains no clause. A declared load cost would be
    a second source of truth that can disagree with the measurement, and a

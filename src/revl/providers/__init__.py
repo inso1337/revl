@@ -37,7 +37,8 @@ from .host import (ModelHost, PlacementRefused, build_hosts, close_hosts,
 from .placement import (Placement, Refusal, check_bindings, model_keys,
                         model_operations, placement_of_files,
                         placement_of_program)
-from .provision import ProvisionRefused, Provisions, RoleProvision
+from .provision import (ProvisionRefused, Provisions, RoleProvision,
+                        gpu_share)
 from .transport import ProviderError, redact, request_json
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "load_config",
     "missing_credentials", "model_keys", "model_operations", "open_hosts",
     "parse_config", "placement_of_files", "placement_of_program",
+    "plan_time_residency",
     "provision_residue", "provision_summaries", "read_credential",
     "rebind_problem", "redact",
     "request_json",
@@ -79,6 +81,104 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
             "not set: " + ", ".join(f"`{env}` (role `{role}`)"
                                     for role, env in missing))
     return hosts
+
+
+#: The longest the plan waits on any one network operation (the connect, or
+#: one read of the answer) when asking a server what it holds, in seconds.
+#: It is a per-read socket timeout, not a deadline for the whole answer: a
+#: server that keeps sending a byte at a time can hold the plan longer. A
+#: completion timeout (default 120s) is sized for generating text; this
+#: question is a listing, and a plan that waits on it blocks every host.
+PLAN_PROBE_TIMEOUT = 10.0
+
+
+def _plan_time_report(adapter, host: str, role: str) -> dict:
+    """The server's `/api/ps` answer for `plan_time_residency`, checked to
+    carry a list of what it holds. Raises `ProviderError` naming the host,
+    the role and the server otherwise."""
+    binding = adapter.binding
+
+    def refused(why: str) -> ProviderError:
+        return ProviderError(
+            f"host `{host}`: cannot ask {binding.base_url} what it holds for "
+            f"model role `{role}`. The arm placed here wrote `prefer "
+            f"resident`, so the placement is ranked against what the host "
+            f"holds and cannot be decided without it; start the server, or "
+            f"drop the clause from that arm ({why})")
+
+    try:
+        raw = adapter.residency_report(
+            timeout=min(binding.timeout, PLAN_PROBE_TIMEOUT))
+    except (ProviderError, OSError) as exc:
+        raise refused(str(exc)) from None
+    models = raw.get("models")
+    if not isinstance(models, list):
+        # `{}` or a non-list `models` would otherwise read as "holds
+        # nothing" and silently drop the preference the author wrote
+        raise refused(
+            "its answer has no `models` list" if models is None else
+            f"its answer's `models` is a JSON {type(models).__name__}, "
+            f"not a list")
+    return raw
+
+
+def plan_time_residency(config, wanted: dict) -> dict:
+    """`{host: {role: device}}`: what each host already holds, asked of the
+    servers at plan time (item 515 / issue #1189 - the acquisition half of
+    §11.6 item 1).
+
+    `wanted` is `{host: (role, ...)}` from
+    `revl.model_schedule.residency_candidates()`: the candidate roles of the
+    arms that wrote `prefer resident`, per host. Only those roles are asked
+    about, each through its own binding, so a placement that ranks nothing
+    makes no request and a host that ranks nothing is not asked. A role whose
+    binding is not managed (or not configured) is skipped: revl does not load
+    it, so what a server holds for it is not something this placement can
+    reuse.
+
+    The device is the CLASS the server's own report implies, read the way
+    `provision.gpu_share` reads the server's own accounting: a member the
+    server reports holding entirely in GPU memory is on a `gpu`, one it
+    reports holding none of there is on a `cpu`. The class is what a
+    ranking reads (a residency is keyed by role and only its keys are
+    compared, `model_schedule._Search.order`), and it is also carried into
+    the host's spec, so a member whose share the server does not report is
+    left OUT rather than guessed at: a guess would be re-derived as a fact by
+    the child that verifies the spec.
+
+    Raises `ProviderError` naming the host and the server when a server
+    cannot be asked, or answers with no list of what it holds. A host whose
+    arm wrote `prefer resident` is planned against what it holds, so a plan
+    that cannot see that is refused rather than decided on an assumption.
+
+    Each server (base URL and credential) is asked once per plan, so every
+    host is ranked against the same snapshot, and each network read of that
+    question waits at most `PLAN_PROBE_TIMEOUT` seconds (or the binding's own
+    timeout, if shorter): a server that does not answer costs a plan one
+    bounded wait, not one completion timeout per host and role. The bound is
+    per read, not overall, so a server that answers a byte at a time is not
+    cut off by it.
+    """
+    held: dict = {}
+    reports: dict = {}
+    for host, roles in sorted(wanted.items()):
+        for role in roles:
+            binding = config.binding(role)
+            if binding is None or not binding.managed:
+                continue
+            adapter = Adapter(binding)
+            key = (binding.base_url, binding.api_key_env)
+            if key not in reports:
+                reports[key] = _plan_time_report(adapter, host, role)
+            entry = adapter.resident_in(reports[key])
+            if entry is None:
+                continue
+            share = gpu_share(entry)
+            if share == 100:
+                held.setdefault(host, {})[role] = "gpu"
+            elif share == 0:
+                held.setdefault(host, {})[role] = "cpu"
+    return held
 
 
 def rebind_problem(ir, files, config_path, hosts) -> str | None:

@@ -2231,6 +2231,50 @@ def capability_realm_diagnostic(processes: dict, ir: dict,
     return None
 
 
+def _plan_time_residency(files, processes: dict,
+                         providers_path: str | None, ir=None) -> tuple:
+    """What each host that wrote `prefer resident` already holds, as
+    `({host: {role: device}}, refusal)` (item 515, issue #1189, the second
+    half of §11.6 item 1).
+
+    The scheduler has ranked by residency since item 2118 and had no caller
+    that gave it one; this is that caller. It is off unless `--providers`
+    names the bindings AND an arm this placement schedules wrote the clause,
+    because a host that ranks nothing must not be planned against a server it
+    does not otherwise need - so a composition that does not use `prefer
+    resident` makes no request and is scheduled exactly as it was.
+
+    A server that cannot be asked is a refusal, not a default. A host whose
+    arm opted in is planned against what it holds, and planning it against
+    nothing would silently undo the preference the author wrote.
+
+    The configuration is checked against the placement (`bind_for_run`, the
+    check `_model_host_plan` makes) BEFORE any server is asked, so a binding
+    the placement refuses (an `on_device` role bound to an off-device URL, a
+    role the program does not declare, an unset credential) is refused
+    without being sent a request or a credential. `ir` is the compiled
+    program; it is compiled from `files` when not given.
+    """
+    if not providers_path:
+        return {}, None
+    from . import model_schedule  # noqa: PLC0415 - loaded only at plan time
+    from . import providers as _p  # noqa: PLC0415
+    if not model_schedule.residency_wanted(files, processes):
+        return {}, None
+    wanted = model_schedule.residency_candidates(files, processes)
+    try:
+        if ir is None:
+            ir = compile_files(files)
+        _p.bind_for_run(ir, files, providers_path)
+        config = _p.load_config(providers_path)
+        return _p.plan_time_residency(config, wanted), None
+    except (_p.ProviderConfigError, _p.PlacementRefused, _p.ProviderError,
+            RevlError) as exc:
+        return {}, str(exc)
+    except OSError as exc:
+        return {}, f"cannot read provider configuration: {exc}"
+
+
 def _model_schedules(files, processes: dict,
                      residency: dict | None = None) -> tuple[str | None, dict]:
     """Schedule the routed model actions onto each host's declared devices
@@ -2240,13 +2284,14 @@ def _model_schedules(files, processes: dict,
     no routed model action has none, so its spec is unchanged.
 
     `residency` is `{host: {role: device}}` for what each host already holds
-    at plan time, as `model_schedule.resident_roles()` reads it off the landed
-    reader (item 2118). It reaches the decision only through an arm that wrote
-    `prefer resident`, so passing it cannot reorder an arm that did not opt
-    in, and passing none is the written order every caller had before. The
-    default is `None` because no plan-time caller observes a host's residency
-    yet - acquisition is item 1's second half, and this parameter is the seam
-    it plugs into rather than a ranking switch."""
+    at plan time, as `model_schedule.resident_roles()` reads it off a live
+    provision and `revl.providers.plan_time_residency()` asks a server for. It
+    reaches the decision only through an arm that wrote `prefer resident`, so
+    passing it cannot reorder an arm that did not opt in, and passing none is
+    the written order every caller had before. `run_placement` is the caller
+    that passes it, from `_plan_time_residency()` above; `model_binding_view`
+    and `_successor_model_schedule` pass none, so what they compute is
+    unchanged."""
     from . import model_schedule  # noqa: PLC0415 - loaded only at plan time
     try:
         schedules = model_schedule.placement_schedules(files, processes,
@@ -4021,13 +4066,26 @@ def run_placement(files, placement_path: str, once: bool = False,
     if tee_problem:
         return abort(tee_problem)
 
+    # --- plan-time residency (item 515, issue #1189 §11.6 item 1): a host
+    # whose arm wrote `prefer resident` is scheduled against what its server
+    # reports holding NOW, which is what makes that clause rank instead of
+    # merely declaring. Read only when `--providers` names the bindings AND an
+    # arm this placement schedules opted in, so a placement that does not use
+    # the clause asks no server and schedules exactly as it did. A server that
+    # cannot be asked is a refusal here, before anything spawns.
+    residency, residency_problem = _plan_time_residency(files, processes,
+                                                        providers, ir)
+    if residency_problem:
+        return abort(residency_problem)
+
     # --- model scheduling (item 515, slice S4): a process may declare the
     # devices it offers (`[[processes.<p>.devices]]`), and every routed model
     # action of a component placed there is scheduled onto one of its declared
     # candidates. No candidate fitting is a refusal here, before anything
     # spawns. A composition with no `route model` block schedules nothing and
     # prints nothing (docs/model-scheduling.md).
-    model_problem, model_handoffs = _model_schedules(files, processes)
+    model_problem, model_handoffs = _model_schedules(files, processes,
+                                                     residency)
     if model_problem:
         return abort(model_problem)
 

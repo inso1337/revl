@@ -318,6 +318,16 @@ class Schedule:
     it is empty for every schedule made before that clause existed and for
     every host whose arms all left the clause out - a reader that ignores it
     reads what it always read.
+
+    A value is where the role is held, as precisely as the reader that
+    produced it can know it: a device NAME from a load revl made
+    (`resident_roles`, which reads the device its own provision chose), and a
+    device CLASS from a server's own report
+    (`revl.providers.plan_time_residency`, because `/api/ps` answers which
+    memory a member occupies and not which device it sits in). Only the KEYS
+    are read - `_Search.order` asks whether a candidate is held, never on
+    what - so either vocabulary is a usable input and the two producers are
+    interchangeable.
     """
     host: str
     devices: tuple
@@ -331,8 +341,19 @@ class Schedule:
         return len(self.resident)
 
     def lines(self) -> list:
-        return [f"model schedule [{self.host}]: {p.describe()}"
-                for p in self.placements]
+        lines = [f"model schedule [{self.host}]: {p.describe()}"
+                 for p in self.placements]
+        if self.residency:
+            # item 1189 §11.6 item 1: a decision that read what the host held
+            # is not reproducible from the composition alone, and a reader who
+            # is not told so would read the written order back as the reason.
+            held = ", ".join(f"{role} ({device})"
+                             for role, device in sorted(self.residency.items()))
+            lines.append(
+                f"model schedule [{self.host}]: ranked by what the server "
+                f"reported holding at plan time ({held}); this decision is "
+                f"not reproducible from the composition alone")
+        return lines
 
     def to_dict(self) -> dict:
         return {
@@ -651,14 +672,20 @@ def placement_schedules(files, processes: dict,
 def resident_roles(provisions) -> dict:
     """`{role: device}` for every role a `Provisions` reports as HELD now.
 
-    This is the read side of item 2118 and the only route by which residency
-    reaches a ranking: `placement_schedules(files, processes,
-    residency={host: resident_roles(provisions)})`. It asks the reader landed
-    by item 1 (`revl.providers.provision.Provisions.residency()`) and derives
-    nothing of its own - a role counts as held exactly when that report shows
-    it loaded more often than it unloaded AND on a device, because a role that
-    was loaded and unloaded is not resident and one that never reached a
-    device is not a placement this host can reuse.
+    This is the read side of item 2118 for a caller that HOLDS the provisions:
+    `placement_schedules(files, processes, residency={host:
+    resident_roles(provisions)})`. It asks the reader landed by item 1
+    (`revl.providers.provision.Provisions.residency()`) and derives nothing of
+    its own - a role counts as held exactly when that report shows it loaded
+    more often than it unloaded AND on a device, because a role that was
+    loaded and unloaded is not resident and one that never reached a device is
+    not a placement this host can reuse.
+
+    A conductor planning a fresh placement has no provisions to read - nothing
+    is loaded yet - so it reaches residency the other way, by asking each
+    server what it holds now: `residency_candidates()` below says which roles
+    are worth asking about, and `revl.providers.plan_time_residency()` asks.
+    Neither route is the other's input; both end at `schedule()`.
 
     Pure: `residency()` reads the record and asks the server nothing, so this
     can be called at plan time.
@@ -668,6 +695,40 @@ def resident_roles(provisions) -> dict:
         if report.get("loads", 0) > report.get("unloads", 0) and report.get("device"):
             held[role] = report["device"]
     return held
+
+
+def residency_candidates(files, processes: dict) -> dict:
+    """`{host: (role, ...)}`: the candidate roles whose held-ness could change
+    a host's decision, and nothing else.
+
+    Residency reaches a step only through `prefer resident`, so the candidates
+    of the arms that wrote the clause are exactly the roles a plan-time read
+    has to ask a server about. Every other role on the host is left out, which
+    is what keeps the read off the network for the compositions that do not
+    use the clause and for the hosts whose arms all left it out.
+
+    Pure: reads the composition's files and the placement, asks no server.
+    """
+    _, table = routes_of(composition_program(files))
+    candidates: dict = {}
+    for name, conf in processes.items():
+        steps = steps_for(table, (conf or {}).get("components") or [])
+        names = sorted({role for step in steps if step.prefer_resident
+                        for role in step.options})
+        if names:
+            candidates[name] = tuple(names)
+    return candidates
+
+
+def residency_wanted(files, processes: dict) -> bool:
+    """Whether any step this placement schedules wrote `prefer resident`.
+
+    False for every composition that does not use the clause, and False for a
+    placement whose opted-in components are on no host. A caller reads this
+    BEFORE it reads any configuration, because a placement that ranks nothing
+    must not be planned against a server it does not otherwise need.
+    """
+    return bool(residency_candidates(files, processes))
 
 
 # --------------------------------------------------------------------------
@@ -755,13 +816,17 @@ def verify_handoff(files, host: str, components, entry) -> dict | None:
         raise ScheduleRefusal(
             f"host `{host}` routes no model action but its spec carries a "
             f"model schedule; a schedule for nothing is refused")
-    residency = entry.get("residency") or {}
-    if not isinstance(residency, dict) or not all(
-            isinstance(role, str) and isinstance(device, str)
-            for role, device in residency.items()):
+    # `handoff` writes the key only for a non-empty residency, so a key that
+    # is present but empty ({}, [], "", 0, False) is not one it wrote
+    residency = entry.get("residency", {})
+    if ("residency" in entry and not residency) or not isinstance(
+            residency, dict) or not all(
+            isinstance(role, str) and role and isinstance(device, str)
+            and device for role, device in residency.items()):
         raise ScheduleRefusal(
             f"host `{host}`: the residency in its model schedule spec is "
-            f"malformed; it must map role names to device names")
+            f"malformed; it must map role names to the device each was held on "
+            f"(or, for a server read, the class it was held in)")
     if residency and not any(step.prefer_resident for step in steps):
         raise ScheduleRefusal(
             f"host `{host}`: the model schedule in its spec carries a "

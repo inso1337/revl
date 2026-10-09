@@ -126,10 +126,21 @@ class Adapter:
     def residency(self) -> dict | None:
         """What the server reports holding for this model, or None when it
         holds nothing. Asked of the server, never remembered."""
+        return self.resident_in(self.residency_report())
+
+    def residency_report(self, timeout: float | None = None) -> dict:
+        """The server's whole answer to "what do you hold", undecoded.
+        `timeout` overrides the binding's completion timeout, which a caller
+        that only asks a question (the plan-time read) caps."""
         credential, secrets = self._credential()
         url, headers = self._wire.residency_request(self.binding, credential)
-        raw = request_json(url, headers=headers, timeout=self.binding.timeout,
-                           secrets=secrets, label=self.label)
+        return request_json(
+            url, headers=headers,
+            timeout=self.binding.timeout if timeout is None else timeout,
+            secrets=secrets, label=self.label)
+
+    def resident_in(self, raw: dict) -> dict | None:
+        """This binding's model's entry in a `residency_report()`, or None."""
         return self._wire.resident_entry(raw, self.binding.model)
 
     def complete(self, request: CompletionRequest) -> Completion:

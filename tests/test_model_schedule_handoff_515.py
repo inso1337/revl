@@ -341,7 +341,31 @@ def test_a_malformed_residency_is_refused(tmp_path):
     entry["residency"] = {"small": 1}
     with pytest.raises(ms.ScheduleRefusal) as excinfo:
         ms.verify_handoff([app], "edge", ["Classifier"], entry)
-    assert "must map role names to device names" in str(excinfo.value)
+    assert "must map role names to the device" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", [{}, [], "", 0, False])
+def test_an_empty_residency_key_is_refused(tmp_path, value):
+    """`handoff` writes the key only for a non-empty residency, so a key that
+    is present and empty (or empty of another type) is not one it wrote, and
+    is refused rather than read as "holds nothing"."""
+    app, decided = _decide(tmp_path, OPTED_IN_APP)
+    entry = ms.handoff(decided)
+    assert "residency" not in entry
+    entry["residency"] = value
+    with pytest.raises(ms.ScheduleRefusal) as excinfo:
+        ms.verify_handoff([app], "edge", ["Classifier"], entry)
+    assert "must map role names to the device" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", [{"small": ""}, {"": "cpu0"}])
+def test_an_empty_role_or_device_is_refused(tmp_path, value):
+    app, decided = _decide(tmp_path, OPTED_IN_APP, {"small": "cpu0"})
+    entry = ms.handoff(decided)
+    entry["residency"] = value
+    with pytest.raises(ms.ScheduleRefusal) as excinfo:
+        ms.verify_handoff([app], "edge", ["Classifier"], entry)
+    assert "must map role names to the device" in str(excinfo.value)
 
 
 def test_a_tampered_residency_is_refused(tmp_path):
@@ -503,7 +527,8 @@ def test_a_composition_without_route_model_spawns_exactly_as_before(
     def run_once(disable: bool):
         if disable:
             monkeypatch.setattr(_placement, "_model_schedules",
-                                lambda files, processes: (None, {}))
+                                lambda files, processes, residency=None:
+                                (None, {}))
         written = _capture_specs(monkeypatch)
         work = tmp_path / ("off" if disable else "on")
         work.mkdir()
