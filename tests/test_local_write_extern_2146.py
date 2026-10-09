@@ -401,3 +401,29 @@ def test_cache_pure_on_a_fn_handing_a_local_extern_on_names_it(tmp_path):
         tmp_path)
     assert "writes through the `local` extern `record`" in err.message
     assert "`*`" not in err.message
+
+
+@pytest.mark.parametrize("call", [
+    'w.st.save(n)',
+    '(if (n == "a") { w.st } else { v.st }).save(n)',
+])
+def test_an_mcp_tool_calling_a_spawned_provision_that_writes_locally_is_not_read_only(
+        tmp_path, call):
+    # a spawned component's provision is a seam too: the IR carries the call as
+    # `callee: {kind: field, target: {kind: instance-get, component, key}}`,
+    # not as a `req` target
+    ir = _ir(tmp_path, extern=_WRITE
+             + 'extern pure fn noop(p: Str) -> Unit = @py { return None }\n',
+             body=(
+        'service Store { fn save(n: Str) -> Unit }\n'
+        'service Journal { fn append(n: Str) -> Unit }\n'
+        'component Wk provides st: Store { provide st { fn save(n) = record(n) } }\n'
+        'component Vk provides st: Store { provide st { fn save(n) = noop(n) } }\n'
+        'component P provides j: Journal {\n'
+        '  let w = effect spawn Wk with { } undo w.dispose()\n'
+        '  let v = effect spawn Vk with { } undo v.dispose()\n'
+        f'  provide j {{ fn append(n) = {call} }}\n'
+        '}\n'))
+    tool = _tool(ir, "revl.j.append")
+    assert tool["annotations"]["readOnlyHint"] is False
+    assert tool["x-revl"]["effects"]["reachesLocalWrite"] == ["record"]

@@ -268,7 +268,13 @@ def _local_write_reach(ir: dict, services: dict) -> dict[tuple, set]:
         fn, closed by the checker's own fixed point seeded by the `local`
         class (`emission_analysis._emitting_capabilities`), and
       * a call to a required service's operation, which reaches whatever the
-        composition's providers of that service reach, to a fixed point."""
+        composition's providers of that service reach, to a fixed point, and
+      * a call into a SPAWNED component's provision (`w.st.save(n)`, also
+        through a computed handle such as `(if c { w.st } else { v.st }).save`),
+        which reaches what that component's provision of the method reaches.
+        A spawned provision referenced any other way (a handle bound to a name
+        first) is not resolvable to one method, so it counts every method of
+        that provision: over-reporting a write is the safe direction."""
     from ..emission_analysis import _calls_in, _emitting_capabilities
 
     externs = list(ir.get("externs") or [])
@@ -279,9 +285,21 @@ def _local_write_reach(ir: dict, services: dict) -> dict[tuple, set]:
                                    classes=("local",))
     components = list(ir.get("components") or [])
     providers: dict[str, list] = {}
+    by_name: dict[str, int] = {}
     for index, component in enumerate(components):
+        by_name.setdefault(component.get("name"), index)
         for key, service_name in (component.get("provides") or {}).items():
             providers.setdefault(service_name, []).append((index, key))
+
+    def instance_gets(node, out: list) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "instance-get":
+                out.append(node)
+            for value in node.values():
+                instance_gets(value, out)
+        elif isinstance(node, list):
+            for value in node:
+                instance_gets(value, out)
 
     local: dict[tuple, set] = {}
     calls: dict[tuple, set] = {}
@@ -298,13 +316,25 @@ def _local_write_reach(ir: dict, services: dict) -> dict[tuple, set]:
                 local[(index, key, op_name)] = reached - {"*"}
                 seams: set = set()
 
+                resolved: set = set()  # id() of instance-gets a call names
+
                 def walk(node):
                     if isinstance(node, dict):
                         target = node.get("target")
+                        callee = node.get("callee")
                         if node.get("kind") == "call" and isinstance(target, dict) \
                                 and target.get("kind") == "req":
-                            seams.add((requires.get(target.get("name")),
+                            seams.add(("svc", requires.get(target.get("name")),
                                        node.get("method")))
+                        if node.get("kind") == "call" and isinstance(callee, dict) \
+                                and callee.get("kind") == "field":
+                            gets: list = []
+                            instance_gets(callee.get("target"), gets)
+                            for get in gets:
+                                resolved.add(id(get))
+                                seams.add(("inst", get.get("component"),
+                                           get.get("key"), get.get("service"),
+                                           callee.get("name")))
                         for value in node.values():
                             walk(value)
                     elif isinstance(node, list):
@@ -312,15 +342,36 @@ def _local_write_reach(ir: dict, services: dict) -> dict[tuple, set]:
                             walk(value)
 
                 walk(body)
+                every: list = []
+                instance_gets(body, every)
+                for get in every:
+                    if id(get) not in resolved:
+                        seams.add(("inst", get.get("component"), get.get("key"),
+                                   get.get("service"), None))
                 calls[(index, key, op_name)] = seams
+
+    def targets(seam) -> list:
+        """The `(component index, key, method)` nodes one seam may run."""
+        if seam[0] == "svc":
+            _, service_name, method = seam
+            return [(pindex, pkey, method)
+                    for pindex, pkey in providers.get(service_name, ())]
+        _, comp_name, pkey, service_name, method = seam
+        pindex = by_name.get(comp_name)
+        if pindex is None:  # not in this program: any provider of the service
+            pairs = providers.get(service_name, ())
+        else:
+            pairs = [(pindex, pkey)]
+        return [(i, k, m) for i, k in pairs for (j, kk, m) in list(local)
+                if j == i and kk == k and (method is None or m == method)]
 
     changed = True
     while changed:  # least fixed point over the service seams
         changed = False
         for node, seams in calls.items():
-            for service_name, method in seams:
-                for pindex, pkey in providers.get(service_name, ()):
-                    more = local.get((pindex, pkey, method), set()) - local[node]
+            for seam in seams:
+                for target in targets(seam):
+                    more = local.get(target, set()) - local[node]
                     if more:
                         local[node] |= more
                         changed = True

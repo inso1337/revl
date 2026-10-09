@@ -792,10 +792,14 @@ The rules, each of which is a refusal when broken:
   `x-revl.effects.reachesLocalWrite`, and says "Local durable write" in its
   description: nothing reverts the write, and nothing bounds what the host body
   does with it. The export follows a call, a value handed on, the `fn`s in
-  between, and a call to a required service's operation, which reaches what
-  every provider of that service in the same compiled program reaches. A
-  provider outside the compiled program is not seen: the export can only name
-  what it was given.
+  between, a call to a required service's operation, which reaches what every
+  provider of that service in the same compiled program reaches, and a call
+  into a spawned component's provision (`w.st.save(n)`, or through a computed
+  handle such as `(if (c) { w.st } else { v.st }).save(n)`), which reaches what
+  that component's provision of the method reaches. A spawned provision the
+  body names some other way counts every method of that provision. A provider
+  outside the compiled program is not seen: the export can only name what it
+  was given.
 
 `local` is the extern author's word, exactly as `pure` is: nothing checks that
 the host body behind it writes only local state and crosses no boundary. What
