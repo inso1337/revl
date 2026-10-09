@@ -505,26 +505,42 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # refusing and dropping the whole component.)
         # item 391: a component-body `Stream.source()` acquisition (a `host`
         # node). The EMITTER half is byte-exact on the reference IR; the native
-        # IR producer drops the whole `let src = effect Stream.source() undo
-        # src.close()` step, so the component emits an empty body and the
-        # module loses its `Stream` import. The `Map`/`Pool`/`Job` host calls
-        # in services_host.rvl go through the native chain byte-exact.
-        "services_host_stream.rvl",
-        # item 391: the placement shapes selfhost/emit_py.rvl used to drop. The
-        # EMITTER half is byte-exact on the reference IR; the native IR producer
-        # drops three things the reference IR carries: the `routes` entry of a
-        # routed require (so no router, no `realm_label`, and the key back in
-        # the inject gate), every operation declared with a `commutative` or
-        # `idempotent` modifier (the Ledger service comes out empty), and the
-        # `undo_captures` pin on a method-body effect.
-        "../emit_py_placement.rvl",
-        # item 391: another EMITTER-exact document the native IR producer
-        # reproduces wrongly. emit_py_builtin_shadow.rvl: the reference frontend
-        # escapes a parameter named `len_` to `len__` (and every read of it) and
-        # leaves a call of the user's `fn len` as `len`. The native IR escapes
-        # the reads but not the parameter, and escapes the call, so the native
-        # chain emits `def ladder(len__, sorted__)` over a body that reads
-        # `len___` and calls `len__`.
+        # IR producer used to drop the whole `let src = effect Stream.source()
+        # undo src.close()` step, so the component emitted an empty body and the
+        # module lost its `Stream` import. The `Map`/`Pool`/`Job` host calls in
+        # services_host.rvl went through the native chain byte-exact already.
+        # (issue #2087: it left this list with the stream slice below — the
+        # native producer now reads the `subscribe` bracket, the combinator
+        # chain, the fan-in and the qualifier tail.)
+        # (issue #2086: `../emit_py_placement.rvl` left this list — the
+        # placement shapes `selfhost/emit_py.rvl` used to drop. The native IR
+        # producer used to drop three things the reference IR carries: the
+        # `routes` entry of a routed require (so no router, no `realm_label`,
+        # and the key back in the inject gate), every operation declared with a
+        # `commutative` or `idempotent` modifier (the Ledger service came out
+        # empty), and the `undo_captures` pin on a method-body effect. The
+        # producer now reads all three, plus the `let-effect` step's key order
+        # (`bind` after `acquire`/`undo`), so the document is byte-exact through
+        # the fully-native chain.)
+        # item 391: another EMITTER-exact document the native IR producer used
+        # to reproduce wrongly — the reference frontend escapes a parameter
+        # named `len_` to `len__` (and every read of it) and leaves a call of
+        # the user's `fn len` as `len`. The native IR escaped the reads but not
+        # the parameter, and escaped the call, so the native chain emitted
+        # `def ladder(len__, sorted__)` over a body that read `len___` and
+        # called `len__`.
+        # (issue #2090: it left this list. The native env answered
+        # `tenv_get(env, n) != ""` — "is this name bound at all" — where the
+        # reference asks `n in scope` — "is this name a LOCAL". The module
+        # path's env holds the case table and every module `fn`'s own name as
+        # well as the body's locals, so `fn len`'s own name counted as bound
+        # and its CALL site was mangled to `len_` while the reference left it
+        # verbatim. `env_mut_put` now also writes a `local ` marker and
+        # `params_env` writes one per parameter, and the `var` arm reads that
+        # marker instead, so a local is mangled at its declaration and at every
+        # read while a callable reference stays verbatim. The declaration/read
+        # half of this entry already agreed before the change; only the call
+        # diverged.)
         # (issue #2089: stdlib/fs.rvl left this list — the native IR producer
         # used to drop the extern's host `refs`, so the module lost its
         # `import inspect` / `_REVL_REFS` header. `lower_to_ir_refs` now reads
@@ -532,7 +548,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # in the reference's own position and key order, so the document
         # reproduces byte-for-byte through the fully-native chain on both the
         # py and ts tiers.)
-        "../emit_py_builtin_shadow.rvl",
         # (issue #2088: the six in-file test documents left this list when
         # `selfhost/lower.rvl` grew the `tests`/`fault_tests` producers —
         # `test_secs_walk` over `lir_plain_test`/`lir_lifecycle_test`/
@@ -543,68 +558,78 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # and without the imports that trailer pulls in. They now reproduce
         # byte-for-byte through the fully-native chain.)
         #
-        # item 391: the await-seed slice. Both are emitter-exact from the
-        # reference IR. async_timer.rvl's `tests` section is byte-exact now too
-        # (issue #2088 above), so what withholds it is the OTHER half of this
+        # item 391: the await-seed slice. Both were emitter-exact from the
+        # reference IR. async_timer.rvl's `tests` section was byte-exact too
+        # (issue #2088 above), so what withheld it was the OTHER half of this
         # slice: its timer bodies `emit counter.tick()` through a required key
         # and `Counter.tick` is an `emission async fn`, but the native IR
-        # producer stamps no `"async": true` on that timer step (item 170's
-        # `_timer_body_reaches_async` colouring), so the emitter omits the
+        # producer stamped no `"async": true` on that timer step (item 170's
+        # `_timer_body_reaches_async` colouring), so the emitter omitted the
         # in-flight window and its teardown. That is a different family from
-        # #2088's — the same one that withholds emit_py_async_shapes.rvl, which
+        # #2088's — the same one that withheld emit_py_async_shapes.rvl, which
         # reaches the frontend's sync instance of a fn with an async-typed
         # parameter (`drive_revl_sync`) and the async-coloured timer flag,
-        # neither of which the native IR producer emits, so the native chain
-        # also loses the `extern_emit` and `asyncio` imports.
-        "../../../examples/async_timer.rvl",
-        "../emit_py_async_shapes.rvl",
-        # item 391: the stream slice. All five are emitter-exact from the
-        # reference IR. The native IR producer drops the body's stream steps
-        # (the `Stream.source()` acquisition, as in services_host_stream.rvl,
-        # the `Pool.open` one beside it, and the `subscribe` that reads the
-        # source), so the native chain emits a sync body with no `Stream`
-        # import. stream_event_130.rvl also comes out as `ir_version 1` where
-        # the reference IR of a typed-event handler carries 3.
-        "streams.rvl",
-        "../../../backends/go/testdata/stream_130.rvl",
-        "../../../backends/go/testdata/stream_event_130.rvl",
-        "../../../backends/rust/scenarios/stream.rvl",
-        "../emit_rust_corpus/comp_stream.rvl",
-        # issue #1646 follow-up: emitter-exact; the native IR producer drops
-        # the body's stream steps, as for the stream slice's documents above.
-        "../emit_py_stream_builtin_bind.rvl",
-        # item 391: the validated slice. Both are emitter-exact from the
-        # reference IR. The native IR producer drops every operation declared
-        # `validated`, as it drops a `commutative` or `idempotent` one (see
-        # emit_py_placement.rvl above), so the service comes out empty: no
-        # grammar registry, no validate seam, and the call renders raw.
-        "../emit_ts_refusals/validated_emission_operation.rvl",
-        "../emit_py_validated_shapes.rvl",
-        # component branch shapes. `selfhost/parser.rvl` reads an arm body as an
-        # expression, so it has no node for a statement-block match arm
-        # (`Some(n) => { let doubled = n * 2 doubled + 1 }`). That node is NOT
-        # what withholds this document, and it is not the only reason the
-        # document is here. Measured on this fixture: replacing the block arm
-        # with a plain one (`Some(n) => n * 2 + 1`) leaves the native output
-        # BYTE-IDENTICAL (4440 bytes, `_Values` still absent) while the
-        # reference moves 6542 -> 6514, and deleting the `block_match` method
-        # outright still diverges (4379 vs 6240). Five of the fourteen provide
-        # methods drop the whole `_Values` class on their own — `record`
-        # (record update), `optional` and `parse` (optional chain), `new_map`
-        # (`Map.empty()`), `block_match` — and `read_optional` diverges on its
-        # own without dropping it (3994 vs 4004). Deleting all six makes the
-        # document byte-exact. In one-method components a record update, an
-        # optional chain and `Map.empty()` each drop the class by itself, while
-        # the same constructs in an ordinary `fn` are fine: these are several
-        # independent component-position gaps in `selfhost/lower.rvl`. The
-        # reference lowers the block arm inline as a `do` expression
-        # (`lower.py::_lower_component_block_arm`), and `selfhost/lower.rvl`
-        # has no `do` producer (`cir_expr` has no `do` arm) — but that is one
-        # gap of several, so issue #2094's parser node, with or without a `do`
-        # producer, cannot close this entry. #2094 is CLOSED as completed and
-        # delivered none of this, so the entry outlives it: issue #2131 is the
-        # open tracker.
-        "branches.rvl",
+        # neither of which the native IR producer emitted, so the native chain
+        # also lost the `extern_emit` and `asyncio` imports.
+        # (issue #2092: both left this list when `selfhost/lower.rvl` grew the
+        # timer-step async stamp — `timer_reaches_async`, the `_timer_body_
+        # reaches_async` port that ORs a directly-reached async required op
+        # against the arrow-pruned call set — and the sync monomorph family —
+        # `mono_plan`, `_monomorphize_free_fn_calls` then `_synthesize_sync_
+        # monomorphs`: a sync caller's call to a colour-polymorphic `fn` is
+        # redirected to a synthesized `_revl_sync` clone whose async-typed
+        # parameters are stripped back to plain fn types, the clone being
+        # appended to `functions` last. Both documents now reproduce
+        # byte-for-byte through the fully-native chain.)
+        # item 391: the stream slice. All five were emitter-exact from the
+        # reference IR; what the native IR producer used to drop was the body's
+        # stream steps (the `Stream.source()` acquisition, as in
+        # services_host_stream.rvl, the `Pool.open` one beside it, and the
+        # `subscribe` that reads the source), so the native chain emitted a sync
+        # body with no `Stream` import. stream_event_130.rvl also came out as
+        # `ir_version 1` where the reference IR of a typed-event handler carries
+        # 3.
+        # (issue #2087: all seven py entries of the stream slice — the five
+        # documents named just above, services_host_stream.rvl and
+        # emit_py_stream_builtin_bind.rvl below — left this list when
+        # `selfhost/lower.rvl` grew the stream statement forms: the `subscribe`
+        # bracket (its `subscribe: true`/`policy` step keys, the combinator
+        # `stages` and the `buffer`/`drain` qualifier tail), the `every <x> in
+        # <sub>` iteration, and the `on <Event> as <x> [in <sub>]` handler with
+        # its contract object and its desugared `sub_<requirement>` bracket. The
+        # native producer also had to admit a bare read of a required `Stream[T]`
+        # (a `req` node) and stop reading `on` as an ordinary ident, and the
+        # document version now carries the same `stream-iter` trigger the
+        # reference's `uses_timers` does.)
+        # issue #1646 follow-up: emitter-exact, and closed with the slice above.
+        # (issue #2085: the validated slice left this list when
+        # `selfhost/lower.rvl` grew the validated operation producer. The
+        # producer now reads the `validated` and `retry` modifiers off the
+        # method header and, for a `validated` operation, derives the response
+        # contract from the declared return exactly as the reference does:
+        # `_validated_response_ir`'s stripped return type becomes a JSON Schema
+        # (`type_schema.json_schema_for`), and that schema becomes the decoding
+        # grammar (`decode_grammar.decode_grammar_for`) — so the service carries
+        # its grammar registry and validate seam and the call renders through it.
+        # `../emit_ts_refusals/validated_emission_operation.rvl` and
+        # `../emit_py_validated_shapes.rvl` now reproduce byte-for-byte through
+        # the fully-native chain.)
+        # (issue #2131: the component branch shapes left this list when
+        # `selfhost/lower.rvl` grew the six producers they were waiting on.
+        # Five were component-position gaps in the pure-expression walk:
+        # `cir_expr` gained `RecUpd` (`record_update`), `OptField` (`optfield`)
+        # and `OptCall` (`optcall`), `cir_hostacq` gained `Map.empty()`'s
+        # `maplit`, and `cir_field` gained the `"opt": true` mark — each spelled
+        # identically by the reference in both dialects, so the fn path already
+        # had them and only the component path dropped them. The sixth is the
+        # statement-block match arm: `selfhost/parser.rvl` reads an arm body as
+        # an expression, so it had no node for `Some(n) => { let doubled =
+        # n * 2 doubled + 1 }`; `ArmN` now carries `blk`/`blkTail`/`isBlk`
+        # (read by `p_blk_arm`, with `body` left `null` so the arm walkers that
+        # cannot see the bindings never read one) and `cir_match` routes the
+        # block to `cir_block_arm`, which emits the reference's inline
+        # `_lower_component_block_arm` `do` node. `branches.rvl` is byte-exact
+        # (6542) through the fully-native chain.)
         # whole-program documents combining several of the above.
         # (`../../../examples/v3_step_scheduler.rvl` left this list with the
         # spawn/instance surface: it is the one py document whose components
@@ -613,6 +638,26 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # rest of it. `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
         # left it when the component dialect grew its `Arrow` arm, issue #1844:
         # its provide method passes an arrow to `run_loop`.)
+        # (issue #2091, DIAGNOSED and split out as issue #2181: this entry is
+        # NOT a whole-program combination of the families above — it is ONE
+        # cause, and it is the only py entry left. `fr3_json_int.rvl` declares
+        # no externs of its own; it imports them (`use "stdlib/json.rvl"
+        # { json_parse, json_stringify }`). The reference's `compile_files`
+        # merges every module in the import closure into one `Program`, and
+        # `src/revl/compiler.py:1127` appends each module's extern declarations
+        # to it — so the document's IR carries that module's WHOLE `pub extern`
+        # section: `json_parse`, `json_stringify` and `json_try_parse`, which
+        # the `use` list does not even name. The native chain links imports in
+        # the DRIVER, not in `lower_to_ir`: `selfhost/compile.rvl`'s
+        # `ul_link_uses` appends only the resolved target's `services[name]`
+        # row, and `lower_to_ir` never sees the used module at all, so a
+        # document that declares no `extern` of its own produces no `externs`
+        # key — and the emitted module loses those three extern bodies (py ref
+        # 3902 bytes vs native 958; ts ref 8540 vs native 1092). The emitter
+        # half is byte-exact when fed the REFERENCE IR, as asserted above. The
+        # native producer also emits no top-level `manifest` key; that is NOT
+        # this cause — every other document here is byte-exact without it, so
+        # no tier emitter reads it.)
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
     ),
     "ts": (
@@ -637,18 +682,26 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # compile byte-exact through the fully-native chain.)
         # (realm placement metadata — isolate / intercept / routes — left this
         # list when lower.rvl grew the component-header prelude; the four ts
-        # realm documents now compile byte-exact through the native chain.)
+        # realm documents now compile byte-exact through the native chain. See
+        # the issue #2086 note on `../../../stdlib/router.rvl` below for the
+        # `routes` half, which the prelude did not cover.)
         # whole-program documents combining several of the above.
         # (`../../../examples/java_match.rvl` left this list with issue #1845:
         # its component's `Err(_)` arm binds `__`, the reference's `_safe_name`
         # spelling of the soft keyword `_`.)
+        # (issue #2091, split out as issue #2181: the SAME single cause as the
+        # py entry above — the native import linker carries a `use`d module's
+        # `services` rows but not its `pub extern` declarations. It is named in
+        # full on the py entry; one producer fix closes the residual on both
+        # tiers.)
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-        # component edge shapes. Everything this document spells is byte-exact
-        # through the native chain except its ONE async provide method: the
-        # guard `if`/`fail` pair, the bare `fn` effect bracket, the `emit …
-        # compensate …` step with its `compensate_captures`, the host-map
-        # bracket and the per-invocation method bracket all reproduce.
-        "component_edges.rvl",
+        # (issue #2092: `component_edges.rvl` left this list with the py entry
+        # above. Its ONE async provide method was withheld by a producer that
+        # had the `await` step for an ACTIVATION body but not for a provide
+        # METHOD body, so the first suspension inside the method returned "not
+        # reproduced" and took the whole method body — and with it the
+        # component's `body` — with it. The one native `selfhost/lower.rvl`
+        # producer fix closes the residual for BOTH tiers.)
         # (`property_edges.rvl` left this list when the `.length` PROPERTY form
         # on a sized receiver started carrying `sized_length`, and
         # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
@@ -661,9 +714,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # issue #106: the families selfhost/emit_ts.rvl learned in one slice.
         # The emitter half of each is byte-exact on the REFERENCE IR (asserted
         # above for every document); the native chain is not, because
-        # selfhost/lower.rvl does not produce the IR these documents need:
-        # a routed require's header (the whole component set drops),
-        "../../../stdlib/router.rvl",
+        # selfhost/lower.rvl does not produce the IR these documents need.
+        # (issue #2086: `../../../stdlib/router.rvl` — a routed require's header
+        # — left this list with the py entry above. The native producer now
+        # emits the component's `routes` entry, so the router, the `realm_label`
+        # and the inject-gate key all come back.)
         # (issue #2089: stdlib/fs.rvl left this list with the py entry above —
         # an extern's host `refs` used to drop, taking the thunks and their
         # imports with them. The one native `selfhost/lower.rvl` producer fix
@@ -672,25 +727,40 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # in `selfhost/lower.rvl`, so `lifecycle_cache.rvl`, the item 280
         # Opt-gap document and the scenario `advance.rvl` left this list.)
         # timers inside a lifecycle-tested document,
-        "../../../examples/async_timer.rvl",
-        # the stream surface (`subscribe`, `merge`, `every ... in`),
-        "../../../backends/go/testdata/stream_130.rvl",
-        "../emit_rust_corpus/comp_stream.rvl",
-        # the statement-block match arm: the parser has no node for the block,
-        # but that is neither the only nor the operative reason this document is
-        # withheld — several component-position gaps in `selfhost/lower.rvl`
-        # each drop the whole provide class on their own, and the block arm is
-        # one of them (see the py list above). Issue #2131 is the open tracker
-        # for the family; #2094, which this entry used to point at, is CLOSED as
-        # completed with the gap intact.
-        "../emit_py_corpus/branches.rvl",
+        # (issue #2092: `../../../examples/async_timer.rvl` left this list with
+        # the py entry above — the native producer now stamps the timer step
+        # `"async": true` when its body reaches an async callable
+        # (`timer_reaches_async`), which is the one `selfhost/lower.rvl` producer
+        # fix both tiers needed.)
+        # (issue #2087: the stream surface (`subscribe`, `merge`, `every ... in`,
+        # `on ... as`) closed with the py entries above — `stream_130.rvl` and
+        # `comp_stream.rvl` left this list too, the one native `selfhost/lower.rvl`
+        # producer fix covering both tiers because selfhost/emit_ts.rvl already
+        # reproduced the reference bytes from the reference IR.)
+        # (issue #2131: `../emit_py_corpus/branches.rvl` left this list with the
+        # py entry above — one `selfhost/lower.rvl` producer fix covers both
+        # tiers, since `selfhost/emit_ts.rvl` already reproduced the reference
+        # bytes from the reference IR. The six component-position producers are
+        # named in the py list above.)
         # and the two documents written for this slice, which combine the above.
-        "routed_timers.rvl",
-        "ref_externs.rvl",
-        # Issue #1592: an extern that declares its own `compensate`. The
-        # emitter half agrees byte for byte on the reference IR; lower.rvl
-        # does not yet lower an extern's declared `compensate` slot.
-        "extern_compensate.rvl",
+        # (issue #2086: `ref_externs.rvl` left this list — a declaration whose
+        # ONLY body arms are HOST REFS (`= @ts ref sym from "path"`) used to fail
+        # the producer's `bcount == 0` exit gate, which dropped the whole
+        # `externs` section. The reference's `_lower_externs` has no body-count
+        # gate at all and the PARSER already refuses a declaration with no arm of
+        # either kind, so the gate now also accepts a ref-only declaration.)
+        # (issue #2131: `routed_timers.rvl` left this list with the entry above.
+        # Its `Tally.total()` is the statement-block match arm, so the same
+        # block-arm producer that closed the py document closed this one.)
+        # (issue #2096: `extern_compensate.rvl` left this list with the
+        # `async_timer.rvl` entry above. Re-measured against `main`: the
+        # extern's declared `compensate` slot was ALREADY lowered (`ir_extern`'s
+        # `compensate` clause, issue #1592) and the native ts bytes matched the
+        # reference everywhere except the `Pulse` timer step — the `emit
+        # ledger.tick()` firing had no `"async": true`, so the emitter omitted
+        # the in-flight window and its teardown. The timer stamp closed it, so
+        # the entry this issue named is byte-exact for a cause other than the
+        # one the issue's body named.)
         # Issue #1954 (item 256) / issue #2012: the capability-bound secret
         # seam. This entry is CLOSED — `selfhost/lower.rvl` now reads
         # `secret NAME for CAP` at the top level, lowers it to the reference's
@@ -758,14 +828,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `Job`, the body walk had no `await` step to carry that, and a refused
         # step drops the WHOLE component `body` — so the native chain emitted
         # 7,067 bytes against the reference's 11,094, the module with no
-        # `Job`/`JobHandle` runtime in it. `comp_stream.rvl` is no longer
+        # `Job`/`JobHandle` runtime in it. `comp_stream.rvl` was no longer
         # refused before any rust is built either: the item-130 stream statement
         # forms landed in `selfhost/lower.rvl` (#1139) and the native gate now
-        # ADMITS it, so its residual is measured in bytes by the same comparison
-        # as every document above. It is `selfhost/lower.rvl`'s, and it is NAMED
-        # rather than skipped, so the day lower.rvl grows that surface this list
-        # shrinks instead of quietly keeping a waiver nobody rereads.
-        "comp_stream.rvl",
+        # ADMITS it, so its residual was measured in bytes by the same comparison
+        # as every document above. It was `selfhost/lower.rvl`'s, and it was
+        # NAMED rather than skipped, so the day lower.rvl grew that surface this
+        # list shrank instead of quietly keeping a waiver nobody rereads — which
+        # is what happened: issue #2087's stream statement forms closed it.
         # (`bridge_types.rvl`, item 391's bridge marshalling document, left with
         # issue #1818: `fn weight(name) = None` dropped the component body.)
         # (issue #2088: in-file `test` blocks left this list when the
@@ -774,11 +844,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # reference IR; the producer was the missing half, so the native chain
         # used to emit the functions and drop every `#[test] fn`. The other
         # rust documents in this tuple are unrelated gaps and stay.)
-        # item 391: the by-value reuse document. Emitter-exact from the
-        # reference IR; the native IR producer does not type the result of a
-        # call to a `let`-bound arrow (`i = bump(i) + 1`), so it writes the `+`
-        # without the reference's `"operands": "Int"` annotation.
-        "by_value_reuse.rvl",
+        # (issue #2095: the by-value reuse document left this list when the
+        # native producer learned to type an arrow at all (`arrow_fn_ty`, the
+        # port of `infer_ast`'s `ExprArrow` arm). The `let`-bound `bump` used to
+        # reach the environment with no type, so the call to it read back "" and
+        # `i = bump(i) + 1` was written without the reference's
+        # `"operands": "Int"` annotation. The other rust documents in this tuple
+        # are unrelated gaps and stay.)
         # item 391: the provide-method control-flow document. Emitter-exact from
         # the reference IR; the native IR producer drops the whole component
         # `body` of a component whose provide method holds a control-flow step,

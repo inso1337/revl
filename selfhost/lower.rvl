@@ -3766,6 +3766,45 @@ fn emit_caps_reach(fs: List[FnD], include_values: Bool) -> CapsT {
 // argument is coerced into (lower.py's `_is_async_fn_type` over each signature).
 // Built once and read by BOTH the async coloring (which prunes a coerced arrow)
 // and the arrow-color leak check (which admits one).
+// --------------------------------------------------- small list/map helpers
+
+fn join_strs(xs: List[Str], sep: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < xs.length()) {
+    if (i > 0) { out = out.concat(sep) }
+    out = out.concat(xs[i])
+    i += 1
+  }
+  return out
+}
+
+// Order-preserving `List` difference: `xs` without the members of `ys`.
+fn without_strs(xs: List[Str], ys: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    if (!contains(ys, xs[i])) { out = out.push(xs[i]) }
+    i += 1
+  }
+  return out
+}
+
+fn mget_str(m: Map[Str, Str], k: Str) -> Str {
+  return match m.lookup(k) { Some(v) => v, None => "" }
+}
+
+fn mget_strs(m: Map[Str, List[Str]], k: Str) -> List[Str] {
+  return match m.lookup(k) { Some(v) => v, None => [] }
+}
+
+fn append_binds(xs: List[Bind], ys: List[Bind]) -> List[Bind] {
+  var out = xs
+  var i = 0
+  while (i < ys.length()) { out = out.push(ys[i])  i += 1 }
+  return out
+}
+
 fn async_slots_map(fs: List[FnD]) -> Map[Str, List[Int]] {
   var m: Map[Str, List[Int]] = Map.empty()
   var i = 0
@@ -3788,13 +3827,23 @@ fn async_slots_map(fs: List[FnD]) -> Map[Str, List[Int]] {
 // only inside a coerced (async-stamped) arrow does not color the body that
 // constructs it. `FnD.callees` stays unpruned for the emission fixed point,
 // which deliberately keeps bubbling through those arrows.
-fn async_colored(fs: List[FnD], slots: Map[Str, List[Int]]) -> List[Str] {
+// Issue #2092: the same closure with a per-`fn` callee EXCLUSION. The reference
+// runs it over a throwaway copy of the fns whose every liftable polymorphic call
+// has already been redirected to a `_revl_sync` clone, which is how it decides
+// whether a caller is still genuinely async once that redirect is in place
+// (`_monomorphize_free_fn_calls`). A `fn` whose colour came only from such a
+// call loses it; one that reaches a real suspension of its own (an `async`
+// extern, or an `async` arrow into its own loop) keeps it and keeps its async
+// loop - item 92's coercion.
+fn async_colored_excl(fs: List[FnD], slots: Map[Str, List[Int]],
+                      excl: Map[Str, List[Str]]) -> List[Str] {
   var colored: List[Str] = []
   var reach: List[List[Str]] = []
   var i = 0
   while (i < fs.length()) {
     if (fs[i].isAsyncExtern) { colored = colored.push(fs[i].name) }
-    reach = reach.push(abody_callees(fs[i].body, 0, slots, []))
+    reach = reach.push(without_strs(abody_callees(fs[i].body, 0, slots, []),
+                                    mget_strs(excl, fs[i].name)))
     i += 1
   }
   var changed = true
@@ -3813,6 +3862,10 @@ fn async_colored(fs: List[FnD], slots: Map[Str, List[Int]]) -> List[Str] {
     }
   }
   return colored
+}
+
+fn async_colored(fs: List[FnD], slots: Map[Str, List[Int]]) -> List[Str] {
+  return async_colored_excl(fs, slots, Map.empty())
 }
 
 fn any_in(xs: List[Str], set: List[Str]) -> Bool {
@@ -19628,7 +19681,8 @@ type IrRes    = { ok: Bool, js: Str }
 type IrSvcR   = { js: Str, v3: Bool }
 type IrCompR  = { js: Str, v3: Bool, v2: Bool }
 type IrMethR  = { js: Str, i: Int, v3: Bool }
-type IrAcc    = { svcs: Str, comps: Str, v3: Bool, v2: Bool }
+type IrAcc    = { svcs: Str, comps: Str, v3: Bool, v2: Bool, col: List[Str],
+                  sl: Map[Str, List[Int]] }
 
 fn mk_irres(ok: Bool, js: Str) -> IrRes { return { ok: ok, js: js } }
 fn mk_irsvcr(js: Str, v3: Bool) -> IrSvcR { return { js: js, v3: v3 } }
@@ -19638,8 +19692,9 @@ fn mk_ircompr(js: Str, v3: Bool, v2: Bool) -> IrCompR {
 fn mk_irmethr(js: Str, i: Int, v3: Bool) -> IrMethR {
   return { js: js, i: i, v3: v3 }
 }
-fn mk_iracc(svcs: Str, comps: Str, v3: Bool, v2: Bool) -> IrAcc {
-  return { svcs: svcs, comps: comps, v3: v3, v2: v2 }
+fn mk_iracc(svcs: Str, comps: Str, v3: Bool, v2: Bool,
+            col: List[Str], sl: Map[Str, List[Int]]) -> IrAcc {
+  return { svcs: svcs, comps: comps, v3: v3, v2: v2, col: col, sl: sl }
 }
 
 fn empty_prog() -> Prog { return { fns: [], svcs: [], comps: [], bad: "" } }
@@ -20246,7 +20301,8 @@ fn ir_doc_key(st: SrcText, line: Int, starts: Bool) -> Str {
 // pairs. Mirrors the reference's per-method dict (check_and_lower's `services`
 // comprehension): `capabilities` present iff a SCOPED `emission[..]`, `async`
 // iff the op is `async` (each of which also bumps `ir_version` to 3).
-fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str], st: SrcText) -> IrMethR {
+fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str, Str],
+              st: SrcText, env: ScEnv) -> IrMethR {
   if (i >= end || atk(ts, i, "}")) { return mk_irmethr(acc, i, v3) }
   // the operation's first token line, captured before the modifier loop — the
   // anchor the reference reads off `self.peek().line` for the doc block above.
@@ -20261,8 +20317,20 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   var scoped = false
   var isAsync = false
   var isIdempotent = false
+  // issue #2086: `commutative` (Def. 39 order-independence opt-in) was read
+  // past, and because the modifier loop below ended on the first token it did
+  // not recognise, the whole OPERATION dropped — the Ledger service came out
+  // with `"methods": {}`. `commutative` is a RESERVED keyword (parser.py:8), so
+  // it is matched with `atw` like `emission`/`async`/`idempotent`.
+  var isCommutative = false
+  // `validated` and `retry` are CONTEXTUAL keywords (ordinary idents read as
+  // clause words), which is why they are matched with `ati` rather than `atw`.
+  var isValidated = false
+  var retryN = 0
   var caps: List[Str] = []
-  while (atw(ts, j, "emission") || atw(ts, j, "async") || atw(ts, j, "idempotent")) {
+  while (atw(ts, j, "emission") || atw(ts, j, "async") || atw(ts, j, "idempotent")
+         || atw(ts, j, "commutative")
+         || ati(ts, j, "validated") || ati(ts, j, "retry")) {
     if (atw(ts, j, "emission")) {
       em = true
       j += 1
@@ -20278,6 +20346,18 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
     } else if (atw(ts, j, "idempotent")) {
       isIdempotent = true
       j += 1
+    } else if (atw(ts, j, "commutative")) {
+      isCommutative = true
+      j += 1
+    } else if (ati(ts, j, "validated")) {
+      isValidated = true
+      j += 1
+    } else if (ati(ts, j, "retry")) {
+      // `retry N`: the budget is a positive int literal the reference reads in
+      // `_retry_budget`. Legal only alongside `validated`, which it checks;
+      // a non-int here is what the reference raises on.
+      retryN = match tkc(ts, j + 1).text.to_int() { Some(n) => n, None => 0 }
+      j += 2
     } else {
       isAsync = true
       j += 1
@@ -20297,12 +20377,14 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   var term = ""
   // issue #1937: the qualifier stripped off the return (`Untrusted`/`Secret`)
   var retQual = ""
+  // the declared return, for the validated response derivation below
+  var rawRet = ""
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
     let rq = taint_top_qualifier(tr.ty)
     if (rq == "Untrusted" || rq == "Secret") { retQual = rq }
-    let rawRet = taint_strip(alias_subst(tr.ty, al))
+    rawRet = taint_strip(alias_subst(tr.ty, al))
     if (rawRet == "Criterion") {
       term = "criterion"
       retJson = jstr("Opt[Bool]")
@@ -20329,17 +20411,34 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
     mj = mj.concat(", \"capabilities\": [").concat(ir_caps_json(caps)).concat("]")
   }
   if (isAsync) { mj = mj.concat(", \"async\": true") }
+  // issue #2086: `async`, `commutative`, `idempotent` — the reference's own key
+  // order (lower.py:9217-9221).
+  if (isCommutative) { mj = mj.concat(", \"commutative\": true") }
   if (isIdempotent) { mj = mj.concat(", \"idempotent\": true") }
+  // `_method_validated_ir` + `_validated_retry_ir`: the delivery class and the
+  // response contract derived from the declared return. A `retry` budget without
+  // `validated` is what the reference raises on, so it is only emitted alongside
+  // the keys (and only when positive — `_validated_retry_ir` returns `{}` at 0).
+  if (isValidated) {
+    mj = mj.concat(sc_validated_json(rawRet, env))
+    if (retryN > 0) { mj = mj.concat(", \"retry\": ").concat(retryN.to_str()) }
+  }
   mj = mj.concat("}")
   let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent, al, st)
+  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isCommutative || isIdempotent,
+                    al, st, env)
 }
 
 fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str], st: SrcText) -> IrSvcR {
   let nm = tkc(ts, i + 1).text
   let end = close_brace(ts, i + 2)
   let hi = end == 0 - 1 ? i + 3 : end - 1
-  let ms = ir_methods(ts, i + 3, hi, "", false, al, st)
+  // The record/variant table a validated response derives its schema from. Only
+  // built for a service that declares one — every other service would pay a
+  // second full token walk for nothing.
+  var env: ScEnv = Map.empty()
+  if (svc_needs_schema(ts, i + 3, hi)) { env = schema_env(ts, 0, Map.empty(), al) }
+  let ms = ir_methods(ts, i + 3, hi, "", false, al, st, env)
   return mk_irsvcr(jstr(nm).concat(": {\"methods\": {").concat(ms.js).concat("}}"),
                    ms.v3)
 }
@@ -20361,6 +20460,694 @@ fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str], st: SrcText) -> IrSvcR
 // Names accumulate a lexical `sc` scope: activation-body `let-effect` binds, and
 // provide-method params/`let` binds. `config` is a header declaration, so it is
 // skipped structurally rather than emitted as a step.
+
+// ==================================================== validated responses
+//
+// Issue #2085. A `validated` operation carries four extra keys in the reference
+// IR: `validated`, `response_schema`, `response_grammar` and, when a retry
+// budget is declared, `retry`. The producer emitted none of them, so the
+// crossing lost `_revl_validate` and the emitted service came out empty.
+//
+// Two reference algorithms are ported byte-for-byte:
+//   * `type_schema.py::json_schema_for` with `validated=True` (so every variant
+//     renders TAGGED), plus its `admits_json_null` / `fully_expressible` guards;
+//   * `decode_grammar.py::_Deriver` / `gbnf_from_schema` / `grammar_digest`,
+//     memoised on the schema TEXT — canonical here, because `json_schema_for` is
+//     a pure function of the type name, so a shape reached twice mints one rule
+//     exactly as the reference does.
+//
+// The type table is read off the TOKEN stream rather than the emitter-side
+// `types` JSON: `types_walk` renders that as text, and the derivation needs the
+// field map itself.
+
+type ScField = { name: Str, ty: Str }
+type ScCase = { name: Str, payload: Str }
+type ScTy = { kind: Str, fields: List[ScField], cases: List[ScCase] }
+type ScTyR = { ty: ScTy, i: Int }
+type ScEnv = Map[Str, ScTy]
+type ScMem = { name: Str, js: Str }
+
+fn sc_none() -> ScTy { return { kind: "", fields: [], cases: [] } }
+fn sc_rec(fs: List[ScField]) -> ScTy { return { kind: "record", fields: fs, cases: [] } }
+fn sc_var(cs: List[ScCase]) -> ScTy { return { kind: "variant", fields: [], cases: cs } }
+
+fn sc_at(env: ScEnv, nm: Str) -> ScTy {
+  return match env.lookup(nm) { Some(t) => t, None => sc_none() }
+}
+
+// `{ name: Type, ... }` up to the closing brace, read exactly as
+// `ir_type_fields` reads it (the field names share the reference's
+// `_record_key_name`, so `config` counts as a field).
+fn sc_fields(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[ScField] {
+  var out: List[ScField] = []
+  var k = lo
+  while (k < hi && !atk(ts, k, "}")) {
+    if (is_record_key(tkc(ts, k)) && atk(ts, k + 1, ":")) {
+      let tr = type_at(ts, k + 2)
+      out = out.push({ name: tkc(ts, k).text, ty: alias_subst(tr.ty, al) })
+      k = tr.i
+      if (atk(ts, k, ",")) { k += 1 }
+    } else { k += 1 }
+  }
+  return out
+}
+
+// `Final(Str) | ToolCalls(List[Call])` -> the two cases, in declaration order.
+fn sc_cases(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[ScCase] {
+  var out: List[ScCase] = []
+  var k = lo
+  while (k < hi) {
+    if (atk(ts, k, "ident")) {
+      var payload = ""
+      var nk = k + 1
+      if (atk(ts, k + 1, "(")) {
+        let tr = type_at(ts, k + 2)
+        payload = alias_subst(tr.ty, al)
+        nk = tr.i
+        if (atk(ts, nk, ")")) { nk += 1 }
+      }
+      out = out.push({ name: tkc(ts, k).text, payload: payload })
+      k = nk
+    } else { k += 1 }
+  }
+  return out
+}
+
+// `ir_type_decl`'s shape decisions, kept in step by hand: a transparent alias
+// contributes nothing, an empty field table is the empty variant, a `|`/`(`
+// right-hand side is a variant, and a bare right-hand side is the one-case
+// nominal variant.
+fn sc_type_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> ScTyR {
+  let lineHi = type_decl_end(ts, i + 1)
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  if (!atk(ts, j, "=")) { return { ty: sc_none(), i: lineHi } }
+  j += 1
+  if (al.has(nm)) { return { ty: sc_none(), i: lineHi } }
+  if (atk(ts, j, "{")) {
+    let bend = close_brace(ts, j)
+    if (bend == 0 - 1) { return { ty: sc_none(), i: lineHi } }
+    let fs = sc_fields(ts, j + 1, bend - 1, al)
+    if (fs.length() == 0) { return { ty: sc_var([]), i: bend } }
+    return { ty: sc_rec(fs), i: bend }
+  }
+  if (is_variant_rhs(ts, j, lineHi)) {
+    return { ty: sc_var(sc_cases(ts, j, lineHi, al)), i: lineHi }
+  }
+  let cs = sc_cases(ts, j, lineHi, al)
+  if (cs.length() == 0) { return { ty: sc_none(), i: lineHi } }
+  return { ty: sc_var(cs), i: lineHi }
+}
+
+// A typed `event` is a record with a contract clause (`ir_event_decl`), so its
+// fields are in scope for a validated response exactly as a `type`'s are.
+fn sc_event_decl(ts: List[Token], i: Int, al: Map[Str, Str]) -> ScTyR {
+  let hi = event_decl_end(ts, i)
+  var j = i + 2
+  if (atk(ts, j, "(")) { j = close_paren(ts, j) }
+  if (j == 0 - 1 || !atk(ts, j, "{")) { return { ty: sc_none(), i: hi } }
+  let bend = close_brace(ts, j)
+  if (bend == 0 - 1) { return { ty: sc_none(), i: hi } }
+  let fs = sc_fields(ts, j + 1, bend - 1, al)
+  if (fs.length() == 0) { return { ty: sc_none(), i: hi } }
+  return { ty: sc_rec(fs), i: bend }
+}
+
+// Every record/variant declaration in the module, keyed by name. `types_walk`'s
+// walk, over a map instead of a JSON string.
+fn schema_env(ts: List[Token], i: Int, env: ScEnv, al: Map[Str, Str]) -> ScEnv {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return env }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return schema_env(ts, i + 1, env, al) }
+  if (at_event(ts, i)) {
+    let d = sc_event_decl(ts, i, al)
+    let e2 = d.ty.kind == "" ? env : env.set(tkc(ts, i + 1).text, d.ty)
+    return schema_env(ts, d.i, e2, al)
+  }
+  if (at_qual_test(ts, i)) {
+    let qe = qual_test_end(ts, i)
+    if (qe != 0 - 1) { return schema_env(ts, qe, env, al) }
+    return schema_env(ts, skip_line(ts, i), env, al)
+  }
+  if (t.kind != "kw") { return schema_env(ts, skip_line(ts, i), env, al) }
+  if (at_pub_prefix(ts, i)) { return schema_env(ts, i + 1, env, al) }
+  if (t.text == "type") {
+    let d = sc_type_decl(ts, i, al)
+    let e3 = d.ty.kind == "" ? env : env.set(tkc(ts, i + 1).text, d.ty)
+    return schema_env(ts, d.i, e3, al)
+  }
+  if (t.text == "test") {
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return schema_env(ts, e, env, al) }
+    return schema_env(ts, skip_line(ts, i), env, al)
+  }
+  if (t.text == "extern") { return schema_env(ts, p_extern(ts, i, empty_prog()).i, env, al) }
+  if (t.text == "fn") { return schema_env(ts, p_fn(ts, i, empty_prog()).i, env, al) }
+  if (t.text == "service") { return schema_env(ts, p_service(ts, i, empty_prog()).i, env, al) }
+  if (t.text == "component") { return schema_env(ts, p_component(ts, i, empty_prog()).i, env, al) }
+  return schema_env(ts, skip_line(ts, i), env, al)
+}
+
+// The table is only worth building for a service that declares a validated
+// operation; every other service would pay a second full token walk for nothing.
+fn svc_needs_schema(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var k = lo
+  while (k < hi) {
+    if (at_word(ts, k, "validated")) { return true }
+    k += 1
+  }
+  return false
+}
+
+// ------------------------------------------------------ JSON schema shape
+
+fn sc_scalar(ty: Str) -> Bool {
+  return ty == "Str" || ty == "Int" || ty == "Float" || ty == "Bool"
+    || ty == "Bytes" || ty == "Unit"
+}
+
+fn sc_admits_null(ty: Str) -> Bool {
+  if (ty == "") { return false }
+  if (ty == "Unit") { return true }
+  let p = ty_parse(ty)
+  return p.head == "Opt" && p.args.length() > 0
+}
+
+fn sc_expressible(ty: Str, env: ScEnv, seen: List[Str]) -> Bool {
+  if (ty == "") { return false }
+  if (sc_scalar(ty)) { return true }
+  let p = ty_parse(ty)
+  if (p.head == "List" && p.args.length() == 1) { return sc_expressible(p.args[0], env, seen) }
+  if (p.head == "Opt" && p.args.length() == 1) {
+    if (sc_admits_null(p.args[0])) { return false }
+    return sc_expressible(p.args[0], env, seen)
+  }
+  if (p.head == "Map" && p.args.length() == 2) {
+    return p.args[0] == "Str" && sc_expressible(p.args[1], env, seen)
+  }
+  if (p.head == "Result" && p.args.length() == 2) { return false }
+  if (contains(seen, ty)) { return false }
+  return sc_expressible_spec(sc_at(env, ty), env, seen.concat([ty]))
+}
+
+fn sc_expressible_spec(sp: ScTy, env: ScEnv, seen: List[Str]) -> Bool {
+  if (sp.kind == "record") {
+    var i = 0
+    while (i < sp.fields.length()) {
+      if (!sc_expressible(sp.fields[i].ty, env, seen)) { return false }
+      i += 1
+    }
+    return true
+  }
+  if (sp.kind == "variant") {
+    var i = 0
+    while (i < sp.cases.length()) {
+      if (sp.cases[i].payload != "" && !sc_expressible(sp.cases[i].payload, env, seen)) {
+        return false
+      }
+      i += 1
+    }
+    return true
+  }
+  return false
+}
+
+fn sc_stub(ty: Str) -> Str { return "{\"x-revlType\": ".concat(jstr(ty)).concat("}") }
+
+fn sc_json(ty: Str, env: ScEnv, seen: List[Str]) -> Str {
+  if (ty == "") { return "{}" }
+  if (ty == "Str") { return "{\"type\": \"string\"}" }
+  if (ty == "Int") { return "{\"type\": \"integer\"}" }
+  if (ty == "Float") { return "{\"type\": \"number\"}" }
+  if (ty == "Bool") { return "{\"type\": \"boolean\"}" }
+  if (ty == "Bytes") { return "{\"type\": \"string\", \"contentEncoding\": \"base64\"}" }
+  if (ty == "Unit") { return "{\"type\": \"null\"}" }
+  let p = ty_parse(ty)
+  if (p.head == "List" && p.args.length() == 1) {
+    return "{\"type\": \"array\", \"items\": ".concat(sc_json(p.args[0], env, seen)).concat("}")
+  }
+  if (p.head == "Opt" && p.args.length() == 1) {
+    if (sc_admits_null(p.args[0])) { return sc_stub(ty) }
+    let inner = sc_json(p.args[0], env, seen)
+    if (inner == "{}") { return "{\"nullable\": true}" }
+    return inner.slice(0, inner.length() - 1).concat(", \"nullable\": true}")
+  }
+  if (p.head == "Map" && p.args.length() == 2) {
+    return "{\"type\": \"object\", \"additionalProperties\": "
+      .concat(sc_json(p.args[1], env, seen)).concat("}")
+  }
+  if (p.head == "Result" && p.args.length() == 2) {
+    return "{\"oneOf\": [".concat(sc_json(p.args[0], env, seen)).concat(", ")
+      .concat(sc_json(p.args[1], env, seen)).concat("]}")
+  }
+  if (contains(seen, ty)) { return sc_stub(ty) }
+  return sc_json_spec(sc_at(env, ty), env, seen.concat([ty]))
+}
+
+// The `properties` order is the declaration order and `required` is SORTED —
+// `json_schema_for` builds a Python dict and `sorted(fields)` a list.
+fn sc_json_spec(sp: ScTy, env: ScEnv, seen: List[Str]) -> Str {
+  if (sp.kind == "record") {
+    var props = ""
+    var names: List[Str] = []
+    var i = 0
+    while (i < sp.fields.length()) {
+      let seg = jstr(sp.fields[i].name).concat(": ").concat(sc_json(sp.fields[i].ty, env, seen))
+      props = i == 0 ? seg : props.concat(", ").concat(seg)
+      names = names.push(sp.fields[i].name)
+      i += 1
+    }
+    return "{\"type\": \"object\", \"properties\": {".concat(props)
+      .concat("}, \"required\": [").concat(str_list_json(sort_strs(names))).concat("]}")
+  }
+  if (sp.kind == "variant") {
+    var arms = ""
+    var i = 0
+    while (i < sp.cases.length()) {
+      let arm = sc_arm(sp.cases[i], env, seen)
+      arms = i == 0 ? arm : arms.concat(", ").concat(arm)
+      i += 1
+    }
+    return "{\"oneOf\": [".concat(arms).concat("]}")
+  }
+  return "{}"
+}
+
+fn sc_arm(c: ScCase, env: ScEnv, seen: List[Str]) -> Str {
+  if (c.payload != "") {
+    return "{\"type\": \"object\", \"properties\": {\"tag\": {\"const\": "
+      .concat(jstr(c.name)).concat("}, \"value\": ").concat(sc_json(c.payload, env, seen))
+      .concat("}, \"required\": [\"tag\", \"value\"], \"additionalProperties\": false}")
+  }
+  return "{\"type\": \"object\", \"properties\": {\"tag\": {\"const\": "
+    .concat(jstr(c.name)).concat("}}, \"required\": [\"tag\"], \"additionalProperties\": false}")
+}
+
+// --------------------------------------------------------- the GBNF rules
+
+type GbRule = { name: Str, defn: Str }
+type GbState = { rules: List[GbRule], memo: Map[Str, Str], lex: List[Str], n: Int }
+type GbRes = { name: Str, st: GbState }
+type GbBody = { txt: Str, st: GbState }
+
+fn gb_lex_order() -> List[Str] {
+  return ["ws", "hex", "schar", "string", "integer", "number", "boolean",
+          "nullv", "b64c", "b64q", "b64tail", "b64string"]
+}
+
+fn gb_lex_deps(nm: Str) -> List[Str] {
+  if (nm == "string") { return ["schar"] }
+  if (nm == "schar") { return ["hex"] }
+  if (nm == "number") { return ["integer"] }
+  if (nm == "b64string") { return ["b64q", "b64tail"] }
+  if (nm == "b64q") { return ["b64c"] }
+  if (nm == "b64tail") { return ["b64c"] }
+  return []
+}
+
+fn gb_lex_rule(nm: Str) -> Str {
+  if (nm == "ws") { return "ws ::= [ \\t\\n\\r]*" }
+  if (nm == "hex") { return "hex ::= [0-9a-fA-F]" }
+  if (nm == "schar") { return "schar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" [\"\\\\/bfnrt] | \"\\\\u\" hex hex hex hex" }
+  if (nm == "string") { return "string ::= \"\\\"\" schar* \"\\\"\"" }
+  if (nm == "integer") { return "integer ::= \"-\"? (\"0\" | [1-9] [0-9]*)" }
+  if (nm == "number") { return "number ::= integer (\".\" [0-9]+)? ([eE] [-+]? [0-9]+)?" }
+  if (nm == "boolean") { return "boolean ::= \"true\" | \"false\"" }
+  if (nm == "nullv") { return "nullv ::= \"null\"" }
+  if (nm == "b64c") { return "b64c ::= [A-Za-z0-9+/]" }
+  if (nm == "b64q") { return "b64q ::= b64c b64c b64c b64c" }
+  if (nm == "b64tail") { return "b64tail ::= b64c b64c \"==\" | b64c b64c b64c \"=\"" }
+  if (nm == "b64string") { return "b64string ::= \"\\\"\" b64q* b64tail? \"\\\"\"" }
+  return ""
+}
+
+fn gb_lex(nm: Str, st: GbState) -> GbRes {
+  if (contains(st.lex, nm)) { return { name: nm, st: st } }
+  var cur: GbState = { rules: st.rules, memo: st.memo, lex: st.lex.push(nm), n: st.n }
+  let deps = gb_lex_deps(nm)
+  var i = 0
+  while (i < deps.length()) {
+    cur = gb_lex(deps[i], cur).st
+    i += 1
+  }
+  return { name: nm, st: cur }
+}
+
+// `_lit`: the JSON string of `text`, then every backslash doubled and every
+// quote escaped — so `Final` becomes `"\"Final\""` and a raw backslash survives.
+fn gbnf_lit(text: Str) -> Str {
+  let body = jstr(text)
+  var inner = ""
+  var i = 0
+  while (i < body.length()) {
+    let c = body.charAt(i)
+    if (c == "\\") { inner = inner.concat("\\\\") }
+    else { if (c == "\"") { inner = inner.concat("\\\"") } else { inner = inner.concat(c) } }
+    i += 1
+  }
+  return "\"".concat(inner).concat("\"")
+}
+
+fn gb_define(key: Str, body: Str, st: GbState) -> GbRes {
+  let nm = "t".concat((st.n + 1).to_str())
+  return { name: nm, st: { rules: st.rules.push({ name: nm, defn: body }),
+                           memo: st.memo.set(key, nm), lex: st.lex, n: st.n + 1 } }
+}
+
+fn gb_ref(s: Str, st: GbState) -> GbRes {
+  if (st.memo.has(s)) {
+    return { name: match st.memo.lookup(s) { Some(v) => v, None => "" }, st: st }
+  }
+  let r = gb_render(s, st)
+  return { name: r.name, st: { rules: r.st.rules, memo: r.st.memo.set(s, r.name),
+                               lex: r.st.lex, n: r.st.n } }
+}
+
+// A nullable schema is `{**base, "nullable": true}` in the reference; here the
+// base is the same TEXT minus that one member, so it memoises to the same rule
+// the un-nullable shape would.
+fn gb_nullable_base(s: Str) -> Str {
+  let ms = jv_members(s)
+  var out = "{"
+  var first = true
+  var i = 0
+  while (i < ms.length()) {
+    if (ms[i].name != "nullable") {
+      out = first ? out : out.concat(", ")
+      out = out.concat(jstr(ms[i].name)).concat(": ").concat(ms[i].js)
+      first = false
+    }
+    i += 1
+  }
+  return out.concat("}")
+}
+
+fn gb_render(s: Str, st: GbState) -> GbRes {
+  if (jv_mem(s, "const") != "") {
+    return gb_define(s, gbnf_lit(jv_val(jv_mem(s, "const"))), st)
+  }
+  if (jv_mem(s, "nullable") != "") {
+    let base = gb_nullable_base(s)
+    if (base == "{}") { return gb_lex("nullv", st) }
+    let inner = gb_ref(base, st)
+    let nv = gb_lex("nullv", inner.st)
+    return gb_define(s, inner.name.concat(" | ").concat(nv.name), nv.st)
+  }
+  let arms = jv_items(jv_mem(s, "oneOf"))
+  if (arms.length() > 0) {
+    var cur = st
+    var body = ""
+    var i = 0
+    while (i < arms.length()) {
+      let r = gb_ref(arms[i], cur)
+      body = i == 0 ? r.name : body.concat(" | ").concat(r.name)
+      cur = r.st
+      i += 1
+    }
+    return gb_define(s, body, cur)
+  }
+  let nt = jv_val(jv_mem(s, "type"))
+  if (nt == "string") {
+    if (jv_val(jv_mem(s, "contentEncoding")) == "base64") { return gb_lex("b64string", st) }
+    return gb_lex("string", st)
+  }
+  if (nt == "integer") { return gb_lex("integer", st) }
+  if (nt == "number") { return gb_lex("number", st) }
+  if (nt == "boolean") { return gb_lex("boolean", st) }
+  if (nt == "null") { return gb_lex("nullv", st) }
+  if (nt == "array") {
+    let it = gb_ref(jv_mem(s, "items"), st)
+    let w = gb_lex("ws", it.st)
+    return gb_define(s, "\"[\" ".concat(w.name).concat(" \"]\" | \"[\" ").concat(w.name)
+      .concat(" ").concat(it.name).concat(" (").concat(w.name).concat(" \",\" ")
+      .concat(w.name).concat(" ").concat(it.name).concat(")* ").concat(w.name)
+      .concat(" \"]\""), w.st)
+  }
+  if (nt == "object") {
+    let ap = jv_mem(s, "additionalProperties")
+    if (ap != "" && jv_mem(s, "properties") == "") {
+      let v = gb_ref(ap, st)
+      let w = gb_lex("ws", v.st)
+      let sc = gb_lex("string", w.st)
+      let entry = sc.name.concat(" ").concat(w.name).concat(" \":\" ").concat(w.name)
+        .concat(" ").concat(v.name)
+      return gb_define(s, "\"{\" ".concat(w.name).concat(" \"}\" | \"{\" ").concat(w.name)
+        .concat(" ").concat(entry).concat(" (").concat(w.name).concat(" \",\" ")
+        .concat(w.name).concat(" ").concat(entry).concat(")* ").concat(w.name)
+        .concat(" \"}\""), sc.st)
+    }
+    if (jv_mem(s, "properties") != "") {
+      let rb = gb_record_body(s, st)
+      return gb_define(s, rb.txt, rb.st)
+    }
+  }
+  // The reference raises here; nothing `fully_expressible` admits reaches it.
+  return gb_lex("string", st)
+}
+
+fn gb_record_body(s: Str, st: GbState) -> GbBody {
+  let props = jv_members(jv_mem(s, "properties"))
+  let w = gb_lex("ws", st)
+  if (props.length() == 0) { return { txt: "\"{\" ".concat(w.name).concat(" \"}\""), st: w.st } }
+  var text = "\"{\" ".concat(w.name)
+  var cur = w.st
+  var i = 0
+  while (i < props.length()) {
+    if (i > 0) { text = text.concat(" ").concat(w.name).concat(" \",\" ").concat(w.name) }
+    let r = gb_ref(props[i].js, cur)
+    text = text.concat(" ").concat(gbnf_lit(props[i].name)).concat(" ").concat(w.name)
+      .concat(" \":\" ").concat(w.name).concat(" ").concat(r.name)
+    cur = r.st
+    i += 1
+  }
+  return { txt: text.concat(" ").concat(w.name).concat(" \"}\""), st: cur }
+}
+
+fn gb_text(root: Str, st: GbState) -> Str {
+  var lines: List[Str] = ["root ::= ".concat(root)]
+  var i = 0
+  while (i < st.rules.length()) {
+    lines = lines.push(st.rules[i].name.concat(" ::= ").concat(st.rules[i].defn))
+    i += 1
+  }
+  let order = gb_lex_order()
+  var k = 0
+  while (k < order.length()) {
+    if (contains(st.lex, order[k])) { lines = lines.push(gb_lex_rule(order[k])) }
+    k += 1
+  }
+  return lines.join(sc_nl()).concat(sc_nl())
+}
+
+fn gb_from_schema(schema: Str) -> Str {
+  let st0: GbState = { rules: [], memo: Map.empty(), lex: [], n: 0 }
+  let r = gb_ref(schema, st0)
+  return gb_text(r.name, r.st)
+}
+
+fn gb_grammar_json(text: Str) -> Str {
+  return "{\"format\": \"gbnf\", \"root\": \"root\", \"text\": ".concat(jstr(text))
+    .concat(", \"digest\": ").concat(jstr(sc_sha256(text))).concat("}")
+}
+
+// ------------------------------------------------- a raw JSON reader
+//
+// The schema is built as TEXT (that is the IR's own spelling), so the grammar
+// derivation reads it back with these. Every reader is total: a malformed node
+// yields "" rather than an error, which the reference raises on and which no
+// `fully_expressible` type can produce.
+
+fn jv_str_end(s: Str, i: Int) -> Int {
+  var k = i + 1
+  while (k < s.length()) {
+    let c = s.charAt(k)
+    if (c == "\\") { k += 2 }
+    else { if (c == "\"") { return k + 1 } else { k += 1 } }
+  }
+  return s.length()
+}
+
+fn jv_close(s: Str, i: Int, open: Str, close: Str) -> Int {
+  var depth = 0
+  var k = i
+  while (k < s.length()) {
+    let c = s.charAt(k)
+    if (c == "\"") { k = jv_str_end(s, k) }
+    else {
+      if (c == open) { depth += 1 }
+      else { if (c == close) { depth -= 1  if (depth == 0) { return k + 1 } } }
+      k += 1
+    }
+  }
+  return s.length()
+}
+
+fn jv_span(s: Str, i: Int) -> Int {
+  var k = i
+  while (k < s.length() && s.charAt(k) == " ") { k += 1 }
+  if (k >= s.length()) { return s.length() }
+  let c = s.charAt(k)
+  if (c == "{") { return jv_close(s, k, "{", "}") }
+  if (c == "[") { return jv_close(s, k, "[", "]") }
+  if (c == "\"") { return jv_str_end(s, k) }
+  var j = k
+  while (j < s.length()) {
+    let d = s.charAt(j)
+    if (d == "," || d == "}" || d == "]" || d == " ") { return j }
+    j += 1
+  }
+  return s.length()
+}
+
+fn jv_val(raw: Str) -> Str {
+  if (raw.length() < 2 || raw.charAt(0) != "\"") { return raw }
+  var out = ""
+  var i = 1
+  while (i < raw.length() - 1) {
+    let c = raw.charAt(i)
+    if (c == "\\") {
+      if (raw.charAt(i + 1) == "\"") { out = out.concat("\"") } else { out = out.concat("\\") }
+      i += 2
+    } else { out = out.concat(c)  i += 1 }
+  }
+  return out
+}
+
+// The raw text of `key`'s value in the object `s`, or "".
+fn jv_mem(s: Str, key: Str) -> Str {
+  let end = s.length()
+  var k = 1
+  while (k < end) {
+    if (s.charAt(k) == "\"") {
+      let e = jv_str_end(s, k)
+      let name = s.slice(k + 1, e - 1)
+      var j = e
+      while (j < end && s.charAt(j) == " ") { j += 1 }
+      if (j < end && s.charAt(j) == ":") {
+        var v = j + 1
+        while (v < end && s.charAt(v) == " ") { v += 1 }
+        let ve = jv_span(s, v)
+        if (name == key) { return s.slice(v, ve) }
+        k = ve
+      } else { k = e }
+    } else { k += 1 }
+  }
+  return ""
+}
+
+fn jv_items(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  let end = s.length()
+  var k = 1
+  while (k < end) {
+    while (k < end && (s.charAt(k) == " " || s.charAt(k) == ",")) { k += 1 }
+    if (k >= end || s.charAt(k) == "]") { return out }
+    let e = jv_span(s, k)
+    out = out.push(s.slice(k, e))
+    k = e
+  }
+  return out
+}
+
+fn jv_members(s: Str) -> List[ScMem] {
+  var out: List[ScMem] = []
+  let end = s.length()
+  var k = 1
+  while (k < end) {
+    while (k < end && (s.charAt(k) == " " || s.charAt(k) == ",")) { k += 1 }
+    if (k >= end || s.charAt(k) == "}") { return out }
+    if (s.charAt(k) == "\"") {
+      let e = jv_str_end(s, k)
+      let name = s.slice(k + 1, e - 1)
+      var j = e
+      while (j < end && s.charAt(j) == " ") { j += 1 }
+      if (j < end && s.charAt(j) == ":") {
+        var v = j + 1
+        while (v < end && s.charAt(v) == " ") { v += 1 }
+        let ve = jv_span(s, v)
+        out = out.push({ name: name, js: s.slice(v, ve) })
+        k = ve
+      } else { k = e }
+    } else { k += 1 }
+  }
+  return out
+}
+
+// A real newline. revl plain strings and template literals carry no escapes at
+// all (`"\n"` and `` `\n` `` are both a literal backslash-n), so the grammar's
+// line SEPARATOR is sourced here — the one place a genuine U+000A is needed.
+fn sc_nl() -> Str {
+  return `
+`
+}
+
+// Lower-case hex SHA-256 of the UTF-8 bytes of `text` (`grammar_digest`).
+// Declared here rather than `use`d from `stdlib/crypto.rvl` because that module
+// is outside `tools/build_gate_crate.py`'s `SELFHOST_CLOSURE` and pulling it in
+// would grow the generated crate. The `@rs` body mirrors the crate's own
+// `build.rs::sha256` so no Rust dependency is added.
+extern pure fn sc_sha256(data: Str) -> Str
+  = @py {
+    import hashlib
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+  }
+  = @rs {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let bytes = data.as_bytes();
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let mut msg = bytes.to_vec();
+    let bits = (bytes.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 { msg.push(0); }
+    msg.extend_from_slice(&bits.to_be_bytes());
+    for block in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let mut v = h;
+        for i in 0..64 {
+            let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+            let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+            let t1 = v[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+            let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+            let t2 = s0.wrapping_add(maj);
+            v = [t1.wrapping_add(t2), v[0], v[1], v[2], v[3].wrapping_add(t1), v[4], v[5], v[6]];
+        }
+        for i in 0..8 { h[i] = h[i].wrapping_add(v[i]); }
+    }
+    let mut out = String::with_capacity(64);
+    for b in h.iter() { out.push_str(&format!("{:08x}", b)); }
+    out
+  }
+
+// The four keys a validated operation adds, in the reference's order, or "".
+fn sc_validated_json(ty: Str, env: ScEnv) -> Str {
+  if (ty == "" || ty == "Unit") { return "" }
+  if (!sc_expressible(ty, env, [])) { return "" }
+  let schema = sc_json(ty, env, [])
+  if (str_has(schema, "x-revlType")) { return "" }
+  return ", \"validated\": true, \"response_schema\": ".concat(schema)
+    .concat(", \"response_grammar\": ").concat(gb_grammar_json(gb_from_schema(schema)))
+}
 
 fn str_has(s: Str, sub: Str) -> Bool { return s.indexOf(sub) != 0 - 1 }
 
@@ -20393,7 +21180,8 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 // The program-global facts a component expression lowering needs beyond its
 // lexical scope. They are all functions of the token stream, read once per
 // component rather than threaded from `ir_walk`, so the walk's signature (and
-// every other lane's edits to it) is untouched:
+// every other lane's edits to it) is untouched — with ONE exception (`col`
+// below, whose whole-program fixed point is threaded rather than recomputed):
 //
 //   reqs   the component's required-service roots
 //   cases  the ADT case table (`case <C>` -> its ADT, `payload <C>` -> its type),
@@ -20411,6 +21199,19 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 //          `realms` and a later `instance-get`'s `service` are BOTH read off
 //   cfg    this component's `config { … }` block as one structural type
 //          spelling, so `config.<field>` infers through `struct_field`
+//   aops   the required-key service ops the program DECLARES `async`, as
+//          "<key>.<op>" — issue #2092's rule 3, the req-target half of the
+//          async-reach a timer step's colour is read off
+//   col    the program's async-colored callables, the SAME closure `fns_walk`
+//          stamps `"async": true` from — issue #2092's rule 1, the name half of
+//          that reach. Threaded rather than derived here because it is a fixed
+//          point over the whole call graph: `ir_component` has no way to reach
+//          it, and recomputing it per component would re-run that fixed point
+//          once per component.
+//   sl     the module callables' `Async[T]` parameter slots, the same table the
+//          colour fixed point is built over — read by the name half of the
+//          timer reach above, which is `abody_callees` and so prunes an arrow
+//          at one of those slots exactly as the fixed point does
 //
 // One row is POSITIONAL rather than program-global:
 //
@@ -20424,13 +21225,15 @@ fn duration_ms_str(numText: Str, unit: Str) -> Str {
 type CCtx = { reqs: List[Str], cases: List[Bind], fns: List[Bind],
               fnps: List[Bind], wit: List[Str], al: Map[Str, Str],
               cprovs: List[Bind], cfg: Str, ln: Int, reqops: List[Bind],
-              handles: Bool, xundo: Map[Str, Str] }
+              handles: Bool, xundo: Map[Str, Str], strreqs: List[Bind],
+              col: List[Str], sl: Map[Str, List[Int]], aops: List[Str] }
 
 // `cx` re-stamped with the line of the statement now being lowered.
 fn cx_at(cx: CCtx, n: Int) -> CCtx {
   return { reqs: cx.reqs, cases: cx.cases, fns: cx.fns, fnps: cx.fnps,
            wit: cx.wit, al: cx.al, cprovs: cx.cprovs, cfg: cx.cfg, ln: n,
-           reqops: cx.reqops, handles: cx.handles, xundo: cx.xundo }
+           reqops: cx.reqops, handles: cx.handles, xundo: cx.xundo,
+           strreqs: cx.strreqs, col: cx.col, sl: cx.sl, aops: cx.aops }
 }
 
 // Membership in a lexical scope, INDEPENDENT of whether the name's type is
@@ -21040,6 +21843,27 @@ fn req_op_returns(ts: List[Token], reqs: List[Bind], al: Map[Str, Str],
   return out
 }
 
+// The `reqop <key>.<op>` keys whose operation its service declares `async` —
+// the req-target half of the async-reach a timer step is coloured from (issue
+// #2092). `req_op_returns` is not enough: a reach reads the DECLARATION's
+// `async`, and a return type does not carry it.
+fn req_async_ops(ts: List[Token], reqs: List[Bind], acc: List[Str]) -> List[Str] {
+  var out = acc
+  var r = 0
+  while (r < reqs.length()) {
+    let ops = svc_op_names(ts, reqs[r].ty)
+    var o = 0
+    while (o < ops.length()) {
+      if (svc_method_async(ts, reqs[r].ty, ops[o])) {
+        out = out.push(reqs[r].name.concat(".").concat(ops[o]))
+      }
+      o += 1
+    }
+    r += 1
+  }
+  return out
+}
+
 fn svc_op_names(ts: List[Token], svc: Str) -> List[Str] {
   var out: List[Str] = []
   var j = 0
@@ -21083,6 +21907,37 @@ fn svc_method_ret(ts: List[Token], svc: Str, meth: Str, al: Map[Str, Str]) -> St
     j += 1
   }
   return ""
+}
+
+// Whether one service operation is declared `async`. The service flags may
+// appear in ANY order before `fn` (`p_methods`'s loop), so the block is walked
+// head by head and the marker is whichever of them the `fn` that names `meth`
+// followed: `emission async fn send` and `async emission fn send` both answer
+// true, and a head that names another operation resets the flag rather than
+// leaking it forward.
+fn svc_method_async(ts: List[Token], svc: Str, meth: Str) -> Bool {
+  var j = 0
+  while (j < ts.length() && !atk(ts, j, "eof")) {
+    if (atw(ts, j, "service") && tkc(ts, j + 1).text == svc && atk(ts, j + 2, "{")) {
+      let end = close_brace(ts, j + 2)
+      let hi = end == 0 - 1 ? j + 3 : end - 1
+      var k = j + 3
+      var asy = false
+      while (k < hi) {
+        if (at_route_clause(ts, k)) { k += 3 } else {
+          if (atw(ts, k, "async")) { asy = true }
+          if (atw(ts, k, "fn")) {
+            if (tkc(ts, k + 1).text == meth) { return asy }
+            asy = false
+          }
+          k += 1
+        }
+      }
+      return false
+    }
+    j += 1
+  }
+  return false
 }
 
 // lower.py `_mark_widen` on a provide method's `return` (issue #1894, the
@@ -21477,6 +22332,17 @@ fn cir_expr(e: Expr, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     // [name, value] PAIRS, not the fn path's object — a different node for the
     // same surface, so it is written out here rather than shared.
     Rec(r)      => cir_record(r.fields, 0, sc, hostSc, cx, ""),
+    // A functional record update. The reference spells the SAME node in both
+    // dialects — `record_update`, with `updates` as [name, value] pairs, the
+    // pair spelling `cir_record` already writes for a literal's `fields` — so
+    // this is the fn path's node, not a component-specific one. Without the
+    // arm the wildcard below swallowed the whole enclosing provide method.
+    RecUpd(r)   => cir_rec_upd(r, sc, hostSc, cx),
+    // `p?.x` and `s?.to_int()`: the optional-access pair, again the fn path's
+    // nodes. `?.` is how a receiver of declared type `Opt[T]` is read at all,
+    // so dropping the node dropped the method that read one.
+    OptField(f) => cir_opt_field(f, sc, hostSc, cx),
+    OptCall(c)  => cir_opt_call(c, sc, hostSc, cx),
     Arrow(a)    => cir_arrow(a, sc, hostSc, cx),
     _           => mk_irres(false, ""),
   }
@@ -21569,6 +22435,43 @@ fn cir_index(x: IndexN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     .concat(", \"index\": ").concat(ix.js).concat("}"))
 }
 
+// The `updates` pairs of a functional record update (`{ base | f = e, … }`).
+fn cir_updates(xs: List[InitN], i: Int, sc: List[Bind], hostSc: List[Str],
+               cx: CCtx, acc: Str) -> IrRes {
+  if (i >= xs.length()) { return mk_irres(true, acc) }
+  let v = cir_expr(xs[i].value, sc, hostSc, cx)
+  if (!v.ok) { return mk_irres(false, "") }
+  let e = "[".concat(jstr(xs[i].name)).concat(", ").concat(v.js).concat("]")
+  return cir_updates(xs, i + 1, sc, hostSc, cx,
+                     acc == "" ? e : acc.concat(", ").concat(e))
+}
+
+fn cir_rec_upd(r: RecUpdN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  let b = cir_expr(r.base, sc, hostSc, cx)
+  if (!b.ok) { return mk_irres(false, "") }
+  let u = cir_updates(r.upds, 0, sc, hostSc, cx, "")
+  if (!u.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"record_update\", \"base\": ".concat(b.js)
+    .concat(", \"updates\": [").concat(u.js).concat("]}"))
+}
+
+fn cir_opt_field(f: FieldN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  let t = cir_expr(f.target, sc, hostSc, cx)
+  if (!t.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"optfield\", \"target\": ".concat(t.js)
+    .concat(", \"name\": ").concat(jstr(f.name)).concat("}"))
+}
+
+fn cir_opt_call(c: OptCallN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  let t = cir_expr(c.target, sc, hostSc, cx)
+  if (!t.ok) { return mk_irres(false, "") }
+  let a = cir_args(c.args, 0, sc, hostSc, cx, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"optcall\", \"target\": ".concat(t.js)
+    .concat(", \"method\": ").concat(jstr(c.name))
+    .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
 // `match <scrut> { <Case>(<bind>) => <body>, … }` in a component position.
 //
 // The binder is NOT renamed here. The reference mangles a binder that collides
@@ -21587,7 +22490,8 @@ fn cir_match(m: MatchN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     if (a.bind != "" && scope_has(sc, a.bind)) { return mk_irres(false, "") }
     let pay = arm_payload(scrutTy, a.pat, env)
     let inner = a.bind == "" ? sc : sc.push({ name: a.bind, ty: pay })
-    let b = cir_expr(a.body, inner, hostSc, cx)
+    let b = a.isBlk ? cir_block_arm(a, inner, hostSc, cx)
+                    : cir_expr(a.body, inner, hostSc, cx)
     if (!b.ok) { return mk_irres(false, "") }
     var arm = "{\"pattern\": ".concat(jstr(a.pat))
       .concat(", \"bind\": ").concat(a.bind == "" ? "null" : jstr(cir_safe_binder(a.bind)))
@@ -21609,6 +22513,44 @@ fn cir_match(m: MatchN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
 // that `_safe_name` would rename is still written as the author spelled it,
 // as before.
 fn cir_safe_binder(n: Str) -> Str { return n == "_" ? "__" : n }
+
+// A statement-block match arm in a COMPONENT position (`=> { let x = …  expr }`).
+//
+// The reference lowers this INLINE as a `do` node holding the bindings and the
+// tail (`_lower_component_block_arm`) — not by lambda-lifting it the way the
+// fn-body path does, because a provide method may read component `config` or a
+// required service that a synthetic module `fn` cannot hold. Each tier renders
+// the node as an awaited walrus sequence, so the node is all that is missing.
+//
+// A binding takes `_safe_name`'s escape and the scope carries it to the reads
+// as a `rename` row, the way every other binder here does; its type is the
+// annotation when one was written and the INFERRED type otherwise, because the
+// reference types a component binding by inference and never by the checker.
+fn cir_block_arm(a: ArmN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
+  var inner = sc
+  var stmts = ""
+  var i = 0
+  while (i < a.blk.length()) {
+    let s = a.blk[i]
+    let v = cir_expr(s.value, inner, hostSc, cx)
+    if (!v.ok) { return mk_irres(false, "") }
+    let safe = safe_name(s.name, inner, hostSc)
+    let ty = s.ty != "" ? s.ty : infer(s.value, cenv_ir(cx, inner))
+    inner = inner.push({ name: s.name, ty: ty })
+    if (safe != s.name) {
+      inner = inner.push({ name: "rename ".concat(s.name), ty: safe })
+    }
+    let st = "{\"step\": \"let\", \"name\": ".concat(jstr(safe))
+      .concat(", \"value\": ").concat(v.js)
+      .concat(", \"mutable\": ").concat(s.mutable ? "true" : "false").concat("}")
+    stmts = i == 0 ? st : stmts.concat(", ").concat(st)
+    i += 1
+  }
+  let t = cir_expr(a.blkTail, inner, hostSc, cx)
+  if (!t.ok) { return mk_irres(false, "") }
+  return mk_irres(true, "{\"kind\": \"do\", \"stmts\": [".concat(stmts)
+    .concat("], \"tail\": ").concat(t.js).concat("}"))
+}
 
 // Every literal `$` in a template's TEXT is doubled, so a `$` the author wrote
 // can never be read back as a positional slot (A4). The reference spells this
@@ -21765,7 +22707,7 @@ fn cir_var(n: Str, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     return cir_adt(tagged_case_adt(cx.cases, n), n, [], sc, hostSc, cx)
   }
   if (scope_has(sc, n)) {
-    return mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
+    return mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(cir_safe_of(sc, n))).concat("}"))
   }
   // Out of scope, the reference answers a name in `callables`, which holds
   // `_BUILTIN_CONSTRUCTORS`, with a `var` node: `None` is the one constructor
@@ -21926,7 +22868,14 @@ fn arrow_param_binds(ps: List[ParamN], al: Map[Str, Str]) -> List[Bind] {
 // stepped aside here instead of being given a host node it is not.
 fn cir_hostacq(root: Str, meth: Str, args: List[Expr], sc: List[Bind],
                hostSc: List[Str], cx: CCtx) -> IrRes {
-  if (root == "Map" && meth == "empty") { return mk_irres(false, "") }
+  // `Map.empty()` is the Map VALUE constructor rather than an acquisition, and
+  // the reference lowers it to `maplit` (`_lower_postfix`). Only the EMPTY
+  // literal reaches that node: an argument list is a reference refusal, so it
+  // is declined here rather than silently dropped.
+  if (root == "Map" && meth == "empty") {
+    if (args.length() != 0) { return mk_irres(false, "") }
+    return mk_irres(true, "{\"kind\": \"maplit\", \"entries\": []}")
+  }
   let a = cir_args(args, 0, sc, hostSc, cx, "")
   if (!a.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"host\", \"fn\": "
@@ -21943,7 +22892,7 @@ fn cir_hostverb(root: Str, meth: Str, args: List[Expr], sc: List[Bind],
   if (!a.ok) { return mk_irres(false, "") }
   return mk_irres(true,
     "{\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": "
-      .concat(jstr(root)).concat("}, \"method\": ").concat(jstr(meth))
+      .concat(jstr(cir_safe_of(sc, root))).concat("}, \"method\": ").concat(jstr(meth))
       .concat(", \"args\": [").concat(a.js).concat("]}"))
 }
 
@@ -21966,11 +22915,19 @@ fn cir_field(f: FieldN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   // Gated on the receiver's type exactly as the reference gates it, so a record
   // whose field is literally named `length` still reads its slot — and a
   // receiver whose type the scope cannot answer infers to "" and stays unmarked.
-  let sized = f.name == "length"
-    && tk_sized_head(parse_head(infer(f.target, cenv_ir(cx, sc))))
+  let tty = cenv_ir(cx, sc)
+  let sized = f.name == "length" && tk_sized_head(parse_head(infer(f.target, tty)))
+  // A field whose DECLARED type is `Opt[…]` reads back an optional, which every
+  // tier spells as its own absence value, so the node carries the mark
+  // (`_field_is_opt`). Gated exactly as the reference gates it: `sized_length`
+  // is the `if` and this is the `elif`, and a receiver whose type the scope
+  // cannot answer carries neither.
+  let opt = !sized
+    && parse_head(infer_field(infer(f.target, tty), f.name, tty)) == "Opt"
   return mk_irres(true, "{\"kind\": \"field\", \"target\": ".concat(t.js)
     .concat(", \"name\": ").concat(jstr(f.name))
-    .concat(sized ? ", \"sized_length\": true" : "").concat("}"))
+    .concat(sized ? ", \"sized_length\": true" : "")
+    .concat(opt ? ", \"opt\": true" : "").concat("}"))
 }
 
 fn cir_bin(b: BinN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
@@ -22150,9 +23107,9 @@ fn cir_if_end(ts: List[Token], i: Int) -> Int {
 // as the method's params and grows with each `let`; a loop's binder is pushed
 // for its body alone. A body whose bindings would need the reference's
 // method-wide `_alloc_safe` mangling is refused by the caller.
-fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], acc: Str) -> IrRes {
+fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind], hostSc: List[Str], acc: Str, top: Bool) -> IrRes {
   if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
-  if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, acc) }
+  if (atk(ts, lo, ";")) { return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, acc, top) }
   if (atw(ts, lo, "effect")) {
     if (atw(ts, lo + 1, "spawn")) { return mk_irres(false, "") }
     let acq = expr_at(ts, lo + 1)
@@ -22163,7 +23120,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
       if (!is_witnessed_acq(acq.e, cx)) { return mk_irres(false, "") }
       let wstep = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js).concat("}")
       let wacc = acc == "" ? wstep : acc.concat(", ").concat(wstep)
-      return cir_method_stmts(ts, acq.i, hi, cx, sc, hostSc, wacc)
+      return cir_method_stmts(ts, acq.i, hi, cx, sc, hostSc, wacc, top)
     }
     let und = expr_at(ts, acq.i + 1)
     if (is_bad(und.e)) { return mk_irres(false, "") }
@@ -22174,16 +23131,46 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     // it is filled, so it carries none)
     let inv = is_hole_expr(und.e) ? ""
       : ", \"inverse\": ".concat(jstr(method_inverse(acq.e, und.e, hostSc, cx)))
+    // issue #2086: the by-value captures of the derived inverse. The reference
+    // pins them in a post-pass over the method body (`_pin_inverse_captures`),
+    // which walks the body's TOP-LEVEL steps only — so a nested `if`/`while`/
+    // `for` interior carries none, and neither does a nested one here.
+    let caps = top ? inverse_captures(ue.js, sc) : mk_irres(true, "")
+    if (!caps.ok) { return mk_irres(false, "") }
+    let capjs = caps.js == "" ? "" : ", \"undo_captures\": [".concat(caps.js).concat("]")
     let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
-      .concat(", \"undo\": ").concat(ue.js).concat(inv).concat("}")
+      .concat(", \"undo\": ").concat(ue.js).concat(inv).concat(capjs).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, und.i, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, und.i, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "emit")) {
     let em = cir_emit_step(ts, lo, cx, sc, hostSc)
     if (!em.ok) { return mk_irres(false, "") }
     let nacc = acc == "" ? em.js : acc.concat(", ").concat(em.js)
-    return cir_method_stmts(ts, em.i, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, em.i, hi, cx, sc, hostSc, nacc, top)
+  }
+  // `await <expr>` in a provide METHOD body -> `{step: "await", expr}` (the
+  // reference's `AwaitStmt` arm). The reference reads this form the same way in
+  // both positions — `await <expr>` — but the ACTIVATION parser folds
+  // `await emit <call>` into the ordinary EMIT statement with `is_async` set
+  // (item 131 §2) while the METHOD parser does not: `emit` is a prefix unary
+  // there, so the suspension's payload is an `EmitExpr` and the step is the
+  // plain `await` over its operand. `cir_expr` drops the `Emit` marker exactly
+  // as the reference's component-pure `EmitExpr` arm does (the marker gates the
+  // emission CHECK, not the node), so `await emit later(x)` here lowers to the
+  // call node, byte-identical to the reference.
+  // issue #2092: without this arm the FIRST suspension refused the whole method
+  // body (`mk_irres(false, "")`), and a method body that withholds drops the
+  // enclosing component's `body` with it — so every document with one async
+  // provide method lost its entire activation.
+  if (atw(ts, lo, "await")) {
+    let r = expr_at(ts, lo + 1)
+    if (is_bad(r.e) || r.i <= lo + 1) { return mk_irres(false, "") }
+    let ae = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
+    if (!ae.ok) { return mk_irres(false, "") }
+    let astep = "{\"step\": \"await\", \"expr\": ".concat(ae.js).concat("}")
+    let aacc = acc == "" ? astep : acc.concat(", ").concat(astep)
+    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, aacc, top)
   }
   if (atw(ts, lo, "if")) {
     let c = expr_at(ts, lo + 1)
@@ -22192,7 +23179,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (tend == 0 - 1) { return mk_irres(false, "") }
     let ce = cir_expr(c.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
     if (!ce.ok) { return mk_irres(false, "") }
-    let tb = cir_method_stmts(ts, c.i + 1, tend - 1, cx, sc, hostSc, "")
+    let tb = cir_method_stmts(ts, c.i + 1, tend - 1, cx, sc, hostSc, "", false)
     if (!tb.ok) { return mk_irres(false, "") }
     var js = "{\"step\": \"if\", \"cond\": ".concat(ce.js)
       .concat(", \"then\": [").concat(tb.js).concat("]")
@@ -22200,7 +23187,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
       let eend = close_brace(ts, tend + 1)
       if (eend == 0 - 1) { return mk_irres(false, "") }
-      let eb = cir_method_stmts(ts, tend + 2, eend - 1, cx, sc, hostSc, "")
+      let eb = cir_method_stmts(ts, tend + 2, eend - 1, cx, sc, hostSc, "", false)
       if (!eb.ok) { return mk_irres(false, "") }
       js = js.concat(", \"else\": [").concat(eb.js).concat("]")
       nexti = eend
@@ -22208,7 +23195,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
       if (atw(ts, tend, "else") && atw(ts, tend + 1, "if")) {
         let eend = cir_if_end(ts, tend + 1)
         if (eend == 0 - 1) { return mk_irres(false, "") }
-        let eb = cir_method_stmts(ts, tend + 1, eend, cx, sc, hostSc, "")
+        let eb = cir_method_stmts(ts, tend + 1, eend, cx, sc, hostSc, "", false)
         if (!eb.ok) { return mk_irres(false, "") }
         js = js.concat(", \"else\": [").concat(eb.js).concat("]")
         nexti = eend
@@ -22218,7 +23205,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     }
     let step = js.concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, nexti, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, nexti, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "while")) {
     let c = expr_at(ts, lo + 1)
@@ -22227,12 +23214,12 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (wend == 0 - 1) { return mk_irres(false, "") }
     let ce = cir_expr(c.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
     if (!ce.ok) { return mk_irres(false, "") }
-    let wb = cir_method_stmts(ts, c.i + 1, wend - 1, cx, sc, hostSc, "")
+    let wb = cir_method_stmts(ts, c.i + 1, wend - 1, cx, sc, hostSc, "", false)
     if (!wb.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"while\", \"cond\": ".concat(ce.js)
       .concat(", \"body\": [").concat(wb.js).concat("]}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, wend, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, wend, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "for")) {
     if (!atk(ts, lo + 1, "(")) { return mk_irres(false, "") }
@@ -22243,33 +23230,33 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (bend == 0 - 1) { return mk_irres(false, "") }
     let ie = cir_expr(it.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 4).line))
     if (!ie.ok) { return mk_irres(false, "") }
-    let fb = cir_method_stmts(ts, it.i + 2, bend - 1, cx, sc.push({ name: bind, ty: "" }), hostSc, "")
+    let fb = cir_method_stmts(ts, it.i + 2, bend - 1, cx, sc.push({ name: bind, ty: "" }), hostSc, "", false)
     if (!fb.ok) { return mk_irres(false, "") }
     let step = "{\"step\": \"for\", \"bind\": ".concat(jstr(bind))
       .concat(", \"iterable\": ").concat(ie.js)
       .concat(", \"body\": [").concat(fb.js).concat("]}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, bend, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, bend, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "break") || atw(ts, lo, "continue")) {
     let step = "{\"step\": ".concat(jstr(tkc(ts, lo).text))
       .concat(", \"line\": ").concat(tkc(ts, lo).line.to_str()).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc, top)
   }
   if (atw(ts, lo, "return")) {
     let r = expr_at(ts, lo + 1)
     if (is_bad(r.e) || r.i <= lo + 1) {
       let step0 = "{\"step\": \"return\", \"expr\": null}"
       let nacc0 = acc == "" ? step0 : acc.concat(", ").concat(step0)
-      return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc0)
+      return cir_method_stmts(ts, lo + 1, hi, cx, sc, hostSc, nacc0, top)
     }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 1).line))
     if (!ve.ok) { return mk_irres(false, "") }
     let wj = cir_widen(ve.js, tenv_get(sc, "returns "), infer(r.e, cenv_ir(cx, sc)))
     let step = "{\"step\": \"return\", \"expr\": ".concat(wj).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc, top)
   }
   // `let <h> = effect <acquire> undo <inverse>` INSIDE a provide method: the
   // per-invocation bracket. The same step as the activation body's, and the one
@@ -22297,14 +23284,23 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (!ue.ok) { return mk_irres(false, "") }
     let caps = inverse_captures(ue.js, sc)
     if (!caps.ok) { return mk_irres(false, "") }
-    var step = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
-      .concat(", \"acquire\": ").concat(ae.js).concat(", \"undo\": ").concat(ue.js)
+    // issue #2092: the reference's key order and provenance, both of which the
+    // activation-body emitter already keeps. `_lower_effect_step` builds the
+    // step as `{"step": …, "acquire": …, "undo": …}` and appends `bind` LAST
+    // (`step["bind"] = bind`), so the method form is `step, acquire, undo,
+    // bind`; the ownership walk then stamps `inverse` on the closed step
+    // (issue #1945) and `_pin_inverse_captures` pins `undo_captures` after it.
+    let inv = is_hole_expr(und.e) ? ""
+      : ", \"inverse\": ".concat(jstr(method_inverse(acq.e, und.e, hostSc, cx)))
+    var step = "{\"step\": \"let-effect\", \"acquire\": ".concat(ae.js)
+      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name))
+      .concat(inv)
     if (caps.js != "") {
       step = step.concat(", \"undo_captures\": [").concat(caps.js).concat("]")
     }
     step = step.concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, und.i, hi, cx, sc2, hostSc2, nacc)
+    return cir_method_stmts(ts, und.i, hi, cx, sc2, hostSc2, nacc, top)
   }
   if (atw(ts, lo, "let") || atw(ts, lo, "var")) {
     let mutable = atw(ts, lo, "var")
@@ -22324,9 +23320,9 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     // the mutable set without a second threaded parameter. A `let` that SHADOWS
     // a `var` writes the key back, and `tenv_get`'s last-wins scan makes the
     // shadow win.
-    let sc2 = env_mut_put(sc.push({ name: name, ty: infer(r.e, cenv(cx, sc)) }),
+    let sc2 = env_mut_put(sc.push({ name: name, ty: value_ty(r.e, cenv(cx, sc)) }),
                           name, mutable)
-    return cir_method_stmts(ts, r.i, hi, cx, sc2, hostSc, nacc)
+    return cir_method_stmts(ts, r.i, hi, cx, sc2, hostSc, nacc, top)
   }
   // `<name> = <expr>` — a reassignment of a local the method declared.
   if (atk(ts, lo, "ident") && atk(ts, lo + 1, "=")) {
@@ -22339,7 +23335,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     let step = "{\"step\": \"assign\", \"name\": ".concat(jstr(name))
       .concat(", \"value\": ").concat(ve.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
-    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc)
+    return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc, top)
   }
   return mk_irres(false, "")
 }
@@ -22523,7 +23519,7 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
     }
     let br = cir_method_stmts(ts, h + 1, bend - 1, cx,
                               tenv_put(concat_binds(sc, pbinds), "returns ", mret),
-                              hostSc, "")
+                              hostSc, "", true)
     if (!br.ok) { return mk_irres(false, "") }
     let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [").concat(pjson)
       .concat("], \"body\": [").concat(br.js).concat("]")
@@ -22571,7 +23567,7 @@ fn cir_setup_stmt(ts: List[Token], lo: Int, cx: CCtx, sc: List[Bind],
              js: "{\"step\": \"let\", \"name\": ".concat(jstr(name))
                    .concat(", \"value\": ").concat(ve.js).concat("}"),
              e: Bad(""), isExpr: false,
-             sc: sc.push({ name: name, ty: infer(r.e, cenv(cx, sc)) }),
+             sc: sc.push({ name: name, ty: value_ty(r.e, cenv(cx, sc)) }),
              muts: mutable ? muts.push(name) : muts, i: r.i }
   }
   if (atw(ts, lo, "assert")) {
@@ -22704,6 +23700,377 @@ fn with_inverse(js: Str, inv: Str) -> Str {
     .concat(", \"inverse\": ").concat(jstr(inv)).concat("}")
 }
 
+// =============================================================== streams (130)
+//
+// issue #2087: the body's stream steps. `subscribe` (the Slice 1 bracket, the
+// Slice 2 combinator chain, the Slice 3 fan-in and the Slice 4.4 qualifier
+// tail), `every <x> in <sub>` (Slice 4) and `on <Event> as <x> [in <sub>]`
+// (Slice 5) are all parsed by the reference BEFORE its expression grammar runs
+// — `subscribe` is a statement form, `merge` and the combinators are not calls,
+// and `on` is a contextual word in neither lexer's table — so the component
+// reader has to read them at the token level here. Without these arms the first
+// one refused the body outright, and `ir_component` dropped the whole
+// activation.
+
+// The requirement rows whose declared type is a `Stream[T]` — item 130's
+// coeffect surface. A bare read of one lowers to a `req` node in a `subscribe`
+// head and nowhere else, and an `on <Event> as <x>` with no `in` clause
+// resolves its source from them BY ELEMENT TYPE (§6b).
+fn stream_req_binds(rs: List[Bind], i: Int, acc: List[Bind]) -> List[Bind] {
+  if (i >= rs.length()) { return acc }
+  if (rs[i].ty.startsWith("Stream[")) { return stream_req_binds(rs, i + 1, acc.push(rs[i])) }
+  return stream_req_binds(rs, i + 1, acc)
+}
+
+// The IR id an in-scope name lowers to. A binder whose spelling had to be
+// escaped (`safe_name`) records `rename <surface>` -> id in the scope, so the
+// declaration and every read of it agree — the reference's `env.locals`.
+fn cir_safe_of(sc: List[Bind], n: Str) -> Str {
+  let s = tenv_get(sc, "rename ".concat(n))
+  return s == "" ? n : s
+}
+
+// The host namespace a binder may not enter (`_HOST_RESERVED`,
+// src/revl/lower.py:601). Spelled out rather than derived: the set is a host
+// ABI fact, and a name in it is already a live binding at every emit target.
+fn is_host_reserved(n: Str) -> Bool {
+  return contains(["ctx", "config", "frame", "fiber", "self", "rawConfig",
+                   "host", "Context", "function", "var", "let", "const", "new",
+                   "class", "this", "typeof", "delete", "in", "of",
+                   "instanceof", "void", "export", "default", "require",
+                   "module", "exports", "import", "yield", "async", "await",
+                   "true", "false", "null", "undefined", "NaN"], n)
+}
+
+// The python keyword / soft-keyword union (`keyword.iskeyword` plus
+// `issoftkeyword`, src/revl/lower.py:673). `_safe_name` escapes against this
+// too, so a binder spelled `class` or `match` ladders exactly as the reference
+// ladders it.
+fn is_py_keyword(n: Str) -> Bool {
+  return contains(["False", "None", "True", "and", "as", "assert", "async",
+                   "await", "break", "class", "continue", "def", "del",
+                   "elif", "else", "except", "finally", "for", "from",
+                   "global", "if", "import", "in", "is", "lambda", "nonlocal",
+                   "not", "or", "pass", "raise", "return", "try", "while",
+                   "with", "yield", "_", "case", "match", "type"], n)
+}
+
+// The reference's `_safe_name` (src/revl/lower.py:745): the escape a BINDER
+// takes when its spelling collides with the host namespace, a python keyword,
+// or a name already taken in this component. Distinct from
+// `predeclared_mangle`, which is a pure ladder-shift re-derived at every read:
+// this one depends on what is already bound, so the binder computes it once and
+// the scope carries it to the reads as a `rename` row.
+fn safe_name(n: Str, sc: List[Bind], hostSc: List[Str]) -> Str {
+  var cand = n
+  var i = 0
+  while (i < 16) {
+    if (!is_host_reserved(cand) && !is_host_predeclared(cand)
+        && !is_py_keyword(cand) && !scope_has(sc, cand)
+        && !contains(hostSc, cand)) {
+      return cand
+    }
+    cand = cand.concat("_")
+    i += 1
+  }
+  return cand
+}
+
+// --------------------------------------------------------------- subscribe
+
+type SubR = { sub: Str, at: Int, ok: Bool }
+type SubQ = { pol: Str, buf: Str, drn: Str, at: Int, ok: Bool }
+
+// One `subscribe` head source, or one fan-in operand: a bare stream name (a
+// bound stream, or a required `Stream[T]`) or a nested `merge`.
+fn cir_sub_src(ts: List[Token], k: Int, sc: List[Bind], hostSc: List[Str],
+               cx: CCtx) -> SubR {
+  if (ati(ts, k, "merge") && atk(ts, k + 1, "(")) {
+    return cir_sub_merge(ts, k + 2, sc, hostSc, cx, [])
+  }
+  if (!atk(ts, k, "ident")) { return { sub: "", at: k, ok: false } }
+  let n = tkc(ts, k).text
+  if (scope_has(sc, n)) {
+    return { sub: "{\"kind\": \"name\", \"id\": ".concat(jstr(cir_safe_of(sc, n))).concat("}"),
+             at: k + 1, ok: true }
+  }
+  // a required stream is a CAPABILITY, not a value: the `req` node is the only
+  // shape a bare read of one lowers to at all (item 130 §1).
+  if (bind_lookup(cx.strreqs, n, 0) != "") {
+    return { sub: "{\"kind\": \"req\", \"name\": ".concat(jstr(n)).concat("}"),
+             at: k + 1, ok: true }
+  }
+  return { sub: "", at: k, ok: false }
+}
+
+// `merge(a, b)` — the Slice 3 fan-in. Exactly two sources; a merged stream is
+// itself a stream, so a nested `merge` recurses and no extra machinery is
+// needed for a three-source fan-in.
+fn cir_sub_merge(ts: List[Token], k: Int, sc: List[Bind], hostSc: List[Str],
+                 cx: CCtx, acc: List[Str]) -> SubR {
+  let a = cir_sub_src(ts, k, sc, hostSc, cx)
+  if (!a.ok || !atk(ts, a.at, ",")) { return { sub: "", at: k, ok: false } }
+  let b = cir_sub_src(ts, a.at + 1, sc, hostSc, cx)
+  if (!b.ok || !atk(ts, b.at, ")")) { return { sub: "", at: k, ok: false } }
+  if (contains(acc, a.sub) || a.sub == b.sub) { return { sub: "", at: k, ok: false } }
+  return { sub: "{\"kind\": \"stream-merge\", \"sources\": [".concat(a.sub)
+    .concat(", ").concat(b.sub).concat("]}"), at: b.at + 1, ok: true }
+}
+
+// The Slice 2 combinator chain, as the `stages` array the stream node carries.
+// `take` carries a raw int count; `map`/`filter` carry a lowered arrow, which
+// is the same component-position arrow node `cir_arrow` writes.
+fn cir_sub_stages(ts: List[Token], k: Int, sc: List[Bind], hostSc: List[Str],
+                  cx: CCtx, acc: Str) -> SubR {
+  if (!atk(ts, k, ".")) { return { sub: acc, at: k, ok: true } }
+  if (!atk(ts, k + 1, "ident") || !atk(ts, k + 2, "(")) { return { sub: "", at: k, ok: false } }
+  let name = tkc(ts, k + 1).text
+  if (!(name == "map" || name == "filter" || name == "take")) {
+    return { sub: "", at: k, ok: false }
+  }
+  var seg = ""
+  var nx = 0
+  if (name == "take") {
+    if (!atk(ts, k + 3, "int") || !atk(ts, k + 4, ")")) { return { sub: "", at: k, ok: false } }
+    seg = "{\"stage\": \"take\", \"count\": ".concat(tkc(ts, k + 3).text).concat("}")
+    nx = k + 5
+  } else {
+    let r = expr_at(ts, k + 3)
+    if (is_bad(r.e) || !atk(ts, r.i, ")")) { return { sub: "", at: k, ok: false } }
+    let fr = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, k + 3).line))
+    if (!fr.ok) { return { sub: "", at: k, ok: false } }
+    seg = "{\"stage\": ".concat(jstr(name)).concat(", \"fn\": ").concat(fr.js).concat("}")
+    nx = r.i + 1
+  }
+  return cir_sub_stages(ts, nx, sc, hostSc, cx,
+                        acc == "" ? seg : acc.concat(", ").concat(seg))
+}
+
+// `[policy <name>] [buffer <n>] [drain <n><unit>]` — the Slice 4.4 tail. Bare
+// words, order-free, each at most once (`_subscribe_quals`,
+// src/revl/parser.py:7045). `drain` is a duration, normalized to ms.
+fn at_sub_qual(ts: List[Token], i: Int) -> Bool {
+  return ati(ts, i, "policy") || ati(ts, i, "buffer") || ati(ts, i, "drain")
+}
+
+fn cir_sub_quals(ts: List[Token], k: Int, pol: Str, buf: Str, drn: Str) -> SubQ {
+  if (!at_sub_qual(ts, k)) { return { pol: pol, buf: buf, drn: drn, at: k, ok: true } }
+  let bad = { pol: "", buf: "", drn: "", at: k, ok: false }
+  let w = tkc(ts, k).text
+  if (w == "policy") {
+    if (pol != "" || !atk(ts, k + 1, "ident")) { return bad }
+    let p = tkc(ts, k + 1).text
+    if (!(p == "error" || p == "drop_newest" || p == "drop_oldest" || p == "block")) {
+      return bad
+    }
+    return cir_sub_quals(ts, k + 2, p, buf, drn)
+  }
+  if (w == "buffer") {
+    if (buf != "" || !atk(ts, k + 1, "int")) { return bad }
+    return cir_sub_quals(ts, k + 2, pol, tkc(ts, k + 1).text, drn)
+  }
+  if (drn != "" || !atk(ts, k + 1, "int") || !atk(ts, k + 2, "ident")) { return bad }
+  let d = duration_ms_str(tkc(ts, k + 1).text, tkc(ts, k + 2).text)
+  if (d == "") { return bad }
+  return cir_sub_quals(ts, k + 3, pol, buf, d)
+}
+
+// ------------------------------------------------------------- event contract
+
+// The `event` declaration named `evn`, as a token index, or -1. Events are
+// top-level declarations and the reference resolves a handler's contract by
+// name against the module's event table (`_event_contract`, lower.py:15820).
+fn ev_decl_at(ts: List[Token], evn: Str) -> Int {
+  var k = 0
+  while (k < ts.length()) {
+    if (atk(ts, k, "eof")) { return 0 - 1 }
+    if (at_event(ts, k) && tkc(ts, k + 1).text == evn) { return k }
+    k += 1
+  }
+  return 0 - 1
+}
+
+// The requirement whose declared `Stream[T]` element type is the event `evn`,
+// or "" when none or more than one does. §6b resolves an `on … as …` with no
+// `in` clause against the component's required streams BY ELEMENT TYPE, and an
+// ambiguous or missing match has no source to acquire.
+fn ev_req_key(rs: List[Bind], i: Int, evn: Str, hit: Str) -> Str {
+  if (i >= rs.length()) { return hit }
+  let ty = rs[i].ty
+  if (ty.startsWith("Stream[") && ty.slice(7, ty.length() - 1) == evn) {
+    if (hit != "") { return "" }
+    return ev_req_key(rs, i + 1, evn, rs[i].name)
+  }
+  return ev_req_key(rs, i + 1, evn, hit)
+}
+
+// `{"name", "key", "window", "schema"}` — the contract a Slice 5 handler
+// carries (item 130 §6). `window` defaults to 64 (`_EVENT_DEDUP_WINDOW`), and
+// the schema is the RAW record schema — `sc_json_spec`, not the `validated`
+// wrapper a service operation adds. An undeclared event name has no contract
+// and the reference refuses the handler, so the body is withheld here.
+fn ev_contract(ts: List[Token], evn: Str, al: Map[Str, Str]) -> IrRes {
+  let k = ev_decl_at(ts, evn)
+  if (k == 0 - 1) { return mk_irres(false, "") }
+  if (!atk(ts, k + 2, "(") || !ati(ts, k + 3, "key") || !atk(ts, k + 4, ":")
+      || !atk(ts, k + 5, "ident")) {
+    return mk_irres(false, "")
+  }
+  let key = tkc(ts, k + 5).text
+  var win = 64
+  var h = k + 6
+  if (atk(ts, h, ",")) {
+    if (!ati(ts, h + 1, "window") || !atk(ts, h + 2, ":") || !atk(ts, h + 3, "int")) {
+      return mk_irres(false, "")
+    }
+    win = match tkc(ts, h + 3).text.to_int() { Some(v) => v, None => 0 - 1 }
+    if (win < 1) { return mk_irres(false, "") }
+    h = h + 4
+  }
+  if (!atk(ts, h, ")")) { return mk_irres(false, "") }
+  let d = sc_event_decl(ts, k, al)
+  if (d.ty.kind == "") { return mk_irres(false, "") }
+  let env = schema_env(ts, 0, Map.empty(), al)
+  return mk_irres(true, "{\"name\": ".concat(jstr(evn))
+    .concat(", \"key\": ").concat(jstr(key))
+    .concat(", \"window\": ").concat(win.to_str())
+    .concat(", \"schema\": ").concat(sc_json_spec(d.ty, env, [evn])).concat("}"))
+}
+
+// ------------------------------------------------------------- timer colour
+//
+// The `"async": true` a timer step carries when its body reaches a suspension
+// (issue #2092; reference `_lower_timer_step` + `_timer_body_reaches_async`).
+// Two halves, ORed, both read off the same tables the body lowering reads:
+//
+//   rule 3  a required key's operation the program DECLARES `async`
+//           (`emit relay.send("tick")`) — `_async_service_op`'s req-receiver
+//           shape, matched here against `cx.aops` (`"<key>.<op>"`)
+//   rule 1  a call of an async-COLORED callable — `_calls_in`'s name channel
+//           intersected with `env.async_callables`, matched here against
+//           `cx.col`
+//
+// The halves prune DIFFERENTLY, and the difference is the reference's: the req
+// half descends into everything ("a timer body is a list of `emit` steps with
+// no intervening arrow value, so nothing is pruned"), while the name half is
+// `_calls_in(…, stop_async_arrows=True)`. The name half here is `acalls_in`,
+// which prunes an arrow at one of its callee's `Async[T]` slots — the same
+// prune the colour fixed point itself is built over (`async_colored` reads
+// `abody_callees`), so the two agree by construction.
+fn timer_reaches_async(ts: List[Token], lo: Int, hi: Int, cx: CCtx) -> Bool {
+  return timer_scan_req(ts, lo, hi, cx)
+      || any_in(timer_scan_calls(ts, lo, hi, cx.sl, []), cx.col)
+}
+
+// The req half, one `emit` step at a time. The `compensate` clause is walked
+// too: it is a value of the very step node the reference's `walk` descends
+// into, so an async op reached only from a compensation still colours.
+fn timer_scan_req(ts: List[Token], lo: Int, hi: Int, cx: CCtx) -> Bool {
+  if (lo >= hi || atk(ts, lo, "}")) { return false }
+  if (!atw(ts, lo, "emit")) { return false }
+  let r = expr_at(ts, lo + 1)
+  if (is_bad(r.e)) { return false }
+  if (timer_expr_req(r.e, cx)) { return true }
+  var nx = r.i
+  if (atw(ts, nx, "compensate")) {
+    let c = expr_at(ts, nx + 1)
+    if (is_bad(c.e)) { return false }
+    if (timer_expr_req(c.e, cx)) { return true }
+    nx = c.i
+  }
+  return timer_scan_req(ts, nx, hi, cx)
+}
+
+fn timer_exprs_req(xs: List[Expr], i: Int, cx: CCtx) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (timer_expr_req(xs[i], cx)) { return true }
+  return timer_exprs_req(xs, i + 1, cx)
+}
+
+fn timer_inits_req(xs: List[InitN], i: Int, cx: CCtx) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (timer_expr_req(xs[i].value, cx)) { return true }
+  return timer_inits_req(xs, i + 1, cx)
+}
+
+fn timer_arms_req(xs: List[ArmN], i: Int, cx: CCtx) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (timer_expr_req(xs[i].body, cx)) { return true }
+  return timer_arms_req(xs, i + 1, cx)
+}
+
+fn timer_parts_req(xs: List[PartN], i: Int, cx: CCtx) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (timer_expr_req(xs[i].e, cx)) { return true }
+  return timer_parts_req(xs, i + 1, cx)
+}
+
+// A call whose receiver is a required key and whose operation the program
+// declares `async`. The emitter's own req dispatch is the guard (`cir_call`: a
+// `Var` root in `cx.reqs`), and it reads the root BEFORE the scope — a local
+// shadowing a required key still lowers to the `req` node, so the shadow is
+// deliberately not consulted here either.
+fn timer_call_req(tg: Expr, args: List[Expr], cx: CCtx) -> Bool {
+  let hit = match tg {
+    Field(fl) => match fl.target {
+      Var(k) => contains(cx.aops, k.concat(".").concat(fl.name)),
+      _      => false,
+    },
+    _ => false,
+  }
+  if (hit) { return true }
+  if (timer_expr_req(tg, cx)) { return true }
+  return timer_exprs_req(args, 0, cx)
+}
+
+fn timer_expr_req(e: Expr, cx: CCtx) -> Bool {
+  return match e {
+    IntLit(_)   => false,
+    FloatLit(_) => false,
+    StrLit(_)   => false,
+    BoolLit(_)  => false,
+    NullLit     => false,
+    Var(_)      => false,
+    Hole(_)     => false,
+    Asset(_)    => false,
+    Bad(_)      => false,
+    Bin(b)      => timer_expr_req(b.r, cx) || timer_expr_req(b.l, cx),
+    Un(u)       => timer_expr_req(u.e, cx),
+    Emit(u)     => timer_expr_req(u.e, cx),
+    Call(c)     => timer_call_req(c.target, c.args, cx),
+    Field(f)    => timer_expr_req(f.target, cx),
+    OptField(f) => timer_expr_req(f.target, cx),
+    OptCall(c)  => timer_call_req(c.target, c.args, cx),
+    Index(x)    => timer_expr_req(x.idx, cx) || timer_expr_req(x.target, cx),
+    If(x)       => timer_expr_req(x.els, cx) || timer_expr_req(x.then_, cx)
+                     || timer_expr_req(x.cond, cx),
+    Rec(r)      => timer_inits_req(r.fields, 0, cx),
+    Lst(l)      => timer_exprs_req(l.items, 0, cx),
+    Arrow(a)    => timer_expr_req(a.body, cx),
+    Match(m)    => timer_arms_req(m.arms, 0, cx) || timer_expr_req(m.scrut, cx),
+    Templ(t)    => timer_parts_req(t.parts, 0, cx),
+    RecUpd(r)   => timer_inits_req(r.upds, 0, cx) || timer_expr_req(r.base, cx),
+  }
+}
+
+// The name half: the arrow-pruned callee names the timer body reaches, the
+// same accumulation `abody_callees` makes over a `Stmt` list.
+fn timer_scan_calls(ts: List[Token], lo: Int, hi: Int,
+                    sl: Map[Str, List[Int]], acc: List[Str]) -> List[Str] {
+  if (lo >= hi || atk(ts, lo, "}")) { return acc }
+  if (!atw(ts, lo, "emit")) { return acc }
+  let r = expr_at(ts, lo + 1)
+  if (is_bad(r.e)) { return acc }
+  var acc2 = acalls_in(r.e, sl, acc)
+  var nx = r.i
+  if (atw(ts, nx, "compensate")) {
+    let c = expr_at(ts, nx + 1)
+    if (!is_bad(c.e)) { acc2 = acalls_in(c.e, sl, acc2) }
+    nx = c.i
+  }
+  return timer_scan_calls(ts, nx, hi, sl, acc2)
+}
+
 // A component activation body -> its `body` step list. `config` is a header
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
@@ -22753,8 +24120,10 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     // issue #1859: a spawn's `undo` is the author's own disposer call — no
     // table proves it reverts — so the step records `asserted` rather than
     // tearing down behind a bare `noResidue: true`.
-    let step = with_inverse("{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
-      .concat(", \"acquire\": ").concat(sp.js).concat(", \"undo\": ").concat(ue.js).concat("}"),
+    // issue #2086: `bind` is appended LAST, after the inverse's own keys, as
+    // `_lower_effect_step` does (`step["bind"] = bind` after the body is built).
+    let step = with_inverse("{\"step\": \"let-effect\", \"acquire\": ".concat(sp.js)
+      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name)).concat("}"),
       "asserted")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, und.i, end, cx, provs, sc2, hostSc, nacc)
@@ -22818,8 +24187,8 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (is_bad(und.e)) { return mk_irres(false, "") }
     let ue = cir_expr(und.e, sc2, hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line))
     if (!ue.ok) { return mk_irres(false, "") }
-    let step0 = "{\"step\": \"let-effect\", \"bind\": ".concat(jstr(name))
-      .concat(", \"acquire\": ").concat(ae.js).concat(", \"undo\": ").concat(ue.js).concat("}")
+    let step0 = "{\"step\": \"let-effect\", \"acquire\": ".concat(ae.js)
+      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name)).concat("}")
     let step1 = with_inverse(step0, site_effect_inverse(acq.e, ae.js, und.e, ue.js,
       hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line)))
     let step = isAsync ? step_async(step1) : step1
@@ -22899,17 +24268,25 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, r.i, end, cx, provs, sc, hostSc, nacc)
   }
-  // `isolate <key> in realm("<label>")` and `intercept <key> with { … }` are
-  // PRELUDE declarations, not activation steps: the reference records them on
-  // the component (`isolate`/`intercept`) and emits no body step for either, so
-  // the walk steps over them structurally. The multi-realm ROUTING spelling
-  // (`in realms(...)`, item 162) is a different declaration with a different
-  // key (`routes`) and is deliberately NOT matched here — it keeps refusing.
+  // `isolate <key> in realm("<label>")`, `isolate <key> in realms(…) [strategy(…)]`
+  // and `intercept <key> with { … }` are PRELUDE declarations, not activation
+  // steps: the reference records them on the component (`isolate`/`routes`/
+  // `intercept`) and emits no body step for either, so the walk steps over them
+  // structurally. The multi-realm ROUTING spelling (`in realms(...)`, item 162)
+  // used to keep refusing here — issue #2086 — which dropped the whole `Router`
+  // body (and, with it, the `provide` step) on every routed document.
   if (atw(ts, i, "isolate")) {
-    if (!(atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
-          && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")
-          && atk(ts, i + 6, ")"))) { return mk_irres(false, "") }
-    return cir_body(ts, i + 7, end, cx, provs, sc, hostSc, acc)
+    if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
+        && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")
+        && atk(ts, i + 6, ")")) {
+      return cir_body(ts, i + 7, end, cx, provs, sc, hostSc, acc)
+    }
+    if (atw(ts, i + 2, "in") && ati(ts, i + 3, "realms")) {
+      let rp = p_route_clause(ts, i + 3)
+      if (!rp.ok) { return mk_irres(false, "") }
+      return cir_body(ts, rp.i, end, cx, provs, sc, hostSc, acc)
+    }
+    return mk_irres(false, "")
   }
   if (atw(ts, i, "intercept")) {
     var k = i + 1
@@ -22918,6 +24295,134 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let ce = close_brace(ts, k)
     if (ce == 0 - 1) { return mk_irres(false, "") }
     return cir_body(ts, ce, end, cx, provs, sc, hostSc, acc)
+  }
+  // `let <h> = subscribe <stream> [.<combinator>(…)]… [policy P] [buffer N]
+  // [drain <dur>] undo <h>.close()` — item 130 §5's bracket. The step is an
+  // ordinary `let-effect` carrying `subscribe: true` and the backpressure
+  // `policy`, with the Slice 2 `stages` and the Slice 4.4 `buffer`/`drain`
+  // additive onto the acquire node and `buffer`/`drain` repeated on the step
+  // AFTER `bind` (`_lower_subscribe_step`, src/revl/lower.py:11653-11675). The
+  // bracket is a HOST local of the reserved `Subscription` family, so
+  // `h.next()`/`h.close()` lower as host verbs, not through the stdlib table.
+  if (atw(ts, i, "let") && atk(ts, i + 2, "=") && atw(ts, i + 3, "subscribe")) {
+    let name = tkc(ts, i + 1).text
+    let head = cir_sub_src(ts, i + 4, sc, hostSc, cx)
+    if (!head.ok) { return mk_irres(false, "") }
+    let stg = cir_sub_stages(ts, head.at, sc, hostSc, cx, "")
+    if (!stg.ok) { return mk_irres(false, "") }
+    let q = cir_sub_quals(ts, stg.at, "", "", "")
+    if (!q.ok) { return mk_irres(false, "") }
+    let pol = q.pol == "" ? "error" : q.pol
+    // The `undo` is required by the surface (rule 3.2) and is read
+    // STRUCTURALLY: the reference shape-checks the lowered expression against
+    // the desugared bracket's own `close` call, so only that spelling reaches
+    // an IR document and a step is never emitted with a hand-written undo.
+    if (!atw(ts, q.at, "undo") || !ati(ts, q.at + 1, name)
+        || !atk(ts, q.at + 2, ".") || !ati(ts, q.at + 3, "close")
+        || !atk(ts, q.at + 4, "(") || !atk(ts, q.at + 5, ")")) {
+      return mk_irres(false, "")
+    }
+    let safe = safe_name(name, sc, hostSc)
+    let sc2 = sc.push({ name: name, ty: "Subscription" })
+      .push({ name: "rename ".concat(name), ty: safe })
+    var acq = "{\"kind\": \"subscribe\", \"stream\": ".concat(head.sub)
+      .concat(", \"policy\": ").concat(jstr(pol))
+    if (stg.sub != "") { acq = acq.concat(", \"stages\": [").concat(stg.sub).concat("]") }
+    if (q.buf != "") { acq = acq.concat(", \"buffer\": ").concat(q.buf) }
+    if (q.drn != "") { acq = acq.concat(", \"drain\": ").concat(q.drn) }
+    acq = acq.concat("}")
+    var step = "{\"step\": \"let-effect\", \"subscribe\": true, \"policy\": "
+      .concat(jstr(pol)).concat(", \"acquire\": ").concat(acq)
+      .concat(", \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": ")
+      .concat(jstr(safe)).concat("}, \"method\": \"close\", \"args\": []}")
+      .concat(", \"bind\": ").concat(jstr(safe))
+    if (q.buf != "") { step = step.concat(", \"buffer\": ").concat(q.buf) }
+    if (q.drn != "") { step = step.concat(", \"drain\": ").concat(q.drn) }
+    step = step.concat("}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_body(ts, q.at + 6, end, cx, provs, sc2, hostSc.push(name), nacc)
+  }
+  // `every <x> in <sub> { … }` — Slice 4's iteration. It shares the `every`
+  // keyword with the timer and is told apart by one token of lookahead: a
+  // timer's next token is a duration's int, an iteration's is its item name.
+  if (atw(ts, i, "every") && atk(ts, i + 1, "ident") && atw(ts, i + 2, "in")) {
+    let subj = cir_sub_src(ts, i + 3, sc, hostSc, cx)
+    if (!subj.ok || !atk(ts, subj.at, "{")) { return mk_irres(false, "") }
+    let bend = close_brace(ts, subj.at)
+    if (bend == 0 - 1) { return mk_irres(false, "") }
+    let item = tkc(ts, i + 1).text
+    let safe = safe_name(item, sc, hostSc)
+    let isc = sc.push({ name: item, ty: "" })
+      .push({ name: "rename ".concat(item), ty: safe })
+    let bodyR = cir_emit_steps(ts, subj.at + 1, bend - 1, cx, isc, hostSc, "")
+    if (!bodyR.ok) { return mk_irres(false, "") }
+    let step = "{\"step\": \"stream-iter\", \"bind\": ".concat(jstr(safe))
+      .concat(", \"subject\": ").concat(subj.sub)
+      .concat(", \"body\": [").concat(bodyR.js).concat("]}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_body(ts, bend, end, cx, provs, isc, hostSc, nacc)
+  }
+  // `on <Event> as <x> [in <sub>] { … }` — Slice 5's typed-event handler. `on`
+  // is a CONTEXTUAL word (neither lexer's KEYWORDS table), so the arm matches
+  // an ident. With no `in <sub>` clause (§6b) the source is the component's
+  // required `Stream[<Event>]`, and the reference DESUGARS the handler into a
+  // synthesized `subscribe` bracket named `sub_<requirement>` plus the
+  // iteration — the same two steps the explicit spelling lowers to, so the
+  // bracket needs no separate arm (`_lower_required_stream_handler`,
+  // src/revl/lower.py:15661).
+  if (ati(ts, i, "on") && atk(ts, i + 1, "ident") && atw(ts, i + 2, "as")
+      && atk(ts, i + 3, "ident")) {
+    let evn = tkc(ts, i + 1).text
+    let item = tkc(ts, i + 3).text
+    var j = i + 4
+    var headJs = ""
+    var subjJs = ""
+    var sc2 = sc
+    var hostSc2 = hostSc
+    var pre = ""
+    if (atw(ts, j, "in")) {
+      let subj = cir_sub_src(ts, j + 1, sc, hostSc, cx)
+      if (!subj.ok) { return mk_irres(false, "") }
+      // one read of the field into a local: two reads of `subj.sub` would
+      // move the `Str` out twice in the rust mirror (E0382).
+      let sub = subj.sub
+      headJs = sub
+      subjJs = sub
+      j = subj.at
+    } else {
+      let key = ev_req_key(cx.strreqs, 0, evn, "")
+      if (key == "") { return mk_irres(false, "") }
+      let safe = safe_name("sub_".concat(key), sc, hostSc)
+      headJs = "{\"kind\": \"req\", \"name\": ".concat(jstr(key)).concat("}")
+      // the iteration reads the BRACKET the desugaring synthesized, not the
+      // requirement: the requirement is the bracket's `acquire` source, and a
+      // `req` node in `subject` would re-acquire the capability per item.
+      subjJs = "{\"kind\": \"name\", \"id\": ".concat(jstr(safe)).concat("}")
+      sc2 = sc.push({ name: "rename ".concat(safe), ty: safe })
+      hostSc2 = hostSc.push(safe)
+      pre = "{\"step\": \"let-effect\", \"subscribe\": true, \"policy\": \"error\""
+        .concat(", \"acquire\": {\"kind\": \"subscribe\", \"stream\": ").concat(headJs)
+        .concat(", \"policy\": \"error\"}")
+        .concat(", \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"name\", \"id\": ")
+        .concat(jstr(safe)).concat("}, \"method\": \"close\", \"args\": []}")
+        .concat(", \"bind\": ").concat(jstr(safe)).concat("}, ")
+    }
+    if (!atk(ts, j, "{")) { return mk_irres(false, "") }
+    let bend = close_brace(ts, j)
+    if (bend == 0 - 1) { return mk_irres(false, "") }
+    let evc = ev_contract(ts, evn, cx.al)
+    if (!evc.ok) { return mk_irres(false, "") }
+    let isafe = safe_name(item, sc2, hostSc2)
+    let isc = sc2.push({ name: item, ty: "" })
+      .push({ name: "rename ".concat(item), ty: isafe })
+    let bodyR = cir_emit_steps(ts, j + 1, bend - 1, cx, isc, hostSc2, "")
+    if (!bodyR.ok) { return mk_irres(false, "") }
+    let step = pre.concat("{\"step\": \"stream-iter\", \"bind\": ").concat(jstr(isafe))
+      .concat(", \"subject\": ").concat(subjJs)
+      .concat(", \"body\": [").concat(bodyR.js).concat("]")
+      .concat(", \"event\": ").concat(evc.js).concat("}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return cir_body(ts, bend, end, cx, provs, isc, hostSc2, nacc)
   }
   if (atw(ts, i, "every") || atw(ts, i, "after")) {
     let mode = tkc(ts, i).text
@@ -22931,9 +24436,14 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     if (bend == 0 - 1) { return mk_irres(false, "") }
     let bodyR = cir_emit_steps(ts, i + 4, bend - 1, cx, sc, hostSc, "")
     if (!bodyR.ok) { return mk_irres(false, "") }
-    let step = "{\"step\": \"timer\", \"mode\": ".concat(jstr(mode))
+    var step = "{\"step\": \"timer\", \"mode\": ".concat(jstr(mode))
       .concat(", \"interval_ms\": ").concat(ims)
       .concat(", \"body\": [").concat(bodyR.js).concat("]}")
+    // async colouring (issue #2092, item 170): a timer body reaching a
+    // suspension is ADMITTED and coloured async, not refused — the firing opens
+    // an `Async[T]` in-flight window and the runtime cancels a pending firing
+    // on unload. A sync timer body carries no key and stays byte-identical.
+    if (timer_reaches_async(ts, i + 4, bend - 1, cx)) { step = step_async(step) }
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, bend, end, cx, provs, sc, hostSc, nacc)
   }
@@ -23048,6 +24558,37 @@ fn ir_isolate(ts: List[Token], lo: Int, hi: Int, acc: Str) -> Str {
   return ir_isolate(ts, j + 1, hi, acc)
 }
 
+// `isolate <key> in realms("w1", "w2") [strategy(<name>)]` -> `"<key>":
+// {"realms": [...], "strategy": "<name>"|null}` entries, in declaration order.
+// Issue #2086: the multi-realm ROUTING spelling is the PLURAL of `ir_isolate`'s
+// pin — the same `isolate <key> in` head with a different tail, recorded under a
+// different component key (`routes`, item 162). Nothing read it, so the whole
+// component header came out without its router and the emitter lost the
+// `_revl_route_<key>` proxy with it.
+//
+// `strategy` is rendered as JSON `null` when the clause omits it, NOT omitted:
+// the reference stores `{"realms": …, "strategy": stmt.strategy}`
+// (lower.py:13849) and `stmt.strategy` is `None`, so the key is always present.
+fn ir_routes(ts: List[Token], lo: Int, hi: Int, acc: Str) -> IrRes {
+  var j = lo
+  while (j < hi && !atw(ts, j, "isolate")) { j += 1 }
+  if (j >= hi) { return mk_irres(true, acc) }
+  if (atw(ts, j + 2, "in") && ati(ts, j + 3, "realms")) {
+    let rp = p_route_clause(ts, j + 3)
+    // A malformed clause is a reference refusal, so there is nothing to compare
+    // against — but the component HEADER still has to stay byte-identical, which
+    // is why this reports `ok:false` (the caller omits the key) rather than
+    // failing the component.
+    if (!rp.ok) { return mk_irres(false, "") }
+    let e = jstr(tkc(ts, j + 1).text)
+      .concat(": {\"realms\": [").concat(ir_caps_json(rp.rlms))
+      .concat("], \"strategy\": ").concat(rp.strat == "" ? "null" : jstr(rp.strat))
+      .concat("}")
+    return ir_routes(ts, rp.i, hi, acc == "" ? e : acc.concat(", ").concat(e))
+  }
+  return ir_routes(ts, j + 1, hi, acc)
+}
+
 // The `config { field: Type [= <literal>] … }` block -> `[{name, type, default}]`.
 fn ir_config(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> Str {
   var j = lo
@@ -23093,7 +24634,8 @@ fn comp_has_kw(ts: List[Token], lo: Int, hi: Int, w: Str) -> Bool {
 // not readable out of the component. It is threaded from `lower_to_ir_at`
 // rather than invented here, so the key is the caller's answer and not this
 // file's guess.
-fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCompR {
+fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str],
+                col: List[Str], sl: Map[Str, List[Int]]) -> IrCompR {
   let nm = tkc(ts, i + 1).text
   var j = i + 2
   var reqs: List[Bind] = []
@@ -23133,11 +24675,14 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
              cprovs: program_provisions(ts),
              cfg: comp_config_struct(ts, lo, hi, al), ln: 0,
              handles: program_names_handles(ts),
-             xundo: extern_undo_names(ts) }
+             xundo: extern_undo_names(ts),
+             strreqs: stream_req_binds(reqs, 0, []),
+             col: col, sl: sl, aops: req_async_ops(ts, reqs, []) }
   let sc0: List[Bind] = []
   let bodyRes = cir_body(ts, lo, hi, cx, provs, sc0, [], "")
   let isoJs = ir_isolate(ts, lo, hi, "")
   let iceptRes = ir_intercept(ts, lo, hi, "")
+  let rtRes = ir_routes(ts, lo, hi, "")
   var js = "{\"name\": ".concat(jstr(nm))
     .concat(", \"source\": ").concat(jstr(fname))
     .concat(", \"config\": [").concat(ir_config(ts, lo, hi, al))
@@ -23153,16 +24698,25 @@ fn ir_component(ts: List[Token], i: Int, fname: Str, al: Map[Str, Str]) -> IrCom
   if (iceptRes.ok && iceptRes.js != "") {
     js = js.concat(", \"intercept\": {").concat(iceptRes.js).concat("}")
   }
+  // ...then `routes` (item 162), the routed-require half of the same prelude.
+  if (rtRes.ok && rtRes.js != "") {
+    js = js.concat(", \"routes\": {").concat(rtRes.js).concat("}")
+  }
   js = js.concat("}")
   // a body-level stdlib builtin (or tagged ADT) construction is the reference's
   // body-only v3 trigger (`_has_builtin`); now that the body is lowered, the
-  // lowered node's presence is the same signal a token scan cannot see.
+  // lowered node's presence is the same signal a token scan cannot see. A
+  // `stream-iter` step is the same kind of signal for the `on <Event> as <x>`
+  // handler: `on` is a CONTEXTUAL word, so a token scan for it would fire on a
+  // variable that merely happens to be spelled `on` (issue #2087).
   let bodyV3 = bodyRes.ok && iceptRes.ok
-    && (str_has(bodyRes.js, "\"kind\": \"builtin\"") || str_has(bodyRes.js, "\"kind\": \"adt\""))
+    && (str_has(bodyRes.js, "\"kind\": \"builtin\"") || str_has(bodyRes.js, "\"kind\": \"adt\"")
+        || str_has(bodyRes.js, "\"step\": \"stream-iter\""))
   let v3 = bodyV3 || comp_has_kw(ts, lo, hi, "if") || comp_has_kw(ts, lo, hi, "fail")
     || comp_has_kw(ts, lo, hi, "every") || comp_has_kw(ts, lo, hi, "after")
     || comp_has_kw(ts, lo, hi, "spawn")
   let v2 = comp_has_kw(ts, lo, hi, "isolate") || comp_has_kw(ts, lo, hi, "intercept")
+    || (rtRes.ok && rtRes.js != "")
   return mk_ircompr(js, v3, v2)
 }
 
@@ -23335,7 +24889,7 @@ fn is_builtin_method(m: Str) -> Bool {
 }
 
 fn is_host_root(n: Str) -> Bool {
-  return n == "Map" || n == "Pool" || n == "Job"
+  return n == "Map" || n == "Pool" || n == "Job" || n == "Stream"
 }
 
 // The stdlib method result type (the checker's `_BUILTIN_SIG` return, non-
@@ -23569,6 +25123,125 @@ fn infer_list_ty(items: List[Expr], env: List[Bind]) -> Str {
   return "List[".concat(elem).concat("]")
 }
 
+// issue #2095 (the self-host port of `infer_ast`'s `ExprArrow` arm and
+// `_resolve_arrow`, src/revl/typecheck.py): an arrow ALWAYS types, as the
+// function type `(<params>) -> <returns>` — arity is purely syntactic and never
+// in doubt, so even an arrow over unknown parameters has one. `infer` answered
+// "" for every arrow, and a `let`-bound arrow is where that shows: the binding
+// reached the environment with no type, so a call to it read back "" and
+// `let bump = (k: Int) => k + size` followed by `i = bump(i) + 1` lost the
+// `operands` annotation the reference stamps on typed arithmetic — rust emitted
+// `i = (bump(i) + 1i64)` where the reference emits the checked add.
+//
+// Each parameter is its written annotation or `Any` (the reference's ⊥,
+// rendered), and the return is the written annotation or, only when no
+// unknown-typed parameter occurs FREE in the body (§3.2,
+// `arrow_depends_on_unknown_param`), what the body infers to — otherwise `Any`.
+// Inferring a result from a body typed under an unknown parameter is not sound,
+// so `(x) => x + 1` must stay `(Any) -> Any` and not become `(Any) -> Int`.
+fn arrow_fn_ty(a: ArrowN, env: List[Bind]) -> Str {
+  var inner = env
+  var pts: List[Str] = []
+  var unknown: List[Str] = []
+  var i = 0
+  while (i < a.params.length()) {
+    let p = a.params[i]
+    // a bare parameter is ⊥, not absent: it is still this body's local, and it
+    // shadows an outer name of the same spelling (`bind_local`), so the entry
+    // goes in empty rather than being left out.
+    inner = tenv_put(inner, p.name, p.ty)
+    if (p.ty == "") { unknown = unknown.push(p.name) }
+    // the ternary MOVES `p.ty` (a `Str` field), so it is written after every
+    // other read of it: a later read would be a borrow after move in the rust
+    // mirror (E0382).
+    pts = pts.push(p.ty == "" ? "Any" : p.ty)
+    i += 1
+  }
+  var ps = ""
+  var k = 0
+  while (k < pts.length()) {
+    ps = k == 0 ? pts[k] : ps.concat(", ").concat(pts[k])
+    k += 1
+  }
+  var rt = a.ret
+  if (rt == "" && !reads_free(a.body, unknown, [])) { rt = infer(a.body, inner) }
+  return "(".concat(ps).concat(") -> ").concat(rt == "" ? "Any" : rt)
+}
+
+// The reference's `_free_names` walk (src/revl/typecheck.py): is any name in
+// `names` READ in `e` outside an inner binder? §3.2 asks it of an arrow's
+// unknown-typed parameters, and the walk errs towards visiting too much —
+// missing an occurrence would name a return the reference leaves `Any`. The
+// binder set is the reference's: a nested arrow's parameters and a match arm's
+// payload binding.
+fn reads_free(e: Expr, names: List[Str], bound: List[Str]) -> Bool {
+  return match e {
+    Var(n)      => contains(names, n) && !contains(bound, n),
+    Bin(b)      => reads_free(b.l, names, bound) || reads_free(b.r, names, bound),
+    Un(u)       => reads_free(u.e, names, bound),
+    Emit(u)     => reads_free(u.e, names, bound),
+    Call(c)     => reads_free(c.target, names, bound)
+                   || reads_free_all(c.args, 0, names, bound),
+    Field(f)    => reads_free(f.target, names, bound),
+    OptField(f) => reads_free(f.target, names, bound),
+    OptCall(c)  => reads_free(c.target, names, bound)
+                   || reads_free_all(c.args, 0, names, bound),
+    Index(x)    => reads_free(x.target, names, bound)
+                   || reads_free(x.idx, names, bound),
+    If(f)       => reads_free(f.cond, names, bound)
+                   || reads_free(f.then_, names, bound)
+                   || reads_free(f.els, names, bound),
+    Rec(r)      => reads_free_inits(r.fields, 0, names, bound),
+    Lst(l)      => reads_free_all(l.items, 0, names, bound),
+    Arrow(a)    => reads_free(a.body, names, union_into(bound, param_names(a.params))),
+    Match(m)    => reads_free(m.scrut, names, bound)
+                   || reads_free_arms(m.arms, 0, names, bound),
+    Templ(t)    => reads_free_parts(t.parts, 0, names, bound),
+    RecUpd(r)   => reads_free(r.base, names, bound)
+                   || reads_free_inits(r.upds, 0, names, bound),
+    _           => false,
+  }
+}
+
+fn reads_free_all(xs: List[Expr], i: Int, names: List[Str], bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (reads_free(xs[i], names, bound)) { return true }
+  return reads_free_all(xs, i + 1, names, bound)
+}
+
+fn reads_free_inits(xs: List[InitN], i: Int, names: List[Str], bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (reads_free(xs[i].value, names, bound)) { return true }
+  return reads_free_inits(xs, i + 1, names, bound)
+}
+
+fn reads_free_arms(xs: List[ArmN], i: Int, names: List[Str], bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  let a = xs[i]
+  let inner = a.bind == "" ? bound : bound.push(a.bind)
+  if (reads_free(a.body, names, inner)) { return true }
+  return reads_free_arms(xs, i + 1, names, bound)
+}
+
+fn reads_free_parts(xs: List[PartN], i: Int, names: List[Str], bound: List[Str]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (reads_free(xs[i].e, names, bound)) { return true }
+  return reads_free_parts(xs, i + 1, names, bound)
+}
+
+// The type of a component/method BINDING's value. The reference types such a
+// binding from its LOWERED value (`_sweep` = `infer_ir` over what
+// `_lower_component_pure_expr` produced), and that lowering STRIPS an `emit`
+// marker down to the call it covers — so `let got = emit fetch(p)` is typed by
+// the call's return, not by the marker (issue #2092: the marker inferred to ""
+// and the unknown then propagated into every `Some(got)` arm payload).
+fn value_ty(e: Expr, env: List[Bind]) -> Str {
+  return match e {
+    Emit(u) => infer(u.e, env),
+    _       => infer(e, env),
+  }
+}
+
 // Best-effort static type of a pure expression ("" = unknown). The covered
 // projection of `infer_ast`: enough to reproduce the IR's type annotations.
 fn infer(e: Expr, env: List[Bind]) -> Str {
@@ -23591,7 +25264,7 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     If(f)       => join_ty(infer(f.then_, env), infer(f.els, env)),
     Rec(r)      => infer_record_ty(r.fields, env),
     Lst(l)      => infer_list_ty(l.items, env),
-    Arrow(a)    => "",
+    Arrow(a)    => arrow_fn_ty(a, env),
     Match(m)    => infer_match_ty(m, env),
     Templ(t)    => "Str",
     // a record update yields the BASE's type with one field replaced, so the
@@ -23682,6 +25355,298 @@ fn lir_args(args: List[Expr], env: List[Bind], al: Map[Str, Str]) -> Str {
 // Like `lir_args`, but marks each argument's Int/Int32 -> Float / Int32 -> Int
 // widen against the callee's declared parameter types (`_mark_widen` at a call
 // site). A missing parameter type (defaults, varargs) leaves its argument bare.
+// ------------------------------------------------------- #2092 sync monomorphs
+//
+// `_colour_polymorphic_fns`: a module `fn` that is async-colored, declares an
+// `Async[T]` parameter, and whose arrow-pruned body reaches no OTHER colored
+// name. A caller that hands such a `fn` only arrows which themselves reach no
+// async callable is a SYNC caller, and the reference redirects its call to a
+// `_revl_sync` clone of the callee whose async-typed parameters are stripped
+// back to plain fn types (`_strip_async_fn_return`). The clone is appended to
+// `functions` last, in sorted monomorph order (`_synthesize_sync_monomorphs`).
+//
+// The redirect is decided in `mono_plan` (over the whole program, before the
+// walk) and consumed by `lir_call` off the caller's body environment, because a
+// call and the colour its own body is stamped with must be the same decision.
+
+// `(Str) -> Async[Str]` -> `(Str) -> Str`; a non-async fn type is returned
+// unchanged (`_strip_async_fn_return`).
+fn strip_async_fn_ret(ty: Str) -> Str {
+  if (!is_async_fn_ty(ty)) { return ty }
+  return "(".concat(join_strs(fn_param_types(ty), ", ")).concat(") -> ")
+    .concat(type_arg1(function_return_ty(ty)))
+}
+
+fn strip_async_ptypes(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    out = out.push(strip_async_fn_ret(xs[i]))
+    i += 1
+  }
+  return out
+}
+
+// The monomorph a caller's redirect row maps `n` to, or "" when the call is left
+// alone. The row is `|origin=mono|...`, so the leading `|` and the trailing `=`
+// anchor the name against a longer one that shares its prefix.
+fn mono_lookup(row: Str, n: Str) -> Str {
+  if (row == "") { return "" }
+  let key = "|".concat(n).concat("=")
+  let at = row.indexOf(key)
+  if (at == 0 - 1) { return "" }
+  let rest = row.slice(at + key.length(), row.length())
+  let end = rest.indexOf("|")
+  if (end == 0 - 1) { return rest }
+  return rest.slice(0, end)
+}
+
+// `_colour_polymorphic_fns`.
+fn poly_fns(fs: List[FnD], colored: List[Str], slots: Map[Str, List[Int]]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < fs.length()) {
+    let f = fs[i]
+    if (contains(colored, f.name) && f.asyncParams.length() > 0
+        && !any_in(abody_callees(f.body, 0, slots, []), colored)) {
+      out = out.push(f.name)
+    }
+    i += 1
+  }
+  return out
+}
+
+// An arrow handed to an `Async[T]` slot that reaches NO async callable - the
+// reference's `_arrow_reaches_async` minus its service-operation half, which no
+// module `fn` body can reach (a module `fn` declares no `requires`).
+fn mono_arg_sync(e: Expr, sl: Map[Str, List[Int]], colored: List[Str]) -> Bool {
+  return match e {
+    Arrow(a) => !any_in(acalls_in(a.body, sl, []), colored),
+    _        => false,
+  }
+}
+
+// Every `Async[T]` slot of the callee carries a sync arrow (`liftable`).
+fn mono_call_liftable(args: List[Expr], asl: List[Int], i: Int,
+                      sl: Map[Str, List[Int]], colored: List[Str]) -> Bool {
+  if (i >= asl.length()) { return true }
+  if (asl[i] >= args.length()) { return false }
+  if (!mono_arg_sync(args[asl[i]], sl, colored)) { return false }
+  return mono_call_liftable(args, asl, i + 1, sl, colored)
+}
+
+fn mt_args(xs: List[Expr], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+           colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return mt_args(xs, i + 1, sl, poly, colored, mt_in(xs[i], sl, poly, colored, acc))
+}
+
+fn mt_inits(xs: List[InitN], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+            colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return mt_inits(xs, i + 1, sl, poly, colored, mt_in(xs[i].value, sl, poly, colored, acc))
+}
+
+fn mt_arms(xs: List[ArmN], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+           colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return mt_arms(xs, i + 1, sl, poly, colored, mt_in(xs[i].body, sl, poly, colored, acc))
+}
+
+fn mt_parts(xs: List[PartN], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+            colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return mt_parts(xs, i + 1, sl, poly, colored, mt_in(xs[i].e, sl, poly, colored, acc))
+}
+
+// The polymorphic callees this call hands ONLY sync arrows. The callee is always
+// descended into, so a polymorphic call nested inside an argument is seen too.
+fn mt_call(tg: Expr, args: List[Expr], sl: Map[Str, List[Int]], poly: List[Str],
+           colored: List[Str], acc: List[Str]) -> List[Str] {
+  let cn = callee_name(tg)
+  var a2 = mt_in(tg, sl, poly, colored, acc)
+  if (contains(poly, cn) && mono_call_liftable(args, acalls_slots(sl, cn), 0, sl, colored)) {
+    a2 = a2.push(cn)
+  }
+  return mt_args(args, 0, sl, poly, colored, a2)
+}
+
+fn mt_in(e: Expr, sl: Map[Str, List[Int]], poly: List[Str], colored: List[Str],
+         acc: List[Str]) -> List[Str] {
+  return match e {
+    IntLit(_)   => acc,
+    FloatLit(_) => acc,
+    StrLit(_)   => acc,
+    BoolLit(_)  => acc,
+    NullLit     => acc,
+    Var(_)      => acc,
+    Hole(_)     => acc,
+    Asset(_)    => acc,
+    Bad(_)      => acc,
+    Bin(b)      => mt_in(b.r, sl, poly, colored, mt_in(b.l, sl, poly, colored, acc)),
+    Un(u)       => mt_in(u.e, sl, poly, colored, acc),
+    Emit(u)     => mt_in(u.e, sl, poly, colored, acc),
+    Call(c)     => mt_call(c.target, c.args, sl, poly, colored, acc),
+    Field(f)    => mt_in(f.target, sl, poly, colored, acc),
+    OptField(f) => mt_in(f.target, sl, poly, colored, acc),
+    OptCall(c)  => mt_args(c.args, 0, sl, poly, colored, mt_in(c.target, sl, poly, colored, acc)),
+    Index(x)    => mt_in(x.idx, sl, poly, colored, mt_in(x.target, sl, poly, colored, acc)),
+    If(x)       => mt_in(x.els, sl, poly, colored,
+                         mt_in(x.then_, sl, poly, colored, mt_in(x.cond, sl, poly, colored, acc))),
+    Rec(r)      => mt_inits(r.fields, 0, sl, poly, colored, acc),
+    Lst(l)      => mt_args(l.items, 0, sl, poly, colored, acc),
+    Arrow(a)    => mt_in(a.body, sl, poly, colored, acc),
+    Match(m)    => mt_arms(m.arms, 0, sl, poly, colored, mt_in(m.scrut, sl, poly, colored, acc)),
+    Templ(t)    => mt_parts(t.parts, 0, sl, poly, colored, acc),
+    RecUpd(r)   => mt_inits(r.upds, 0, sl, poly, colored, mt_in(r.base, sl, poly, colored, acc)),
+  }
+}
+
+fn mt_body(ss: List[Stmt], i: Int, sl: Map[Str, List[Int]], poly: List[Str],
+           colored: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  return mt_body(ss, i + 1, sl, poly, colored, mt_in(ss[i].e, sl, poly, colored, acc))
+}
+
+// The liftable polymorphic callees of every module `fn`, keyed by name - the
+// probe `_monomorphize_free_fn_calls` runs over a throwaway copy of the fns.
+fn mono_by_fn(fs: List[FnD], poly: List[Str], sl: Map[Str, List[Int]],
+              colored: List[Str]) -> Map[Str, List[Str]] {
+  var m: Map[Str, List[Str]] = Map.empty()
+  var i = 0
+  while (i < fs.length()) {
+    let hit = mt_body(fs[i].body, 0, sl, poly, colored, [])
+    if (hit.length() > 0) { m = m.set(fs[i].name, hit) }
+    i += 1
+  }
+  return m
+}
+
+type MonoPlan = { colored: List[Str], monos: Map[Str, Str], origins: List[Str],
+                  al: Map[Str, Str] }
+
+// `_monomorphize_free_fn_calls` followed by `_synthesize_sync_monomorphs`: the
+// colour the walk stamps, the origins to clone, and the caller -> redirect rows
+// the body environments carry.
+fn mono_plan(fs: List[FnD], colored: List[Str], sl: Map[Str, List[Int]],
+             al: Map[Str, Str]) -> MonoPlan {
+  let poly = poly_fns(fs, colored, sl)
+  if (poly.length() == 0) {
+    return { colored: colored, monos: Map.empty(), origins: [], al: al }
+  }
+  let lift = mono_by_fn(fs, poly, sl, colored)
+  let genuinely = async_colored_excl(fs, sl, lift)
+  var syncfns: List[Str] = []
+  var excl: Map[Str, List[Str]] = Map.empty()
+  var i = 0
+  while (i < fs.length()) {
+    let hit = mget_strs(lift, fs[i].name)
+    if (hit.length() > 0 && !contains(genuinely, fs[i].name)) {
+      syncfns = syncfns.push(fs[i].name)
+      excl = excl.set(fs[i].name, hit)
+    }
+    i += 1
+  }
+  if (syncfns.length() == 0) {
+    return { colored: colored, monos: Map.empty(), origins: [], al: al }
+  }
+  let colored2 = async_colored_excl(fs, sl, excl)
+  var callables: List[Str] = []
+  i = 0
+  while (i < fs.length()) { callables = callables.push(fs[i].name)  i += 1 }
+  var origins: List[Str] = []
+  i = 0
+  while (i < syncfns.length()) {
+    let hit = mget_strs(excl, syncfns[i])
+    var j = 0
+    while (j < hit.length()) {
+      if (!contains(origins, hit[j])) { origins = origins.push(hit[j]) }
+      j += 1
+    }
+    i += 1
+  }
+  origins = sort_strs(origins)
+  var monos: Map[Str, Str] = Map.empty()
+  var taken: List[Str] = []
+  i = 0
+  while (i < origins.length()) {
+    var name = origins[i].concat("_revl_sync")
+    while (contains(callables, name) || contains(taken, name)) { name = name.concat("_") }
+    monos = monos.set(origins[i], name)
+    taken = taken.push(name)
+    i += 1
+  }
+  var al2 = al
+  i = 0
+  while (i < syncfns.length()) {
+    let hit = sort_strs(mget_strs(excl, syncfns[i]))
+    var row = ""
+    var j = 0
+    while (j < hit.length()) {
+      row = row.concat("|").concat(hit[j]).concat("=").concat(mget_str(monos, hit[j])).concat("|")
+      j += 1
+    }
+    al2 = al2.set("@mono:".concat(syncfns[i]), row)
+    i += 1
+  }
+  return { colored: colored2, monos: monos, origins: origins, al: al2 }
+}
+
+// The DECLARED return type of module callable `fn <nm>` - the other half of the
+// signature `module_callable_fnty` renders.
+fn decl_ret_of(ts: List[Token], nm: Str, al: Map[Str, Str]) -> Str {
+  var j = 0
+  while (j < ts.length() && !atk(ts, j, "eof")) {
+    if (atw(ts, j, "fn") && tkc(ts, j + 1).text == nm && atk(ts, j + 2, "(")) {
+      let ps = params_at(ts, j + 3)
+      if (atk(ts, ps.i, "arrow")) { return alias_subst(type_at(ts, ps.i + 1).ty, al) }
+      return ""
+    }
+    j += 1
+  }
+  return ""
+}
+
+// The DECLARED fn-type spelling of every module callable, `(p1, p2) -> ret`. The
+// reference lowers a module body with the program's whole `env.types` in hand,
+// so a call to a sibling `fn` is checked against its declared signature: that is
+// what gives an unannotated lambda argument the `param_types` and `returns` the
+// declaration promised, and what the redirect above reads when it de-asyncs the
+// argument of a redirected call. Seeded only into a document that HAS a sync
+// monomorph, so every other document's bodies see the environment they saw
+// before.
+fn module_callable_fnty(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
+  let fs = parse_prog_ts(ts).fns
+  var out: List[Bind] = []
+  var i = 0
+  while (i < fs.length()) {
+    let ps = decl_params_of(ts, fs[i].name)
+    var tys: List[Str] = []
+    var k = 0
+    while (k < ps.length()) { tys = tys.push(alias_subst(ps[k].ty, al))  k += 1 }
+    out = out.push({ name: fs[i].name,
+                     ty: "(".concat(join_strs(tys, ", ")).concat(") -> ")
+                           .concat(decl_ret_of(ts, fs[i].name, al)) })
+    i += 1
+  }
+  return out
+}
+
+// `_synthesize_sync_monomorphs`'s parameter rewrite: every `Async[T]` slot of a
+// clone is stripped back to a plain fn type, so the clone is checkable against
+// the sync arrow the redirected call hands it.
+fn ir_fn_params_json_strip(ps: List[ParamN]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ps.length()) {
+    let e = "{\"name\": ".concat(jstr(predeclared_mangle(ps[i].name)))
+      .concat(", \"type\": ").concat(jstr(strip_async_fn_ret(taint_strip(ps[i].ty)))).concat("}")
+    out = out == "" ? e : out.concat(", ").concat(e)
+    i += 1
+  }
+  return out
+}
+
 fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind], al: Map[Str, Str]) -> Str {
   var out = ""
   var i = 0
@@ -24160,9 +26125,18 @@ fn lir_call(callee: Expr, args: List[Expr], env: List[Bind], al: Map[Str, Str]) 
   // emits the conversion. The callee's declared parameter types drive it; only
   // a `Var` callee names a signature (the reference's `ExprVar` guard), so a
   // higher-order callee keeps its arguments un-marked.
-  let ptypes = match callee { Var(n) => fn_param_types(tenv_get(env, n)), _ => [], }
+  let ptypes0 = match callee { Var(n) => fn_param_types(tenv_get(env, n)), _ => [], }
+  // Issue #2092: a SYNC caller's call to a colour-polymorphic `fn` goes to the
+  // `_revl_sync` clone `mono_plan` synthesized for it, and the clone's async
+  // slots are already stripped, so the arrow argument is checked against the
+  // plain fn type - which is what makes it a sync arrow rather than a coerced
+  // one (`_monomorphize_sync_callback_calls`).
+  let mono = match callee { Var(n) => mono_lookup(tenv_get(env, "@mono"), n), _ => "", }
+  let ptypes = mono == "" ? ptypes0 : strip_async_ptypes(ptypes0)
   let argsjs = ptypes.length() == 0 ? lir_args(args, env, al) : lir_call_args(args, ptypes, env, al)
-  return "{\"kind\":\"call\",\"callee\":".concat(lir_expr(callee, env, al))
+  let calleejs = mono == "" ? lir_expr(callee, env, al)
+    : "{\"kind\":\"var\",\"name\":".concat(jstr(mono)).concat("}")
+  return "{\"kind\":\"call\",\"callee\":".concat(calleejs)
     .concat(",\"args\":[").concat(argsjs).concat("]}")
 }
 
@@ -24191,8 +26165,23 @@ fn is_host_root_recv(recv: Expr) -> Bool {
 // the shadow win.
 fn mut_key(n: Str) -> Str { return "mut ".concat(n) }
 
+// The LOCAL marker. This module path's `env` is one list holding three
+// different things — the case table, every module `fn`'s own name (bound to its
+// function type), and the body's locals — while the reference keeps its locals
+// in `scope` and its module callables in a separate `callables`. The
+// distinction is load-bearing at exactly one decision: `_lower_expr`'s
+// `ExprVar` arm mangles a name iff it is in `scope`, and leaves a CALLABLE
+// reference verbatim, so the body of `fn len` calls itself as `len` and not as
+// `len_`. `local_key` is the row that tells the two apart: written by every
+// local-binding site (they all funnel through `env_mut_put`, plus `params_env`
+// for a declaration's parameters) and read by the `var` arm. A name that is
+// only a module callable carries no row and stays verbatim; a local that
+// SHADOWS one carries it and is mangled, which is what the reference answers
+// too. Issue #2090.
+fn local_key(n: Str) -> Str { return "local ".concat(n) }
+
 fn env_mut_put(env: List[Bind], n: Str, mutable: Bool) -> List[Bind] {
-  return tenv_put(env, mut_key(n), mutable ? "1" : "")
+  return tenv_put(tenv_put(env, mut_key(n), mutable ? "1" : ""), local_key(n), "1")
 }
 
 fn env_mut_clear_params(env: List[Bind], ps: List[ParamN], i: Int) -> List[Bind] {
@@ -24367,6 +26356,12 @@ fn lir_match(m: MatchN, env: List[Bind], al: Map[Str, Str]) -> Str {
   var i = 0
   while (i < m.arms.length()) {
     let a = m.arms[i]
+    // The fn-body path lowers a statement-block arm by lambda-LIFTING it into a
+    // synthetic helper `fn` (`_lift_block_arm`, reached only from the fn-body
+    // lowering) — a rewrite this producer has no sink for. The whole `match` is
+    // therefore the `bad` node it already was, rather than a plausible-looking
+    // match whose arm body reads bindings that were never emitted.
+    if (a.isBlk) { return "{\"kind\":\"bad\"}" }
     let pay = arm_payload(scrutTy, a.pat, env)
     var inner = a.bind == "" ? env : env_mut_put(env, a.bind, false)
     if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }
@@ -24421,7 +26416,7 @@ fn lir_expr(e: Expr, env: List[Bind], al: Map[Str, Str]) -> Str {
                     && !tagged_case_adt(env, n).startsWith("Opt"))
                      ? lir_adt(tagged_case_adt(env, n), n, [], env, al)
                      : "{\"kind\":\"var\",\"name\":".concat(
-                         jstr(tenv_get(env, n) != "" ? predeclared_mangle(n) : n)).concat("}"),
+                         jstr(tenv_get(env, local_key(n)) != "" ? predeclared_mangle(n) : n)).concat("}"),
     Bin(b)      => lir_bin(b, env, al),
     Un(u)       => lir_un(u, env, al),
     Emit(u)     => "{\"kind\":\"bad\"}",
@@ -26188,6 +28183,12 @@ fn params_env(ps: List[ParamN], acc: List[Bind], tps: List[Str]) -> List[Bind] {
   var env = acc
   var i = 0
   while (i < ps.length()) {
+    // A parameter is a local binding in the reference's `scope` whatever its
+    // declared type, so it carries the LOCAL marker whether or not a type row
+    // is written; the escape rule then reads the declaration's own spelling
+    // (`ir_fn_params_json` mangles the same name) rather than treating the
+    // parameter as a module callable. Issue #2090.
+    env = tenv_put(env, local_key(ps[i].name), "1")
     // stripped: past the declaration a `Secret[T]` parameter IS a `T` (the
     // qualifier is orthogonal to the base type), and the marking lives on in
     // the IR flag rather than in the type the body is checked against.
@@ -26202,6 +28203,17 @@ fn params_env(ps: List[ParamN], acc: List[Bind], tps: List[Str]) -> List[Bind] {
 // One module `fn` -> its `functions` entry. Advances past the whole fn.
 fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
                 colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str]) -> LirFn {
+  return lir_function_named(ts, i, cases, public_fn, colored, sm, al, "", false, [])
+}
+
+// `nmOut` overrides the emitted name (a `_revl_sync` clone re-renders its
+// origin's span under the monomorph's name) and `strip` drops both the `async`
+// stamp and the async half of every parameter's type, which is the whole of
+// `_synthesize_sync_monomorphs`. `fnty` carries the module callables' declared
+// signatures; it is empty unless this document has a sync monomorph.
+fn lir_function_named(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
+                      colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str],
+                      nmOut: Str, strip: Bool, fnty: List[Bind]) -> LirFn {
   let nm = tkc(ts, i + 1).text
   let ps0 = params_at(ts, fn_params_i(ts, i))
   // the declaration is read through the alias table, so the IR spelling, the
@@ -26236,36 +28248,47 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool,
   // ownership marks are keyed by token index, so no key can collide): a `try`
   // names its fresh locals off the identifiers spelled inside it
   let tmarks = om.marks.set("@try_fn", i).set("@try_end", bend)
-  let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
-                         params_env(ps.ps, cases, tps), [], retTy, tmarks, om.births, al)
-  let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_fn_params_json(ps.ps))
+  // the caller's own redirect row rides the body environment under a reserved
+  // key no identifier can spell, the way `mut_key` and `local_key` already do.
+  let benv = append_binds(params_env(ps.ps, cases, tps), fnty)
+    .push({ name: "@mono", ty: mget_str(al, "@mono:".concat(nm)) })
+  let bodyjs = lir_stmts(ts, reti + 1, bend - 1, benv, [], retTy, tmarks, om.births, al)
+  let js = "{\"name\":".concat(jstr(nmOut == "" ? nm : nmOut))
+    .concat(",\"params\":[").concat(strip ? ir_fn_params_json_strip(ps.ps) : ir_fn_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
     .concat(bodyjs).concat("]")
     .concat(cache_pure ? ",\"cache\":{\"class\":\"pure_fn\"}" : "")
-    .concat(contains(colored, nm) ? ",\"async\":true" : "").concat("}")
+    .concat(strip ? "" : (contains(colored, nm) ? ",\"async\":true" : "")).concat("}")
   return { js: js, i: bend }
 }
 
 // Collect every top-level `fn` into the `functions` list; skip other decls
 // wholesale (a nested `fn` inside a component is not a module function).
+// The module `functions` array and, separately, the `_revl_sync` clones it
+// appends last: a clone is a re-render of its origin's span, so it is collected
+// under the monomorph's name and joined on in `origins` order at the end.
+type FnsOut = { js: Str, clones: Map[Str, Str] }
+
 fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
-            colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str]) -> Str {
-  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+            colored: List[Str], sm: Map[Str, Str], al: Map[Str, Str],
+            monos: Map[Str, Str], origins: List[Str], fnty: List[Bind],
+            clones: Map[Str, Str]) -> FnsOut {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return { js: acc, clones: clones } }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al) }
-  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored, sm, al) }
+  if (at_boot(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  if (at_event(ts, i)) { return fns_walk(ts, event_decl_end(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones) }
   if (at_qual_test(ts, i)) {
     let qe = qual_test_end(ts, i)
-    if (qe != 0 - 1) { return fns_walk(ts, qe, acc, cases, colored, sm, al) }
-    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
+    if (qe != 0 - 1) { return fns_walk(ts, qe, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones)
   }
-  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al) }
-  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al) }
+  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones) }
   if (t.text == "test") {
     let e = test_block_end(ts, i)
-    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored, sm, al) }
-    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
+    if (e != 0 - 1) { return fns_walk(ts, e, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+    return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones)
   }
   if (t.text == "type") {
   // a `type` is stepped over to the end of the DECLARATION, not of its first
@@ -26274,23 +28297,30 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind],
   // top-level declaration head to this walker: `type Envelope = {` then
   // `component: Int,` on its own line minted a component named ":". Same span
   // `type_ctors` and `p_top` already read.
-    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored, sm, al)
+    return fns_walk(ts, type_decl_end(ts, i + 1), acc, cases, colored, sm, al, monos, origins, fnty, clones)
   }
-  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
+  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
   let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
   if (t.text == "fn" || public_fn) {
-    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn, colored, sm, al)
+    let fi = public_fn ? i + 1 : i
+    let f = lir_function_named(ts, fi, cases, public_fn, colored, sm, al, "", false, fnty)
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
-    return fns_walk(ts, f.i, acc2, cases, colored, sm, al)
+    let mname = mget_str(monos, tkc(ts, fi + 1).text)
+    var cl = clones
+    if (mname != "") {
+      let g = lir_function_named(ts, fi, cases, public_fn, colored, sm, al, mname, true, fnty)
+      if (g.js != "") { cl = cl.set(mname, g.js) }
+    }
+    return fns_walk(ts, f.i, acc2, cases, colored, sm, al, monos, origins, fnty, cl)
   }
   // the remaining `pub` forms (`pub type` / `pub service` / `pub extern`) carry
   // nothing this walker reads, so the prefix is stepped over and the declaration
   // it heads dispatches above. `pub fn` cannot reach here: it is the one form
   // whose prefix IS data (the `"public"` stamp), handled with the `fn` branch.
-  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al) }
-  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
-  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored, sm, al) }
-  return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al)
+  if (at_pub_prefix(ts, i)) { return fns_walk(ts, i + 1, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc, cases, colored, sm, al, monos, origins, fnty, clones) }
+  return fns_walk(ts, skip_line(ts, i), acc, cases, colored, sm, al, monos, origins, fnty, clones)
 }
 
 // ================================================================ externs IR
@@ -26533,8 +28563,8 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str],
   // every `stdlib/fs.rvl` extern pairs a `@py` block with a `@ts ref` arm, which
   // is why the old `atk(ts, k + 1, "hostbody")` guard ended the loop at the ref
   // arm and the entry lost its `refs` (issue #2089). The ref arm contributes no
-  // body, so the loop's exit stays `bcount == 0` — the reference's own gate, and
-  // the reason a ref-only extern is still out of the covered surface.
+  // body, so the exit gate below has to accept a declaration whose ONLY arms are
+  // refs.
   while (atk(ts, k, "=")
          && (atk(ts, k + 1, "hostbody") || atk(ts, k + 1, "@"))) {
     if (atk(ts, k + 1, "hostbody")) {
@@ -26558,14 +28588,21 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str],
       k = k + 7
     }
   }
-  if (bcount == 0) { return mk_irres(false, "") }
+  // issue #2086: a declaration whose only arms are HOST REFS (`= @ts ref sym from
+  // "path"`) is in the covered surface — the reference's `_lower_externs` has no
+  // body-count gate at all, and the PARSER already guarantees at least one arm of
+  // either kind (`extern_decl`'s `if not bodies` refusal, parser.py:3689), so
+  // `bcount == 0` here can only mean "every arm was a ref". Gating on `bcount`
+  // alone dropped the whole `externs` section for such a document, which is
+  // silent: the IR stays well formed, it just has no externs in it.
+  let refsJson = rw_refs_json(rows, nm)
+  if (bcount == 0 && refsJson == "") { return mk_irres(false, "") }
   var js = "{\"name\": ".concat(jstr(nm)).concat(", \"class\": ").concat(jstr(cls))
     .concat(", \"params\": [").concat(ir_params_json(alias_subst_params(ps.ps, al)))
     .concat("], \"returns\": ").concat(retJson)
     .concat(", \"bodies\": {").concat(bodies).concat("}")
   // issue #2089: the extern's host `refs`, keyed by backend, spliced in the
   // reference's own position (right after `bodies`) and key order.
-  let refsJson = rw_refs_json(rows, nm)
   if (refsJson != "") { js = js.concat(", \"refs\": ").concat(refsJson) }
   // The RETURN-side half of the marking (the counterpart of a parameter's
   // `secret`). `returns` above is stripped, so these two flags are the only
@@ -27578,7 +29615,7 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st:
   if (at_qual_test(ts, i)) {
     let qe = qual_test_end(ts, i)
     if (qe != 0 - 1) {
-      return ir_walk(ts, qe, mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
+      return ir_walk(ts, qe, mk_iracc(a.svcs, a.comps, true, a.v2, a.col, a.sl), fname, al, st)
     }
     return ir_walk(ts, skip_line(ts, i), a, fname, al, st)
   }
@@ -27586,7 +29623,7 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st:
   if (at_pub_prefix(ts, i)) { return ir_walk(ts, i + 1, a, fname, al, st) }
   if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a, fname, al, st) }
   if (t.text == "test") {
-    let na = mk_iracc(a.svcs, a.comps, true, a.v2)
+    let na = mk_iracc(a.svcs, a.comps, true, a.v2, a.col, a.sl)
     let e = test_block_end(ts, i)
     if (e != 0 - 1) { return ir_walk(ts, e, na, fname, al, st) }
     return ir_walk(ts, skip_line(ts, i), na, fname, al, st)
@@ -27603,27 +29640,27 @@ fn ir_walk(ts: List[Token], i: Int, a: IrAcc, fname: Str, al: Map[Str, Str], st:
     // `ir_version`; only one that survives the erasure is.
     let survives = !al.has(tkc(ts, i + 1).text)
     return ir_walk(ts, type_decl_end(ts, i + 1),
-                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2), fname, al, st)
+                   mk_iracc(a.svcs, a.comps, a.v3 || survives, a.v2, a.col, a.sl), fname, al, st)
   }
   if (t.text == "extern") {
     return ir_walk(ts, p_extern(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
+                   mk_iracc(a.svcs, a.comps, true, a.v2, a.col, a.sl), fname, al, st)
   }
   if (t.text == "fn") {
     return ir_walk(ts, p_fn(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, a.comps, true, a.v2), fname, al, st)
+                   mk_iracc(a.svcs, a.comps, true, a.v2, a.col, a.sl), fname, al, st)
   }
   if (t.text == "service") {
     let sv = ir_service(ts, i, al, st)
     let svcs2 = a.svcs == "" ? sv.js : a.svcs.concat(", ").concat(sv.js)
     return ir_walk(ts, p_service(ts, i, empty_prog()).i,
-                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2), fname, al, st)
+                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2, a.col, a.sl), fname, al, st)
   }
   if (t.text == "component") {
-    let cp = ir_component(ts, i, fname, al)
+    let cp = ir_component(ts, i, fname, al, a.col, a.sl)
     let comps2 = a.comps == "" ? cp.js : a.comps.concat(", ").concat(cp.js)
     return ir_walk(ts, p_component(ts, i, empty_prog()).i,
-                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2), fname, al, st)
+                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2, a.col, a.sl), fname, al, st)
   }
   return ir_walk(ts, skip_line(ts, i), a, fname, al, st)
 }
@@ -27682,17 +29719,36 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   // checker, for the same reason: an alias that reached either of them would be
   // an undeclared type name.
   let al = alias_map(ts)
-  let a = ir_walk(ts, 0, mk_iracc("", "", false, false), fname, al, src_text(src))
-  let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   // The async COLOUR is a whole-program property, so the streaming function
   // producer cannot decide it one declaration at a time: the reference runs the
   // fixed point over the call graph and only then stamps `"async": true` on each
   // coloured entry (`check_and_lower`). The gate half of this file already
   // computes that same closure for its A1/composition verdicts, so the producer
-  // reads it rather than deriving a second one.
+  // reads it rather than deriving a second one. The component reader reads it
+  // too — issue #2092: a timer whose body reaches a coloured callable is itself
+  // coloured — so it is computed ahead of the walk and threaded through `IrAcc`
+  // rather than derived a second time per component.
   let pg = parse_prog_ts(ts)
-  let colored = async_colored(pg.fns, async_slots_map(pg.fns))
-  let fnsjs = fns_walk(ts, 0, "", case_binds(ts, al), colored, own_program_summary(ts), al)
+  let slots = async_slots_map(pg.fns)
+  let colored = async_colored(pg.fns, slots)
+  // Issue #2092: the sync monomorphs, decided over the whole program BEFORE the
+  // walk, so that the colour a body is stamped with and the redirect its calls
+  // take are one decision (`_monomorphize_free_fn_calls` then
+  // `_synthesize_sync_monomorphs`). The recolour reaches the component reader
+  // too, which reads the same `colored`.
+  let plan = mono_plan(pg.fns, colored, slots, al)
+  let fnty = plan.origins.length() == 0 ? [] : module_callable_fnty(ts, plan.al)
+  let a = ir_walk(ts, 0, mk_iracc("", "", false, false, plan.colored, slots), fname, al, src_text(src))
+  let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
+  let fo = fns_walk(ts, 0, "", case_binds(ts, plan.al), plan.colored, own_program_summary(ts),
+                    plan.al, plan.monos, plan.origins, fnty, Map.empty())
+  var fnsjs = fo.js
+  var ci = 0
+  while (ci < plan.origins.length()) {
+    let cjs = mget_str(fo.clones, mget_str(plan.monos, plan.origins[ci]))
+    if (cjs != "") { fnsjs = fnsjs == "" ? cjs : fnsjs.concat(", ").concat(cjs) }
+    ci += 1
+  }
   let typesjs = types_walk(ts, 0, "", al)
   // The bound-secret table is computed once, ahead of the extern walk, because
   // the walk needs it: a secret bound to a capability stamps the NAME onto every

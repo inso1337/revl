@@ -1777,34 +1777,11 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 <!-- docgen:selfhost-residual-docs begin -->
 `py`:
 
-- `services_host_stream.rvl`
-- `../emit_py_placement.rvl`
-- `../emit_py_builtin_shadow.rvl`
-- `../../../examples/async_timer.rvl`
-- `../emit_py_async_shapes.rvl`
-- `streams.rvl`
-- `../../../backends/go/testdata/stream_130.rvl`
-- `../../../backends/go/testdata/stream_event_130.rvl`
-- `../../../backends/rust/scenarios/stream.rvl`
-- `../emit_rust_corpus/comp_stream.rvl`
-- `../emit_py_stream_builtin_bind.rvl`
-- `../emit_ts_refusals/validated_emission_operation.rvl`
-- `../emit_py_validated_shapes.rvl`
-- `branches.rvl`
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 
 `ts`:
 
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
-- `component_edges.rvl`
-- `../../../stdlib/router.rvl`
-- `../../../examples/async_timer.rvl`
-- `../../../backends/go/testdata/stream_130.rvl`
-- `../emit_rust_corpus/comp_stream.rvl`
-- `../emit_py_corpus/branches.rvl`
-- `routed_timers.rvl`
-- `ref_externs.rvl`
-- `extern_compensate.rvl`
 
 `go`:
 
@@ -1816,8 +1793,6 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 
 `rust`:
 
-- `comp_stream.rvl`
-- `by_value_reuse.rvl`
 - `method_control_flow.rvl`
 
 `wasm`:

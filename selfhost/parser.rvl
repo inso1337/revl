@@ -35,7 +35,14 @@ pub type ParamN = { name: Str, ty: Str }
 
 
 type ArrowN   = { params: List[ParamN], body: Expr, ret: Str }
-pub type ArmN = { pat: Str, bind: Str, body: Expr }
+// A statement-block match arm (`Some(n) => { let d = n * 2  d + 1 }`): the
+// `let`/`var` bindings the tail reads, and the tail — the arm's VALUE. `body`
+// stays `null` for a block arm and the block lives in `blk`/`blkTail`, because
+// every reader of `body` that predates this node (the call walkers, the
+// canonical renderer) walks it in the ARM's scope, where the bindings do not
+// exist; only the two lowerings that can see them read `blk`/`blkTail`.
+pub type ArmLetN = { name: Str, mutable: Bool, ty: Str, value: Expr }
+pub type ArmN = { pat: Str, bind: Str, body: Expr, blk: List[ArmLetN], blkTail: Expr, isBlk: Bool }
 type MatchN   = { scrut: Expr, arms: List[ArmN] }
 pub type PartN = { kind: Str, text: Str, e: Expr }
 type TemplN   = { parts: List[PartN] }
@@ -87,6 +94,8 @@ type Arms = { i: Int, xs: List[ArmN], ok: Bool, msg: Str }
 type Inits = { i: Int, xs: List[InitN], ok: Bool, msg: Str }
 type Pars = { i: Int, xs: List[ParamN], ok: Bool, msg: Str }
 type TyR  = { i: Int, ty: Str, ok: Bool }
+// A statement-block arm body: the bindings, the tail, and the index past `}`.
+type BlkR = { i: Int, blk: List[ArmLetN], tail: Expr, ok: Bool }
 
 // ---------------------------------------------------------------- tokens
 
@@ -158,11 +167,25 @@ fn render_arms(xs: List[ArmN]) -> Str {
   while (i < xs.length()) {
     let a = xs[i]
     let b = a.bind == "" ? "_" : a.bind
+    let body = a.isBlk ? render_arm_block(a.blk, a.blkTail) : render(a.body)
     out = out.push("(arm ".concat(a.pat).concat(" ").concat(b).concat(" ")
-                   .concat(render(a.body)).concat(")"))
+                   .concat(body).concat(")"))
     i += 1
   }
   return out.join(" ")
+}
+
+// A statement-block arm renders its bindings ahead of its value, so the
+// canonical form still reads as the source it was written from.
+fn render_arm_block(blk: List[ArmLetN], tail: Expr) -> Str {
+  var out = "({"
+  var i = 0
+  while (i < blk.length()) {
+    out = out.concat(" ").concat(blk[i].mutable ? "var " : "let ")
+      .concat(blk[i].name).concat(" = ").concat(render(blk[i].value))
+    i += 1
+  }
+  return out.concat(" ").concat(render(tail)).concat(" })")
 }
 
 fn render_inits(xs: List[InitN]) -> Str {
@@ -852,6 +875,65 @@ fn p_params(ts: List[Token], i: Int, d: Int) -> Pars {
   return { i: jj + 1, xs: ps, ok: fin, msg: "" }
 }
 
+// Does the `{` at `i` open a statement block rather than a record? The
+// reference's `_block_arm_ahead` (src/revl/parser.py): a record LITERAL always
+// opens `ident :` (or is the empty `{}`) and a record UPDATE opens `base | …`;
+// anything else after `=>` is a statement block.
+fn blk_arm_ahead(ts: List[Token], i: Int) -> Bool {
+  if (!at(ts, i, "{")) { return false }
+  if (at(ts, i + 1, "}")) { return false }
+  if (record_update_ahead(ts, i)) { return false }
+  return !(at(ts, i + 1, "ident") && at(ts, i + 2, ":"))
+}
+
+// The bindings and the trailing expression of one statement-block arm body.
+//
+// Only the shapes BOTH lowerings can carry are read. The reference's component
+// path refuses a reassignment, a loop, a statement `if` and a destructuring
+// `let` here (`_refuse_block_arm_stmt`, G6), and its `fn` path lowers them by
+// lambda-LIFTING the arm into a synthetic helper — a rewrite this parser has no
+// sink for. So a statement this reader does not recognise ends the block, and
+// the arm stays unread exactly as it did before the block existed.
+fn p_blk_arm(ts: List[Token], i: Int, d: Int) -> BlkR {
+  var j = i + 1
+  var xs = []
+  var ok = true
+  var go = true
+  while (go && !at(ts, j, "}") && !at(ts, j, "eof")) {
+    if (at_kw(ts, j, "let") || at_kw(ts, j, "var")) {
+      let mutable = at_kw(ts, j, "var")
+      if (!at(ts, j + 1, "ident")) { ok = false  go = false }
+      if (ok) {
+        let name = tk(ts, j + 1).text
+        var k = j + 2
+        var ty = ""
+        if (at(ts, k, ":")) {
+          let tr = p_type(ts, k + 1, d)
+          if (!tr.ok) { ok = false  go = false }
+          if (tr.ok) { ty = tr.ty  k = tr.i }
+        }
+        if (ok && !at(ts, k, "=")) { ok = false  go = false }
+        if (ok) {
+          let v = p_expr_d(ts, k + 1, d + 1)
+          if (is_bad(v.e)) { ok = false  go = false }
+          if (!is_bad(v.e)) {
+            xs = xs.push({ name: name, mutable: mutable, ty: ty, value: v.e })
+            j = v.i
+          }
+        }
+      }
+    } else { go = false }
+  }
+  if (!ok || at(ts, j, "}") || at(ts, j, "eof")) {
+    return { i: 0 - 1, blk: [], tail: NullLit, ok: false }
+  }
+  let t = p_expr_d(ts, j, d)
+  if (is_bad(t.e) || t.i <= j || !at(ts, t.i, "}")) {
+    return { i: 0 - 1, blk: [], tail: NullLit, ok: false }
+  }
+  return { i: t.i + 1, blk: xs, tail: t.e, ok: true }
+}
+
 fn p_arms(ts: List[Token], i: Int, d: Int) -> Arms {
   var j = i
   var xs = []
@@ -873,15 +955,34 @@ fn p_arms(ts: List[Token], i: Int, d: Int) -> Arms {
       }
       if (ok && !at(ts, j, "=>")) { ok = false }
       if (ok) {
-        let b = p_expr_d(ts, j + 1, d)
-        if (is_bad(b.e)) { ok = false }
-        if (!is_bad(b.e)) {
-          let bnd = bind
-          xs = xs.push({ pat: pat, bind: bnd, body: b.e })
-          j = b.i
-          // the reference breaks when an arm is not followed by `,`; the
-          // comma must be tested BEFORE it is consumed
+        // A `{` after `=>` is a statement block, a record literal or a record
+        // update. The block read is tried FIRST and only when it succeeds is
+        // the arm a block; a `{` it declines falls through to the expression
+        // read below, so no arm that read before reads differently now.
+        var blk = false
+        if (blk_arm_ahead(ts, j + 1)) {
+          let br = p_blk_arm(ts, j + 1, d)
+          if (br.ok) {
+            let bnd = bind
+            xs = xs.push({ pat: pat, bind: bnd, body: NullLit, blk: br.blk, blkTail: br.tail, isBlk: true })
+            j = br.i
+            blk = true
+          }
+        }
+        if (blk) {
           if (at(ts, j, ",")) { j += 1 } else { go = false }
+        }
+        if (!blk) {
+          let b = p_expr_d(ts, j + 1, d)
+          if (is_bad(b.e)) { ok = false }
+          if (!is_bad(b.e)) {
+            let bnd = bind
+            xs = xs.push({ pat: pat, bind: bnd, body: b.e, blk: [], blkTail: NullLit, isBlk: false })
+            j = b.i
+            // the reference breaks when an arm is not followed by `,`; the
+            // comma must be tested BEFORE it is consumed
+            if (at(ts, j, ",")) { j += 1 } else { go = false }
+          }
         }
       }
     }
