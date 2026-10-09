@@ -152,6 +152,20 @@ def _emitting_extern_reach(ir: dict) -> dict:
     return _emitting_extern_names(list(fns), list(ir.get("externs") or []))
 
 
+def _local_extern_reach(ir: dict) -> dict:
+    """#2146: the same fixed point seeded by the `local` class alone, keyed by
+    extern name: callable name -> the `local` externs its call or its value
+    reaches (`*` marking a first-class dispatch on the way). Not a crossing, so
+    it stays out of `_emitting_extern_reach`; `cache pure` is its consumer."""
+    from .emission_analysis import _emitting_capabilities
+
+    fns = ir.get("functions") or []
+    if isinstance(fns, dict):
+        fns = list(fns.values())
+    return _emitting_capabilities(list(fns), list(ir.get("externs") or []),
+                                  by_name=True, classes=("local",))
+
+
 def _channels(node) -> tuple:
     """`(called, values)`: `lower._calls_in`'s call channel (both call
     encodings, component `{kind: fn}` and pure `{kind: call, callee: {kind:
@@ -186,6 +200,7 @@ class Composition:
         self.load_order = list(self.manifest.get("loadOrder") or [])
         self.fn_externs = _fn_extern_reach(ir)
         self._emitting_externs = None  # the G4 fixed point, built by `_host_routes`
+        self._local_externs = None  # the `local`-seeded twin, built by `local_reach`
 
         # provision resolution is per-(key, realm): the same key in two realms
         # is multi-tenancy, not a conflict (docs/design-v2-realms.md)
@@ -270,6 +285,20 @@ class Composition:
         disagree about whether a scope widens (item 414: the erase report was a
         second class fold blind to it)."""
         return self._host_routes(*_channels(nodes))[1]
+
+    def local_reach(self, nodes) -> set:
+        """#2146: every `local` extern `nodes` reach, by a call or as a VALUE,
+        directly or through pure fns. The same two channels and the same fixed
+        point `value_widens` reads, seeded by the `local` class instead, so an
+        `apply(record, p)` route is seen exactly as `apply(charge, p)` is."""
+        if self._local_externs is None:
+            self._local_externs = _local_extern_reach(self.ir)
+        reach = self._local_externs
+        called, values = _channels(nodes)
+        out: set = set()
+        for name in called | values:
+            out |= reach.get(name) or set()
+        return out - {"*"}
 
     def witnessed_registered(self, nodes) -> set:
         """The `witnessed` externs `nodes` reach in EFFECT position — the ones

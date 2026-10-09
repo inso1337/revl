@@ -1291,6 +1291,12 @@ def _cache_scope_findings(index, sid: str, cls: str):
             yield (name, f"{label} reaches the emission extern `{name}`{via}",
                    "`cache pure` claims the result is a function of the "
                    "arguments alone, and a boundary crossing is not")
+        elif klass == "local" and pure:
+            # #2146: not a crossing, but a durable write a hit would skip
+            yield (name, f"{label} reaches the `local` extern `{name}`{via}",
+                   "`cache pure` claims the result is a function of the "
+                   "arguments alone, and a hit skips the call, so the durable "
+                   "local write would silently not happen")
 
     for fact in facts["emissions"]:
         token = f"{fact['key']}.{fact['method']}"
@@ -1303,6 +1309,17 @@ def _cache_scope_findings(index, sid: str, cls: str):
             yield (token, f"{label} emits `{token}`",
                    "`cache pure` claims the result is a function of the "
                    "arguments alone, and a boundary crossing is not")
+
+    if pure:
+        # #2146: a `local` extern reached through a fn or handed on as a value
+        # (`apply(record, p)`) is not in the extern facts above; the
+        # `local`-seeded fixed point sees every route
+        named = {f["name"] for f in facts["externs"] if f.get("class") == "local"}
+        for name in sorted(index.local_reach(scope["nodes"]) - named):
+            yield (name, f"{label} reaches the `local` extern `{name}`",
+                   "`cache pure` claims the result is a function of the "
+                   "arguments alone, and a hit skips the call, so the durable "
+                   "local write would silently not happen")
 
     if index.value_widens(scope["nodes"]):
         yield ("*", f"{label} hands an emitting callable on as a VALUE",

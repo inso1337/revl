@@ -559,12 +559,13 @@ extern fn f() = @py { pass }
 ```
 
 ```
-unclassified extern — expected `pure`, `acquire`, or `emission` after `extern`
-  classification is mandatory: `pure` has no observable effect, `acquire` must declare `undo`, and `emission` may declare `compensate`
+unclassified extern — expected `pure`, `acquire`, `emission`, or `witnessed` after `extern`
+  classification is mandatory: `pure` has no observable effect, `acquire` must declare `undo`, `emission` may declare `compensate`, `witnessed` is a reversible mutation whose declared `undo` the accumulator auto-registers, and `local` is a durable write to local state that crosses no boundary and so asks no owner
 ```
 
 Fix: keep the boundary enumerable — declare host code as an `extern` with a
-`pure`/`acquire`/`emission` classification. Emissions that reach the
+`pure`/`acquire`/`emission`/`witnessed`/`local` classification. Emissions that
+reach the
 boundary without a declaration are caught earlier, by G4's propagation;
 G8 is the reason those declarations are an upper bound (see
 docs/capabilities.md §3).

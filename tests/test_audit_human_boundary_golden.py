@@ -16,11 +16,12 @@ test would have flagged that the boundary line's shape changed for every scoped
 extern in a corpus.
 
 This golden is that check. It pins the `host code:` clause for one corpus that
-exercises all four G4 classifications — `pure`, `acquire`, `emission`,
-`witnessed` — with the two scopable classes (`emission`, `witnessed`) present
-BOTH scoped and bare. A wording change to the render then shows up as a diff on
-`EXPECTED_HOST_CODE` in this file, reviewed deliberately, rather than reaching a
-consumer silently. It does not freeze the format — it makes changing it visible.
+exercises all five G4 classifications — `pure`, `acquire`, `emission`,
+`witnessed`, `local` — with the two scopable classes (`emission`, `witnessed`)
+present BOTH scoped and bare. A wording change to the render then shows up as a
+diff on `EXPECTED_HOST_CODE` in this file, reviewed deliberately, rather than
+reaching a consumer silently. It does not freeze the format — it makes changing
+it visible.
 
 NON-VACUITY (issue #288 exit test — "prove it bites"): re-applying #257's change
 means rendering the ` [fs]` token differently on the witnessed/emission line.
@@ -44,7 +45,9 @@ from revl.__main__ import main  # noqa: E402
 # only two classes the grammar lets a capability scope onto (item 343), so they
 # appear both scoped (`store [db]`, `write [fs]`) and bare (`send`, `touch`);
 # `pure` and `acquire` are never scoped. `open_h` (acquire) and the witnessed
-# mutations name their inverses, as G4 requires.
+# mutations name their inverses, as G4 requires. `local` (item 2146) takes no
+# inverse and no scope, and — unlike every other class — is only reachable from
+# a provide-METHOD body, so `Worker` provides a one-method service to reach it.
 CORPUS = """\
 type Handle = { fd: Int }
 type W = { path: Str }
@@ -57,13 +60,19 @@ extern emission fn send(x: Str) -> Str = @py { return x }
 extern emission[db] fn store(x: Str) -> Str = @py { return x }
 extern witnessed fn touch(p: Str) -> Result[W, E] undo restore(result) = @py { return {"path": p} }
 extern witnessed[fs] fn write(p: Str) -> Result[W, E] undo restore(result) = @py { return {"path": p} }
+extern local fn record(p: Str) -> Unit = @py { return None }
 
-component Worker {
+service Journal { fn append(n: Str) -> Unit }
+
+component Worker provides j: Journal {
   let h = effect open_h() undo release_h(h)
   emit send(digest("m"))
   emit store("k")
   effect touch("t")
   effect write("w")
+  provide j {
+    fn append(n) = record("r")
+  }
 }
 """
 
@@ -73,6 +82,7 @@ EXPECTED_HOST_CODE = (
     "host code: "
     "digest (pure, py), "
     "open_h (acquire, py), "
+    "record (local, py), "
     "release_h (pure, py), "
     "send (emission, py), "
     "store [db] (emission, py), "
@@ -114,6 +124,7 @@ def test_json_boundary_externs_are_the_supported_surface(tmp_path, capsys):
     assert externs == [
         {"name": "digest", "class": "pure", "backends": ["py"]},
         {"name": "open_h", "class": "acquire", "backends": ["py"]},
+        {"name": "record", "class": "local", "backends": ["py"]},
         {"name": "release_h", "class": "pure", "backends": ["py"]},
         {"name": "send", "class": "emission", "backends": ["py"]},
         {"name": "store", "class": "emission", "backends": ["py"],
@@ -124,15 +135,17 @@ def test_json_boundary_externs_are_the_supported_surface(tmp_path, capsys):
     ]
 
 
-def test_all_four_classifications_are_covered(tmp_path, capsys):
+def test_all_five_classifications_are_covered(tmp_path, capsys):
     # Guard the corpus itself: if a future edit drops a classification, this
     # fails rather than letting the golden certify less than it names.
     doc = json.loads(_audit_stdout(tmp_path, capsys, "--json"))
     classes = {e["class"] for e in doc["boundary"]["Worker"]["externs"]}
-    assert {"pure", "acquire", "emission", "witnessed"} <= classes
+    assert {"pure", "acquire", "emission", "witnessed", "local"} <= classes
     # both scoped and bare present for the two scopable classes
     externs = {e["name"]: e for e in doc["boundary"]["Worker"]["externs"]}
     assert externs["store"]["capabilities"] == ["db"]   # emission, scoped
     assert "capabilities" not in externs["send"]        # emission, bare
     assert externs["write"]["capabilities"] == ["fs"]   # witnessed, scoped
     assert "capabilities" not in externs["touch"]       # witnessed, bare
+    # item 2146: `local` is the one class that takes no scope at all
+    assert "capabilities" not in externs["record"]

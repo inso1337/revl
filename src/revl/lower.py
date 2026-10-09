@@ -3262,7 +3262,7 @@ def _check_deferred_extern(decl, filename: str) -> None:
 
     1. `deferred` only on an `emission`. `pure` has nothing to defer; `acquire`
        and `witnessed` must run mid-session (their return is the resource or the
-       witness).
+       witness); `local` (item 2146) has no remote to hand a queued action to.
     2. A deferred emission returns `Unit`. The call completes before the action
        fires, so no value can flow back; a non-Unit return would be a lie the
        program could branch on. This is also the mechanical (b)/(c) boundary: an
@@ -3278,7 +3278,8 @@ def _check_deferred_extern(decl, filename: str) -> None:
             filename, decl.line,
             f"`deferred` is only valid on an `emission` extern; `{decl.name}` is "
             f"`{decl.classification}`",
-            hint="a `pure` extern has nothing to defer, and an `acquire` or "
+            hint="a `pure` extern has nothing to defer, a `local` extern writes "
+                 "local state and has no remote to queue to, and an `acquire` or "
                  "`witnessed` extern must run mid-session — its return is the "
                  "resource or the witness (docs/design/245-session-commit.md)",
             code="G4", category="deferred")
@@ -4852,6 +4853,27 @@ def _lower_externs(program: Program, filename: str, types: dict,
                 f"pure extern `{decl.name}` cannot declare `undo` or `compensate`",
                 hint="`pure` means no observable effect, so there is nothing to invert or compensate",
             )
+        # item 2146: a `local` extern is a durable write to LOCAL state, and
+        # local state is not a boundary. `undo` and `compensate` are both claims
+        # about a crossing — `undo` says "the far side can be put back", and
+        # `compensate` says "a one-way effect can be offset" — so neither has a
+        # referent here. The store's own transaction is what makes the write
+        # durable and reversible-or-not, and revl must not let an author spell a
+        # teardown the runtime could not honour. Refused rather than ignored, so
+        # the claim cannot be silently dropped (the same discipline 243 rule 3
+        # applies to a non-emission inverse).
+        if decl.classification == "local" and (decl.undo is not None or decl.compensate is not None):
+            raise RevlError(
+                filename, decl.line,
+                f"local extern `{decl.name}` cannot declare `undo` or "
+                f"`compensate`",
+                hint="a `local` extern writes durable local state and crosses no "
+                     "boundary, so there is no far side to invert and no one-way "
+                     "effect to offset — the write's own transaction is its "
+                     "durability guarantee. An `acquire`/`witnessed` extern is "
+                     "the shape for a write that needs a declared teardown",
+                code="G4", category="boundary",
+            )
         if decl.classification == "emission" and decl.undo is not None:
             raise RevlError(
                 filename, decl.line,
@@ -5670,7 +5692,8 @@ def _check_cache_resource(cache, filename: str, line: int, what: str,
 
 def _check_cache_declarations(program: Program, externs: list, types: dict,
                               emitting_caps: dict, filename: str,
-                              untrusted: bool = False) -> None:
+                              untrusted: bool = False,
+                              local_writes: dict | None = None) -> None:
     """The item-310 admission checks, run once the emission fixed point and the
     type/extern tables are known. Refuses in every case the seam-method slice
     cannot soundly cache; the surviving declarations flow their `cache` metadata
@@ -5808,6 +5831,26 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
                      "nothing; move the clause to the emission that reads the "
                      "boundary, as `cache capability` or `cache external` "
                      "(item 310)",
+                code="G4", category="cache")
+        # #2146: a `local` write is not a crossing, but it is a durable side
+        # effect, and a hit skips the call that would have made it. A fn whose
+        # reach writes through a `local` extern is therefore not pure either.
+        written = (local_writes or {}).get(fn.name) or set()
+        if written:
+            # `*` marks a `local` extern handed on as a value; the fixed point
+            # carries the concrete names alongside it, so name one of those
+            named = sorted(c for c in written if c != "*")
+            culprit = f"the `local` extern `{named[0]}`" if named \
+                else "a `local` extern handed on as a value"
+            raise RevlError(
+                fn.source or filename, fn.line,
+                f"the reach of {what} writes through {culprit}: a durable "
+                f"write is not pure",
+                hint="`cache pure` memoizes a function whose result is a "
+                     "function of its arguments alone, and a cache hit skips "
+                     "the call, so the write would silently not happen. Drop "
+                     "the clause, or move the write out of the cached fn "
+                     "(#2146)",
                 code="G4", category="cache")
         check_invalidated_by(cache, fn.line, what)
 
@@ -8729,8 +8772,14 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # reads the extern/type tables). Refuses every declaration the seam-method
     # slice cannot soundly cache; survivors flow their `cache` IR below. Inert for
     # any program declaring no `cache` clause, so byte-identity holds.
+    # #2146: the same closure seeded by the `local` class alone, keyed by
+    # extern name: the fns whose reach makes a durable local write. Not a
+    # crossing, so it joins neither set above; `cache pure` is its consumer.
+    local_writes = _emitting_capabilities(fns, externs, by_name=True,
+                                          classes=("local",))
     _check_cache_declarations(program, externs, types, emitting_caps,
-                              program.filename, untrusted=untrusted)
+                              program.filename, untrusted=untrusted,
+                              local_writes=local_writes)
 
     # item 187: default-parameter values must be pure and well-typed. Checked
     # here, once the emission fixed point is known, so an effectful default is
@@ -12161,9 +12210,16 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
         callee = _bare_callee_name(raw_acquire)
         inverse = env.extern_undo.get(callee) if callee is not None else None
         declared = None
+        declared_local = False
         if inverse is not None:
             declared = (env.extern_class.get(callee) or "acquire", inverse)
-        message, hint = missing_undo_refusal(head, declared)
+        elif callee is not None and env.extern_class.get(callee) == "local":
+            # item 2146: a `local` extern declares no inverse, so it has no
+            # entry in `extern_undo` and the branch above cannot see it. Name
+            # the class so the refusal tells the author to drop the bracket
+            # rather than to reclassify the write `pure`.
+            declared_local = True
+        message, hint = missing_undo_refusal(head, declared, declared_local)
         raise RevlError(
             filename, line, message, hint=hint,
             code="G4", category="witnessed",

@@ -54,9 +54,10 @@ def tools_from_ir(ir: dict, *, composition: str = "revl") -> list[dict]:
     types = ir.get("types") or {}
     externs = {e["name"]: e for e in ir.get("externs") or []}
     reach = _extern_reachability(ir, externs)
+    local_reach = _local_write_reach(ir, services)
     tools: list[dict] = []
 
-    for component in ir.get("components") or []:
+    for index, component in enumerate(ir.get("components") or []):
         provided = provided_methods(component)
         for key, service_name in (component.get("provides") or {}).items():
             service = services.get(service_name) or {}
@@ -64,6 +65,13 @@ def tools_from_ir(ir: dict, *, composition: str = "revl") -> list[dict]:
             for op_name, op in (service.get("methods") or {}).items():
                 observed = _method_effects(bodies.get(op_name) or [], component,
                                            services, externs, reach)
+                # #2146: the `local` writes the operation reaches by every
+                # route, including a required service's provider and a
+                # callable handed on as a value
+                observed["local_writes"] = set(observed["local_writes"]) \
+                    | local_reach.get((index, key, op_name), set())
+                observed["writes_host"] = observed["writes_host"] \
+                    or bool(observed["local_writes"])
                 tools.append(_tool(composition, key, service_name, op_name, op,
                                    component, types, observed))
     return tools
@@ -83,6 +91,7 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
     # bare `witnessed`; the key is absent on a plain operation.
     witnessed = op.get("witnessed")
     uses_extern = observed["uses_extern"]
+    local_writes = sorted(observed.get("local_writes") or ())
     params = op.get("params") or []
     properties, required = {}, []
     for param in params:
@@ -114,10 +123,22 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
         else:
             behaviour += (" Unscoped: the declaration names no capability, so it "
                           "promises nothing about where the writes go.")
+    elif local_writes:
+        behaviour = ("Local durable write: reaches the `local` extern(s) "
+                     f"{', '.join(local_writes)}, which write durable state on this "
+                     "host without crossing the system boundary. Nothing reverts "
+                     "that write, and the `local` class is the extern author's "
+                     "word: the compiler does not inspect the host body. A service "
+                     "declaration still bounds what its providers may do, so no "
+                     "provider of this operation can reach an emission.")
     else:
         behaviour = ("Read-only: the compiler refused any unreverted mutation here, "
                      "and a service declaration bounds what its providers may do — "
                      "no provider of this operation can reach an emission.")
+    if local_writes and (emission or witnessed is not None):
+        behaviour += (" It also reaches the `local` extern(s) "
+                      f"{', '.join(local_writes)}: a durable write on this host "
+                      "that nothing reverts.")
     description = (
         f"{service_name}.{op_name} — provided at key `{key}` by component "
         f"`{component.get('name')}`. " + behaviour
@@ -139,8 +160,12 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
             # is a proof that the body mutates NOTHING — a witnessed operation
             # writes (reversibly), so it may not claim it; `destructiveHint`
             # stays false because the checker refuses anything it cannot revert.
-            "readOnlyHint": not emission and witnessed is None,
-            "destructiveHint": emission,
+            # A reached `local` extern (#2146) writes durably and is not
+            # reverted, and the checker does not bound what its host body does
+            # (it may delete), so it is neither read-only nor provably
+            # non-destructive.
+            "readOnlyHint": not emission and witnessed is None and not local_writes,
+            "destructiveHint": emission or bool(local_writes),
             "idempotentHint": bool(op.get("commutative")),
             "openWorldHint": uses_extern,
         },
@@ -168,6 +193,10 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
                 # upper bound — a plain operation reaches neither of these
                 "reachesEmission": sorted(observed["emissions"]),
                 "reachesHostCode": sorted(observed["externs"]),
+                # the reached `local` externs (#2146): durable, unreverted,
+                # not crossings. Absent when none is reached, so every tool
+                # that reaches no `local` extern keeps its bytes.
+                **({"reachesLocalWrite": local_writes} if local_writes else {}),
                 # the boundaries this body actually crosses — a subset of the
                 # declared `capabilities` above, which the checker enforces
                 "reachesCapabilities": sorted(observed["capabilities"]),
@@ -224,6 +253,129 @@ def _called_fns(node, found: set) -> None:
     elif isinstance(node, list):
         for value in node:
             _called_fns(value, found)
+
+
+def _local_write_reach(ir: dict, services: dict) -> dict[tuple, set]:
+    """#2146: `(component index, provide key, operation)` -> every `local`
+    extern the operation's body reaches.
+
+    A service declaration bounds its providers' EMISSIONS, so an operation
+    declared plain is read-only with respect to crossings whatever its
+    providers do. It does not bound a `local` write, which is not a crossing,
+    so the provenance walk has to follow every route one can take:
+
+      * a call or a VALUE reference (`apply(wipe, n)`) to an extern or a pure
+        fn, closed by the checker's own fixed point seeded by the `local`
+        class (`emission_analysis._emitting_capabilities`), and
+      * a call to a required service's operation, which reaches whatever the
+        composition's providers of that service reach, to a fixed point, and
+      * a call into a SPAWNED component's provision (`w.st.save(n)`, also
+        through a computed handle such as `(if c { w.st } else { v.st }).save`),
+        which reaches what that component's provision of the method reaches.
+        A spawned provision referenced any other way (a handle bound to a name
+        first) is not resolvable to one method, so it counts every method of
+        that provision: over-reporting a write is the safe direction."""
+    from ..emission_analysis import _calls_in, _emitting_capabilities
+
+    externs = list(ir.get("externs") or [])
+    fns = ir.get("functions") or []
+    if isinstance(fns, dict):
+        fns = list(fns.values())
+    by_fn = _emitting_capabilities(list(fns), externs, by_name=True,
+                                   classes=("local",))
+    components = list(ir.get("components") or [])
+    providers: dict[str, list] = {}
+    by_name: dict[str, int] = {}
+    for index, component in enumerate(components):
+        by_name.setdefault(component.get("name"), index)
+        for key, service_name in (component.get("provides") or {}).items():
+            providers.setdefault(service_name, []).append((index, key))
+
+    def instance_gets(node, out: list) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "instance-get":
+                out.append(node)
+            for value in node.values():
+                instance_gets(value, out)
+        elif isinstance(node, list):
+            for value in node:
+                instance_gets(value, out)
+
+    local: dict[tuple, set] = {}
+    calls: dict[tuple, set] = {}
+    for index, component in enumerate(components):
+        requires = component.get("requires") or {}
+        for key, bodies in provided_methods(component).items():
+            for op_name, body in bodies.items():
+                called: set = set()
+                values: set = set()
+                _calls_in(body, called, values=values)
+                reached: set = set()
+                for name in called | values:
+                    reached |= by_fn.get(name) or set()
+                local[(index, key, op_name)] = reached - {"*"}
+                seams: set = set()
+
+                resolved: set = set()  # id() of instance-gets a call names
+
+                def walk(node):
+                    if isinstance(node, dict):
+                        target = node.get("target")
+                        callee = node.get("callee")
+                        if node.get("kind") == "call" and isinstance(target, dict) \
+                                and target.get("kind") == "req":
+                            seams.add(("svc", requires.get(target.get("name")),
+                                       node.get("method")))
+                        if node.get("kind") == "call" and isinstance(callee, dict) \
+                                and callee.get("kind") == "field":
+                            gets: list = []
+                            instance_gets(callee.get("target"), gets)
+                            for get in gets:
+                                resolved.add(id(get))
+                                seams.add(("inst", get.get("component"),
+                                           get.get("key"), get.get("service"),
+                                           callee.get("name")))
+                        for value in node.values():
+                            walk(value)
+                    elif isinstance(node, list):
+                        for value in node:
+                            walk(value)
+
+                walk(body)
+                every: list = []
+                instance_gets(body, every)
+                for get in every:
+                    if id(get) not in resolved:
+                        seams.add(("inst", get.get("component"), get.get("key"),
+                                   get.get("service"), None))
+                calls[(index, key, op_name)] = seams
+
+    def targets(seam) -> list:
+        """The `(component index, key, method)` nodes one seam may run."""
+        if seam[0] == "svc":
+            _, service_name, method = seam
+            return [(pindex, pkey, method)
+                    for pindex, pkey in providers.get(service_name, ())]
+        _, comp_name, pkey, service_name, method = seam
+        pindex = by_name.get(comp_name)
+        if pindex is None:  # not in this program: any provider of the service
+            pairs = providers.get(service_name, ())
+        else:
+            pairs = [(pindex, pkey)]
+        return [(i, k, m) for i, k in pairs for (j, kk, m) in list(local)
+                if j == i and kk == k and (method is None or m == method)]
+
+    changed = True
+    while changed:  # least fixed point over the service seams
+        changed = False
+        for node, seams in calls.items():
+            for seam in seams:
+                for target in targets(seam):
+                    more = local.get(target, set()) - local[node]
+                    if more:
+                        local[node] |= more
+                        changed = True
+    return local
 
 
 def _extern_reachability(ir: dict, externs: dict) -> dict[str, set]:
@@ -301,8 +453,14 @@ def _method_effects(body: list, component: dict, services: dict,
 
     walk_steps(body)
     # a host extern that is not `pure` writes to the outside world
-    writes_host = any((externs.get(name) or {}).get("class") in ("emission", "acquire")
+    writes_host = any((externs.get(name) or {}).get("class")
+                      in ("emission", "acquire", "local")
                       for name in extern_names)
+    # a `local` extern (#2146) is a durable write that is not a crossing: no
+    # declaration bounds it and nothing reverts it, so an operation that
+    # reaches one may not claim to be read-only
+    local_writes = {name for name in extern_names
+                    if (externs.get(name) or {}).get("class") == "local"}
     # an `emission` extern *is* the boundary, so it names its own capability
     capabilities |= {name for name in extern_names
                      if (externs.get(name) or {}).get("class") == "emission"}
@@ -312,6 +470,7 @@ def _method_effects(body: list, component: dict, services: dict,
         "capabilities": capabilities,
         "uses_extern": bool(extern_names),
         "writes_host": writes_host,
+        "local_writes": local_writes,
     }
 
 
