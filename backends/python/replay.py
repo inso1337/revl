@@ -427,7 +427,10 @@ class Step:
         # A provider body's own emission made while answering a caller's
         # `emit svc.op(...)` is the same physical crossing the caller's record
         # already describes; recovery counts it there, once.
-        self.within: Optional[dict] = _ENCLOSING.get()
+        enclosing = _ENCLOSING.get()
+        self.within: Optional[dict] = ({key: enclosing[key]
+                                      for key in ("seq", "component", "label")}
+                                     if enclosing is not None else None)
         # the WAL seq this step was written at, once it is (None without a WAL)
         self.wal_seq: Optional[int] = None
         self.crossed = False          # an emission the unwind stepped over
@@ -1453,7 +1456,7 @@ def _record_emission_outcome(ref: dict, outcome: str,
         return
     detail = None
     if error is not None:
-        detail = {"type": type(error).__name__, "message": str(error)}
+        detail = {"type": type(error).__name__, "message": _describe(str(error))}
     wal.record_emission_outcome(step.wal_seq, outcome, detail=detail)
 
 
@@ -1587,6 +1590,12 @@ class _RecordingContext:
             object.__getattribute__(self, "_revl_timeline"),
             object.__getattribute__(self, "_revl_ir"),
             object.__getattribute__(self, "_revl_services"))
+
+    def _revl_record_extern_outcome(self, step: Optional[Step], outcome: str,
+                                    error: Optional[BaseException] = None) -> None:
+        timeline = object.__getattribute__(self, "_revl_timeline")
+        _record_emission_outcome({"_timeline": timeline, "_step": step},
+                                 outcome, error)
 
     def _revl_record_extern(self, name: str, args: tuple) -> Step:
         """Record a DIRECT free host-extern emission (`emit announce(msg)`, a
@@ -1798,7 +1807,8 @@ class Recorder:
 
     # -- crash-recovery WAL (roadmap item 47) ------------------------------
 
-    def open_wal(self, path: str, generation: Optional[int] = None) -> "WriteAheadLog":
+    def open_wal(self, path: str, generation: Optional[int] = None, *,
+                 allow_unsynced: bool = False) -> "WriteAheadLog":
         """Open a durable write-ahead log; every step recorded from now on is
         appended to it as it commits.
 
@@ -1822,7 +1832,8 @@ class Recorder:
         what keeps every caller from having to remember."""
         if self.wal is not None:  # a prior generation's log (e.g. --watch reload)
             self.wal.close()
-        self.wal = WriteAheadLog(path, self._ir, generation).open()
+        self.wal = WriteAheadLog(path, self._ir, generation,
+                                 allow_unsynced=allow_unsynced).open()
         for timeline in self.timelines.values():
             timeline.attach_wal(self.wal, self._ir)
         return self.wal
@@ -2120,7 +2131,7 @@ def _last_newline_offset(handle, size: int) -> int:
     return -1
 
 
-def _seal_torn_tail(path: str) -> None:
+def _seal_torn_tail(path: str, *, allow_unsynced: bool = False) -> None:
     """Truncate a never-acknowledged partial trailing write so the WAL ends at a
     clean record boundary before it is appended to (issue #535).
 
@@ -2153,12 +2164,11 @@ def _seal_torn_tail(path: str) -> None:
         handle.flush()
         try:
             os.fsync(handle.fileno())
-        except ValueError:  # pragma: no cover — e.g. a pipe target
-            pass
-        except OSError as error:
-            raise ReplayError(
-                "write-ahead log fsync failed; the host call was not permitted"
-            ) from error
+        except (OSError, ValueError) as error:
+            if not allow_unsynced:
+                raise ReplayError(
+                    "write-ahead log fsync failed; the host call was not permitted"
+                ) from error
 
 
 def _next_seq(path: str) -> int:
@@ -2239,8 +2249,10 @@ class WriteAheadLog:
     """
 
     def __init__(self, path: str, ir: Optional[dict] = None,
-                 generation: Optional[int] = None) -> None:
+                 generation: Optional[int] = None, *,
+                 allow_unsynced: bool = False) -> None:
         self.path = path
+        self._allow_unsynced = allow_unsynced
         self._ir = ir
         self._generation = generation
         self._seq = 0
@@ -2271,7 +2283,7 @@ class WriteAheadLog:
         # torn final write. Seal that never-acknowledged partial line FIRST, so
         # this generation's records append onto a clean newline boundary instead
         # of merging into it and corrupting the file mid-flight (issue #535).
-        _seal_torn_tail(self.path)
+        _seal_torn_tail(self.path, allow_unsynced=self._allow_unsynced)
         # Resume this session's monotonic seq space from whatever is already on
         # disk. On the first open the log is new (or empty) and this is 0; on a
         # --watch reload the same file already carries the prior generation's
@@ -2284,6 +2296,8 @@ class WriteAheadLog:
             header = {"record": "header", "walVersion": WAL_VERSION,
                       "generation": self._generation,
                       "guarantee": WAL_GUARANTEE}
+            if self._allow_unsynced:
+                header["durability"] = "unsynced-opt-out"
             # issue #1477: name the composition this log belongs to, so
             # `revl recover --composition FILE` can refuse to replay the log's
             # descriptors through a DIFFERENT composition's host bodies. Only
@@ -2301,6 +2315,8 @@ class WriteAheadLog:
             self._write({"record": "generation", "generation": self._generation,
                          "fromSeq": self._seq,
                          "composition": composition_digest(self._ir)})
+        if self._allow_unsynced:
+            self._write({"record": "durability-opt-out", "fromSeq": self._seq})
         return self
 
     def __enter__(self) -> "WriteAheadLog":
@@ -2328,8 +2344,9 @@ class WriteAheadLog:
         self._handle.flush()
         try:
             os.fsync(self._handle.fileno())
-        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
-            pass
+        except (OSError, ValueError) as error:
+            if not self._allow_unsynced:
+                raise ReplayError("write-ahead log fsync failed") from error
 
     def record_emission_outcome(self, seq: Optional[int], outcome: str,
                                  *, detail: Optional[dict] = None) -> None:
@@ -2622,7 +2639,8 @@ class WriteAheadLog:
         return record
 
     def record_approval_consumed(self, request_id: str, *,
-                                 use: int | None = None) -> dict:
+                                 use: int | None = None,
+                                 scope: str | None = None) -> dict:
         """Append one SPEND, durably, BEFORE the authorized crossing runs (item
         246, Decision 3: consume-before-fire). A crash between this record and
         the fire leaves consumed-but-unfired, which is fail-closed: a fresh
@@ -2650,9 +2668,13 @@ class WriteAheadLog:
 
         ``revl recover`` does not read these records (src/revl/wal.py); they are
         the audit trail."""
-        record = {"record": "approval-consumed", "requestId": request_id}
+        record = {"record": "approval-consumed", "requestId": request_id,
+                  "seq": self._seq}
+        self._seq += 1
         if use is not None:
             record["use"] = use
+        if scope is not None:
+            record["scope"] = scope
         self._write(record)
         return record
 
