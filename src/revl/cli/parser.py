@@ -1587,6 +1587,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "writes FILE.<process> and FILE is the run's index")
     run.add_argument("--require-settled-wal", action="store_true",
                      help="refuse a new run while the WAL contains unresolved emissions")
+    run.add_argument("--allow-unsynced-wal", action="store_true",
+                     help="explicitly permit fsync failures; WAL durability is not guaranteed")
     run.add_argument("--trace", default=None, metavar="FILE",
                      help="write a causal lifecycle trace (JSONL) — every "
                           "transition carries the cause chain behind it, "
@@ -1682,6 +1684,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="a write-ahead log written by `revl run --wal`, or "
                               "the index of a `revl run --placement --wal` run, "
                               "whose process WALs are recovered together")
+    recover.add_argument("--operator-resolved", type=int, action="append", default=[],
+                         metavar="SEQ", help="acknowledge a reconciled crossing by sequence")
     recover.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
                          help="on roll-forward, the item-15 snapshot to re-admit "
                               "so recovery resumes the persisted generation")
