@@ -11,6 +11,46 @@ verdict), `src/revl/run.py` (`--wal` wiring), `src/revl/mcp/persist.py`
 
 ---
 
+## Plain emission completion and settlement
+
+The single-process Python backend records each plain service or host-extern
+emission before calling the host. A successful return (including an awaited
+return) writes `emission-complete` referencing the original `seq`. An exception
+writes `emission-failed` through the existing redaction path. Failure does not
+prove that nothing reached the outside world, so it remains unresolved.
+
+WAL write, flush and fsync failures stop the crossing before its host body.
+`--allow-unsynced-wal` explicitly permits fsync failures for an unsuitable
+target; it prints a warning and records the durability opt-out in the WAL.
+Write and flush failures still propagate. This option forfeits the durability
+guarantee and applies only to the single-process Python backend.
+
+`revl run app.rvl --wal run.wal --require-settled-wal` refuses before activation
+when the existing WAL has an emission without completion, an approved deferred
+emission without a flush receipt, or an emission approval spent without its
+matching emission. The refusal names the crossing sequences and approval IDs.
+Activation-scoped approvals are distinguished from emission approvals.
+Omitting the flag preserves the existing restart policy.
+
+After checking the actual external outcome, an operator can acknowledge a
+sequence with `revl recover --wal run.wal --operator-resolved SEQ`. The
+acknowledgement is appended and fsync'd to the same WAL, with the original
+sequence number. It does not call the host, retry the emission, or claim that
+the effect was undone. A torn trailing write is sealed before appending.
+A model-only recovery report never writes this acknowledgement automatically.
+
+If the process dies after the host returns but before completion is durable,
+the emission remains unknown: it may have been delivered once. Recovery does
+not retry a plain emission. Completed steady-state emissions are excluded from
+the crash residue; other effects retain their existing recovery semantics.
+
+Older logs without outcome records are treated conservatively by the opt-in
+check. An old approval lacking both a sequence and scope cannot be resolved by
+sequence; retain that log for audit and use a new WAL only after reconciling its
+external state. The default recovery behavior for old logs is unchanged.
+
+---
+
 ## 1. Why this exists here and nowhere else
 
 Item 15 (`docs/persistence.md`) makes the *shape* of an admitted composition
