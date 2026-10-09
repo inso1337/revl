@@ -5942,7 +5942,8 @@ class Session:
                 self._persist_auto_spend(record)
             use = self._next_spend_use(record["requestId"])
             if wal is not None:
-                wal.record_approval_consumed(record["requestId"], use=use)
+                wal.record_approval_consumed(record["requestId"], use=use,
+                                             scope="activation")
             if release["kind"] == "approval":
                 # item 471 Slice 2: the activation gate's two-phase spend is a
                 # spend, so it mints the admission receipt too. Without this the
