@@ -5835,12 +5835,17 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
         # #2146: a `local` write is not a crossing, but it is a durable side
         # effect, and a hit skips the call that would have made it. A fn whose
         # reach writes through a `local` extern is therefore not pure either.
-        written = sorted((local_writes or {}).get(fn.name) or ())
+        written = (local_writes or {}).get(fn.name) or set()
         if written:
+            # `*` marks a `local` extern handed on as a value; the fixed point
+            # carries the concrete names alongside it, so name one of those
+            named = sorted(c for c in written if c != "*")
+            culprit = f"the `local` extern `{named[0]}`" if named \
+                else "a `local` extern handed on as a value"
             raise RevlError(
                 fn.source or filename, fn.line,
-                f"the reach of {what} writes through the `local` extern "
-                f"`{written[0]}`: a durable write is not pure",
+                f"the reach of {what} writes through {culprit}: a durable "
+                f"write is not pure",
                 hint="`cache pure` memoizes a function whose result is a "
                      "function of its arguments alone, and a cache hit skips "
                      "the call, so the write would silently not happen. Drop "

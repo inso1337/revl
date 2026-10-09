@@ -54,9 +54,10 @@ def tools_from_ir(ir: dict, *, composition: str = "revl") -> list[dict]:
     types = ir.get("types") or {}
     externs = {e["name"]: e for e in ir.get("externs") or []}
     reach = _extern_reachability(ir, externs)
+    local_reach = _local_write_reach(ir, services)
     tools: list[dict] = []
 
-    for component in ir.get("components") or []:
+    for index, component in enumerate(ir.get("components") or []):
         provided = provided_methods(component)
         for key, service_name in (component.get("provides") or {}).items():
             service = services.get(service_name) or {}
@@ -64,6 +65,13 @@ def tools_from_ir(ir: dict, *, composition: str = "revl") -> list[dict]:
             for op_name, op in (service.get("methods") or {}).items():
                 observed = _method_effects(bodies.get(op_name) or [], component,
                                            services, externs, reach)
+                # #2146: the `local` writes the operation reaches by every
+                # route, including a required service's provider and a
+                # callable handed on as a value
+                observed["local_writes"] = set(observed["local_writes"]) \
+                    | local_reach.get((index, key, op_name), set())
+                observed["writes_host"] = observed["writes_host"] \
+                    or bool(observed["local_writes"])
                 tools.append(_tool(composition, key, service_name, op_name, op,
                                    component, types, observed))
     return tools
@@ -245,6 +253,78 @@ def _called_fns(node, found: set) -> None:
     elif isinstance(node, list):
         for value in node:
             _called_fns(value, found)
+
+
+def _local_write_reach(ir: dict, services: dict) -> dict[tuple, set]:
+    """#2146: `(component index, provide key, operation)` -> every `local`
+    extern the operation's body reaches.
+
+    A service declaration bounds its providers' EMISSIONS, so an operation
+    declared plain is read-only with respect to crossings whatever its
+    providers do. It does not bound a `local` write, which is not a crossing,
+    so the provenance walk has to follow every route one can take:
+
+      * a call or a VALUE reference (`apply(wipe, n)`) to an extern or a pure
+        fn, closed by the checker's own fixed point seeded by the `local`
+        class (`emission_analysis._emitting_capabilities`), and
+      * a call to a required service's operation, which reaches whatever the
+        composition's providers of that service reach, to a fixed point."""
+    from ..emission_analysis import _calls_in, _emitting_capabilities
+
+    externs = list(ir.get("externs") or [])
+    fns = ir.get("functions") or []
+    if isinstance(fns, dict):
+        fns = list(fns.values())
+    by_fn = _emitting_capabilities(list(fns), externs, by_name=True,
+                                   classes=("local",))
+    components = list(ir.get("components") or [])
+    providers: dict[str, list] = {}
+    for index, component in enumerate(components):
+        for key, service_name in (component.get("provides") or {}).items():
+            providers.setdefault(service_name, []).append((index, key))
+
+    local: dict[tuple, set] = {}
+    calls: dict[tuple, set] = {}
+    for index, component in enumerate(components):
+        requires = component.get("requires") or {}
+        for key, bodies in provided_methods(component).items():
+            for op_name, body in bodies.items():
+                called: set = set()
+                values: set = set()
+                _calls_in(body, called, values=values)
+                reached: set = set()
+                for name in called | values:
+                    reached |= by_fn.get(name) or set()
+                local[(index, key, op_name)] = reached - {"*"}
+                seams: set = set()
+
+                def walk(node):
+                    if isinstance(node, dict):
+                        target = node.get("target")
+                        if node.get("kind") == "call" and isinstance(target, dict) \
+                                and target.get("kind") == "req":
+                            seams.add((requires.get(target.get("name")),
+                                       node.get("method")))
+                        for value in node.values():
+                            walk(value)
+                    elif isinstance(node, list):
+                        for value in node:
+                            walk(value)
+
+                walk(body)
+                calls[(index, key, op_name)] = seams
+
+    changed = True
+    while changed:  # least fixed point over the service seams
+        changed = False
+        for node, seams in calls.items():
+            for service_name, method in seams:
+                for pindex, pkey in providers.get(service_name, ()):
+                    more = local.get((pindex, pkey, method), set()) - local[node]
+                    if more:
+                        local[node] |= more
+                        changed = True
+    return local
 
 
 def _extern_reachability(ir: dict, externs: dict) -> dict[str, set]:

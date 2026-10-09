@@ -780,14 +780,22 @@ The rules, each of which is a refusal when broken:
   `crossings()`, and the per-call approval decision sees no crossing — so it
   never pends.
 - **Not pure.** A `local` write is durable, and a cache hit skips the call that
-  makes it. `cache pure` on a `fn` whose reach writes through a `local` extern
-  is refused (G4), and so is `cache pure` on a seam method whose provider
-  closure reaches one (the load-time applicability fold).
-- **Not read-only.** An MCP tool whose operation reaches a `local` extern
-  exports `readOnlyHint: false` and `destructiveHint: true`, names the extern
-  under `x-revl.effects.reachesLocalWrite`, and says "Local durable write" in
-  its description: nothing reverts the write, and nothing bounds what the host
-  body does with it.
+  makes it. `cache pure` on a `fn` is refused (G4) when the fn reaches a
+  `local` extern by a call or as a value handed on (`apply(record, x)`),
+  directly or through other `fn`s: the same fixed point the crossing checks
+  use, seeded by the `local` class. `cache pure` on a seam method is refused at
+  load when any scope of its provider closure reaches one by either route (the
+  applicability fold).
+- **Not read-only.** An MCP tool (`revl mcp` tool export) whose operation
+  reaches a `local` extern exports `readOnlyHint: false` and
+  `destructiveHint: true`, names the extern under
+  `x-revl.effects.reachesLocalWrite`, and says "Local durable write" in its
+  description: nothing reverts the write, and nothing bounds what the host body
+  does with it. The export follows a call, a value handed on, the `fn`s in
+  between, and a call to a required service's operation, which reaches what
+  every provider of that service in the same compiled program reaches. A
+  provider outside the compiled program is not seen: the export can only name
+  what it was given.
 
 `local` is the extern author's word, exactly as `pure` is: nothing checks that
 the host body behind it writes only local state and crosses no boundary. What

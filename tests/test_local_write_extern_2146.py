@@ -342,3 +342,62 @@ def test_cache_pure_on_a_seam_method_reaching_a_local_write_is_refused(tmp_path)
     problem = cache_applicability_refusal(ClassMap(ir), index)
     assert problem is not None
     assert "reaches the `local` extern `record`" in problem
+
+
+# The routes a `local` write takes past the direct call. A service declaration
+# bounds its providers' EMISSIONS, not their `local` writes, and a callable
+# handed on as a value reaches whatever it names.
+
+_APPLY = 'fn apply(f: (Str) -> Unit, x: Str) -> Unit { return f(x) }\n'
+
+
+def _tool(ir: dict, name: str) -> dict:
+    from revl.mcp.schema import tools_from_ir
+    return next(t for t in tools_from_ir(ir) if t["name"] == name)
+
+
+def test_an_mcp_tool_calling_a_required_op_that_writes_locally_is_not_read_only(
+        tmp_path):
+    ir = _ir(tmp_path, body=(
+        'service Store { fn save(n: Str) -> Unit }\n'
+        'service Journal { fn append(n: Str) -> Unit }\n'
+        'component S provides st: Store { provide st { fn save(n) = record(n) } }\n'
+        'component W requires st: Store provides j: Journal {\n'
+        '  provide j { fn append(n) = st.save(n) }\n'
+        '}\n'))
+    tool = _tool(ir, "revl.j.append")
+    assert tool["annotations"]["readOnlyHint"] is False
+    assert tool["annotations"]["destructiveHint"] is True
+    assert tool["x-revl"]["effects"]["reachesLocalWrite"] == ["record"]
+    assert "Local durable write" in tool["description"]
+
+
+def test_an_mcp_tool_handing_a_local_extern_on_as_a_value_is_not_read_only(
+        tmp_path):
+    ir = _ir(tmp_path, body=_APPLY + _CORPUS.replace(
+        'fn append(n) = record("r")', 'fn append(n) = apply(record, n)'))
+    tool = _tool(ir, "revl.j.append")
+    assert tool["annotations"]["readOnlyHint"] is False
+    assert tool["x-revl"]["effects"]["reachesLocalWrite"] == ["record"]
+
+
+def test_cache_pure_on_a_seam_method_handing_a_local_extern_on_is_refused(
+        tmp_path):
+    from revl.mcp.approval import cache_applicability_refusal
+    from revl.mcp.session import Session
+    ir = _ir(tmp_path, body=_APPLY + (
+        'service S { fn get(p: Str) -> Unit cache pure }\n'
+        'component C provides s: S { provide s { fn get(p) = apply(record, p) } }\n'))
+    index = Session._build_cache_index(Session.__new__(Session), ir)
+    problem = cache_applicability_refusal(ClassMap(ir), index)
+    assert problem is not None
+    assert "reaches the `local` extern `record`" in problem
+
+
+def test_cache_pure_on_a_fn_handing_a_local_extern_on_names_it(tmp_path):
+    err = _refusal(
+        _WRITE + _APPLY
+        + 'fn sq(x: Str) -> Unit cache pure { return apply(record, x) }\n',
+        tmp_path)
+    assert "writes through the `local` extern `record`" in err.message
+    assert "`*`" not in err.message
