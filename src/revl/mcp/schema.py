@@ -83,6 +83,7 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
     # bare `witnessed`; the key is absent on a plain operation.
     witnessed = op.get("witnessed")
     uses_extern = observed["uses_extern"]
+    local_writes = sorted(observed.get("local_writes") or ())
     params = op.get("params") or []
     properties, required = {}, []
     for param in params:
@@ -114,10 +115,22 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
         else:
             behaviour += (" Unscoped: the declaration names no capability, so it "
                           "promises nothing about where the writes go.")
+    elif local_writes:
+        behaviour = ("Local durable write: reaches the `local` extern(s) "
+                     f"{', '.join(local_writes)}, which write durable state on this "
+                     "host without crossing the system boundary. Nothing reverts "
+                     "that write, and the `local` class is the extern author's "
+                     "word: the compiler does not inspect the host body. A service "
+                     "declaration still bounds what its providers may do, so no "
+                     "provider of this operation can reach an emission.")
     else:
         behaviour = ("Read-only: the compiler refused any unreverted mutation here, "
                      "and a service declaration bounds what its providers may do — "
                      "no provider of this operation can reach an emission.")
+    if local_writes and (emission or witnessed is not None):
+        behaviour += (" It also reaches the `local` extern(s) "
+                      f"{', '.join(local_writes)}: a durable write on this host "
+                      "that nothing reverts.")
     description = (
         f"{service_name}.{op_name} — provided at key `{key}` by component "
         f"`{component.get('name')}`. " + behaviour
@@ -139,8 +152,12 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
             # is a proof that the body mutates NOTHING — a witnessed operation
             # writes (reversibly), so it may not claim it; `destructiveHint`
             # stays false because the checker refuses anything it cannot revert.
-            "readOnlyHint": not emission and witnessed is None,
-            "destructiveHint": emission,
+            # A reached `local` extern (#2146) writes durably and is not
+            # reverted, and the checker does not bound what its host body does
+            # (it may delete), so it is neither read-only nor provably
+            # non-destructive.
+            "readOnlyHint": not emission and witnessed is None and not local_writes,
+            "destructiveHint": emission or bool(local_writes),
             "idempotentHint": bool(op.get("commutative")),
             "openWorldHint": uses_extern,
         },
@@ -168,6 +185,10 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
                 # upper bound — a plain operation reaches neither of these
                 "reachesEmission": sorted(observed["emissions"]),
                 "reachesHostCode": sorted(observed["externs"]),
+                # the reached `local` externs (#2146): durable, unreverted,
+                # not crossings. Absent when none is reached, so every tool
+                # that reaches no `local` extern keeps its bytes.
+                **({"reachesLocalWrite": local_writes} if local_writes else {}),
                 # the boundaries this body actually crosses — a subset of the
                 # declared `capabilities` above, which the checker enforces
                 "reachesCapabilities": sorted(observed["capabilities"]),
@@ -301,8 +322,14 @@ def _method_effects(body: list, component: dict, services: dict,
 
     walk_steps(body)
     # a host extern that is not `pure` writes to the outside world
-    writes_host = any((externs.get(name) or {}).get("class") in ("emission", "acquire")
+    writes_host = any((externs.get(name) or {}).get("class")
+                      in ("emission", "acquire", "local")
                       for name in extern_names)
+    # a `local` extern (#2146) is a durable write that is not a crossing: no
+    # declaration bounds it and nothing reverts it, so an operation that
+    # reaches one may not claim to be read-only
+    local_writes = {name for name in extern_names
+                    if (externs.get(name) or {}).get("class") == "local"}
     # an `emission` extern *is* the boundary, so it names its own capability
     capabilities |= {name for name in extern_names
                      if (externs.get(name) or {}).get("class") == "emission"}
@@ -312,6 +339,7 @@ def _method_effects(body: list, component: dict, services: dict,
         "capabilities": capabilities,
         "uses_extern": bool(extern_names),
         "writes_host": writes_host,
+        "local_writes": local_writes,
     }
 
 

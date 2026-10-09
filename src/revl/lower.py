@@ -5692,7 +5692,8 @@ def _check_cache_resource(cache, filename: str, line: int, what: str,
 
 def _check_cache_declarations(program: Program, externs: list, types: dict,
                               emitting_caps: dict, filename: str,
-                              untrusted: bool = False) -> None:
+                              untrusted: bool = False,
+                              local_writes: dict | None = None) -> None:
     """The item-310 admission checks, run once the emission fixed point and the
     type/extern tables are known. Refuses in every case the seam-method slice
     cannot soundly cache; the surviving declarations flow their `cache` metadata
@@ -5830,6 +5831,21 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
                      "nothing; move the clause to the emission that reads the "
                      "boundary, as `cache capability` or `cache external` "
                      "(item 310)",
+                code="G4", category="cache")
+        # #2146: a `local` write is not a crossing, but it is a durable side
+        # effect, and a hit skips the call that would have made it. A fn whose
+        # reach writes through a `local` extern is therefore not pure either.
+        written = sorted((local_writes or {}).get(fn.name) or ())
+        if written:
+            raise RevlError(
+                fn.source or filename, fn.line,
+                f"the reach of {what} writes through the `local` extern "
+                f"`{written[0]}`: a durable write is not pure",
+                hint="`cache pure` memoizes a function whose result is a "
+                     "function of its arguments alone, and a cache hit skips "
+                     "the call, so the write would silently not happen. Drop "
+                     "the clause, or move the write out of the cached fn "
+                     "(#2146)",
                 code="G4", category="cache")
         check_invalidated_by(cache, fn.line, what)
 
@@ -8751,8 +8767,14 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # reads the extern/type tables). Refuses every declaration the seam-method
     # slice cannot soundly cache; survivors flow their `cache` IR below. Inert for
     # any program declaring no `cache` clause, so byte-identity holds.
+    # #2146: the same closure seeded by the `local` class alone, keyed by
+    # extern name: the fns whose reach makes a durable local write. Not a
+    # crossing, so it joins neither set above; `cache pure` is its consumer.
+    local_writes = _emitting_capabilities(fns, externs, by_name=True,
+                                          classes=("local",))
     _check_cache_declarations(program, externs, types, emitting_caps,
-                              program.filename, untrusted=untrusted)
+                              program.filename, untrusted=untrusted,
+                              local_writes=local_writes)
 
     # item 187: default-parameter values must be pure and well-typed. Checked
     # here, once the emission fixed point is known, so an effectful default is

@@ -779,6 +779,24 @@ The rules, each of which is a refusal when broken:
   emitting set, it is not relayed, it adds no token to `revl audit --diff`'s
   `crossings()`, and the per-call approval decision sees no crossing — so it
   never pends.
+- **Not pure.** A `local` write is durable, and a cache hit skips the call that
+  makes it. `cache pure` on a `fn` whose reach writes through a `local` extern
+  is refused (G4), and so is `cache pure` on a seam method whose provider
+  closure reaches one (the load-time applicability fold).
+- **Not read-only.** An MCP tool whose operation reaches a `local` extern
+  exports `readOnlyHint: false` and `destructiveHint: true`, names the extern
+  under `x-revl.effects.reachesLocalWrite`, and says "Local durable write" in
+  its description: nothing reverts the write, and nothing bounds what the host
+  body does with it.
+
+`local` is the extern author's word, exactly as `pure` is: nothing checks that
+the host body behind it writes only local state and crosses no boundary. What
+limits that trust is who may write it and what may reach it. Untrusted-authored
+source cannot declare an `extern` at all (the `no_extern` admission check,
+`src/revl/admit_profile.py` `check_no_extern`), and a `secret`-carrying argument
+is refused at every extern host call, `local` included (the taint check in
+`src/revl/taint.py`), so a `local` body never receives a bound key to carry
+out.
 
 One wording lags deliberately. The G8 "unclassified extern" **message** — the
 one that enumerates the classes — is mirrored byte for byte by the self-hosted

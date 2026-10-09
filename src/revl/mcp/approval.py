@@ -1291,6 +1291,12 @@ def _cache_scope_findings(index, sid: str, cls: str):
             yield (name, f"{label} reaches the emission extern `{name}`{via}",
                    "`cache pure` claims the result is a function of the "
                    "arguments alone, and a boundary crossing is not")
+        elif klass == "local" and pure:
+            # #2146: not a crossing, but a durable write a hit would skip
+            yield (name, f"{label} reaches the `local` extern `{name}`{via}",
+                   "`cache pure` claims the result is a function of the "
+                   "arguments alone, and a hit skips the call, so the durable "
+                   "local write would silently not happen")
 
     for fact in facts["emissions"]:
         token = f"{fact['key']}.{fact['method']}"

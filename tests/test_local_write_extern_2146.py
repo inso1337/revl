@@ -295,3 +295,50 @@ def test_an_unclassified_extern_hint_names_local(tmp_path):
     assert "unclassified extern" in err.message
     assert "`local`" in err.hint
     assert "`local`" not in err.message
+
+
+# -- 5. not read-only, not pure ----------------------------------------------
+#
+# `local` is not a crossing, but it is a durable write that nothing reverts.
+# Two surfaces used to read "not a crossing" as "no effect": the MCP tool hints
+# and the `cache pure` admission.
+
+def test_an_mcp_tool_reaching_a_local_write_is_not_read_only(tmp_path):
+    from revl.mcp.schema import tools_from_ir
+    tool = tools_from_ir(_ir(tmp_path))[0]
+    assert tool["annotations"]["readOnlyHint"] is False
+    assert tool["annotations"]["destructiveHint"] is True
+    assert tool["x-revl"]["effects"]["reachesLocalWrite"] == ["record"]
+    assert "Local durable write" in tool["description"]
+    assert "refused any unreverted mutation" not in tool["description"]
+
+
+def test_an_mcp_tool_reaching_only_a_pure_extern_keeps_its_hints(tmp_path):
+    # the control: same shape, `pure` extern, unchanged annotations and bytes
+    from revl.mcp.schema import tools_from_ir
+    tool = tools_from_ir(_ir(tmp_path, extern=_WRITE.replace("local", "pure")))[0]
+    assert tool["annotations"]["readOnlyHint"] is True
+    assert tool["annotations"]["destructiveHint"] is False
+    assert "reachesLocalWrite" not in tool["x-revl"]["effects"]
+    assert "Read-only" in tool["description"]
+
+
+def test_cache_pure_on_a_fn_reaching_a_local_write_is_refused(tmp_path):
+    err = _refusal(
+        _WRITE + 'fn sq(x: Str) -> Unit cache pure { return record(x) }\n',
+        tmp_path)
+    assert err.code == "G4"
+    assert "writes through the `local` extern `record`" in err.message
+    assert "durable write is not pure" in err.message
+
+
+def test_cache_pure_on_a_seam_method_reaching_a_local_write_is_refused(tmp_path):
+    from revl.mcp.approval import cache_applicability_refusal
+    from revl.mcp.session import Session
+    ir = _ir(tmp_path, body=(
+        'service S { fn get(p: Str) -> Unit cache pure }\n'
+        'component C provides s: S { provide s { fn get(p) = record(p) } }\n'))
+    index = Session._build_cache_index(Session.__new__(Session), ir)
+    problem = cache_applicability_refusal(ClassMap(ir), index)
+    assert problem is not None
+    assert "reaches the `local` extern `record`" in problem
