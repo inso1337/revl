@@ -1615,7 +1615,9 @@ for the key lifecycle and what the signature binds.
   typed. A member with too few verified receipts STAYS WHERE IT IS rather than
   being demoted, because a missing proof is not a violation, and a rung the
   charter cannot lawfully issue is refused `grant-ceiling` before a single
-  receipt is verified. Promotion is an ADMISSION decision and uses the
+  receipt is verified. A rung at or below the member's own tier is refused
+  `not-a-promotion`: no verb lowers a member, and naming the tier it already
+  holds writes no second receipt. Promotion is an ADMISSION decision and uses the
   admitting key, so a peer that compromised the attesting key cannot walk
   itself up the ladder.
   There is no `--force`, no `--evidence-count` and no `--bypass-ceiling`.

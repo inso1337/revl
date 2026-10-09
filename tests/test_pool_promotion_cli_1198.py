@@ -373,6 +373,53 @@ def test_promote_moves_a_member_when_the_pairs_verify(tmp_path):
     assert roster.members[WORKER].evidence == 2
 
 
+def _promoted_pool(tmp_path):
+    """A pool whose worker has already been promoted to `RUNG` by the CLI,
+    with the evidence still in the ledger, so a second call has every pair it
+    would need for the rung and only the DIRECTION can refuse it."""
+    pool = pool_on_disk(tmp_path, tiers=rung(evidence=2))
+    ledger = pool.ledger()
+    for n in (1, 2):
+        pool.deliver(ledger, task_id=f"task-{n}")
+    pool.save_ledger(ledger)
+    code, printed, _ = promote_cli(pool)
+    assert code == 0, printed
+    _, roster = pool.reload()
+    assert roster.members[WORKER].tier == RUNG
+    return pool, len(roster.events)
+
+
+def test_promote_refuses_a_rung_below_the_members_tier(tmp_path):
+    """No verb lowers a member: withdrawal is the answer to a member the pool
+    no longer trusts (`docs/design/550-private-peer-pool.md`). `promote` to
+    the entry tier of a `replayable` member used to return `PROMOTE`, exit 0,
+    and demote it. Mutation: drop the `TIER_ORDER` comparison in
+    `peer_pool.promote`; the member is moved down and a receipt is written."""
+    pool, events = _promoted_pool(tmp_path)
+
+    code, printed, _ = promote_cli(pool, tier=pp.ENTRY_TIER)
+    assert code == 1, printed
+    assert receipt_of(printed)["link"] == pp.LINK_NOT_A_PROMOTION
+    _, roster = pool.reload()
+    assert roster.members[WORKER].tier == RUNG
+    assert len(roster.events) == events
+
+
+def test_promote_refuses_the_members_own_tier(tmp_path):
+    """Promoting a member to the tier it already holds moves nothing, so it is
+    not a promotion and must not write a second promotion receipt. It used to
+    return `PROMOTE`, exit 0, and append one. Mutation: compare with `<`
+    instead of `<=`."""
+    pool, events = _promoted_pool(tmp_path)
+
+    code, printed, _ = promote_cli(pool, tier=RUNG)
+    assert code == 1, printed
+    assert receipt_of(printed)["link"] == pp.LINK_NOT_A_PROMOTION
+    _, roster = pool.reload()
+    assert roster.members[WORKER].tier == RUNG
+    assert len(roster.events) == events
+
+
 def test_an_unflagged_but_valid_pair_still_promotes(tmp_path):
     """F1b, the anti-duplicate pin.
 

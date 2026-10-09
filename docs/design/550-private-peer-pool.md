@@ -562,9 +562,12 @@ parametrized hostile-input test over ten malformed records.
   is the existing answer, and it is a different act with a different ledger
   effect: an operator who wants a member back at `probation` withdraws and
   re-admits it, which is deliberately more expensive than a demotion would be.
-  Promotion also does not require rungs to be climbed one at a time: the only
-  check is that the charter declares the target rung, so `probation` may be
-  promoted straight to `durable`. That is safe in the direction that matters:
+  `promote` enforces that: a target rung at or below the member's own tier in
+  `TIER_ORDER` is refused `not-a-promotion`, so promoting to the entry tier
+  cannot demote a member and promoting to the tier it holds writes no second
+  receipt. Promotion does not require rungs to be climbed one at a time: the
+  target must be a rung the charter declares and above the member's tier, so
+  `probation` may be promoted straight to `durable`. That is safe in the direction that matters:
   a rung is diffed against the charter ceiling, never against the rung below,
   so skipping a rung cannot launder a wider grant. It does mean the
   ladder's SHAPE is whatever the operator declared, including a ladder whose

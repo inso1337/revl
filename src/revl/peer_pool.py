@@ -281,6 +281,7 @@ LINK_GRANT_CEILING = "grant-ceiling"
 LINK_PROMOTION_EVIDENCE = "promotion-evidence"
 LINK_NOT_A_MEMBER = "not-a-member"
 LINK_UNKNOWN_TIER = "unknown-tier"
+LINK_NOT_A_PROMOTION = "not-a-promotion"
 LINK_IDENTITY_MODE = "identity-mode"
 LINK_IDENTITY_DOWNGRADE = "identity-downgrade"
 LINK_UNKNOWN_KEY = "unknown-key"
@@ -308,6 +309,7 @@ REFUSAL_LINKS: tuple[str, ...] = (
     LINK_PROMOTION_EVIDENCE,
     LINK_NOT_A_MEMBER,
     LINK_UNKNOWN_TIER,
+    LINK_NOT_A_PROMOTION,
     LINK_IDENTITY_MODE,
     LINK_IDENTITY_DOWNGRADE,
     LINK_UNKNOWN_KEY,
@@ -1499,6 +1501,18 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
         return _refusal(
             LINK_UNKNOWN_TIER,
             f"the charter declares no tier {tier!r}", peer_id=peer_id)
+    # A promotion moves a member UP the ladder and nothing else. No verb
+    # lowers a member (withdrawal is the answer to one the pool no longer
+    # trusts), and a call naming the tier the member already holds moves
+    # nothing and must not write a second receipt. `TIER_ORDER` is the
+    # ladder `PoolCharter` validates every declared tier against, so both
+    # names index it.
+    if TIER_ORDER.index(tier) <= TIER_ORDER.index(member.tier):
+        return _refusal(
+            LINK_NOT_A_PROMOTION,
+            f"peer {peer_id!r} holds tier {member.tier!r}; {tier!r} is not "
+            f"above it, and no verb lowers a member (withdraw instead)",
+            peer_id=peer_id)
 
     # The ceiling diff runs HERE, ahead of the evidence stage, and that order
     # is the point. The evidence count is arithmetic over the receipts the
