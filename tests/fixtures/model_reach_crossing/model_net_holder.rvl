@@ -1,0 +1,20 @@
+// REFUSED G-MODEL-PLACE (item 519, issue #1193 slice 6): `Classifier` holds
+// `net.request` through `llm`, and routes `classify` through model role
+// `cloud`, which reaches `shell.exec`. That is issue #1193's own example, and
+// it used to be ADMITTED: the fold ran only for a component that held a
+// `model.`-spelled token, the unnameable `*`, or a `svc:` element, and
+// `net.request` is none of those, so the pair was never compared. A component
+// that reaches ANY boundary is in the product; the exemption is a component
+// that reaches none. The file name's prefix is the expected verdict (`model_`
+// refused under G-MODEL-PLACE, `ok_` admitted);
+// tests/test_model_reach_crossing.py holds it.
+
+model role cloud off_device reaches [shell.exec]
+
+service Net { emission[net.request] fn fetch(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Net provides out: Answer {
+  route model on classify { * -> cloud }
+  provide out { fn classify(text) = emit llm.fetch(text) }
+}

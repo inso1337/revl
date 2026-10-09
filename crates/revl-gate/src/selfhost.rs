@@ -21787,15 +21787,7 @@ fn model_svc_ns(xs: &[String], comp: CompD) -> Vec<String> {
 }
 
 fn model_consults(held: &[String]) -> bool {
-    let mut i = 0i64;
-    while (i < held.revl_length()) {
-        let t = cap_parse((held)[(i) as usize].clone()).token;
-        if ((((t == "*") || starts_with__m2(&t, "svc:")) || (t == "model")) || starts_with__m2(&t, "model.")) {
-            return true;
-        }
-        i = (i).checked_add(1i64).expect("revl: Int overflow");
-    }
-    return false;
+    return (held.revl_length() > 0i64);
 }
 
 fn model_role_of(tok: String, rs: &[MRole]) -> String {

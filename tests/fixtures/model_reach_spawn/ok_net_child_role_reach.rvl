@@ -1,0 +1,22 @@
+// ADMITTED: the control for `model_net_child_role_reach.rvl`. Same spawn, same
+// `net.request` hold on both sides, but role `tool` reaches `net.request`,
+// which `Worker` holds, so the child's real ceiling is exactly what it
+// declares and the supervisor's grant covers it. It pins that bringing
+// `net`-holding components into the product is not a blanket refusal: the
+// widening changes which pairs are compared, not the answer when the pair is
+// within authority. The file name's prefix is the expected verdict (`model_`
+// refused, `ok_` admitted).
+
+model role tool on_device reaches [net.request]
+
+service Net { emission[net.request] fn fetch(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+
+component Worker requires net: Net provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit net.fetch("x") return "x" } }
+}
+
+component Supervisor requires net: Net {
+  let w = effect spawn Worker with { } undo w.dispose()
+}

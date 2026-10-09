@@ -17360,17 +17360,16 @@ fn model_svc_ns(xs: List[Str], comp: CompD) -> List[Str] {
   return out
 }
 
-// `_consults_a_model`: a held boundary counts unless its declared token PROVES
-// it is some other boundary.
+// `_consults_a_model`: whether a role has a ceiling to widen over this
+// component. THE EXEMPTION IS "REACHES NOTHING", NOT "HOLDS NO MODEL TOKEN" -
+// a role steers a component by choosing among the boundaries it can reach, so
+// a component that reaches none has no ceiling to widen, and a component that
+// reaches any boundary does. Reading the held tokens instead missed issue
+// #1193's own example: a component holding `net` that routes through a model
+// able to reach `shell` was accounted for what it held, because `net` is not
+// spelled `model.` anything.
 fn model_consults(held: List[Str]) -> Bool {
-  var i = 0
-  while (i < held.length()) {
-    let t = cap_parse(held[i]).token
-    if (t == "*" || starts_with(t, "svc:") || t == "model"
-        || starts_with(t, "model.")) { return true }
-    i += 1
-  }
-  return false
+  return held.length() > 0
 }
 
 // `model_route.role_of_crossing`: the declared role a `model.<tail>` token

@@ -1,8 +1,10 @@
 # 541: The model role in the capability attenuation product
 
-Roadmap: item 519 (issue #1193), from the 2026-09-19 external review. Slice 1
-is LANDED with this note, and slice 2 since (section 8); slice 3 is designed
-here and not written, slice 4 landed upstream.
+Roadmap: item 519 (issue #1193), from the 2026-09-19 external review. Slices 1
+and 2 are LANDED with this note and since, slice 3 is now landed in BOTH
+engines, slice 4 landed upstream ahead of this note, slice 5 is partial, and
+slice 6 (the consult predicate, which corrects slice 1's) is LANDED (section
+8).
 
 Design-doc number: 541. Numbers 531 to 538 were already taken on 2026-09-20,
 531 on main and the rest in open pull requests (532 in #1228 and #1242, 533 in
@@ -181,21 +183,21 @@ the model-role sibling of the `dropped` column in the item-66 audit chain.
 
 ### 3.1 When the product is asked
 
-The product is computed for a component that holds a boundary that could be a
-model call AND either declares a `route model` block or makes a crossing a
-`model.<role>` token places on a role (slice 2, section 8). `_consults_a_model`
-decides the second, and it is an over-approximation in the refusing direction:
-a held boundary counts unless its declared token PROVES it is some other
-boundary. Three shapes count — a token whose head is `model`, the unnameable
-`*`, and a `key:` wiring element, which is a boundary whose declaration names
-no token at all and so rules nothing out.
+The product is computed for a component that reaches at least one boundary AND
+either declares a `route model` block or makes a crossing a `model.<role>`
+token places on a role (slice 2, section 8). `_consults_a_model` decides the
+FIRST of those, and its question is the exemption itself: a component that
+reaches ANY boundary is in the product, and one that reaches none is out of it.
+It is `bool(held)`, nothing more. `model.*`, the unnameable `*` and a `svc:`
+element (a boundary whose declaration names no token at all) are SUFFICIENT
+shapes for a held boundary to matter, and none of them is NECESSARY; reading
+the tokens instead of the emptiness was the gap issue #1193 slice 6 closed.
 
-A component whose held boundaries are all declared non-model tokens consults no
-model. That is not an exemption and not a policy escape: a role steers a
+A component that reaches none is not exempt by policy: a role steers a
 component by choosing among the boundaries the component can reach, so a
-component that reaches none has no ceiling for a role to widen. It is also what
-keeps the slice free of a migration: item 512's own fixtures declare a route
-over an action that crosses nothing.
+component that reaches none has no ceiling for a role to widen. That is also
+what keeps the slice free of a migration: item 512's own fixtures declare a
+route over an action that crosses nothing.
 
 The gate reads the HELD set and not the component's own `emit` steps, because a
 provider body crosses through a `requires` key and it is the key's SERVICE that
@@ -384,7 +386,7 @@ crossing reaches: decision 4's over-approximation stays, in the refusing
 direction. Oracle: `tests/test_model_reach_crossing.py`, ported to the gate
 (section 7).
 
-**S3. The role in the spawn product. LANDED IN THE REFERENCE (issue #1193).**
+**S3. The role in the spawn product. LANDED IN BOTH ENGINES (issue #1193).**
 A spawner whose CHILD routes through a role reaching past the spawner is the
 lineage form of the same question, and it needs the model reach folded into
 `_spawn_surface_closure` -- which is why it is separate: the closure is the one
@@ -398,17 +400,23 @@ switches the item-294 `config.` substitution off and keeps the comparison
 fail-closed. Oracle: `tests/fixtures/model_reach_spawn/` (two widenings, two
 controls) run by `tests/test_model_reach_spawn.py`.
 
-What S3 does NOT do is land the fold in the GATE. `selfhost/lower.rvl`'s
-`check_spawn` still builds `reachBase` from `reach_surface_pairs` alone, so both
-widening documents are OPEN GATE BYPASSES: they are named in
-`tests/test_gate_reference_census.py`'s `KNOWN_BYPASSES`, recorded in
-`tools/gate_reference_census_baseline.json`, and pinned in both directions by
-that file's `MODEL_REACH_SPAWN` section -- the two `ok_` controls are decided
-alike by both engines, so what diverges is the widening case and not the corpus.
-The port is the completion of a fold the gate already carries for the crossing
-side (the `MODEL_REACH_CROSSING` corpus), and it is held back only because
-`selfhost/lower.rvl` is being edited by PR #2101; it is the remaining work of
-this slice.
+The gate half landed with the reference half, in PR #2119 (commit 1bb7e86f4,
+2026-10-07), which is what unblocked it: `selfhost/lower.rvl`'s
+`model_reach_spawn_base` is now the surface the spawn closure STARTS from, so
+`check_spawn` folds the same reach and both widening documents are refused with
+the reference's own sentence. No bypass is left for this corpus
+(`tests/test_gate_reference_census.py`'s `KNOWN_BYPASSES` is `set()`), and that
+file's `MODEL_REACH_SPAWN` section pins every document by name in both
+directions, so a document that stops being decided alike is a failure rather
+than a new baseline entry. The fold stays inert for every program that declares
+no `model role` (`model_roles_of` empty) and leaves an UNDECIDED role edge
+unfolded, keeping the gate's previous answer rather than guessing at a reach the
+fold cannot justify; that direction is deliberate, because a false refusal over
+the corpus is the regression the census exists to catch.
+
+S3's own predicate half was still wrong when it landed; S6 is the
+correction. `model_consults` skipped a child holding no `model.`-spelled token
+in BOTH engines, so the fold S3 added was never asked about that child.
 
 **S4. The kernel boundary. LANDED UPSTREAM, ahead of this note.** Issue
 #1223's rule, expressed as this fold with a kernel-owned held set, is item 544
@@ -428,6 +436,42 @@ members, and the aggregation's own reach - the council's answer is a join of
 its members' answers, and whether that join can reach further than any single
 member is a question this slice does not ask.
 
+**S6. The consult predicate. LANDED (issue #1193).** Section 3.1's exemption
+is "reaches nothing", and S1 wrote it as a token proxy: a held boundary counted
+only when its declared token was `model.*`, the unnameable `*`, or a `svc:`
+element. Each of those is SUFFICIENT and none is NECESSARY, and the difference
+is the issue's own motivating example: a component holding `net.request` that
+routes through a model reaching `shell.exec` was accounted for what it HELD
+rather than for what the pair could reach. `_consults_a_model` is `bool(held)`
+in the reference and `model_consults` is `held.length() > 0` in the gate, so
+the fold's question is the exemption itself.
+
+This is the one slice of the six that had NO oracle able to see it, which is
+why it is separate rather than a line inside S1. Both engines agreed, on the
+wrong answer, in the same direction: a held set that is not empty and not
+`model.`-spelled took the `_model_consult` early return, so no edge existed for
+`_check_model_attenuation` or `_spawn_base_with_model` to fold and no
+`model_reach` row was emitted. Agreement was total, so
+`tests/test_gate_reference_census.py` could not redden it. It was a coverage
+hole and not a gate bypass. What closes it is a corpus that reaches the case:
+`tests/fixtures/model_reach_crossing/model_net_holder.rvl` (refused) with
+`ok_net_holder.rvl` (admitted, and it must keep its `model_reach` row) and
+`tests/fixtures/model_reach_spawn/model_net_child_role_reach.rvl` (refused,
+`MODEL` and not `G4`) with `ok_net_child_role_reach.rvl`, and
+`tests/fixtures/model_reach_spawn/model_net_child_key_reach.rvl` (refused,
+`G4`), where the child holds the role's reach itself so only the spawn fold
+can refuse it. Three modules carry
+the predicate's OLD body as an in-module `_token_test` and monkeypatch the fold
+back onto it, so the mutation that reopens the hole is executable and the
+tests go red rather than resting on the argument. The spawn widening lands in
+its own bucket, `MODEL_REACH_SPAWN_PRODUCT_WIDENING`, expected
+`agree-refuse/MODEL`: the child's own product is reached first and the lineage
+inherits the reach instead of re-deriving it, and that ordering is pinned by
+name rather than assumed.
+
+What S6 does NOT do is measure the held set. It asks whether the set is empty;
+whether the set is COMPLETE is section 9's second bullet and is unchanged.
+
 ---
 
 ## 9. Things stated here that are not verified
@@ -435,10 +479,15 @@ member is a question this slice does not ask.
 * That a role's `reaches [...]` corresponds to anything a real model member can
   or cannot do. It is a declared claim, checked against the components that
   route to it, and nothing measures a member (section 5).
-* That `_consults_a_model` is complete. It is a deliberate
-  over-approximation, and a component that reaches a model through a boundary
-  whose declared token is neither `model.*`, `*`, nor untokened would not be
-  gated in. No such shape is known; it was not exhaustively searched for.
+* That `_consults_a_model` is complete. It asks the design note's question now
+  (does the component reach anything?) rather than the token proxy it used
+  before issue #1193 slice 6, so the shape this bullet used to name (a
+  component reaching a model through a boundary whose declared token is neither
+  `model.*`, `*`, nor untokened) is gated in. What is still unverified is the
+  other half: that a boundary the fold cannot SEE is in the held set at all.
+  The predicate reads the same lowered held set the attenuation fold compares,
+  so the two cannot disagree, but that is an argument about one reader and not
+  a measurement of the grammar.
 * Any claim about the six emitter tiers. Nothing in this slice reaches an
   emitter, so there is nothing tier-specific to be right or wrong about, but
   that is an argument and not a measurement.

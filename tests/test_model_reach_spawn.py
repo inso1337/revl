@@ -21,15 +21,28 @@ role's reach up the lineage and the existing monotone-shrinkage refusal fires
 verbatim - no new code, no new message. The local base stays the child's own
 crossings, so `holds` still names what the spawner actually holds.
 
-tests/fixtures/model_reach_spawn/ holds the corpus: `model_` is refused under
-G4, `ok_` is the admitted control. tests/test_gate_reference_census.py records
-the self-host gate's half of it: all four documents are decided alike by both
-engines -- the two `model_` documents `agree-refuse/G4`, the two `ok_` controls
+tests/fixtures/model_reach_spawn/ holds the corpus: `model_` is refused, `ok_`
+is the admitted control. tests/test_gate_reference_census.py records the
+self-host gate's half of it: all six documents are decided alike by both
+engines -- the two S3 `model_` documents `agree-refuse/G4`, the S6
+`model_net_child_role_reach.rvl` `agree-refuse/MODEL`, the `ok_` controls
 `agree-admit` -- and `KNOWN_BYPASSES` there is empty, because the gate folds the
 same reach in (`selfhost/lower.rvl`'s `model_reach_spawn_base`). The two halves
 are pinned separately on purpose: this file holds the reference against the
 fixtures, the census holds the gate against the reference over the whole
 corpus, and neither can move without the other going red.
+
+Issue #1193 slice 6 (the consult predicate) adds
+`model_net_child_role_reach.rvl` and its control, the first documents here
+whose child holds no `model.`-spelled token. Before the correction the
+token-keyed `_consults_a_model` exempted such a child, so the spawn granted it
+exactly what the spawner held while the child reached `shell.exec` through its
+role - a lineage widening with no `model_reach` row to show for it. The
+refusal that now fires is the COMPONENT's (`G-MODEL-PLACE` at the child's
+`route model` line), not the spawn statement's (`G4`): the child's own product
+is reached first and the lineage inherits the same reach, because
+`_spawn_base_with_model` reads `_model_reach_by_component`. That ordering is
+pinned, not assumed: see the three tests below the fold tests.
 """
 
 from pathlib import Path
@@ -50,8 +63,14 @@ HINT = ("a spawned child's capability set must be covered by its spawner's "
         "holds what it grants, or narrow the capability on `{child}` (monotone "
         "shrinkage: narrowing is sound, widening is not)")
 
-REFUSED = ("child_role_reach", "grandchild_role_reach")
-ADMITTED = ("role_within_the_spawner", "spawner_holds_the_role_reach")
+REFUSED = ("child_role_reach", "grandchild_role_reach", "net_child_key_reach")
+ADMITTED = ("role_within_the_spawner", "spawner_holds_the_role_reach",
+            "net_child_role_reach")
+# issue #1193's consult-predicate correction: refused by the COMPONENT's
+# product, not the spawn statement's - see
+# `test_the_widening_refusal_is_the_component_s_not_the_spawn`.
+WIDENED = ("net_child_role_reach",)
+PRODUCT_CODE = "G-MODEL-PLACE"
 MESSAGE = {
     # the role's reach is reached by the child itself
     "child_role_reach": ("`Supervisor` spawns `Worker`, granting it "
@@ -60,10 +79,18 @@ MESSAGE = {
     # the same reach, one spawn edge further up
     "grandchild_role_reach": ("`Top` spawns `Mid`, granting it `shell.exec`, "
                               "but `Top` holds only `model.complete`" + TAIL),
+    # issue #1193's consult-predicate correction, on the spawn fold alone: the
+    # child holds the role's reach itself, so its own product admits it
+    "net_child_key_reach": ("`Supervisor` spawns `Worker`, granting it "
+                            "`shell.exec`, but `Supervisor` holds only "
+                            "`net.request`" + TAIL),
 }
-SPAWNER = {"child_role_reach": "Supervisor", "grandchild_role_reach": "Top"}
-CHILD = {"child_role_reach": "Worker", "grandchild_role_reach": "Mid"}
-LINE = {"child_role_reach": 24, "grandchild_role_reach": 18}
+SPAWNER = {"child_role_reach": "Supervisor", "grandchild_role_reach": "Top",
+           "net_child_key_reach": "Supervisor"}
+CHILD = {"child_role_reach": "Worker", "grandchild_role_reach": "Mid",
+         "net_child_key_reach": "Worker"}
+LINE = {"child_role_reach": 24, "grandchild_role_reach": 18,
+        "net_child_key_reach": 29}
 
 
 def _src(stem: str) -> str:
@@ -79,6 +106,7 @@ def _refusal(stem: str) -> RevlError:
 def test_the_corpus_is_the_refusals_and_their_controls():
     names = sorted(p.stem for p in CORPUS.glob("*.rvl"))
     assert names == sorted([f"model_{s}" for s in REFUSED]
+                           + [f"model_{s}" for s in WIDENED]
                            + [f"ok_{s}" for s in ADMITTED])
 
 
@@ -153,3 +181,95 @@ def test_the_model_product_admits_the_child_the_spawn_fold_refuses():
     assert rows[0]["holds"] == ["model.complete", "shell.exec"]
     assert rows[0]["reaches"] == ["shell.exec"]
     assert rows[0]["effective"] == ["model.complete", "shell.exec"]
+
+
+def _token_test(held):
+    """The predicate the fold asked its question with before issue #1193's
+    consult-predicate correction: a held boundary counts only when its declared
+    token PROVES it is some other boundary. The MUTATION the three tests below
+    are against, kept here so it cannot drift from the one in
+    tests/test_model_reach_crossing.py without a second edit."""
+    for cap in held:
+        token = cap.token
+        if token == "*" or token.startswith("svc:"):
+            return True
+        if token == "model" or token.startswith("model."):
+            return True
+    return False
+
+
+def test_the_widening_refusal_is_the_component_s_not_the_spawn():
+    """`model_net_child_role_reach.rvl`, issue #1193's own example with a
+    spawn edge. `Supervisor` holds only `net.request` and so does `Worker`, so
+    the spawn grants exactly what the spawner holds and the lineage rule has
+    nothing to refuse - the widening is entirely the child's. The refusal names
+    the COMPONENT and its `route model` line, not the spawn statement: the
+    component's product is reached now, and `_spawn_base_with_model` reads the
+    same `_model_reach_by_component`, so the lineage inherits the reach rather
+    than re-deriving it."""
+    err = _refusal("model_net_child_role_reach")
+    assert err.code == PRODUCT_CODE
+    assert err.category == CATEGORY
+    assert err.line == 24
+    assert err.message.startswith("`Worker` routes `go` (*) through model role "
+                                  "`tool`")
+    assert "holds only `net.request`" in err.message
+    # the spawn statement is not the refusing line, and grants nothing extra
+    lines = _src("model_net_child_role_reach").split("\n")
+    assert "spawn Worker" in lines[28]
+
+
+def test_the_token_test_admits_the_token_clean_lineage(monkeypatch):
+    """F5 - the falsifier. Restore the token-keyed predicate and the document
+    above is ADMITTED whole. The spawn record proves the fail-open was the
+    predicate and not the lineage rule: `granted` is exactly `holds`, with
+    nothing attenuated, so no spawn comparison could have caught it - while the
+    child reached `shell.exec` through role `tool` and left no `model_reach`
+    row anywhere for item 544's kernel check to read."""
+    from revl import lower
+    src = _src("model_net_child_role_reach")
+    assert "model." not in src.split("component Worker", 1)[1]
+    monkeypatch.setattr(lower, "_consults_a_model", _token_test)
+    ir = compile_source(src, "model_net_child_role_reach.rvl")
+    inst = ir["manifest"]["instances"][0]
+    assert inst["holds"] == ["net.request"]
+    assert inst["granted"] == ["net.request"]
+    assert inst["attenuated"] == []
+    assert not ir["manifest"].get("model_reach")
+
+
+def test_the_control_keeps_its_row_and_the_token_test_drops_it(monkeypatch):
+    """The control for the two above, and the silent half of the mutation.
+    `ok_net_child_role_reach.rvl` is admitted either way - the verdict does not
+    move - but the token-keyed predicate drops the `model_reach` row, which is
+    the audit surface the kernel check reads. A verdict-only test would call
+    that a pass."""
+    from revl import lower
+    src = _src("ok_net_child_role_reach")
+    ir = compile_source(src, "ok_net_child_role_reach.rvl")
+    assert ir["manifest"]["instances"][0]["granted"] == ["net.request"]
+    rows = ir["manifest"]["model_reach"]
+    assert [r["component"] for r in rows] == ["Worker"]
+    assert rows[0]["holds"] == ["net.request"]
+    assert rows[0]["reaches"] == ["net.request"]
+    monkeypatch.setattr(lower, "_consults_a_model", _token_test)
+    assert not compile_source(src, "ok_net_child_role_reach.rvl")[
+        "manifest"].get("model_reach")
+
+
+def test_the_token_test_admits_the_child_that_holds_the_role_reach(monkeypatch):
+    """The spawn-fold half of the mutation, isolated. In
+    `model_net_child_key_reach.rvl` `Worker` holds `shell.exec` itself, so its
+    own model product admits it and only the spawn fold can refuse. Restore the
+    token-keyed predicate and the fold skips `Worker`, whose held tokens are
+    `net.request` and `shell.exec`, neither spelled `model.` anything: the
+    spawn grants only `net.request`, what `Supervisor` holds, and the program
+    is ADMITTED while the child reaches `shell.exec` through role `tool`."""
+    from revl import lower
+    src = _src("model_net_child_key_reach")
+    assert "model." not in src.split("component Worker", 1)[1]
+    monkeypatch.setattr(lower, "_consults_a_model", _token_test)
+    ir = compile_source(src, "model_net_child_key_reach.rvl")
+    inst = ir["manifest"]["instances"][0]
+    assert inst["granted"] == ["net.request"]
+    assert inst["attenuated"] == []

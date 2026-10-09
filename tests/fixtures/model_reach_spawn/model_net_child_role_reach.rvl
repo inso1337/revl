@@ -1,0 +1,30 @@
+// REFUSED G-MODEL-PLACE (item 519, issue #1193 slice 6): the spawn-lineage
+// form of `tests/fixtures/model_reach_crossing/model_net_holder.rvl`.
+// `Supervisor` holds only `net.request` and spawns `Worker`, which holds only
+// `net.request` too - so the spawn itself grants nothing the supervisor lacks,
+// and before this slice the program was ADMITTED whole. `Worker` routes `go`
+// through model role `tool`, which reaches `shell.exec`: the child's real
+// ceiling is the pair's, and the supervisor was accounted as if the role were
+// inert because `net.request` is not spelled `model.` anything.
+//
+// The refusal is the COMPONENT's, not the spawn statement's: `Worker`'s own
+// product is now reached, and it fires first. The spawn fold inherits the same
+// reach (`_spawn_base_with_model` reads `_model_reach_by_component`), so the
+// lineage is closed by the same change; the ordering is pinned in
+// tests/test_model_reach_spawn.py rather than assumed here. The file name's
+// prefix is the expected verdict (`model_` refused, `ok_` admitted).
+
+model role tool on_device reaches [shell.exec]
+
+service Shell { emission[shell.exec] fn run(c: Str) -> Str }
+service Net { emission[net.request] fn fetch(p: Str) -> Str }
+service Task { emission fn go() -> Str }
+
+component Worker requires net: Net provides task: Task {
+  route model on go { * -> tool }
+  provide task { fn go() { emit net.fetch("x") return "x" } }
+}
+
+component Supervisor requires net: Net {
+  let w = effect spawn Worker with { } undo w.dispose()
+}

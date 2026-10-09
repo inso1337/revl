@@ -93,10 +93,93 @@ def test_a_model_consuming_component_with_no_role_compiles():
 def test_a_routed_component_that_crosses_nothing_compiles():
     """CONTROL B. A role can only steer an action that reaches a boundary, so
     a component holding none has no ceiling for a role to widen. This is the
-    shape every item-512 fixture has, which is why none of them migrate."""
+    shape every item-512 fixture has, which is why none of them migrate.
+
+    Issue #1193 slice 6 (the consult predicate): this control is not merely
+    consistent with the exemption, it IS the exemption. `_consults_a_model`
+    reads the held set's emptiness and nothing else, so the question the
+    product asks is the design note's own - "does this component reach anything
+    for a role to widen?" (docs/design/541-model-in-attenuation.md, section
+    3.1) - rather than the proxy it used to ask, "is one of the things it holds
+    spelled `model.`?"."""
     ir = compile_source(ROUTES_BUT_CROSSES_NOTHING, "control_b.rvl")
     assert [c["name"] for c in ir["components"]] == ["Classifier"]
     assert "model_reach" not in (ir.get("manifest") or {})
+
+
+# Issue #1193's own example, in the inline form this file uses. `Classifier`
+# holds `net.request` - not the unnameable `*`, not a `svc:` element, not
+# spelled `model.` anything - and routes `classify` through a role. `%s` is the
+# role's reach clause.
+CONSULTS_NET = """
+model role cloud off_device %s
+
+service Net { emission[net.request] fn fetch(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Net provides out: Answer {
+  route model on classify { * -> cloud }
+  provide out { fn classify(text) = emit llm.fetch(text) }
+}
+"""
+
+
+def _token_test(held):
+    """The predicate the fold asked its question with before issue #1193's
+    consult-predicate correction, kept here as the MUTATION the two tests below
+    are against. Identical to the copy in tests/test_model_reach_crossing.py and
+    tests/test_model_reach_spawn.py."""
+    for cap in held:
+        token = cap.token
+        if token == "*" or token.startswith("svc:"):
+            return True
+        if token == "model" or token.startswith("model."):
+            return True
+    return False
+
+
+def test_a_component_holding_no_model_token_is_still_folded_in():
+    """Issue #1193's own example, and the whole reason this slice exists. The
+    fold ran only for a component holding a `model.`-spelled token, the
+    unnameable `*`, or a `svc:` element, so this component was skipped
+    entirely: it was accounted for what it HELD, never for what the pair could
+    reach. `net.request` is a real boundary and a real ceiling to widen."""
+    record, text = _refusal(CONSULTS_NET % "reaches [shell.exec]")
+    assert record["code"] == CODE
+    assert "Classifier" in text       # the component
+    assert "cloud" in text            # the role
+    assert "shell.exec" in text       # what the role reaches
+    assert "net.request" in text      # what the component holds
+
+
+def test_the_control_for_it_is_admitted_and_recorded():
+    """The other half, in the shape that has no `model.` token on either side:
+    a role reaching `net.request` when the component holds `net.request` is
+    narrowing, and narrowing is sound. The record is what item 544's kernel
+    check reads, so it must be produced for a token-clean pair too."""
+    rows = _reach_record(CONSULTS_NET % "reaches [net.request]")
+    assert rows == [{
+        "component": "Classifier", "action": "classify", "origin": "*",
+        "role": "cloud", "residence": "off_device",
+        "holds": ["net.request"], "reaches": ["net.request"],
+        "effective": ["net.request"], "attenuated": [],
+        "reach_declared": True,
+    }]
+
+
+def test_the_token_reading_admits_it_and_drops_the_record(monkeypatch):
+    """F1/F6 - the falsifier for both tests above, in one mutation. Restore the
+    token-keyed predicate and the refused document is ADMITTED and the admitted
+    document keeps its verdict while losing its `model_reach` row. The second
+    half is the quiet one: a verdict-only test would call it a pass, and item
+    544's kernel check would be reading an empty manifest."""
+    from revl import lower
+    monkeypatch.setattr(lower, "_consults_a_model", _token_test)
+    wide = compile_source(CONSULTS_NET % "reaches [shell.exec]", "net.rvl")
+    assert not (wide.get("manifest") or {}).get("model_reach")
+    narrow = compile_source(CONSULTS_NET % "reaches [net.request]", "net.rvl")
+    assert [c["name"] for c in narrow["components"]] == ["Classifier"]
+    assert not (narrow.get("manifest") or {}).get("model_reach")
 
 
 # ------------------------------------------------- the roadmap's own exit test

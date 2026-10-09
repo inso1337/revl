@@ -18010,35 +18010,28 @@ def _model_reach_caps(role) -> set:
 
 
 def _consults_a_model(held: set) -> bool:
-    """Whether a component holds a boundary that could be a model call (519).
+    """Whether a role has a ceiling to widen over this component (519).
 
-    A sound over-approximation, in the direction the rest of this file takes:
-    a held boundary counts unless its DECLARED capability token proves it is
-    some other boundary. Three shapes count -
+    THE EXEMPTION IS "REACHES NOTHING", NOT "HOLDS NO MODEL TOKEN". A role
+    steers a component by choosing among the boundaries the component can
+    reach, so a component that reaches none has no ceiling for a role to widen
+    (docs/design/541-model-in-attenuation.md, section 3.1). That is the whole
+    of the exemption, and `held` non-empty is exactly it.
 
-    * a token whose head is `model` (the declared model crossing, item 343 -
-      the same token `revl.taint` reads for the origin ceiling);
-    * the unnameable `*` (a host emission or a first-class dispatch, which no
-      `emission[...]` list can name and which may therefore be a model call);
-    * a `svc:` element (`_UNDECLARED_NS`, item 561) - a boundary whose
-      declaration names no capability token at all, so nothing rules a model
-      call out.
+    This used to read the held tokens instead and count a component only when
+    one of them was `model.*`, the unnameable `*`, or a `svc:` element
+    (`_UNDECLARED_NS`, item 561). Each of those is SUFFICIENT - none is
+    NECESSARY, and the difference is issue #1193's own motivating example: a
+    component holding `net` that routed through a model able to reach `shell`
+    was accounted for what it held rather than for what the pair could reach,
+    because `net` is not spelled `model.` anything. Whether the author wrote a
+    `route model` block is the declaration that a model steers this component;
+    the spelling of what it holds is not.
 
-    A component whose held boundaries are all declared non-model tokens
-    consults no model, and a `route model` block over it places a call it
-    cannot make. That is not an exemption: a role steers a component by
-    choosing among the boundaries the component can reach, so a component that
-    reaches none has no ceiling for a role to widen. The gate reads the HELD
-    set rather than the component's own emit steps because a provider body
-    crosses through a `requires` key, and it is the key's service that declares
-    the `model.*` token - the body only names the key."""
-    for cap in held:
-        token = cap.token
-        if token == "*" or token.startswith(_UNDECLARED_NS):
-            return True
-        if token == "model" or token.startswith("model."):
-            return True
-    return False
+    The gate reads the HELD set rather than the component's own emit steps
+    because a provider body crosses through a `requires` key, and it is the
+    key's service that declares the token - the body only names the key."""
+    return bool(held)
 
 
 def _model_held_render(cap: "object") -> str:
@@ -18239,8 +18232,10 @@ def _check_model_attenuation(components: list[dict], services: dict,
     (`model_route.UNDECLARED_REACH`), which no held set covers - reading
     silence as "reaches nothing" would make an unknown model inert in the
     product, and an unknown model is the whole reason the item exists. A
-    crossing whose declared token does not PROVE it is some other boundary
-    counts as a model call (`_consults_a_model`). A crossing placed on a role
+    component that reaches ANY boundary is in the product whether or not one
+    of its held tokens is spelled `model.` anything (`_consults_a_model`) -
+    the exemption is a component that reaches none, not one that holds no
+    model token. A crossing placed on a role
     by its `model.<role>` token is an edge whether or not a `route model`
     block names the role (`_model_reach_edges`), so leaving the block out is
     not a way out of the product.
