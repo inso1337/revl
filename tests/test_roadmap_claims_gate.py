@@ -438,7 +438,8 @@ def test_the_shipped_ratchet_loads_and_every_entry_names_its_sentence():
 @pytest.fixture(scope="module")
 def real():
     tree = gate.Tree.from_git(ROOT)
-    source = gate.DEFAULT_ROADMAP.read_text()
+    # The main file plus docs/roadmap-archive/, as the gate itself reads it.
+    source = gate.read_roadmap(gate.DEFAULT_ROADMAP).text
     return source, tree
 
 

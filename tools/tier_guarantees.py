@@ -492,7 +492,8 @@ def parity_divergences(host_tiers: tuple[str, ...]) -> dict[tuple[str, str], str
 
     backends = {alias for alias in markers.TIER_ALIASES}
     out: dict[tuple[str, str], str] = {}
-    for record in markers.tier_parity_records(ROADMAP.read_text(encoding="utf-8"),
+    # The main file plus docs/roadmap-archive/ (tools/roadmap_source.py).
+    for record in markers.tier_parity_records(markers.read_roadmap(ROADMAP).text,
                                               backends):
         codes: set[str] = set()
         for subject in record["subjects"]:

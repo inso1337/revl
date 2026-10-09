@@ -459,7 +459,9 @@ def test_the_roadmap_row_agrees_with_the_measurement(data):
     markers = load_by_path(
         "check_roadmap_markers_for_item_533",
         ROOT / "tools" / "check_roadmap_markers.py")
-    text = (ROOT / "docs" / "v2.0-roadmap.md").read_text(encoding="utf-8")
+    # Item 533 is closed, so it lives in docs/roadmap-archive/; the gate's
+    # loader reads the main file and the archive as one document.
+    text = markers.read_roadmap(ROOT / "docs" / "v2.0-roadmap.md").text
     rows = [item for item in markers.items(text) if item["number"] == "533"]
     assert len(rows) == 1, [item["line"] for item in rows]
     row = rows[0]["body"]

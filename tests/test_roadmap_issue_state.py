@@ -481,7 +481,7 @@ def test_the_audit_catches_rows_the_citation_gate_cannot_see():
     them anything. Asserted as a lower bound: the roadmap is a living document
     and other lanes add rows to it.
     """
-    text = ROADMAP.read_text(encoding="utf-8")
+    text = gate.read_roadmap(ROADMAP).text  # main file + docs/roadmap-archive/
     records = gate.inprogress_records(text)
     inflight = [r for r in records if r["glyph"] in gate.INFLIGHT_GLYPHS]
     assert len(inflight) >= 20, (
@@ -515,7 +515,7 @@ def test_item_523_is_no_longer_an_in_progress_row():
     contradicted its body. The two REAL residuals (items 534 and 535) are
     deliberately left alone: their residuals are still in the tree.
     """
-    text = ROADMAP.read_text(encoding="utf-8")
+    text = gate.read_roadmap(ROADMAP).text  # main file + docs/roadmap-archive/
     assert not [r for r in gate.inprogress_records(text) if r["number"] == "523"]
     row = [it for it in gate.items(text) if it["number"] == "523"]
     assert len(row) == 1

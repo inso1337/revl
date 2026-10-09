@@ -1794,7 +1794,9 @@ def select(changed, root) -> dict:
             # citation leaves the ratchet entry matching nothing, and that test
             # is what says so. Without this line the commit that pays the debt
             # is exactly the commit that does not run the check.
-            if f == "docs/v2.0-roadmap.md":
+            # The archive under docs/roadmap-archive/ is the same document to
+            # the gate (tools/roadmap_source.py).
+            if f == "docs/v2.0-roadmap.md" or f.startswith("docs/roadmap-archive/"):
                 pytest_nodes.add("tests/test_roadmap_claims_gate.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue

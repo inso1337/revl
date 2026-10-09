@@ -166,6 +166,10 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from roadmap_source import read_roadmap  # noqa: E402  (tools/ is not a package)
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ROADMAP = ROOT / "docs" / "v2.0-roadmap.md"
 DEFAULT_ALLOWLIST = Path(__file__).resolve().parent / "roadmap_claim_allowlist.json"
@@ -683,7 +687,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rules = args.rules or list(RULES)
     tree = Tree.from_git(args.root)
-    source = args.roadmap.read_text()
+    # The main file plus docs/roadmap-archive/, judged as one document (see
+    # tools/roadmap_source.py); `where` names the file a claim's line is in.
+    roadmap = read_roadmap(args.roadmap)
+    source = roadmap.text
+
+    def where(line: int) -> str:
+        path, local = roadmap.locate(line)
+        name = (path.name if path == args.roadmap
+                else "%s/%s" % (path.parent.name, path.name))
+        return "%s:%d" % (name, local)
     ratchet = load_ratchet(args.ratchet)
     denominator, findings, unused = run(
         source, tree, rules, load_allowlist(args.allowlist) + ratchet
@@ -711,8 +724,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.quiet:
         for rule in rules:
             for claim, verdict in by_rule[rule]:
-                print("\n%s:%d  [%s]\n  %s\n  %s"
-                      % (args.roadmap.name, claim.line, rule, claim.text.strip(), verdict))
+                print("\n%s  [%s]\n  %s\n  %s"
+                      % (where(claim.line), rule, claim.text.strip(), verdict))
         for entry in unused:
             print("\n%s entry matches nothing and MUST be removed: [%s] %s"
                   % (entry.get("origin", "allow-list"), entry["rule"],

@@ -28,7 +28,7 @@
     {
       "rule": "path",
       "claim": "canonical_echoer/aggregates/service.core.wat",
-      "location": "docs/v2.0-roadmap.md:4919",
+      "location": "docs/v2.0-roadmap.md:1712",
       "verdict": "cites `canonical_echoer/aggregates/service.core.wat`, which is not a file in the tree",
       "fix": "Item 432(e) says the hunk moved goldens `in all four` and then names three of them with slashes used as an alternation, which reads as one path and is none. The three files are backends/wasm/golden/canonical_echoer.core.wat, canonical_aggregates.core.wat and canonical_service.core.wat. Spell them out, or write canonical_{echoer,aggregates,service}.core.wat, and this entry and the count go with the edit."
     }

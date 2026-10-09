@@ -179,6 +179,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from roadmap_source import read_roadmap  # noqa: E402  (tools/ is not a package)
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ROADMAP = ROOT / "docs" / "v2.0-roadmap.md"
 DEFAULT_BASE = "origin/main"
@@ -2293,7 +2297,11 @@ def main(argv: list[str] | None = None) -> int:
     if not roadmap.is_file():
         print(f"error: no such roadmap file: {roadmap}", file=sys.stderr)
         return 2
-    text = roadmap.read_text(encoding="utf-8")
+    # The main file plus docs/roadmap-archive/, judged as one document; see
+    # tools/roadmap_source.py. `source.relabel` maps a line past the main
+    # file back to the archive file it came from, in what is printed.
+    source = read_roadmap(roadmap)
+    text = source.text
 
     git = Git(ROOT, args.base, allow_fetch=not args.no_fetch)
     if not git.ok("rev-parse", "--git-dir"):
@@ -2391,6 +2399,9 @@ def main(argv: list[str] | None = None) -> int:
                 + "\n".join("  " + e for e in extra)
             )
 
+    findings = [source.relabel(f) for f in findings]
+    successor_note = source.relabel(successor_note)
+
     for note in git.notes():
         print(note)
 
@@ -2398,7 +2409,8 @@ def main(argv: list[str] | None = None) -> int:
     coverage = citation_coverage(audit, roadmap, args.base)
     if not findings:
         if audit["unexamined"]:
-            print(citation_unexamined_report(audit, roadmap, args.base, scanned))
+            print(source.relabel(
+                citation_unexamined_report(audit, roadmap, args.base, scanned)))
             return 0
         print(f"roadmap markers OK: {scanned} in-progress marker(s) with a named "
               f"branch, all consistent with {args.base}.")
