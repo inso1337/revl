@@ -620,7 +620,13 @@ def test_admit_does_not_carry_a_metric_across_the_barrier():
 def test_only_the_observation_property_reads_slo():
     """One `.slo` attribute read in the whole module, and it is the tripwire
     property's own return. Anything else would mean a metric had found a way
-    into the decision."""
+    into the decision.
+
+    `slo_supplied` is the second exception and it is named here for the reason
+    the reader set is exhaustive: adding a reader has to be a deliberate act
+    that shows up in this list. It exists so a SERIALIZER can write the block
+    into a window document without consulting it, and the counter half of the
+    claim is measured below rather than asserted by the name."""
     tree = module_ast()
     readers = []
     for node in ast.walk(tree):
@@ -629,7 +635,33 @@ def test_only_the_observation_property_reads_slo():
                 if isinstance(child, ast.Attribute) and child.attr in (
                         "slo", "_slo"):
                     readers.append(node.name)
-    assert sorted(set(readers)) == ["__init__", "has_slo", "slo"]
+    assert sorted(set(readers)) == ["__init__", "has_slo", "slo",
+                                    "slo_supplied"]
+
+
+def test_the_slo_read_counter_is_incremented_in_exactly_one_function():
+    """The counter half, as a property of the module rather than of a name.
+
+    `slo_reads` is initialised in `Observation.__init__` and incremented in
+    exactly one place: the tripwire property. Any second increment would be a
+    consultation the verdict's `slo_reads` no longer counts, which is the one
+    way "no metric was read" can become false while the report stays true."""
+    tree = module_ast()
+    incremented, initialised = [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for child in ast.walk(node):
+            target = None
+            if isinstance(child, ast.AugAssign):
+                target = child.target
+            elif isinstance(child, ast.Assign) and len(child.targets) == 1:
+                target = child.targets[0]
+            if isinstance(target, ast.Attribute) and target.attr == "slo_reads":
+                (incremented if isinstance(child, ast.AugAssign)
+                 else initialised).append(node.name)
+    assert sorted(set(incremented)) == ["slo"]
+    assert sorted(set(initialised)) == ["__init__"]
 
 
 def test_accumulate_is_called_after_the_precondition_walk_returns():

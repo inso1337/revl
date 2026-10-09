@@ -117,6 +117,16 @@ ROUTING_KIND = "revl.shadow-routing"
 #: MAJOR.MINOR, additive within a MAJOR.
 ROUTING_VERSION = "1.0"
 
+#: The self-identifying tag of a RECORDED WINDOW DOCUMENT, which is the
+#: serialized form of a :class:`ShadowLedger` and the artifact a promotion is
+#: decided from. Distinct from :data:`ROUTING_KIND`, which tags a live
+#: ledger's summary: a window document carries the entries, and the summary
+#: drops them.
+WINDOW_KIND = "revl.shadow-window"
+
+#: MAJOR.MINOR, additive within a MAJOR.
+WINDOW_VERSION = "1.0"
+
 #: The side whose answer was handed to the caller. Two values and no third:
 #: an answer either came from the incumbent or from the candidate.
 INCUMBENT = "incumbent"
@@ -142,12 +152,29 @@ ACTION_MISMATCHED = "action-mismatched"
 REALM_MISMATCHED = "realm-mismatched"
 SERVED_CANDIDATE = "served-candidate"
 
+#: The window document itself is not a window. Two links and not one, because
+#: "cut short" and "written wrong" are two mistakes with two fixes: a
+#: TRUNCATED document is missing a member it was supposed to carry, and a
+#: MALFORMED one carries a member that is not what it claims to be. Neither is
+#: repaired by a default.
+WINDOW_MALFORMED = "window-malformed"
+WINDOW_TRUNCATED = "window-truncated"
+
 #: Every link this module can report, for a caller that wants exhaustiveness.
+#:
+#: These are the SCHEDULE's refusals, and every one is reachable from
+#: `decide`. The two window-document links are NOT here: they are refusals
+#: about reading an artifact, they are reported under a stage of their own,
+#: and keeping them out of this tuple is what lets the slice-2 pin that every
+#: member of it is reachable by a real schedule stay exactly as it was.
 LINKS = (
     ROUTE_MALFORMED, SHARE_MALFORMED, ROUTE_MISMATCHED,
     ACTION_UNSCHEDULED, ACTION_MISMATCHED, REALM_MISMATCHED,
     SERVED_CANDIDATE,
 )
+
+#: The links :func:`window_from_dict` can report, and the only two it can.
+WINDOW_LINKS = (WINDOW_MALFORMED, WINDOW_TRUNCATED)
 
 #: The stage name these refusals are reported under, so a reader of a verdict
 #: can see that the walk stopped BEFORE the gate rather than inside it.
@@ -415,6 +442,348 @@ class ShadowLedger:
                                        if s.side == CANDIDATE),
             "refusal": list(self.refusal) if self.refusal else None,
         }
+
+    def as_window(self) -> dict:
+        """The window as a DOCUMENT, which is what a promotion is decided from.
+
+        `as_dict` is a SUMMARY: it drops every entry and every record, so
+        nothing can be decided from it. This carries the entries, their
+        stamps and both sides' sealed records, which is the evidence the gate
+        reads, plus the schedule that produced them.
+
+        The two RECORDED WORLDS are deliberately NOT carried. The worlds a
+        decision runs over are item 496's: `canary.slice_timeline` of each of
+        the two generations, which is a static walk of the composition. A world
+        recorded during a shadowed run is the RUN's timeline, and it is not
+        comparable step-for-step with another generation's static walk — the
+        candidate's own completion crosses the same seam, so it consumes a step
+        index and shifts the incumbent's crossings relative to an unshadowed
+        run (measured: two declared crossings plus one shadowed one record at
+        indices 1, 2 and 3). So the reader derives the worlds from the two
+        compositions it is given, and it derives them ALWAYS.
+
+        How many pairs the run itself carried a world for is therefore not
+        written here either. It is derivable only from the run, the decision
+        never consults it, and a document author can write any count — so
+        carrying it would add a number to the artifact that no reader checks
+        and no verdict rests on."""
+        return {
+            "kind": WINDOW_KIND, "version": WINDOW_VERSION,
+            "route": {
+                "component": self.route.component,
+                "action": self.route.action,
+                "realm": self.route.realm,
+                "incumbent_role": self.route.incumbent_role,
+                "candidate_role": self.route.candidate_role,
+                "share": str(self.route.share),
+                "salt": self.route.salt,
+                "live": self.route.live,
+            },
+            "entries": [
+                {
+                    "crossing": list(entry.crossing),
+                    "component": entry.component,
+                    "action": entry.action,
+                    "realm": entry.realm,
+                    "side": entry.side,
+                    "incumbent": dict(entry.observation.incumbent),
+                    "candidate": dict(entry.observation.candidate),
+                    "slo": (None if entry.observation.slo_supplied is None
+                            else dict(entry.observation.slo_supplied)),
+                }
+                for entry in self.entries
+            ],
+            "served": [
+                {"crossing": list(item.crossing), "shadowed": item.shadowed,
+                 "side": item.side}
+                for item in self.served
+            ],
+            "candidate_calls": self.candidate_calls,
+            "refusal": list(self.refusal) if self.refusal else None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# reading a recorded window back
+# ---------------------------------------------------------------------------
+#
+# `as_window` writes one and this reads it. The reader is strict on purpose:
+# a window document is operator-supplied, so the two ways it can be wrong are
+# named separately and neither is repaired. What it does NOT do is trust the
+# document because it parses: the sealed records are re-verified by the gate's
+# own `model_evidence.verify`, and every stamp is checked against the
+# composition by `revl.shadow_runtime.check_stamps`. This function checks
+# shape, which is all a reader of an artifact can check on its own.
+
+def _window_member(document: Any, name: str, where: str) -> tuple:
+    """``(value, refusal)`` for one required member of a window document.
+
+    An ABSENT member is :data:`WINDOW_TRUNCATED` and a member that is present
+    but is not what it claims to be is :data:`WINDOW_MALFORMED`, decided by
+    the caller. Absence is separated out because it is the one mistake a
+    default would paper over, and a defaulted window is a promotion on
+    evidence nobody recorded."""
+    if not isinstance(document, Mapping):
+        return (None, (WINDOW_MALFORMED,
+                       f"{where} is {document!r}, which is not an object"))
+    if name not in document:
+        return (None, (WINDOW_TRUNCATED,
+                       f"{where} has no {name!r} member. A window document is "
+                       f"written whole: an absent member is a document that "
+                       f"was cut short, and defaulting one would let a "
+                       f"promotion rest on a window nobody recorded"))
+    return (document[name], None)
+
+
+def _window_share(text: Any) -> Optional[Share]:
+    """``Share`` from a ``"n/d"`` string, or ``None``. Not a float: a share is
+    a statement about counting, and `0.05` is a rounding of `1/20`."""
+    if not isinstance(text, str):
+        return None
+    head, separator, tail = text.partition("/")
+    if not separator or not head.isdigit() or not tail.isdigit():
+        return None
+    share = Share(int(head), int(tail))
+    return share if share.valid() else None
+
+
+def _window_route(document: Any) -> tuple:
+    """``(route, refusal)`` for the window's schedule."""
+    route, refusal = _window_member(document, "route", "the window document")
+    if refusal is not None:
+        return (None, refusal)
+    names = {}
+    for name in ("component", "action", "realm", "incumbent_role",
+                 "candidate_role"):
+        value, refusal = _window_member(route, name, "the window's route")
+        if refusal is not None:
+            return (None, refusal)
+        if not isinstance(value, str) or not value:
+            return (None, (WINDOW_MALFORMED,
+                           f"the window's route.{name} is {value!r}, which is "
+                           f"not a name"))
+        names[name] = value
+    share_text, refusal = _window_member(route, "share", "the window's route")
+    if refusal is not None:
+        return (None, refusal)
+    share = _window_share(share_text)
+    if share is None:
+        return (None, (WINDOW_MALFORMED,
+                       f"the window's route.share is {share_text!r}, which is "
+                       f"not a rational `n/d` with d > 0 and 0 <= n <= d; a "
+                       f"share is a statement about counting and a float is a "
+                       f"rounding of one"))
+    salt, refusal = _window_member(route, "salt", "the window's route")
+    if refusal is not None:
+        return (None, refusal)
+    if not isinstance(salt, str):
+        return (None, (WINDOW_MALFORMED,
+                       f"the window's route.salt is {salt!r}, which is not a "
+                       f"string; the salt pins which crossings were shadowed "
+                       f"and an unpinned selection cannot be reproduced"))
+    live, refusal = _window_member(route, "live", "the window's route")
+    if refusal is not None:
+        return (None, refusal)
+    if not isinstance(live, bool):
+        return (None, (WINDOW_MALFORMED,
+                       f"the window's route.live is {live!r}, which is not a "
+                       f"boolean; `live` selects whether the candidate's "
+                       f"answer is the one in use, and that is not a "
+                       f"question with a default"))
+    return (ShadowRoute(component=names["component"], action=names["action"],
+                        realm=names["realm"],
+                        incumbent_role=names["incumbent_role"],
+                        candidate_role=names["candidate_role"], share=share,
+                        salt=salt, live=live), None)
+
+
+def _window_crossing(value: Any, where: str) -> tuple:
+    """``(crossing, refusal)`` for one ``[component, step_index]`` key."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return (None, (WINDOW_MALFORMED,
+                       f"{where} is {value!r}, which is not a "
+                       f"(component, step_index) crossing key"))
+    component, index = value
+    if not isinstance(component, str) or not component:
+        return (None, (WINDOW_MALFORMED,
+                       f"{where} names component {component!r}, which is not "
+                       f"a name"))
+    if not isinstance(index, int) or isinstance(index, bool):
+        return (None, (WINDOW_MALFORMED,
+                       f"{where} names step index {index!r}, which is not an "
+                       f"integer; the crossing key is what the stamp is "
+                       f"checked against the composition on"))
+    return ((component, index), None)
+
+
+def _window_entry(value: Any, index: int) -> tuple:
+    """``(entry, refusal)`` for one recorded shadow observation."""
+    where = f"window position {index}"
+    if not isinstance(value, Mapping):
+        return (None, (WINDOW_MALFORMED,
+                       f"{where} is {value!r}, which is not an entry"))
+    crossing, refusal = _window_member(value, "crossing", where)
+    if refusal is not None:
+        return (None, refusal)
+    crossing, refusal = _window_crossing(crossing, f"{where}'s crossing")
+    if refusal is not None:
+        return (None, refusal)
+    stamp = {}
+    for name in ("component", "action", "realm", "side"):
+        member, refusal = _window_member(value, name, where)
+        if refusal is not None:
+            return (None, refusal)
+        if not isinstance(member, str) or not member:
+            return (None, (WINDOW_MALFORMED,
+                           f"{where}'s {name} is {member!r}, which is not a "
+                           f"name"))
+        stamp[name] = member
+    if stamp["side"] not in SIDES:
+        return (None, (WINDOW_MALFORMED,
+                       f"{where} records the served side as {stamp['side']!r}, "
+                       f"which is outside {list(SIDES)}"))
+    records = {}
+    for name in ("incumbent", "candidate"):
+        member, refusal = _window_member(value, name, where)
+        if refusal is not None:
+            return (None, refusal)
+        if not isinstance(member, Mapping):
+            return (None, (WINDOW_MALFORMED,
+                           f"{where}'s {name} is {member!r}, which is not an "
+                           f"item 517 record; the two records are the "
+                           f"evidence, and a window that carries a "
+                           f"placeholder for one carries none"))
+        records[name] = dict(member)
+    slo, refusal = _window_member(value, "slo", where)
+    if refusal is not None:
+        return (None, refusal)
+    if slo is not None and not isinstance(slo, Mapping):
+        return (None, (WINDOW_MALFORMED,
+                       f"{where}'s slo is {slo!r}, which is neither absent nor "
+                       f"a metric block; the gate counts what was supplied so "
+                       f"a reader can see what it declined to read, and a "
+                       f"block that is not a block is not counted"))
+    return (Entry(crossing=crossing, component=stamp["component"],
+                  action=stamp["action"], realm=stamp["realm"],
+                  side=stamp["side"],
+                  observation=promotion.Observation(
+                      incumbent=records["incumbent"],
+                      candidate=records["candidate"],
+                      slo=None if slo is None else dict(slo),
+                      realm=stamp["realm"])), None)
+
+
+def _window_served(value: Any, index: int) -> tuple:
+    """``(served, refusal)`` for one crossing the scheduler handled."""
+    where = f"the window's served position {index}"
+    if not isinstance(value, Mapping):
+        return (None, (WINDOW_MALFORMED,
+                       f"{where} is {value!r}, which is not a served crossing"))
+    crossing, refusal = _window_member(value, "crossing", where)
+    if refusal is not None:
+        return (None, refusal)
+    crossing, refusal = _window_crossing(crossing, f"{where}'s crossing")
+    if refusal is not None:
+        return (None, refusal)
+    shadowed, refusal = _window_member(value, "shadowed", where)
+    if refusal is not None:
+        return (None, refusal)
+    if not isinstance(shadowed, bool):
+        return (None, (WINDOW_MALFORMED,
+                       f"{where}'s shadowed is {shadowed!r}, which is not a "
+                       f"boolean; it says whether the candidate was consulted "
+                       f"at all, which is a thing the ledger counts rather "
+                       f"than asserts"))
+    side, refusal = _window_member(value, "side", where)
+    if refusal is not None:
+        return (None, refusal)
+    if side not in SIDES:
+        return (None, (WINDOW_MALFORMED,
+                       f"{where} records the served side as {side!r}, which is "
+                       f"outside {list(SIDES)}"))
+    return (Served(crossing=crossing, shadowed=shadowed, side=side), None)
+
+
+def _window_sequence(document: Any, name: str, read: Callable) -> tuple:
+    """``(items, refusal)`` for one list member, each item read by ``read``."""
+    value, refusal = _window_member(document, name, "the window document")
+    if refusal is not None:
+        return (None, refusal)
+    if not isinstance(value, (list, tuple)):
+        return (None, (WINDOW_MALFORMED,
+                       f"the window document's {name} is {value!r}, which is "
+                       f"not a list"))
+    items = []
+    for index, item in enumerate(value):
+        read_item, refusal = read(item, index)
+        if refusal is not None:
+            return (None, refusal)
+        items.append(read_item)
+    return (tuple(items), None)
+
+
+def window_from_dict(document: Any) -> tuple:
+    """``(ledger, refusal)`` from a recorded window document: one is ``None``.
+
+    The reader counterpart of :meth:`ShadowLedger.as_window`. It is strict
+    about shape and silent about truth: shape is what a reader of an artifact
+    can check on its own, and whether the evidence is evidence is the gate's
+    question, answered past this function by `model_evidence.verify` over the
+    sealed records and by `revl.shadow_runtime.check_stamps` over the stamps.
+
+    Nothing is defaulted. An absent member is :data:`WINDOW_TRUNCATED` and a
+    present member of the wrong shape is :data:`WINDOW_MALFORMED`, and both
+    are refusals the caller reports rather than repairs."""
+    kind, refusal = _window_member(document, "kind", "the window document")
+    if refusal is not None:
+        return (None, refusal)
+    if kind != WINDOW_KIND:
+        return (None, (WINDOW_MALFORMED,
+                       f"the document's kind is {kind!r} and a window is "
+                       f"{WINDOW_KIND!r}; a plan document read as a window is "
+                       f"a promotion decided from the declaration it was "
+                       f"supposed to be judged against"))
+    version, refusal = _window_member(document, "version",
+                                      "the window document")
+    if refusal is not None:
+        return (None, refusal)
+    if version != WINDOW_VERSION:
+        return (None, (WINDOW_MALFORMED,
+                       f"the document's version is {version!r} and this "
+                       f"reader writes and reads {WINDOW_VERSION!r}"))
+    route, refusal = _window_route(document)
+    if refusal is not None:
+        return (None, refusal)
+    entries, refusal = _window_sequence(document, "entries", _window_entry)
+    if refusal is not None:
+        return (None, refusal)
+    served, refusal = _window_sequence(document, "served", _window_served)
+    if refusal is not None:
+        return (None, refusal)
+    calls, refusal = _window_member(document, "candidate_calls",
+                                    "the window document")
+    if refusal is not None:
+        return (None, refusal)
+    if not isinstance(calls, int) or isinstance(calls, bool) or calls < 0:
+        return (None, (WINDOW_MALFORMED,
+                       f"the window document's candidate_calls is {calls!r}, "
+                       f"which is not a count"))
+    failure, refusal = _window_member(document, "refusal",
+                                      "the window document")
+    if refusal is not None:
+        return (None, refusal)
+    if failure is not None:
+        if not isinstance(failure, (list, tuple)) or len(failure) != 2 \
+                or not all(isinstance(part, str) for part in failure):
+            return (None, (WINDOW_MALFORMED,
+                           f"the window document's refusal is {failure!r}, "
+                           f"which is not a (link, reason) pair; a schedule "
+                           f"that refused is reported, never silently "
+                           f"re-decided on the entries that accumulated "
+                           f"before it"))
+        failure = (failure[0], failure[1])
+    return (ShadowLedger(route=route, entries=entries, served=served,
+                         candidate_calls=calls, refusal=failure), None)
 
 
 # ---------------------------------------------------------------------------
@@ -757,12 +1126,13 @@ def render(verdict: promotion.Promotion,
 DECISIONS = promotion.DECISIONS
 
 __all__ = [
-    "ROUTING_KIND", "ROUTING_VERSION", "INCUMBENT", "CANDIDATE", "SIDES",
-    "LINKS", "SCHEDULE_STAGE", "DECISIONS",
+    "ROUTING_KIND", "ROUTING_VERSION", "WINDOW_KIND", "WINDOW_VERSION",
+    "INCUMBENT", "CANDIDATE", "SIDES",
+    "LINKS", "WINDOW_LINKS", "SCHEDULE_STAGE", "DECISIONS",
     "ROUTE_MALFORMED", "SHARE_MALFORMED", "ROUTE_MISMATCHED",
     "ACTION_UNSCHEDULED", "ACTION_MISMATCHED", "REALM_MISMATCHED",
-    "SERVED_CANDIDATE",
+    "SERVED_CANDIDATE", "WINDOW_MALFORMED", "WINDOW_TRUNCATED",
     "Share", "NOTHING", "EVERYTHING", "ShadowRoute", "Answered", "Served",
     "Entry", "ShadowLedger", "Scheduler", "selects", "serve", "decide",
-    "render",
+    "render", "window_from_dict",
 ]

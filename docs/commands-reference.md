@@ -12,11 +12,11 @@ The verb set, in the order the parser declares it:
 ```text
 compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  version  contract
-erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
-quarantine  analyze  test  mcp  gen-types  import  export  sourcemap
-serve  run  dev  recover  act  estop  slo  branch  compare  replay  why
-metrics  trace  profile  pool  attest  dash  repair  bundle  emit
-verify  deploy  deploy-admit  truc
+erase-report  retention-receipt  plan  apply  undo  canary  promote
+query  fmt  quarantine  analyze  test  mcp  gen-types  import  export
+sourcemap  serve  run  dev  recover  act  estop  slo  branch  compare
+replay  why  metrics  trace  profile  pool  attest  dash  repair  bundle
+emit  verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -839,6 +839,46 @@ tenants are untouched ([verified-canary.md](verified-canary.md)).
 - `--json` - machine-readable, versioned report document.
 - `--no-residue-proof` - skip the runtime teardown proof (static survivors
   proof only; use where cordis is unavailable).
+
+### `revl promote`
+
+Decide a promotion from RECORDED evidence (issue #1192): read a declared plan
+and a recorded shadow window, check both against the composition the window was
+taken over, run the composition → schedule → gate walk over them, and print the
+verdict ([558-shadow-scheduling.md](design/558-shadow-scheduling.md)).
+
+The verb decides; it does not land. Exit 0 means a `PROMOTE` whose replay
+comparison actually ran; every other outcome (`REFUSE`, `REVERT`, a
+malformed document, an unresolvable generation) exits non-zero.
+
+The authority diff is measured from `FILES` and `--candidate`, not taken from
+the plan: a candidate that widens any authority axis is refused
+`authority-widened` even when the plan's `authority_diff` is empty.
+
+- `FILES` - the running (incumbent) composition's `.rvl` files; the window's
+  worlds are derived from these and the candidate generation (required).
+- `--candidate FILE` - the successor generation of the slice's provider;
+  repeatable, required.
+- `--plan PLAN.json` - the declared plan document (`revl.shadow-plan`): the
+  roles, the authority diff, the layer classes, and the stated threshold the
+  promotion is judged against (required).
+- `--window WINDOW.json` - the recorded shadow window document
+  (`revl.shadow-window`): the schedule, the accumulated crossings, and both
+  sides' sealed model-decision records (required).
+- `--evidence-key PATH` - the model-decision evidence key, for checking the
+  window's seals. Omit to run without one: an unverifiable record is refused,
+  never admitted unchecked.
+- `--json` - machine-readable, versioned verdict document.
+
+The comparison is item 496's replay walk over the two generations' recorded
+worlds, so a divergence is attributed to an exact (component, realm) step and
+named; a stated metric is never what promotes.
+
+Not to be confused with the peer pool's `promote`, the verb issue #1198 adds as
+`revl pool promote` (item 546,
+[550-private-peer-pool.md](design/550-private-peer-pool.md)). That one raises a
+*peer*'s tier inside a private pool; this one promotes a *generation*. The two
+share only the word.
 
 ### `revl repair`
 

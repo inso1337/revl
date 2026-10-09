@@ -46,6 +46,7 @@ from .cli.interop import (
 from .cli.observe import (
     _run_attest, _run_changelog, _run_dash, _run_diff, _run_explain,
     _run_history_query, _run_metrics, _run_profile, _run_trace, _run_why)
+from .cli.promote import _run_promote
 from .cli.slo import _run_slo
 
 
@@ -1409,6 +1410,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_undo(args)
     if args.command == "canary":
         return _run_canary(args)
+    if args.command == "promote":
+        return _run_promote(args)
     if args.command == "quarantine":
         return _run_quarantine(args)
     if args.command == "contract":
