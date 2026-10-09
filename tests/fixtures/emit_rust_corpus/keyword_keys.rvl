@@ -1,0 +1,42 @@
+// issue #1927, held to byte agreement by tests/test_selfhost_emit_rust.py and
+// built under cargo by backends/rust/test_keyword_keys_rust_1927.py.
+//
+// `box` is a valid revl key and a Rust keyword. `Reader` requires `box`, so
+// the key's local, its provider-struct field, its `self.` capture and its
+// undo and timer reclones all take the mangled `box_`, the spelling the
+// expression renderer already used, while the inject gate and
+// `ctx.require::<..>("box")` keep the surface key. The method-body local
+// `mut` is a Rust keyword too.
+
+service Store {
+  fn get() -> Int
+  fn grab(k: Int) -> Int
+  fn release(k: Int) -> Int
+  emission fn put(k: Int) -> Int
+}
+
+service Front { emission fn read(n: Int) -> Int }
+
+component Shop provides box: Store {
+  provide box {
+    fn get() = 7
+    fn grab(k) = k
+    fn release(k) = 0
+    fn put(k) = k
+  }
+}
+
+component Reader requires box: Store provides front: Front {
+  effect box.grab(1) undo box.release(1)
+  every 1s {
+    emit box.put(3)
+  }
+  provide front {
+    fn read(n) {
+      let mut = box.get()
+      effect box.grab(mut) undo box.release(mut)
+      emit box.put(n)
+      return mut + n
+    }
+  }
+}

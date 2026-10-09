@@ -12,6 +12,9 @@
     "#1812, when binding uniqueness became `RevL.G6Binding` (the `BU`",
     "row). Both buckets stay, so a new unresolvable `undo` or a new G6",
     "purity refusal still reds the gate.)",
+    "`out-of-fragment-witnessed` (issue #1963) holds the files the checker",
+    "refuses for a witnessed extern called with a site `undo`: the model",
+    "has no witnessed-extern fact yet.",
     "",
     "Each bucket records an absence, so none can disagree with anything",
     "and none could fail the gate on its own (issue #1169). This ledger",
@@ -32,5 +35,9 @@
   "out-of-fragment-G6": [],
   "out-of-fragment-inverse": [
     "examples/rejections/g4_undo_not_release.rvl"
+  ],
+  "out-of-fragment-witnessed": [
+    "tests/fixtures/effect_statement_rules/g4_witnessed_site_undo_activation.rvl",
+    "tests/fixtures/effect_statement_rules/g4_witnessed_site_undo_method.rvl"
   ]
 }

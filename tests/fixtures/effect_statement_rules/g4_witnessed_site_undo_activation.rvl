@@ -1,0 +1,15 @@
+// G4 (issue #1963): the same witnessed site `undo`, in the activation body.
+type E = { code: Str }
+extern pure fn unput(k: Str) -> Unit = @py {
+    return
+}
+extern witnessed[store] fn put_w(k: Str) -> Result[Str, E]
+  undo unput(result) = @py {
+    return Ok(k)
+}
+
+service W { emission fn put(k: Str) }
+component C provides w: W {
+  effect put_w("a") undo unput("a")
+  provide w { fn put(k) { } }
+}

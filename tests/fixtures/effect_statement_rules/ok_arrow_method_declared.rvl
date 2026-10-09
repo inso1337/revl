@@ -1,0 +1,8 @@
+// Admitted (issue #1963): an arrow method reading a declared requirement, its
+// expression on the next line.
+service Db { fn get() -> Str }
+service R { fn get() -> Str }
+component D requires db: Db provides r: R {
+  provide r { fn get() =
+    db.get() }
+}

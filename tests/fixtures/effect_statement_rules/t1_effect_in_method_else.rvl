@@ -1,0 +1,12 @@
+// T1 (issue #1963): the step in the `else` branch of a provide-method `if`.
+service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      if (k == "a") {
+        let n = 1
+      } else {
+        effect store.insert(k, "1") undo store.remove(k)
+      }
+  } }
+}

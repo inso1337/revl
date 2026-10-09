@@ -1,0 +1,11 @@
+// Admitted (issue #1963): a top-level provide-method effect with its `undo`,
+// including one written on the next line.
+service W { fn put(k: Str) }
+component C provides w: W {
+  let store = effect Map.new() undo store.drop()
+  provide w { fn put(k) {
+      effect store.insert(k, "1") undo store.remove(k)
+      effect store.insert("b", "2")
+        undo store.remove("b")
+  } }
+}

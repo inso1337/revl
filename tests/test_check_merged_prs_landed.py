@@ -443,9 +443,11 @@ def test_the_baseline_ratchet_did_not_absorb_the_false_alarm():
     # The exact set, so an entry cannot be added without editing this line.
     # #1607 is the one added since: a fast-forward merge into an open PR's
     # branch whose work reached main inside #1557's squash, recorded as
-    # CARRIED with a measured witness rather than to quiet the run.
+    # CARRIED with a measured witness rather than to quiet the run. #1805 is
+    # the same shape: its head was carried in #1773's branch, which GitHub
+    # recorded as a merge into that branch, and #1773 then squashed to main.
     assert sorted(entries) == ["1236", "1296", "1305", "1308", "1309", "1318",
-                               "1319", "1320", "1607"], sorted(entries)
+                               "1319", "1320", "1607", "1805"], sorted(entries)
 
 
 # --------------------------------------------------------------------------
