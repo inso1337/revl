@@ -1447,29 +1447,32 @@ def serve_http(ir: dict, config: dict | None = None, *,
             raise
     bound_host, bound_port = httpd.server_address[:2]
     scheme = "https" if httpd.tls_context is not None else "http"
-    print(f"revl serve --http: {composition} on {scheme}://{bound_host}:{bound_port}",
-          file=sys.stderr)
-    print(f"  gate frontier: {face.frontier}", file=sys.stderr)
-    served = len(face._by_path) + sum(
-        (r.key, r.op) not in face._withheld_ops for r in face._routes_457)
-    print(f"  {served} public operation(s); GET / for the manifest. LOCAL "
-          "contract only — no safety claim about any callee.", file=sys.stderr)
-    for withheld in face._withheld_ops.values():
-        print(f"  withheld: {withheld.message()}", file=sys.stderr)
-    if listener is not None:
-        for line in listener.describe():
-            print(f"  {line}", file=sys.stderr)
-    if refuse_ungated_emissions and approval_policy is None:
-        refused = sorted(f"{key}.{op}" for key, op in _served_ops(face)
-                         if face.ungated_class(key, op) != "none")
-        print(f"  --refuse-ungated-emissions: {len(refused)} public operation(s) "
-              f"reach a class-(c) crossing and are refused"
-              + (f": {', '.join(refused)}" if refused else ""), file=sys.stderr)
-    if approval_policy is not None and listener is None:
-        print("  warning: the approval policy holds every class-(c) crossing an "
-              "app request reaches, and without --operator-listen nothing can "
-              "answer its ticket, so those requests stay pending", file=sys.stderr)
     try:
+        # inside the try: a SIGTERM (turned into KeyboardInterrupt) that lands
+        # while these lines print must still reach the `finally` that stops
+        # the operator listener and disarms the latch (issue #2211)
+        print(f"revl serve --http: {composition} on {scheme}://{bound_host}:{bound_port}",
+              file=sys.stderr)
+        print(f"  gate frontier: {face.frontier}", file=sys.stderr)
+        served = len(face._by_path) + sum(
+            (r.key, r.op) not in face._withheld_ops for r in face._routes_457)
+        print(f"  {served} public operation(s); GET / for the manifest. LOCAL "
+              "contract only — no safety claim about any callee.", file=sys.stderr)
+        for withheld in face._withheld_ops.values():
+            print(f"  withheld: {withheld.message()}", file=sys.stderr)
+        if listener is not None:
+            for line in listener.describe():
+                print(f"  {line}", file=sys.stderr)
+        if refuse_ungated_emissions and approval_policy is None:
+            refused = sorted(f"{key}.{op}" for key, op in _served_ops(face)
+                             if face.ungated_class(key, op) != "none")
+            print(f"  --refuse-ungated-emissions: {len(refused)} public operation(s) "
+                  f"reach a class-(c) crossing and are refused"
+                  + (f": {', '.join(refused)}" if refused else ""), file=sys.stderr)
+        if approval_policy is not None and listener is None:
+            print("  warning: the approval policy holds every class-(c) crossing an "
+                  "app request reaches, and without --operator-listen nothing can "
+                  "answer its ticket, so those requests stay pending", file=sys.stderr)
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass

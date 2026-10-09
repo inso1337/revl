@@ -579,15 +579,18 @@ class HttpTransport:
             print(f"error: {error}", file=stderr)
             return 1
         scheme = "https" if self.exposure.tls else "http"
-        print(f"revl mcp: MCP {PROTOCOL_VERSION} on {scheme}://{host}:{port}{ENDPOINT} "
-              f"(auth: {self.authenticator.mode}; one request at a time)", file=stderr)
-        if self.latch.path:
-            # revl_estop is accepted even while the profile settles or is broken
-            # (under the last adopted profile); the latch halts with no request
-            # at all, the one path that needs no adopted profile
-            print(f"revl mcp: out-of-band E-Stop: revl estop --latch {self.latch.path}",
-                  file=stderr)
         try:
+            # inside the try: a SIGTERM (turned into KeyboardInterrupt) that
+            # lands while these lines print must still reach the `finally`
+            # that disarms the latch (issue #2211)
+            print(f"revl mcp: MCP {PROTOCOL_VERSION} on {scheme}://{host}:{port}{ENDPOINT} "
+                  f"(auth: {self.authenticator.mode}; one request at a time)", file=stderr)
+            if self.latch.path:
+                # revl_estop is accepted even while the profile settles or is broken
+                # (under the last adopted profile); the latch halts with no request
+                # at all, the one path that needs no adopted profile
+                print(f"revl mcp: out-of-band E-Stop: revl estop --latch {self.latch.path}",
+                      file=stderr)
             while self._thread is not None and self._thread.is_alive():
                 self._thread.join(timeout=1.0)
         except KeyboardInterrupt:
