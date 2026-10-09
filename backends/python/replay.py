@@ -1439,28 +1439,51 @@ _ENCLOSING: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
 
 
 def _crossing_ref(timeline: "Timeline", step: Step) -> dict:
-    return {"seq": step.wal_seq, "component": timeline.component, "label": step.label}
+    return {"seq": step.wal_seq, "component": timeline.component, "label": step.label,
+            "_timeline": timeline, "_step": step}
+
+
+def _record_emission_outcome(ref: dict, outcome: str,
+                             error: Optional[BaseException] = None) -> None:
+    """Persist the outcome of a plain emission without changing its seq."""
+    timeline = ref.get("_timeline")
+    step = ref.get("_step")
+    wal = getattr(timeline, "_wal", None)
+    if wal is None or step is None or step.wal_seq is None:
+        return
+    detail = None
+    if error is not None:
+        detail = {"type": type(error).__name__, "message": str(error)}
+    wal.record_emission_outcome(step.wal_seq, outcome, detail=detail)
 
 
 def _call_within(ref: dict, fn: Callable, args: tuple, kwargs: dict) -> Any:
-    """``fn(*args, **kwargs)`` with ``ref`` as the enclosing crossing, for the
-    synchronous body and, when it returns an awaitable, for the awaited one."""
+    """Call a host crossing and journal completion or failure after it returns."""
     token = _ENCLOSING.set(ref)
     try:
         result = fn(*args, **kwargs)
+    except BaseException as error:
+        _record_emission_outcome(ref, "emission-failed", error)
+        raise
     finally:
         _ENCLOSING.reset(token)
     if inspect.isawaitable(result):
         return _await_within(ref, result)
+    _record_emission_outcome(ref, "emission-complete")
     return result
 
 
 async def _await_within(ref: dict, awaitable: Any) -> Any:
     token = _ENCLOSING.set(ref)
     try:
-        return await awaitable
+        result = await awaitable
+    except BaseException as error:
+        _record_emission_outcome(ref, "emission-failed", error)
+        raise
     finally:
         _ENCLOSING.reset(token)
+    _record_emission_outcome(ref, "emission-complete")
+    return result
 
 
 class _SpawnRecorder:
@@ -1565,7 +1588,7 @@ class _RecordingContext:
             object.__getattribute__(self, "_revl_ir"),
             object.__getattribute__(self, "_revl_services"))
 
-    def _revl_record_extern(self, name: str, args: tuple) -> None:
+    def _revl_record_extern(self, name: str, args: tuple) -> Step:
         """Record a DIRECT free host-extern emission (`emit announce(msg)`, a
         kind-3/4 crossing) on THIS component's timeline (item 414).
 
@@ -1594,7 +1617,7 @@ class _RecordingContext:
         while frame is not None and \
                 "_revl_transparent_frame" in frame.f_code.co_varnames:
             frame = frame.f_back
-        object.__getattribute__(self, "_revl_timeline").record_emission(
+        return object.__getattribute__(self, "_revl_timeline").record_emission(
             name, name, tuple(args), None,
             (frame.f_code.co_filename, frame.f_lineno)
             if frame is not None else (None, None))
@@ -2130,8 +2153,12 @@ def _seal_torn_tail(path: str) -> None:
         handle.flush()
         try:
             os.fsync(handle.fileno())
-        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+        except ValueError:  # pragma: no cover — e.g. a pipe target
             pass
+        except OSError as error:
+            raise ReplayError(
+                "write-ahead log fsync failed; the host call was not permitted"
+            ) from error
 
 
 def _next_seq(path: str) -> int:
@@ -2303,6 +2330,16 @@ class WriteAheadLog:
             os.fsync(self._handle.fileno())
         except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
             pass
+
+    def record_emission_outcome(self, seq: Optional[int], outcome: str,
+                                 *, detail: Optional[dict] = None) -> None:
+        """Record completion or failure for a previously journalled emission."""
+        if seq is None:
+            return
+        record = {"record": outcome, "seq": seq}
+        if detail:
+            record["error"] = detail
+        self._write(record)
 
     def append_step(self, step: "Step", component: str) -> dict:
         """Write one committed effect ahead of it mattering."""
