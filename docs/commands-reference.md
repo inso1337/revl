@@ -1451,7 +1451,8 @@ Stand up and operate a private peer pool (roadmap item 524): several
 independent operators running work for each other without trusting each other's
 machines. The verbs declare a pool, admit a peer that proves its identity and
 its artifact, read the roster, check that members are still there, run work on
-a member and read the delivery ledger, and withdraw a peer. See
+a member and read the delivery ledger, move a member up the ladder the charter
+declares, and withdraw a peer. See
 [design/550-private-peer-pool.md](design/550-private-peer-pool.md) for the trust
 progression and the failure direction of every step in it, and
 [design/567-pool-dispatch.md](design/567-pool-dispatch.md) for the task
@@ -1471,11 +1472,11 @@ than to a pool name. Every refusal names one lowercase link (`artifact-digest`,
 
 Several operator commands can run against one pool directory at once. Every
 verb that changes pool state (`init`, `register`, `rotate`, `revoke-key`,
-`join`, `withdraw`, `probe`, and `run --pool private`) holds an exclusive lock
-on `pool.lock` in the directory for its read-modify-write, never while waiting
-on a peer, and every state file is replaced atomically, so no update is lost
-and `status` never reads half a file. The lock is advisory: it binds `revl`
-processes, not other programs editing the files.
+`join`, `promote`, `withdraw`, `probe`, and `run --pool private`) holds an
+exclusive lock on `pool.lock` in the directory for its read-modify-write,
+never while waiting on a peer, and every state file is replaced atomically, so
+no update is lost and `status` never reads half a file. The lock is advisory:
+it binds `revl` processes, not other programs editing the files.
 
 A peer's identity is an asymmetric key pair by default (issue #1278): the peer
 draws it with `pool keygen`, the operator pins only the public half with `pool
@@ -1515,6 +1516,22 @@ for the key lifecycle and what the signature binds.
     above the entry tier.
   - `--key PATH` - the operator signing key (falls back to
     `REVL_ATTEST_KEY_FILE` / `REVL_ATTEST_KEY`).
+  - `--tier NAME` - declare a rung of the ladder ABOVE the entry tier.
+    Repeatable. A rung no pool declares is a rung no member can be moved to,
+    so `promote --tier NAME` refuses `unknown-tier` unless init declared it.
+    The rungs are `probation`, `replayable` and `durable`; `probation` is the
+    entry rung and is declared by `--entry-caps` instead.
+  - `--tier-evidence NAME=N` - how many attested execution receipts a member
+    must have accumulated before `promote` will move it to rung NAME.
+    REQUIRED for every `--tier`, and deliberately not defaulted: `0` would
+    make the rung free and any other number would be this tool inventing a
+    threshold. The count is re-derived from the signed receipts at promote
+    time, so this states a COST, not a credit a member can carry.
+  - `--tier-caps NAME=CAP` - a capability rung NAME hands a member promoted
+    onto it, in the capability grammar. Repeatable per rung. Every grant is
+    diffed against `--ceiling` by the same monotonicity check spawn
+    attenuation runs, so a rung that widens is refused `grant-ceiling` at
+    promote time rather than silently narrowed.
 - `keygen` - the peer side: draw a key pair on this machine. The private half is
   written 0600 and never leaves it; the public half is what the operator pins.
   - `--peer-id ID`, `--out PATH` (private), `--public PATH`
@@ -1589,6 +1606,28 @@ for the key lifecycle and what the signature binds.
   - `--identity-key PATH` - sign the withdrawal receipt with an operator key
     pair, so any holder of the matching public key can check who removed whom.
     Its fingerprint must be in the charter's revoke authority.
+- `promote` - move a member up the ladder, by RECOUNTING the signed execution
+  receipts the delivery ledger already holds for it. It reads the ledger and
+  states no threshold of its own: `peer_pool.promote` re-verifies each
+  `(receipt, attestation)` pair through `pool_receipt.count_evidence` against
+  the charter's `--attest-identity` keys, so the count that decides the
+  promotion is arithmetic over signed bytes rather than a number the operator
+  typed. A member with too few verified receipts STAYS WHERE IT IS rather than
+  being demoted, because a missing proof is not a violation, and a rung the
+  charter cannot lawfully issue is refused `grant-ceiling` before a single
+  receipt is verified. A rung at or below the member's own tier is refused
+  `not-a-promotion`: no verb lowers a member, and naming the tier it already
+  holds writes no second receipt. Promotion is an ADMISSION decision and uses the
+  admitting key, so a peer that compromised the attesting key cannot walk
+  itself up the ladder.
+  There is no `--force`, no `--evidence-count` and no `--bypass-ceiling`.
+  - `--dir DIR`, `--peer ID`, `--key PATH`
+  - `--tier NAME` - the rung to move the member to. It must be a rung
+    `pool init --tier` declared, so the cost of the rung was stated by the
+    operator who owns the pool, not by the peer.
+  - `--identity-key PATH` - sign the promotion receipt with an operator key
+    pair, so any holder of the matching public key can check it. Its
+    fingerprint must be in the charter's admit authority.
 - `serve` - the PEER side: listen for signed tasks, run the artifact the task
   pins BY HASH, and answer with a signed execution receipt. It holds its own
   private identity and the operator's PUBLIC one, so there is no secret here

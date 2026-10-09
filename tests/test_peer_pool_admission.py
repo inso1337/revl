@@ -795,6 +795,9 @@ def test_every_declared_link_is_reached_by_a_test_or_the_corpus():
     reached |= {pp.LINK_CHARTER_SIGNATURE, pp.LINK_ADMITTING_AUTHORITY,
                 pp.LINK_PROMOTION_EVIDENCE, pp.LINK_NOT_A_MEMBER,
                 pp.LINK_UNKNOWN_TIER}
+    # `not-a-promotion` is reached through the CLI by
+    # `tests/test_pool_promotion_cli_1198.py`'s downward and same-tier rows.
+    reached |= {pp.LINK_NOT_A_PROMOTION}
     reached |= IDENTITY_CORPUS_LINKS
     assert set(pp.REFUSAL_LINKS) == reached, (
         f"never exercised: {sorted(set(pp.REFUSAL_LINKS) - reached)}")

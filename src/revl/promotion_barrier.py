@@ -500,17 +500,26 @@ SWEEP_EXEMPT = {
     "src/revl/cli/parser.py":
         "it DECLARES verbs and their flags, and renders no verdict: the token "
         "the sweep matches is a subcommand's own name in "
-        "`add_parser(\"promote\", ...)`. Every value this module accepts is a "
-        "path, a boolean or a repeat count, handed to a handler in "
-        "`src/revl/cli/`; the decision is the handler's, and the handler for "
-        "this verb runs the registered path above. What would make this "
-        "module a second policy engine is a threshold, a decision word or a "
-        "default that makes a required document optional in the block that "
-        "builds the verb, and that is pinned by "
+        "`add_parser(\"promote\", ...)`, which this tree spells twice, once "
+        "for the shadow-routing `promote` and once for `pool promote`. Every "
+        "value this module accepts is a path, a boolean, a string or a repeat "
+        "count, handed to a handler in `src/revl/cli/` or to `peer_pool`; the "
+        "decision is the handler's, and each handler runs a path registered "
+        "above -- `src/revl/cli/promote.py` runs `shadow_runtime.decide` -> "
+        "`shadow_promotion.decide`, and `peer_pool` owns its own two stages, "
+        "`_ceiling_precondition` for the authority diff and "
+        "`_evidence_precondition` for the recounted evidence. What would make "
+        "this module a second policy engine is a threshold, a decision word "
+        "or a default that makes a required document optional in either block "
+        "that builds a verb, and both blocks are pinned, one test per verb: "
         "`tests/test_promote_cli_1192.py::"
         "test_the_promote_subparser_declares_no_number_and_no_decision_word`, "
-        "which reads the block and refuses any numeric constant and any "
-        "decision word other than the verb's own name",
+        "which reads the shadow-routing block and refuses any numeric "
+        "constant and any decision word other than the verb's own name, and "
+        "`tests/test_pool_promotion_cli_1198.py::"
+        "test_the_promote_branch_holds_no_threshold_and_no_rung_name`, which "
+        "reads the `pool promote` block and refuses any threshold literal or "
+        "rung name in it",
 }
 
 

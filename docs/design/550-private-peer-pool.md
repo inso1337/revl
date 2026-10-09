@@ -1,13 +1,15 @@
 # Design: the private peer pool as an operable product (item 524, issue #1198)
 
-Status: slice 1 landed; the receipt slice landed on top of it
-([566-pool-execution-receipts.md](566-pool-execution-receipts.md)), which is
-where promotion evidence is now recounted rather than believed, and the dispatch
-slice on top of that ([567-pool-dispatch.md](567-pool-dispatch.md)), which is
-where a task reaches a member and a result is recorded as delivered once. The
+Status: the promotion slice landed on top of the dispatch slice: `pool init
+--tier` declares the ladder, `revl pool promote` walks a member up it on
+recounted evidence, and `pool status` renders it
+([566-pool-execution-receipts.md](566-pool-execution-receipts.md) is where
+promotion evidence is recounted rather than believed, and
+[567-pool-dispatch.md](567-pool-dispatch.md) is where a task reaches a member
+and a result is recorded as delivered once). The
 pool declaration, the join admission gate, the tier ladder, promotion on
 attested evidence and withdrawal are in `src/revl/peer_pool.py` with `revl pool
-init | request | join | status | withdraw`; the dispatcher is in
+init | request | join | promote | status | withdraw`; the dispatcher is in
 `src/revl/pool_dispatch.py` with `revl pool serve | ledger` and `revl run --pool
 private`; member liveness is in `src/revl/pool_health.py` with `revl pool probe`
 and `revl pool status --require-live`.
@@ -84,8 +86,16 @@ is the whole point of item 524's warning about a second, weaker policy engine.
 | tier | effect ceiling | how it is reached |
 |---|---|---|
 | `probation` | `pure` | admission |
-| `replayable` | `idempotent-external` | attested receipts, count declared by the charter |
-| `durable` | `witnessed` | attested receipts, count declared by the charter |
+| `replayable` | `idempotent-external` | attested receipts, count declared by the charter (`pool init --tier-evidence`) |
+| `durable` | `witnessed` | attested receipts, count declared by the charter (`pool init --tier-evidence`) |
+
+A rung exists only if the charter declares it: `pool init --tier NAME` writes
+the rung, `--tier-evidence NAME=N` writes its cost and `--tier-caps NAME=CAP`
+writes what it grants. `revl pool promote` refuses `unknown-tier` for a rung the
+charter does not declare, so a member cannot be moved onto a rung whose cost
+nobody stated. The verb itself carries no threshold and no rung name. It reads
+the stored pairs and hands them to `peer_pool.promote`, so there is one place
+the ladder is decided and it is the checked one.
 
 Two effect classes are reachable from no rung at all, and that is a refusal
 rather than an omission. `deferred-irreversible` is resolvable only at a trusted
@@ -361,12 +371,25 @@ last of those. What remains:
    (This point used to name `src/revl/liveness.py` as the machinery to read
    from. That was wrong: that module is `revl analyze`'s Petri-net deadlock
    search over a composition and knows nothing about peers.)
-7. **Promotion has no CLI verb.** `promote` recounts evidence from
-   `(receipt, attestation)` pairs and the ledger now stores those pairs for
-   every delivered task, so the input exists. The verb needs charter tiers
-   above `probation` that `pool init` can write, and it needs point 5's
-   classifier before a promoted member could be sent anything its new tier
-   allows and its old one did not.
+7. **Promotion is operable.** DONE, under issue #1198. `pool init --tier NAME`
+   declares a rung above `probation`, `--tier-evidence NAME=N` states what the
+   rung costs and `--tier-caps NAME=CAP` what it grants; `revl pool promote
+   --dir DIR --peer ID --tier NAME --key KEY` moves a member onto one, and
+   `pool status` renders the declared ladder. The verb adds no policy: it reads
+   the signed `(receipt, attestation)` pairs the delivery ledger already holds
+   (`pool_dispatch.evidence_pairs`, a read accessor) and hands them to
+   `peer_pool.promote`, which recounts them itself through
+   `pool_receipt.count_evidence`. There is no count parameter and no rung name
+   literal in the CLI path, so the threshold is the one the charter states and
+   the rung must be one the charter declares.
+   The point-5 classifier limit still stands unchanged: a promoted member is
+   still sent nothing, because `classify_artifact` proves only boundary-free
+   compositions. The ladder bounds what a member may be ASKED to do; it is not
+   a licence to cross a boundary the pool never audited.
+   `--tier-budgets` is deliberately absent rather than unimplemented: `pool
+   init` has no `--ceiling-budgets`, so the ceiling holds no budget key and
+   `grant_widenings` would refuse every grant `grant-ceiling`. A flag whose
+   every use is refused is worse than no flag.
 
 ## Liveness
 
@@ -529,3 +552,30 @@ parametrized hostile-input test over ten malformed records.
   `pool_dispatch`, so a withdrawal reports the tasks the peer really owed; with
   no dispatcher in the picture it still reports an empty `orphaned` set, which
   is honest and correct rather than a gap.
+* `revl pool promote` proves the member cleared the rung's stated cost; it does
+  not make the rung USEFUL yet. A promoted member is still sent only
+  boundary-free compositions, because point 5's classifier is still missing, so
+  a `replayable` member is a member the pool may lawfully send idempotent
+  external work to and has no work of that shape to send. The ladder is real
+  and the ceiling is enforced; the payoff is deferred to the classifier.
+* There is no verb that LOWERS a member, and none is planned here. Withdrawal
+  is the existing answer, and it is a different act with a different ledger
+  effect: an operator who wants a member back at `probation` withdraws and
+  re-admits it, which is deliberately more expensive than a demotion would be.
+  `promote` enforces that: a target rung at or below the member's own tier in
+  `TIER_ORDER` is refused `not-a-promotion`, so promoting to the entry tier
+  cannot demote a member and promoting to the tier it holds writes no second
+  receipt. Promotion does not require rungs to be climbed one at a time: the
+  target must be a rung the charter declares and above the member's tier, so
+  `probation` may be promoted straight to `durable`. That is safe in the direction that matters:
+  a rung is diffed against the charter ceiling, never against the rung below,
+  so skipping a rung cannot launder a wider grant. It does mean the
+  ladder's SHAPE is whatever the operator declared, including a ladder whose
+  upper rung costs fewer receipts than a lower one. Nothing a peer can put in a
+  signed join or receipt changes that; it is the operator's own declaration.
+* Promotion reads the delivery ledger and nothing else. A receipt the peer
+  obtained OUTSIDE this pool's dispatcher is not evidence here, because the
+  ledger only holds pairs this pool wrote, and a member whose work all happened
+  elsewhere promotes never. That is the correct direction, because evidence the
+  pool did not witness is not evidence, but it means the ladder measures this
+  pool's traffic, not the peer's competence.

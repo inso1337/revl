@@ -805,6 +805,38 @@ def save_ledger(pool_dir, ledger: DeliveryLedger) -> None:
     pool_state.write_json(Path(pool_dir) / LEDGER_FILE, ledger.as_dict())
 
 
+def evidence_pairs(ledger: DeliveryLedger, *,
+                   peer_id: str) -> list[tuple[dict, dict]]:
+    """The signed `(execution_receipt, attestation)` pairs this ledger already
+    holds for one peer, in ledger order.
+
+    A READ ACCESSOR, NOT A JUDGE. It selects records and decides nothing.
+
+    It deliberately does NOT filter on ``counts_as_evidence``. That flag is the
+    DISPATCHER's verdict at the moment the result came back, and the judge of
+    whether a pair counts NOW is ``pool_receipt.count_evidence``, which
+    re-verifies the signature, the pool, the peer, the artifact digest, the
+    admission time and the attestor's authority. Filtering here would promote
+    the dispatcher's opinion into the promotion verdict -- the "second, weaker
+    policy engine" item 524 warns about -- and it would also be wrong in the
+    fail-closed direction: a pair whose flag was never written is still
+    evidence if it verifies.
+
+    Handing it every stored pair cannot inflate a count, because
+    ``count_evidence`` deduplicates on ``task_id``: a peer can re-sign the same
+    work with a new timestamp and a new digest for nothing, and neither one
+    counts twice."""
+    pairs: list[tuple[dict, dict]] = []
+    for _task_id, entry in sorted(ledger.tasks.items()):
+        if entry.get("peer_id") != peer_id:
+            continue
+        receipt = entry.get("receipt")
+        attestation = entry.get("attestation")
+        if isinstance(receipt, Mapping) and isinstance(attestation, Mapping):
+            pairs.append((dict(receipt), dict(attestation)))
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # the peer side: running one task
 # ---------------------------------------------------------------------------
