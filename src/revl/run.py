@@ -1147,6 +1147,7 @@ class _Driver:
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
+                 require_settled_wal: bool = False,
                  root_dirs: list | None = None, secrets: dict | None = None,
                  secrets_may_be_absent: bool = False,
                  estop_latch: str | None = None, ambient: dict | None = None,
@@ -1235,6 +1236,21 @@ class _Driver:
         # crash-recovery WAL (roadmap item 47): --wal implies recording, since
         # the accumulator it persists is what recording captures.
         self.wal_path = wal_path
+        self.require_settled_wal = bool(require_settled_wal)
+        if self.require_settled_wal and wal_path and os.path.exists(wal_path):
+            with open(wal_path, "r", encoding="utf-8") as handle:
+                entries = [json.loads(line) for line in handle if line.strip()]
+            completed = {entry.get("seq") for entry in entries
+                         if entry.get("record") == "emission-complete"}
+            unresolved = [entry for entry in entries
+                          if entry.get("record") == "effect"
+                          and entry.get("kind") == "emission"
+                          and entry.get("seq") not in completed]
+            if unresolved:
+                raise RuntimeError(
+                    "WAL contains unresolved emissions; resolve them before starting "
+                    "with --require-settled-wal"
+                )
         self.recorder = self._make_recorder() if (record or wal_path) else None
 
         # -- causal trace (docs/why-runtime.md) ----------------------------
@@ -2860,6 +2876,7 @@ def run_command(args, hold_once: bool = False) -> int:
                          trace_path=getattr(args, "trace", None),
                          withdraw=withdraw,
                          wal_path=getattr(args, "wal", None),
+                         require_settled_wal=bool(getattr(args, "require_settled_wal", False)),
                          estop_latch=getattr(args, "estop_latch", None),
                          root_dirs=root_dirs,
                          ambient=ambient,
