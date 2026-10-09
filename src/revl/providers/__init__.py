@@ -83,6 +83,42 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
     return hosts
 
 
+#: The longest the plan waits for a server to say what it holds, in seconds.
+#: A completion timeout (default 120s) is sized for generating text; this
+#: question is a listing, and a plan that waits on it blocks every host.
+PLAN_PROBE_TIMEOUT = 10.0
+
+
+def _plan_time_report(adapter, host: str, role: str) -> dict:
+    """The server's `/api/ps` answer for `plan_time_residency`, checked to
+    carry a list of what it holds. Raises `ProviderError` naming the host,
+    the role and the server otherwise."""
+    binding = adapter.binding
+
+    def refused(why: str) -> ProviderError:
+        return ProviderError(
+            f"host `{host}`: cannot ask {binding.base_url} what it holds for "
+            f"model role `{role}`. The arm placed here wrote `prefer "
+            f"resident`, so the placement is ranked against what the host "
+            f"holds and cannot be decided without it; start the server, or "
+            f"drop the clause from that arm ({why})")
+
+    try:
+        raw = adapter.residency_report(
+            timeout=min(binding.timeout, PLAN_PROBE_TIMEOUT))
+    except (ProviderError, OSError) as exc:
+        raise refused(str(exc)) from None
+    models = raw.get("models")
+    if not isinstance(models, list):
+        # `{}` or a non-list `models` would otherwise read as "holds
+        # nothing" and silently drop the preference the author wrote
+        raise refused(
+            "its answer has no `models` list" if models is None else
+            f"its answer's `models` is a JSON {type(models).__name__}, "
+            f"not a list")
+    return raw
+
+
 def plan_time_residency(config, wanted: dict) -> dict:
     """`{host: {role: device}}`: what each host already holds, asked of the
     servers at plan time (item 515 / issue #1189 - the acquisition half of
@@ -108,26 +144,28 @@ def plan_time_residency(config, wanted: dict) -> dict:
     the child that verifies the spec.
 
     Raises `ProviderError` naming the host and the server when a server
-    cannot be asked. A host whose arm wrote `prefer resident` is planned
-    against what it holds, so a plan that cannot see that is refused rather
-    than decided on an assumption.
+    cannot be asked, or answers with no list of what it holds. A host whose
+    arm wrote `prefer resident` is planned against what it holds, so a plan
+    that cannot see that is refused rather than decided on an assumption.
+
+    Each server (base URL and credential) is asked once per plan, so every
+    host is ranked against the same snapshot, and each question waits at most
+    `PLAN_PROBE_TIMEOUT` seconds (or the binding's own timeout, if shorter):
+    an unanswering server costs a plan one bounded wait, not one completion
+    timeout per host and role.
     """
     held: dict = {}
+    reports: dict = {}
     for host, roles in sorted(wanted.items()):
         for role in roles:
             binding = config.binding(role)
             if binding is None or not binding.managed:
                 continue
-            try:
-                entry = Adapter(binding).residency()
-            except (ProviderError, OSError) as exc:
-                raise ProviderError(
-                    f"host `{host}`: cannot ask {binding.base_url} what it "
-                    f"holds for model role `{role}`. The arm placed here "
-                    f"wrote `prefer resident`, so the placement is ranked "
-                    f"against what the host holds and cannot be decided "
-                    f"without it; start the server, or drop the clause from "
-                    f"that arm ({exc})") from None
+            adapter = Adapter(binding)
+            key = (binding.base_url, binding.api_key_env)
+            if key not in reports:
+                reports[key] = _plan_time_report(adapter, host, role)
+            entry = adapter.resident_in(reports[key])
             if entry is None:
                 continue
             share = gpu_share(entry)

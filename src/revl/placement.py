@@ -2232,7 +2232,7 @@ def capability_realm_diagnostic(processes: dict, ir: dict,
 
 
 def _plan_time_residency(files, processes: dict,
-                         providers_path: str | None) -> tuple:
+                         providers_path: str | None, ir=None) -> tuple:
     """What each host that wrote `prefer resident` already holds, as
     `({host: {role: device}}, refusal)` (item 515, issue #1189, the second
     half of §11.6 item 1).
@@ -2247,6 +2247,13 @@ def _plan_time_residency(files, processes: dict,
     A server that cannot be asked is a refusal, not a default. A host whose
     arm opted in is planned against what it holds, and planning it against
     nothing would silently undo the preference the author wrote.
+
+    The configuration is checked against the placement (`bind_for_run`, the
+    check `_model_host_plan` makes) BEFORE any server is asked, so a binding
+    the placement refuses (an `on_device` role bound to an off-device URL, a
+    role the program does not declare, an unset credential) is refused
+    without being sent a request or a credential. `ir` is the compiled
+    program; it is compiled from `files` when not given.
     """
     if not providers_path:
         return {}, None
@@ -2256,9 +2263,13 @@ def _plan_time_residency(files, processes: dict,
         return {}, None
     wanted = model_schedule.residency_candidates(files, processes)
     try:
+        if ir is None:
+            ir = compile_files(files)
+        _p.bind_for_run(ir, files, providers_path)
         config = _p.load_config(providers_path)
         return _p.plan_time_residency(config, wanted), None
-    except (_p.ProviderConfigError, _p.ProviderError, RevlError) as exc:
+    except (_p.ProviderConfigError, _p.PlacementRefused, _p.ProviderError,
+            RevlError) as exc:
         return {}, str(exc)
     except OSError as exc:
         return {}, f"cannot read provider configuration: {exc}"
@@ -4063,7 +4074,7 @@ def run_placement(files, placement_path: str, once: bool = False,
     # the clause asks no server and schedules exactly as it did. A server that
     # cannot be asked is a refusal here, before anything spawns.
     residency, residency_problem = _plan_time_residency(files, processes,
-                                                        providers)
+                                                        providers, ir)
     if residency_problem:
         return abort(residency_problem)
 

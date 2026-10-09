@@ -42,6 +42,7 @@ import json
 import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -52,6 +53,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import model_schedule as ms  # noqa: E402
 from revl import placement as _placement  # noqa: E402
+from revl import providers as _providers_mod  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -78,6 +80,10 @@ class FakeServer:
         self.requests: list = []
         self.held: dict = {}
         self.mode = "ok"
+        #: when set, the body `/api/ps` answers with, verbatim
+        self.payload = None
+        #: seconds the server waits before answering
+        self.delay = 0.0
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -85,6 +91,11 @@ class FakeServer:
                 outer.requests.append(self.path)
                 if self.path != "/api/ps":
                     self._send({"error": "unknown"}, 404)
+                    return
+                if outer.delay:
+                    time.sleep(outer.delay)
+                if outer.payload is not None:
+                    self._send(outer.payload)
                     return
                 if outer.mode == "error":
                     self._send({"error": "busy"}, 500)
@@ -374,6 +385,86 @@ def test_an_unreachable_server_refuses_by_name(tmp_path):
     residency, problem = _read(files, processes, path)
     assert residency == {}
     assert "host `edge`" in problem and dead in problem
+
+
+# --------------------------------------------------------------------------
+# 1b. The binding is checked before any server is asked, each server is asked
+#     once, its answer must say what it holds, and the wait is bounded
+# --------------------------------------------------------------------------
+
+def test_a_binding_the_placement_refuses_is_not_asked(tmp_path, server):
+    """`small` is declared `on_device`; a binding that says its endpoint is
+    `off_device` is refused by the placement check. That check runs BEFORE
+    the plan-time read, so the server (and any credential) is never sent a
+    request for a binding the plan goes on to refuse."""
+    files, processes = _program(tmp_path)
+    path = _providers(tmp_path, {
+        "small": {**_role(server.base), "residence": "off_device"}})
+    residency, problem = _read(files, processes, path)
+    assert residency == {}
+    assert problem and "on_device" in problem
+    assert server.requests == []
+
+
+def test_a_binding_for_an_undeclared_role_is_not_asked(tmp_path, server):
+    """A configuration that binds a role the program does not declare is
+    refused as a whole, before any of its servers is asked."""
+    files, processes = _program(tmp_path)
+    path = _providers(tmp_path, {"small": _role(server.base),
+                                 "ghost": _role(server.base, "ghost:1b")})
+    residency, problem = _read(files, processes, path)
+    assert residency == {}
+    assert problem and "ghost" in problem
+    assert server.requests == []
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"models": 5}, {"models": {"tiny:1b": {}}}, {"models": "tiny:1b"},
+    {"models": None}])
+def test_an_answer_without_a_list_of_models_refuses_by_name(tmp_path, server,
+                                                            payload):
+    """`{}` or a `models` that is not a list says nothing about what the
+    server holds. Read as "holds nothing" it would silently drop the
+    `prefer resident` the author wrote, and a non-list would be a traceback
+    rather than a refusal; it is a refusal naming the host and the server."""
+    files, processes = _program(tmp_path)
+    path = _providers(tmp_path, {"small": _role(server.base)})
+    server.payload = payload
+    residency, problem = _read(files, processes, path)
+    assert residency == {}
+    assert problem and "host `edge`" in problem and server.base in problem
+    assert "`models`" in problem
+    assert server.requests == ["/api/ps"]
+
+
+def test_each_server_is_asked_once_per_plan(tmp_path, server):
+    """Two candidate roles bound to the same server are one question, not
+    two: every role is ranked against the same snapshot, and a slow server
+    costs the plan one wait rather than one per role."""
+    files, processes = _program(tmp_path)
+    path = _providers(tmp_path, {"fast": _role(server.base, "fast:1b"),
+                                 "small": _role(server.base, "small:1b")})
+    server.held = {"fast:1b": SIZE, "small:1b": GRAPH}
+    assert _read(files, processes, path) == (
+        {"edge": {"fast": "gpu", "small": "cpu"}}, None)
+    assert server.requests == ["/api/ps"]
+
+
+def test_the_plan_time_question_waits_a_bounded_time(tmp_path, server,
+                                                     monkeypatch):
+    """The binding's completion timeout (120s by default) is sized for
+    generating text; the plan-time listing waits at most
+    `PLAN_PROBE_TIMEOUT`, and a server that does not answer within it is the
+    same named refusal as one that is down."""
+    monkeypatch.setattr(_providers_mod, "PLAN_PROBE_TIMEOUT", 0.3)
+    files, processes = _program(tmp_path)
+    path = _providers(tmp_path, {"small": _role(server.base)})
+    server.delay = 2.0
+    started = time.monotonic()
+    residency, problem = _read(files, processes, path)
+    assert time.monotonic() - started < 1.5
+    assert residency == {}
+    assert problem and "host `edge`" in problem and server.base in problem
 
 
 def test_a_providers_file_that_cannot_be_read_refuses(tmp_path, server):

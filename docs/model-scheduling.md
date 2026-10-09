@@ -153,6 +153,13 @@ exactly as it did, and `--providers` on its own moves no verdict.
 
 A server that cannot be asked is a **refusal**, not a default: the run exits
 non-zero before anything spawns, naming the host, the server and the role.
+So is an answer with no `models` list, which would otherwise read as "holds
+nothing" and drop the clause silently. The configuration is checked against
+the placement first (the same check `revl run --providers` makes), so a
+binding the plan would refuse is never sent a request or a credential. Each
+server is asked once per plan, so every host ranks against the same snapshot,
+and the question waits at most 10 seconds (or the binding's own `timeout`, if
+shorter), not a completion timeout per host and role.
 
 Two limits are worth stating plainly. The read is a report about a moment, and
 revl cannot tell who loaded what, so a model another client loaded is

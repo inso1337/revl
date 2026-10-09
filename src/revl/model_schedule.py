@@ -816,10 +816,13 @@ def verify_handoff(files, host: str, components, entry) -> dict | None:
         raise ScheduleRefusal(
             f"host `{host}` routes no model action but its spec carries a "
             f"model schedule; a schedule for nothing is refused")
-    residency = entry.get("residency") or {}
-    if not isinstance(residency, dict) or not all(
-            isinstance(role, str) and isinstance(device, str)
-            for role, device in residency.items()):
+    # `handoff` writes the key only for a non-empty residency, so a key that
+    # is present but empty ({}, [], "", 0, False) is not one it wrote
+    residency = entry.get("residency", {})
+    if ("residency" in entry and not residency) or not isinstance(
+            residency, dict) or not all(
+            isinstance(role, str) and role and isinstance(device, str)
+            and device for role, device in residency.items()):
         raise ScheduleRefusal(
             f"host `{host}`: the residency in its model schedule spec is "
             f"malformed; it must map role names to the device each was held on "
