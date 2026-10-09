@@ -1526,9 +1526,14 @@ class _ComponentEmitter:
             elif kind == "emit":
                 seg = [self._statement(step["expr"], scope, where)]
                 index = len(segments) + 1
-                if step.get("compensate") is not None:
+                # one compensation per crossing (issue #1902): the site-spelled
+                # clause, else the emitted extern's declared one (item 254,
+                # issue #1979)
+                compensate = step.get("compensate") or _declared_compensate(
+                    step.get("expr"), self.externs)
+                if compensate is not None:
                     entries.append({"index": index, "kind": "compensation",
-                                    "wat": self._statement(step["compensate"], scope, where)})
+                                    "wat": self._statement(compensate, scope, where)})
                 segments.append("\n      ".join(seg))
             elif kind == "await":
                 # A1 on the substrate: the segment launches an async host op;
@@ -6333,6 +6338,122 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         refuse_approval_on_ownerless_tier(ir, "wasm")
     except RevlError as exc:
         raise EmitError(exc.message) from None
+def _declared_externs(externs) -> dict:
+    """Emission externs that declare their own `compensate` (item 254), by name."""
+    if isinstance(externs, dict):
+        externs = list(externs.values())
+    return {ext.get("name"): ext for ext in externs or []
+            if ext.get("class") == "emission" and ext.get("compensate") is not None}
+
+
+def _as_fn_call(node):
+    """An extern's declared slot is lowered in the pure-expression dialect
+    (`call` of a `var` callee). Re-spell a bare named call as the component
+    dialect's `fn` node, which the component renderer reads."""
+    if isinstance(node, dict) and node.get("kind") == "call" and "method" not in node:
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            return {"kind": "fn", "name": callee.get("name"),
+                    "args": list(node.get("args") or [])}
+    return node
+
+
+def _declared_compensate(expr, externs) -> dict | None:
+    """The compensation an activation-body `emit` statement's own call
+    declares, as a component-dialect node, or None (issue #1979)."""
+    if not isinstance(expr, dict) or expr.get("kind") != "fn":
+        return None
+    ext = _declared_externs(externs).get(expr.get("name"))
+    return _as_fn_call(ext["compensate"]) if ext is not None else None
+
+
+#: Why this tier cannot register a compensation outside an activation-body
+#: `emit` statement, named in every refusal below.
+_WASM_COMPENSATION_LIMIT = (
+    "the wasm accumulator is the activation state machine, fixed at compile "
+    "time, so it registers a compensation only from an activation-body `emit` "
+    "statement; a provide method, a nested position or a timer firing has "
+    "nowhere to register one (issue #1979)")
+
+
+def _ui_units(ir: dict) -> list:
+    """The provide methods that are UI transaction units (item 522), as
+    `(component, key, method)`, from `revl.ui_transaction`, the derivation
+    every tier's emitter uses. Empty for a document with no computer-use
+    extern."""
+    roots = {str(cap).split(".", 1)[0]
+             for ext in ir.get("externs") or []
+             for cap in ext.get("capabilities") or []}
+    if not roots & {"ui", "screen"}:
+        return []
+    try:
+        from revl import ui_transaction  # noqa: PLC0415
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: src/ on the path
+        import pathlib  # noqa: PLC0415
+        import sys as _sys  # noqa: PLC0415
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl import ui_transaction  # noqa: PLC0415
+    return sorted({(plan["component"], plan["key"], plan["method"])
+                   for plan in ui_transaction.plans(ir)
+                   if plan["key"] != "<activation>"})
+
+
+def _declared_calls(node, declared: dict, skip=None):
+    """The names of the compensate-declaring externs *node* calls, in order,
+    except the one call node `skip`."""
+    if isinstance(node, dict):
+        if node is not skip and node.get("kind") == "fn" and node.get("name") in declared:
+            yield node.get("name")
+        for value in node.values():
+            yield from _declared_calls(value, declared, skip)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _declared_calls(item, declared, skip)
+
+
+def _refuse_unregistrable_compensations(ir: dict) -> None:
+    """Issue #1979: refuse by name what this tier would otherwise DROP.
+
+    An extern that declares `compensate` (item 254) owes it at every crossing.
+    This tier registers one only from an activation-body `emit` statement (the
+    statement's own call; `_ComponentEmitter.emit` adds the entry), so a
+    crossing anywhere else is refused here instead of emitting with the
+    compensation in no entry. A provide method that is a UI transaction unit
+    (item 522, issue #1369) is refused too: settling a failed call needs a
+    per-call accumulator this tier does not have, and a failing call traps."""
+    for component, key, method in _ui_units(ir):
+        raise EmitError(
+            f"{component}.{key}.{method}: this provide method crosses a "
+            f"computer-use verb, so it is a UI transaction unit (item 522), and "
+            f"the wasm tier cannot settle one when its call fails: "
+            f"{_WASM_COMPENSATION_LIMIT}; see also issue #1369")
+    declared = _declared_externs(ir.get("externs"))
+    if not declared:
+        return
+    for component in ir.get("components") or []:
+        cname = component.get("name")
+        for step in component.get("body") or []:
+            if not isinstance(step, dict):
+                continue
+            kind = step.get("step")
+            if kind == "provide":
+                for method in step.get("methods") or []:
+                    for name in _declared_calls(method.get("body"), declared):
+                        raise EmitError(
+                            f"{cname}.{step.get('name')}.{method.get('name')}: "
+                            f"extern `{name}` declares `compensate`, and this "
+                            f"provide method crosses it: {_WASM_COMPENSATION_LIMIT}")
+                continue
+            own = step.get("expr") if kind == "emit" else None
+            for name in _declared_calls(step, declared, skip=own):
+                raise EmitError(
+                    f"{cname}: extern `{name}` declares `compensate`, and the "
+                    f"`{kind}` step crosses it outside an activation-body `emit` "
+                    f"statement: {_WASM_COMPENSATION_LIMIT}")
+
+
 def _refuse_validated_emissions(ir: dict) -> None:
     """Items 257/513 tier gate (issue #1373): a `validated` emission is a CHECKED
     boundary. The crossing validates the completion against the schema derived
@@ -6658,6 +6779,7 @@ def emit(ir: dict, record: bool = False, prune: bool = True) -> dict[str, str]:
     _refuse_fault_tests(ir)
 
     _refuse_lifecycle_tests(ir.get("tests") or [])
+    _refuse_unregistrable_compensations(ir)
     version = ir.get("ir_version")
     if version == 1 or version == 2:
         modules = _emit_v1(ir, record=record)

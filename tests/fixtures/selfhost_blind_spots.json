@@ -306,8 +306,10 @@
       ],
       "Live component activation/provide/job/spawn/resource and witnessed undo ABI is implemented by the separate _ComponentEmitter, which the module-only selfhost port does not instantiate. This includes teardown/transactional frames, secret-witness WAL metadata and the issue #1577 refusal of a witnessed extern that takes a `secret` parameter; runtime redaction remains a separate roadmap 421F6 boundary.": [
         "async=<true>",
+        "class=emission",
         "class=witnessed",
         "fn=Job.run",
+        "key=<activation>",
         "kind=bracket",
         "kind=compensation",
         "kind=config",

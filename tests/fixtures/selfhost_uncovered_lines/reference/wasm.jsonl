@@ -24,6 +24,20 @@
 
 ["function", "demand-generated-float-formatting-and-k-ary-string", "_V3Emitter._interp_expr", 20, 20]
 
+["reason", "extern-declared-compensate-on-wasm-issue-1979", "Issue #1979: an extern-declared `compensate` on the wasm tier. `_declared_compensate`, `_declared_externs` and `_as_fn_call` register the declared compensation of an activation-body `emit` statement's own call (`_ComponentEmitter.emit` gains the entry), and `_refuse_unregistrable_compensations`, `_declared_calls` and `_ui_units` refuse by name every other crossing and every UI transaction unit (item 522, issue #1369). It is live component emission, which the module-only selfhost/emit_wasm.rvl does not instantiate, so no emit_wasm_corpus document can carry it; the proof is backends/wasm/test_declared_compensate_1979.py."]
+
+["function", "extern-declared-compensate-on-wasm-issue-1979", "_as_fn_call", 5, 5]
+
+["function", "extern-declared-compensate-on-wasm-issue-1979", "_declared_calls", 8, 8]
+
+["function", "extern-declared-compensate-on-wasm-issue-1979", "_declared_compensate", 4, 4]
+
+["function", "extern-declared-compensate-on-wasm-issue-1979", "_declared_externs", 1, 1]
+
+["function", "extern-declared-compensate-on-wasm-issue-1979", "_refuse_unregistrable_compensations", 15, 15]
+
+["function", "extern-declared-compensate-on-wasm-issue-1979", "_ui_units", 10, 10]
+
 ["reason", "float-valued-module-signatures-operands-are-refused-by", "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float."]
 
 ["function", "float-valued-module-signatures-operands-are-refused-by", "_f64_literal", 1, 1]
@@ -304,7 +318,7 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._witnessed_extern", 2, 2]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.emit", 39, 39]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter.emit", 40, 40]
 
 ["reason", "the-item-130-required-stream-t-coeffect-refusal", "The item 130 required-`Stream[T]` coeffect refusal (`_refuse_required_stream`). This tier refuses the whole stream surface by design, having no async host seam, and the coeffect is refused with it at the component's DECLARATION. A corpus document declaring `requires <k>: Stream[T]` would be refused here rather than emitted, so it cannot be a byte-agreement case; the refusal is pinned by tests/test_stream_reactive.py instead."]
 

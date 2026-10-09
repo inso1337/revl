@@ -253,7 +253,13 @@ each is a sentence the tier's loop is built against, not a new decision):
   abandon-the-wait shape is unavailable. Between-compensation check only.
 - **wasm.** Two qualifications. First, the wasm accumulator is fixed at
   ACTIVATION TIME; a method-time compensation is a hard `EmitError` on this
-  tier today. Exit test 3's "mixed-entry LIFO in both phases" therefore
+  tier today. That covers an extern-declared `compensate` (item 254) too:
+  an activation-body `emit` statement's own call registers the declared one
+  (a site-spelled clause replaces it), and every other crossing of such an
+  extern, in a provide method or a nested position, is refused by name, as
+  is a provide method that is a UI transaction unit (item 522). Before
+  issue #1979 the declared form registered nowhere and the program still
+  emitted. Exit test 3's "mixed-entry LIFO in both phases" therefore
   reads, on wasm, over activation-registered entries only; the method-time
   half of the contract is not owed until that restriction lifts (its own
   item, not Slice 2b). Second, the table's "guest code yes" is a wasmtime
