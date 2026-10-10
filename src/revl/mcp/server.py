@@ -74,6 +74,7 @@ from ..compiler import compile_files, compile_source, escaping_use_path
 from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
+from . import boolargs as _boolargs
 from . import fillspec
 from . import draft as _draft
 from . import knowledge_index as _knowledge
@@ -2090,7 +2091,8 @@ def _commit_held(arguments: dict) -> dict:
 
 
 def _edit_draft(arguments: dict, verify=None) -> dict:
-    commit = arguments.get("commit", True) is not False
+    # issue #2239: only a real `true`, or no `commit` at all, commits
+    commit = arguments.get("commit", True) is True
 
     def boot(vs, config, record):
         if not commit:  # issue #1696: a speculative change does not boot it
@@ -2109,7 +2111,8 @@ def _edit_loaded(arguments: dict, verify=None) -> dict:
     """Edit the running composition: speculatively, into the caller's proposal
     (`commit: false`, issue #1696), or committed. Either way a held proposal
     is what the edit builds on, and a commit is refused if it went stale."""
-    commit = arguments.get("commit", True) is not False
+    # issue #2239: only a real `true`, or no `commit` at all, commits
+    commit = arguments.get("commit", True) is True
     base = _proposal.base(SESSION)
     if commit and base is not None and _proposal.stale(SESSION):
         return _session_error(_proposal.stale(SESSION), edited=False,
@@ -5684,6 +5687,8 @@ TOOLS.append({
 })
 
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
+#: issue #2239: each verb's declared arguments, checked once at dispatch
+_SCHEMAS = {tool["name"]: tool.get("inputSchema") for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
 
 # issue #1692: whether this interpreter can boot a composition at all. Probed
@@ -5814,12 +5819,20 @@ def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
     passes the same jail, authoring and operator gates any call does. With
     `record`, a successful mutating call's exact undo is attached to the
     payload and pushed on the session's undo stack (issue #1703)."""
+    # issue #2239: the declared booleans, before anything reads them. A
+    # `"true"`/`"false"` string is read as its bool and the response says so;
+    # any other non-bool is refused by key and type, so no handler ever reads
+    # a string where its schema promised a boolean.
+    arguments, canonicalised, wrong = _boolargs.check(_SCHEMAS.get(name),
+                                                      arguments)
+    if wrong:
+        return _session_error(wrong, category="usage")
     # the path jail and the authoring gate run BEFORE the operator gate and
     # before any handler: a refusal here has read nothing, compiled nothing
     # and run nothing, so neither can be used as an oracle.
     payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
     if payload is not None:
-        return payload
+        return _canonicalised(payload, canonicalised)
     # operator capabilities (roadmap item 55): gate a mutating management
     # verb against the session's bound operator before it can run. No
     # profile bound -> ungated, today's behaviour unchanged. Skipped when the
@@ -5827,14 +5840,15 @@ def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
     # against an operator's grants.
     decision = _operator.decide(SESSION, name, arguments)
     if decision.gated and not decision.allowed:
-        return _refused_by_operator(decision)
+        return _canonicalised(_refused_by_operator(decision),
+                              canonicalised)
     if not runtime_available() and _runtime_gate.is_refused(name, arguments):
         # issue #1692: a verb that needs a live composition, on an
         # interpreter that cannot boot one, refuses by name with the fix in
         # `next`, instead of failing on an import error or on "nothing is
         # loaded". After the operator gate: "you may not" outranks "this
         # server cannot".
-        return _runtime_gate.refusal(name)
+        return _canonicalised(_runtime_gate.refusal(name), canonicalised)
     pre = _capture_undo_state(name, arguments)
     ir_before = getattr(SESSION, "ir", None)
     payload = _run_handler(name, arguments)
@@ -5848,6 +5862,14 @@ def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
     record_tool_call = getattr(SESSION, "record_tool_call", None)
     if record_tool_call is not None:
         record_tool_call(name, arguments, payload, ir_before)
+    return _canonicalised(payload, canonicalised)
+
+
+def _canonicalised(payload: dict, keys: list) -> dict:
+    """Name the boolean arguments read from strings (issue #2239)."""
+    if keys:
+        payload["argumentsCanonicalised"] = {
+            "keys": list(keys), "note": _boolargs.note(keys)}
     return payload
 
 
