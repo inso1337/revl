@@ -308,6 +308,19 @@ fn main() {
         println!("{}", confidential::revl_redact_text(format!(
             "[{name}] {channel:<6}| {subject:<16}| {detail}")));
     };
+    // A boot that cannot be honoured is fatal: report it once (redacted), dispose
+    // whatever did load LIFO, and exit nonzero. Both boot-failure arms below go
+    // through here so the teardown they promise cannot drift apart; `exit`, not a
+    // panic, because a panic would run the hook installed just below mid-teardown
+    // and report residue that is ours to clear.
+    let fatal_boot = |message: String, fibers: &[(String, cordis::Fiber)]| -> ! {
+        eprintln!("{}", confidential::revl_redact_text(format!("[{name}] {message}")));
+        for (label, fiber) in fibers.iter().rev() {
+            let _ = fiber.dispose();
+            log("swap", label, "dispose");
+        }
+        std::process::exit(1)
+    };
     // The uncaught channel: a panic unwinding out of a host body prints from the
     // runtime itself, before `log` runs and outside every funnel the emitted
     // program has. `set_hook` sees a panic on ANY thread, so one redacted line
@@ -411,17 +424,28 @@ fn main() {
                             fibers.push((cname.to_string(), fiber));
                         }
                         Err(error) => {
-                            eprintln!("{}", confidential::revl_redact_text(format!(
-                                "[{name}] boot failed loading {cname}: {error}")));
-                            for (label, fiber) in fibers.iter().rev() {
-                                let _ = fiber.dispose();
-                                log("swap", label, "dispose");
-                            }
-                            std::process::exit(1);
+                            fatal_boot(format!("boot failed loading {cname}: {error}"), &fibers);
                         }
                     }
                 }
-                None => log("load", cname, "UNKNOWN component"),
+                // issue #2200: a component the generated plugin table does not
+                // have is a FATAL spec/build mismatch, not a line to log past.
+                // Skipping it left the placement short of the composition it
+                // claims to have booted: every other component loaded, the
+                // process said `UP` and the no-residue proof still held, so
+                // `revl run --backend rust` exited 0 having silently run
+                // nothing for that component. The name here comes from the
+                // placement spec and must be spelled exactly as the emitter
+                // spells the plugin fn (src/revl/placement.py `_snake` calls
+                // that same conversion), so a mismatch means the spec and the
+                // built module disagree and neither may be papered over.
+                // Teardown what did load, LIFO, then exit nonzero.
+                None => {
+                    fatal_boot(format!(
+                        "FATAL unknown component {cname}: the spec names a plugin \
+                         this build does not have (name spelling must match the \
+                         emitter's)"), &fibers);
+                }
             }
         }
     }

@@ -244,10 +244,69 @@ def _load_placement(path: str) -> dict:
     return tomllib.loads(text)
 
 
+_EMIT_MODULES: dict = {}
+
+
+def backend_emit_module(backend: str):
+    """The `backends/<backend>/emit.py` module, loaded from its own path and
+    cached.
+
+    Every backend directory ships a module named `emit`, so a bare `import
+    emit` answers with whichever directory sat first on `sys.path` (issue
+    #1449). A caller that needs a backend's *algorithm* rather than its output
+    — `placement._snake` reusing the rust emitter's component-name conversion
+    (issue #2200) — gets the very module the tier's emitter runs as, so there
+    is one implementation and not two that can drift.
+
+    The module is bound under the unique name `revl_<backend>_emit` and reused
+    from `sys.modules` when that name already holds this path, so every loader
+    in the process shares ONE module object. The cache is keyed by the resolved
+    path, so two checkouts in one process never alias each other's emitter.
+
+    This lives here, in the placement layer, and NOT in `revl._paths`:
+    `_paths` is on the compile graph (`compiler.py` imports it), and a
+    path-loading call in a compile-reachable module makes the affected-test
+    selector (`tools/affected_tests.py`) add an edge from it to every `revl.*`
+    module any `backends/**/*.py` file imports. `placement` is off that graph,
+    so its loader edge is never expanded.
+    """
+    path = (backends_root() / backend / "emit.py").resolve()
+    module = _EMIT_MODULES.get(path)
+    if module is None:
+        import importlib.util  # noqa: PLC0415
+
+        name = f"revl_{backend}_emit"
+        bound = Path(getattr(sys.modules.get(name), "__file__", "") or "")
+        if bound.resolve() == path:
+            module = sys.modules[name]
+        else:
+            if not path.is_file():
+                raise ImportError(f"no `emit` module for the {backend} backend at {path}")
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"no `emit` module for the {backend} backend at {path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            sys.modules[name] = module
+        _EMIT_MODULES[path] = module
+    return module
+
+
 def _snake(name: str) -> str:
-    """PascalCase component name -> snake_case cordis-rs plugin fn name
-    (matches backends/rust/emit.py: UserCache -> user_cache)."""
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    """PascalCase component name -> snake_case cordis-rs plugin fn name, by
+    CALLING backends/rust/emit.py's own conversion rather than re-deriving it
+    (issue #2200).
+
+    There used to be two algorithms here: this module split before every
+    capital (`KVStore` -> `k_v_store`) while the emitter inserted a separator
+    only after a lowercase letter or digit (`KVStore` -> `kvstore`). The
+    emitter's spelling is the one that counts — it is the `pub fn` name and the
+    plugin-table key the rust runner looks a component up by (`_revl_load`) —
+    so a consecutive-capital component was placed under a name the runner does
+    not have, and the runner skipped it silently. The spec is the side that had
+    to move, and it now takes the emitter's function itself.
+    """
+    return backend_emit_module("rust")._snake(name)
 
 
 def _process_placements(ir: dict, own: list) -> dict:
