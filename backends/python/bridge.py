@@ -786,14 +786,24 @@ CALLER_PROCESS: str | None = None
 
 def _enclosing_crossing() -> dict | None:
     """The recorded crossing this call is made inside, named by this process,
-    or None (no recorder, no enclosing crossing, or not a placement process)."""
+    or None (no recorder, no enclosing crossing, or not a placement process).
+
+    Issue #2234: the record that goes on the wire is projected down to the
+    crossing's PUBLIC keys, exactly as `replay.Step.within` projects it. The
+    recorder's `_ENCLOSING` ref also carries the live `Timeline` and the `Step`
+    behind it (issue #1609, for `_record_emission_outcome`), and this is the one
+    place a ref is spread into a record that is serialised: spreading it whole
+    put a `Timeline` on the wire and raised `TypeError: Object of type Timeline
+    is not JSON serializable` inside the sending process.
+    """
     replay = _sys.modules.get("replay")
     enclosing = getattr(replay, "_ENCLOSING", None)
     ref = enclosing.get() if enclosing is not None else None
     if CALLER_PROCESS is None or not isinstance(ref, dict) \
             or ref.get("seq") is None or ref.get("process") is not None:
         return None
-    return {**ref, "process": CALLER_PROCESS}
+    within = {key: ref[key] for key in ("seq", "component", "label") if key in ref}
+    return {**within, "process": CALLER_PROCESS}
 
 
 def _served_within(req: dict) -> dict | None:
