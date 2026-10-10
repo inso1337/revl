@@ -60,11 +60,13 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
 import sys
 import tempfile
+import uuid
 import warnings
 from dataclasses import dataclass
 
@@ -605,6 +607,22 @@ def wal_dir_candidates() -> list[str]:
     return candidates
 
 
+def _probe_wal_dir_writable(directory: str) -> None:
+    """Raise :class:`OSError` unless a WAL file can be created in ``directory``.
+
+    ``os.access`` is checked first for a cheap, named reason, then a uniquely
+    named probe file is created and removed, because ``os.access`` answers from
+    the mode bits and misses denials such as a read-only mount or a file sandbox.
+    """
+    if not os.access(directory, os.W_OK | os.X_OK):
+        raise PermissionError(
+            errno.EACCES, "directory is not writable", directory)
+    probe = os.path.join(directory, f".revl-probe-{os.getpid()}-{uuid.uuid4().hex}")
+    fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    os.unlink(probe)
+
+
 def resolve_wal_dir() -> WALDirResolution:
     """Resolve the approval-WAL directory, reporting HOW it resolved.
 
@@ -615,12 +633,17 @@ def resolve_wal_dir() -> WALDirResolution:
 
     It creates the directory it returns — resolving is the probe. That is the
     only honest answer to "where will the WAL go": a candidate is durable
-    exactly when it can be created ``0o700``.
+    exactly when it can be created ``0o700`` and a file can be written in it.
+    ``makedirs(exist_ok=True)`` succeeds on an existing directory without
+    checking anything, so a candidate that exists but is not writable (mode bits,
+    a read-only mount, a restrictive file sandbox) is also recorded in
+    ``attempts`` and the walk moves on to the next candidate.
     """
     attempts: list[tuple[str, str]] = []
     for directory in wal_dir_candidates():
         try:
             os.makedirs(directory, mode=0o700, exist_ok=True)
+            _probe_wal_dir_writable(directory)
         except OSError as exc:
             attempts.append((directory, f"{type(exc).__name__}: {exc}"))
             continue
