@@ -190,6 +190,36 @@ def test_the_provided_service_is_inferred_from_the_key():
                    .replace("provide store", "provide st2"))
 
 
+def test_a_component_that_is_not_a_name_names_add_component():
+    """Issue #2219: the old hint read as the shape of `component`, so agents
+    nested `component` inside `component` and retried byte-identically. The
+    refusal must name the failing key and the type it needs."""
+    from revl.mcp import change
+    from revl.mcp.change import ChangeError
+    with pytest.raises(ChangeError) as excinfo:
+        change.component_source({"source": BASE, "modules": {}}, {
+            "component": {"component": "Ticker", "provide": "clock",
+                          "methods": {"now": "1", "later": "2"}},
+            "provide": "clock", "methods": {"now": "1", "later": "2"}})
+    message = str(excinfo.value)
+    assert "`add.component`" in message and "string" in message, message
+    assert "siblings" in message, message
+
+
+def test_methods_as_a_list_names_add_methods_and_wants_an_object():
+    """Issue #2219: a `methods` list must be refused naming `add.methods` and
+    the object shape, not the whole `add` shape."""
+    from revl.mcp import change
+    from revl.mcp.change import ChangeError
+    with pytest.raises(ChangeError) as excinfo:
+        change.component_source({"source": BASE, "modules": {}}, {
+            "component": "Ticker", "provide": "clock",
+            "methods": ["fn now() = 1", "fn later(n) = n * 2"]})
+    message = str(excinfo.value)
+    assert "`add.methods`" in message and "object" in message, message
+    assert "list" in message, message
+
+
 @pytest.mark.parametrize("change,needle", [
     ({"methods": {"now": "ghost.get() + 1", "later": "n"}},
      "`ghost` is not a key of this composition"),

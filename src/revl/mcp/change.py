@@ -222,10 +222,17 @@ def component_source(vs: dict, spec: dict) -> str:
     from . import symbols  # noqa: PLC0415
 
     name = spec.get("component")
+    if not isinstance(name, str) or not name:
+        raise ChangeError("`add.component` must be the component's NAME (a "
+                          "non-empty string); `provide` and `methods` are its "
+                          "siblings inside `add`, not keys of `component`")
     methods = spec.get("methods")
-    if not isinstance(name, str) or not name or not isinstance(methods, dict):
-        raise ChangeError("`add` with `component` is {component, provide, methods: "
-                          "{op: body}, config?, target?}")
+    if not isinstance(methods, dict):
+        got = "nothing" if methods is None else f"a {type(methods).__name__}"
+        raise ChangeError("`add.methods` must be an object mapping operation "
+                          "names to bodies, e.g. "
+                          "{\"get\": \"fn get(k: Str) -> Opt[Str] = ...\"}; "
+                          f"got {got}")
     services, keys = _composition_vocabulary(vs)
     key, service = _provided(spec.get("provide"), keys)
     decl = services.get(service)
