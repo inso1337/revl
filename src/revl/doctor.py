@@ -615,7 +615,7 @@ def check_approval_wal(prober: Prober) -> Check:
 
     The gate's authority is recorded in the WAL, and the WAL directory resolves
     at runtime from the environment (``REVL_WAL_DIR`` / ``XDG_STATE_HOME`` /
-    HOME). When no durable candidate can be created — a read-only or absent HOME
+    HOME). When no durable candidate can be created and written — a read-only or absent HOME
     — it falls back to the process tempdir, which the OS may clear at any time.
     That used to happen silently; it is a warning at the call site now, and this
     is the same fact where an operator goes to ask "is this set up correctly".
