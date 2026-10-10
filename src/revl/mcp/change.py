@@ -28,7 +28,8 @@ the draft handling are the ones `revl_edit` already runs. The intents:
 * ``{add: {source, target?}}``: new declarations appended to a buffer (the
   only one, or `target`), refused if a name is already declared.
 * ``{add: {component, provide, methods, config?, target?}}``: the server writes
-  the component (issue #1700, `component_source`). `provide` is a key, or
+  the component (issue #1700, `component_source`). `provide` is a key,
+  `"key: Service"` (`"kv: Kv"`), or
   `{key, service}`; its service is the one given, or the one the composition
   already knows that key as. Each method's frame comes from the service
   declaration, `methods` holding only the bodies. `requires` is inferred:
@@ -42,6 +43,8 @@ guarantee, not only as an admission verdict.
 """
 
 from __future__ import annotations
+
+import re
 
 from .. import query as _query
 from ..errors import RevlError
@@ -302,17 +305,32 @@ def _composition_vocabulary(vs: dict) -> tuple[dict, dict]:
     return services, resolved
 
 
+_PROVIDE_FORMS = ("`provide` is a bare key (\"kv\") or \"key: Service\" "
+                  "(\"kv: Kv\") or {key, service}, e.g. "
+                  "{\"key\": \"kv\", \"service\": \"Kv\"}")
+
+
+# revl identifiers are ASCII (lexer.py), so `\w` (Unicode) would admit too much.
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
 def _provided(provide, keys: dict) -> tuple[str, str]:
     if isinstance(provide, dict) and isinstance(provide.get("key"), str):
         key = provide["key"]
         service = provide.get("service") or keys.get(key)
+    elif isinstance(provide, str) and ":" in provide:
+        key, _, service = (part.strip() for part in provide.partition(":"))
+        if not (_IDENT.match(key) and _IDENT.match(service)):
+            raise ChangeError(f"{_PROVIDE_FORMS}; got {provide!r}, which is "
+                              "not `key: Service` with a name on each side")
     elif isinstance(provide, str) and provide:
         key, service = provide, keys.get(provide)
     else:
-        raise ChangeError("`provide` is a key, or {key, service}")
+        raise ChangeError(f"{_PROVIDE_FORMS}; got {provide!r}")
     if not service:
         raise ChangeError(f"the composition does not know `{key}` yet, so its "
-                          "service cannot be inferred: give {key, service}")
+                          "service cannot be inferred: give \"key: Service\" "
+                          "or {key, service}, e.g. \"kv: Kv\"")
     return key, service
 
 
