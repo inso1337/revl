@@ -26387,7 +26387,9 @@ fn cir_bin(b: BinN, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     if ((!l.ok) || (!r.ok)) {
         return mk_irres(false, String::from(""));
     }
-    return mk_irres(true, (((((String::from("{\"kind\": \"bin\", \"op\": ").revl_concat(&jstr(&b.op))).revl_concat(", \"left\": ")).revl_concat(&l.js)).revl_concat(", \"right\": ")).revl_concat(&r.js)).revl_concat("}"));
+    let tenv = cenv_ir(cx.clone(), sc.clone());
+    let opnd = operands_of(&b.op, &infer(b.l.clone(), tenv.clone()), &infer(b.r.clone(), tenv.clone()));
+    return mk_irres(true, ((((((String::from("{\"kind\": \"bin\", \"op\": ").revl_concat(&jstr(&b.op))).revl_concat(", \"left\": ")).revl_concat(&l.js)).revl_concat(", \"right\": ")).revl_concat(&r.js)).revl_concat(&if (opnd == "") { String::from("") } else { String::from(", \"operands\": ").revl_concat(&jstr(&opnd)) })).revl_concat("}"));
 }
 
 fn cir_un(u: UnN, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
@@ -26395,7 +26397,9 @@ fn cir_un(u: UnN, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     if (!o.ok) {
         return mk_irres(false, String::from(""));
     }
-    return mk_irres(true, (((String::from("{\"kind\": \"un\", \"op\": ").revl_concat(&jstr(&u.op))).revl_concat(", \"operand\": ")).revl_concat(&o.js)).revl_concat("}"));
+    let ot = if (u.op == "-") { infer(u.e.clone(), cenv_ir(cx.clone(), sc.clone())) } else { String::from("") };
+    let opnd = if ((ot == "Int") || (ot == "Int32")) { ot.clone() } else { String::from("") };
+    return mk_irres(true, ((((String::from("{\"kind\": \"un\", \"op\": ").revl_concat(&jstr(&u.op))).revl_concat(", \"operand\": ")).revl_concat(&o.js)).revl_concat(&if (opnd == "") { String::from("") } else { String::from(", \"operands\": ").revl_concat(&jstr(&opnd)) })).revl_concat("}"));
 }
 
 fn cir_if_expr(f: IfN, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
@@ -37687,8 +37691,8 @@ fn lower_to_ir_lowers_a_timer_step_with_interval_ms__component_spine_() {
 }
 
 #[test]
-fn lower_to_ir_lowers_a_typed_provide_method_arithmetic_body__name_id__no_operands_() {
-    assert!((lower_to_ir(String::from("service Calc { fn add(a: Int, b: Int) -> Int } component A provides calc: Calc { provide calc { fn add(a, b) = a + b } }")) == "{\"ir_version\": 1, \"services\": {\"Calc\": {\"methods\": {\"add\": {\"params\": [{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}], \"returns\": \"Int\", \"emission\": false}}}}, \"components\": [{\"name\": \"A\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"calc\": \"Calc\"}, \"body\": [{\"step\": \"provide\", \"name\": \"calc\", \"service\": \"Calc\", \"methods\": [{\"name\": \"add\", \"params\": [\"a\", \"b\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"bin\", \"op\": \"+\", \"left\": {\"kind\": \"name\", \"id\": \"a\"}, \"right\": {\"kind\": \"name\", \"id\": \"b\"}}}]}]}]}]}"));
+fn lower_to_ir_lowers_a_typed_provide_method_arithmetic_body__name_id__operands_() {
+    assert!((lower_to_ir(String::from("service Calc { fn add(a: Int, b: Int) -> Int } component A provides calc: Calc { provide calc { fn add(a, b) = a + b } }")) == "{\"ir_version\": 1, \"services\": {\"Calc\": {\"methods\": {\"add\": {\"params\": [{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}], \"returns\": \"Int\", \"emission\": false}}}}, \"components\": [{\"name\": \"A\", \"source\": \"<string>\", \"config\": [], \"requires\": {}, \"provides\": {\"calc\": \"Calc\"}, \"body\": [{\"step\": \"provide\", \"name\": \"calc\", \"service\": \"Calc\", \"methods\": [{\"name\": \"add\", \"params\": [\"a\", \"b\"], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"bin\", \"op\": \"+\", \"left\": {\"kind\": \"name\", \"id\": \"a\"}, \"right\": {\"kind\": \"name\", \"id\": \"b\"}, \"operands\": \"Int\"}}]}]}]}]}"));
 }
 
 #[test]

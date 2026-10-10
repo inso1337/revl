@@ -1041,6 +1041,38 @@ fn async_arrow(shape: Str, lam: Str) -> Str {
   return lam
 }
 
+// THE one place the `operands` annotation becomes python (issue #2198). Two
+// renderers reach it: `render_bin`/`render_un` are the module-fn spine and
+// `cbin`/`cun` the component path. The component pair used to spell every
+// operator with the raw host form, and that is the whole reason a `provide`
+// method disagreed with a module `fn` on the same source — python's `%` FLOORS
+// (`-7 % 2` is `1`) where docs/arithmetic.md specifies the truncated `-1`, and
+// its `/` on two Ints had to be true division through `_revl_div`. The caller
+// renders its own operands (`expr` or `cexpr`), so recursion and the component
+// path's own rendering stay with the caller; the annotation decision is the
+// only thing shared, and `""` means "nothing special", never a guess.
+fn annotated_bin(node: Any, lb: Str, rb: Str) -> Str {
+  let op = node_op(node)
+  let opnd = node_operands(node)
+  if (is_addsubmul(op) && opnd == "Int") { return bounded(`${lb} ${op} ${rb}`, "64") }
+  if (is_addsubmul(op) && opnd == "Int32") { return bounded(`${lb} ${op} ${rb}`, "32") }
+  if (op == "/") { return `_revl_div(${lb}, ${rb})` }
+  if (op == "%" && opnd == "Float") {
+    // The Float remainder is IEEE `fmod`, which has a VALUE at a zero
+    // divisor (NaN) where the Int one faults (issue #721).
+    return `_revl_frem(${lb}, ${rb})`
+  }
+  if (op == "%" && opnd == "Int") { return `_revl_rem(${lb}, ${rb})` }
+  return ""
+}
+
+fn annotated_un(node: Any, ob: Str) -> Str {
+  let opnd = node_operands(node)
+  if (opnd == "Int") { return `_revl_i64(-${ob})` }
+  if (opnd == "Int32") { return `_revl_i32(-${ob})` }
+  return ""
+}
+
 fn render_bin(node: Any) -> Str {
   let op = node_op(node)
   if (op == "??") {
@@ -1053,42 +1085,28 @@ fn render_bin(node: Any) -> Str {
     let name = opt_temp(node)
     return `(${name} if (${name} := ${lhs}) is not None else ${rhs})`
   }
-  let opnd = node_operands(node)
-  if (is_addsubmul(op) && opnd == "Int") {
-    return bounded(`${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))}`, "64")
-  }
-  if (is_addsubmul(op) && opnd == "Int32") {
-    return bounded(`${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))}`, "32")
-  }
-  if (op == "/") {
-    return `_revl_div(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
-  }
-  if (op == "%" && opnd == "Float") {
-    // The Float remainder is IEEE `fmod`, which has a VALUE at a zero
-    // divisor (NaN) where the Int one faults (issue #721).
-    return `_revl_frem(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
-  }
-  if (op == "%" && opnd == "Int") {
-    return `_revl_rem(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
-  }
+  let lb = expr(value_field(node, "left"))
+  let rb = expr(value_field(node, "right"))
+  let ann = annotated_bin(node, lb, rb)
+  if (ann != "") { return ann }
   if (op == "&" || op == "|" || op == "^") {
     // Int32 bitwise AND/OR/XOR (item 366): for operands already in i32 range,
     // python's `&`/`|`/`^` produce an in-range result, so no re-wrap is needed.
-    return `(${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))})`
+    return `(${lb} ${op} ${rb})`
   }
   if (op == ">>") {
     // Arithmetic (sign-extending) right shift; the count is taken mod 32
     // (`& 31`), matching wasm/JS. python `>>` is arithmetic and the magnitude
     // only shrinks, so the result stays in i32 range.
-    return `(${expr(value_field(node, "left"))} >> (${expr(value_field(node, "right"))} & 31))`
+    return `(${lb} >> (${rb} & 31))`
   }
   if (op == "<<") {
     // Left shift wraps into 32-bit two's complement (a bit op, no trap): the
     // count is taken mod 32 and the result is re-wrapped.
-    return `_revl_i32_wrap(${expr(value_field(node, "left"))} << (${expr(value_field(node, "right"))} & 31))`
+    return `_revl_i32_wrap(${lb} << (${rb} & 31))`
   }
   let pop = py_bin_op(op)
-  return `(${expr(value_field(node, "left"))} ${pop} ${expr(value_field(node, "right"))})`
+  return `(${lb} ${pop} ${rb})`
 }
 
 fn render_un(node: Any) -> Str {
@@ -1100,10 +1118,10 @@ fn render_un(node: Any) -> Str {
     return `(~${expr(value_field(node, "operand"))})`
   }
   if (op == "-") {
-    let opnd = node_operands(node)
-    if (opnd == "Int") { return `_revl_i64(-${expr(value_field(node, "operand"))})` }
-    if (opnd == "Int32") { return `_revl_i32(-${expr(value_field(node, "operand"))})` }
-    return `(-${expr(value_field(node, "operand"))})`
+    let ob = expr(value_field(node, "operand"))
+    let ann = annotated_un(node, ob)
+    if (ann != "") { return ann }
+    return `(-${ob})`
   }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
@@ -2155,7 +2173,11 @@ fn carrow(node: Any) -> Str {
   return async_arrow(value_str(value_field(node, "__async_shape__")), `lambda ${lp}: ${cexpr(value_field(node, "body"))}`)
 }
 
-// component `bin`: NO arithmetic specialization (the reference difference).
+// component `bin`/`un`: the SAME annotated rendering the module-fn spine uses
+// (`annotated_bin`/`annotated_un`, issue #2198). Spelling these with the raw
+// host operator is what made a `provide` method answer `-7 % 2` as python's
+// floored `1` while the same expression in a module `fn` answered the
+// truncated `-1` docs/arithmetic.md specifies.
 fn cbin(node: Any) -> Str {
   let op = node_op(node)
   if (op == "??") {
@@ -2166,14 +2188,23 @@ fn cbin(node: Any) -> Str {
     let name = opt_temp(node)
     return `(${name} if (${name} := ${lhs}) is not None else ${rhs})`
   }
+  let lb = cexpr(value_field(node, "left"))
+  let rb = cexpr(value_field(node, "right"))
+  let ann = annotated_bin(node, lb, rb)
+  if (ann != "") { return ann }
   let pop = py_bin_op(op)
-  return `(${cexpr(value_field(node, "left"))} ${pop} ${cexpr(value_field(node, "right"))})`
+  return `(${lb} ${pop} ${rb})`
 }
 
 fn cun(node: Any) -> Str {
   let op = node_op(node)
   if (op == "!") { return `(not ${cexpr(value_field(node, "operand"))})` }
-  if (op == "-") { return `(-${cexpr(value_field(node, "operand"))})` }
+  if (op == "-") {
+    let ob = cexpr(value_field(node, "operand"))
+    let ann = annotated_un(node, ob)
+    if (ann != "") { return ann }
+    return `(-${ob})`
+  }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
 

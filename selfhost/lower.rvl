@@ -20455,8 +20455,10 @@ fn ir_service(ts: List[Token], i: Int, al: Map[Str, Str], st: SrcText) -> IrSvcR
 //   * a name in scope lowers to `{"kind": "name", "id": <n>}`, NOT `var`;
 //   * `config.<field>` lowers to `{"kind": "config", "field": <field>}`;
 //   * a required-service call `req.op(args)` lowers to a `req`-target call;
-//   * `bin`/`un` carry NO `operands` tag (the component path never annotates
-//     arithmetic — only the pure-fn lowering does).
+//   * `bin`/`un` carry the `operands` tag the pure-fn lowering writes, through
+//     the same `operands_of` helper (issue #2198): the two strata agree, so
+//     `/`, `%`, `+`, `-`, `*` are annotated identically wherever they are
+//     written.
 // Names accumulate a lexical `sc` scope: activation-body `let-effect` binds, and
 // provide-method params/`let` binds. `config` is a header declaration, so it is
 // skipped structurally rather than emitted as a step.
@@ -22930,19 +22932,43 @@ fn cir_field(f: FieldN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     .concat(opt ? ", \"opt\": true" : "").concat("}"))
 }
 
+// The `operands` annotation the reference stamps on typed arithmetic (item
+// #2198). The component path once carried NONE — it ported only the `Str`
+// relational mark item 458 added, so `/`, `%`, `+`, `-` and `*` inside a
+// `provide` method, an activation `let` or an `effect` argument reached every
+// tier unannotated and each fell back to its host's operator. The same
+// program answered per tier (`-7 % 2` python's floored `1` against the
+// truncated `-1` docs/arithmetic.md specifies, `/` skipping `_revl_div`) and
+// go and rust did not build. `operands_of` is the one decision, shared with
+// the module-fn spine (`lir_bin`/`lir_un`), so the two strata cannot disagree.
+// The type env is `cenv_ir`, the same one `cir_field` and the return-widening
+// mark read: `config` fields, the required services' operation returns, the
+// cases and the lexical scope. An operand it cannot type infers to `""`, which
+// stamps nothing — an absent annotation, never a guess.
 fn cir_bin(b: BinN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   let l = cir_expr(b.l, sc, hostSc, cx)
   let r = cir_expr(b.r, sc, hostSc, cx)
   if (!l.ok || !r.ok) { return mk_irres(false, "") }
+  let tenv = cenv_ir(cx, sc)
+  let opnd = operands_of(b.op, infer(b.l, tenv), infer(b.r, tenv))
   return mk_irres(true, "{\"kind\": \"bin\", \"op\": ".concat(jstr(b.op))
-    .concat(", \"left\": ").concat(l.js).concat(", \"right\": ").concat(r.js).concat("}"))
+    .concat(", \"left\": ").concat(l.js).concat(", \"right\": ").concat(r.js)
+    .concat(opnd == "" ? "" : ", \"operands\": ".concat(jstr(opnd)))
+    .concat("}"))
 }
 
 fn cir_un(u: UnN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
   let o = cir_expr(u.e, sc, hostSc, cx)
   if (!o.ok) { return mk_irres(false, "") }
+  // Unary minus is arithmetic too — `-Int.MIN` overflows — and only
+  // `Int`/`Int32` are marked; no tier treats Float negation specially. Read
+  // exactly as `lir_un` reads it for the module-fn spine.
+  let ot = u.op == "-" ? infer(u.e, cenv_ir(cx, sc)) : ""
+  let opnd = (ot == "Int" || ot == "Int32") ? ot : ""
   return mk_irres(true, "{\"kind\": \"un\", \"op\": ".concat(jstr(u.op))
-    .concat(", \"operand\": ").concat(o.js).concat("}"))
+    .concat(", \"operand\": ").concat(o.js)
+    .concat(opnd == "" ? "" : ", \"operands\": ".concat(jstr(opnd)))
+    .concat("}"))
 }
 
 fn cir_if_expr(f: IfN, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
@@ -32859,9 +32885,14 @@ test "lower_to_ir lowers a timer step with interval_ms (component spine)" {
     == """{"ir_version": 3, "services": {"Log": {"methods": {"write": {"params": [{"name": "msg", "type": "Str"}], "returns": null, "emission": true}}}}, "components": [{"name": "P", "source": "<string>", "config": [], "requires": {"log": "Log"}, "provides": {}, "body": [{"step": "timer", "mode": "every", "interval_ms": 15000, "body": [{"step": "emit", "expr": {"kind": "call", "target": {"kind": "req", "name": "log"}, "method": "write", "args": [{"kind": "lit", "value": "beat"}]}}]}]}]}"""
 }
 
-test "lower_to_ir lowers a typed provide-method arithmetic body (name/id, no operands)" {
+test "lower_to_ir lowers a typed provide-method arithmetic body (name/id, operands)" {
+  // The component stratum annotates arithmetic through the same `operands_of`
+  // helper the module-fn spine uses (issue #2198), so `a + b` over two Ints
+  // carries `operands: "Int"` here exactly as it does in a `fn` body. Before
+  // the fix the component path dropped the tag and every backend fell back to
+  // its host operator.
   assert lower_to_ir("""service Calc { fn add(a: Int, b: Int) -> Int } component A provides calc: Calc { provide calc { fn add(a, b) = a + b } }""")
-    == """{"ir_version": 1, "services": {"Calc": {"methods": {"add": {"params": [{"name": "a", "type": "Int"}, {"name": "b", "type": "Int"}], "returns": "Int", "emission": false}}}}, "components": [{"name": "A", "source": "<string>", "config": [], "requires": {}, "provides": {"calc": "Calc"}, "body": [{"step": "provide", "name": "calc", "service": "Calc", "methods": [{"name": "add", "params": ["a", "b"], "body": [{"step": "return", "expr": {"kind": "bin", "op": "+", "left": {"kind": "name", "id": "a"}, "right": {"kind": "name", "id": "b"}}}]}]}]}]}"""
+    == """{"ir_version": 1, "services": {"Calc": {"methods": {"add": {"params": [{"name": "a", "type": "Int"}, {"name": "b", "type": "Int"}], "returns": "Int", "emission": false}}}}, "components": [{"name": "A", "source": "<string>", "config": [], "requires": {}, "provides": {"calc": "Calc"}, "body": [{"step": "provide", "name": "calc", "service": "Calc", "methods": [{"name": "add", "params": ["a", "b"], "body": [{"step": "return", "expr": {"kind": "bin", "op": "+", "left": {"kind": "name", "id": "a"}, "right": {"kind": "name", "id": "b"}, "operands": "Int"}}]}]}]}]}"""
 }
 
 test "lower_to_ir lowers an arrow bound in a provide method" {

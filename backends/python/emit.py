@@ -1060,6 +1060,79 @@ def _bounded(operation: str, width: int) -> str:
             f"<= _REVL_I{width}_MAX else _revl_i{width}({tmp}))")
 
 
+def _annotated_bin(node: dict, render) -> str | None:
+    """Render an arithmetic `bin` node from its `operands` annotation, or
+    `None` when the annotation asks for nothing special.
+
+    THE one place the `operands` annotation is turned into python. This module
+    has two expression renderers — the module-level `_expr` for a `fn` body and
+    `_ComponentEmitter._expr` for a component body — and the component one used
+    to ignore the annotation and spell every operator with the raw host form
+    (issue #2198). That is the whole reason a `provide` method disagreed with a
+    module `fn` on the same source: python's `%` FLOORS (`-7 % 2` is `1`) where
+    docs/arithmetic.md specifies the truncated `-1` every other tier computes,
+    and its `/` on two Ints had to be true division through `_revl_div` rather
+    than `/`. `render` is the caller's own child renderer, so recursion, error
+    prefixes and the component renderer's `where` label all stay with the
+    caller; the annotation is the only thing shared.
+
+    `+ - *` on `Int`/`Int32` go through `_bounded`: python is arbitrary
+    precision, so it is the tier that has to *impose* the bound rather than
+    detect it — without it a program that overflows on every other tier quietly
+    succeeds here, the reference tier disagreeing with all five others.
+    """
+    op = node.get("op")
+    operands = node.get("operands")
+    if op in ("+", "-", "*") and operands in ("Int", "Int32"):
+        # The bound is imposed INLINE (roadmap item 436 F5): the in-range
+        # answer, which is every answer a correct program produces, no longer
+        # costs a Python frame. `_revl_i64` stays as the trapping tail, so the
+        # raise and its message are still written once.
+        width = 64 if operands == "Int" else 32
+        return _bounded(f"{render(node['left'])} {op} "
+                        f"{render(node['right'])}", width)
+    if op == "/":
+        # true division, IEEE at zero (docs/arithmetic.md) — regardless of the
+        # operand type, since `Int / Int` is Float.
+        return f"_revl_div({render(node['left'])}, {render(node['right'])})"
+    if op == "%" and operands == "Float":
+        # The Float remainder is IEEE `fmod`, and IEEE gives it a VALUE at a
+        # zero divisor — `x % 0.0` is NaN, not a fault. python's own `%` raises
+        # `ZeroDivisionError` there, exactly as its `/` does, so it is the one
+        # tier that has to build the IEEE answer (issue #721). `_revl_rem` is
+        # the Int form and must keep faulting at zero.
+        return f"_revl_frem({render(node['left'])}, {render(node['right'])})"
+    if op == "%" and operands == "Int":
+        # `%` is the TRUNCATED remainder — it takes the sign of the dividend,
+        # as in TypeScript (§0) — and pairs with `div_trunc` so that
+        # (a.div_trunc(b)) * b + a % b == a. Python's `%` floors and takes the
+        # sign of the *divisor*, so it is the one tier that has to build this.
+        # The Euclidean remainder is `mod`, a different operation with a
+        # different name (docs/arithmetic.md). The same form serves Int and
+        # Float (it is `math.fmod` written out), so an emitted module needs no
+        # import for it. A preamble helper, not a lambda built and applied at
+        # every evaluation (item 436 F6).
+        return f"_revl_rem({render(node['left'])}, {render(node['right'])})"
+    return None
+
+
+def _annotated_un(node: dict, render) -> str | None:
+    """Render a unary-minus node from its `operands` annotation, or `None`.
+
+    The same split, the same drift (issue #2198): the component renderer
+    spelled `-x` as the host's `-x`, so negating `Int.MIN` inside a `provide`
+    method quietly came back as 2^63 where rust, java and go trap — and the
+    module renderer already had the fix. Negation is `0 - x`, so it goes
+    through the bound like any other subtraction (docs/arithmetic.md).
+    """
+    if node.get("op") != "-":
+        return None
+    operands = node.get("operands")
+    if operands in ("Int", "Int32"):
+        return f"_revl_i{'64' if operands == 'Int' else '32'}(-{render(node['operand'])})"
+    return None
+
+
 # The field-read temp; see `_field_read`. Same single-name argument as
 # `_BOUNDED_TMP`: the walrus sits in a condition python evaluates first, so a
 # nested read has finished with the name before the outer read rebinds it.
@@ -1898,6 +1971,15 @@ class _ComponentEmitter:
                 if binder == f"({reader})":
                     return f"({rhs} if {reader} is None else {reader})"
                 return f"({reader} if {binder} is not None else {rhs})"
+            # A component body is a second renderer on this tier, so an
+            # annotated `+ - * / %` here has to reach the SAME rendering a
+            # module `fn` gets — `_annotated_bin` is that one rendering
+            # (issue #2198). Spelling these with the host operator is what
+            # made `config.a % config.b` come back as python's floored `1`
+            # in a `provide` method and the truncated `-1` in a `fn`.
+            annotated = _annotated_bin(expr, lambda n: self._expr(n, where))
+            if annotated is not None:
+                return annotated
             op = _PY_BIN_OPS.get(expr.get("op"))
             if op is None:
                 raise EmitError(f"{where}: unsupported binary operator {expr.get('op')!r}")
@@ -1906,6 +1988,9 @@ class _ComponentEmitter:
             if expr.get("op") == "!":
                 return f"(not {self._expr(expr.get('operand'), where)})"
             if expr.get("op") == "-":
+                annotated = _annotated_un(expr, lambda n: self._expr(n, where))
+                if annotated is not None:
+                    return annotated
                 return f"(-{self._expr(expr.get('operand'), where)})"
             raise EmitError(f"{where}: unsupported unary operator {expr.get('op')!r}")
         if kind == "if":
@@ -3964,46 +4049,13 @@ def _expr(node: dict) -> str:
             # expression evaluates FIRST, so the `then` branch reads a value
             # the operand produced exactly once
             return f"({reader} if {binder} is not None else {rhs})"
-        if node["op"] in ("+", "-", "*") and node.get("operands") == "Int":
-            # Int is bounded 64-bit and overflow TRAPS (docs/arithmetic.md).
-            # python is arbitrary precision, so it is the tier that has to
-            # *impose* the bound rather than detect it — without this, a
-            # program that overflows on every other tier quietly succeeds here,
-            # which is the reference tier disagreeing with all five others.
-            #
-            # The bound is imposed INLINE (roadmap item 436 F5): the in-range
-            # answer, which is every answer a correct program produces, no
-            # longer costs a Python frame. `_revl_i64` stays as the trapping
-            # tail, so the raise and its message are still written once.
-            return _bounded(f"{_expr(node['left'])} {node['op']} "
-                            f"{_expr(node['right'])}", 64)
-        if node["op"] in ("+", "-", "*") and node.get("operands") == "Int32":
-            # Int32 traps at the 32-bit edge, the same imposition at half the
-            # width (docs/arithmetic.md).
-            return _bounded(f"{_expr(node['left'])} {node['op']} "
-                            f"{_expr(node['right'])}", 32)
-        if node["op"] == "/":
-            # true division, IEEE at zero (docs/arithmetic.md)
-            return f"_revl_div({_expr(node['left'])}, {_expr(node['right'])})"
-        if node["op"] == "%" and node.get("operands") == "Float":
-            # The Float remainder is IEEE `fmod`, and IEEE gives it a VALUE at
-            # a zero divisor — `x % 0.0` is NaN, not a fault. python's own `%`
-            # raises `ZeroDivisionError` there, exactly as its `/` does, so it
-            # is the one tier that has to build the IEEE answer (issue #721).
-            # `_revl_rem` below is the Int form and must keep faulting at zero.
-            return f"_revl_frem({_expr(node['left'])}, {_expr(node['right'])})"
-        if node["op"] == "%" and node.get("operands") == "Int":
-            # `%` is the TRUNCATED remainder — it takes the sign of the
-            # dividend, as in TypeScript (§0) — and pairs with `div_trunc` so
-            # that (a.div_trunc(b)) * b + a % b == a. Python's `%` floors and
-            # takes the sign of the *divisor*, so it is the one tier that has
-            # to build this. The Euclidean remainder is `mod`, which is a
-            # different operation with a different name (docs/arithmetic.md).
-            # The same form serves Int and Float (it is `math.fmod` written
-            # out), so an emitted module needs no import for it.
-            # A preamble helper, not a lambda built and applied at every
-            # evaluation (item 436 F6).
-            return f"_revl_rem({_expr(node['left'])}, {_expr(node['right'])})"
+        # Every annotated arithmetic node is rendered by the ONE function the
+        # component renderer calls too (`_annotated_bin`), so a `fn` body and a
+        # `provide`-method body cannot disagree about `+ - * / %` again
+        # (issue #2198).
+        annotated = _annotated_bin(node, _expr)
+        if annotated is not None:
+            return annotated
         if node["op"] in ("&", "|", "^"):
             # Int32 bitwise AND/OR/XOR (item 366). These are bit patterns, not
             # arithmetic, so they never trap. python's ints are signed and, for
@@ -4035,15 +4087,15 @@ def _expr(node: dict) -> str:
             # in i32 range for any in-range `x`, so no re-wrap is needed.
             return f"(~{_expr(node['operand'])})"
         if node["op"] == "-":
-            if node.get("operands") == "Int":
-                # Negation is `0 - x`, and `0 - Int.MIN` overflows: it goes
-                # through the bound like any other subtraction (docs/
-                # arithmetic.md). Without this, `-Int.MIN` — which traps on
-                # rust and wasm — quietly came back as 2^63 here, out of the
-                # range python itself imposes on every other operation.
-                return f"_revl_i64(-{_expr(node['operand'])})"
-            if node.get("operands") == "Int32":
-                return f"_revl_i32(-{_expr(node['operand'])})"
+            # Negation is `0 - x`, and `0 - Int.MIN` overflows: it goes through
+            # the bound like any other subtraction (docs/arithmetic.md).
+            # Without this, `-Int.MIN` — which traps on rust and wasm —
+            # quietly came back as 2^63 here, out of the range python itself
+            # imposes on every other operation. Shared with the component
+            # renderer, which had the same gap (issue #2198).
+            annotated = _annotated_un(node, _expr)
+            if annotated is not None:
+                return annotated
             return f"(-{_expr(node['operand'])})"
         raise EmitError(f"unsupported unary operator {node['op']!r}")
     if kind == "call":

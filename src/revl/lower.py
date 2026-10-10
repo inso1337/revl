@@ -7026,6 +7026,73 @@ _TYPED_ARITH_OPS = ("/", "%", "+", "-", "*")
 # so; a refusal is honest where a wrong answer is not.
 _RELATIONAL_OPS = ("<", ">", "<=", ">=")
 
+#: Every `bin` operator whose `operands` annotation a backend keys on: the
+#: arithmetic family above and the `Str` relational one. Guarding the inference
+#: on this tuple keeps a `bin` no backend annotates from paying for two type
+#: probes.
+_ANNOTATED_BIN_OPS = _TYPED_ARITH_OPS + _RELATIONAL_OPS
+
+
+def _operand_annotation(op: str, left_type: str | None,
+                        right_type: str | None = None, *,
+                        unary: bool = False) -> str | None:
+    """The `operands` annotation a `bin`/`un` node carries, or `None`.
+
+    THE one place the annotation is decided. Both lowering strata call it: the
+    `fn` stratum (`_lower_pure_expr`) and the component stratum
+    (`_lower_component_pure_expr`, which covers a `provide`-method body, an
+    activation `let` and an `effect` argument). It was one copy per stratum
+    once, and the component copy had drifted: it kept only the `Str`
+    relational annotation that item 458 added and never learned the arithmetic
+    one, so `/`, `%`, `+`, `-` and `*` written inside a `provide` method
+    reached every backend unannotated and each fell back to its host's
+    operator. The same program then answered per tier — `-7 % 2` was python's
+    FLOORED `1` against the truncated `-1` docs/arithmetic.md specifies and
+    java computed, `/` skipped `_revl_div` so `-7 / 2` was `-3.0` on java, and
+    go and rust did not build (issue #2198). Two call sites, one function: the
+    strata cannot disagree about what a `bin` node means again.
+
+    `unary` says the node has one operand and `right_type` is absent rather
+    than unknown: a `bin` whose RIGHT operand cannot be typed must stay
+    unannotated (the old `fn`-stratum arm required BOTH types), and without the
+    flag `Int - <untypable>` would read as a negation. Unary minus is
+    arithmetic too — negating `Int.MIN` overflows — and only `Int`/`Int32` are
+    annotated: it is the bound a backend must re-impose, and no tier treats
+    Float negation specially.
+
+    A caller passes the operand types it can determine and `None` for one it
+    cannot; an undetermined operand is an absent annotation, never a guess and
+    never an error (the two strata read their types from different oracles —
+    `infer_ast` for the parser AST, `infer_ir` for the lowered component body —
+    and both answer `None` rather than raising).
+    """
+    if unary:
+        if op == "-" and left_type in ("Int", "Int32"):
+            # `-x` is `0 - x`; on Int32, `0 - Int32.MIN` overflows the i32
+            # range just as `0 - Int.MIN` overflows i64, so the bound is
+            # re-imposed at the tier (docs/arithmetic.md).
+            return left_type
+        return None
+    if op in _TYPED_ARITH_OPS:
+        if left_type == "Int32" and right_type == "Int32":
+            # Int32 arithmetic traps at the i32 edge, the same discipline
+            # `Int` has at i64 (docs/arithmetic.md). `/` still yields Float
+            # and `%` is width-agnostic; only `+ - *` need the i32 helper.
+            return "Int32"
+        if left_type == "Int" and right_type == "Int":
+            return "Int"
+        if "Float" in (left_type, right_type):
+            return "Float"
+        return None
+    if op in _RELATIONAL_OPS:
+        # `Str` ordering is by code point on every tier that lowers it; ts and
+        # java need to be told the operands are strings to get there (see
+        # _RELATIONAL_OPS). Only `Str` is marked: every other relational
+        # operand is a scalar its host already orders the same way revl does.
+        if left_type == "Str" and right_type == "Str":
+            return "Str"
+    return None
+
 
 def _str_literal_value(value):
     """Canonical IR form for a `Str` literal: a sequence of Unicode scalar
@@ -7241,27 +7308,16 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         # result) is what makes the arithmetic specifiable at all — see
         # docs/arithmetic.md. Inference runs without a filename so an
         # undetermined operand is an absent annotation, never an error.
-        if expr.op in _TYPED_ARITH_OPS:
-            left_type = infer_ast(expr.left, type_env, types, None)
-            right_type = infer_ast(expr.right, type_env, types, None)
-            if left_type == "Int32" and right_type == "Int32":
-                # Int32 arithmetic traps at the i32 edge, the same discipline
-                # `Int` has at i64 (docs/arithmetic.md). `/` still yields Float
-                # and `%` is width-agnostic; only `+ - *` need the i32 helper.
-                node["operands"] = "Int32"
-            elif left_type == "Int" and right_type == "Int":
-                node["operands"] = "Int"
-            elif "Float" in (left_type, right_type):
-                node["operands"] = "Float"
-        elif expr.op in _RELATIONAL_OPS:
-            # `Str` ordering is by code point on every tier that lowers it;
-            # ts and java need to be told the operands are strings to get
-            # there (see _RELATIONAL_OPS). Only `Str` is marked: every other
-            # relational operand is a scalar its host already orders the same
-            # way revl does.
-            if (infer_ast(expr.left, type_env, types, None) == "Str"
-                    and infer_ast(expr.right, type_env, types, None) == "Str"):
-                node["operands"] = "Str"
+        # `_operand_annotation` decides the annotation for BOTH strata; the
+        # component stratum reads the same decision off the types `infer_ir`
+        # recovers from its lowered operands (issue #2198).
+        if expr.op in _ANNOTATED_BIN_OPS:
+            annotation = _operand_annotation(
+                expr.op,
+                infer_ast(expr.left, type_env, types, None),
+                infer_ast(expr.right, type_env, types, None))
+            if annotation is not None:
+                node["operands"] = annotation
         return node
     if isinstance(expr, ExprUn):
         if expr.op == "try":
@@ -7275,12 +7331,10 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         # backend must re-impose (docs/arithmetic.md), and no tier needs to
         # treat Float negation specially.
         if expr.op == "-":
-            operand_type = infer_ast(expr.operand, type_env, types, None)
-            if operand_type in ("Int", "Int32"):
-                # `-x` is `0 - x`; on Int32, `0 - Int32.MIN` overflows the i32
-                # range just as `0 - Int.MIN` overflows i64, so the bound is
-                # re-imposed at the tier (docs/arithmetic.md).
-                node["operands"] = operand_type
+            annotation = _operand_annotation(
+                "-", infer_ast(expr.operand, type_env, types, None), unary=True)
+            if annotation is not None:
+                node["operands"] = annotation
         return node
     if isinstance(expr, ExprCall):
         _callee = expr.callee
@@ -9707,10 +9761,33 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             if bind is not None:
                 safe = _safe_name(bind, set(scope.values()))
                 inner[bind] = safe
+            # The payload type the arm binds goes into the SAME type env the
+            # method's parameters and `let` binds live in, so an arithmetic
+            # operand the arm names is annotated exactly as it is in a module
+            # `fn` (`_lower_pure_expr` threads `inner_type_env` the same way).
+            # Restored afterwards: two arms may bind one name to two payload
+            # types, and one arm's payload type must not leak into the next.
+            # Without it the arm body's `/`, `%`, `+`, `-`, `*` reached every
+            # backend unannotated and each fell back to its host operator
+            # (issue #2198).
+            seeded = payload_type is not None and bind is not None
+            had_previous = seeded and inner[bind] in env.type_env
+            if seeded:
+                previous = env.type_env.get(inner[bind])
+                env.type_env[inner[bind]] = payload_type
+            try:
+                arm_body = _lower_component_pure_expr(body, env, inner,
+                                                      callables, pure_only)
+            finally:
+                if seeded:
+                    if had_previous:
+                        env.type_env[inner[bind]] = previous
+                    else:
+                        env.type_env.pop(inner[bind], None)
             arm = {
                 "pattern": pattern,
                 "bind": inner.get(bind) if bind is not None else None,
-                "body": _lower_component_pure_expr(body, env, inner, callables, pure_only),
+                "body": arm_body,
             }
             # the payload type a match arm binds, when the scrutinee's static
             # type is recoverable — the same key the pure-fn lowering
@@ -10090,17 +10167,26 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                                    pure_only),
                 "right": _lower_component_pure_expr(expr.right, env, scope, callables,
                                                     pure_only)}
-        # A provide-method body is a second renderer on every tier, so a
-        # comparison written there must mean what the same comparison means in
-        # a module `fn` — the lesson item 458's `&&`/`||` fix already paid for.
-        # `env.type_env` carries the method's parameter types (the service
-        # signature is their source of truth, A6); an operand it cannot type
-        # is simply left unannotated, never guessed.
-        if expr.op in _RELATIONAL_OPS:
+        # A provide-method body is a second renderer on every tier, so an
+        # operator written there must mean what the same operator means in a
+        # module `fn` — the lesson item 458's `&&`/`||` fix already paid for.
+        # `_operand_annotation` is the SAME decision the `fn` stratum makes;
+        # only the type oracle differs, because this stratum holds lowered IR
+        # nodes rather than parser AST: `infer_ir` recovers the operand types
+        # `env.type_env` knows (method parameters, service signature — A6 —
+        # config fields, locals) and answers `None` for one it cannot, which is
+        # an absent annotation, never a guess. Reading the annotation off the
+        # fn stratum's own function is what keeps the two from drifting apart
+        # again: without it the arithmetic family was silently missing here and
+        # each backend fell back to its host operator (issue #2198).
+        if expr.op in _ANNOTATED_BIN_OPS:
             tenv = getattr(env, "type_env", None) or {}
-            if (infer_ast(expr.left, tenv, env.types, None) == "Str"
-                    and infer_ast(expr.right, tenv, env.types, None) == "Str"):
-                node["operands"] = "Str"
+            annotation = _operand_annotation(
+                expr.op,
+                infer_ir(node["left"], tenv, env.types, env.services),
+                infer_ir(node["right"], tenv, env.types, env.services))
+            if annotation is not None:
+                node["operands"] = annotation
         return node
     if isinstance(expr, ExprUn):
         if expr.op == "try":
@@ -10110,9 +10196,20 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 "a returned `Err` does not settle the unit there (issue #1900)",
                 hint="match on the `Result` instead",
                 code="T1", category="type-mismatch")
-        return {"kind": "un", "op": expr.op,
+        node = {"kind": "un", "op": expr.op,
                 "operand": _lower_component_pure_expr(expr.operand, env, scope, callables,
                                                       pure_only)}
+        # Unary minus is arithmetic on this stratum too, and carried the same
+        # drift as the binary form (issue #2198): the same decision, the same
+        # shared function.
+        if expr.op == "-":
+            tenv = getattr(env, "type_env", None) or {}
+            annotation = _operand_annotation(
+                "-", infer_ir(node["operand"], tenv, env.types, env.services),
+                unary=True)
+            if annotation is not None:
+                node["operands"] = annotation
+        return node
     if isinstance(expr, ExprIndex):
         return {"kind": "index",
                 "target": _lower_component_pure_expr(expr.target, env, scope, callables,

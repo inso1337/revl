@@ -694,9 +694,18 @@ def _expr(node, env: _Env, expected=None) -> str:
             if node.get("operands") == "Int":
                 # `-x` is `0 - x`; negating Int.MIN overflows, so it traps
                 # through the same checked subtraction as any Int `-`
-                # (docs/arithmetic.md; wasm lowers `-x` the same way).
-                env.needs_overflow = True
-                return "revlSub(0, %s)" % operand
+                # (docs/arithmetic.md; wasm lowers `-x` the same way). The
+                # method renderer writes into this `_Env` rather than into the
+                # typed-core ctx the prelude reads, so the flag the prelude
+                # consults is the component one (issue #2198). `_PRIM` renders
+                # revl `Int` as Go's `int` on the ir_version 1/2 component
+                # tier and as `int64` on the v3 one, and the checked helper is
+                # int64, so the narrow tier converts in and back out.
+                global _COMP_NEEDS_OVERFLOW
+                _COMP_NEEDS_OVERFLOW = True
+                if _go_type("Int") == "int64":
+                    return "revlSub(0, %s)" % operand
+                return "int(revlSub(0, int64(%s)))" % operand
             return "(-%s)" % operand
         raise EmitError("unsupported unary operator: %r" % (node.get("op"),))
     if kind == "if":  # ternary
@@ -1331,6 +1340,44 @@ _V3_OVERFLOW32_HELPER = """func revlToI32(v int64) int32 {
 }
 """
 
+# The trapping `+ - *` on Int (docs/arithmetic.md), as a preamble. The pure
+# typed-core renderer writes this out of its own assembly off
+# `ctx.needs_overflow`; the component method renderer writes into an `_Env`,
+# not into that ctx, so the text lives here for both. `revlMul` names
+# Int.MIN * -1 explicitly: `p/b != a` cannot see it, because Go DEFINES
+# `Int.MIN / -1` as Int.MIN (spec, "Integer operators") rather than trapping,
+# so the readback equals `a` and the check passes. Every other tier traps on
+# that product; go returned Int.MIN silently.
+_V3_OVERFLOW_HELPER = """func revlAdd(a, b int64) int64 {
+	s := a + b
+	if (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {
+		panic("revl: Int overflow")
+	}
+	return s
+}
+
+func revlSub(a, b int64) int64 {
+	d := a - b
+	if (b < 0 && d < a) || (b > 0 && d > a) {
+		panic("revl: Int overflow")
+	}
+	return d
+}
+
+func revlMul(a, b int64) int64 {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a == (-9223372036854775807 - 1) && b == -1 {
+		panic("revl: Int overflow")
+	}
+	p := a * b
+	if p/b != a {
+		panic("revl: Int overflow")
+	}
+	return p
+}"""
+
 
 # stdlib helpers referenced by component method bodies live in the shared v3
 # preamble; using any one flags the preamble + its imports into the module.
@@ -1350,6 +1397,12 @@ _COMP_NEEDS_STRCONV = False
 # `ctx.needs_overflow32`; a method body reaches the same helper through this
 # flag, so a component-only document carries it too (issue #1347).
 _COMP_NEEDS_OVERFLOW32 = False
+# Trapping `+ - *` on Int referenced by a component body: flags the checked
+# helpers `revlAdd`/`revlSub`/`revlMul`. The method renderer reaches them
+# through `_Env`, not through the typed-core ctx the prelude reads, so without
+# this flag a method body emitted the call and no definition — `undefined:
+# revlSub` (issue #2198).
+_COMP_NEEDS_OVERFLOW = False
 # A `timer` step (item 57) in a component body: flags the clock coeffect +
 # timer scheduler preamble (_TIMER_PREAMBLE). Timers lower to a revertible
 # schedule whose inverse is cancellation, wired into the same effect ledger.
@@ -10876,41 +10929,7 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         ))
         out.append("")
     if ctx.needs_overflow:
-        out.append("func revlAdd(a, b int64) int64 {")
-        out.append("\ts := a + b")
-        out.append("\tif (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {")
-        out.append('\t\tpanic("revl: Int overflow")')
-        out.append("\t}")
-        out.append("\treturn s")
-        out.append("}")
-        out.append("")
-        out.append("func revlSub(a, b int64) int64 {")
-        out.append("\td := a - b")
-        out.append("\tif (b < 0 && d < a) || (b > 0 && d > a) {")
-        out.append('\t\tpanic("revl: Int overflow")')
-        out.append("\t}")
-        out.append("\treturn d")
-        out.append("}")
-        out.append("")
-        out.append("func revlMul(a, b int64) int64 {")
-        out.append("\tif a == 0 || b == 0 {")
-        out.append("\t\treturn 0")
-        out.append("\t}")
-        # `p/b != a` cannot see Int.MIN * -1: the product wraps back to
-        # Int.MIN, and Go DEFINES `Int.MIN / -1` as Int.MIN (spec, "Integer
-        # operators") rather than trapping — so the readback equals `a` and
-        # the check passes. Every other tier traps on this product; go
-        # returned Int.MIN silently. Name the one case the readback is blind
-        # to, the way revlDivTrunc/revlDivFloor already do.
-        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
-        out.append('\t\tpanic("revl: Int overflow")')
-        out.append("\t}")
-        out.append("\tp := a * b")
-        out.append("\tif p/b != a {")
-        out.append('\t\tpanic("revl: Int overflow")')
-        out.append("\t}")
-        out.append("\treturn p")
-        out.append("}")
+        out.append(_V3_OVERFLOW_HELPER)
         out.append("")
     if ctx.needs_overflow32:
         # Int32 traps at the i32 edge (docs/arithmetic.md). Go's int32 wraps,
@@ -11333,7 +11352,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
-    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
+    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32, _COMP_NEEDS_OVERFLOW
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _STREAM_ITER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMPENSATED_EXTERNS
@@ -11403,6 +11422,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     _COMP_NEEDS_PARSE_INT = False
     _COMP_NEEDS_STRCONV = False
     _COMP_NEEDS_OVERFLOW32 = False
+    _COMP_NEEDS_OVERFLOW = False
 
     # Emit the body first so `_COMP_NEEDS_STDLIB` settles before the import
     # block and preamble are assembled. For ir_version 1/2 no v3 feature is
@@ -11520,6 +11540,11 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         # `Int.to_int32` in a method body: the same checked narrow the pure
         # typed-core path emits off `ctx.needs_overflow32` (issue #1347).
         out.append(_V3_OVERFLOW32_HELPER)
+    if _COMP_NEEDS_OVERFLOW:
+        # `Int` unary minus in a method body: the same checked subtraction the
+        # pure typed-core path emits off `ctx.needs_overflow` (issue #2198).
+        out.append(_V3_OVERFLOW_HELPER)
+        out.append("")
     if needs_result_preamble:
         # component tier keeps the sealed interface (see _COMP_RESULT_PREAMBLE):
         # witnessed `@go` externs hand-construct RevlOk/RevlErr.
@@ -12114,7 +12139,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
-    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
+    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32, _COMP_NEEDS_OVERFLOW
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
     global _COMP_NEEDS_STREAM_DRAIN, _COMP_NEEDS_STREAM_EVENT
     global _STREAM_ITER_COUNTER
@@ -12140,6 +12165,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     _COMP_NEEDS_PARSE_INT = False
     _COMP_NEEDS_STRCONV = False
     _COMP_NEEDS_OVERFLOW32 = False
+    _COMP_NEEDS_OVERFLOW = False
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     _STREAM_ITER_COUNTER = 0
@@ -12353,42 +12379,11 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     if ctx.needs_ftoa:
         out.append(_V3_FTOA_HELPER)
         out.append("")
-    if ctx.needs_overflow:
-        out.append("func revlAdd(a, b int64) int64 {")
-        out.append("\ts := a + b")
-        out.append("\tif (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {")
-        out.append('\t\tpanic("revl: Int overflow")')
-        out.append("\t}")
-        out.append("\treturn s")
-        out.append("}")
-        out.append("")
-        out.append("func revlSub(a, b int64) int64 {")
-        out.append("\td := a - b")
-        out.append("\tif (b < 0 && d < a) || (b > 0 && d > a) {")
-        out.append('\t\tpanic("revl: Int overflow")')
-        out.append("\t}")
-        out.append("\treturn d")
-        out.append("}")
-        out.append("")
-        out.append("func revlMul(a, b int64) int64 {")
-        out.append("\tif a == 0 || b == 0 {")
-        out.append("\t\treturn 0")
-        out.append("\t}")
-        # `p/b != a` cannot see Int.MIN * -1: the product wraps back to
-        # Int.MIN, and Go DEFINES `Int.MIN / -1` as Int.MIN (spec, "Integer
-        # operators") rather than trapping — so the readback equals `a` and
-        # the check passes. Every other tier traps on this product; go
-        # returned Int.MIN silently. Name the one case the readback is blind
-        # to, the way revlDivTrunc/revlDivFloor already do.
-        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
-        out.append('\t\tpanic("revl: Int overflow")')
-        out.append("\t}")
-        out.append("\tp := a * b")
-        out.append("\tif p/b != a {")
-        out.append('\t\tpanic("revl: Int overflow")')
-        out.append("\t}")
-        out.append("\treturn p")
-        out.append("}")
+    # `or _COMP_NEEDS_OVERFLOW`: the trapping Int ops can come from a
+    # component METHOD body as well as from a top-level fn (issue #2198), and
+    # the method renderer does not write into `ctx`.
+    if ctx.needs_overflow or _COMP_NEEDS_OVERFLOW:
+        out.append(_V3_OVERFLOW_HELPER)
         out.append("")
     # `or _COMP_NEEDS_OVERFLOW32`: the narrow can come from a component
     # METHOD body as well as from a top-level fn (issue #1347), and the

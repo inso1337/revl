@@ -3394,6 +3394,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   var used_stdlib = has_text(marked_lines, stdlib_mark())
   var comp_strconv = false
   var comp_ovf32 = false
+  var comp_ovf = false
   var comp_teardown = false
   var comp_result = false
   var fnlines = []
@@ -3409,6 +3410,10 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
     for (l of marked_comp) { comp_lines = comp_lines.push(strip_marks(l)) }
     comp_strconv = has_text(comp_lines, "strconv.Format")
     comp_ovf32 = has_text(comp_lines, "revlToI32(")
+    // `_COMP_NEEDS_OVERFLOW`: a method body's Int unary minus renders the
+    // checked subtraction `revlSub(0, ..)`, which no binary operator on this
+    // tier spells, so the call is the mark for the trio.
+    comp_ovf = has_text(comp_lines, "revlSub(0, ")
     comp_teardown = has_text(comp_lines, "newRevlFrame()")
     // issue #1892: a component signature that takes a Result names
     // `RevlResult[` with no `Result[` in the pure sections; the struct form
@@ -3498,7 +3503,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
     out = out.push("")
   }
   if (uses_ftoa) { out = out.concat(ftoa_helper(strings_alias)).push("") }
-  if (flags.ovf) { out = out.concat(overflow_preamble()) }
+  if (flags.ovf || comp_ovf) { out = out.concat(overflow_preamble()) }
   if (uses_ovf32) { out = out.concat(overflow32_preamble()) }
   if (uses_int_arith) { out = out.concat(int_arith_preamble()) }
   if (used_opt) { out = out.concat(opt_preamble()) }
