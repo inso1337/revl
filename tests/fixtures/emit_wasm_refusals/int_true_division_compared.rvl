@@ -1,0 +1,9 @@
+// `Int / Int` as the operand of a comparison in a module fn. Same refusal as
+// int_true_division.rvl (issue #2201), reached through a different statement:
+// the enclosing `>` would refuse its Float operand by the relational-operator
+// message, so the reference's `_V3Emitter._bin_expr` refuses an Int `/`
+// operand by its own name first. The line-coverage gate drives both sides over
+// it here; that is the only way that operand check's raise runs. Both answers
+// are asserted by tests/test_selfhost_emit_wasm.py
+// (test_int_true_division_is_refused_by_name_on_both_sides).
+pub fn big(a: Int, b: Int) -> Bool { return a / b > 1.0 }

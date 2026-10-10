@@ -32,9 +32,10 @@ Covered subset (what emits byte-identical):
     local), return, if/else, while, the bare-expr ``(drop)``, and assert;
   * ``_expr`` — lit (Int ``i64.const`` / Bool ``i32.const``), var (the
     param/local slot), bin (the checked ``$int_add``/``$int_sub``/``$int_mul``
-    and their ``$int32_*`` twins, ``%`` as ``i64.rem_s``, ``/`` as
-    ``i64.div_s``, the i64/i32 comparisons, ``&&``/``||`` as ``i32.and``/
-    ``i32.or``), un (``!`` as ``i32.eqz``, ``-`` as a checked subtract-from-zero).
+    and their ``$int32_*`` twins, ``%`` as ``i64.rem_s``, the i64/i32
+    comparisons, ``&&``/``||`` as ``i32.and``/``i32.or``), un (``!`` as
+    ``i32.eqz``, ``-`` as a checked subtract-from-zero). ``/`` yields Float and
+    is refused on both sides (issue #2201; the port's ``<<UNSUPPORTED-OP:/>>``).
 
 Deliberately OUT (excluded from the corpus, deferred to wasm Path B slice 2+):
 any value that touches linear memory (Str, List, records, tagged Opt/Result/user
@@ -533,3 +534,31 @@ def test_an_uncalled_bodyless_extern_still_emits(reference, tmp_path):
                     "fn g(s: Str) -> Str { return s }\n")
     wat = reference.emit(compile_files([str(path)]))["functions"]
     assert "unsupported on this tier: externs peek (no @wasm body)" in wat
+
+
+INT_TRUE_DIVISION = sorted(
+    (ROOT / "tests" / "fixtures" / "emit_wasm_refusals").glob("int_true_division*.rvl"))
+
+
+@pytest.mark.parametrize("path", INT_TRUE_DIVISION, ids=lambda p: p.stem)
+def test_int_true_division_is_refused_by_name_on_both_sides(emitted, reference, path):
+    """issue #2201: `Int / Int` is true division and yields Float, which this
+    tier does not lower, so BOTH sides have to refuse it rather than lower it
+    to `i64.div_s` (3 for `7 / 2`, where every other tier gives 3.5).
+
+    The reference raises by the Float name and names `div_trunc`; a pure port
+    fn cannot raise, so it answers with `<<UNSUPPORTED-OP:/>>` and never emits
+    the instruction. The documents live in `emit_wasm_refusals/` because the
+    reference has no bytes for the byte-agreement oracle to agree with.
+    """
+    assert len(INT_TRUE_DIVISION) == 2, INT_TRUE_DIVISION
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError) as exc:
+        reference.emit(ir)
+    assert "type 'Float' is not lowerable" in str(exc.value)
+    assert "div_trunc" in str(exc.value)
+    got = emitted["emit_wasm_src"](ir)
+    assert "<<UNSUPPORTED-OP:/>>" in got
+    # The helper preamble's `$int_div_*` use `(i64.div_s (local.get …))`; the
+    # bare `(i64.div_s)` is the shape the old `/` arm emitted.
+    assert "(i64.div_s)" not in got

@@ -34,7 +34,7 @@
 
 ["reason", "only-unsupported-literal-kind-markers-and-the-unknown", "Only unsupported literal/kind markers and the unknown Some-payload default Int remain. Supported payloads have an inferable type; bare Some now covers expected-free payload inference."]
 
-["function", "only-unsupported-literal-kind-markers-and-the-unknown", "render_inner", 3, 3]
+["function", "only-unsupported-literal-kind-markers-and-the-unknown", "render_inner", 2, 2]
 
 ["reason", "remaining-aliases-are-frontend-normalized-to-before-canonica", "Remaining ===/!== aliases are frontend-normalized to ==/!= before canonical typed IR reaches the emitters."]
 
@@ -60,7 +60,7 @@
 
 ["reason", "remaining-fallbacks-reject-unsupported-operators-types-integ", "Remaining fallbacks reject unsupported operators/types; integer / compatibility exists but current source / produces Float and is rejected by the WASM reference."]
 
-["function", "remaining-fallbacks-reject-unsupported-operators-types-integ", "bin_instr", 3, 3]
+["function", "remaining-fallbacks-reject-unsupported-operators-types-integ", "bin_instr", 2, 2]
 
 ["reason", "remaining-false-return-is-a-missing-declared-type", "Remaining false return is a missing declared type lookup; valid record allocations have a declaration or hit the separately deferred anonymous-record path."]
 
@@ -116,7 +116,7 @@
 
 ["reason", "remaining-widening-int-branch-is-intercepted-by-infer", "Remaining widening=Int branch is intercepted by infer_val_ty before delegation; other fallbacks are unsupported literal/unary/kind and Float operand paths rejected by reference validation."]
 
-["function", "remaining-widening-int-branch-is-intercepted-by-infer", "infer_ty", 5, 5]
+["function", "remaining-widening-int-branch-is-intercepted-by-infer", "infer_ty", 4, 4]
 
 ["reason", "the-noninteger-operand-guard-rejects-unsupported-folding-typ", "The noninteger operand guard rejects unsupported folding types. The Int32 bounds assignments require two emitted i32.const operands, but source integer literals are Int and to_int32 emits a checked narrowing call; the existing Int32 addition corpus therefore exits at const_numeral failure before these assignments. This is unreachable from the current source-to-WAT path, not missing Int32 arithmetic support."]
 

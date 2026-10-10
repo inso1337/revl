@@ -1007,6 +1007,64 @@ def test_v3_integer_division_by_zero_faults_on_wasmtime(tmp_path):
         assert out.returncode != 0 and "wasm trap" in out.stderr, (fn, out.stdout)
 
 
+#: issue #2201: `Int / Int` in each position that used to reach `i64.div_s` —
+#: a module fn and a provide method, each inside an interpolation (the one
+#: position where this tier lowers a Float expression); a module fn's `let`
+#: and the operand of its comparison/equality, which used to be refused by the
+#: enclosing operator's message instead; a provide method's scalar operator;
+#: and a provide method through a delegated module fn. (A `-> Float` return
+#: was already refused by its signature.)
+_INT_DIVISION_SITES = {
+    "fn interpolation": "fn q(a: Int, b: Int) -> Str = `${a / b}`",
+    "fn let": "fn q(a: Int, b: Int) -> Int {\n  let x = a / b\n  return a\n}",
+    "fn comparison": "fn q(a: Int, b: Int) -> Bool { return a / b > 1.0 }",
+    "fn equality": "fn q(a: Int, b: Int) -> Bool { return a / b == 1.0 }",
+    "provide interpolation": (
+        "service Calc { fn half(a: Int, b: Int) -> Str }\n"
+        "component C provides calc: Calc {\n"
+        "  provide calc { fn half(a, b) = `${a / b}` }\n"
+        "}"),
+    "provide comparison": (
+        "service Calc { fn big(a: Int, b: Int) -> Bool }\n"
+        "component C provides calc: Calc {\n"
+        "  provide calc { fn big(a, b) = a / b > 1.0 }\n"
+        "}"),
+    "provide via fn": (
+        "service Calc { fn half(a: Int, b: Int) -> Str }\n"
+        "fn q(a: Int, b: Int) -> Str = `${a / b}`\n"
+        "component C provides calc: Calc {\n"
+        "  provide calc { fn half(a, b) = q(a, b) }\n"
+        "}"),
+}
+
+
+@pytest.mark.parametrize("site", sorted(_INT_DIVISION_SITES))
+def test_int_true_division_is_refused_by_the_float_name(site):
+    """REGRESSION (#2201): `/` is true division and `7 / 2` is 3.5 : Float
+    (docs/arithmetic.md). This tier does not lower Float, so `/` is
+    unavailable here — it used to lower `Int / Int` to `i64.div_s`, rendering
+    `3` where every other tier renders `3.5`, and trapping at a zero divisor
+    where they give IEEE infinity. It must be refused, by the documented Float
+    name, pointing at the integer division the tier does lower."""
+    emit = _emitter()
+    with pytest.raises(emit.EmitError) as failure:
+        emit.emit(compile_source(_INT_DIVISION_SITES[site]))
+    message = str(failure.value)
+    assert "type 'Float' is not lowerable — this tier supports Int/Bool" in message
+    assert "div_trunc" in message
+
+
+def test_named_integer_division_and_float_interpolation_still_lower():
+    """The refusal is `/` on Int only: `div_trunc` keeps its native
+    `i64.div_s`, `%` its `i64.rem_s`, and `Float / Float` feeding an
+    interpolation keeps its `f64.div` (docs/strings.md)."""
+    wat = _emitter().emit(compile_source(
+        "fn d(a: Int, b: Int) -> Int = a.div_trunc(b)\n"
+        "fn r(a: Int, b: Int) -> Int = a % b\n"
+        "fn f() -> Str = `${1.0 / 2.0}`"))["functions"]
+    assert "(i64.div_s" in wat and "(i64.rem_s)" in wat and "(f64.div)" in wat
+
+
 @_needs_wasmtime
 def test_component_boundary_carries_a_64_bit_int(tmp_path):
     """The coeffect/provision ABI is `Int` too, so it is i64 in and i64 out. A

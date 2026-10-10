@@ -32,9 +32,11 @@
 //     local), return, if/else, while, the bare-expr `(drop)`, and assert;
 //   * `_expr` — lit (Int i64.const / Bool i32.const), var (param/local slot),
 //     bin (the checked int_add/int_sub/int_mul and their int32_* twins, `%` as
-//     i64.rem_s, `/` as i64.div_s, the i64/i32 comparisons, `&&`/`||` as
-//     i32.and/i32.or), un (`!` as i32.eqz, `-` as a checked subtract-from-zero),
-//     and the Int32->Int `widen` marker as i64.extend_i32_s.
+//     i64.rem_s, the i64/i32 comparisons, `&&`/`||` as i32.and/i32.or), un
+//     (`!` as i32.eqz, `-` as a checked subtract-from-zero), and the
+//     Int32->Int `widen` marker as i64.extend_i32_s. `/` is true division and
+//     yields Float, which this tier refuses (issue #2201): the reference raises
+//     and the port answers `<<UNSUPPORTED-OP:/>>`.
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on wasm-emitter slices, deliberately OUT of this slice —
@@ -169,7 +171,9 @@ fn bin_instr(op: Str, opnd: Str) -> Str {
   if (op == "+") { return `call $int_add` }
   if (op == "-") { return `call $int_sub` }
   if (op == "*") { return `call $int_mul` }
-  if (op == "/") { return "i64.div_s" }
+  // `/` yields Float (docs/arithmetic.md), refused on this tier (#2201): the
+  // reference raises, and a pure port fn answers with a named marker instead.
+  if (op == "/") { return "<<UNSUPPORTED-OP:/>>" }
   if (op == "%") { return "i64.rem_s" }
   return ""
 }
@@ -891,6 +895,7 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
   let left = render_expr(ln, s, "", depth)
   let right = render_expr(rn, s, "", depth)
   let instr = bin_instr(op, opnd)
+  if (instr.startsWith("<<")) { return { wat: instr, ty: "" } }
   var result_ty = opnd
   if (is_comparison(op)) { result_ty = "Bool" }
   let folded = fold_const(op, opnd, left.wat, right.wat)
@@ -2500,7 +2505,7 @@ test "bin_instr picks the width and the checked helpers" {
   assert bin_instr("+", "Int") == `call $int_add`
   assert bin_instr("*", "Int32") == `call $int32_mul`
   assert bin_instr("%", "Int") == "i64.rem_s"
-  assert bin_instr("/", "Int") == "i64.div_s"
+  assert bin_instr("/", "Int") == "<<UNSUPPORTED-OP:/>>"
   assert bin_instr("&&", "Bool") == "i32.and"
   assert bin_instr("||", "Bool") == "i32.or"
 }

@@ -41,7 +41,7 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
 | `config` blocks | no instantiation-config channel yet | hosted backends |
 | host builtins (`Pool`, `Map`; `Job` outside `await`) | different host namespace | express state through coeffects |
 | method-time effects / compensation | the accumulator is fixed at activation | hosted backends |
-| `Float` / `Map` / function-typed values (any position) | no value representation in the canonical-ABI model (Float has only the interpolation subset) | hosted backends / WIT tier |
+| `Float` / `Map` / function-typed values (any position) | no value representation in the canonical-ABI model (Float has only the interpolation subset; `Int / Int` yields Float and is refused, use `div_trunc`) | hosted backends / WIT tier |
 | `repeat` builtin, `List.indexOf` | `repeat` and the List per-element search not lowered yet (`Str.split`/`join`/`indexOf` now DO lower — the reader trio, `$str_split`/`$str_join`/`$str_index_of`) | hosted backends |
 | non-scalar instance-accessor payloads (`spawn`) | a pointer would cross into memory the spawner does not own | hosted backends |
 

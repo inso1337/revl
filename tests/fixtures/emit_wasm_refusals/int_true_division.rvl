@@ -1,0 +1,20 @@
+// `Int / Int` bound by a `let` in a module fn. The frontend admits it: `/` is
+// true division and `a / b` is a Float (docs/arithmetic.md). The wasm
+// reference REFUSES it by the Float name (issue #2201): this tier does not
+// lower Float, so `/` is unavailable here, and the refusal points at
+// `div_trunc`. It used to lower to `i64.div_s`, so `7 / 2` was 3 where every
+// other tier gives 3.5, and a zero divisor trapped where they give infinity.
+//
+// This is not a byte-agreement case, so it cannot live in the tier's CORPUS.
+// The line-coverage gate drives both sides over it here: the reference's raise
+// in `backends/wasm/emit.py::_refuse_int_division`, and the port's
+// `<<UNSUPPORTED-OP:/>>` arm in selfhost/emit_wasm.rvl `bin_instr`/`render_bin`.
+// Both answers are asserted by tests/test_selfhost_emit_wasm.py
+// (test_int_true_division_is_refused_by_name_on_both_sides), and the
+// reference's text on the other fn and provide-method sites by
+// backends/wasm/test_v3_emit.py
+// (test_int_true_division_is_refused_by_the_float_name).
+pub fn half(a: Int, b: Int) -> Int {
+  let x = a / b
+  return a
+}

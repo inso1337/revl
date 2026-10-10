@@ -1318,6 +1318,8 @@
    "tests/fixtures/emit_rust_refusals/host_identifier_collision.rvl",
    "tests/fixtures/emit_ts_corpus/host_map_journal.rvl",
    "tests/fixtures/emit_ts_refusals/host_identifier_collision.rvl",
+   "tests/fixtures/emit_wasm_refusals/int_true_division.rvl",
+   "tests/fixtures/emit_wasm_refusals/int_true_division_compared.rvl",
    "tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl",
    "tests/fixtures/model_reach_spawn/model_child_role_reach.rvl",
    "tests/fixtures/model_reach_spawn/model_grandchild_role_reach.rvl",

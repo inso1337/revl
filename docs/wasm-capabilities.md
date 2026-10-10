@@ -54,7 +54,10 @@ module that does not validate (`type mismatch: expected i32, found f64`) —
 a diagnostic from wasmtime at load, not from the emitter, and the only Float
 position that emitted anything at all rather than saying no. Interpolating a
 Float *expression* that is never bound (`` `${3.0}` ``, `` `${1.0 + 2.0}` ``)
-still lowers, within the `$f64_to_str` fence below.
+still lowers, within the `$f64_to_str` fence below. `/` on `Int` operands does
+not: it is true division and yields `Float` (docs/arithmetic.md), so it is
+refused in every position, by the same name, pointing at `div_trunc` (issue
+#2201; it used to lower to `i64.div_s` and render `7 / 2` as `3`).
 
 ## String and collection builtins
 

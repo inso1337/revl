@@ -124,7 +124,7 @@
 
 ["reason", "remaining-inference-includes-deferred-coalescing-interpolati", "Remaining inference includes deferred coalescing/interpolation/match/Float/component __wat, legacy List + and Str index rejected by today's frontend, and malformed/unbound/unsupported kinds and type errors. Expected-free user ADT inference is now covered."]
 
-["function", "remaining-inference-includes-deferred-coalescing-interpolati", "_V3Emitter._infer_type", 41, 41]
+["function", "remaining-inference-includes-deferred-coalescing-interpolati", "_V3Emitter._infer_type", 39, 39]
 
 ["reason", "remaining-literal-pool-branches-collect-checked-division-err", "Remaining literal-pool branches collect checked-division error text and interpolation/legacy-format text; checked division and interpolation are deferred, and format is component vocabulary. Item 458 adds two: the pooling of that arm's second Err reason (`revl: Int overflow`), which only the three quotient forms carry."]
 

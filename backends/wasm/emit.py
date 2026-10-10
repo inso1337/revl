@@ -1242,7 +1242,8 @@ class _ComponentEmitter:
         if instruction is None:
             # `??`, Str concatenation, Str equality, List `+` — the engine has
             # them and knows the operand types; it refuses with its own reason
-            # if the combination is genuinely not lowerable.
+            # if the combination is genuinely not lowerable (as it does `/` on
+            # Int, which yields Float: `_refuse_int_division`, #2201).
             return self._delegate(node, scope, types, where)
         if op in _BOOL_OPS and not _trap_free_operand(
                 node.get("right"),
@@ -3074,14 +3075,18 @@ _CMP_SUFFIX = {
 _BOOL_OPS = {"&&": "i32.and", "||": "i32.or"}
 #: `Int` overflow *traps* (docs/arithmetic.md), and wasm has no checked
 #: arithmetic, so `+`/`-`/`*` go through helpers that test for overflow and
-#: execute `unreachable`. `/` and `%` cannot overflow into a wrong value — they
-#: trap natively on a zero divisor, which is the fault every other tier gives.
+#: execute `unreachable`. `%` cannot overflow into a wrong value — it traps
+#: natively on a zero divisor, which is the fault every other tier gives.
 _TRAPPING_INT_OPS = {"+": "call $int_add", "-": "call $int_sub", "*": "call $int_mul"}
 #: Int32 `+ - *` trap at the i32 edge through their own checked helpers, the
 #: same discipline as `Int` at half the width (docs/arithmetic.md).
 _TRAPPING_INT32_OPS = {"+": "call $int32_add", "-": "call $int32_sub",
                        "*": "call $int32_mul"}
-_RAW_INT_OPS = {"/": "i64.div_s", "%": "i64.rem_s"}
+#: `/` is NOT here: `Int / Int` is true division and yields Float
+#: (docs/arithmetic.md), so `i64.div_s` would be a wrong value (`7 / 2` is 3,
+#: not 3.5) and a trap where IEEE gives ±inf. It is refused by
+#: `_refuse_int_division`; integer division is spelled `div_trunc` & co.
+_RAW_INT_OPS = {"%": "i64.rem_s"}
 #: Int32 bitwise operators (item 366). wasm is the reference substrate: every
 #: one is a single native i32 instruction, and both shifts mask the count to 5
 #: bits (mod 32) exactly as the spec requires, so no count-masking is emitted
@@ -3177,6 +3182,23 @@ def _refuse_float_operands(node: Any, where: str) -> None:
         raise EmitError(
             f"{where}: type 'Float' is not lowerable — this tier supports "
             f"Int/Bool, and the operands of `{node.get('op')}` are Float")
+
+
+def _refuse_int_division(node: Any, where: str) -> None:
+    """`/` on Int (or Int32) operands is refused, by the Float name.
+
+    `/` is true division and its result is `Float` whatever the operands
+    (docs/arithmetic.md), and this tier does not lower Float — so `/` is
+    unavailable here, exactly as the arithmetic page says. Only `Float / Float`
+    feeding an interpolation is lowered (`f64.div`), before this is reached.
+    The named integer divisions are the remedy and all lower on this tier.
+    """
+    if isinstance(node, dict) and node.get("op") == "/":
+        raise EmitError(
+            f"{where}: type 'Float' is not lowerable — this tier supports "
+            f"Int/Bool, and `/` is true division, which yields Float; for "
+            f"integer division use `a.div_trunc(b)` (or `div_floor`/"
+            f"`div_euclid`)")
 
 
 def _extern_wasm_body(ext: dict) -> str | None:
@@ -5270,6 +5292,13 @@ class _V3Emitter:
         right_node = node.get("right")
         left_ty = self._infer_type(left_node, scope)
         right_ty = self._infer_type(right_node, scope)
+        for operand in (left_node, right_node):
+            # An Int `/` operand is refused by its own name (#2201) before an
+            # enclosing comparison's type check would refuse it by another.
+            if (isinstance(operand, dict) and operand.get("kind") == "bin"
+                    and operand.get("op") == "/"
+                    and operand.get("operands") != "Float"):
+                _refuse_int_division(operand, where)
         if op in ("==", "===", "!=", "!==") and left_ty == "Str" and right_ty == "Str":
             left = self._expr(left_node, scope, where, "Str")
             right = self._expr(right_node, scope, where, "Str")
@@ -5339,6 +5368,7 @@ class _V3Emitter:
             instr = {"+": "f64.add", "-": "f64.sub",
                      "*": "f64.mul", "/": "f64.div"}[op]
             return _E(f"{left.wat}\n      {right.wat}\n      ({instr})", "Float")
+        _refuse_int_division(node, where)
         if op in ("+", "-", "*", "/", "%") and not (
                 left_ty == right_ty and left_ty in ("Int", "Int32")):
             _refuse_float_operands(node, where)

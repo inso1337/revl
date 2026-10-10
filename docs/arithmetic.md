@@ -585,6 +585,16 @@ emitter, not of WebAssembly, which has `f64`. That means `/` is unavailable
 there too, since it yields Float. `div_trunc`, `div_floor`, `div_euclid` and
 `mod` all work, at the full 64-bit range.
 
+`Int / Int` is refused at emit time by the same name, and the diagnostic names
+the remedy: `type 'Float' is not lowerable — this tier supports Int/Bool, and
+`/` is true division, which yields Float; for integer division use
+`a.div_trunc(b)` (or `div_floor`/`div_euclid`)`. It used to lower to
+`i64.div_s` instead (issue #2201), so `` `${7 / 2}` `` rendered `3` where every
+other tier renders `3.5`, and a zero divisor trapped where they give IEEE
+infinity. The refusal covers module `fn`s and provide methods alike, and is
+pinned by `backends/wasm/test_v3_emit.py`
+(`test_int_true_division_is_refused_by_the_float_name`).
+
 ## Integer division by zero
 
 Integer division and modulo have no value at zero, and every tier said so
