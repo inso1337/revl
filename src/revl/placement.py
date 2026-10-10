@@ -245,9 +245,13 @@ def _load_placement(path: str) -> dict:
 
 
 def _snake(name: str) -> str:
-    """PascalCase component name -> snake_case cordis-rs plugin fn name
-    (matches backends/rust/emit.py: UserCache -> user_cache)."""
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    """PascalCase component name -> the snake_case name the cordis-rs runner
+    looks the component up by (`UserCache` -> `user_cache`, `KVStore` ->
+    `kvstore`). The rust emitter's `_snake` is THE rule, because it spells the
+    keys of the binary's `_revl_load` / `_revl_isolate_ctx` tables: a second
+    copy here split consecutive capitals differently (`k_v_store`), so the
+    runner never found such a component (issue #2200)."""
+    return _emit_gate_module("rust")._snake(name)
 
 
 def _process_placements(ir: dict, own: list) -> dict:

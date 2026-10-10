@@ -421,7 +421,22 @@ fn main() {
                         }
                     }
                 }
-                None => log("load", cname, "UNKNOWN component"),
+                None => {
+                    // A spec naming a component this binary does not contain is
+                    // a build/spec mismatch, never a runtime condition: skipping
+                    // it reported UP / NO-RESIDUE for a composition that never
+                    // ran, and a placement peer later failed on an unrelated
+                    // "missing services" (issue #2200). Fatal, in every mode.
+                    log("load", cname, "UNKNOWN component");
+                    eprintln!("{}", confidential::revl_redact_text(format!(
+                        "[{name}] unknown component '{cname}': this binary has no \
+                         component by that name (spec/emitter name mismatch)")));
+                    for (label, fiber) in fibers.iter().rev() {
+                        let _ = fiber.dispose();
+                        log("swap", label, "dispose");
+                    }
+                    std::process::exit(1);
+                }
             }
         }
     }

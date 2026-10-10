@@ -22,6 +22,7 @@ cordis-rs:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -131,3 +132,50 @@ def test_run_rust_restores_the_committed_components_module(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
     assert components.read_bytes() == before, \
         "the run left src/components.rs modified"
+
+
+# issue #2200: the spec spelled a component's runner name with placement's own
+# `_snake` (`KVStore` -> `k_v_store`) while the binary keys its load table on
+# the rust emitter's (`kvstore`). The runner only logged `UNKNOWN component`,
+# skipped it, and the run still printed UP / NO-RESIDUE and exited 0.
+ACRONYM = """\
+service Kv { fn get(k: Str) -> Str }
+component KVStore provides kv: Kv {
+  provide kv { fn get(k) = "v:" + k }
+}
+"""
+
+
+@needs_cordis_rs
+def test_run_rust_once_loads_an_acronym_named_component(tmp_path):
+    source = tmp_path / "acronym.rvl"
+    source.write_text(ACRONYM, encoding="utf-8")
+    result = _run_cli([str(source), "--backend", "rust", "--once"], input_text="")
+    out = result.stdout
+    assert result.returncode == 0, result.stderr + out
+    assert "UNKNOWN component" not in out, out
+    assert re.search(r"load  \| kvstore\s+\| state=Active", out), out
+    assert "NO-RESIDUE" in out
+
+
+@needs_cordis_rs
+def test_rust_runner_exits_nonzero_on_an_unknown_component(monkeypatch, capsys):
+    """A spec naming a component the binary does not contain is fatal: the
+    runner says which name it could not find and exits non-zero, rather than
+    booting the rest and proving NO-RESIDUE for a composition that never ran."""
+    from revl import run_rust as run_rust_mod
+    from revl.compiler import compile_source
+
+    real_spec = run_rust_mod._spec
+
+    def spec_with_a_stranger(ir, config, files):
+        spec = real_spec(ir, config, files)
+        return {**spec, "components": [*spec["components"], "no_such_component"]}
+
+    monkeypatch.setattr(run_rust_mod, "_spec", spec_with_a_stranger)
+    ir = compile_source(ACRONYM.replace("KVStore", "KvStore"), "known.rvl")
+    rc = run_rust_mod.run_rust(ir, {}, [], once=True)
+    out = capsys.readouterr()
+    assert rc != 0, out.out + out.err
+    assert "unknown component 'no_such_component'" in out.out, out.out
+    assert "the rust composition process exited 1" in out.err, out.err
