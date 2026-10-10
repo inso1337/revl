@@ -1147,6 +1147,8 @@ class _Driver:
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
+                 require_settled_wal: bool = False,
+                 allow_unsynced_wal: bool = False,
                  root_dirs: list | None = None, secrets: dict | None = None,
                  secrets_may_be_absent: bool = False,
                  estop_latch: str | None = None, ambient: dict | None = None,
@@ -1235,6 +1237,15 @@ class _Driver:
         # crash-recovery WAL (roadmap item 47): --wal implies recording, since
         # the accumulator it persists is what recording captures.
         self.wal_path = wal_path
+        self.require_settled_wal = bool(require_settled_wal)
+        self.allow_unsynced_wal = bool(allow_unsynced_wal)
+        if self.require_settled_wal and wal_path and os.path.exists(wal_path):
+            from .wal import read_wal, unresolved_crossings
+            unresolved = unresolved_crossings(read_wal(wal_path)["records"])
+            if unresolved:
+                raise RuntimeError(
+                    "WAL contains unresolved crossings: " + json.dumps(unresolved)
+                )
         self.recorder = self._make_recorder() if (record or wal_path) else None
 
         # -- causal trace (docs/why-runtime.md) ----------------------------
@@ -1672,7 +1683,8 @@ class _Driver:
             if self.wal_path is not None:
                 # open the WAL before activation, so each effect is written
                 # ahead of it mattering (docs/crash-recovery.md)
-                self.recorder.open_wal(self.wal_path, self.generation)
+                self.recorder.open_wal(self.wal_path, self.generation,
+                                       allow_unsynced=self.allow_unsynced_wal)
         return module
 
     def set_secret(self, name: str, value: str) -> dict:
@@ -2670,6 +2682,30 @@ def _is_model_refusal(exc: BaseException) -> bool:
 
 
 def run_command(args, hold_once: bool = False) -> int:
+    if getattr(args, "allow_unsynced_wal", False):
+        if (not getattr(args, "wal", None) or getattr(args, "placement", None)
+                or getattr(args, "backend", "py") != "py"):
+            print("error: --allow-unsynced-wal requires --wal and the single-process Python backend",
+                  file=sys.stderr)
+            return 2
+        print("warning: --allow-unsynced-wal disables the WAL fsync guarantee",
+              file=sys.stderr)
+    if getattr(args, "require_settled_wal", False):
+        from .wal import read_wal, unresolved_crossings, WALIntegrityError
+        wal_path = getattr(args, "wal", None)
+        if not wal_path or getattr(args, "placement", None) or getattr(args, "backend", "py") != "py":
+            print("error: --require-settled-wal requires --wal and the single-process Python backend",
+                  file=sys.stderr)
+            return 2
+        try:
+            pending = unresolved_crossings(read_wal(wal_path)["records"]) if os.path.exists(wal_path) else []
+        except (OSError, WALIntegrityError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        if pending:
+            print("error: WAL contains unresolved crossings: " + json.dumps(pending),
+                  file=sys.stderr)
+            return 1
     if getattr(args, "placement", None):
         # `--placement` splits the composition across processes, each with its
         # own tier; a top-level `--backend` would name one tier for the whole
@@ -2860,6 +2896,8 @@ def run_command(args, hold_once: bool = False) -> int:
                          trace_path=getattr(args, "trace", None),
                          withdraw=withdraw,
                          wal_path=getattr(args, "wal", None),
+                         require_settled_wal=bool(getattr(args, "require_settled_wal", False)),
+                         allow_unsynced_wal=bool(getattr(args, "allow_unsynced_wal", False)),
                          estop_latch=getattr(args, "estop_latch", None),
                          root_dirs=root_dirs,
                          ambient=ambient,

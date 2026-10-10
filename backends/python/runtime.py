@@ -1411,9 +1411,32 @@ def extern_emit(ctx, name: "str", fn, args: "tuple"):
     # issue #1504: refuse BEFORE the crossing is recorded or its host body runs
     _estop_check(name)
     record = getattr(ctx, "_revl_record_extern", None)
-    if callable(record):
-        record(name, args)
-    return fn(*args)
+    step = record(name, args) if callable(record) else None
+    try:
+        result = fn(*args)
+    except BaseException as error:
+        outcome = getattr(ctx, "_revl_record_extern_outcome", None)
+        if callable(outcome):
+            outcome(step, "emission-failed", error)
+        raise
+    if inspect.isawaitable(result):
+        async def await_extern():
+            try:
+                value = await result
+            except BaseException as error:
+                outcome = getattr(ctx, "_revl_record_extern_outcome", None)
+                if callable(outcome):
+                    outcome(step, "emission-failed", error)
+                raise
+            outcome = getattr(ctx, "_revl_record_extern_outcome", None)
+            if callable(outcome):
+                outcome(step, "emission-complete", None)
+            return value
+        return await_extern()
+    outcome = getattr(ctx, "_revl_record_extern_outcome", None)
+    if callable(outcome):
+        outcome(step, "emission-complete", None)
+    return result
 
 
 def _revl_canonical_args_bytes(args) -> bytes:

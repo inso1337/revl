@@ -1082,6 +1082,7 @@ def test_run_pool_private_refuses_a_bundle_name_outside_the_working_dir(
     ["--policy", "p.toml"], ["--watch"], ["--record"],
     ["--estop-latch", "latch"], ["--wal", "w.jsonl"], ["--trace", "t.jsonl"],
     ["--withdraw", "Comp"], ["--plan"], ["--placement", "p.toml"], ["--once"],
+    ["--require-settled-wal"], ["--allow-unsynced-wal"],
 ])
 def test_a_local_only_run_flag_is_refused_rather_than_ignored(tmp_path, flag):
     """A flag that is accepted and ignored is not implemented. Every `revl run`

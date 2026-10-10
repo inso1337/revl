@@ -600,6 +600,10 @@ def _run_recover(args) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     if index is not None:
+        if getattr(args, "operator_resolved", []):
+            print("error: resolve a crossing on its process WAL, not the placement index",
+                  file=sys.stderr)
+            return 2
         return _recover_placement(args, index, reissue, session)
 
     world = None
@@ -608,12 +612,15 @@ def _run_recover(args) -> int:
         # own host bodies and providers, checked against the WAL header's digest.
         if getattr(args, "composition", None):
             world = _bind_composition(args)
+        from ..wal import resolve_crossing
+        for seq in getattr(args, "operator_resolved", []):
+            resolve_crossing(args.wal, seq)
         report = recover(args.wal, world=world, session=session,
                          snapshot=snapshot, reissue=reissue,
                          forward_admissions=getattr(args, "forward", False))
         if world is not None:
             report["binding"] = world.describe()
-    except (RecoveryError, WALIntegrityError, OSError) as error:
+    except (RecoveryError, WALIntegrityError, OSError, ValueError) as error:
         # A corrupt or unreadable WAL is a diagnostic, not a traceback: recover
         # is the tool an operator reaches for AFTER a crash, so a mid-file
         # corruption (WALIntegrityError) or an unreadable log (OSError) must

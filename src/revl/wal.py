@@ -272,6 +272,65 @@ def approval_spends(records: list) -> list:
     return out
 
 
+def unresolved_crossings(records: list) -> list:
+    """Conservative settlement check; a report alone never settles a crossing."""
+    settled = {r.get("seq") for r in records
+               if r.get("record") in ("emission-complete", "operator-resolved")
+               and isinstance(r.get("seq"), int)}
+    flushed = {r.get("seq") for r in records if r.get("record") == "flushed"}
+    last_approved = max((i for i, r in enumerate(records)
+                         if r.get("record") == "commit-approved"), default=-1)
+    outstanding = []
+    for index, record in enumerate(records):
+        kind, seq = record.get("record"), record.get("seq")
+        if kind == "effect" and record.get("kind") == "emission" and seq not in settled:
+            outstanding.append({"kind": "emission", "seq": seq})
+        elif kind == "deferred-emission" and index < last_approved and seq not in flushed | settled:
+            outstanding.append({"kind": "deferred-emission", "seq": seq})
+    emitted = {}
+    for record in records:
+        if record.get("record") == "approval-emission":
+            key = (record.get("requestId"), record.get("use"))
+            emitted[key] = emitted.get(key, 0) + 1
+    for index, record in enumerate(records):
+        if record.get("record") != "approval-consumed":
+            continue
+        key = (record.get("requestId"), record.get("use"))
+        if emitted.get(key, 0):
+            emitted[key] -= 1
+            continue
+        if record.get("seq") in settled:
+            continue
+        if record.get("scope") == "activation":
+            for following in records[index + 1:]:
+                if following.get("record") in ("header", "generation"):
+                    break
+                if following.get("record") == "activation-complete":
+                    break
+            else:
+                following = {}
+            if following.get("record") == "activation-complete":
+                continue
+        outstanding.append({"kind": "approval-consumed", "seq": record.get("seq"),
+                            "requestId": key[0], "use": key[1]})
+    return outstanding
+
+
+def resolve_crossing(path: str, seq: int) -> None:
+    """Record an operator's acknowledgement of one unresolved sequence."""
+    loaded = read_wal(path)
+    records = loaded["records"]
+    if not any(item.get("seq") == seq for item in unresolved_crossings(records)):
+        raise ValueError(f"seq {seq} is not an unresolved crossing")
+    # Use the existing crash-tail sealer before appending an acknowledgement.
+    if loaded["torn"]:
+        seal_torn_tail(path, require_sync=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"record": "operator-resolved", "seq": seq}) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def read_wal(path: str) -> dict:
     """Load a WAL from disk into ``{header, records, complete, torn}``.
 
@@ -380,7 +439,7 @@ def _last_newline_offset(handle, size: int) -> int:
     return -1
 
 
-def seal_torn_tail(path: str) -> None:
+def seal_torn_tail(path: str, *, require_sync: bool = False) -> None:
     """Truncate a never-acknowledged partial trailing write so the WAL ends at a
     clean record boundary before it is appended to (issue #535).
 
@@ -423,7 +482,8 @@ def seal_torn_tail(path: str) -> None:
         try:
             os.fsync(handle.fileno())
         except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
-            pass
+            if require_sync:
+                raise
 
 
 def _check_version(header: dict, path: str) -> None:

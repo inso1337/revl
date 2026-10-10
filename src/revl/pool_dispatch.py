@@ -289,6 +289,11 @@ LOCAL_ONLY_RUN_FLAGS: tuple[tuple[str, str, Any], ...] = (
     ("record", "--record", False),
     ("estop_latch", "--estop-latch", None),
     ("wal", "--wal", None),
+    # issue #2183: like --wal itself, both settlement flags gate what the
+    # LOCAL runner records and refuses before it runs; neither reaches a
+    # pool member, so each is refused by name rather than silently dropped.
+    ("require_settled_wal", "--require-settled-wal", False),
+    ("allow_unsynced_wal", "--allow-unsynced-wal", False),
     ("trace", "--trace", None),
     ("withdraw", "--withdraw", None),
     ("plan", "--plan", False),
