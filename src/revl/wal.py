@@ -60,6 +60,7 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import importlib.util
 import json
@@ -619,8 +620,12 @@ def _probe_wal_dir_writable(directory: str) -> None:
             errno.EACCES, "directory is not writable", directory)
     probe = os.path.join(directory, f".revl-probe-{os.getpid()}-{uuid.uuid4().hex}")
     fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.close(fd)
-    os.unlink(probe)
+    try:
+        os.close(fd)
+    finally:
+        # A failed cleanup alone does not make a writable directory unusable.
+        with contextlib.suppress(OSError):
+            os.unlink(probe)
 
 
 def resolve_wal_dir() -> WALDirResolution:

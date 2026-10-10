@@ -78,3 +78,18 @@ def test_writable_candidate_is_unchanged_and_leaves_no_probe(home):
     assert res.directory == wal_dir_candidates()[0]
     assert res.attempts == ()
     assert os.listdir(res.directory) == []
+
+
+def test_failed_probe_cleanup_does_not_reject_a_writable_candidate(home, monkeypatch):
+    real_unlink = os.unlink
+
+    def flaky_unlink(path, *args, **kwargs):
+        if ".revl-probe-" in os.fspath(path):
+            raise PermissionError(13, "unlink denied", path)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", flaky_unlink)
+    res = resolve_wal_dir()
+    assert res.durable
+    assert res.directory == wal_dir_candidates()[0]
+    assert res.attempts == ()
