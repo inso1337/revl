@@ -11,7 +11,7 @@ r_service = "service" ident "{" { [ "route" ident string ] { (("emission" | "asy
 r_component = "component" ident { r__header_clause } [ "liveness" r__duration_literal ] "{" { r__skip_semis (r_config_block | r__misplaced_header_clause | r_stmt__in_method_off) } r__skip_semis "}" ;
 r_type_decl = "type" ident [ "[" { ident [ "," ] } "]" ] "=" "{" { r__record_key_name ":" r_type_ [ "," ] } "}" | "type" ident [ "[" { ident [ "," ] } "]" ] "=" r_type_ | "type" ident [ "[" { ident [ "," ] } "]" ] "=" { ident [ "(" r_type_ ")" ] "|" } ident r__type_suffix | "type" ident [ "[" { ident [ "," ] } "]" ] "=" { ident [ "(" r_type_ ")" ] "|" } ident [ "(" r_type_ ")" ] ;
 r__endorse_slot = { "endorse" "[" ident { "," ident } "]" } ;
-r_fn_decl = "fn" ident r__type_param_list "(" { r__name ":" r_type_ [ "=" r_pure_expr ] [ "," ] } ")" [ "->" r_type_ ] [ r__cache_clause ] "=" r_pure_expr | "fn" ident r__type_param_list "(" { r__name ":" r_type_ [ "=" r_pure_expr ] [ "," ] } ")" [ "->" r_type_ ] [ r__cache_clause ] "{" { r__skip_semis r_fn_stmt } r__skip_semis "}" ;
+r_fn_decl = "fn" ident r__type_param_list "(" { r__name ":" r_type_ [ "=" r_pure_expr ] [ "," ] } ")" [ "->" r_type_ ] [ r__cache_clause ] "=" r__reject_equals_block_body r_pure_expr | "fn" ident r__type_param_list "(" { r__name ":" r_type_ [ "=" r_pure_expr ] [ "," ] } ")" [ "->" r_type_ ] [ r__cache_clause ] "{" { r__skip_semis r_fn_stmt } r__skip_semis "}" ;
 r_extern_decl = "extern" ("pure" | "acquire" | "emission" | "witnessed" | "local" | "witnessed" | "local") [ r__capability_list ] [ r__reach_clause ] { ("async" | "deferred" | "validated" | "retry" r__retry_budget | "idempotent" [ r__idempotency_key_clause ]) } "fn" [ "|" "async" ] ident r__type_param_list "(" { r__name ":" r_type_ [ "," ] } ")" [ "->" r_type_ ] [ r__cache_clause ] [ "undo" { ("idempotent" | "pure") } r_pure_expr ] [ "compensate" r_pure_expr ] [ "requires" "approval" ] [ r_config_block ] { "=" (host_body | "@" ident ("ref" ident "from" string | "file" string)) } ;
 r_test_decl = "test" string "{" { r__skip_semis (r_lifecycle_stmt | r__reject_lifecycle_stmt_here r_fn_stmt) } r__skip_semis "}" ;
 r_fault_test_decl = "fault" "test" string "for" ident [ "with" "{" { r__name ":" r_literal [ "," ] } "}" ] "{" { r__skip_semis ("fail" r__expect_word__opsb1d6b9 r__fault_injection_point | "assert" r__fault_assertion) } r__skip_semis "}" ;
@@ -40,6 +40,7 @@ r__record_key_name = ident | "component" | "config" | "in" | "intercept" | "isol
 r__type_suffix = "[" r__capability_token "]" r__type_suffix_tail | [ "[" r_type_ { "," r_type_ } "]" ] r__type_suffix_tail ;
 r__type_param_list = [ "[" { ident [ "," ] } "]" ] ;
 r_pure_expr = r__ternary ;
+r__reject_equals_block_body = "" ;
 r_fn_stmt = r__fn_stmt ;
 r__reach_clause = "(" "confined" ":" ident ")" ;
 r__idempotency_key_clause = "(" "key" ":" ident ")" ;
@@ -87,7 +88,7 @@ r_realm_placeholder = "realm" "(" "?" ident ")" ;
 r_realm_label = "realm" "(" string ")" ;
 r_model_route_stmt = "route" "model" "on" ident "{" ({ r__skip_semis ("*" | ident) "->" r__model_route_candidate { "|" r__model_route_candidate } [ "prefer" "resident" ] [ "," ] } | { r__skip_semis ("*" | ident) "->" r__model_route_candidate { "|" r__model_route_candidate } [ "prefer" "resident" ] [ "," ] } r__skip_semis) "}" ;
 r_record_literal = "{" { r__record_key_name ":" ("[" { r_literal [ "," ] } "]" | r_literal) [ "," ] } "}" ;
-r_provide = "provide" r__provision_key "{" { [ "async" ] "fn" ident "(" { r__name [ ":" r_type_ ] [ "," ] } ")" [ "->" r_type_ ] ("=" r_pure_expr | "{" { r__skip_semis r_stmt__in_method_on } r__skip_semis "}") } "}" ;
+r_provide = "provide" r__provision_key "{" { [ "async" ] "fn" ident "(" { r__name [ ":" r_type_ ] [ "," ] } ")" [ "->" r_type_ ] ("=" r__reject_equals_block_body r_pure_expr | "{" { r__skip_semis r_stmt__in_method_on } r__skip_semis "}") } "}" ;
 r__ternary = r__ternary_body ;
 r__fn_stmt = ("let" | "var") r__record_pattern "=" r_pure_expr | ("let" | "var") r__list_pattern "=" r_pure_expr | ("let" | "var") ident [ ":" r_type_ ] "=" r_pure_expr | "return" [ r_pure_expr ] | r_if_stmt | r_while_stmt | r_for_stmt | "assert" r_pure_expr | r__loop_control_stmt | ident ("=" | ("+" | "-" | "*" | "/" | "%") "=") r_pure_expr | r_pure_expr ;
 r__call_stmt = "call" r__provision_key "." ident "(" { r_pure_expr [ "," ] } ")" ;
