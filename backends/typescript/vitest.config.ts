@@ -10,6 +10,16 @@ import { emitFixtures } from './scripts/emit-fixtures'
 // resolution, silently dropping that file on cold runs.
 emitFixtures()
 
+// The wall-clock bound on ONE generated ts test module's `vitest run`, raised
+// from the same `REVL_TS_TIMEOUT` the runner in src/revl/test.py reads (issue
+// #2229). 180s there / 60s here is the ratio these two literals already had, so
+// an unset variable is exactly today's 60s and an exported `900` gives 300s.
+// Vitest's bound is deliberately the LOWER of the two: on a loaded host it then
+// reports first, naming the test that ran out of time, instead of the runner's
+// outer bound killing the whole run without saying which test was working.
+const TS_TIMEOUT_S = Number(process.env.REVL_TS_TIMEOUT || 180)
+const TS_TIMEOUT_MS = (TS_TIMEOUT_S * 1000) / 3
+
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
@@ -21,7 +31,7 @@ export default defineConfig({
     // and failed as "Test timed out" — a red herring that says nothing about
     // the emitter, and one that got worse every time a file was added to the
     // suite. The assertion is untouched; only the clock is.
-    testTimeout: 60_000,
-    hookTimeout: 60_000,
+    testTimeout: TS_TIMEOUT_MS,
+    hookTimeout: TS_TIMEOUT_MS,
   },
 })

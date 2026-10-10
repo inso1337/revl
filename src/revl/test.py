@@ -28,6 +28,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -441,6 +442,93 @@ def _node_version() -> "tuple[int, int] | None":
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
+# --- the ts tier's wall-clock bound (issue #2229) ---------------------------
+#
+# Each generated ts test module is executed by ONE `vitest run <file>`, and on
+# the green path re-run under plain node. Both are wall-clock deadlines on a
+# process whose runtime is a property of the HOST, not of the code under test:
+# on an idle machine they finish in seconds, and on a loaded one a test that is
+# still working is killed and reported as a failure. Measured on 2026-10-10 at
+# a 15-minute load average around 12, two compositions reported
+# `subprocess.TimeoutExpired ... timed out after 180 seconds` — timeouts, not
+# assertion failures, and both passed on a quiet host.
+#
+# `REVL_TS_TIMEOUT` (seconds) raises the bound. The vitest bound INSIDE the run
+# is derived from the SAME variable in backends/typescript/vitest.config.ts, at
+# the ratio the two literals already had (60/180), so an unset variable is
+# byte-identical to the old behaviour and an exported one moves both. Keeping
+# the inner bound strictly below the outer is deliberate: vitest then reports
+# first, with the named test that ran out of time, instead of the outer bound's
+# blunt kill of the whole run.
+_TS_TIMEOUT_DEFAULT = 180
+
+
+def _ts_timeout_seconds() -> int:
+    """The ts tier's wall-clock bound in seconds (``REVL_TS_TIMEOUT``).
+
+    Read at call time, not at import: the same `os.environ` this returns from is
+    the one handed to the vitest child below, so the outer bound and the inner
+    one `vitest.config.ts` derives from it always come from one snapshot.
+    """
+    return int(os.environ.get("REVL_TS_TIMEOUT", str(_TS_TIMEOUT_DEFAULT)))
+
+
+def _composition_name(ir: dict) -> str:
+    """Name the composition in a tier message (issue #2229).
+
+    A verdict that says "the composition ran out of time" is only actionable if
+    it also says WHICH composition: the caller's own log is the only other place
+    the name appears, and the point of the message is that the caller does not
+    have to go and correlate it. The name is the distinct source files the
+    manifest was compiled from — what the caller named on the command line.
+    """
+    files = sorted({entry.get("file") for entry
+                    in ((ir.get("manifest") or {}).get("components") or [])
+                    if entry.get("file")})
+    return ", ".join(files) if files else "the composition"
+
+
+def _ts_foreground(argv: list, cwd: Path, timeout: int,
+                   env: "dict | None" = None) -> subprocess.CompletedProcess:
+    """`subprocess.run(..., capture_output=True)` that kills the process GROUP.
+
+    A killed `vitest run` does not take its children with it: `subprocess.run`
+    kills only the process it spawned, and a vitest fork worker survived its
+    parent at PPID 1, 37% CPU, for ~7 minutes, with the generated workspace
+    already deleted (issue #2229). So the child is put in its OWN session and
+    the timeout path kills the whole group — the idiom
+    `tools/hooks/pre-commit` already uses for a wedged suite.
+    `start_new_session=True` makes the child the leader of that group, so its
+    pid IS the group id, and no `getpgid` lookup is needed.
+    """
+    process = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True,
+                               start_new_session=True, env=env)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def _ts_timeout_message(ir: dict, bound: int) -> str:
+    """The named failure a ts run reports when the bound fires (issue #2229).
+
+    It has to read as "this ran out of time", not as an unnamed crash: the
+    caller must be able to tell a bound-versus-host from a broken test, and be
+    told which knob moves the bound.
+    """
+    return (f"{_composition_name(ir)} ran out of time under vitest: nothing "
+            f"failed, the run was still working when the {bound}s bound fired. "
+            f"On a loaded host raise it with REVL_TS_TIMEOUT=<seconds> (the "
+            f"vitest bound inside the run is a third of it) and rerun")
+
+
 def _ts_runtime_contract(path: Path) -> tuple[str, str]:
     """Re-run the module vitest just passed under PLAIN NODE.
 
@@ -460,10 +548,9 @@ def _ts_runtime_contract(path: Path) -> tuple[str, str]:
                         f"the tier's (docs/ts-runtime-contract.md)")
     runner = BACKENDS / "typescript" / "scripts" / "node-tier-runner.mjs"
     try:
-        result = subprocess.run(
-            ["node", str(runner), str(path)],
-            cwd=BACKENDS / "typescript",
-            capture_output=True, text=True, timeout=180,
+        result = _ts_foreground(
+            ["node", str(runner), str(path)], BACKENDS / "typescript",
+            _ts_timeout_seconds(),
         )
     except subprocess.TimeoutExpired:
         return ("fail", "the emitted module did not terminate under plain node "
@@ -541,12 +628,17 @@ def run_ts(ir: dict) -> tuple[str, str]:
             f"{json.dumps(str(stdlib_root().parent))}\n\n"
         )
         path.write_text(stdlib_ref_root_stmt + source, encoding="utf-8")
-        result = subprocess.run(
-            [*vitest, "run", str(path)],
-            cwd=BACKENDS / "typescript",
-            capture_output=True, text=True, timeout=180,
-            env={**os.environ, "CI": "1"},
-        )
+        bound = _ts_timeout_seconds()
+        try:
+            result = _ts_foreground(
+                [*vitest, "run", str(path)], BACKENDS / "typescript", bound,
+                env={**os.environ, "CI": "1"},
+            )
+        except subprocess.TimeoutExpired:
+            # No handler here before #2229, so the caller saw the raw
+            # `subprocess.TimeoutExpired` traceback: an unnamed crash rather
+            # than "this composition ran out of the host's time".
+            return ("fail", _ts_timeout_message(ir, bound))
         output = (result.stdout + result.stderr).strip()
         if output:
             print(output)
