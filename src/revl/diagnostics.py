@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 
 from .errors import RevlError
+from ._paths import relpath_or_abs
 
 # guarantee/amendment tag embedded in the message, e.g. "... (G4)"
 _TAG = re.compile(r"\((G[1-9]|A[1-9]|R[1-5]|T[1-9])\)")
@@ -565,7 +566,9 @@ def classify(error: RevlError) -> dict:
         "severity": "error",
         "code": effective,
         "category": category or "check",
-        "file": error.filename,
+        # relativize at the JSON boundary so no raise site can leak the
+        # loader-resolved absolute path (issue #2222)
+        "file": relpath_or_abs(error.filename),
         "line": error.line,
         "message": error.message,
     }
