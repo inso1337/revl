@@ -28,6 +28,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from revl._paths import relpath_or_abs  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
 
@@ -108,8 +109,11 @@ def test_source_missing_path_is_attributed_per_file(workdir):
                    {"symbol": "OnlyOne", "files": [str(good), str(missing)]})
 
     files = [d.get("file") for d in _diagnostics(result)]
-    assert str(missing) in files, result
-    assert str(good) not in files, result
+    # `file` is spelled relative to the invocation (issue #2222), so the
+    # expectation is that same spelling: the attribution is what this holds,
+    # and it must still name the missing path and not the readable one.
+    assert relpath_or_abs(str(missing)) in files, result
+    assert relpath_or_abs(str(good)) not in files, result
 
 
 def test_source_content_error_is_still_a_content_error(workdir):
