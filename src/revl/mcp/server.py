@@ -4096,6 +4096,9 @@ TOOLS = [
                                                       "add at the end of the buffer "
                                                       "(no offset; a name already "
                                                       "declared is refused)"},
+                            "remove": {"type": "boolean",
+                                       "description": "with `symbol`: remove the "
+                                                      "declaration"},
                         },
                     },
                 },
@@ -4242,8 +4245,13 @@ TOOLS = [
                                        "append to the only buffer, or `target`; "
                                        "or {component, provide, methods, config?}: "
                                        "the server writes the component"},
+                # no `type`: the string form stays valid; the object form's
+                # boolean is still checked at dispatch (issue #2239)
                 "withdraw": {"description": "a component name, or {component, "
-                                            "cascade?: true}"},
+                                            "cascade?: true}",
+                             "properties": {
+                                 "component": {"type": "string"},
+                                 "cascade": {"type": "boolean"}}},
                 "gauntlet": {"type": "boolean",
                              "description": "also grade the candidate in the "
                                             "gauntlet's isolated session before "
@@ -5686,6 +5694,13 @@ TOOLS.append({
     "handler": _tool_verbs,
 })
 
+# issue #2239: `revl_change {edit}` takes revl_edit's patch, so it declares
+# the same `edits` items (and their booleans are checked the same way)
+_BY_NAME = {tool["name"]: tool for tool in TOOLS}
+_BY_NAME["revl_change"]["inputSchema"]["properties"]["edit"]["properties"] = {
+    "target": {"type": "string"},
+    "edits": _BY_NAME["revl_edit"]["inputSchema"]["properties"]["edits"]}
+del _BY_NAME
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 #: issue #2239: each verb's declared arguments, checked once at dispatch
 _SCHEMAS = {tool["name"]: tool.get("inputSchema") for tool in TOOLS}

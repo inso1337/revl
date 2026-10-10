@@ -825,6 +825,16 @@ instead. `revl_change {add}` is this edit.
 shared with `revl_change`, and `revl_change {commit: true}` commits it (issue
 #1696). The default stays `commit: true` for now; see the design note.
 
+Boolean arguments, on every verb, are checked against the verb's own
+`inputSchema` before anything runs (issue #2239). That covers every property the
+schema declares `boolean`, including nested ones such as `edits[].remove` and
+`withdraw.cascade`. A real `true`/`false` passes. The exact strings `"true"` and
+`"false"` are read as the boolean they name, and the response lists those keys
+in `argumentsCanonicalised: {keys, note}`. Any other value, including `null`, `0`
+and `1`, is refused with the key, the expected type and the type received, and
+nothing runs. Before this, `revl_edit {commit: null}` (or `"false"`) committed
+the edit, and `revl_ship {apply: "false"}` swapped.
+
 A swapped edit, a draft edit with open holes and a proposal (`commit: false`)
 all carry `blastRadius`, which makes preflight automatic. It is read off the
 composition that is running when the edit arrives. Its `touched` names

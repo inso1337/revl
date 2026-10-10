@@ -124,7 +124,7 @@ def test_commit_non_boolean_is_refused(loaded, value, kind):
     assert _running(out) == before
 
 
-def test_nested_declared_boolean_is_checked():
+def test_hatch_call_checks_the_named_verbs_schema():
     """`revl_verbs` hatch args reach the named verb's own schema."""
     out = _call("revl_verbs", {"name": "revl_export",
                                "args": {"overwrite": 1}})
@@ -176,3 +176,64 @@ def test_handler_default_true_read_fails_closed(loaded):
     assert out.get("swapped") is not True, out
     after = _call("revl_state", {})
     assert _running(after) == (1, ALL_FOUR)
+
+
+# ------------------------------------ nested booleans the schemas now declare
+
+def test_withdraw_cascade_string_true_reads_as_true(loaded):
+    out = _call("revl_change", {"withdraw": {"component": "TenantAStore",
+                                             "cascade": "true"}})
+    assert out["ok"] is True, out
+    assert out["argumentsCanonicalised"]["keys"] == ["withdraw.cascade"]
+    real = _call("revl_change", {"discard": True})
+    assert real["ok"] is True, real
+    same = _call("revl_change", {"withdraw": {"component": "TenantAStore",
+                                              "cascade": True}})
+    assert same.get("ok") == out.get("ok")
+    assert same.get("committed") == out.get("committed")
+
+
+def test_withdraw_by_name_still_passes(loaded):
+    out = _call("revl_change", {"withdraw": "TenantAApp"})
+    assert out["ok"] is True, out
+    assert "argumentsCanonicalised" not in out
+
+
+def test_edit_remove_string_true_reads_as_true(loaded):
+    edits = [{"symbol": "TenantAApp", "remove": "true"},
+             {"symbol": "TenantAStore", "remove": "true"}]
+    out = _call("revl_edit", {"edits": edits, "commit": False,
+                              "replacing": ["TenantAApp", "TenantAStore"]})
+    assert out["ok"] is True, out
+    assert out["argumentsCanonicalised"]["keys"] == ["edits[0].remove",
+                                                     "edits[1].remove"]
+    assert _running(out) == (1, ALL_FOUR)
+
+
+def test_change_edit_remove_is_checked_too(loaded):
+    out = _call("revl_change", {"edit": {"edits": [
+        {"symbol": "TenantAApp", "remove": "yes"}]}})
+    assert out["ok"] is False, out
+    assert "`edit.edits[0].remove` must be a boolean" in _message(out)
+
+
+def test_edit_remove_non_boolean_is_refused(loaded):
+    out = _call("revl_edit", {"edits": [{"symbol": "TenantAApp", "remove": 1}],
+                              "commit": False})
+    assert out["ok"] is False, out
+    message = _message(out)
+    assert "`edits[0].remove` must be a boolean" in message, message
+    assert "got int" in message
+    assert _running(out) == (1, ALL_FOUR)
+
+
+# ------------------------------------------ "false" on revl_ship never swaps
+
+def test_ship_apply_string_false_does_not_swap(clean_session):
+    loaded = _call("revl_load", {"source": INLINE})
+    assert loaded["ok"] is True, loaded
+    before = _running(loaded)
+    out = _call("revl_ship", {"source": INLINE.replace("= 1", "= 2"),
+                              "apply": "false"})
+    assert _running(out) == before, out
+    assert out["argumentsCanonicalised"]["keys"] == ["apply"]
