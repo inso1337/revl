@@ -34,7 +34,7 @@
 
 ["reason", "only-unsupported-literal-kind-markers-and-the-unknown", "Only unsupported literal/kind markers and the unknown Some-payload default Int remain. Supported payloads have an inferable type; bare Some now covers expected-free payload inference."]
 
-["function", "only-unsupported-literal-kind-markers-and-the-unknown", "render_inner", 3, 3]
+["function", "only-unsupported-literal-kind-markers-and-the-unknown", "render_inner", 2, 2]
 
 ["reason", "remaining-aliases-are-frontend-normalized-to-before-canonica", "Remaining ===/!== aliases are frontend-normalized to ==/!= before canonical typed IR reaches the emitters."]
 
@@ -58,9 +58,9 @@
 
 ["function", "remaining-fallback-handles-a-constructor-case-absent-from", "tag_of", 1, 1]
 
-["reason", "remaining-fallbacks-reject-unsupported-operators-types-integ", "Remaining fallbacks reject unsupported operators/types; integer / compatibility exists but current source / produces Float and is rejected by the WASM reference."]
+["reason", "remaining-fallbacks-reject-unsupported-operators-types-integ", "Remaining fallbacks reject unsupported operators/types; `%` is the only raw integer instruction this table carries, and source `/` (which yields Float) is refused by name instead (issue #2201)."]
 
-["function", "remaining-fallbacks-reject-unsupported-operators-types-integ", "bin_instr", 3, 3]
+["function", "remaining-fallbacks-reject-unsupported-operators-types-integ", "bin_instr", 2, 2]
 
 ["reason", "remaining-false-return-is-a-missing-declared-type", "Remaining false return is a missing declared type lookup; valid record allocations have a declaration or hit the separately deferred anonymous-record path."]
 

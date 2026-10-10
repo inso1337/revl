@@ -32,9 +32,10 @@
 //     local), return, if/else, while, the bare-expr `(drop)`, and assert;
 //   * `_expr` — lit (Int i64.const / Bool i32.const), var (param/local slot),
 //     bin (the checked int_add/int_sub/int_mul and their int32_* twins, `%` as
-//     i64.rem_s, `/` as i64.div_s, the i64/i32 comparisons, `&&`/`||` as
-//     i32.and/i32.or), un (`!` as i32.eqz, `-` as a checked subtract-from-zero),
-//     and the Int32->Int `widen` marker as i64.extend_i32_s.
+//     i64.rem_s, `/` REFUSED by name because it is true division and so yields
+//     Float, the i64/i32 comparisons, `&&`/`||` as i32.and/i32.or), un (`!` as
+//     i32.eqz, `-` as a checked subtract-from-zero), and the Int32->Int `widen`
+//     marker as i64.extend_i32_s.
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on wasm-emitter slices, deliberately OUT of this slice —
@@ -46,8 +47,9 @@
 //     value threads the alloc / str_ptr / slot machinery and the nested
 //     scratch-pointer stack (`_acquire_tmp`) — a much larger, allocation-shaped
 //     surface than the scalar corner;
-//   * Float end to end — `/` yields Float (refused at a scalar return/binding by
-//     name), and interpolating a Float pulls in the f64_to_str Grisu/Ryu helper;
+//   * Float end to end — `/` yields Float, so it is refused BY NAME wherever it
+//     appears (issue #2201), and interpolating a Float pulls in the f64_to_str
+//     Grisu/Ryu helper;
 //     the stdlib builtins (str_split/str_join/str_index_of and every `builtin`/
 //     `len` node); the `for` loop (its list iteration is a memory walk);
 //   * COMPONENTS / SERVICES entirely (`_ComponentEmitter` — realms, `provide`/
@@ -144,7 +146,10 @@ fn is_comparison(op: Str) -> Bool { return is_cmp(op) || is_bool_op(op) }
 // `_bin_instr`: the single wasm instruction for `op` over `operand_ty` operands.
 // In the scalar subset `&&`/`||` always see Bool operands and the checked
 // arithmetic always sees Int/Int32, so the reference's None-returning guards
-// (Str/List/`??`) are unreachable here.
+// (Str/List/`??`) are unreachable here. `/` has NO instruction at any width:
+// it is true division, so `Int / Int` is Float (docs/arithmetic.md), and Float
+// is refused BY NAME on this tier. `i64.div_s` here answered a silent 3 where
+// the language says 3.5 — see `render_bin`.
 fn bin_instr(op: Str, opnd: Str) -> Str {
   if (op == "&&") { return "i32.and" }
   if (op == "||") { return "i32.or" }
@@ -169,7 +174,6 @@ fn bin_instr(op: Str, opnd: Str) -> Str {
   if (op == "+") { return `call $int_add` }
   if (op == "-") { return `call $int_sub` }
   if (op == "*") { return `call $int_mul` }
-  if (op == "/") { return "i64.div_s" }
   if (op == "%") { return "i64.rem_s" }
   return ""
 }
@@ -838,6 +842,14 @@ fn trap_free_operand(node: Any, s: Scope) -> Bool {
 fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
   let op = node_op(node)
   if (op == "??") { return { wat: "<<DEFER-coalesce>>", ty: "" } }
+  // `/` is TRUE division: `Int / Int` is Float (docs/arithmetic.md), `7 / 2` is
+  // 3.5, and Float is refused on this tier BY NAME — the same refusal the
+  // reference raises. `i64.div_s` here was a silent 3 in the one position the
+  // tier allows Float (a `${…}` part), which is exactly what this port must not
+  // answer, and `f64.div` is no better: `$f64_to_str` traps on a finite float
+  // that is not integer-valued (docs/strings.md) where `/` is documented total.
+  // `%` is Int-only and keeps `i64.rem_s` (it traps at a zero divisor).
+  if (op == "/") { return { wat: "<<UNSUPPORTED-TRUE-DIVISION:Float>>", ty: "" } }
   let ln = value_field(node, "left")
   let rn = value_field(node, "right")
   let lty = infer_val_ty(ln, s)
@@ -2500,7 +2512,10 @@ test "bin_instr picks the width and the checked helpers" {
   assert bin_instr("+", "Int") == `call $int_add`
   assert bin_instr("*", "Int32") == `call $int32_mul`
   assert bin_instr("%", "Int") == "i64.rem_s"
-  assert bin_instr("/", "Int") == "i64.div_s"
+  // issue #2201: `/` has no instruction at either width — `Int / Int` is Float,
+  // and this tier refuses Float by name (render_bin answers the marker).
+  assert bin_instr("/", "Int") == ""
+  assert bin_instr("/", "Int32") == ""
   assert bin_instr("&&", "Bool") == "i32.and"
   assert bin_instr("||", "Bool") == "i32.or"
 }
