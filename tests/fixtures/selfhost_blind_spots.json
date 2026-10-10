@@ -296,6 +296,9 @@
       "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR. Compatibility aliases remain in cmp_suffix, but canonical source equality already exercises ==/!=.": [
         "op=!==",
         "op===="
+      ],
+      "Issue #2201: the WASM reference refuses `/` by name \u2014 it yields `Float`, which this tier does not lower \u2014 and selfhost/emit_wasm.rvl mirrors that refusal in `render_bin`. No CORPUS document can reach either arm, because a corpus document is one the reference EMITS: `ratio` in tests/fixtures/emit_wasm_refusals/true_division.rvl is the one document in the tree that reaches them, the line-coverage gate drives both halves over it, and tests/test_selfhost_emit_wasm.py::test_a_true_division_the_reference_refuses_is_refused_by_name_here_too asserts the refusal's text on both sides. `%` stays covered by arith.rvl.": [
+        "op=/"
       ]
     },
     "unported": {
@@ -353,9 +356,6 @@
         "kind=match",
         "pattern=_",
         "payload_type=Any"
-      ],
-      "The WASM reference explicitly rejects operands=Float and Float-valued module types. Source / yields Float (including Int/Int), so its legacy integer WAT instruction entry is not evidence of supported source division; named integer division builtins are a separate covered family.": [
-        "op=/"
       ],
       "The WASM reference explicitly rejects record update and optional field/call chaining. Plain records/field reads and Opt construction are covered but do not provide these operations.": [
         "kind=optcall",
