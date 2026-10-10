@@ -79,7 +79,8 @@ def test_a_bare_key_keeps_inferring_the_service():
 
 
 @pytest.mark.parametrize("provide", [":Kv", "kv:", ":", " : ", "kv: Kv Extra",
-                                     "k v: Kv", "kv: Kv:Kv", "1kv: Kv"])
+                                     "k v: Kv", "kv: Kv:Kv", "1kv: Kv",
+                                     "kv\u00e9: Kv", "kv: K\u00e9"])
 def test_a_malformed_key_service_names_the_accepted_forms(provide):
     with pytest.raises(ChangeError) as excinfo:
         change._provided(provide, {"kv": "Kv"})
