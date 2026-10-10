@@ -2424,6 +2424,21 @@ class Program:
 # carries the triple form
 _CANONICAL_OPS = {"===": "==", "!==": "!="}
 
+# issue #2187: keywords that can open a STATEMENT but never an expression or
+# a record field name. Used to recognise `fn f(..) = { <statement> … }` — a
+# block body written after a signature `=` — before the record-literal parse
+# misreports the statement keyword as a bad field name. Deliberately excludes
+# every keyword that can lead an expression (`true`/`false`/`null`, `hole`,
+# `config`, `match`, `if`, `emit`, `try`: all valid as a record-update base
+# `{ <expr> | … }`) and every keyword that can name a record field (idents and
+# `_RECORD_KEY_NOUNS`), so a genuine record literal like `= { k: x }` never
+# reaches the refusal.
+_STMT_ONLY_KWS = frozenset({
+    "let", "var", "effect", "subscribe", "return", "while", "for",
+    "assert", "break", "continue", "fail", "await", "verified",
+    "every", "after",
+})
+
 # item 384: foreign statement/declaration keywords that LEX as identifiers
 # (none is a revl keyword) and so land in a statement- or declaration-dispatch
 # position where they are already an error — but a cryptic one (`expected a
@@ -8054,7 +8069,9 @@ class Parser:
         # the identical AST a `{ return <expr> }` body produces — no new IR node,
         # no emitter change, no gate-crate movement.
         if self.at("="):
-            self.next()
+            eq = self.next()
+            # issue #2187: same stray-`=` shape as the provide-method `=` above
+            self._reject_equals_block_body(eq.line, name)
             body = [ReturnStmt(self.pure_expr(), line)]
             return FnDecl(name, params, returns, body, public, line, verified,
                           source=self.filename, type_params=type_params,
@@ -9574,6 +9591,36 @@ class Parser:
                 )
         return self.pure_expr()
 
+    def _reject_equals_block_body(self, eq_line: int, fname: str) -> None:
+        """Issue #2187: refuse `fn f(..) = { <statement> … }` with a diagnostic
+        that names the `=`, instead of the incidental record-literal error.
+
+        A signature that took `=` has an expression body, so the `{` after it
+        opens a record literal — never a block. When the first token inside is
+        a keyword that can only open a statement (`_STMT_ONLY_KWS`: `let`,
+        `var`, `effect`, …), no record reading is possible and the author meant
+        a block body: say so, and name the character to delete. Mirrors
+        `_arrow_body`, which handles the identical failure class for closures
+        by looking ahead to recognise the author's intent before the record
+        parser can misreport it.
+
+        Only fires on statement-only keywords, so a genuine record literal
+        like `fn go(x) = { k: x }` — or a record update `{ base | k = v }` —
+        keeps today's parse byte-for-byte.
+        """
+        if not self.at("{"):
+            return
+        nxt = self.peek_ahead(1)
+        if nxt.kind == "kw" and nxt.value in _STMT_ONLY_KWS:
+            raise self.err(
+                eq_line,
+                "a body written with `=` takes a single expression, not "
+                "statements",
+                hint=f"drop the `=` to write a block body (`fn {fname}(...) "
+                     f"{{ ... }}`) — the `{{` after `=` opens a record "
+                     f"literal, so `{nxt.value}` was read as a field name",
+            )
+
     def _arrow_params_ahead(self) -> bool:
         """Current token is `(` — is this `(a, b) => …` / `(a: Int) => …`
         rather than a parenthesised expression?
@@ -9681,7 +9728,12 @@ class Parser:
                 self.next()
                 returns = self.type_()
             if self.at("="):
-                self.next()
+                eq = self.next()
+                # issue #2187: `fn m(..) = { <statement> … }` is a block body
+                # written after a signature `=` — refuse with a diagnostic that
+                # names the `=` before the record-literal parse misreports the
+                # statement keyword as a bad field name.
+                self._reject_equals_block_body(eq.line, mname)
                 body = [ReturnStmt(self.pure_expr(), mline)]
             else:
                 self.expect("{")
