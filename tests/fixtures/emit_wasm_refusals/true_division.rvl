@@ -1,0 +1,25 @@
+// `Int / Int` yields `Float`, which is not a type this tier lowers: it supports
+// `Int`/`Bool` and says so by name (issue #2201). Both sides used to lower the
+// node to `i64.div_s` -- answering `3` where the language says `3.5`, a silent
+// wrong value in the one position the tier DOES admit a `Float` (a `${...}`
+// interpolation), and in the binding below.
+//
+// Both positions are here, because they reach different code. `ratio` is the
+// scalar binding: the reference refuses it in `_bin_expr`, and it is the only
+// document in the tree that reaches the port's `render_bin` refusal.
+// `half` is the interpolation: the reference refuses it in the same place, and
+// the port refuses the interpolation as `<<UNSUPPORTED-EXPR:interp>>` before it
+// gets that far -- the port's function-only slice carries no interpolation.
+//
+// This is not a byte-agreement case, so it cannot live in the tier's CORPUS.
+// The line-coverage gate drives the reference over it here, which is the only
+// way
+//
+//   backends/wasm/emit.py::_refuse_true_division
+//
+// ever runs. The refusal's text is asserted by
+// tests/test_selfhost_emit_wasm.py::
+// test_a_true_division_the_reference_refuses_is_refused_by_name_here_too.
+fn ratio(a: Int, b: Int) { return a / b }
+
+fn half(a: Int, b: Int) -> Str { return `${a / b}` }

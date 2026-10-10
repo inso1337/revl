@@ -32,16 +32,19 @@ Covered subset (what emits byte-identical):
     local), return, if/else, while, the bare-expr ``(drop)``, and assert;
   * ``_expr`` — lit (Int ``i64.const`` / Bool ``i32.const``), var (the
     param/local slot), bin (the checked ``$int_add``/``$int_sub``/``$int_mul``
-    and their ``$int32_*`` twins, ``%`` as ``i64.rem_s``, ``/`` as
-    ``i64.div_s``, the i64/i32 comparisons, ``&&``/``||`` as ``i32.and``/
-    ``i32.or``), un (``!`` as ``i32.eqz``, ``-`` as a checked subtract-from-zero).
+    and their ``$int32_*`` twins, ``%`` as ``i64.rem_s``, ``/`` REFUSED by name
+    because it yields ``Float`` (issue #2201), the i64/i32 comparisons,
+    ``&&``/``||`` as ``i32.and``/``i32.or``), un (``!`` as ``i32.eqz``, ``-`` as
+    a checked subtract-from-zero).
 
 Deliberately OUT (excluded from the corpus, deferred to wasm Path B slice 2+):
 any value that touches linear memory (Str, List, records, tagged Opt/Result/user
 variants — string literals pool into ``data`` and move ``heap_start``, and each
 value threads ``$alloc``/``_str_ptr``/the nested scratch-pointer stack); Float
-end to end (``/`` yields Float, refused at a scalar return/binding by name; a
-``${aFloat}`` part pulls in ``$f64_to_str``); every ``builtin``/``len`` node
+end to end (``/`` yields Float, so it is refused by name wherever it appears —
+issue #2201, including the scalar binding the port used to lower to
+``i64.div_s``; a ``${aFloat}`` part pulls in ``$f64_to_str``); every
+``builtin``/``len`` node
 (``.to_int()`` widening is a ``builtin``, not a bare ``widen`` marker) and the
 ``for`` loop (a memory walk); components/services entirely; ``match``/``adt`` over
 tagged cells; arrow values; ``??``; field/index; ``@wasm`` externs; and in-file
@@ -469,6 +472,57 @@ def test_a_ui_transaction_unit_is_refused_by_name_on_both_sides(emitted, referen
     assert [line.strip() for line in got.splitlines() if "<<" in line] == [
         ";; <<UNSUPPORTED-COMPONENT:Agent>>",
     ], "the port names what it cannot lower rather than answering with a module"
+
+
+TRUE_DIVISION = (
+    ROOT / "tests" / "fixtures" / "emit_wasm_refusals" / "true_division.rvl")
+
+
+def test_a_true_division_the_reference_refuses_is_refused_by_name_here_too(
+        emitted, reference):
+    """issue #2201: `/` yields `Float`, and BOTH sides have to say so.
+
+    The language types `Int / Int` as `Float` -- `7 / 2` is 3.5, not 3 -- and
+    this tier lowers neither `Float` nor any floating-point instruction: its
+    contract, stated in docs/arithmetic.md and pinned by
+    `tests/test_458_float_division_and_remainder.py::
+    test_wasm_refuses_float_by_name`, is to REFUSE `Float` by name. Both halves
+    used to lower this node to `i64.div_s` instead, which is not a refusal and
+    not a Float either: it is the silent wrong value 3, in the one position the
+    tier DOES admit a `Float` (a `${...}` interpolation) and in the scalar
+    binding below it.
+
+    Why REFUSE rather than lower as `f64.div`: this tier's `$f64_to_str`
+    renders only the integer-valued finite floats and TRAPS on every other one
+    (docs/strings.md, "Remaining wasm WAT work"), so `f64.div` would turn
+    `${7 / 2}` into a runtime trap in a language that documents `/` as total.
+
+    `%` over two `Int`s is untouched: it is `i64.rem_s`, and it keeps trapping
+    at a zero divisor. Only `/` moved.
+
+    Why the case lives in `emit_wasm_refusals/` rather than `CORPUS`: a document
+    the reference REFUSES has no bytes for the byte-agreement oracle to agree
+    with, so no corpus entry can reach this path at all. `ratio` is also the one
+    document in the tree that reaches the port's `render_bin` refusal.
+    """
+    ir = compile_files([str(TRUE_DIVISION)])
+    with pytest.raises(reference.EmitError) as exc:
+        reference.emit(ir)
+    message = str(exc.value)
+    assert message.startswith("ratio: "), message
+    assert "Float" in message, (
+        "the refusal names the type it will not lower: this case no longer "
+        "exercises it"
+    )
+    assert "only lowerable for Int/Int32" not in message, (
+        "that is the message for an operand the tier cannot type at all, not "
+        "for `Int / Int`, whose type is `Float` and is refused as such"
+    )
+    got = emitted["emit_wasm_src"](ir)
+    assert [line.strip() for line in got.splitlines() if "<<" in line] == [
+        "<<UNSUPPORTED-TRUE-DIVISION:Float>>",
+        "<<UNSUPPORTED-EXPR:interp>>",
+    ], "the port names the refusal rather than answering with a module"
 
 
 @pytest.mark.parametrize("source, reason", [

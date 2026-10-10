@@ -3074,14 +3074,21 @@ _CMP_SUFFIX = {
 _BOOL_OPS = {"&&": "i32.and", "||": "i32.or"}
 #: `Int` overflow *traps* (docs/arithmetic.md), and wasm has no checked
 #: arithmetic, so `+`/`-`/`*` go through helpers that test for overflow and
-#: execute `unreachable`. `/` and `%` cannot overflow into a wrong value — they
-#: trap natively on a zero divisor, which is the fault every other tier gives.
+#: execute `unreachable`. `%` cannot overflow into a wrong value — it traps
+#: natively on a zero divisor, which is the fault every other tier gives.
 _TRAPPING_INT_OPS = {"+": "call $int_add", "-": "call $int_sub", "*": "call $int_mul"}
 #: Int32 `+ - *` trap at the i32 edge through their own checked helpers, the
 #: same discipline as `Int` at half the width (docs/arithmetic.md).
 _TRAPPING_INT32_OPS = {"+": "call $int32_add", "-": "call $int32_sub",
                        "*": "call $int32_mul"}
-_RAW_INT_OPS = {"/": "i64.div_s", "%": "i64.rem_s"}
+#: `/` is deliberately ABSENT: it is true division, so `Int / Int` is `Float`
+#: (docs/arithmetic.md) and this tier refuses Float by name — see
+#: `_refuse_true_division`. `i64.div_s` here was a silent wrong value (7 / 2
+#: answered 3), and `f64.div` is no better: `$f64_to_str` traps on a
+#: non-integer-valued finite float (docs/strings.md §"Remaining wasm WAT work"),
+#: where the language documents `/` as total. Integer division is spelled
+#: `div_trunc` / `div_floor` / `div_euclid`.
+_RAW_INT_OPS = {"%": "i64.rem_s"}
 #: Int32 bitwise operators (item 366). wasm is the reference substrate: every
 #: one is a single native i32 instruction, and both shifts mask the count to 5
 #: bits (mod 32) exactly as the spec requires, so no count-masking is emitted
@@ -3177,6 +3184,29 @@ def _refuse_float_operands(node: Any, where: str) -> None:
         raise EmitError(
             f"{where}: type 'Float' is not lowerable — this tier supports "
             f"Int/Bool, and the operands of `{node.get('op')}` are Float")
+
+
+def _refuse_true_division(operand_ty: str, where: str) -> None:
+    """`/` over two `Int`s is refused BY NAME, because it is Float division.
+
+    `Int / Int` is `Float` (docs/arithmetic.md): `7 / 2` is `3.5`, not `3`. This
+    tier lowers `Int`/`Bool` and refuses `Float` by name, and the one position
+    where it does lower a Float — a `${…}` part feeding `$f64_to_str` — cannot
+    absorb the result either, because that renderer traps on a finite float that
+    is not integer-valued (docs/strings.md §"Remaining wasm WAT work") while the
+    language documents `/` as total. So both lowerings are wrong: `i64.div_s`
+    answers a silent `3`, and `f64.div` moves the wrong answer to a runtime trap.
+    The refusal is the tier's documented contract, and it is stated here rather
+    than left to surface as a generic "only lowerable for Int/Int32".
+
+    `%` is unaffected: it is Int-only and keeps `i64.rem_s`, which traps at a
+    zero divisor — the fault every other tier gives.
+    """
+    raise EmitError(
+        f"{where}: `/` yields 'Float' even over two {operand_ty}s, and 'Float' "
+        f"is not lowerable — this tier supports Int/Bool, so `{operand_ty} / "
+        f"{operand_ty}` is refused by name (docs/arithmetic.md); use "
+        f"div_trunc / div_floor / div_euclid for integer division")
 
 
 def _extern_wasm_body(ext: dict) -> str | None:
@@ -5343,6 +5373,13 @@ class _V3Emitter:
                 left_ty == right_ty and left_ty in ("Int", "Int32")):
             _refuse_float_operands(node, where)
             raise EmitError(f"{where}: arithmetic operator {op!r} is only lowerable for Int/Int32")
+        if op == "/":
+            # Past the guard above, `/` is over two Ints (or two Int32s) — and
+            # that is TRUE division, i.e. Float, which this tier refuses by name
+            # rather than lowering to `i64.div_s` (issue #2201). The Float-operand
+            # branch above already returned, so `Float / Float` in the renderer
+            # position is untouched.
+            _refuse_true_division(left_ty, where)
         if op not in _BINARY_OPS:
             raise EmitError(f"{where}: unsupported binary operator {op!r}")
         _refuse_float_operands(node, where)
