@@ -784,8 +784,11 @@ def check_verbs_in_guide() -> list[str]:
 # `docs/v2.0-roadmap.md` is excluded, for the reason DOC_STATUS_EXCLUDED gives:
 # it is the reasoning-of-record, appended to by nearly every PR, and it records
 # what was true when an item was written rather than what is true now. Its own
-# citations are gated by `tools/check_roadmap_claims.py`.
+# citations are gated by `tools/check_roadmap_claims.py`. Its closed items
+# moved verbatim to `docs/roadmap-archive/`, which is excluded for the same
+# reason (RESIDUAL_PROSE_EXCLUDED_DIRS).
 RESIDUAL_PROSE_EXCLUDED = frozenset({"docs/v2.0-roadmap.md"})
+RESIDUAL_PROSE_EXCLUDED_DIRS = ("docs/roadmap-archive/",)
 
 # A paragraph is only read for residual figures when it is about the native
 # chain. "Residual" is a word this repository uses for a dozen unrelated
@@ -841,7 +844,8 @@ def check_residual_claims(root: Path | None = None) -> list[str]:
     out: list[str] = []
     for path in paths:
         rel = path.relative_to(base).as_posix()
-        if rel in RESIDUAL_PROSE_EXCLUDED:
+        if rel in RESIDUAL_PROSE_EXCLUDED or rel.startswith(
+                RESIDUAL_PROSE_EXCLUDED_DIRS):
             continue
         for para, line in _paragraphs(path.read_text(encoding="utf-8")):
             if not _RESIDUAL_ANCHOR.search(para):

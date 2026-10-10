@@ -70,6 +70,8 @@ def _copy_tool_into(repo: Path) -> None:
     live inside the checkout it is judging, exactly as it does in CI."""
     (repo / "tools").mkdir(exist_ok=True)
     shutil.copyfile(TOOL, repo / "tools" / "check_roadmap_markers.py")
+    # The roadmap loader it imports (main file + docs/roadmap-archive/).
+    shutil.copyfile(TOOLS / "roadmap_source.py", repo / "tools" / "roadmap_source.py")
 
 
 def _run(repo: Path, *extra: str) -> subprocess.CompletedProcess:
