@@ -178,4 +178,8 @@ def test_rust_runner_exits_nonzero_on_an_unknown_component(monkeypatch, capsys):
     out = capsys.readouterr()
     assert rc != 0, out.out + out.err
     assert "unknown component 'no_such_component'" in out.out, out.out
+    # the component that booted before the stranger is torn down first, and
+    # the run never claims to be up
+    assert re.search(r"swap  \| kv_store\s+\| dispose", out.out), out.out
+    assert "[run] UP" not in out.out, out.out
     assert "the rust composition process exited 1" in out.err, out.err
