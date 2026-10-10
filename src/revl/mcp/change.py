@@ -302,17 +302,31 @@ def _composition_vocabulary(vs: dict) -> tuple[dict, dict]:
     return services, resolved
 
 
+_PROVIDE_FORMS = ("`provide` is a bare key (\"kv\") or \"key: Service\" "
+                  "(\"kv: Kv\") or {key, service}, e.g. "
+                  "{\"key\": \"kv\", \"service\": \"Kv\"}")
+
+
 def _provided(provide, keys: dict) -> tuple[str, str]:
+    import re  # noqa: PLC0415
+
     if isinstance(provide, dict) and isinstance(provide.get("key"), str):
         key = provide["key"]
         service = provide.get("service") or keys.get(key)
+    elif isinstance(provide, str) and ":" in provide:
+        key, _, service = (part.strip() for part in provide.partition(":"))
+        ident = re.compile(r"[A-Za-z_]\w*\Z")
+        if not (ident.match(key) and ident.match(service)):
+            raise ChangeError(f"{_PROVIDE_FORMS}; got {provide!r}, which is "
+                              "not `key: Service` with a name on each side")
     elif isinstance(provide, str) and provide:
         key, service = provide, keys.get(provide)
     else:
-        raise ChangeError("`provide` is a key, or {key, service}")
+        raise ChangeError(f"{_PROVIDE_FORMS}; got {provide!r}")
     if not service:
         raise ChangeError(f"the composition does not know `{key}` yet, so its "
-                          "service cannot be inferred: give {key, service}")
+                          "service cannot be inferred: give \"key: Service\" "
+                          "or {key, service}, e.g. \"kv: Kv\"")
     return key, service
 
 
