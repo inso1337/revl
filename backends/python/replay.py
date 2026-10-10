@@ -427,10 +427,18 @@ class Step:
         # A provider body's own emission made while answering a caller's
         # `emit svc.op(...)` is the same physical crossing the caller's record
         # already describes; recovery counts it there, once.
+        #
+        # Issue #2221: the ref also carries the recorder's PRIVATE `_timeline`
+        # and `_step` (live objects, what `_record_emission_outcome` needs), so
+        # it is projected down to the public keys here — a live `Timeline` must
+        # never reach a record that is serialised. Issue #1889's `process`,
+        # which names the caller process of a served crossing and is documented
+        # in docs/crash-recovery.md, is public and stays.
         enclosing = _ENCLOSING.get()
-        self.within: Optional[dict] = ({key: enclosing[key]
-                                      for key in ("seq", "component", "label")}
-                                     if enclosing is not None else None)
+        self.within: Optional[dict] = (
+            {key: enclosing[key] for key in ("seq", "component", "label", "process")
+             if key in enclosing}
+            if enclosing is not None else None)
         # the WAL seq this step was written at, once it is (None without a WAL)
         self.wal_seq: Optional[int] = None
         self.crossed = False          # an emission the unwind stepped over
