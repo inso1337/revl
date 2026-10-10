@@ -181,6 +181,18 @@ A tier verdict is `pass` only when both agree. If node cannot run an emitted
 module at all (too old), the tier reports **skip with the reason** rather than
 passing on vitest's word.
 
+Both executions carry a wall-clock bound, because the deadline is on a process
+whose runtime is a property of the HOST: on a loaded machine a run that is
+still working is killed and reported as a failure (issue #2229). The bound is
+`REVL_TS_TIMEOUT` seconds, default 180, read by `src/revl/test.py`; vitest's own
+`testTimeout`/`hookTimeout` are derived from the same variable in
+`backends/typescript/vitest.config.ts` at the ratio the two literals already had
+(a third, so 60s by default), so vitest reports a named test first and the outer
+bound is the backstop. When the outer bound fires, the verdict names the
+composition, the bound and the variable to raise, instead of a raw
+`subprocess.TimeoutExpired`; the timed-out child's whole process group is killed,
+so no vitest fork worker outlives the run.
+
 Two gates in CI, one per shape.
 
 **The test shape.** `tests/test_cross_tier_execution.py` drives `RUNNERS["ts"]`
