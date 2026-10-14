@@ -23,7 +23,7 @@ $ revl attest service.rvl --key ci-signer.key
 attestation: admitted  (revl.attestation v2.0)
   composition sha256: 6f1e…（64 hex）
   guarantees: G1, G2, G3, G4, G5, G6, G7, G8, G9
-  checker:    revl 2.0.0, ruleset 4ccbf1242e16…
+  checker:    revl 0.3.0rc1, ruleset 4ccbf1242e16…
   signed:     2026-08-25T00:00:00+00:00  (hmac-sha256, key 3a9c…)
   signer:     ci@revl
   signature:  b2d4…（64 hex）
@@ -286,7 +286,7 @@ $ revl attest service.rvl --certificate --key ci-signer.key
 certificate: admitted  (revl.component-certificate v1.1)
   subject:   service.rvl  (source 6edb64a9969e, ir c38dc4f80f98)
   proof:     leanprover/lean4:v4.33.1  (as of 16c2be6cbdaa)
-  checker:   revl 2.0.0, ruleset 3e202568c8a0
+  checker:   revl 0.3.0rc1, ruleset 3e202568c8a0
   signed:    2026-09-10T04:17:27+00:00  (hmac-sha256, key a03904d368b21d03)
   evidence:  39 requirements over 9 attested guarantees, 12 conditional, 2 with no recorded status
   coverage:

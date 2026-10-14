@@ -13,7 +13,7 @@
 /** The gate frontier this client was generated under (item 338: a
  *  refusal is authoritative; an admission is a compile-time judgment
  *  scoped to THIS frontier, never a runtime-confinement claim). */
-export const REVL_GATE_FRONTIER = "reference-full:2.0.0";
+export const REVL_GATE_FRONTIER = "reference-full:0.3.0rc1";
 
 /** How the client reaches the remote. The client marshals nothing
  *  itself: the canonical wire encoding IS the TS type shape below

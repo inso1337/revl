@@ -17,7 +17,7 @@
 # an expected-before check (issue #523), documented in docs/witnessed-fs.md.
 [project]
 name = "revl"
-version = "2.0.0"
+version = "0.3.0rc1"
 description = "A research language for spatiotemporal composability (Cordis paradigm)"
 readme = "README.md"
 requires-python = ">=3.11"

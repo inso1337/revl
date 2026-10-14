@@ -2,7 +2,7 @@
 // entirely in the browser. No server, no build step, nothing leaves the page.
 import { EXAMPLES } from "./examples.js";
 
-const WHEEL = "vendor/revl-2.0.0-py3-none-any.whl";
+const WHEEL = "vendor/revl-0.3.0rc1-py3-none-any.whl";
 
 // The in-process driver. Everything the playground shows comes from calling
 // the same functions revl's CLI calls — no shelling out, no re-implementation.

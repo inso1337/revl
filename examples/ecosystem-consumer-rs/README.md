@@ -56,7 +56,7 @@ prints one line per candidate. It logs `gate_version()` once per run —
 **four** fields here, not py's three:
 
 ```
-gate_version: api=1.0.0 language=2.0.0 frontier=selfhost-admit:<hash>
+gate_version: api=1.0.0 language=0.3.0rc1 frontier=selfhost-admit:<hash>
 gate_layer: composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer
 ```
 

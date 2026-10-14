@@ -61,7 +61,7 @@ weekly:
      dropped that step would publish a `site/` with no wheel in it and 404 the
      playground, and nothing else in the tree would notice.
   2. A fresh build is named exactly what the pages fetch. `site/js/playground.js`
-     and `playground/app.js` hardcode `vendor/revl-2.0.0-py3-none-any.whl`,
+     and `playground/app.js` hardcode `vendor/revl-0.3.0rc1-py3-none-any.whl`,
      while the builder names its output from `pyproject.toml`'s version — so a
      version bump renames the wheel and 404s both playgrounds. That was true
      before this change too and nothing checked it.

@@ -281,7 +281,7 @@ pub use ir::{check_ir_boundary, IrRefusal, KNOWN_IR_FIELDS, KNOWN_IR_REVISIONS};
 pub const GATE_API_VERSION: &str = "1.0.0";
 
 /// The revl language/package version this gate's refusals are drawn from.
-pub const LANGUAGE_VERSION: &str = "2.0.0";
+pub const LANGUAGE_VERSION: &str = "0.3.0rc1";
 
 /// The semver of the NAVIGATION surface ([`symbols`]), versioned on its own.
 /// It is not part of the admission surface [`GATE_API_VERSION`] names and has

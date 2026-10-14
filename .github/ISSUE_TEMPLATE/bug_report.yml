@@ -91,7 +91,7 @@ body:
         revl version or commit SHA (`git rev-parse --short HEAD`), Python version, and — if a tier
         runtime is involved — the toolchain version (node, cargo, javac, wasmtime, go).
       placeholder: |
-        revl: 2.0.0 (or commit abc1234)
+        revl: 0.3.0rc1 (or commit abc1234)
         python: 3.12
         toolchain: wasmtime 47.0.3
     validations:

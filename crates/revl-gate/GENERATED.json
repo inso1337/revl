@@ -87,7 +87,7 @@
     "types"
   ],
   "issues_admissions": true,
-  "language_version": "2.0.0",
+  "language_version": "0.3.0rc1",
   "layer": "1 (verdict surface), admit-only",
   "manifest_arm": "revl_gate::admit_into(source, manifest) \u2014 the item-186 ambient gate as a binding: the union fold's G2/G3 legs, the replacement wave's withdrawals and its `C=k:T` state hand-offs. Refuses a row it cannot read rather than skipping it, and issues no admission.",
   "max_level_items": 1024,

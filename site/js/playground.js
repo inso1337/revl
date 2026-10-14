@@ -5,7 +5,7 @@
 import { EXAMPLES } from "./examples.js";
 import { highlightRevl } from "./revl-lang.js";
 
-const WHEEL = "vendor/revl-2.0.0-py3-none-any.whl";
+const WHEEL = "vendor/revl-0.3.0rc1-py3-none-any.whl";
 const CORDIS_WHEEL = "vendor/cordis-4.0.0-py3-none-any.whl";
 
 // The in-process driver — the same functions the CLI calls.

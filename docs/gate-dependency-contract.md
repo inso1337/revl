@@ -68,7 +68,7 @@ The admission is also scoped to the gate that produced it. `gate_version()`
 returns three fields:
 
 ```python
-{"api": "1.0.0", "language": "2.0.0", "frontier": "reference-full:2.0.0"}
+{"api": "1.0.0", "language": "0.3.0rc1", "frontier": "reference-full:0.3.0rc1"}
 ```
 
 - **`api`**: the semver of the `revl.gate` surface itself. Branch your
@@ -88,7 +88,7 @@ verdict itself.** Two gates at different frontiers can disagree on the same
 source. If you cache a verdict, transmit it to another service, or compare it
 against a verdict from a different revl deployment, record `frontier`
 alongside it. "revl admitted it" is not a portable fact on its own; "revl's
-`reference-full:2.0.0` gate admitted it" is.
+`reference-full:0.3.0rc1` gate admitted it" is.
 
 ## Clause 3: the runtime half is a separate adoption
 
