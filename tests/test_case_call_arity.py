@@ -21,6 +21,7 @@ from revl.errors import RevlError
 SHAPE = "type Shape = Dot | Box(Int)\n"
 PAIR = "type P = Pp(Int) | Qq\n"
 MB = "type Mb[T] = Jj(T) | Nn\n"
+TALLY = "service Tally { fn count() -> Int\n  fn shape() -> Shape }\n"
 
 # name -> (source, the refusal message)
 REFUSED: dict[str, tuple[str, str]] = {
@@ -68,6 +69,20 @@ REFUSED: dict[str, tuple[str, str]] = {
         "type Outcome = Ok(Int) | Err(Str)\n"
         "fn mk() -> Outcome { return Ok() }",
         "variant case `Ok` takes 1 payload argument, 0 given"),
+    # a provide body is checked on its lowered IR, not by `infer_ast`
+    "provide_expression_body": (
+        SHAPE + TALLY + "component C provides t: Tally { provide t {\n"
+                        "  fn count() = 1\n"
+                        "  fn shape() = Box(1, 2) } }",
+        "variant case `Box` takes 1 payload argument, 2 given"),
+    "provide_block_body": (
+        SHAPE + TALLY + "component C provides t: Tally { provide t {\n"
+                        "  fn count() = 1\n"
+                        "  fn shape() {\n"
+                        "    let o = Some(1, 2)\n"
+                        "    return Dot\n"
+                        "  } } }",
+        "variant case `Some` takes 1 payload argument, 2 given"),
 }
 
 # Well-formed calls around the refusals: the rule must not move these.
@@ -79,6 +94,13 @@ ADMITTED: dict[str, str] = {
     "ok": "fn mk() -> Result[Int, Str] { return Ok(1) }",
     "err": 'fn mk() -> Result[Int, Str] { return Err("e") }',
     # a local of function type named like a case is a call of the local
+    "provide_body": (
+        SHAPE + TALLY + "component C provides t: Tally { provide t {\n"
+                        "  fn count() = 1\n"
+                        "  fn shape() {\n"
+                        "    let o = Some(1)\n"
+                        "    return Box(1)\n"
+                        "  } } }"),
     "shadowing_local": (
         SHAPE + "fn mk() -> Int {\n"
                 "  let Box = (a: Int, b: Int) => a + b\n"

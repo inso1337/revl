@@ -2780,9 +2780,16 @@ def check_case_call_arity(expr, tenv: dict, types: dict,
     if parse_type(tenv.get(name))[0] == FN_HEAD:
         return
     case = (types.get(CASES_KEY) or {}).get(name)
-    if case is None:
-        return
-    want, given = case_payload_arity(name, case), len(expr.args)
+    if case is not None:
+        check_case_arity(name, case, len(expr.args), filename,
+                         getattr(expr, "line", 0))
+
+
+def check_case_arity(name: str, case: dict, given: int, filename: str,
+                     line: int) -> None:
+    """Raise the issue #2447 refusal when `given` is not `name`'s payload
+    count. Shared by the AST checker and the component-body IR sweep."""
+    want = case_payload_arity(name, case)
     if want == given:
         return
     payload = render_type(case.get("payload"))
@@ -2793,7 +2800,7 @@ def check_case_call_arity(expr, tenv: dict, types: dict,
     else:
         hint = f"`{name}` carries one payload: write `{name}(value)`"
     raise RevlError(
-        filename, getattr(expr, "line", 0),
+        filename, line,
         f"variant case `{name}` takes {want} payload "
         f"argument{'' if want == 1 else 's'}, {given} given",
         hint=hint, code="T1", category="type-mismatch",
@@ -3111,6 +3118,16 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         # provision at lower time, so `service` is always present.
         return node.get("service")
     if kind == "call":
+        callee = node.get("callee")
+        if filename and isinstance(callee, dict) and callee.get("kind") == "var":
+            # `Some`/`None` (and an untagged `Ok`/`Err`) lower to a call of
+            # the constructor, not an `adt` node: count its arguments too
+            # (issue #2447)
+            case = (types.get(CASES_KEY) or {}).get(callee.get("name"))
+            if case is not None and str(case.get("adt") or "").startswith(
+                    ("Opt[", "Result[")):
+                check_case_arity(callee["name"], case,
+                                 len(node.get("args") or []), filename, line)
         target = node.get("target")
         if isinstance(target, dict) and target.get("kind") == "req":
             svc = services.get(tenv.get(f"req.{target.get('name')}") or "")
@@ -3215,6 +3232,10 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         tname = node.get("type")
         case_name = node.get("case")
         args = node.get("args") or []
+        case_entry = (types.get(CASES_KEY) or {}).get(case_name)
+        if filename and case_entry is not None:
+            # issue #2447: the payload count, as `infer_ast` checks it
+            check_case_arity(case_name, case_entry, len(args), filename, line)
         spec = types.get(tname or "")
         generic = isinstance(spec, dict) and bool(spec.get("params"))
         payload = None

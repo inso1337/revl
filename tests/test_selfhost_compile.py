@@ -3342,6 +3342,8 @@ CASE_ARITY_NATIVE_VERDICTS: dict[str, str] = {
         "REFUSED|T1|this function's return expects `Mb[Int]`, got `Mb`",
     "missing_payload": "EMITS",
     "none_argument": "EMITS",
+    "provide_block_body": "EMITS",
+    "provide_expression_body": "EMITS",
     "ok_extra": "EMITS",
     "some_extra": "EMITS",
     "some_missing": "EMITS",

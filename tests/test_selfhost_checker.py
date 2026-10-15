@@ -1768,6 +1768,15 @@ def test_case_arity_is_a_known_silent_admit(infer_prog, prog_expr):
     prog, expr = prog_expr
     assert _ref_prog_infer(prog, expr) == "refuse", \
         f"corpus bug: reference accepts {prog!r} / {expr!r}"
+    # and refuses for the count, not for some other reason
+    program = refparser.Parser(prog, "diff.rvl").parse()
+    types = _lower_type_decls(program, "diff.rvl")
+    types[CASES_KEY] = _case_table(types)
+    with pytest.raises(RevlError) as refused:
+        infer_ast(_ref_parse(expr), dict(ENV), types, filename="diff.rvl")
+    case = expr.split("(")[0]
+    assert refused.value.message.startswith(f"variant case `{case}` takes "), \
+        refused.value.message
     got = infer_prog(prog, expr)
     assert got == CASE_ARITY_SILENT_ADMITS[prog_expr], (
         f"{prog!r} / {expr!r}: recorded as "

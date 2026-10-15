@@ -957,10 +957,12 @@ component Reader provides feed: Feed {
 """),
     # The accepting twin of the single-case-alias G1 rejections: a MULTI-case
     # variant registers each case name as a constructor, builtin-spelled names
-    # included (`type T = Foo | Str` makes `Str(...)` a real case), so both
-    # implementations admit the call. Pinned so the `type_ctors` alias/variant
-    # split cannot regress into refusing a genuine constructor.
-    ("bare call of a builtin-named case in a multi-case variant", """type T = Foo | Str
+    # included (`type T = Foo | Str(Str)` makes `Str(...)` a real case), so
+    # both implementations admit the call. Pinned so the `type_ctors`
+    # alias/variant split cannot regress into refusing a genuine constructor.
+    # The case carries a payload: a nullary `Str` called with an argument is
+    # refused for its count (issue #2447).
+    ("bare call of a builtin-named case in a multi-case variant", """type T = Foo | Str(Str)
 service S { fn go() -> Int }
 component C provides s: S {
   provide s { fn go() { let x = Str("a")   return 0 } }
@@ -7323,6 +7325,11 @@ _NR_LATER_SLICES = (
     # raises it while typing the call, which is ahead of the lowering walk this
     # slice runs in, so the gate reports a LATER refusal instead.
     "payload expects",
+    # the same constructor's payload COUNT (issue #2447): `NrCircle(x)` calls
+    # a nullary case with an argument. The gate does not count case arguments
+    # yet (tests/test_selfhost_compile.py::CASE_ARITY_NATIVE_VERDICTS), so it
+    # reports a LATER refusal, as for `payload expects`.
+    "payload argument",
     # a callable NAME read as a VALUE. `nr_helper` and `nr_ext` resolve here —
     # that is this slice's whole claim — but neither the signature rows nor the
     # `fn`-token scan gives such a read a function TYPE, so a refusal that
