@@ -747,6 +747,51 @@ def test_a_keyword_wire_name_has_one_verdict_on_every_surface(consumer, keyword)
         f"both read, over the keyword realm {keyword!r}: {issued}")
 
 
+# Issue #2453: the reference's realm label is wider than a bare identifier.
+# `parser._REALM_LABEL_RE` is `[A-Za-z0-9][A-Za-z0-9._-]*`, so `w-1`, `1a` and
+# `a.b` are all legal labels, and `manifest_wire` writes them on the wire as
+# spelled. A label cannot carry a wire separator (`; , / < > = : !`), so none of
+# these is ambiguous; `manifest_shape` used to read the realm field with the
+# NAME rule and decline the whole wire over a label the reference admits.
+@pytest.mark.parametrize("label", ["w-1", "1a", "a.b", "7", "w_1-2.x"])
+def test_a_non_identifier_realm_label_does_not_decline_the_wire(consumer, label):
+    """Issue #2453: a legal realm label that is not a bare identifier is read as
+    the realm it is, on a provision, a requirement and a route row alike."""
+    from revl import gate as py_gate
+    running = compile_source(
+        _KEYWORD_REALM_RUNNING.replace("REALM", label), "running.rvl")
+    wire = manifest_wire(running)
+    assert f"Kv/store/{label};" in wire, wire
+    assert f"App<store/{label};" in wire, wire
+    fresh = "service Ledger {\n  fn append(row: Str) -> Int\n}\n"
+    assert py_gate.admit_into(fresh, running).admitted is True
+    [issued] = _crate_verdicts(consumer, [fresh], "--admission-into", wire)
+    assert issued["admitted"] is True, (
+        f"the admission surface declined a wire the reference reads, over the "
+        f"realm label {label!r}: {issued}")
+    routed = wire + ";App>store/" + label
+    [issued] = _crate_verdicts(consumer, [fresh], "--admission-into", routed)
+    assert issued["admitted"] is True, (
+        f"the admission surface declined a route row over the realm label "
+        f"{label!r}: {issued}")
+    # and the label is carried, not skipped: a route into a realm nothing
+    # provides is refused BY NAME, which is the check the label feeds
+    dangling = wire + ";App>store/" + label + "x"
+    [issued] = _crate_verdicts(consumer, [fresh], "--admission-into", dangling)
+    assert issued["code"] == "ROUTE" and f"`{label}x`" in issued["message"], issued
+
+
+@pytest.mark.parametrize("label", ["-w", ".w", "w w", "w\u00e9"])
+def test_a_garbled_realm_field_still_declines_the_wire(consumer, label):
+    """The wire stays fail-closed for a realm field the reference could not have
+    rendered: a leading `-` (a withdrawal marker) or
+    `.`, whitespace and non-ASCII."""
+    fresh = "service Ledger {\n  fn append(row: Str) -> Int\n}\n"
+    wire = f"Kv/store/{label};App/app/;App<store/{label};!services;:Store;:AppSvc"
+    [issued] = _crate_verdicts(consumer, [fresh], "--admission-into", wire)
+    assert issued["admitted"] is False, (label, issued)
+
+
 def test_every_refusal_the_crate_issues_is_a_real_reference_refusal(agreement):
     """The sound direction, held on its own over the whole corpus at once: the
     crate must never REFUSE a program the reference admits either — that would

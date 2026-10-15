@@ -384,6 +384,27 @@ fn is_wire_name(field: &str) -> bool {
     is_ident_start(bytes[0]) && bytes[1..].iter().all(|&b| is_ident_byte(b))
 }
 
+/// A realm label as a MANIFEST WIRE field (issue #2453): the reference's own
+/// label rule, `[A-Za-z0-9][A-Za-z0-9._-]*` (`revl.parser._REALM_LABEL_RE`).
+///
+/// A label is a string literal in the source and is wider than a name: `w-1`,
+/// `1a` and `a.b` are all legal, and `revl.manifest.manifest_wire` writes them
+/// on the wire as spelled. Reading the realm field with [`is_wire_name`] made
+/// this surface decline the whole wire over a label the reference admits. None
+/// of the extra bytes (`-`, `.`, a leading digit) is a wire separator or a row
+/// marker, and the first byte is alphanumeric, so a leading `-` (a withdrawal)
+/// still cannot pass. The empty label is the shared realm and is handled by
+/// each caller, as before.
+fn is_wire_realm(field: &str) -> bool {
+    let bytes = field.as_bytes();
+    match bytes.first() {
+        Some(first) if first.is_ascii_alphanumeric() => {
+            bytes[1..].iter().all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        }
+        _ => false,
+    }
+}
+
 /// A name this source may DECLARE: a name that does not shadow a reference
 /// builtin type or the reserved opaque `Principal`.
 fn is_declarable(token: &str) -> bool {
@@ -1274,7 +1295,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
                 return None;
             }
             // an empty label is the shared realm, exactly as on a provision row
-            if realms.split(',').any(|r| !r.is_empty() && !is_wire_name(r)) {
+            if realms.split(',').any(|r| !r.is_empty() && !is_wire_realm(r)) {
                 return None;
             }
             components.push(component);
@@ -1302,7 +1323,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
                 Some((key, realm)) => (key, realm),
                 None => (spec, ""),
             };
-            if !is_wire_name(key) || (!realm.is_empty() && !is_wire_name(realm)) {
+            if !is_wire_name(key) || (!realm.is_empty() && !is_wire_realm(realm)) {
                 return None;
             }
             required.push(key);
@@ -1325,7 +1346,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
         if !is_wire_name(component) || !is_wire_name(key) {
             return None;
         }
-        if !realm.is_empty() && !is_wire_name(realm) {
+        if !realm.is_empty() && !is_wire_realm(realm) {
             return None;
         }
         provided.push(key);
@@ -1357,6 +1378,20 @@ mod tests {
         assert!(basis.contains("services=1"), "{}", basis);
         assert!(basis.contains("methods=2"), "{}", basis);
         assert!(basis.contains(SURFACE_ID), "{}", basis);
+    }
+
+    #[test]
+    fn a_realm_label_is_wider_than_a_wire_name() {
+        // Issue #2453: the reference's label rule, not the name rule.
+        for label in ["w-1", "1a", "a.b", "7", "w_1-2.x", "match"] {
+            assert!(is_wire_realm(label), "{}", label);
+        }
+        for garbled in ["", "-w", ".w", "_w", "w w", "a/b", "a,b", "a;b", "a<b", "\u{e9}"] {
+            assert!(!is_wire_realm(garbled), "{:?}", garbled);
+        }
+        let wire = "Kv/store/w-1;App/app/;App<store/w-1;App>store/w-1,1a;!services;:Store;:AppSvc";
+        assert!(manifest_shape(wire).is_some());
+        assert!(manifest_shape("Kv/store/-w;App/app/;!services").is_none());
     }
 
     #[test]
