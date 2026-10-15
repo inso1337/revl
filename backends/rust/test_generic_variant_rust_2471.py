@@ -41,10 +41,12 @@ _spec.loader.exec_module(rust_emit)
 # Construction, a match that binds the payload, functions taking and returning
 # `Mb[Int]`, two instantiations (`Mb[Int]`, `Mb[Str]`) and a nested one, a
 # two-parameter variant, a `List` payload, a record field, a list of variants,
-# lets and structural equality.
+# lets and structural equality, unpinned list literals (`[Nn, Jj(4)]`,
+# `[None, Some(5)]`) and a parameter no case names (`Ph[T]`).
 PROGRAM = """\
 type Mb[T] = Jj(T) | Nn
 type Ei[L, R] = Le(L) | Ri(R)
+type Ph[T] = Aa | Bb
 type Holder = { name: Str, slot: Mb[Str] }
 
 fn len_of(s: Str) -> Int { return s.length() }
@@ -141,6 +143,40 @@ fn wild(m: Mb[Int]) -> Int {
   }
 }
 
+fn flip(p: Ph[Int]) -> Ph[Int] {
+  return match p {
+    Aa => Bb,
+    Bb => Aa,
+  }
+}
+
+fn is_aa(p: Ph[Int]) -> Bool {
+  return match p {
+    Aa => true,
+    Bb => false,
+  }
+}
+
+fn opt_of(o: Opt[Int]) -> Int {
+  return match o {
+    Some(x) => x,
+    None => 0,
+  }
+}
+
+fn literal() -> Int {
+  let xs = [Nn, Jj(4)]
+  let os = [None, Some(5)]
+  var acc = 0
+  for (m of xs) {
+    acc = acc + un(m)
+  }
+  for (o of os) {
+    acc = acc + opt_of(o)
+  }
+  return acc
+}
+
 test "construct and match a generic variant" {
   assert un(Jj(41)) == 41
   assert un(Nn) == 0
@@ -171,6 +207,10 @@ test "generic variant values in lets, records and lists" {
   assert wild(Jj(5)) == 1
   assert wild(Nn) == 2
   assert Jj("a") != Nn
+  assert literal() == 9
+  assert is_aa(flip(Bb))
+  assert !is_aa(flip(Aa))
+  assert flip(Aa) == Bb
 }
 """
 
@@ -183,6 +223,9 @@ def test_the_variant_enum_declares_its_type_parameters():
     src = rust_emit.emit(_ir())
     assert "pub enum Mb<T> {\n    Jj(T),\n    Nn,\n}" in src, src
     assert "pub enum Ei<L, R> {\n    Le(L),\n    Ri(R),\n}" in src, src
+    # `Ph[T]` names `T` in no case, and rustc rejects an unused parameter
+    # (E0392): a hidden case carries it as PhantomData
+    assert "    __RevlPhantom(std::marker::PhantomData<fn() -> (T,)>),\n}" in src, src
     assert "    slot: Mb<String>," in src, src
     assert "fn un(m: Mb<i64>) -> i64 {" in src, src
     assert "fn size(m: Mb<String>) -> Mb<i64> {" in src, src
@@ -213,6 +256,7 @@ service S {
   fn get(n: Int) -> Mb[Int]
   fn read(m: Mb[Str]) -> Str
   fn bump(m: Mb[Int]) -> Mb[Int]
+  fn many(n: Int) -> List[Mb[Int]]
 }
 
 component P provides s: S {
@@ -235,6 +279,9 @@ component P provides s: S {
         Nn => Nn,
       }
     }
+    fn many(n) {
+      return [Jj(n), Nn]
+    }
   }
 }
 
@@ -243,6 +290,14 @@ fn un(m: Mb[Int]) -> Int {
     Jj(x) => x,
     Nn => 0,
   }
+}
+
+fn sum(ms: List[Mb[Int]]) -> Int {
+  var acc = 0
+  for (m of ms) {
+    acc = acc + un(m)
+  }
+  return acc
 }
 
 lifecycle test "a service passes generic variants" {
@@ -257,6 +312,8 @@ lifecycle test "a service passes generic variants" {
   assert q == "none"
   let b = call s.bump(Jj(1))
   assert un(b) == 2
+  let xs = call s.many(5)
+  assert sum(xs) == 5
   unload P
   assert no_residue
 }

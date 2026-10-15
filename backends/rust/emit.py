@@ -1440,6 +1440,17 @@ def _split_fn_type(name: str) -> tuple[list[str], str]:
     raise EmitError(f"malformed function type: {name!r}")
 
 
+_RUST_TYPE_WORD = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _rust_phantom_params(spec: dict) -> list:
+    """The type parameters of a generic variant that no case payload names."""
+    used = set()
+    for case in spec.get("cases") or []:
+        used.update(_RUST_TYPE_WORD.findall(str(case.get("payload") or "")))
+    return [p for p in spec.get("params") or [] if p not in used]
+
+
 def _rust_type(name: object, types: dict | None = None,
                position: str = "value") -> str:
     """Surface type -> Rust type. Unknown named types map to cordis `Value`.
@@ -9002,6 +9013,17 @@ def _emit_v3_types(types: dict) -> list[str]:
                     if (raw_name, case.get("name")) in boxed_cases:
                         rendered = f"Box<{rendered}>"
                     out.append(f"    {cname}({rendered}),")
+            phantom = _rust_phantom_params(spec)
+            if phantom:
+                # issue #2471: a parameter no payload names (`type Ph[T] =
+                # Aa | Bb`) is rejected by rustc (E0392); a hidden case that
+                # carries it as PhantomData keeps `Ph::Aa` a plain unit case.
+                # No value ever holds it, serde skips it, and every emitted
+                # match already ends in `_ => unreachable!()`
+                marker = ", ".join(_ident(p, "type name") for p in phantom)
+                out.append("    #[doc(hidden)]")
+                out.append("    #[serde(skip)]")
+                out.append(f"    __RevlPhantom(std::marker::PhantomData<fn() -> ({marker},)>),")
             out.append("}")
         else:
             raise EmitError(f"unsupported type kind {spec.get('kind')!r} for {name!r}")

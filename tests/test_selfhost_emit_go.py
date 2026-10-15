@@ -1021,7 +1021,7 @@ def test_a_host_identifier_collision_is_refused_by_name(reference):
 # refuses these documents loudly first (GENERIC_VARIANT_LOUD_REFUSALS in
 # tests/test_selfhost_compile.py). Same ratchet as that table: the day the
 # port follows the reference this fails, and the entry is DELETED and the
-# document added to CORPUS. issue: TBD
+# document added to CORPUS. issue #2494
 GENERIC_VARIANT_PORT_GAPS: dict[str, tuple[str, str, str]] = {
     "construct_and_match": (
         "type Mb[T] = Jj(T) | Nn\n"

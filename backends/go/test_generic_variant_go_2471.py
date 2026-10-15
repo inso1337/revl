@@ -42,10 +42,12 @@ _spec.loader.exec_module(go_emit)
 # Construction, a match that binds the payload, functions taking and returning
 # `Mb[Int]`, two instantiations (`Mb[Int]`, `Mb[Str]`) and a nested one, a
 # two-parameter variant, a `List` payload, a record field, a list of variants,
-# lets and structural equality.
+# lets and structural equality, unpinned list literals (`[Nn, Jj(4)]`,
+# `[None, Some(5)]`) and a parameter no case names (`Ph[T]`).
 PROGRAM = """\
 type Mb[T] = Jj(T) | Nn
 type Ei[L, R] = Le(L) | Ri(R)
+type Ph[T] = Aa | Bb
 type Holder = { name: Str, slot: Mb[Str] }
 
 fn len_of(s: Str) -> Int { return s.length() }
@@ -142,6 +144,40 @@ fn wild(m: Mb[Int]) -> Int {
   }
 }
 
+fn flip(p: Ph[Int]) -> Ph[Int] {
+  return match p {
+    Aa => Bb,
+    Bb => Aa,
+  }
+}
+
+fn is_aa(p: Ph[Int]) -> Bool {
+  return match p {
+    Aa => true,
+    Bb => false,
+  }
+}
+
+fn opt_of(o: Opt[Int]) -> Int {
+  return match o {
+    Some(x) => x,
+    None => 0,
+  }
+}
+
+fn literal() -> Int {
+  let xs = [Nn, Jj(4)]
+  let os = [None, Some(5)]
+  var acc = 0
+  for (m of xs) {
+    acc = acc + un(m)
+  }
+  for (o of os) {
+    acc = acc + opt_of(o)
+  }
+  return acc
+}
+
 test "construct and match a generic variant" {
   assert un(Jj(41)) == 41
   assert un(Nn) == 0
@@ -172,6 +208,10 @@ test "generic variant values in lets, records and lists" {
   assert wild(Jj(5)) == 1
   assert wild(Nn) == 2
   assert Jj("a") != Nn
+  assert literal() == 9
+  assert is_aa(flip(Bb))
+  assert !is_aa(flip(Aa))
+  assert flip(Aa) == Bb
 }
 """
 
@@ -216,6 +256,7 @@ service S {
   fn get(n: Int) -> Mb[Int]
   fn read(m: Mb[Str]) -> Str
   fn bump(m: Mb[Int]) -> Mb[Int]
+  fn many(n: Int) -> List[Mb[Int]]
 }
 
 component P provides s: S {
@@ -238,6 +279,9 @@ component P provides s: S {
         Nn => Nn,
       }
     }
+    fn many(n) {
+      return [Jj(n), Nn]
+    }
   }
 }
 
@@ -246,6 +290,14 @@ fn un(m: Mb[Int]) -> Int {
     Jj(x) => x,
     Nn => 0,
   }
+}
+
+fn sum(ms: List[Mb[Int]]) -> Int {
+  var acc = 0
+  for (m of ms) {
+    acc = acc + un(m)
+  }
+  return acc
 }
 
 lifecycle test "a service passes generic variants" {
@@ -260,6 +312,8 @@ lifecycle test "a service passes generic variants" {
   assert q == "none"
   let b = call s.bump(Jj(1))
   assert un(b) == 2
+  let xs = call s.many(5)
+  assert sum(xs) == 5
   unload P
   assert no_residue
 }
@@ -291,4 +345,32 @@ def test_the_placement_bridge_refuses_a_generic_variant_by_name():
     with pytest.raises(go_emit.EmitError) as err:
         go_emit.emit_placement(_component_ir())
     assert "type 'Mb[T]' is not lowerable on the go placement bridge" in str(
+        err.value)
+
+
+UNPINNED = """\
+type Mb[T] = Jj(T) | Nn
+
+service S {
+  fn keep(n: Int) -> Int
+}
+
+component P provides s: S {
+  provide s {
+    fn keep(n) {
+      let v = Nn
+      return n
+    }
+  }
+}
+"""
+
+
+def test_an_unpinned_type_argument_is_refused_by_name():
+    # Nothing pins `T` for this `Nn`, and Go infers no type argument from
+    # later use: the emitter names the variant instead of printing an
+    # `MbNn[Any]{}` that does not build.
+    with pytest.raises(go_emit.EmitError) as err:
+        go_emit.emit(compile_source(UNPINNED, "unpinned_2471.rvl"))
+    assert "variant case `Nn`: type 'Mb[T]' has no type argument for T" in str(
         err.value)
