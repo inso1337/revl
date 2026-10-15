@@ -224,7 +224,7 @@
 
 ["function", "realm-routing-and-child-instances-require-intercept-json", "_v3_spawn", 14, 14]
 
-["reason", "record-variant-context-invariants-the-remaining-branches-dia", "Record/variant context invariants: the remaining branches diagnose duplicate or ambiguous record shapes and constructors, malformed pattern arity, and recursive boxing edges. The self-host Rust slice supports the covered unique non-recursive records and ADTs but deliberately does not mirror recursive boxing. emit_rust_corpus/bridge_types.rvl (item 391) reaches 2 more of `_V3Ctx._disambiguate_record`'s statements."]
+["reason", "record-variant-context-invariants-the-remaining-branches-dia", "Record/variant context invariants: the remaining branches diagnose duplicate or ambiguous record shapes and constructors, malformed pattern arity, and recursive boxing edges. The self-host Rust slice supports the covered unique non-recursive records and ADTs but deliberately does not mirror recursive boxing. emit_rust_corpus/bridge_types.rvl (item 391) reaches 2 more of `_V3Ctx._disambiguate_record`'s statements. Issue #2471 adds four to `_emit_v3_types`: a type parameter no case payload names gets a hidden `PhantomData` case, since rustc rejects an unused parameter (E0392). No CORPUS document declares a generic variant until the self-host port lands (issue #2494)."]
 
 ["function", "record-variant-context-invariants-the-remaining-branches-dia", "_V3Ctx.__init__", 1, 1]
 
@@ -240,7 +240,7 @@
 
 ["function", "record-variant-context-invariants-the-remaining-branches-dia", "_V3Ctx.record_type_for_names", 9, 9]
 
-["function", "record-variant-context-invariants-the-remaining-branches-dia", "_emit_v3_types", 6, 6]
+["function", "record-variant-context-invariants-the-remaining-branches-dia", "_emit_v3_types", 10, 10]
 
 ["function", "record-variant-context-invariants-the-remaining-branches-dia", "_recursive_boxed_edges", 13, 13]
 
@@ -300,7 +300,7 @@
 
 ["function", "ui-transaction-unit-item-522-issue-1369", "_ui_transaction_facts", 29, 29]
 
-["reason", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `_rust_type`'s statements."]
+["reason", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `_rust_type`'s statements. Issue #2471 adds six to `_rust_type`: a generic variant renders with its type arguments (`Mb<i64>`). No CORPUS document declares a generic variant until the self-host port lands (issue #2494)."]
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_arg_ref_name", 2, 2]
 
@@ -320,7 +320,7 @@
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_fn_type", 1, 1]
 
-["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_type", 1, 1]
+["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_type", 7, 7]
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_v3_lit", 3, 3]
 

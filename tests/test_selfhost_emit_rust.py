@@ -1520,3 +1520,38 @@ def test_a_refusal_before_a_fault_test_keeps_the_reference_order(
     markers = re.findall(r"<<UNSUPPORTED-[A-Z-]+:", emitted["emit_rust_src"](ir))
     assert "<<UNSUPPORTED-FAULT-TEST:" in markers, markers
     assert markers[0] == first, markers
+
+
+# Issue #2471: the reference rust emitter lowers a user generic variant (`type
+# Mb[T] = Jj(T) | Nn`) to an enum with type parameters (`pub enum Mb<T>`,
+# `Mb<i64>`); selfhost/emit_rust.rvl still emits the earlier form, which does
+# not build (`pub enum Mb` with a `Value` payload and `Value` for `Mb[Int]`).
+# The port is fed the reference IR here, so the difference is NAMED rather
+# than passing for agreement. The fully-native chain does not reach it:
+# selfhost/lower.rvl refuses these documents loudly first
+# (GENERIC_VARIANT_LOUD_REFUSALS in tests/test_selfhost_compile.py). Same
+# ratchet as that table: the day the port follows the reference this fails,
+# and the entry is DELETED and the document added to CORPUS. issue #2494
+GENERIC_VARIANT_PORT_GAPS: dict[str, tuple[str, str, str]] = {
+    "construct_and_match": (
+        "type Mb[T] = Jj(T) | Nn\n"
+        "fn un(m: Mb[Int]) -> Int { return match m { Jj(x) => x, Nn => 0 } }\n"
+        "fn one() -> Mb[Int] { return Jj(1) }\n",
+        "pub enum Mb<T> {",
+        "fn un(m: Value) -> i64 {"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_PORT_GAPS))
+def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_path,
+                                                     name):
+    source, reference_token, port_token = GENERIC_VARIANT_PORT_GAPS[name]
+    doc = tmp_path / f"{name}.rvl"
+    doc.write_text(source)
+    ir = compile_files([str(doc)])
+    want, got = reference.emit(ir), emitted["emit_rust_src"](ir)
+    assert reference_token in want, want
+    assert got != want and port_token in got, (
+        f"{name}: the port no longer emits {port_token!r}. If it now matches "
+        f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
+        f"add the document to CORPUS.")
