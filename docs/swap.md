@@ -228,6 +228,101 @@ the cordis-py runtime alone (roadmap item 23 runs on py). Swapping to a differen
 tier (`--to node|rust|java|go`) is the same operation over the same seam; it
 additionally needs that tier's toolchain, which the placement smoke covers.
 
+## Proving the boundary (in-process hot-swap)
+
+Everything above is the placement swap, which moves a component to a fresh
+process. The in-process hot-swap is a different path: `Session.swap`
+(`src/revl/mcp/session.py`, the call under `revl_swap`, `revl_edit` and
+rollback) disposes generation N and boots N+1 **in the same process**.
+Disposal running does not prove that N left nothing behind, so the swap can be
+asked to prove it (issue #2277). For now the option is Python API only: none
+of the MCP verbs passes it yet.
+
+```python
+session.swap(ir, origin=origin, prove_boundary=True)
+```
+
+With the option, the swap seals the boundary after N's teardown and before
+N+1 loads. It compares the process against the baseline the session took
+before its first generation booted. If anything is off baseline, the swap
+refuses by name, boots N again, and N keeps serving. A clean seal adds the
+proof to the answer as `boundary`:
+
+```json
+{"noResidue": true,
+ "checks": {"residue": true, "hostResources": true, "escrow": true,
+            "registers": true, "threads": true, "tasks": true, "env": true,
+            "modules": true},
+ "detail": {...}}
+```
+
+A refusal is a `BoundaryRefused` (a `SessionError`). Its `code` is the first
+refusal, `refusals` lists all of them, and `boundary` holds the proof that
+refused:
+
+| Refusal | What was off baseline |
+|---|---|
+| `RESIDUE_LEFT` | An R4 teardown check failed: the cordis registry, provisions, effect stack or listeners, an unresolved compensation, or a host `new`/`open` with no `drop`/`close` in the host trace. These are the same checks `unload` reports. |
+| `BOUNDARY_UNVERIFIED` | The driver captured no host trace, so the host-resource pairing could not run. A check that did not run is never a pass. |
+| `ESCROW_OPEN` | A witnessed mutation is still escrowed, or a deferred emission is still queued, on the session owner. It stays the session's to commit or abort. |
+| `REGISTER_DRIFT` | A runtime register in `swap_boundary.REGISTERS` holds something it did not hold at the baseline, for example a trace observer that was never unsubscribed. |
+| `THREAD_LEFT` | A thread is alive that was not alive at the baseline. |
+| `TASK_LEFT` | An asyncio task is pending on the session's event loop that was not pending at the baseline. The loop outlives the swap, so the task would keep running under the successor's calls. |
+| `ENV_DRIFT` | An `os.environ` key was added, removed or changed. The proof names keys, never values. |
+| `MODULE_LEFT` | A `sys.modules` entry appeared that is not the generation namespace (`revl_run_gen*`), the standard library or revl's toolchain, or a name the baseline held now maps to a different module object (listed in `detail.modulesReplaced`). A `@py ref` module counts, because the successor could import N's copy. |
+| `TIER_UNSUPPORTED` | The proof was asked for on a tier other than py. Other tiers boot each generation as a child process, so there is no shared boundary. This refuses before anything is torn down. |
+
+Two runtime registers fill up for every generation and are never emptied by
+the runtime: the config each component resolved (secret fields included) and
+the decoding grammars each emitted module states. That residue is revl's, not
+the author's, so with the option the swap withdraws the predecessor's own
+entries from both before comparing and lists them in `detail.discharged` (keys
+only). The predecessor's entries are the ones its IR names: its component names
+for the config table, and `Service.method` for every method with a response
+grammar. An entry under any other name, such as another session's, is never
+touched, and neither is one still holding the object it held at the baseline (an
+earlier session's leftover). The tables are keyed by name, so a second session
+running a component of the same name shares its entry. If the seal refuses, the
+withdrawn entries go back before the predecessor is booted again, so the tables
+end where the swap found them. The successor registers its own. The realm-label
+table is not compared at all: it
+interns stateless `(realm, key)` identities that every generation shares on
+purpose.
+
+What the seal does **not** cover, so a clean proof is not read as more than it
+is:
+
+- **The clock.** The session clock is a ratchet and N+1 reads a later time than
+  a fresh process would (`_CLOCK_ANCHOR` is deliberately not compared).
+- **Randomness.** The state of Python's `random` module is not reset.
+- **The filesystem.** A committed witnessed write is meant to outlive its
+  generation. A write from a `@py` body that goes around a witnessed extern
+  is not seen.
+- **Attributes of already-imported modules.** Modules are compared by name
+  and object. A host body that patches an attribute of a module the process
+  had already imported (say `json.dumps`) leaves the same module object
+  behind, and the patch outlives the generation unseen.
+- **Runtime globals left out on purpose.** `swap_boundary.NOT_COMPARED` names
+  every mutable global of the runtime the seal does not compare, each with its
+  reason: the realm-label intern table, the clock anchor, the trace callback,
+  the trace-entry counter, the type lookup, the digest nonce, and the
+  ContextVars, whose values are per context and so never reach the context the
+  seal reads. A test holds `REGISTERS` and `NOT_COMPARED` equal to the
+  runtime's mutable globals, so a register added later fails it until it is
+  placed in one of them.
+- **Reused identities.** A register's entries are compared by object identity
+  (`id()`), which CPython reuses after an object is collected. A new object at
+  a collected baseline object's address, under the same key, reads as the
+  baseline one. Threads are held as objects, so this does not apply to them.
+- **Other activity in the process.** Threads, environment and modules are
+  process-wide, so a second session or the host program changing them between
+  the baseline and the seal also refuses. This errs on the side of refusing.
+
+A swap without `prove_boundary` behaves exactly as before. This is the proof
+obligation only. It does not compare test results between N and N+1 in one
+process. Whether a same-process A/B run can ever count as evidence is still
+open on issue #2277.
+
 ## Deferred: shadow verification
 
 The next layer on top of `swap` is **replay-based shadow verification**: record

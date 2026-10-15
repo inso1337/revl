@@ -36,6 +36,7 @@ from ..typecheck import compatible
 from . import operator as _operator
 from . import quorum as _quorum
 from . import identity as _identity
+from . import swap_boundary as _swap_boundary
 from .approval import ApprovalRequired
 from .undo_record import undo_cold_start_note
 from .approval import _args_digest as _cache_args_digest
@@ -86,6 +87,21 @@ class SessionError(RuntimeError):
     def __init__(self, *args: object, code: str | None = None) -> None:
         super().__init__(*args)
         self.code = code
+
+
+class BoundaryRefused(SessionError):
+    """A swap asked to prove its boundary (`prove_boundary=True`) whose
+    predecessor left something behind, or that cannot be proven on this tier
+    (issue #2277). `code` is the first refusal, `refusals` names every one, and
+    `boundary` is the proof that refused (None for `TIER_UNSUPPORTED`, which
+    refuses before anything runs). The predecessor is serving when this is
+    raised."""
+
+    def __init__(self, message: str, refusals: list,
+                 boundary: dict | None = None) -> None:
+        super().__init__(message, code=refusals[0])
+        self.refusals = list(refusals)
+        self.boundary = boundary
 
 
 class NothingLoaded(SessionError):
@@ -595,6 +611,21 @@ def _activation_error():
     return ActivationError
 
 
+def _boundary_refused(boundary: dict) -> BoundaryRefused:
+    """The refusal for a boundary proof that did not seal clean (issue #2277),
+    naming every refusal and the checks behind them."""
+    codes = boundary["refusals"]
+    failed = sorted(name for name, ok in boundary["checks"].items() if not ok)
+    failed += list(boundary.get("unverified") or ())
+    return BoundaryRefused(
+        f"swap refused ({', '.join(codes)}): the predecessor generation did not "
+        f"leave the process at its baseline ({', '.join(failed)}), so the "
+        f"successor would run beside what it left. Rolled back: the previous "
+        f"generation was booted again and is serving. The proof is on the "
+        f"refusal's `boundary` (docs/swap.md, \"Proving the boundary\").",
+        codes, boundary)
+
+
 def _capturing_driver_class():
     """`run._Driver`, with its trace captured instead of printed."""
     from ..run import _Driver  # noqa: PLC0415 — lazy: importing run pulls cordis
@@ -651,6 +682,10 @@ class Session:
         # commit verb derives. A `runtime.SessionOwner`, created at load. None
         # when nothing is loaded.
         self._owner = None
+        # issue #2277: the process snapshot taken before the first generation
+        # booted (`swap_boundary.take`), the baseline a `prove_boundary` swap
+        # seals against. None when nothing is loaded.
+        self._boundary_baseline = None
         # the admission inputs that produced the live composition — the
         # *sources*, kept so the composition can be snapshotted for
         # re-admission (docs/persistence.md). None when a composition was
@@ -1257,6 +1292,9 @@ class Session:
                 self.approval_policy is not None or policy_requires_approval
                 or _ir_has_approval_edges(ir)):
             self._ensure_wal_open()
+        # issue #2277: the process as it was before this session's first
+        # generation, which a swap asked to prove its boundary compares against.
+        self._boundary_baseline = _swap_boundary.take(runtime_mod, self._loop)
         # item 245: register the session commit-state owner before the
         # composition loads, so every activation frame joins its live-frame
         # registry (the commit verb's gate target). Installed through the shared
@@ -1690,7 +1728,8 @@ class Session:
         return module
 
     def swap(self, ir: dict, origin: dict | None = None,
-             migrate: str = "generational") -> dict:
+             migrate: str = "generational", *, prove_boundary: bool = False,
+             backend: str = "py") -> dict:
         """Replace the running composition. The caller has already had the
         candidate admitted; this performs the transition.
 
@@ -1731,9 +1770,29 @@ class Session:
         (`_LoadCheckpoint`, with the same `_SURVIVES_A_FAILED_LOAD`), and the
         running generation was never touched. Past the teardown the running
         generation is gone, so `_cut_over` rolls back ANY failure by rebooting
-        it (`_abort_swap`), not only a failed activation."""
+        it (`_abort_swap`), not only a failed activation.
+
+        `prove_boundary` (issue #2277) seals the boundary between the two
+        generations: after the predecessor is disposed and before the successor
+        loads, the process is compared against the baseline taken before this
+        session's first generation (`swap_boundary.seal`). Anything off
+        baseline refuses with `BoundaryRefused` (`RESIDUE_LEFT`,
+        `BOUNDARY_UNVERIFIED`, `ESCROW_OPEN`, `REGISTER_DRIFT`, `THREAD_LEFT`,
+        `TASK_LEFT`, `ENV_DRIFT`, `MODULE_LEFT`) after the predecessor is rebooted, so it keeps serving.
+        A clean seal adds the proof to the answer as `boundary`. `backend` is
+        the tier the caller expects the proof on; a Session swaps in process on
+        the py tier only, so any other tier refuses `TIER_UNSUPPORTED` before
+        anything runs. `backend` is read only with `prove_boundary`. Without
+        `prove_boundary` the swap is unchanged."""
         driver = self._require()
         self._refuse_if_halted("swap")   # item 443
+        if prove_boundary and backend != "py":
+            raise BoundaryRefused(
+                f"swap refused (TIER_UNSUPPORTED): a boundary proof exists only "
+                f"for the py tier, which swaps in process. The {backend!r} tier "
+                f"boots every generation as a child process, so there is no "
+                f"shared boundary to prove. Nothing was swapped; the running "
+                f"composition is untouched.", [_swap_boundary.TIER_UNSUPPORTED])
         checkpoint = _LoadCheckpoint(self)
         try:
             plan = self._plan_swap(driver, ir, migrate)
@@ -1742,7 +1801,7 @@ class Session:
             _name_the_candidate(exc, ir)
             raise
         try:
-            return self._cut_over(driver, ir, origin, plan)
+            return self._cut_over(driver, ir, origin, plan, prove_boundary)
         except ApprovalRequired as exc:
             _name_the_candidate(exc, ir)
             raise
@@ -1821,10 +1880,12 @@ class Session:
                          pre_pending=pre_pending)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
-                  plan: "_SwapPlan") -> dict:
+                  plan: "_SwapPlan", prove_boundary: bool = False) -> dict:
         """Tear the running generation down and boot the successor in its place.
         From the teardown on, a failure of any kind reboots the predecessor
-        (`_abort_swap`) so the running system keeps serving."""
+        (`_abort_swap`) so the running system keeps serving. With
+        `prove_boundary`, a boundary that does not seal clean is one of those
+        failures (`_prove_boundary`)."""
         old_ir, new_map = plan.old_ir, plan.new_map
         pre, handoff_pre = plan.pre, plan.handoff_pre
         saved_previous, saved_previous_origin = self.previous, self.previous_origin
@@ -1837,6 +1898,26 @@ class Session:
         # ones it ran with.
         self._seal_generation()
         self._run(driver._dispose_all(self.ir))
+        boundary = None
+        if prove_boundary:
+            # issue #2277: past the teardown, so a refusal (or a fault in the
+            # seal itself) boots the predecessor again, as below
+            withdrawn: dict = {}
+            try:
+                withdrawn = _swap_boundary.discharge(
+                    self._boundary_baseline, driver.runtime,
+                    _swap_boundary.owned_keys(old_ir))
+                boundary = self._prove_boundary(driver, withdrawn)
+                if boundary.get("refusals"):
+                    raise _boundary_refused(boundary)
+            except BaseException:
+                # the predecessor's config and grammar entries go back first,
+                # so the process-global tables end where the swap found them
+                _swap_boundary.restore(driver.runtime, withdrawn)
+                self._reboot_predecessor(old_ir, pre, saved_previous,
+                                         saved_previous_origin, handoff_pre)
+                self._record_generation()
+                raise
         driver.ir = self.ir = ir
         self.origin = origin
         self.draft = None  # a new generation makes any uncommitted edit stale
@@ -1950,6 +2031,8 @@ class Session:
         # laundered result).
         self._install_cache_index(ir)
         state = self.state(drain=True)
+        if boundary is not None:
+            state["boundary"] = boundary
         if migration is not None:
             state["migration"] = migration
         if handoff is not None:
@@ -2096,8 +2179,19 @@ class Session:
         both spawned-instance state and provider hand-off state — onto the
         re-loaded predecessor, so the composition is left exactly as if the
         swap had never been attempted."""
+        self._run(self._driver._dispose_all(self.ir))
+        self._reboot_predecessor(old_ir, pre, saved_previous,
+                                 saved_previous_origin, handoff_pre)
+
+    def _reboot_predecessor(self, old_ir: dict, pre: dict,
+                            saved_previous: dict | None,
+                            saved_previous_origin: dict | None,
+                            handoff_pre: dict | None = None) -> None:
+        """Boot the predecessor again once whatever was running is disposed, and
+        re-seat its captured instance and hand-off state. The second half of
+        `_abort_swap`, and the whole of a refused boundary proof's rollback
+        (issue #2277), which has no successor to dispose."""
         driver = self._driver
-        self._run(driver._dispose_all(self.ir))
         driver.ir = self.ir = old_ir
         self.origin = self.previous_origin
         self.previous, self.previous_origin = saved_previous, saved_previous_origin
@@ -4582,6 +4676,22 @@ class Session:
         undo that did not happen. When there is any, a fifth check,
         `compensations`, is present and false, and `noResidue` is false with it.
         A boundary with none keeps the four checks, byte-identical."""
+        checks, detail, unverified = self._residue_checks(driver, residue)
+        driver.runtime.set_trace(None)
+        report = {"noResidue": all(checks.values()) and not unverified,
+                  "checks": checks, "detail": detail,
+                  "trace": driver.drain_events()}
+        if unverified:
+            report["unverified"] = unverified
+        trusted = _trust_the_author(self.ir)
+        if trusted:
+            report["trustTheAuthor"] = trusted
+        return report
+
+    def _residue_checks(self, driver, residue=()) -> tuple:
+        """The R4 checks `_teardown_report` reports, as `(checks, detail,
+        unverified)`, without its side effects: the trace is neither cleared
+        nor drained, so a swap can read them at its boundary (issue #2277)."""
         checks = {
             "registry": driver.root.registry.size == 0,
             "provisions": driver.root.reflect.store == {},
@@ -4598,16 +4708,21 @@ class Session:
             "disposablesBaseline": driver._baseline_disposables,
         }
         unverified = self._check_host_resources(driver, checks, detail)
-        driver.runtime.set_trace(None)
-        report = {"noResidue": all(checks.values()) and not unverified,
-                  "checks": checks, "detail": detail,
-                  "trace": driver.drain_events()}
-        if unverified:
-            report["unverified"] = unverified
-        trusted = _trust_the_author(self.ir)
-        if trusted:
-            report["trustTheAuthor"] = trusted
-        return report
+        return checks, detail, unverified
+
+    def _prove_boundary(self, driver, withdrawn: dict) -> dict:
+        """Seal the swap boundary (issue #2277): the disposed generation's R4
+        checks plus the process snapshot, against the session's baseline.
+        `withdrawn` is the predecessor's config and grammar entries, already
+        taken out of the runtime's tables (`swap_boundary.discharge`)."""
+        owner = self._owner
+        owed = owner.collect_compensation_residue() if owner is not None else []
+        checks, detail, unverified = self._residue_checks(driver, owed)
+        if owed:
+            detail["compensationResidue"] = len(owed)
+        residue = {"checks": checks, "detail": detail, "unverified": unverified}
+        return _swap_boundary.seal(self._boundary_baseline, driver.runtime,
+                                   residue, self._owner, withdrawn, self._loop)
 
     @staticmethod
     def _check_host_resources(driver, checks: dict, detail: dict) -> list:
@@ -4682,6 +4797,7 @@ class Session:
         # issue #1738: the commit session ends here; keep its prompt tally.
         self._loop_axes.close_owner(self._owner)
         self._owner = None
+        self._boundary_baseline = None
         self._actions = []
         self._act_calls = []
         self._act_approvals = {}

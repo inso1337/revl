@@ -272,6 +272,87 @@ OTHER_CODES = {
         "fix": "admit the turn again against the live generation to get a "
                "handle onto it",
     },
+    # ---- the swap boundary proof (issue #2277, docs/swap.md "Proving the
+    # boundary"): a `prove_boundary` swap refused, and the predecessor serving
+    "RESIDUE_LEFT": {
+        "category": "session",
+        "guarantee": "a proven swap boots its successor only once the "
+                     "predecessor's teardown left no residue",
+        "meaning": "an R4 teardown check failed at the swap boundary: the "
+                   "cordis counters, an unresolved compensation, or a host "
+                   "acquisition with no release in the host trace",
+        "fix": "give each acquisition an `undo` that releases it and make the "
+               "release succeed, then swap again",
+    },
+    "BOUNDARY_UNVERIFIED": {
+        "category": "session",
+        "guarantee": "a check that did not run is never a pass",
+        "meaning": "the driver captured no host trace, so the boundary could "
+                   "not pair each host acquisition with its release",
+        "fix": "run the session on a driver that captures the host trace",
+    },
+    "ESCROW_OPEN": {
+        "category": "session",
+        "guarantee": "a proven swap does not cross a pending witnessed "
+                     "mutation or deferred emission",
+        "meaning": "the predecessor left an escrowed witnessed mutation or a "
+                   "queued deferred emission on the session owner",
+        "fix": "commit or abort the session, then swap again",
+    },
+    "REGISTER_DRIFT": {
+        "category": "session",
+        "guarantee": "a proven swap leaves the runtime's enumerated registers "
+                     "as the session found them",
+        "meaning": "a runtime register holds something it did not hold before "
+                   "the session's first generation (the proof names it)",
+        "fix": "release what the named register holds (unsubscribe the "
+               "observer, stop the probe) before the swap",
+    },
+    "THREAD_LEFT": {
+        "category": "session",
+        "guarantee": "a proven swap leaves no thread the predecessor started",
+        "meaning": "a thread is alive that was not alive before the session's "
+                   "first generation (the proof names it)",
+        "fix": "stop and join the thread in the component's teardown",
+    },
+    "TASK_LEFT": {
+        "category": "session",
+        "guarantee": "a proven swap leaves no asyncio task the predecessor "
+                     "started pending on the session's event loop",
+        "meaning": "a task is pending on the session loop that was not before "
+                   "the session's first generation; the loop outlives the "
+                   "swap, so it would keep running under the successor (the "
+                   "proof names its coroutine)",
+        "fix": "keep the task's handle and cancel and await it in the "
+               "component's teardown",
+    },
+    "ENV_DRIFT": {
+        "category": "session",
+        "guarantee": "a proven swap leaves the process environment as the "
+                     "session found it",
+        "meaning": "an `os.environ` key was added, removed or changed (the "
+                   "proof names keys, never values)",
+        "fix": "do not write the environment from a host body; pass the value "
+               "through the component's `config` block instead",
+    },
+    "MODULE_LEFT": {
+        "category": "session",
+        "guarantee": "a proven swap leaves no module the successor could "
+                     "import the predecessor's copy of",
+        "meaning": "a `sys.modules` entry appeared that is not the generation "
+                   "namespace, the standard library or revl's toolchain",
+        "fix": "keep host state out of imported modules, or swap without the "
+               "proof and accept that the successor shares them",
+    },
+    "TIER_UNSUPPORTED": {
+        "category": "session",
+        "guarantee": "a boundary proof is offered only where a swap shares a "
+                     "process",
+        "meaning": "the proof was asked for on a tier other than py, which "
+                   "boots every generation as a child process",
+        "fix": "ask for the proof on the py tier, or drop it: the other tiers "
+               "start each generation fresh",
+    },
     "MCP-IDENTITY": {
         "category": "identity",
         "guarantee": "every answer comes from the revision the client pinned",
