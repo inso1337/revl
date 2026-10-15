@@ -10010,8 +10010,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                              else "this position")
                     _refuse_unbracketed_host_acquire(root, method, where,
                                                      filename, line)
+                # raising mode, as a declared callable's arguments (#2483)
                 host_check(f"{root}.{method}",
-                           [infer_ir(a, env.type_env, env.types, env.services)
+                           [infer_ir(a, env.type_env, env.types, env.services,
+                                     filename, line)
                             for a in args],
                            filename, line)
                 return {"kind": "host", "fn": f"{root}.{method}", "args": args}
@@ -17017,8 +17019,10 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
             return node
         with _emit_head_args(env, mode) as amode:
             host_args = [_lower_expr(a, env, amode) for a in call.args]
+        # raising mode, as a declared callable's arguments (#2483)
         host_check(f"{head}.{call.name}",
-                   [infer_ir(a, env.type_env, env.types, env.services)
+                   [infer_ir(a, env.type_env, env.types, env.services,
+                             env.filename, expr.line)
                     for a in host_args],
                    env.filename, expr.line)
         node = {"kind": "host", "fn": f"{head}.{call.name}", "args": host_args}

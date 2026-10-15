@@ -198,6 +198,7 @@ _SHAPES = _VAULT + (
     "service Sink {\n"
     "  emission fn put(s: Shape)\n"
     "  emission fn put_int(n: Int)\n"
+    "  emission fn os(o: Opt[Shape])\n"
     "}\n"
     "extern acquire fn put_opt(o: Opt[Int]) -> SecretHandle"
     " undo secret_release(result) = @py { return 1 }\n"
@@ -213,6 +214,10 @@ def _emit_put(arg: str) -> str:
 def _acquire(call: str) -> str:
     return _SHAPES + ("component C {\n"
                       f"  let h = effect {call} undo secret_release(h)\n}}\n")
+
+
+def _emit_put_os(arg: str) -> str:
+    return _SHAPES + f"component C requires k: Sink {{\n  emit k.os({arg})\n}}\n"
 
 
 _PAYLOAD_TYPE = "`Box(...)` payload expects `Int`, got `Str`"
@@ -235,6 +240,7 @@ EFFECT_ARG_REFUSED: dict[str, tuple[str, str]] = {
                   '  provide s { fn go() -> Str { emit k.put(Box("x"))'
                   '  return "k" } }\n}\n',
         _PAYLOAD_TYPE),
+    "service_some_payload_type": (_emit_put_os('Some(Box("x"))'), _PAYLOAD_TYPE),
     "service_argument_type": (
         _SHAPES + 'component C requires k: Sink {\n  emit k.put_int("x")\n}\n',
         "`k.put_int` argument `n` expects `Int`, got `Str`"),
@@ -260,6 +266,7 @@ _LET_TWIN: dict[str, str] = {
     "acquire_some_payload_type": 'put_opt(Some("x"))',
     "acquire_ok_payload_type": 'put_res(Ok("x"))',
     "acquire_err_payload_type": "put_res(Err(1))",
+    "service_some_payload_type": 'Some(Box("x"))',
 }
 
 
@@ -294,3 +301,86 @@ def test_well_typed_effect_arguments_are_still_admitted():
                   "  emit k.put_int(1)\n"
                   "}\n", "t.rvl")
     assert any(c["name"] == "C" for c in ir["components"])
+
+
+# A host builtin's arguments are inferred in raising mode too, so a payload
+# nested in one meets the same check (`Pool.open(Str, Int)`).
+@pytest.mark.parametrize("arg, message", [
+    ('[Box("x")].length()', _PAYLOAD_TYPE),
+    ("[Box(1, 2)].length()",
+     "variant case `Box` takes 1 payload argument, 2 given"),
+])
+def test_host_builtin_argument_payload_is_checked(arg, message):
+    with pytest.raises(RevlError) as refused:
+        compile_source(_SHAPES + "component C {\n"
+                       f'  let p = effect Pool.open("u", {arg}) undo p.close()\n'
+                       "}\n", "t.rvl")
+    assert message in str(refused.value)
+    assert refused.value.code == "T1"
+
+
+def test_well_typed_host_builtin_argument_is_still_admitted():
+    compile_source(_SHAPES + "component C {\n"
+                   '  let p = effect Pool.open("u", [Box(1)].length())'
+                   " undo p.close()\n}\n", "t.rvl")
+
+
+# Typing the built-in `Some`/`Ok`/`Err` in `infer_ir` also moves provide-method
+# verdicts to the `fn` body's: a wrong-typed constructor in a provide return is
+# refused, and an `Err` payload read through a `match` is no longer `Any`.
+
+_PROVIDE = ("service Q {\n"
+            "  fn go() -> Opt[Int]\n"
+            "  fn gr() -> Result[Int, Str]\n"
+            "  fn gs() -> Opt[Result[Int, Str]]\n"
+            "  fn gi(b: Bool) -> Int\n"
+            "}\n")
+_GOOD_BODIES = {
+    "go": "fn go() = Some(1)",
+    "gr": "fn gr() = Ok(1)",
+    "gs": "fn gs() = None",
+    "gi": "fn gi(b) = 1",
+}
+_ERR_ARM = ("let r = b ? Ok(1) : Err(2)\n"
+            "  return match r { Ok(v) => v, Err(e) => 0 - e }")
+
+
+def _provide(method: str, body: str) -> str:
+    bodies = dict(_GOOD_BODIES, **{method: body})
+    return (_PROVIDE + "component C provides q: Q { provide q {\n  "
+            + "\n  ".join(bodies[m] for m in sorted(bodies)) + "\n} }\n")
+
+
+# name -> (provide-method source, the `fn` body twin, what both say)
+# `PROVIDE_RETURN_REFUSED` is read by tests/test_selfhost_compile.py.
+PROVIDE_RETURN_REFUSED: dict[str, tuple[str, str, str]] = {
+    "provide_some_return": (
+        _provide("go", 'fn go() = Some("x")'),
+        'fn go() -> Opt[Int] { return Some("x") }\n',
+        "expects `Opt[Int]`, got `Opt[Str]`"),
+    "provide_ok_return": (
+        _provide("gr", 'fn gr() = Ok("x")'),
+        'fn gr() -> Result[Int, Str] { return Ok("x") }\n',
+        "expects `Result[Int, Str]`, got `Result[Str, Any]`"),
+    "provide_nested_ok_return": (
+        _provide("gs", 'fn gs() = Some(Ok("x"))'),
+        'fn gs() -> Opt[Result[Int, Str]] { return Some(Ok("x")) }\n',
+        "expects `Opt[Result[Int, Str]]`, got `Opt[Result[Str, Any]]`"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PROVIDE_RETURN_REFUSED))
+def test_provide_return_constructor_matches_the_fn_body(name):
+    source, twin, message = PROVIDE_RETURN_REFUSED[name]
+    for text in (twin, source):
+        with pytest.raises(RevlError) as refused:
+            compile_source(text, "t.rvl")
+        assert message in str(refused.value), str(refused.value)
+        assert refused.value.code == "T1"
+
+
+def test_provide_err_payload_through_match_is_admitted():
+    # main refused this with "operand of `-` expects `Int`, got `Any`"; the
+    # `fn` body twin was always admitted
+    compile_source("fn gi(b: Bool) -> Int {\n  " + _ERR_ARM + "\n}\n", "t.rvl")
+    compile_source(_provide("gi", "fn gi(b) {\n  " + _ERR_ARM + "\n  }"), "t.rvl")
