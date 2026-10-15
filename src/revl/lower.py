@@ -9508,8 +9508,12 @@ def _component_req_call(env: Env, root: str, method: str, args: list, line: int)
             hint="an emission crosses the system boundary and cannot be reverted; "
                  "`emit` makes that visible at the call site",
         )
+    _event_item_reads_first(env, args, line)
     for arg, (pname, ptype) in zip(args, decl.params):
-        actual = infer_ir(arg, env.type_env, env.types, env.services)
+        # raising mode: a case payload nested in the argument meets the
+        # checks a `let` initializer gives it (issue #2483)
+        actual = infer_ir(arg, env.type_env, env.types, env.services,
+                          env.filename, line)
         if ptype and actual and not compatible(ptype, actual, env.types):
             raise mismatch(env.filename, line,
                            f"`{root}.{method}` argument `{pname}`", ptype, actual)
@@ -10007,8 +10011,11 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                              else "this position")
                     _refuse_unbracketed_host_acquire(root, method, where,
                                                      filename, line)
+                # raising mode, as a declared callable's arguments (#2483)
+                _event_item_reads_first(env, args, line)
                 host_check(f"{root}.{method}",
-                           [infer_ir(a, env.type_env, env.types, env.services)
+                           [infer_ir(a, env.type_env, env.types, env.services,
+                                     filename, line)
                             for a in args],
                            filename, line)
                 return {"kind": "host", "fn": f"{root}.{method}", "args": args}
@@ -15970,6 +15977,9 @@ def _lower_stream_iter_step(stmt: "StreamIterStmt", env: Env, filename: str,
         # where a plain `every`'s untyped item admits either.
         env.type_env[item] = stmt.event
     body: list = []
+    saved_event_item = getattr(env, "_event_item", None)
+    if contract is not None:
+        env._event_item = (item, stmt.event, contract)
     for inner in stmt.body:
         if isinstance(inner, FailStmt):
             body.append({
@@ -15986,6 +15996,7 @@ def _lower_stream_iter_step(stmt: "StreamIterStmt", env: Env, filename: str,
             _check_event_field_reads(emit_step.get("expr"), item, stmt.event,
                                      contract, env, filename, inner.line)
         body.append(emit_step)
+    env._event_item = saved_event_item
     env.locals = saved_locals
     env.type_env = saved_type_env
     step = {
@@ -16036,6 +16047,17 @@ def _event_contract(stmt: "StreamIterStmt", env: Env, filename: str):
                   f"events: {known} (item 130 §6)"),
             code="lifecycle", category="lifecycle")
     return contract
+
+
+def _event_item_reads_first(env: Env, args: list, line: int) -> None:
+    """Inside an `on <Event> as <x>` body, refuse an undeclared field read on
+    the item by the event's own message before the raising argument inference
+    of issue #2483 names it as a plain record field."""
+    active = getattr(env, "_event_item", None)
+    if active is not None:
+        item, event, contract = active
+        _check_event_field_reads(args, item, event, contract, env,
+                                 env.filename, line)
 
 
 def _check_event_field_reads(node, item: str, event: str, contract: dict,
@@ -17014,8 +17036,11 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
             return node
         with _emit_head_args(env, mode) as amode:
             host_args = [_lower_expr(a, env, amode) for a in call.args]
+        # raising mode, as a declared callable's arguments (#2483)
+        _event_item_reads_first(env, host_args, expr.line)
         host_check(f"{head}.{call.name}",
-                   [infer_ir(a, env.type_env, env.types, env.services)
+                   [infer_ir(a, env.type_env, env.types, env.services,
+                             env.filename, expr.line)
                     for a in host_args],
                    env.filename, expr.line)
         node = {"kind": "host", "fn": f"{head}.{call.name}", "args": host_args}
@@ -17063,8 +17088,11 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                 )
             with _emit_head_args(env, mode) as amode:
                 lowered = [_lower_expr(a, env, amode) for a in op.args]
+            _event_item_reads_first(env, lowered, op.line)
             for arg, (pname, ptype) in zip(lowered, decl.params):
-                actual = infer_ir(arg, env.type_env, env.types, env.services)
+                # raising mode, as `_component_req_call` (issue #2483)
+                actual = infer_ir(arg, env.type_env, env.types, env.services,
+                                  env.filename, op.line)
                 if ptype and actual and not compatible(ptype, actual, env.types):
                     raise mismatch(env.filename, op.line,
                                    f"`{node['name']}.{op.name}` argument `{pname}`",
