@@ -112,8 +112,6 @@
     "name=Ok",
     "op=!==",
     "op====",
-    "pattern=Err",
-    "pattern=Ok",
     "pattern=record",
     "recv=Float",
     "secret=<true>",
