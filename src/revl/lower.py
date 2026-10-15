@@ -9509,7 +9509,10 @@ def _component_req_call(env: Env, root: str, method: str, args: list, line: int)
                  "`emit` makes that visible at the call site",
         )
     for arg, (pname, ptype) in zip(args, decl.params):
-        actual = infer_ir(arg, env.type_env, env.types, env.services)
+        # raising mode: a case payload nested in the argument meets the
+        # checks a `let` initializer gives it (issue #2483)
+        actual = infer_ir(arg, env.type_env, env.types, env.services,
+                          env.filename, line)
         if ptype and actual and not compatible(ptype, actual, env.types):
             raise mismatch(env.filename, line,
                            f"`{root}.{method}` argument `{pname}`", ptype, actual)
@@ -17064,7 +17067,9 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
             with _emit_head_args(env, mode) as amode:
                 lowered = [_lower_expr(a, env, amode) for a in op.args]
             for arg, (pname, ptype) in zip(lowered, decl.params):
-                actual = infer_ir(arg, env.type_env, env.types, env.services)
+                # raising mode, as `_component_req_call` (issue #2483)
+                actual = infer_ir(arg, env.type_env, env.types, env.services,
+                                  env.filename, op.line)
                 if ptype and actual and not compatible(ptype, actual, env.types):
                     raise mismatch(env.filename, op.line,
                                    f"`{node['name']}.{op.name}` argument `{pname}`",

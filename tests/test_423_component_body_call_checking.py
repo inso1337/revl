@@ -179,3 +179,118 @@ def test_a_name_that_is_not_a_declared_callable_is_not_judged_here():
                   '  let m = effect Map.new() undo m.drop()\n'
                   '}\n')
     assert any(c["name"] == "C" for c in ir["components"])
+
+
+# -- issue #2483: an effect call's arguments meet the same checks ------------
+#
+# A required-service operation compared each argument's type in the oracle
+# mode of `infer_ir`, which never raises, so a wrong case payload nested in the
+# argument (`Box("x")`, `Box(1, 2)`) was admitted where a `let` initializer
+# refuses it. A built-in `Some`/`Ok`/`Err` inferred no type in the component
+# stratum, so `put_opt(Some("x"))` met `Opt[Int]` unjudged. Each refusal is
+# the message and code the same expression gets in a `fn` body.
+#
+# `EFFECT_ARG_REFUSED` is read by tests/test_selfhost_compile.py, which records
+# how the native chain answers each refused document.
+
+_SHAPES = _VAULT + (
+    "type Shape = Dot | Box(Int)\n"
+    "service Sink {\n"
+    "  emission fn put(s: Shape)\n"
+    "  emission fn put_int(n: Int)\n"
+    "}\n"
+    "extern acquire fn put_opt(o: Opt[Int]) -> SecretHandle"
+    " undo secret_release(result) = @py { return 1 }\n"
+    "extern acquire fn put_res(r: Result[Int, Str]) -> SecretHandle"
+    " undo secret_release(result) = @py { return 1 }\n"
+)
+
+
+def _emit_put(arg: str) -> str:
+    return _SHAPES + f"component C requires k: Sink {{\n  emit k.put({arg})\n}}\n"
+
+
+def _acquire(call: str) -> str:
+    return _SHAPES + ("component C {\n"
+                      f"  let h = effect {call} undo secret_release(h)\n}}\n")
+
+
+_PAYLOAD_TYPE = "`Box(...)` payload expects `Int`, got `Str`"
+
+# name -> (source, the refusal message)
+EFFECT_ARG_REFUSED: dict[str, tuple[str, str]] = {
+    "service_payload_type": (_emit_put('Box("x")'), _PAYLOAD_TYPE),
+    "service_payload_extra": (
+        _emit_put("Box(1, 2)"),
+        "variant case `Box` takes 1 payload argument, 2 given"),
+    "service_payload_missing": (
+        _emit_put("Box()"),
+        "variant case `Box` takes 1 payload argument, 0 given"),
+    "service_argument_to_nullary": (
+        _emit_put("Dot(1)"),
+        "variant case `Dot` takes 0 payload arguments, 1 given"),
+    "service_payload_in_provide_method": (
+        _SHAPES + "service S { emission fn go() -> Str }\n"
+                  "component C requires k: Sink provides s: S {\n"
+                  '  provide s { fn go() -> Str { emit k.put(Box("x"))'
+                  '  return "k" } }\n}\n',
+        _PAYLOAD_TYPE),
+    "service_argument_type": (
+        _SHAPES + 'component C requires k: Sink {\n  emit k.put_int("x")\n}\n',
+        "`k.put_int` argument `n` expects `Int`, got `Str`"),
+    "acquire_some_payload_type": (
+        _acquire('put_opt(Some("x"))'),
+        "argument 1 of `put_opt(...)` expects `Opt[Int]`, got `Opt[Str]`"),
+    "acquire_ok_payload_type": (
+        _acquire('put_res(Ok("x"))'),
+        "argument 1 of `put_res(...)` expects `Result[Int, Str]`, "
+        "got `Result[Str, Any]`"),
+    "acquire_err_payload_type": (
+        _acquire("put_res(Err(1))"),
+        "argument 1 of `put_res(...)` expects `Result[Int, Str]`, "
+        "got `Result[Any, Int]`"),
+}
+
+# the `fn`-body `let` initializer each component refusal must agree with
+_LET_TWIN: dict[str, str] = {
+    "service_payload_type": 'Box("x")',
+    "service_payload_extra": "Box(1, 2)",
+    "service_payload_missing": "Box()",
+    "service_argument_to_nullary": "Dot(1)",
+    "acquire_some_payload_type": 'put_opt(Some("x"))',
+    "acquire_ok_payload_type": 'put_res(Ok("x"))',
+    "acquire_err_payload_type": "put_res(Err(1))",
+}
+
+
+@pytest.mark.parametrize("name", sorted(EFFECT_ARG_REFUSED))
+def test_effect_argument_is_checked(name):
+    source, message = EFFECT_ARG_REFUSED[name]
+    with pytest.raises(RevlError) as refused:
+        compile_source(source, "t.rvl")
+    assert message in str(refused.value), str(refused.value)
+    assert refused.value.code == "T1"
+
+
+@pytest.mark.parametrize("name", sorted(_LET_TWIN))
+def test_effect_refusal_matches_the_let_initializer(name):
+    source = _SHAPES + ("fn mk() -> Int {\n"
+                        f"  let v = {_LET_TWIN[name]}\n  return 1\n}}\n")
+    with pytest.raises(RevlError) as refused:
+        compile_source(source, "t.rvl")
+    assert EFFECT_ARG_REFUSED[name][1] in str(refused.value)
+    assert refused.value.code == "T1"
+
+
+def test_well_typed_effect_arguments_are_still_admitted():
+    ir = compile_source(
+        _SHAPES + "component C requires k: Sink {\n"
+                  "  let a = effect put_opt(Some(1)) undo secret_release(a)\n"
+                  "  let b = effect put_opt(None) undo secret_release(b)\n"
+                  "  let c = effect put_res(Ok(1)) undo secret_release(c)\n"
+                  '  let d = effect put_res(Err("e")) undo secret_release(d)\n'
+                  "  emit k.put(Box(1))\n"
+                  "  emit k.put(Dot)\n"
+                  "  emit k.put_int(1)\n"
+                  "}\n", "t.rvl")
+    assert any(c["name"] == "C" for c in ir["components"])
