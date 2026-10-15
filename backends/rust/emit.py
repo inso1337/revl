@@ -1474,6 +1474,14 @@ def _rust_type(name: object, types: dict | None = None,
         if head == "Result":
             ok, err = _split_generic(inner)
             return f"Result<{_rust_type(ok, types)}, {_rust_type(err, types)}>"
+        spec = types.get(head)
+        if spec and spec.get("kind") == "variant" and spec.get("params"):
+            # issue #2471: an applied user generic variant is the enum's own
+            # instantiation, `Mb[Int]` -> `Mb<i64>`
+            args = _split_generic(inner)
+            if len(args) == len(spec["params"]):
+                rendered = ", ".join(_rust_type(a, types) for a in args)
+                return f"{_ident(head, 'type name')}<{rendered}>"
     return "Value"
 
 
@@ -8977,14 +8985,20 @@ def _emit_v3_types(types: dict) -> list[str]:
         elif spec.get("kind") == "variant":
             out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
             out.append('#[serde(tag = "$kind", content = "$value")]')
-            out.append(f"pub enum {name} {{")
+            # issue #2471: a generic variant declares its type parameters, and
+            # a payload naming one keeps it (`Jj(T)`), not the `Value` an
+            # unknown name falls back to
+            params = spec.get("params") or []
+            scope = dict(types, **{p: {"kind": "param"} for p in params})
+            generics = f"<{', '.join(_ident(p, 'type name') for p in params)}>" if params else ""
+            out.append(f"pub enum {name}{generics} {{")
             for case in spec.get("cases") or []:
                 cname = _ident(case.get("name"), "case name")
                 payload = case.get("payload")
                 if payload is None:
                     out.append(f"    {cname},")
                 else:
-                    rendered = _rust_type(payload, types)
+                    rendered = _rust_type(payload, scope)
                     if (raw_name, case.get("name")) in boxed_cases:
                         rendered = f"Box<{rendered}>"
                     out.append(f"    {cname}({rendered}),")

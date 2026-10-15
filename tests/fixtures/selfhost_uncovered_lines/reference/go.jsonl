@@ -1,6 +1,6 @@
 ["reason", "a-non-string-surface-answers-false-and-the", "A non-string surface answers False and the lowercase `any` answers True. The emitter only asks with a string, and an erased `any` reaches a scrutinee only nested inside `Opt[...]`/`Result[...]`, never as the whole surface. Opt, Result and declared-variant scrutinees are in the corpus."]
 
-["function", "a-non-string-surface-answers-false-and-the", "_go_v3_is_interface", 2, 2]
+["function", "a-non-string-surface-answers-false-and-the", "_go_v3_is_interface", 3, 3]
 
 ["reason", "backends-go-emit-py-refuse-stream-document-top", "backends/go/emit.py::_refuse_stream_document_top_level: every statement is on the refusal path. item 130 diverts a stream document to the live stc-go path so its component is not dropped, and that path renders no top-level `fn` and no plain `test` block, so a document holding BOTH is refused by name rather than compiled to a module quietly short of a section. The byte-agreement corpus is documents the reference EMITS, so no corpus document can reach the raise, and its call site is on the same unentered path (`_emit` counts that one). Pinned by tests/test_stream_reactive.py::test_go_refuses_a_stream_document_whose_top_level_it_would_drop, with ::test_go_still_emits_a_stream_document_whose_top_level_it_can_carry as its control."]
 
@@ -56,13 +56,13 @@
 
 ["reason", "component-method-expression-renderer-and-tuple-return-conven", "Component/method expression renderer and tuple-return convention, reached from _emit_component_step/_emit_method_body, not the pure _go_v3_expr renderer. This includes legacy name/fn/format literals and component Opt/Result spreading; the selfhost module port excludes that live ABI, not the corresponding pure literals or user ADTs. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1321 adds two statements to `_comp_infer`: the `fn` arm that reads a top-level fn/extern's declared return type off `_FN_RET`, so a receiver-typed builtin (`firsts(xs).length()`) can tell a Str receiver from a List one instead of guessing. It sits on the same deferred component/method path. Three later changes land on this same deferred component/method path. Issue #1347 adds three statements to `_comp_builtin`: the `to_int32` arm that flags the checked narrow `revlToI32`, which the pure typed-core path already carried, so a method body calling it no longer falls through to the unknown-method arm and the conformance matrix stops reading that as a go tier limit. Issue #1356 adds nine to `_comp_infer`: a `call` arm that reads a required service method's declared return type off the document's service table, and a `config` arm that reads a config field's declared surface type, both registries being populated only by `_emit_component`. Issue #1376 adds five more to `_comp_infer` and six to `_emit_return`: the `??` arm answers `T` rather than the left operand's `Opt[T]`, and a ternary in RETURN position over the tuple convention has no single-expression Go form, so it spreads into an `if` statement and each branch takes the ordinary return lowering. Issue #1834 adds three more on that path: `_comp_infer_match` (14) answers a match's type from its first arm whose body infers one, with the arm's binding in scope, instead of the scrutinee's type; `_comp_arm_binding` (11) gives that binding's type; and `_go_comp_match` (5 more) binds a non-identifier scrutinee to an interface-typed temp before the type switch, as the pure tier does (item 313). Issue #1892 adds three to `_go_type`: the `Any` arm (Go's `any`) and the `Result[T, E]` value-position arm (`RevlResult[T, E]`), so a service or provide-method signature that takes either builds. tests/fixtures/emit_go_corpus/comp_provide_any_result.rvl reaches both, through the self-host port's matching `comp_go_type` arms."]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_arm_binding", 11, 11]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_arm_binding", 8, 8]
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_builtin", 24, 24]
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_checked_div_expr", 9, 9]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_infer", 18, 18]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_infer", 17, 17]
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_infer_match", 4, 4]
 
@@ -80,7 +80,7 @@
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_literal", 1, 1]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_type", 1, 1]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_type", 4, 4]
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_zero", 10, 10]
 
@@ -134,7 +134,7 @@
 
 ["reason", "issue-1631-the-arity-guard-in-v3-fill", "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus."]
 
-["function", "issue-1631-the-arity-guard-in-v3-fill", "_v3_fill_erased", 1, 1]
+["function", "issue-1631-the-arity-guard-in-v3-fill", "_v3_fill_erased", 3, 3]
 
 ["reason", "issue-2009-host-map-journal-arm-lines-inside-shared-helpers-go", "Issue #2009: the statements the host-map journal arm adds inside helpers the go corpus already calls. `_body_needs_journal` asks whether a provide-method body needs a frame at all, and `_steps_have_bracket` asks whether any step of a body carries a `bracket`. Both answer about a document the corpus does not have, for the reason recorded on the arm's own helpers, and both sit behind the same `_JOURNAL_MODE` gate."]
 
@@ -165,6 +165,26 @@
 ["reason", "issue-2464-issue-2457-go-activation-recover-and-extern-imports", "Issue #2464 / issue #2457: `_emit_apply_header` opens a component's `Apply` with a deferred `recover` when the activation body runs a step, so a panic in an activation (or in a provide method or extern it calls) fails the activation instead of killing the process; and `_emit` and `_emit_v3_combined` add the package a `@go` extern body names with `//revl:import` to the live stc-go module's imports (2 and 1 of their statements, recorded on their own groups). selfhost/emit_go.rvl renders only components whose body is all `provide` blocks (`component_ok`), and those keep the plain `Apply`, which the corpus does run; no corpus component has an activation step or an extern with an import directive, so the recovering arm and both import loops run on no corpus document. Porting them to the self-host emitter is post-v3 work. Pinned by tests/test_go_activation_panic_and_extern_imports.py, which builds and runs the emitted Go."]
 
 ["function", "issue-2464-issue-2457-go-activation-recover-and-extern-imports", "_emit_apply_header", 6, 6]
+
+["reason", "issue-2471-generic-variants-wait-on-the-port", "issue #2471: the reference lowers a user generic variant (Go generics, a rust enum with type parameters) and the self-host port does not yet, so no CORPUS document can hold these bytes; the divergence is pinned in GENERIC_VARIANT_PORT_GAPS (tests/test_selfhost_emit_<tier>.py). Retire by porting and adding a corpus document."]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_emit_v3_go_generic_variant", 14, 14]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_go_v3_applied_variant", 9, 9]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_go_v3_type_args", 2, 2]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_go_v3_variant_payload", 2, 2]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_comp_applied", 9, 9]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_comp_case_type", 1, 1]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_generic_variant", 4, 4]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_subst", 3, 3]
+
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_unify", 13, 13]
 
 ["reason", "issue-721-issue-1321-component-is-observable-decides", "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them."]
 
@@ -212,7 +232,7 @@
 
 ["reason", "match-arms-the-parser-cannot-produce-a-wildcard", "Match arms the parser cannot produce: a wildcard arm that binds the scrutinee (the source `_` pattern takes no binder, `_match_pattern` returns `('_', None)`), so every `wbind` arm here is compatibility IR; the non-exhaustive panics, which the checker's exhaustiveness rule keeps out of an admitted document; and an unresolvable case name. The Opt and Result two-value matches, with and without their wildcard arms, are in the corpus (emit_go_corpus/stdlib_surface.rvl, issue #106)."]
 
-["function", "match-arms-the-parser-cannot-produce-a-wildcard", "_go_v3_match", 4, 4]
+["function", "match-arms-the-parser-cannot-produce-a-wildcard", "_go_v3_match", 8, 8]
 
 ["function", "match-arms-the-parser-cannot-produce-a-wildcard", "_go_v3_match_opt", 14, 14]
 
@@ -250,7 +270,7 @@
 
 ["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_go_proxy_method", 15, 15]
 
-["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_bridge_helpers", 52, 52]
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_bridge_helpers", 54, 54]
 
 ["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_combined", 31, 31]
 
@@ -284,7 +304,7 @@
 
 ["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_stmt", 1, 1]
 
-["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_type", 1, 1]
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_type", 4, 4]
 
 ["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_v3_builtin_ret_type", 2, 2]
 
@@ -334,7 +354,7 @@
 
 ["reason", "remaining-raises-reject-duplicate-variant-constructors-and-u", "Remaining raises reject duplicate variant constructors and unsupported declared type kinds; valid record/variant emission is covered."]
 
-["function", "remaining-raises-reject-duplicate-variant-constructors-and-u", "_emit_v3_go_types", 2, 2]
+["function", "remaining-raises-reject-duplicate-variant-constructors-and-u", "_emit_v3_go_types", 3, 3]
 
 ["reason", "spawn-handle-runtime-and-instance-key-lookup-require", "Spawn-handle runtime and instance-key lookup require live component acquisitions. The residual _spawn_targets/_iter_spawn_nodes branches inspect actual component let-effect spawn nodes; the empty pure-module scan runs but cannot enter those branches. Issue #106: the go corpus carries the v3 combined path's first self-host slice now (tests/fixtures/emit_go_corpus/comp_provide_pure.rvl and four provide-only component documents), which runs part of this; the counts are lowered in place."]
 
