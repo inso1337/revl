@@ -169,3 +169,111 @@ def test_the_unit_runs_on_the_py_tier(tmp_path, a):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS use_b" in result.stdout
     assert "[py] pass: 2 test(s) passed" in result.stdout
+
+
+# --- every expression slot the rewrite walks (review of #2498) --------------
+#
+# Each snippet puts the module's private helper in one slot. After
+# `_rewrite_module` renames it, a generic walk over EVERY dataclass field of
+# the parsed program must find no bare `fold_records` left. The walk follows
+# fields by reflection, not by node kind, so it is also the completeness check:
+# a node kind the rewrite does not know still fails here. A `merge(..)`
+# operand is a stream name (a call there does not parse), so it has no slot.
+
+from revl import compiler as _compiler
+from revl import parser as _parser
+
+SLOT_HEAD = '''service Mem { fn go(x: Int) -> Int }
+service Vault { endorse[confidential] fn lookup(name: Str) -> Result[Str, Str] }
+fn fold_records(records: List[Int]) -> List[Int] { return records }
+'''
+
+SLOTS = {
+    "emit expression": '''component W provides mem: Mem {
+  provide mem { fn go(x) { let a = emit send_mail(fold_records([x]).length()) return a } }
+}''',
+    "endorse expression": '''component K provides vault: Vault {
+  provide vault { fn lookup(name) = Err(endorse[confidential](fold_records([1]), reason = "r")) }
+}''',
+    "spawn config": '''component S {
+  let w = effect spawn Child with { n: fold_records([1]).length() } undo w.dispose()
+}''',
+    "subscribe stage": '''component C {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.map(x => fold_records([x]).length()) undo sub.close()
+}''',
+    "subscribe replay cursor": '''component C {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src replay(from: fold_records([1])) undo sub.close()
+}''',
+    "effect replay cursor": '''component C {
+  let src = effect Stream.source() replay(from: fold_records([1])) undo src.close()
+}''',
+    "requires replay cursor": '''component C requires s: Stream[Int] replay(from: fold_records([1])) {
+  let sub = subscribe s undo sub.close()
+}''',
+    "fn parameter default": '''fn g(n: Int = fold_records([1]).length()) -> Int { return n }''',
+}
+
+
+def _bare_refs(node, seen=None) -> int:
+    seen = set() if seen is None else seen
+    if id(node) in seen:
+        return 0
+    seen.add(id(node))
+    if isinstance(node, _parser.ExprVar):
+        return int(node.name == "fold_records")
+    if isinstance(node, (list, tuple, set)):
+        return sum(_bare_refs(n, seen) for n in node)
+    if isinstance(node, dict):
+        return sum(_bare_refs(n, seen) for n in node.values())
+    if hasattr(node, "__dataclass_fields__"):
+        return sum(_bare_refs(getattr(node, f), seen)
+                   for f in node.__dataclass_fields__)
+    return 0
+
+
+def _parse(source: str):
+    return _parser.Parser(source, "a.rvl").parse()
+
+
+@pytest.mark.parametrize("slot", sorted(SLOTS))
+def test_every_expression_slot_is_rewritten(slot):
+    program = _parse(SLOT_HEAD + SLOTS[slot] + "\n")
+    assert _bare_refs(program) == 1   # the slot's call, before the rewrite
+    _compiler._rewrite_module(program, {"fold_records": "fold_records__m0"}, {})
+    assert _bare_refs(program) == 0
+
+
+def test_the_review_s_emit_case_compiles_as_one_unit(tmp_path):
+    a = '''service Mail { emission[mail] fn go(x: Int) -> Int }
+
+extern emission[mail] fn send_mail(n: Int) -> Int = @py { return n }
+
+fn fold_records(records: List[Int]) -> List[Int] {
+  return records
+}
+
+component Writer provides mail: Mail {
+  provide mail { fn go(x) { let a = emit send_mail(fold_records([x]).length()) return a } }
+}
+'''
+    ir = _compile(tmp_path, a)
+    assert '"fold_records__m0"' in json.dumps(ir["components"])
+
+
+def test_a_parameter_default_calls_its_own_module_s_helper(tmp_path):
+    a = '''fn fold_records(records: List[Int]) -> List[Int] {
+  return records
+}
+
+pub fn g(n: Int = fold_records([1, 2]).length()) -> Int {
+  return n
+}
+
+test "default" {
+  assert g() == 2
+}
+'''
+    ir = _compile(tmp_path, a)
+    assert '"fold_records__m0"' in json.dumps(ir["tests"])
