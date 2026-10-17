@@ -4,7 +4,6 @@ package counter
 
 import (
 	"fmt"
-	revldebug "runtime/debug"
 	"slices"
 	"sync"
 
@@ -175,7 +174,7 @@ func Counter() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			var store *Map[int]

@@ -11,15 +11,18 @@ the panic through, and an unrecovered go panic kills the whole process:
     returned;
 
 Each now reports the failure the way an activation failure is reported (the
-step it ran plus `panic: <v>`), and the next lifecycle test still runs. The
-recovered error also carries the go stack (`debug.Stack()`), which the
-one-line `panic: <v>` of #2464 dropped.
+step it ran plus `panic: <v>`), and the next lifecycle test still runs. That
+report also carries the go stack (`debug.Stack()`): it reaches only the
+author's own test run. The `Apply` recover keeps the one line `panic: <v>`,
+because its error reaches the placement runner's log and FATAL lines, one
+redacted record per line (issue #814), and a stack's host paths and argument
+words cannot be redacted.
 
 A panic in a bridge crossing (`RevlInvoke`) stays fatal by design: the
 placement runner's guard turns it into one redacted FATAL line
 (tests/test_go_runner_fatal_funnel.py, issue #814).
 
-Each test builds and runs the emitted package with the real toolchain.
+The run tests build and run the emitted package with the real toolchain.
 """
 
 from __future__ import annotations
@@ -135,6 +138,53 @@ def test_the_recovered_panic_carries_the_go_stack(tmp_path):
     assert "goroutine " in report, output
     assert "runtime/debug.Stack()" in report, output
     assert ".Boom(" in report or "boom" in report.lower(), output
+
+
+#: The plain (non-binding) form of the step: `let got = call ..` above and
+#: `call ..` here are the two spellings a driver call has.
+PLAIN_CALL_DOC = PROVIDER + """
+lifecycle test "a panicking plain call" {
+  load Agent
+  call ops.run("r")
+  unload Agent
+}
+""" + SURVIVOR
+
+
+def test_a_panicking_plain_call_is_blamed_on_that_call(tmp_path):
+    output = _run_lifecycle(tmp_path, PLAIN_CALL_DOC, "lplain")
+    assert ('lifecycle test "a panicking plain call": call ops.run: '
+            'panic: the provider gave up') in output, output
+    assert "--- PASS: TestTheNextTestStillRuns" in output, output
+
+
+def test_every_step_names_itself_before_it_runs():
+    """A panic is blamed on the step that set `_revlAt` last, so every step
+    kind sets it, `assert` and `assert no_residue` included."""
+    src = _go_emit().emit(compile_source(CALL_DOC, "lcall.rvl"), "lcall")
+    test = src[src.index("func TestAPanickingCall("):]
+    test = test[:test.index("\n}\n")]
+    labels = [line.strip() for line in test.splitlines()
+              if line.strip().startswith("_revlAt = ")]
+    assert labels == ['_revlAt = "load Agent"', '_revlAt = "call ops.run"',
+                      '_revlAt = "assert"', '_revlAt = "unload Agent"'], labels
+    survivor = src[src.index("func TestTheNextTestStillRuns("):]
+    survivor = survivor[:survivor.index("\n}\n")]
+    assert '_revlAt = "assert no_residue"' in survivor
+
+
+def test_the_activation_error_stays_one_line():
+    """The `Apply` recover's error reaches the placement runner's log and
+    FATAL lines, so it carries no stack, and a document without a lifecycle
+    test does not import `runtime/debug`."""
+    doc = PROVIDER + """
+component Caller requires ops: Ops {
+  emit ops.run("r")
+}
+"""
+    src = _go_emit().emit(compile_source(doc, "apply.rvl"), "apply")
+    assert '_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)' in src
+    assert "revldebug" not in src
 
 
 # ---- entry point 2: a timer body fired from `advance` ----------------------

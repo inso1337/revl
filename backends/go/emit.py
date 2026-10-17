@@ -2705,12 +2705,16 @@ def _refuse_required_stream(component: dict, tier: str) -> None:
 _APPLY_WIRING_STEPS = ("provide", "intercept")
 
 
-#: The error a recovered panic becomes inside this process (issue #2481): the
-#: one line an activation failure has always carried (`panic: <v>`), then the
-#: go stack of the panicking goroutine, so a fault in emitted glue (a nil
-#: dereference, an index out of range) still names the frame it came from.
-#: `revldebug` is aliased so no author name can shadow the package; every
-#: renderer imports it when the rendered body spells it (`_GO_DEBUG_IMPORT`).
+#: The error a recovered panic becomes in a lifecycle test (issue #2481): the
+#: one line an activation failure carries (`panic: <v>`), then the go stack of
+#: the panicking goroutine, so a fault in emitted glue (a nil dereference, an
+#: index out of range) still names the frame it came from. Only the lifecycle
+#: recover uses it: that report reaches the author's own `go test` run and
+#: nothing else. The `Apply` recover keeps the one line, because its error
+#: reaches the placement runner's log and FATAL lines, which carry one
+#: redacted record per line (issue #814) and cannot redact a stack's host paths
+#: or argument words. `revldebug` is aliased so no author name can shadow the
+#: package; both renderers import it when the rendered body spells it.
 _GO_RECOVERED_ERROR = 'fmt.Errorf("panic: %v\\n%s", r, revldebug.Stack())'
 _GO_DEBUG_IMPORT = '\trevldebug "runtime/debug"'
 
@@ -2732,7 +2736,7 @@ def _emit_apply_header(body, out) -> None:
     out.append("\t\tApply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {")
     out.append("\t\t\tdefer func() {")
     out.append("\t\t\t\tif r := recover(); r != nil {")
-    out.append('\t\t\t\t\t_revlApplyInv, _revlApplyErr = nil, %s' % _GO_RECOVERED_ERROR)
+    out.append('\t\t\t\t\t_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)')
     out.append("\t\t\t\t}")
     out.append("\t\t\t}()")
 
@@ -4942,11 +4946,13 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                         out.append("\t\t%s" % mcall)
                     out.append("\t}")
             elif kind == "assert":
+                out.append("\t_revlAt = %s" % _go_string("assert"))
                 out.append("\tif !(%s) {" % _go_lifecycle_assert(
                     step["expr"], bind_types, env, where))
                 out.append("\t\trevlT.Fatalf(%s)" % _go_string(where_f + ": assertion failed"))
                 out.append("\t}")
             elif kind == "assert_no_residue":
+                out.append("\t_revlAt = %s" % _go_string("assert no_residue"))
                 out.append("\t// R4 + R1: the composition must leave the live")
                 out.append("\t// runtime holding nothing — the orchestrator reaps")
                 out.append("\t// disposed fibers asynchronously, so poll briefly.")

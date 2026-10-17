@@ -4,7 +4,6 @@ package tenants
 
 import (
 	"fmt"
-	revldebug "runtime/debug"
 	"slices"
 	"sync"
 
@@ -193,7 +192,7 @@ func TenantAStore() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			var store *Map[string]
@@ -236,7 +235,7 @@ func TenantBStore() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			var store *Map[string]
@@ -279,7 +278,7 @@ func TenantAApp() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			kv, err := stc.Service[Kv](ctx, _keyKv)
@@ -305,7 +304,7 @@ func TenantBApp() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			kv, err := stc.Service[Kv](ctx, _keyKv)

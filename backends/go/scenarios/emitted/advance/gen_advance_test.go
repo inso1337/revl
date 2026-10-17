@@ -665,7 +665,7 @@ func TickCounter() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			_revlJournal := revlJournalNew()
@@ -718,7 +718,7 @@ func Heartbeat() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			counter, err := stc.Service[Counter](ctx, _keyCounter)
@@ -747,7 +747,7 @@ func Warmup() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			counter, err := stc.Service[Counter](ctx, _keyCounter)
@@ -837,6 +837,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		}
 		before = (_svc).Count()
 	}
+	_revlAt = "assert"
 	if !(before == 0) {
 		revlT.Fatalf("lifecycle test \"an every-timer fires on each advanced tick\": assertion failed")
 	}
@@ -851,6 +852,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		}
 		ticks = (_svc).Count()
 	}
+	_revlAt = "assert"
 	if !(ticks == 3) {
 		revlT.Fatalf("lifecycle test \"an every-timer fires on each advanced tick\": assertion failed")
 	}
@@ -876,6 +878,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		}
 		settled = (_svc).Count()
 	}
+	_revlAt = "assert"
 	if !(settled == 3) {
 		revlT.Fatalf("lifecycle test \"an every-timer fires on each advanced tick\": assertion failed")
 	}
@@ -890,6 +893,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		}
 		delete(_fibers, "TickCounter")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.
@@ -945,6 +949,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		}
 		early = (_svc).Count()
 	}
+	_revlAt = "assert"
 	if !(early == 0) {
 		revlT.Fatalf("lifecycle test \"an after-timer fires once when its delay elapses\": assertion failed")
 	}
@@ -959,6 +964,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		}
 		fired = (_svc).Count()
 	}
+	_revlAt = "assert"
 	if !(fired == 1) {
 		revlT.Fatalf("lifecycle test \"an after-timer fires once when its delay elapses\": assertion failed")
 	}
@@ -973,6 +979,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		}
 		spent = (_svc).Count()
 	}
+	_revlAt = "assert"
 	if !(spent == 1) {
 		revlT.Fatalf("lifecycle test \"an after-timer fires once when its delay elapses\": assertion failed")
 	}
@@ -998,6 +1005,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		}
 		delete(_fibers, "TickCounter")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.

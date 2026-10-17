@@ -971,7 +971,7 @@ func Crasher() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
 			_revlFrame := newRevlFrame()
@@ -1069,6 +1069,7 @@ func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 		}
 		delete(_fibers, "Crasher")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.

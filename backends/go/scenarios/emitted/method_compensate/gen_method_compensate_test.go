@@ -971,6 +971,7 @@ func TestCleanUnloadOfAnUnCalledAgentLeavesNoResidue(revlT *testing.T) {
 		}
 		delete(_fibers, "Agent")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.

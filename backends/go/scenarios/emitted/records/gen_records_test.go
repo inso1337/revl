@@ -647,9 +647,11 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 		}
 		ada = (_svc).Make("ada", 36)
 	}
+	_revlAt = "assert"
 	if !(ada.Age == 36) {
 		revlT.Fatalf("lifecycle test \"records/lists/variants round-trip through a live provide method\": assertion failed")
 	}
+	_revlAt = "assert"
 	if !(ada.Name == "ada") {
 		revlT.Fatalf("lifecycle test \"records/lists/variants round-trip through a live provide method\": assertion failed")
 	}
@@ -662,9 +664,11 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 		}
 		older = (_svc).Birthday(ada)
 	}
+	_revlAt = "assert"
 	if !(older.Age == 37) {
 		revlT.Fatalf("lifecycle test \"records/lists/variants round-trip through a live provide method\": assertion failed")
 	}
+	_revlAt = "assert"
 	if !(older.Name == "ada") {
 		revlT.Fatalf("lifecycle test \"records/lists/variants round-trip through a live provide method\": assertion failed")
 	}
@@ -677,6 +681,7 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 		}
 		who = (_svc).SecondName([]Person{Person{Name: "ada", Age: 36}, Person{Name: "bo", Age: 41}})
 	}
+	_revlAt = "assert"
 	if !(who == "bo") {
 		revlT.Fatalf("lifecycle test \"records/lists/variants round-trip through a live provide method\": assertion failed")
 	}
@@ -689,6 +694,7 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 		}
 		c = (_svc).Area(ShapeCircle{Value: 2})
 	}
+	_revlAt = "assert"
 	if !(c == 12) {
 		revlT.Fatalf("lifecycle test \"records/lists/variants round-trip through a live provide method\": assertion failed")
 	}
@@ -701,6 +707,7 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 		}
 		sq = (_svc).Area(ShapeSquare{Value: 5})
 	}
+	_revlAt = "assert"
 	if !(sq == 25) {
 		revlT.Fatalf("lifecycle test \"records/lists/variants round-trip through a live provide method\": assertion failed")
 	}
@@ -726,6 +733,7 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 		}
 		delete(_fibers, "Registry")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.
