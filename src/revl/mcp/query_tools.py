@@ -93,6 +93,12 @@ def _buffer_sources(modules: dict | None) -> dict | None:
     return {os.path.abspath(path): text for path, text in modules.items()}
 
 
+class _ModulesWithoutCandidate(Exception):
+    """`modules` are the in-memory `use` imports of a candidate, not a candidate
+    of their own. Raised by `_compile` so `_run` answers with the shared
+    refusal without carrying the envelope vocabulary itself (issue #2500)."""
+
+
 def _compile(arguments: dict) -> dict:
     source = arguments.get("source")
     if source is not None:
@@ -102,6 +108,8 @@ def _compile(arguments: dict) -> dict:
     if files:
         return compile_files(list(files),
                              sources=_buffer_sources(arguments.get("modules")))
+    if arguments.get("modules") is not None and not _carries_candidate(arguments):
+        raise _ModulesWithoutCandidate
     held = _HELD_CANDIDATE() if _HELD_CANDIDATE is not None else None
     if held:
         return _compile(held)
@@ -120,12 +128,21 @@ def no_candidate_refusal() -> dict:
         "fix": "pass `source` or `files` beside `modules`"}]}
 
 
+def _mark_session(result: dict) -> dict:
+    """Say that the held set answered the call. The marker is the answer's
+    PROVENANCE, not its verdict, so it rides even on an `ok: False` answer that
+    resolved nothing (an unknown component is still an answer about the held
+    composition). Same reading as `revl_check`'s held form (issue #2500)."""
+    result["queried"] = "session"
+    return result
+
+
 def _run(arguments: dict, fn, *args, **kwargs) -> dict:
-    if arguments.get("modules") is not None and not _carries_candidate(arguments):
-        return no_candidate_refusal()
     from_session = not _carries_candidate(arguments)
     try:
         ir = _compile(arguments)
+    except _ModulesWithoutCandidate:
+        return no_candidate_refusal()
     except RevlError as error:
         refusal = report(error)
         # The held composition itself failed to compile: still an answer ABOUT
@@ -133,22 +150,13 @@ def _run(arguments: dict, fn, *args, **kwargs) -> dict:
         # which composition it was told about. The `ValueError` branch below is
         # deliberately NOT marked: there the session held nothing, so no
         # composition answered and the refusal is a usage error (issue #2500).
-        if from_session:
-            refusal["queried"] = "session"
-        return refusal
+        return _mark_session(refusal) if from_session else refusal
     except ValueError as error:
         return {"ok": False, "diagnostics": [{
             "severity": "error", "code": "REVL", "category": "usage",
             "message": str(error)}]}
     result = fn(ir, *args, **kwargs)
-    # The call named no candidate, so the held set answered it. Say so: the
-    # marker is the answer's PROVENANCE, not its verdict, so it rides even on
-    # an `ok: False` answer that resolved nothing (an unknown component is
-    # still an answer about the held composition). Same reading as `revl_check`'s
-    # held form (issue #2500).
-    if from_session:
-        result["queried"] = "session"
-    return result
+    return _mark_session(result) if from_session else result
 
 
 def _require(arguments: dict, field: str):
