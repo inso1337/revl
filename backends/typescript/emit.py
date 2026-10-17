@@ -1632,6 +1632,20 @@ def _statement(rendered: str) -> str:
     return rendered
 
 
+def _asi_safe(rendered: str) -> str:
+    """An expression statement that cannot glue onto the line before it.
+
+    JS ASI does not end a statement before a line that starts with `(`, `[`
+    or a backtick, so `$revl_frame.journalBegin()` followed by a parenthesized
+    acquisition (`((!revlEq(x, undefined)) ? m.remove(k) : noop())`, a ternary
+    effect) parses as `journalBegin()(...)` and throws "is not a function" when
+    the bracket runs (issue #2501). A leading `;` ends the previous statement;
+    every other line is returned unchanged."""
+    if rendered[:1] in ("(", "[", "`"):
+        return ";" + rendered
+    return rendered
+
+
 def _balanced(text: str) -> bool:
     depth = 0
     for ch in text:
@@ -1720,7 +1734,7 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             if bind is not None:
                 lines.append(f"{indent}  {bind} = {acquire}")
             else:
-                lines.append(f"{indent}  {acquire}")
+                lines.append(f"{indent}  {_asi_safe(acquire)}")
             inverse = _pinned_arrow(step, "undo", f"() => {undo}")
             # issue #2009: the inverse runs with the journal re-armed, so a key
             # only the undo writes is judged too (py `Frame._guard`, 3690).
@@ -2530,7 +2544,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     cas_bind = bind_name
                     lines.append(f"{indent}const {bind_name} = {acquire}")
                 else:
-                    lines.append(f"{indent}{acquire}")
+                    lines.append(f"{indent}{_asi_safe(acquire)}")
             undo = _expr(step["undo"], ctx)
             acquire_node = step.get("acquire") or {}
             b_key = step.get("bind") or _acquire_method_name(acquire_node)

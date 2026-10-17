@@ -1,0 +1,42 @@
+// Issue #2501: an effect whose acquisition is a ternary renders as a ts line
+// that starts with `(`. JS ASI does not end a statement before such a line, so
+// the `$revl_frame.journalBegin()` the emitter places right above every
+// bracket's forward write was CALLED with it (`journalBegin()((...))`, "is not
+// a function"). Both bracket sites are here: the activation body
+// (`seeded() ? ...`) and a provide-method body (`held != None ? ...`, the shape
+// of a downstream approval gate). The reference now `;`-leads such a line.
+//
+// It sits outside every corpus directory the census walks only so this
+// two-line emitter fix does not move the census baseline; nothing in it is a
+// native-gate refusal. tests/test_host_map_journal_2009.py runs it under node.
+service Gate {
+  fn approve(k: Str) -> Str
+}
+
+fn noop() {}
+
+fn seeded() -> Bool { return true }
+
+component Ledger provides gate: Gate {
+  let approved = effect Map.new() undo approved.drop()
+  let pending = effect Map.new() undo pending.drop()
+  effect seeded() ? pending.insert("a", "waiting") : noop()
+  undo   seeded() ? pending.remove("a") : noop()
+  provide gate {
+    fn approve(k) {
+      let held: Opt[Str] = pending.get(k)
+      effect approved.insert(k, "yes")
+      undo   approved.remove(k)
+      effect held != None ? pending.remove(k) : noop()
+      undo   held != None ? pending.insert(k, held ?? "waiting") : noop()
+      return "ok"
+    }
+  }
+}
+
+lifecycle test "a ternary effect after journalBegin runs" {
+  load Ledger
+  call gate.approve("a")
+  unload Ledger
+  assert no_residue
+}

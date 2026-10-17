@@ -324,6 +324,11 @@ CORPUS = [
     # say why in their own `CORPUS` comment.
     "../emit_py_corpus/ui_transaction_unit.rvl",
     "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
+    # Issue #2501: a ternary acquisition renders as a `(`-led line, which JS
+    # ASI glued onto the `journalBegin()` above it; the reference `;`-leads it
+    # at both bracket sites and the port must agree. Outside the census walk
+    # only to keep the census baseline still (the document's own header).
+    "../../noncensus_corpus/emit_ts_ternary_effect_asi.rvl",
 ]
 
 def _load_reference_emit():
@@ -808,3 +813,4 @@ def test_ts_type_matches_reference_on_structural_types_2297(emitted, reference, 
     of a union, exactly as the reference `_ts_v3_type` does. The corpus document
     `block_arm_records.rvl` covers the lifted-arm signatures end to end."""
     assert emitted["ts_type"](surface) == reference._ts_v3_type(surface)
+
