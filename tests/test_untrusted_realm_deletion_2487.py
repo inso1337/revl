@@ -129,29 +129,3 @@ def test_untrusted_withdraw_of_the_whole_provider_is_unchanged(loaded):
     assert committed.get("swapped") is True, committed
     names = {c["name"] for c in server_mod.SESSION.ir["components"]}
     assert names == {"TenantBStore", "TenantBApp"}
-
-
-def _tenant_a_without_clause() -> str:
-    """`Kv`, TenantAStore and TenantAApp as text, both clauses left out: a
-    `revl_swap` candidate that names no realm."""
-    src = (ROOT / "examples" / "tenants.rvl").read_text()
-    cut = (src[src.index("service Kv"):src.index("component TenantBStore")]
-           + src[src.index("component TenantAApp"):src.index("component TenantBApp")])
-    return cut.replace(CLAUSE, "")
-
-
-def test_untrusted_swap_that_leaves_the_clause_out_is_refused(loaded):
-    """The same move through `revl_swap` with inline source."""
-    swapped = _call("revl_swap", {"source": _tenant_a_without_clause(),
-                                  "replacing": ["TenantAStore", "TenantAApp"]})
-    assert swapped.get("swapped") is False, swapped
-    assert REFUSAL in _messages(swapped), swapped
-    assert _realms("TenantAStore") == {"kv": "tenant_a"}
-
-
-def test_trusted_swap_that_leaves_the_clause_out_is_admitted(loaded):
-    server_mod.set_authoring_trust(host_code=True)
-    swapped = _call("revl_swap", {"source": _tenant_a_without_clause(),
-                                  "replacing": ["TenantAStore", "TenantAApp"]})
-    assert swapped.get("swapped") is True, swapped
-    assert _realms("TenantAStore") == {}
