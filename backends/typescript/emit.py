@@ -1642,7 +1642,13 @@ def _asi_safe(rendered: str) -> str:
     the bracket runs (issue #2501). The same holds for every bare expression
     statement the emitter writes (a fn-body expression statement, a sync
     `emit`, a timer firing), so each of them goes through here. A leading `;`
-    ends the previous statement; every other line is returned unchanged."""
+    ends the previous statement; every other line is returned unchanged.
+
+    `+`, `-` and `/` are the other ASI hazards, and no rendered expression can
+    start with one: the lexer has no signed or regex literal, revl has no
+    unary `+`, and `_expr`'s `un` arm spells `-` as `revlI64(-x)` (Int),
+    `revlI32(-x)` (Int32) or `(-x)` (Float), so a negation leads with a name
+    or `(`, and every `bin` leads with `(` or a `revl*` helper name."""
     if rendered[:1] in ("(", "[", "`"):
         return ";" + rendered
     return rendered
