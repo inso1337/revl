@@ -929,6 +929,19 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
                             "and the server-side source are untouched")
         return rejected
 
+    # (1b) issue #2487: an untrusted author may not move a provider that stays
+    # admitted out of its realm by deleting the clause. Compared against the
+    # running generation, which is what the edit would replace.
+    try:
+        _check_realm_removal(session.ir, ir, _candidate_texts(vs))
+    except RevlError as error:
+        rejected = report(error)
+        rejected.update(edited=False, admitted=False, swapped=False,
+                        note="the patch moves an admitted provision out of its "
+                             "realm; the running composition and the "
+                             "server-side source are untouched")
+        return rejected
+
     # (2) open holes -> checked, not admissible. Advance the working buffer so
     # the next edit builds on it (fill holes one at a time), but swap nothing.
     from .server import _untrusted_author  # noqa: PLC0415 - no import cycle
@@ -1021,6 +1034,26 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),
             "blastRadius": radius, **_summary(ir), **state, **classes}
+
+
+def _candidate_texts(vs: dict) -> dict:
+    """Each candidate filename mapped to the text the compile reads for it, as
+    the component IR's `source` names it, so a refusal can carry a line."""
+    texts = dict(vs.get("files_content") or {})
+    texts.update(vs.get("modules") or {})
+    if vs.get("source") is not None:
+        texts["<candidate>.rvl"] = vs["source"]
+    return {k: v for k, v in texts.items() if isinstance(v, str)}
+
+
+def _check_realm_removal(admitted: dict | None, candidate: dict,
+                         texts: dict | None = None) -> None:
+    """`admit_profile.check_no_realm_removal` under the server's authoring
+    profile, read from the server as `compile_virtual` reads it."""
+    from ..admit_profile import check_no_realm_removal  # noqa: PLC0415
+    from .server import AUTHORING  # noqa: PLC0415 - lazy, avoids an import cycle
+
+    check_no_realm_removal(admitted, candidate, AUTHORING.profile(), texts)
 
 
 def running_source(session) -> dict:
