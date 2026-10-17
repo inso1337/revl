@@ -742,3 +742,44 @@ def test_the_whole_chain_unloads_without_residue():
                         + CHAIN_API + CHAIN_LOG})
     unloaded = _call("revl_unload", {})
     assert unloaded["noResidue"] is True
+
+
+# ------------- the query verbs and revl_plan read the held set too (issue #2500)
+#
+# #2117 gave `revl_check` the bare call. The five composition queries (step 4
+# of the loop is one of them) and `revl_plan` still demanded `source`/`files`.
+# Each now reads the session's working set when it carries no candidate, and
+# answers as it does for the same text sent explicitly.
+
+_TENANTS = (ROOT / "examples" / "tenants.rvl")
+
+_HELD_VERBS = [
+    ("revl_query_withdraw", {"component": "TenantAStore"}),
+    ("revl_query_dependents", {"target": "kv"}),
+    ("revl_query_emitters", {"target": "kv"}),
+    ("revl_query_reach", {"component": "TenantAApp"}),
+    ("revl_query_drift", {"service": "Kv", "loses": ["unset"]}),
+    ("revl_plan", {}),
+]
+
+
+@pytest.mark.parametrize("verb,extra", _HELD_VERBS)
+def test_held_form_answers_like_the_explicit_form(monkeypatch, verb, extra):
+    text = _TENANTS.read_text()
+    _held(monkeypatch, _HeldSession(text))
+
+    held = _call(verb, dict(extra))
+    explicit = _call(verb, {**extra, "files": [str(_TENANTS)]})
+
+    assert held["ok"] is True, held
+    assert held == explicit
+
+
+@pytest.mark.parametrize("verb,extra", _HELD_VERBS)
+def test_no_held_session_keeps_the_usage_refusal(monkeypatch, verb, extra):
+    _held(monkeypatch, _HeldSession(loaded=False))
+
+    payload = _call(verb, dict(extra))
+
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["category"] == "usage", payload
