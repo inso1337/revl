@@ -244,11 +244,12 @@ def test_template_successor_does_not_claim_a_provider_capture():
     assert tmpl.restored is None
 
 
-def _mixed(*, isolated: bool, board_reads: str) -> str:
-    """One frame, two stores: `secret` serves `kv` (isolated in tenant_a when
+def _mixed(*, isolated: bool, board_reads: str,
+           realm: str = 'realm("tenant_a")') -> str:
+    """One frame, two stores: `secret` serves `kv` (isolated in `realm` when
     `isolated`), `open` serves the shared `board`, and the hand-off is on
     `board`. The capture takes the whole frame, `secret` included."""
-    clause = '  isolate kv in realm("tenant_a")\n' if isolated else ""
+    clause = f"  isolate kv in {realm}\n" if isolated else ""
     return (
         "component Mixed provides kv: Kv, board: Kv {\n"
         f"{clause}"
@@ -307,3 +308,161 @@ def _map_at(component: str, pos: int):
     session = server_mod.SESSION
     resources = session._frame_resources(session._driver.fibers.get(component))
     return resources[pos]
+
+
+TENANT_A_APP = (
+    "component TenantAApp requires kv: Kv {\n"
+    '  isolate kv in realm("tenant_a")\n'
+    '  effect kv.set("who", "alice") undo kv.unset("who")\n'
+    "}\n")
+
+# the operator binds the untrusted author's `realm(?tenant)` to tenant_a
+BINDING = (("tenant", "tenant_a"),)
+
+
+def _untrusted_bound() -> None:
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=False, realm_bindings=BINDING)
+
+
+def _operator_file(tmp_path: Path, monkeypatch, text: str) -> str:
+    """Load `text` from a jailed file: operator-authored, while the transport
+    stays untrusted for everything the agent sends after."""
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "running.rvl"
+    target.write_text(text, encoding="utf-8")
+    loaded = _call("revl_load", {"files": [str(target)]})
+    assert loaded["ok"] is True, loaded
+    return str(target)
+
+
+def _board_get(key: str) -> dict:
+    read = _call("revl_call", {"key": "board", "method": "get", "args": [key]})
+    assert read["ok"] is True, read
+    return read
+
+
+def _committed(changed: dict) -> None:
+    assert changed["ok"] is True and changed.get("committed") is True, \
+        [d.get("message") for d in changed.get("diagnostics") or []]
+
+
+def _tenant_a_store(extra_provides: str = "", extra_body: str = "") -> str:
+    """TenantAStore as an untrusted author writes it: `realm(?tenant)`."""
+    return (
+        f"component TenantAStore provides kv: Kv{extra_provides} {{\n"
+        "  isolate kv in realm(?tenant)\n"
+        "  handoff kv: Map[Str, Str]\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide kv {\n"
+        "    fn get(k) = store.get(k)\n"
+        "    fn set(k, v) { effect store.insert(k, v) undo store.remove(k) }\n"
+        "    fn unset(k) = store.remove(k)\n"
+        "  }\n"
+        f"{extra_body}"
+        "}\n")
+
+
+BOARD_OVER_STORE = (
+    "  provide board {\n"
+    "    fn get(k) = store.get(k)\n"
+    "    fn set(k, v) { effect store.insert(k, v) undo store.remove(k) }\n"
+    "    fn unset(k) = store.remove(k)\n"
+    "  }\n")
+
+
+@needs_runtime
+def test_untrusted_successor_adding_a_shared_key_starts_cold(
+        tmp_path, monkeypatch):
+    """An untrusted replace keeps kv in tenant_a (through the operator's
+    binding) but adds a shared `board` over the same store. The shared key is
+    part of the placement, so the frame is placed differently: cold."""
+    _untrusted_bound()
+    _operator_file(tmp_path, monkeypatch, _tenants_with_handoff())
+    _map("TenantAStore").insert(*SECRET)
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "TenantAStore",
+        "source": _tenant_a_store(", board: Kv", BOARD_OVER_STORE)}})
+    _committed(changed)
+    assert _board_get(SECRET[0]).get("result") != SECRET[1]
+    entry = changed["handoff"][A_LABEL]
+    assert entry["migrated"] is False and entry["reason"] == "placement"
+
+
+@needs_runtime
+def test_untrusted_same_shape_rewiring_of_a_multi_realm_frame_starts_cold(
+        tmp_path, monkeypatch):
+    """The operator's frame isolates kv in tenant_a and hands off a shared
+    `board`. An untrusted successor with the identical placement (through
+    `realm(?tenant)`) points `board` at `secret`. Resources match by
+    position, so an equal placement proves nothing: a frame spanning realms
+    does not hand its state to an agent-authored successor."""
+    _untrusted_bound()
+    _operator_file(tmp_path, monkeypatch, MIXED_REST + TENANT_A_APP
+                   + _mixed(isolated=True, board_reads="open"))
+    _map_at("Mixed", 0).insert(*SECRET)
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed",
+        "source": _mixed(isolated=True, board_reads="secret",
+                         realm="realm(?tenant)")}})
+    _committed(changed)
+    assert _board_get(SECRET[0]).get("result") != SECRET[1]
+    entry = changed["handoff"]["board"]
+    assert entry["migrated"] is False and entry["reason"] == "multi-realm"
+
+
+@needs_runtime
+def test_untrusted_edit_of_the_mixed_frame_does_not_leak(tmp_path, monkeypatch):
+    """The Mixed case as the untrusted author over revl_change, TenantAApp
+    kept: drop the isolate clause and point `board` at `secret`. Either the
+    swap is refused or the successor starts cold; the secret never reaches
+    the shared `board`."""
+    _untrusted_bound()
+    target = _operator_file(tmp_path, monkeypatch, MIXED_REST + TENANT_A_APP
+                            + _mixed(isolated=True, board_reads="open"))
+    _map_at("Mixed", 0).insert(*SECRET)
+    changed = _call("revl_change", {"commit": True, "edit": {
+        "target": target, "edits": [
+            {"anchor": '  isolate kv in realm("tenant_a")\n  handoff board',
+             "replacement": "  handoff board"},
+            {"anchor": "fn get(k) = open.get(k)",
+             "replacement": "fn get(k) = secret.get(k)"}]}})
+    if changed.get("committed"):
+        assert _board_get(SECRET[0]).get("result") != SECRET[1]
+        assert changed["handoff"]["board"]["migrated"] is False
+    else:
+        assert _map_at("Mixed", 0).data.get(SECRET[0]) == SECRET[1]
+
+
+@needs_runtime
+def test_control_untrusted_single_realm_successor_still_migrates(
+        tmp_path, monkeypatch):
+    _untrusted_bound()
+    _operator_file(tmp_path, monkeypatch, _tenants_with_handoff())
+    _map("TenantAStore").insert(*SECRET)
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "TenantAStore", "source": _tenant_a_store()}})
+    _committed(changed)
+    assert _store("TenantAStore")[SECRET[0]] == SECRET[1]
+    assert changed["handoff"][A_LABEL]["migrated"] is True
+
+
+@needs_runtime
+def test_control_operator_multi_realm_successor_still_migrates(
+        tmp_path, monkeypatch):
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    loaded = _call("revl_load", {"source": MIXED_REST + TENANT_A_APP
+                                 + _mixed(isolated=True, board_reads="open")})
+    assert loaded["ok"] is True, loaded
+    _map_at("Mixed", 0).insert(*SECRET)
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed",
+        "source": _mixed(isolated=True, board_reads="open").replace(
+            "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)")}})
+    _committed(changed)
+    assert _map_at("Mixed", 0).data[SECRET[0]] == SECRET[1]
+    assert changed["handoff"]["board"]["migrated"] is True

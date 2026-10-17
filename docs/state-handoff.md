@@ -103,12 +103,24 @@ On a **verified** swap the exported value is threaded from old to new through
    provider fiber. Keyed by **provided key**, not component name, so a renamed
    successor (`Cache` → `CacheV2`) that re-provides `cache` is correlated by
    *what it provides*. The match is on the provided key **and the frame's
-   whole placement**, its full `isolate` map (issue #2510). The capture takes
-   every resource of the frame, including the stores behind the component's
-   other provided keys, so state captured from a frame that isolates `kv` in
+   whole placement**: every key the component provides or requires, mapped to
+   its realm, shared keys included (issue #2510). The capture takes every
+   resource of the frame, including the stores behind the component's other
+   keys, so state captured from a frame that isolates `kv` in
    `realm("tenant_a")` crosses only to a successor placed the same way, even
-   when the hand-off key itself is shared. A successor placed differently
-   starts cold, and a capture two successors could claim is copied to neither.
+   when the hand-off key itself is shared, and a successor that adds or drops
+   a key over the same frame is placed differently. A successor placed
+   differently starts cold, and a capture two successors could claim is
+   copied to neither.
+
+   Resources are matched by position, so an equal placement does not bind a
+   store to the key it serves. A successor written by the **agent** (the
+   untrusted-author profile on the MCP transport, or `Gate.propose`'s
+   `declared` policy) therefore inherits state only from a frame that places
+   every key in **one** realm (the shared realm counts as one). A frame that
+   spans realms starts cold for an agent-authored successor, with `reason:
+   "multi-realm"`. An operator-written successor of such a frame still
+   migrates.
 2. **Restore, after load.** `_restore_provider_state` re-seats each captured
    vector onto the successor's provider fiber through the resources'
    `__revl_restore__` protocol — **check the whole cohort, then apply**, so a
@@ -120,7 +132,8 @@ On a **verified** swap the exported value is threaded from old to new through
    entry also carries `realm: "tenant_a"`. A successor that declared the
    hand-off but started cold gets an entry too: `migrated: false`, a `reason`
    (`realm` when the hand-off key changed realm, `placement` when another key
-   of the frame did, `ambiguous` when two successors claimed one capture) and
+   of the frame did, `multi-realm` for the agent-authored rule above,
+   `ambiguous` when two successors claimed one capture) and
    a `note`. `Gate.propose`'s `migration` field lists only the entries that
    carried state.
 
