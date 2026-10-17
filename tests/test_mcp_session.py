@@ -840,7 +840,7 @@ def test_plan_with_only_modules_is_a_usage_refusal(monkeypatch):
 @pytest.mark.parametrize("verb,extra", _HELD_VERBS)
 def test_held_form_obeys_the_authoring_refusal(monkeypatch, verb, extra):
     """Held source is agent text, so under the default closed authoring
-    profile a source with host code is refused, as `revl_check {}` refuses it.
+    profile a source that names a realm is refused, as `revl_check {}` refuses it.
     No patching: the real gate decides."""
     _held(monkeypatch, _HeldSession(_TENANTS.read_text()))
 
