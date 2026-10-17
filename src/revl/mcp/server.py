@@ -102,6 +102,7 @@ from .. import query as Q
 from ..plan import _merge_resulting_ir
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
+from . import query_tools as _query_tools
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
 from . import ambient as _ambient
@@ -3254,6 +3255,21 @@ def _held_candidate(vs: dict) -> dict:
     return {}
 
 
+def _held_query_candidate() -> dict | None:
+    """The held working set in the shape the query verbs compile (issue #2500),
+    or None when the session holds nothing. One reader over the same set
+    `_check_held` checks, `revl_swap {}` re-admits and `revl_source {}` reads,
+    installed on `query_tools` because that module owns the five verbs and
+    cannot import this one."""
+    vs = _held_working_set()
+    if vs is None:
+        return None
+    return _held_candidate(vs) or None
+
+
+_query_tools.set_held_candidate(_held_query_candidate)
+
+
 def _check_held(arguments: dict) -> dict:
     """`revl_check` with no candidate of its own: check what the session holds.
 
@@ -3412,6 +3428,11 @@ def _tool_plan(arguments: dict) -> dict:
     agent does not have to round-trip the running IR through its context to
     ask "what would this do?". An explicit `manifest` always wins, and the
     `against` field says which was used.
+
+    With no candidate either (`source`, a non-empty `files`, or `modules`), it
+    plans re-admitting the source the session already holds — the same set
+    `revl_swap {}` re-admits, so the bare `revl_plan {}` rehearses the bare
+    `revl_swap {}` (issue #2500). The answer carries `planned: "session"`.
     """
     from ..plan import plan as build_plan  # noqa: PLC0415 — lazy, mirrors _boundary_of
 
@@ -3422,11 +3443,30 @@ def _tool_plan(arguments: dict) -> dict:
     elif running is None:
         against = "nothing (cold start — every provision is a gain)"
 
+    source, files, modules = _candidate_of(arguments)
+    if modules is not None and not _carries_candidate(arguments):
+        return _query_tools.no_candidate_refusal()
+    from_session = not _carries_candidate(arguments)
+    if from_session:
+        held = _held_query_candidate()
+        if held is None:
+            return _session_error(
+                "revl_plan needs a candidate: pass `source` or `files`, or "
+                "plan re-admitting the composition the session holds — and "
+                "this session holds none (nothing is loaded and no draft is "
+                "open)",
+                category="usage",
+                fix="pass `source` or `files`",
+                next=_remedy.load_next())
+        source = held.get("source")
+        files = held.get("files")
+        modules = held.get("modules")
+
     result = build_plan(
-        source=arguments.get("source"),
-        files=arguments.get("files"),
+        source=source,
+        files=files,
         manifest=running,
-        modules=arguments.get("modules"),
+        modules=modules,
         replacing=tuple(arguments.get("replacing") or ()),
         include_ir=True,
     )
@@ -3440,6 +3480,8 @@ def _tool_plan(arguments: dict) -> dict:
     # the race before it swaps; the plan itself is unchanged.
     payload = {**result, "against": against,
                "note": "nothing was admitted, swapped or written — this is a plan"}
+    if from_session:
+        payload["planned"] = "session"
     warnings = _leases.advise_plan(SESSION, arguments)
     if warnings:
         payload["leaseWarnings"] = warnings

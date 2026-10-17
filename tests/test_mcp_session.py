@@ -328,6 +328,285 @@ def test_session_true_refuses_a_candidate_of_its_own(monkeypatch):
     assert "selfCheck" not in payload
 
 
+# ---------------- step 4 reads what steps 1-3 mutated (issue #2500)
+#
+# #2117 fixed the bare call for `revl_check` and stated the principle it rests
+# on: the name and the loop position already imply the bare call, and
+# `revl_swap {}` and `revl_source {}` read the same set. The fix reached ONE
+# verb. The five composition queries route through `query_tools._run`, whose
+# `_compile` demanded `source` or `files` and had no held form — and
+# `revl_query_withdraw` IS the loop's preflight step (step 4 of 6), so step 4
+# could not read the artifact steps 1-3 built. Measured on a small model's
+# warm K=8: 3 of its 15 refusals were `revl_query_withdraw {"component": X}`
+# with exactly the right arguments and no candidate to send, and 3 more were
+# the bare `revl_plan {}`, whose own description promises it "Defaults to the
+# composition this server has loaded".
+#
+# So the same reading applies: nothing sent means the held set answers, and
+# the answer says which composition it describes (`queried: "session"`,
+# `planned: "session"`). A call with neither a candidate nor anything held
+# stays a USAGE refusal, so `ok: false` keeps meaning "your composition has a
+# problem" rather than "you forgot an argument".
+
+
+def test_a_query_reads_the_held_composition_without_resending_it(monkeypatch):
+    """`revl_query_withdraw` is loop step 4 of 6, and steps 1-3 mutate the held
+    set, so the bare call asks about that set — the same one `revl_check {}`
+    checks and `revl_swap {}` re-admits (issue #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_query_withdraw", {"component": "C"})
+
+    assert payload["ok"] is True, payload
+    assert payload["queried"] == "session"
+    assert payload["component"] == "C"
+    assert payload["provides"] == [{"key": "cache", "realm": ""}]
+
+
+def test_every_query_verb_reads_the_held_set(monkeypatch):
+    """The fallback is the family's, not one verb's: all five compile the held
+    source when the call names none (issue #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    calls = [
+        ("revl_query_emitters", {"target": "cache"}),
+        ("revl_query_withdraw", {"component": "C"}),
+        ("revl_query_dependents", {"target": "cache"}),
+        ("revl_query_reach", {"component": "C"}),
+        ("revl_query_drift", {"service": "Cache"}),
+    ]
+
+    for tool, arguments in calls:
+        payload = _call(tool, arguments)
+        assert payload["ok"] is True, (tool, payload)
+        assert payload["queried"] == "session", tool
+
+
+def test_the_session_marker_is_provenance_not_a_verdict(monkeypatch):
+    """A held query that resolves nothing (`ok: false`, an unknown name) is
+    still an answer ABOUT the held set, so it keeps the marker: the model
+    needs to know which composition told it the name is unknown (issue
+    #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_query_reach", {"component": "NoSuchComponent"})
+
+    assert payload["ok"] is False
+    assert "unknown component" in payload["error"]
+    assert payload["known"] == ["C"]
+    assert payload["queried"] == "session"
+
+
+def test_the_bare_plan_reads_files_by_truth_like_every_other_verb(monkeypatch):
+    """`files: []` carries no files, so for `revl_plan` too it is the bare
+    form rather than a candidate that happens to be empty — the same reading
+    `revl_check` and the five queries give it (issue #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_plan", {"files": []})
+
+    assert payload["ok"] is True, payload
+    assert payload["planned"] == "session"
+
+
+def test_a_plan_carrying_modules_and_no_candidate_is_a_usage_error(monkeypatch):
+    """`revl_plan` describes the same `modules` mistake as the queries, so it
+    gives the same refusal instead of a raw `ValueError` (issue #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_plan", {
+        "modules": {"./lib.rvl": "pub fn d(n: Int) -> Int { return n }"}})
+
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["category"] == "usage"
+    assert payload["diagnostics"][0]["fix"] == (
+        "pass `source` or `files` beside `modules`")
+    assert "planned" not in payload
+
+
+# A files-loaded composition holds its buffers in the session: no MCP verb
+# writes to disk, so an edit lives only in the working set and the compiler
+# reads a path out of the buffer map before the disk (`edit.file_modules`).
+# A held query must compile that same text, or step 4 answers about the
+# composition as it was BEFORE step 3 and reports the component step 3 just
+# made as unknown — under `queried: "session"`, which is exactly the
+# provenance that would make the stale answer look authoritative.
+
+FILES_DISK = """
+service Kv { fn get(k: Str) -> Opt[Str] }
+component Store provides kv: Kv {
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(k) = m.get(k) }
+}
+"""
+
+FILES_EDITED = FILES_DISK.replace("component Store", "component RenamedStore")
+
+
+def test_a_files_loaded_session_answers_about_its_buffers_not_the_disk(
+        tmp_path, monkeypatch):
+    """The held set of a `files` composition is the buffer text, so a held
+    query sees the rename step 3 made and no longer sees the name it replaced
+    (issue #2500)."""
+    path = tmp_path / "kv.rvl"
+    path.write_text(FILES_DISK, encoding="utf-8")
+    session = _HeldSession()
+    session.origin = {"files": [str(path)],
+                      "files_content": {str(path): FILES_EDITED},
+                      "modules": {}}
+    _held(monkeypatch, session)
+
+    after = _call("revl_query_withdraw", {"component": "RenamedStore"})
+    assert after["ok"] is True, after
+    assert after["queried"] == "session"
+
+    before = _call("revl_query_withdraw", {"component": "Store"})
+    assert before["ok"] is False, before
+    assert "unknown component" in before["error"]
+    assert before["known"] == ["RenamedStore"]
+
+
+def test_a_held_composition_that_does_not_compile_is_still_marked_as_held(
+        monkeypatch):
+    """A held set that fails to compile is still an answer ABOUT the held set,
+    and the one case where the model most needs to know which composition it
+    was told about — so the marker rides the refusal too (issue #2500)."""
+    _held(monkeypatch, _HeldSession(
+        "component C provides cache: Cache {\n"
+        "  provide cache { fn get(key) = key }\n}\n"))
+
+    payload = _call("revl_query_dependents", {"target": "cache"})
+
+    assert payload["ok"] is False, payload
+    assert payload["queried"] == "session"
+    assert payload["diagnostics"], payload
+
+
+def test_a_query_that_names_a_candidate_is_not_answered_from_the_session(
+        monkeypatch):
+    """The marker is the answer's provenance, so a call that sent its own
+    source is not labelled as having read the session (issue #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_query_dependents", {"target": "cache",
+                                              "source": READONLY})
+
+    assert payload["ok"] is True, payload
+    assert "queried" not in payload
+
+
+def test_the_two_candidate_readers_agree():
+    """`_carries_candidate` decides whether a call names a composition, and
+    there are two copies: #2117's in `server.py` and this change's in
+    `query_tools.py`. They cannot import each other (`server` imports
+    `query_tools`), so they must be kept in step by hand — and a divergence
+    would mean `revl_check {}` and a held query disagreed about what "no
+    candidate" means, one reading the session while the other compiled an
+    empty set. The boundary is `source` by presence (an empty string is still
+    a candidate) and `files` by truth (an empty list is not) (issue #2500)."""
+    from revl.mcp import query_tools as query_mod
+    from revl.mcp import server as server_mod
+
+    shapes = [
+        {},
+        {"files": []},
+        {"files": ["a.rvl"]},
+        {"source": ""},
+        {"source": "component C {}"},
+        {"modules": {}},
+        {"modules": {"./lib.rvl": "pub fn f() -> Int { return 1 }"}},
+        {"source": "component C {}", "files": []},
+        {"files": [], "modules": {"./lib.rvl": "pub fn f() -> Int { return 1 }"}},
+    ]
+
+    for arguments in shapes:
+        assert (server_mod._carries_candidate(arguments)
+                == query_mod._carries_candidate(arguments)), arguments
+
+
+def test_a_query_on_a_session_holding_nothing_is_a_usage_error(monkeypatch):
+    """Nothing sent and nothing held is an ARGUMENT error: the `category` says
+    so, the message names the missing argument, and no query verdict is
+    attached, so `ok: false` cannot be read as "your composition is broken"
+    (issue #2500)."""
+    from revl.mcp import server as server_mod
+
+    _held(monkeypatch, server_mod.Session())
+
+    payload = _call("revl_query_dependents", {"target": "cache"})
+
+    assert payload["ok"] is False
+    (diagnostic,) = payload["diagnostics"]
+    assert diagnostic["category"] == "usage"
+    assert "source" in diagnostic["message"]
+    assert "ValueError" not in diagnostic["message"]
+    assert "keys" not in payload
+
+
+def test_a_query_carrying_modules_and_no_candidate_is_a_usage_error(monkeypatch):
+    """`modules` are a candidate's `use` imports, so a query carrying them and
+    no `source`/`files` names no candidate to compile — and does NOT silently
+    read the session instead, which would compile a different composition than
+    the caller described (issue #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_query_dependents", {
+        "target": "cache",
+        "modules": {"./lib.rvl": "pub fn d(n: Int) -> Int { return n }"}})
+
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["category"] == "usage"
+    assert payload["diagnostics"][0]["fix"] == (
+        "pass `source` or `files` beside `modules`")
+
+
+def test_an_empty_files_list_is_the_bare_query_form(monkeypatch):
+    """`files: []` carries no files, and the family reads `files` by truth, not
+    by presence, so it is the bare form and the held set answers — the same
+    reading `revl_check` gives it (issue #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_query_dependents", {"target": "cache", "files": []})
+
+    assert payload["ok"] is True, payload
+    assert payload["queried"] == "session"
+
+
+def test_the_bare_plan_rehearses_the_bare_swap(monkeypatch):
+    """`revl_plan`'s description says it "Defaults to the composition this
+    server has loaded, so it is the rehearsal for `revl_swap`" — which for a
+    bare call means planning the re-admission `revl_swap {}` performs, not
+    refusing for want of a candidate (issue #2500)."""
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    payload = _call("revl_plan", {})
+
+    assert payload["ok"] is True, payload
+    assert payload["planned"] == "session"
+    assert payload["against"] == "session"
+    assert payload["candidate"]["components"] == ["C"]
+
+
+def test_the_bare_plan_on_a_session_holding_nothing_is_a_usage_error(
+        monkeypatch):
+    """Nothing held is an argument error with the call to make, not a raw
+    `ValueError` under `category: "internal"` (issue #2500)."""
+    from revl.mcp import server as server_mod
+
+    _held(monkeypatch, server_mod.Session())
+
+    payload = _call("revl_plan", {})
+
+    assert payload["ok"] is False
+    (diagnostic,) = payload["diagnostics"]
+    assert diagnostic["category"] == "usage"
+    assert "source" in diagnostic["message"]
+    assert "ValueError" not in diagnostic["message"]
+    assert diagnostic["fix"] == "pass `source` or `files`"
+    assert payload["next"]["tool"] == "revl_load"
+    assert "planned" not in payload
+
+
 # ------------------------------------------------- a load over a held draft
 #
 # A draft is the session's only copy of the work in progress: nothing on disk
