@@ -1791,8 +1791,11 @@ linked graph and three are may-analyses, and each result says which via
 `precision`, `precisionNote`, and `assumptions` ([queries.md](queries.md)).
 `source` / `files` are optional when the session holds a composition: with
 neither, each verb reads the held working set (the one `revl_check {}` and
-`revl_swap {}` read) and answers as it would for that text sent explicitly. With
-nothing held, the call is a `usage` refusal (issue #2500).
+`revl_swap {}` read, including edited buffers of a `files` set) and answers as
+it would for that text sent explicitly, under the same authoring-trust check as
+`revl_check {}`. With nothing held, the call is a `usage` refusal; a loaded
+session with no source text is a `session` refusal (issue #2500). Unlike
+`revl_check {}`, the answer carries no `checked: "session"` marker.
 
 ### `revl_query_emitters`
 

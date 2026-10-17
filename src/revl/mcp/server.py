@@ -3301,19 +3301,37 @@ def _with_held_candidate(handler, refuse_empty: bool = False):
     handler would otherwise raise instead of refusing, so it gets the same
     `usage` refusal."""
     def wrapped(arguments: dict):
-        if _carries_candidate(arguments) or arguments.get("modules") is not None:
+        if _carries_candidate(arguments):
+            return handler(arguments)
+        if arguments.get("modules") is not None:
+            if refuse_empty:
+                return _session_error(
+                    "`modules` are the in-memory `use` imports of a "
+                    "candidate: they ride beside `source` or `files`, and "
+                    "this call carries neither",
+                    category="usage",
+                    fix="pass `source` or `files` beside `modules`")
             return handler(arguments)
         vs = _held_working_set()
-        candidate = _held_candidate(vs) if vs is not None else {}
-        if candidate:
-            return handler({**arguments, **candidate})
-        if refuse_empty:
+        if vs is None:
+            if refuse_empty:
+                return _session_error(
+                    "provide `source` or `files`, or hold a composition in "
+                    "the session (nothing is loaded and no draft is open)",
+                    category="usage", fix="pass `source` or `files`",
+                    next=_remedy.load_next())
+            return handler(arguments)
+        candidate = _held_candidate(vs)
+        if not candidate:
             return _session_error(
-                "provide `source` or `files`, or hold a composition in the "
-                "session (nothing is loaded and no draft is open)",
-                category="usage", fix="pass `source` or `files`",
-                next=_remedy.load_next())
-        return handler(arguments)
+                "the session's composition carries no source text to read "
+                "— it was not loaded from `source` or `files`, so there is "
+                "nothing to recompile",
+                category="session")
+        refusal = _authoring_refusal(candidate)
+        if refusal is not None:
+            return refusal
+        return handler({**arguments, **candidate})
     wrapped.__name__ = getattr(handler, "__name__", "wrapped")
     wrapped.__doc__ = handler.__doc__
     return wrapped

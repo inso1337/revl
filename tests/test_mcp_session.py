@@ -751,6 +751,16 @@ def test_the_whole_chain_unloads_without_residue():
 # Each now reads the session's working set when it carries no candidate, and
 # answers as it does for the same text sent explicitly.
 
+class _EditedFilesSession(_HeldSession):
+    """A files-loaded set whose draft buffer differs from the file on disk."""
+
+    def __init__(self, path, edited):
+        super().__init__(loaded=True)
+        self.origin = {"files": [path]}
+        self.draft = {"files": [path], "files_content": {path: edited},
+                      "modules": {}}
+
+
 _TENANTS = (ROOT / "examples" / "tenants.rvl")
 
 _HELD_VERBS = [
@@ -766,7 +776,7 @@ _HELD_VERBS = [
 @pytest.mark.parametrize("verb,extra", _HELD_VERBS)
 def test_held_form_answers_like_the_explicit_form(monkeypatch, verb, extra):
     text = _TENANTS.read_text()
-    _held(monkeypatch, _HeldSession(text))
+    _held(monkeypatch, _EditedFilesSession(str(_TENANTS), text))
 
     held = _call(verb, dict(extra))
     explicit = _call(verb, {**extra, "files": [str(_TENANTS)]})
@@ -783,3 +793,61 @@ def test_no_held_session_keeps_the_usage_refusal(monkeypatch, verb, extra):
 
     assert payload["ok"] is False
     assert payload["diagnostics"][0]["category"] == "usage", payload
+
+
+@pytest.mark.parametrize("verb,extra", [
+    ("revl_query_withdraw", {"component": "ZCache"}),
+    ("revl_query_reach", {"component": "ZCache"}),
+    ("revl_query_dependents", {"target": "cache"}),
+    ("revl_query_emitters", {"target": "cache"}),
+    ("revl_query_drift", {"service": "Cache"}),
+    ("revl_plan", {}),
+])
+def test_held_form_reads_the_edited_buffer_not_the_disk(
+        monkeypatch, tmp_path, verb, extra):
+    path = tmp_path / "cache.rvl"
+    path.write_text(CACHE)
+    edited = CACHE.replace("MemCache", "ZCache")
+    _held(monkeypatch, _EditedFilesSession(str(path), edited))
+
+    payload = _call(verb, dict(extra))
+
+    assert payload["ok"] is True, payload
+    if verb != "revl_query_emitters":  # no emission here, so it names nothing
+        assert "ZCache" in str(payload)
+    assert "MemCache" not in str(payload)
+
+
+def test_loaded_session_without_source_text_is_a_session_refusal(monkeypatch):
+    held = _held(monkeypatch, _HeldSession(loaded=True))
+    held.origin = {}
+
+    for verb, extra in _HELD_VERBS:
+        payload = _call(verb, dict(extra))
+        assert payload["ok"] is False
+        assert payload["diagnostics"][0]["category"] == "session", (verb, payload)
+
+
+def test_plan_with_only_modules_is_a_usage_refusal(monkeypatch):
+    _held(monkeypatch, _HeldSession(loaded=False))
+
+    payload = _call("revl_plan", {"modules": {"a.rvl": "x"}})
+
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["category"] == "usage", payload
+
+
+@pytest.mark.parametrize("verb,extra", _HELD_VERBS)
+def test_held_form_obeys_the_authoring_refusal(monkeypatch, verb, extra):
+    from revl.mcp import server as server_mod
+
+    _held(monkeypatch, _EditedFilesSession(str(_TENANTS),
+                                           _TENANTS.read_text()))
+    monkeypatch.setattr(server_mod, "_authoring_refusal",
+                        lambda a: {"ok": False, "diagnostics": [
+                            {"severity": "error", "category": "authoring"}]})
+
+    payload = _call(verb, dict(extra))
+
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["category"] == "authoring"
