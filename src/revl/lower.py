@@ -1392,7 +1392,7 @@ def _subst_body_annotations(stmts: list, subst) -> None:
                 walk_expr(body)
                 if isinstance(body, ExprBlockArm):
                     for stmt in body.stmts:
-                        walk_expr(stmt.value)
+                        walk_stmt(stmt)
                     walk_expr(body.tail)
         elif isinstance(expr, Interp):
             for kind, part in expr.parts:
