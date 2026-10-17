@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -925,6 +926,13 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestTheIssuerActivatesAndRevertsItsPool(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"the issuer activates and reverts its pool\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
+	_revlAt = "load Issuer"
 	{
 		_f := LoadIssuer(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -932,6 +940,7 @@ func TestTheIssuerActivatesAndRevertsItsPool(revlT *testing.T) {
 		}
 		_fibers["Issuer"] = _f
 	}
+	_revlAt = "unload Issuer"
 	if _f, _ok := _fibers["Issuer"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a
@@ -942,6 +951,7 @@ func TestTheIssuerActivatesAndRevertsItsPool(revlT *testing.T) {
 		}
 		delete(_fibers, "Issuer")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.
