@@ -620,6 +620,46 @@ def _capturing_driver_class():
     return _CapturingDriver
 
 
+def _handoff_realm(comp: dict, key: str):
+    """The realm `comp` provides `key` in: its `isolate` placement, or `None`
+    for the shared realm (the same reading as `run.provision_placements`)."""
+    return (comp.get("isolate") or {}).get(key)
+
+
+def _handoff_label(key: str, realm) -> str:
+    """The swap report's name for a hand-off slot: the bare key in the shared
+    realm (unchanged from item 53), `key in realm("r")` in an isolated one."""
+    return key if realm is None else f'{key} in realm("{realm}")'
+
+
+def _handoff_cold_report(successors: dict, pre: dict) -> dict:
+    """Report entries for the successors that declare a `handoff` but start
+    cold because the capture is not theirs to take (issue #2510): two or more
+    claim one captured slot, or the key was captured only in other realms."""
+    captured_keys = {key for key, _realm in pre}
+    report: dict = {}
+    for (key, realm), comps in successors.items():
+        names = [c["name"] for c in comps]
+        if (key, realm) in pre:
+            if len(comps) < 2:
+                continue
+            reason, note = "ambiguous", (
+                f"{len(comps)} successors accept the state of `{key}` in this "
+                f"realm; it is copied to none of them")
+        elif key in captured_keys:
+            others = sorted(_handoff_label(k, r) for k, r in pre if k == key)
+            reason, note = "realm", (
+                f"the running state of `{key}` was captured in a different "
+                f"realm ({', '.join(others)}); it does not cross realms, so "
+                f"this successor starts cold")
+        else:
+            continue
+        report[_handoff_label(key, realm)] = {
+            "component": names[0] if len(names) == 1 else names,
+            "migrated": False, "reason": reason, "note": note}
+    return report
+
+
 class Session:
     """One live composition, driven step by step."""
 
@@ -2266,13 +2306,16 @@ class Session:
 
     def _capture_provider_state(self, old_ir: dict | None) -> dict:
         """Snapshot the live state of every running provider that declared a
-        `handoff` (item 53), keyed by the provided key it hangs off.
+        `handoff` (item 53), keyed by `(provided key, placement realm)`, the
+        realm `None` for the shared realm (issue #2510).
 
         The value is the ordered `(resource_type, state)` vector of the
         provider's activation frame — captured while the old provider is still
         live and its world still exists, before teardown drops it. Keyed by
         provided key (not component name) so the successor's provider, which may
-        be a differently-named component, is correlated by *what it provides*.
+        be a differently-named component, is correlated by *what it provides*,
+        and by the realm it provides it in, so a realm-scoped store never
+        reaches a successor placed in another realm.
 
         A TEMPLATE component is skipped (F5): a template's live state is the
         item-10 per-INSTANCE concern (`_capture_instances`), not a composition-
@@ -2295,7 +2338,10 @@ class Session:
                  res.__revl_state__() if hasattr(res, "__revl_state__") else None)
                 for res in resources
             ]
-            pre[handoff["key"]] = {
+            key = handoff["key"]
+            # issue #2510: the slot is (key, placement realm), never the key
+            # alone, so a successor in another realm cannot claim it
+            pre[(key, _handoff_realm(comp, key))] = {
                 "component": comp["name"],
                 "type": handoff.get("type"),
                 "captured": captured,
@@ -2364,19 +2410,31 @@ class Session:
         A captured key whose successor declares no `handoff` is *not* migrated:
         the successor opted out of inheriting the state (a deliberate, if lossy,
         author choice), so it starts cold rather than being force-fed a shape it
-        never declared."""
+        never declared.
+
+        Issue #2510: a capture is matched by `(key, realm)`. A successor that
+        accepts a key whose state was captured only in ANOTHER realm starts
+        cold (`reason: "realm"`), and a capture two successors could claim is
+        copied to neither (`reason: "ambiguous"`); the report names both. Cold,
+        not a refusal: the running state belongs to its realm, and a successor
+        moved out of that realm is a different provider there, the same as a
+        successor that declares no hand-off."""
         runtime = self._driver.runtime
-        new_by_key: dict = {}
+        successors: dict = {}
         for comp in new_ir.get("components") or []:
             handoff = comp.get("handoff")
             if isinstance(handoff, dict) and handoff.get("key"):
-                new_by_key[handoff["key"]] = comp
+                key = handoff["key"]
+                successors.setdefault((key, _handoff_realm(comp, key)),
+                                      []).append(comp)
         plan: list = []
-        report: dict = {}
-        for key, info in pre.items():
-            comp = new_by_key.get(key)
-            if comp is None:
-                continue  # successor does not accept this key's state — cold
+        report: dict = _handoff_cold_report(successors, pre)
+        for slot, info in pre.items():
+            key = slot[0]
+            claimants = successors.get(slot) or []
+            if len(claimants) != 1:
+                continue  # none accepts it (cold), or ambiguous (reported cold)
+            comp = claimants[0]
             # F1 defence in depth: the accept-vs-export §5 type gate. Admission
             # runs it when a manifest is threaded, and the `declared` disclosure
             # gate runs it before teardown, but a swap reached by any other path
@@ -2407,16 +2465,19 @@ class Session:
                         f"provider of {key!r}: resource #{pos} was "
                         f"{old_type.__name__}, the successor acquires "
                         f"{type(res).__name__} — retyped state cannot migrate")
-            plan.append((key, comp["name"], resources, captured))
-        for key, cname, resources, captured in plan:
+            plan.append((slot, comp["name"], resources, captured))
+        for slot, cname, resources, captured in plan:
             for res, (_old_type, snap) in zip(resources, captured):
                 if snap is not None:
                     res.__revl_restore__(snap)
-            report[key] = {
+            entry = {
                 "component": cname, "migrated": True,
                 # honest count of what actually crossed (item 53 operator rule)
                 "resources": sum(1 for _t, s in captured if s is not None),
             }
+            if slot[1] is not None:
+                entry["realm"] = slot[1]
+            report[_handoff_label(*slot)] = entry
         return report or None
 
     def rollback(self) -> dict:

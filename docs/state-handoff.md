@@ -102,7 +102,13 @@ On a **verified** swap the exported value is threaded from old to new through
    the live-instance migration (item 10) reads, but for a *composition-level*
    provider fiber. Keyed by **provided key**, not component name, so a renamed
    successor (`Cache` → `CacheV2`) that re-provides `cache` is correlated by
-   *what it provides*.
+   *what it provides*. The match is on the provided key **and its placement realm**
+   (the `isolate` realm, or the shared realm): state captured in
+   `realm("tenant_a")` crosses only to a successor that provides the key in
+   `realm("tenant_a")`. A successor that declares the hand-off in another realm
+   starts cold, and a capture two successors could claim is copied to neither;
+   the `handoff` block reports either one with `migrated: false` and a
+   `reason` of `realm` or `ambiguous` (issue #2510).
 2. **Restore, after load.** `_restore_provider_state` re-seats each captured
    vector onto the successor's provider fiber through the resources'
    `__revl_restore__` protocol — **check the whole cohort, then apply**, so a
