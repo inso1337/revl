@@ -3289,6 +3289,59 @@ def _check_held(arguments: dict) -> dict:
     return result
 
 
+def _with_held_candidate(handler, refuse_empty: bool = False):
+    """Give a source-taking verb the held-session form `revl_check` has
+    (issue #2500, after #2117): called with no `source`/`files`, it reads the
+    working set the session holds through `_held_working_set` and
+    `_held_candidate`, the same door `revl_check {}` and `revl_swap {}` use,
+    and answers exactly as it would for that text sent explicitly.
+
+    A call that names a candidate is untouched. With nothing held the verb's
+    own refusal stands; `refuse_empty` is for a verb (`revl_plan`) whose
+    handler would otherwise raise instead of refusing, so it gets the same
+    `usage` refusal."""
+    def wrapped(arguments: dict):
+        if _carries_candidate(arguments):
+            return handler(arguments)
+        if arguments.get("modules") is not None:
+            if refuse_empty:
+                return _session_error(
+                    "`modules` are the in-memory `use` imports of a "
+                    "candidate: they ride beside `source` or `files`, and "
+                    "this call carries neither",
+                    category="usage",
+                    fix="pass `source` or `files` beside `modules`")
+            return handler(arguments)
+        vs = _held_working_set()
+        if vs is None:
+            if refuse_empty:
+                return _session_error(
+                    "provide `source` or `files`, or hold a composition in "
+                    "the session (nothing is loaded and no draft is open)",
+                    category="usage", fix="pass `source` or `files`",
+                    next=_remedy.load_next())
+            return handler(arguments)
+        candidate = _held_candidate(vs)
+        if not candidate:
+            return _session_error(
+                "the session's composition carries no source text to read: "
+                "it was not loaded from `source` or `files`, so there is "
+                "nothing to recompile",
+                category="session")
+        refusal = _authoring_refusal(candidate)
+        if refusal is not None:
+            return refusal
+        return handler({**arguments, **candidate})
+    wrapped.__name__ = getattr(handler, "__name__", "wrapped")
+    wrapped.__doc__ = handler.__doc__
+    return wrapped
+
+
+_HELD_DOC = (" `source`/`files` are optional when the session holds a "
+             "composition: with neither, the verb reads the held working set "
+             "(the same one `revl_check {}` and `revl_swap {}` read).")
+
+
 def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
     """Compile a candidate as sent. `held` is the session's working set a
     held-session check compiled instead (issue #2117), used only to describe
@@ -3913,7 +3966,9 @@ TOOLS = [
                        "teardown order, how the composition's irreversible reach "
                        "(G8) changes, and any interface drift. A rejected candidate "
                        "is explained, not thrown. Defaults to the composition this "
-                       "server has loaded, so it is the rehearsal for revl_swap.",
+                       "server has loaded, so it is the rehearsal for revl_swap. With no "
+                       "`source`/`files` it plans the working set the session "
+                       "holds, as `revl_swap {}` would re-admit it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3927,7 +3982,7 @@ TOOLS = [
             },
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
-        "handler": _tool_plan,
+        "handler": _with_held_candidate(_tool_plan, refuse_empty=True),
     },
     {
         "name": "revl_ship",
@@ -5787,6 +5842,9 @@ TOOLS.append({
 
 # composition queries (docs/queries.md) — defined next door so this module
 # stays the protocol layer and the query surface can grow on its own
+for _query in QUERY_TOOLS:
+    _query["handler"] = _with_held_candidate(_query["handler"])
+    _query["description"] += _HELD_DOC
 TOOLS.extend(QUERY_TOOLS)
 
 # the two session-bound query modes (live / historical) carry their schema

@@ -452,8 +452,11 @@ and any interface drift. A rejected candidate is explained, not thrown.
 Defaults to the composition the server has loaded, so it is the rehearsal for
 `revl_swap`.
 
-- Inputs: `source` / `files` / `modules`; `manifest` (omit to plan against the
-  loaded session, or against nothing for a cold start); `replacing`.
+- Inputs: `source` / `files` / `modules`, all optional when the session holds a
+  composition (with none, the held working set is planned, as `revl_swap {}`
+  would re-admit it; with nothing held, a `usage` refusal); `manifest` (omit to
+  plan against the loaded session, or against nothing for a cold start);
+  `replacing`.
 
 ### `revl_ship`
 
@@ -1786,6 +1789,13 @@ replayable rather than faked.
 The five static query verbs answer over source; two of them are proofs over the
 linked graph and three are may-analyses, and each result says which via
 `precision`, `precisionNote`, and `assumptions` ([queries.md](queries.md)).
+`source` / `files` are optional when the session holds a composition: with
+neither, each verb reads the held working set (the one `revl_check {}` and
+`revl_swap {}` read, including edited buffers of a `files` set) and answers as
+it would for that text sent explicitly, under the same authoring-trust check as
+`revl_check {}`. With nothing held, the call is a `usage` refusal; a loaded
+session with no source text is a `session` refusal (issue #2500). Unlike
+`revl_check {}`, the answer carries no `checked: "session"` marker.
 
 ### `revl_query_emitters`
 
