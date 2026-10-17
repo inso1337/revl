@@ -631,7 +631,10 @@ class _ModuleLoader:
         try:
             virtual = self._sources.get(abs_path)
             if virtual is not None:
-                program = Parser(virtual, abs_path).parse()
+                # issue #2513: through `parse_text`, so an in-memory module
+                # carries the same per-declaration provenance as a disk read;
+                # without it every component fell back to `paths[0]`
+                program = parse_text(virtual, abs_path)
             else:
                 # issue #1779: read ONCE and parse that text, so the report
                 # below is the text that was compiled rather than a later
