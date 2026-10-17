@@ -2107,7 +2107,8 @@ def _rewrite_stmt(stmt, val_renames, type_renames, bound: set[str]) -> None:
 def _rewrite_component_stmt(stmt, val_renames, type_renames,
                             bound: set[str]) -> None:
     """The statements only a component body holds (issue #2451): provide
-    blocks, the state hand-off, effects, timers, emissions and approvals."""
+    blocks, the state hand-off, effects, timers, emissions and approvals, and
+    a lifecycle test's load and call statements (issues #2498/#2499)."""
     def subst(t):
         return _subst_type(t, type_renames)
 
@@ -2139,6 +2140,17 @@ def _rewrite_component_stmt(stmt, val_renames, type_renames,
         for _, value in stmt.request.fields or ():
             walk(value)
         bound.add(stmt.bind)
+    # issues #2498/#2499: a lifecycle test's `load X with { f: <expr> }` and
+    # `call key.op(<args>)` hold expressions that may call the module's own
+    # renamed helper. Left bare, the call kept the pre-rename spelling.
+    elif isinstance(stmt, _ast.LoadStmt):
+        for _, value, _ in stmt.config:
+            walk(value)
+    elif isinstance(stmt, _ast.CallStmt):
+        for arg in stmt.args:
+            walk(arg)
+        if stmt.bind:
+            bound.add(stmt.bind)
 
 
 def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
