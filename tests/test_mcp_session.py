@@ -839,15 +839,44 @@ def test_plan_with_only_modules_is_a_usage_refusal(monkeypatch):
 
 @pytest.mark.parametrize("verb,extra", _HELD_VERBS)
 def test_held_form_obeys_the_authoring_refusal(monkeypatch, verb, extra):
-    from revl.mcp import server as server_mod
-
-    _held(monkeypatch, _EditedFilesSession(str(_TENANTS),
-                                           _TENANTS.read_text()))
-    monkeypatch.setattr(server_mod, "_authoring_refusal",
-                        lambda a: {"ok": False, "diagnostics": [
-                            {"severity": "error", "category": "authoring"}]})
+    """Held source is agent text, so under the default closed authoring
+    profile a source with host code is refused, as `revl_check {}` refuses it.
+    No patching: the real gate decides."""
+    _held(monkeypatch, _HeldSession(_TENANTS.read_text()))
 
     payload = _call(verb, dict(extra))
 
-    assert payload["ok"] is False
-    assert payload["diagnostics"][0]["category"] == "authoring"
+    assert payload["ok"] is False, payload
+    assert payload.get("authoringTrust") == "untrusted", payload
+    assert _call("revl_check", {})["ok"] is False
+
+
+_SHAPE_VERBS = [
+    ("revl_query_withdraw", {"component": "MemCache"}),
+    ("revl_query_reach", {"component": "MemCache"}),
+    ("revl_query_dependents", {"target": "cache"}),
+    ("revl_query_emitters", {"target": "cache"}),
+    ("revl_query_drift", {"service": "Cache"}),
+    ("revl_plan", {}),
+]
+
+
+@pytest.mark.parametrize("shape", ["source", "files"])
+@pytest.mark.parametrize("verb,extra", _SHAPE_VERBS)
+def test_held_form_over_both_session_shapes(monkeypatch, tmp_path, shape,
+                                            verb, extra):
+    if shape == "source":
+        _held(monkeypatch, _HeldSession(CACHE))
+        candidate = {"source": CACHE}
+    else:
+        monkeypatch.chdir(tmp_path)  # the operator root is the cwd
+        path = tmp_path / "cache.rvl"
+        path.write_text(CACHE)
+        _held(monkeypatch, _EditedFilesSession(str(path), CACHE))
+        candidate = {"files": [str(path)]}
+
+    held = _call(verb, dict(extra))
+    explicit = _call(verb, {**extra, **candidate})
+
+    assert held["ok"] is True, held
+    assert held == explicit

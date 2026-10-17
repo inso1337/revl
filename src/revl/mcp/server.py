@@ -3324,8 +3324,8 @@ def _with_held_candidate(handler, refuse_empty: bool = False):
         candidate = _held_candidate(vs)
         if not candidate:
             return _session_error(
-                "the session's composition carries no source text to read "
-                "— it was not loaded from `source` or `files`, so there is "
+                "the session's composition carries no source text to read: "
+                "it was not loaded from `source` or `files`, so there is "
                 "nothing to recompile",
                 category="session")
         refusal = _authoring_refusal(candidate)
