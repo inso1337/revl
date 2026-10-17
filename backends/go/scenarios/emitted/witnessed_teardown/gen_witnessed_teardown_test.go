@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -763,7 +764,7 @@ func C() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			_revlFrame := newRevlFrame()
@@ -832,7 +833,7 @@ func CAbort() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			_revlFrame := newRevlFrame()
@@ -927,6 +928,13 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestCommitPathBracketRevertsWitnessedPersistsCompensationDischarges(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"commit path: bracket reverts, witnessed persists, compensation discharges\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
+	_revlAt = "load C"
 	{
 		_f := LoadC(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -934,6 +942,7 @@ func TestCommitPathBracketRevertsWitnessedPersistsCompensationDischarges(revlT *
 		}
 		_fibers["C"] = _f
 	}
+	_revlAt = "unload C"
 	if _f, _ok := _fibers["C"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a

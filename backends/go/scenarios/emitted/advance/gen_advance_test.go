@@ -6,6 +6,7 @@ import (
 	stdctx "context"
 	"fmt"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"sync"
 	"testing"
@@ -664,7 +665,7 @@ func TickCounter() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			_revlJournal := revlJournalNew()
@@ -717,7 +718,7 @@ func Heartbeat() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			counter, err := stc.Service[Counter](ctx, _keyCounter)
@@ -746,7 +747,7 @@ func Warmup() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			counter, err := stc.Service[Counter](ctx, _keyCounter)
@@ -803,8 +804,15 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"an every-timer fires on each advanced tick\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
 	RevlJournalReset()
 	RevlClockReset()
+	_revlAt = "load TickCounter"
 	{
 		_f := LoadTickCounter(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -812,6 +820,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		}
 		_fibers["TickCounter"] = _f
 	}
+	_revlAt = "load Heartbeat"
 	{
 		_f := LoadHeartbeat(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -819,6 +828,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		}
 		_fibers["Heartbeat"] = _f
 	}
+	_revlAt = "call counter.count"
 	var before int64
 	{
 		_svc, _err := stc.Service[Counter](root, _keyCounter)
@@ -830,7 +840,9 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 	if !(before == 0) {
 		revlT.Fatalf("lifecycle test \"an every-timer fires on each advanced tick\": assertion failed")
 	}
+	_revlAt = "advance 35000ms"
 	RevlClockAdvance(35000)
+	_revlAt = "call counter.count"
 	var ticks int64
 	{
 		_svc, _err := stc.Service[Counter](root, _keyCounter)
@@ -842,6 +854,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 	if !(ticks == 3) {
 		revlT.Fatalf("lifecycle test \"an every-timer fires on each advanced tick\": assertion failed")
 	}
+	_revlAt = "unload Heartbeat"
 	if _f, _ok := _fibers["Heartbeat"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a
@@ -852,7 +865,9 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		}
 		delete(_fibers, "Heartbeat")
 	}
+	_revlAt = "advance 100000ms"
 	RevlClockAdvance(100000)
+	_revlAt = "call counter.count"
 	var settled int64
 	{
 		_svc, _err := stc.Service[Counter](root, _keyCounter)
@@ -864,6 +879,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 	if !(settled == 3) {
 		revlT.Fatalf("lifecycle test \"an every-timer fires on each advanced tick\": assertion failed")
 	}
+	_revlAt = "unload TickCounter"
 	if _f, _ok := _fibers["TickCounter"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a
@@ -894,8 +910,15 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"an after-timer fires once when its delay elapses\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
 	RevlJournalReset()
 	RevlClockReset()
+	_revlAt = "load TickCounter"
 	{
 		_f := LoadTickCounter(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -903,6 +926,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		}
 		_fibers["TickCounter"] = _f
 	}
+	_revlAt = "load Warmup"
 	{
 		_f := LoadWarmup(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -910,7 +934,9 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		}
 		_fibers["Warmup"] = _f
 	}
+	_revlAt = "advance 30000ms"
 	RevlClockAdvance(30000)
+	_revlAt = "call counter.count"
 	var early int64
 	{
 		_svc, _err := stc.Service[Counter](root, _keyCounter)
@@ -922,7 +948,9 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 	if !(early == 0) {
 		revlT.Fatalf("lifecycle test \"an after-timer fires once when its delay elapses\": assertion failed")
 	}
+	_revlAt = "advance 30000ms"
 	RevlClockAdvance(30000)
+	_revlAt = "call counter.count"
 	var fired int64
 	{
 		_svc, _err := stc.Service[Counter](root, _keyCounter)
@@ -934,7 +962,9 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 	if !(fired == 1) {
 		revlT.Fatalf("lifecycle test \"an after-timer fires once when its delay elapses\": assertion failed")
 	}
+	_revlAt = "advance 100000ms"
 	RevlClockAdvance(100000)
+	_revlAt = "call counter.count"
 	var spent int64
 	{
 		_svc, _err := stc.Service[Counter](root, _keyCounter)
@@ -946,6 +976,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 	if !(spent == 1) {
 		revlT.Fatalf("lifecycle test \"an after-timer fires once when its delay elapses\": assertion failed")
 	}
+	_revlAt = "unload Warmup"
 	if _f, _ok := _fibers["Warmup"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a
@@ -956,6 +987,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		}
 		delete(_fibers, "Warmup")
 	}
+	_revlAt = "unload TickCounter"
 	if _f, _ok := _fibers["TickCounter"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a

@@ -2705,6 +2705,16 @@ def _refuse_required_stream(component: dict, tier: str) -> None:
 _APPLY_WIRING_STEPS = ("provide", "intercept")
 
 
+#: The error a recovered panic becomes inside this process (issue #2481): the
+#: one line an activation failure has always carried (`panic: <v>`), then the
+#: go stack of the panicking goroutine, so a fault in emitted glue (a nil
+#: dereference, an index out of range) still names the frame it came from.
+#: `revldebug` is aliased so no author name can shadow the package; every
+#: renderer imports it when the rendered body spells it (`_GO_DEBUG_IMPORT`).
+_GO_RECOVERED_ERROR = 'fmt.Errorf("panic: %v\\n%s", r, revldebug.Stack())'
+_GO_DEBUG_IMPORT = '\trevldebug "runtime/debug"'
+
+
 def _emit_apply_header(body, out) -> None:
     """Open the component's `Apply` closure.
 
@@ -2722,7 +2732,7 @@ def _emit_apply_header(body, out) -> None:
     out.append("\t\tApply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {")
     out.append("\t\t\tdefer func() {")
     out.append("\t\t\t\tif r := recover(); r != nil {")
-    out.append('\t\t\t\t\t_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)')
+    out.append('\t\t\t\t\t_revlApplyInv, _revlApplyErr = nil, %s' % _GO_RECOVERED_ERROR)
     out.append("\t\t\t\t}")
     out.append("\t\t\t}()")
 
@@ -4801,6 +4811,18 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
         out.append("func %s(revlT *testing.T) {" % tname)
         out.append("\troot := stc.New()")
         out.append("\t_fibers := map[string]*stc.Fiber{}")
+        # issue #2481: a provide method a driver step calls, or a timer body
+        # an `advance` fires, runs on THIS goroutine and outside any `Apply`,
+        # so its panic killed the test binary and every later test with it.
+        # Recover it into this test's failure, reported like a failed load
+        # (the step, then `panic: <v>`) with the go stack after it.
+        out.append("\t_revlAt := %s" % _go_string("start"))
+        out.append("\tdefer func() {")
+        out.append("\t\tif r := recover(); r != nil {")
+        out.append('\t\t\trevlT.Fatalf("%%s: %%s: %%v", %s, _revlAt, %s)'
+                   % (_go_string(where), _GO_RECOVERED_ERROR))
+        out.append("\t\t}")
+        out.append("\t}()")
         # item 102: the clock coeffect is package-global; reset it so this
         # test's `advance` steps start from t=0 and see only its own timers,
         # independent of any earlier lifecycle test in the file (mirrors the
@@ -4815,6 +4837,7 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
             kind = step.get("step")
             if kind == "load":
                 component = step["component"]
+                out.append("\t_revlAt = %s" % _go_string("load " + component))
                 cname = _camel(component)
                 cfg = step.get("config") or {}
                 out.append("\t{")
@@ -4845,6 +4868,7 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 out.append("\t}")
             elif kind == "unload":
                 component = step["component"]
+                out.append("\t_revlAt = %s" % _go_string("unload " + component))
                 out.append("\tif _f, _ok := _fibers[%s]; _ok {" % _go_string(component))
                 out.append("\t\t_f.Dispose()")
                 out.append("\t\t// disposal is orchestrated asynchronously; a")
@@ -4870,6 +4894,7 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                     _expr(a, env, params[i].get("type") if i < len(params) else None)
                     for i, a in enumerate(step.get("args") or []))
                 mcall = "(_svc).%s(%s)" % (_camel(step["method"]), args)
+                out.append("\t_revlAt = %s" % _go_string("call %s.%s" % (key, step["method"])))
                 if bind is not None and str(ret_surface or "").startswith("Opt["):
                     payload = ret_surface[4:-1]
                     go_payload = _go_type(payload)
@@ -4952,6 +4977,7 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 # any due timer bodies run synchronously inside RevlClockAdvance
                 # before the next statement observes their effect
                 # (docs/time-coeffect.md §advance).
+                out.append("\t_revlAt = %s" % _go_string("advance %dms" % int(step["ms"])))
                 out.append("\tRevlClockAdvance(%d)" % int(step["ms"]))
             else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
@@ -11988,6 +12014,9 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         # `math.Mod` for a Float `%` in a method body; nothing else on this
         # tier imports `math`, and Go rejects a repeated import.
         out.append('\t"math"')
+    if "revldebug." in body_blob:
+        # issue #2481: a recovered panic carries the go stack
+        out.append(_GO_DEBUG_IMPORT)
     if _COMP_NEEDS_STRCONV and not _COMP_NEEDS_TEARDOWN:
         # Int.to_str renders through strconv.FormatInt (item 434 (f)); the
         # teardown block above already imports strconv when it is present, and
@@ -12823,6 +12852,9 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         imports.append('\t"strings"')
     if ctx.needs_float_rem or _COMP_NEEDS_FLOAT_REM:
         imports.append('\t"math"')
+    if "revldebug." in body_blob:
+        # issue #2481: a recovered panic carries the go stack
+        imports.append(_GO_DEBUG_IMPORT)
     if ctx.needs_strconv or _COMP_NEEDS_STRCONV:
         imports.append('\t"strconv"')
     if _COMP_NEEDS_TEARDOWN:

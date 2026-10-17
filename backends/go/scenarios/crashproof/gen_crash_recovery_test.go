@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -970,7 +971,7 @@ func Crasher() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			_revlFrame := newRevlFrame()
@@ -1043,6 +1044,13 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"crasher lifecycle boots and unloads clean\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
+	_revlAt = "load Crasher"
 	{
 		_f := LoadCrasher(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -1050,6 +1058,7 @@ func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 		}
 		_fibers["Crasher"] = _f
 	}
+	_revlAt = "unload Crasher"
 	if _f, _ok := _fibers["Crasher"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a

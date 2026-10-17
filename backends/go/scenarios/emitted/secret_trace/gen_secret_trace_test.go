@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -854,7 +855,7 @@ func Issuer() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			var pool *Pool
@@ -925,6 +926,13 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestTheIssuerActivatesAndRevertsItsPool(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"the issuer activates and reverts its pool\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
+	_revlAt = "load Issuer"
 	{
 		_f := LoadIssuer(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -932,6 +940,7 @@ func TestTheIssuerActivatesAndRevertsItsPool(revlT *testing.T) {
 		}
 		_fibers["Issuer"] = _f
 	}
+	_revlAt = "unload Issuer"
 	if _f, _ok := _fibers["Issuer"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -1016,7 +1017,7 @@ func SiteAbort() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			_revlFrame := newRevlFrame()
@@ -1049,7 +1050,7 @@ func ExternOk() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			_revlFrame := newRevlFrame()
@@ -1081,7 +1082,7 @@ func ExternAbort() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			_revlFrame := newRevlFrame()
@@ -1171,7 +1172,7 @@ func Beat() stc.Component {
 		Apply: func(ctx *stc.Context) (_revlApplyInv stc.Inverse, _revlApplyErr error) {
 			defer func() {
 				if r := recover(); r != nil {
-					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
+					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack())
 				}
 			}()
 			_revlFrame := newRevlFrame()
@@ -1238,6 +1239,13 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestCleanUnloadOfAnUnCalledAgentLeavesNoResidue(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"clean unload of an un-called agent leaves no residue\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
+	_revlAt = "load Agent"
 	{
 		_f := LoadAgent(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -1245,6 +1253,7 @@ func TestCleanUnloadOfAnUnCalledAgentLeavesNoResidue(revlT *testing.T) {
 		}
 		_fibers["Agent"] = _f
 	}
+	_revlAt = "unload Agent"
 	if _f, _ok := _fibers["Agent"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a
