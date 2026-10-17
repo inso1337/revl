@@ -446,6 +446,14 @@ def check_no_realm_placement(root_programs: list[Program],
     realm-scoped one. The check is strictly narrowing, structural, and root-
     scoped exactly as `check_no_extern` is — a trusted co-composed provider
     module still places whatever the operator wrote.
+
+    "Strictly narrowing" holds for source that was never placed. It does not
+    hold for an EDIT of admitted source: deleting the clause from a provider
+    that stays admitted names no realm, yet it moves that provider's existing
+    provision, and its data, into the shared realm where any shared-realm
+    component binds it. This check is syntactic over the incoming text and
+    cannot see a deletion, so `check_no_realm_removal` compares the edit
+    against the admitted generation (issue #2487).
     """
     if not profile.no_realm_placement:
         return
@@ -492,6 +500,92 @@ def check_no_realm_placement(root_programs: list[Program],
                            else [s.realm])
                  if not r.startswith("?")]),
         )
+
+
+def _removed_provision_realms(admitted: dict,
+                              candidate: dict) -> list[tuple[str, str, str, str | None]]:
+    """`(component, key, admitted realm, candidate realm)` for every provision
+    whose realm the candidate moves: a component in both generations that still
+    provides `key`, where the admitted generation placed `key` in a realm and
+    the candidate places it elsewhere or nowhere (the shared realm)."""
+    running = {c.get("name"): c for c in admitted.get("components") or []}
+    moved = []
+    for comp in candidate.get("components") or []:
+        before = running.get(comp.get("name"))
+        if before is None:
+            continue
+        placed = before.get("isolate") or {}
+        now = comp.get("isolate") or {}
+        for key in comp.get("provides") or {}:
+            realm = placed.get(key)
+            if realm is not None and now.get(key) != realm:
+                moved.append((comp["name"], key, realm, now.get(key)))
+    return moved
+
+
+def check_no_realm_removal(admitted: dict | None, candidate: dict,
+                           profile: AdmissionProfile | None) -> None:
+    """Refuse an untrusted edit that moves a surviving provider out of its realm
+    (issue #2487), the deletion half of `check_no_realm_placement`.
+
+    Writing `isolate <key> in realm("...")` is refused; deleting an admitted
+    one names nothing and so passed the syntactic check, while it moves the
+    provision, and the data behind it, from a realm-scoped boundary into the
+    shared realm, where any shared-realm component may bind it. That is the
+    authority widening the placement refusal exists to stop, reached by
+    deletion. So for a component that is in the admitted generation and in the
+    candidate, and still provides the key, the candidate must keep the realm
+    the admitted generation placed it in.
+
+    Only provisions are compared. A requirer that leaves its realm binds a
+    shared-realm provider instead, which an untrusted author may already add,
+    so it gains nothing. Withdrawing the provider takes its provision with it,
+    which moves nothing and is unaffected; so is a trusted author (`None`
+    profile) and a first generation (`admitted is None`)."""
+    if profile is None or not profile.no_realm_placement or not admitted:
+        return
+    moved = _removed_provision_realms(admitted, candidate)
+    if not moved:
+        return
+    name, key, realm, now = moved[0]
+    where = "the shared realm" if now is None else f'realm("{now}")'
+    raise RevlError(
+        next((c.get("source") for c in candidate.get("components") or []
+              if c.get("name") == name), None) or "<candidate>", 0,
+        f"admission refused: this author cannot remove the realm placement of "
+        f"`{name}`: the admitted `isolate {key} in realm(\"{realm}\")` would "
+        f"move its `{key}` provision to {where}",
+        hint="removing a realm clause from a provider that stays admitted makes "
+             "its provision, and the data behind it, bindable by any "
+             "shared-realm component, which widens authority as surely as "
+             "naming a realm does. Keep the clause, withdraw the component "
+             "instead, or have an operator move it through the gated swap "
+             "(issue #2487)",
+        code="G9", category="admission",
+        navigate=_realm_removal_navigate([r for _n, _k, r, _w in moved]),
+    )
+
+
+def _realm_removal_navigate(realms) -> dict:
+    """The removal refusal's alternatives: the author may keep the placement
+    or withdraw the whole component; moving it is the operator's."""
+    from . import navigate as nav  # noqa: PLC0415 - lazy, avoids a cycle
+    alts = [
+        nav.alternative(
+            enacts=nav.ENACTS_AUTHOR,
+            action=("keep the admitted `in realm(...)` clause on the provider, "
+                    "or withdraw the component, which takes its provision "
+                    "with it"),
+            ref="keep-realm"),
+        nav.alternative(
+            enacts=nav.ENACTS_OPERATOR,
+            action=("or have an operator move the provision through the "
+                    "reviewed, gated swap"),
+            ref="operator-swap"),
+    ]
+    return nav.record(family="admit-profile",
+                      refused={"realms": sorted(set(realms))},
+                      blocked=False, alternatives=alts, profile=None)
 
 
 def _iter_var_refs(node, out: set) -> None:
