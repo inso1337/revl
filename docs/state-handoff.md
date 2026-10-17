@@ -102,19 +102,27 @@ On a **verified** swap the exported value is threaded from old to new through
    the live-instance migration (item 10) reads, but for a *composition-level*
    provider fiber. Keyed by **provided key**, not component name, so a renamed
    successor (`Cache` → `CacheV2`) that re-provides `cache` is correlated by
-   *what it provides*. The match is on the provided key **and its placement realm**
-   (the `isolate` realm, or the shared realm): state captured in
-   `realm("tenant_a")` crosses only to a successor that provides the key in
-   `realm("tenant_a")`. A successor that declares the hand-off in another realm
-   starts cold, and a capture two successors could claim is copied to neither;
-   the `handoff` block reports either one with `migrated: false` and a
-   `reason` of `realm` or `ambiguous` (issue #2510).
+   *what it provides*. The match is on the provided key **and the frame's
+   whole placement**, its full `isolate` map (issue #2510). The capture takes
+   every resource of the frame, including the stores behind the component's
+   other provided keys, so state captured from a frame that isolates `kv` in
+   `realm("tenant_a")` crosses only to a successor placed the same way, even
+   when the hand-off key itself is shared. A successor placed differently
+   starts cold, and a capture two successors could claim is copied to neither.
 2. **Restore, after load.** `_restore_provider_state` re-seats each captured
    vector onto the successor's provider fiber through the resources'
    `__revl_restore__` protocol — **check the whole cohort, then apply**, so a
    single incompatible provider rejects with nothing half-written.
 3. **Report.** The swap result carries a `handoff` block naming, per key, the
    successor component and the count of resources actually carried across.
+   An entry is labelled by the bare key in the shared realm (`kv`) and as
+   `kv in realm("tenant_a")` when the hand-off key is isolated; an isolated
+   entry also carries `realm: "tenant_a"`. A successor that declared the
+   hand-off but started cold gets an entry too: `migrated: false`, a `reason`
+   (`realm` when the hand-off key changed realm, `placement` when another key
+   of the frame did, `ambiguous` when two successors claimed one capture) and
+   a `note`. `Gate.propose`'s `migration` field lists only the entries that
+   carried state.
 
 Admission has already proved the *declared* shapes compatible; the resource-
 vector check at step 2 is defence in depth for a provider whose runtime shape

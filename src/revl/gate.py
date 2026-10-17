@@ -1142,7 +1142,13 @@ class Gate:
         # `None` for a stateless swap (nothing spawned, no hand-off), the
         # byte-identical case that needs no reconciliation.
         templates = (state.get("migration") or {}).get("templates")
-        handoff = state.get("handoff")
+        # only the hand-off entries that carried state: a cold entry (issue
+        # #2510, `migrated: false`) reconciled nothing, so a swap whose every
+        # entry is cold keeps `migration` None; `state["handoff"]` still names
+        # each cold successor and why
+        handoff = {label: entry for label, entry
+                   in (state.get("handoff") or {}).items()
+                   if entry.get("migrated")}
         migration = None
         if templates or handoff:
             migration = {}

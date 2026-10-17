@@ -224,3 +224,86 @@ def test_control_capture_two_successors_could_claim_goes_to_neither():
     assert report["kv"]["migrated"] is False
     assert report["kv"]["reason"] == "ambiguous"
     assert report["kv"]["component"] == ["One", "Two"]
+
+
+def test_template_successor_does_not_claim_a_provider_capture():
+    """Capture skips templates (F5); restore skips them the same way, so a
+    template that declares the hand-off is not a successor."""
+    old, tmpl = _Resource({"who": "alice"}), _Resource()
+    stub = SimpleNamespace(
+        _driver=SimpleNamespace(runtime=SimpleNamespace(
+            StateIncompatible=RuntimeError), fibers={"Old": old, "Tmpl": tmpl}),
+        _frame_resources=lambda fiber: [fiber] if fiber is not None else [])
+    comp = {"handoff": {"key": "kv", "type": "Map[Str, Str]"},
+            "provides": {"kv": "Kv"}}
+    pre = Session._capture_provider_state(
+        stub, {"components": [dict(comp, name="Old")]})
+    new_ir = {"components": [dict(comp, name="Tmpl")],
+              "manifest": {"templates": ["Tmpl"]}}
+    assert Session._restore_provider_state(stub, new_ir, pre) is None
+    assert tmpl.restored is None
+
+
+def _mixed(*, isolated: bool, board_reads: str) -> str:
+    """One frame, two stores: `secret` serves `kv` (isolated in tenant_a when
+    `isolated`), `open` serves the shared `board`, and the hand-off is on
+    `board`. The capture takes the whole frame, `secret` included."""
+    clause = '  isolate kv in realm("tenant_a")\n' if isolated else ""
+    return (
+        "component Mixed provides kv: Kv, board: Kv {\n"
+        f"{clause}"
+        "  handoff board: Map[Str, Str]\n"
+        "  let secret = effect Map.new() undo secret.drop()\n"
+        "  let open = effect Map.new() undo open.drop()\n"
+        "  provide kv {\n"
+        "    fn get(k) = secret.get(k)\n"
+        "    fn set(k, v) { effect secret.insert(k, v) undo secret.remove(k) }\n"
+        "    fn unset(k) = secret.remove(k)\n"
+        "  }\n"
+        "  provide board {\n"
+        f"    fn get(k) = {board_reads}.get(k)\n"
+        "    fn set(k, v) { effect open.insert(k, v) undo open.remove(k) }\n"
+        "    fn unset(k) = open.remove(k)\n"
+        "  }\n"
+        "}\n")
+
+
+MIXED_REST = (
+    "service Kv {\n  fn get(k: Str) -> Opt[Str]\n  fn set(k: Str, v: Str)\n"
+    "  fn unset(k: Str)\n}\n\n")
+
+
+@needs_runtime
+def test_placement_change_on_another_key_starts_cold(tmp_path, monkeypatch):
+    """The hand-off key (`board`) stays shared while the frame's other key
+    (`kv`) leaves tenant_a. The frame's `secret` store is tenant_a's, so the
+    capture must not cross: the slot is the whole placement, not the hand-off
+    key's realm. Run as the operator so the placement change is admitted on
+    any edit-path profile; the matcher, not admission, is under test."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    loaded = _call("revl_load", {
+        "source": MIXED_REST + _mixed(isolated=True, board_reads="open")})
+    assert loaded["ok"] is True, loaded
+    _map_at("Mixed", 0).insert(*SECRET)
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed",
+        "source": _mixed(isolated=False, board_reads="secret")}})
+    assert changed["ok"] is True and changed.get("committed") is True, \
+        [d.get("message") for d in changed.get("diagnostics") or []]
+    read = _call("revl_call", {"key": "board", "method": "get",
+                               "args": [SECRET[0]]})
+    assert read["ok"] is True and read.get("result") != SECRET[1], read
+    assert SECRET[0] not in dict(_map_at("Mixed", 0).data)
+    entry = changed["handoff"]["board"]
+    assert entry["migrated"] is False and entry["reason"] == "placement"
+
+
+def _map_at(component: str, pos: int):
+    from revl.mcp import server as server_mod
+
+    session = server_mod.SESSION
+    resources = session._frame_resources(session._driver.fibers.get(component))
+    return resources[pos]

@@ -620,43 +620,75 @@ def _capturing_driver_class():
     return _CapturingDriver
 
 
-def _handoff_realm(comp: dict, key: str):
-    """The realm `comp` provides `key` in: its `isolate` placement, or `None`
-    for the shared realm (the same reading as `run.provision_placements`)."""
-    return (comp.get("isolate") or {}).get(key)
+def _handoff_slot(comp: dict, key: str) -> tuple:
+    """The slot a hand-off provider's state is captured under and claimed
+    from: `(key, placement)`, where `placement` is the component's WHOLE
+    `isolate` map as a frozenset of `(key, realm)` pairs. The capture takes
+    the whole activation frame, every resource, including the stores behind
+    keys other than the hand-off key, so the slot records the realm of every
+    key, not only the hand-off key's (issue #2510). Empty for a component
+    with no `isolate` clause (the shared realm)."""
+    return (key, frozenset((comp.get("isolate") or {}).items()))
 
 
-def _handoff_label(key: str, realm) -> str:
+def _slot_realm(slot: tuple):
+    """The realm the slot's hand-off key is placed in, `None` for shared."""
+    key, placement = slot
+    return dict(placement).get(key)
+
+
+def _handoff_label(slot: tuple) -> str:
     """The swap report's name for a hand-off slot: the bare key in the shared
     realm (unchanged from item 53), `key in realm("r")` in an isolated one."""
-    return key if realm is None else f'{key} in realm("{realm}")'
+    realm = _slot_realm(slot)
+    return slot[0] if realm is None else f'{slot[0]} in realm("{realm}")'
+
+
+def _placement_text(placement: frozenset) -> str:
+    if not placement:
+        return "no isolate clause"
+    return ", ".join(f'{k} in realm("{r}")' for k, r in sorted(placement))
+
+
+def _handoff_entry(slot: tuple, entry: dict) -> dict:
+    """`entry` with the slot's realm added when the hand-off key is isolated
+    (the shared-realm shape stays as item 53 reported it)."""
+    realm = _slot_realm(slot)
+    if realm is not None:
+        entry["realm"] = realm
+    return entry
 
 
 def _handoff_cold_report(successors: dict, pre: dict) -> dict:
     """Report entries for the successors that declare a `handoff` but start
     cold because the capture is not theirs to take (issue #2510): two or more
-    claim one captured slot, or the key was captured only in other realms."""
-    captured_keys = {key for key, _realm in pre}
+    claim one captured slot, or the key was captured only under a different
+    placement. `reason` is `realm` when the hand-off key itself moved realm,
+    `placement` when another key of the frame did."""
     report: dict = {}
-    for (key, realm), comps in successors.items():
+    for slot, comps in successors.items():
+        key, placement = slot
         names = [c["name"] for c in comps]
-        if (key, realm) in pre:
+        if slot in pre:
             if len(comps) < 2:
                 continue
             reason, note = "ambiguous", (
-                f"{len(comps)} successors accept the state of `{key}` in this "
-                f"realm; it is copied to none of them")
-        elif key in captured_keys:
-            others = sorted(_handoff_label(k, r) for k, r in pre if k == key)
-            reason, note = "realm", (
-                f"the running state of `{key}` was captured in a different "
-                f"realm ({', '.join(others)}); it does not cross realms, so "
-                f"this successor starts cold")
+                f"{len(comps)} successors accept the state of `{key}` under "
+                f"the same placement; it is copied to none of them")
         else:
-            continue
-        report[_handoff_label(key, realm)] = {
+            others = [s for s in pre if s[0] == key]
+            if not others:
+                continue
+            same_realm = any(_slot_realm(s) == _slot_realm(slot) for s in others)
+            reason = "placement" if same_realm else "realm"
+            ran = "; ".join(sorted(_placement_text(s[1]) for s in others))
+            note = (f"the running state of `{key}` was captured from a frame "
+                    f"placed as ({ran}); this successor is placed as "
+                    f"({_placement_text(placement)}). State does not cross a "
+                    f"placement change, so this successor starts cold")
+        report[_handoff_label(slot)] = _handoff_entry(slot, {
             "component": names[0] if len(names) == 1 else names,
-            "migrated": False, "reason": reason, "note": note}
+            "migrated": False, "reason": reason, "note": note})
     return report
 
 
@@ -2306,8 +2338,8 @@ class Session:
 
     def _capture_provider_state(self, old_ir: dict | None) -> dict:
         """Snapshot the live state of every running provider that declared a
-        `handoff` (item 53), keyed by `(provided key, placement realm)`, the
-        realm `None` for the shared realm (issue #2510).
+        `handoff` (item 53), keyed by `_handoff_slot`: the provided key and the
+        frame's whole `isolate` placement (issue #2510).
 
         The value is the ordered `(resource_type, state)` vector of the
         provider's activation frame — captured while the old provider is still
@@ -2341,7 +2373,7 @@ class Session:
             key = handoff["key"]
             # issue #2510: the slot is (key, placement realm), never the key
             # alone, so a successor in another realm cannot claim it
-            pre[(key, _handoff_realm(comp, key))] = {
+            pre[_handoff_slot(comp, key)] = {
                 "component": comp["name"],
                 "type": handoff.get("type"),
                 "captured": captured,
@@ -2412,21 +2444,24 @@ class Session:
         author choice), so it starts cold rather than being force-fed a shape it
         never declared.
 
-        Issue #2510: a capture is matched by `(key, realm)`. A successor that
-        accepts a key whose state was captured only in ANOTHER realm starts
-        cold (`reason: "realm"`), and a capture two successors could claim is
-        copied to neither (`reason: "ambiguous"`); the report names both. Cold,
+        Issue #2510: a capture is matched by `(key, placement)`, the placement
+        being the frame's whole `isolate` map. A successor that accepts a key
+        whose state was captured only under ANOTHER placement starts cold
+        (`reason: "realm"` or `"placement"`), and a capture two successors
+        could claim is copied to neither (`reason: "ambiguous"`); the report names both. Cold,
         not a refusal: the running state belongs to its realm, and a successor
         moved out of that realm is a different provider there, the same as a
         successor that declares no hand-off."""
         runtime = self._driver.runtime
+        templates = set((new_ir.get("manifest") or {}).get("templates") or [])
         successors: dict = {}
         for comp in new_ir.get("components") or []:
+            if comp.get("name") in templates:
+                continue  # F5: a template is the per-instance path, as in capture
             handoff = comp.get("handoff")
             if isinstance(handoff, dict) and handoff.get("key"):
                 key = handoff["key"]
-                successors.setdefault((key, _handoff_realm(comp, key)),
-                                      []).append(comp)
+                successors.setdefault(_handoff_slot(comp, key), []).append(comp)
         plan: list = []
         report: dict = _handoff_cold_report(successors, pre)
         for slot, info in pre.items():
@@ -2470,14 +2505,11 @@ class Session:
             for res, (_old_type, snap) in zip(resources, captured):
                 if snap is not None:
                     res.__revl_restore__(snap)
-            entry = {
+            report[_handoff_label(slot)] = _handoff_entry(slot, {
                 "component": cname, "migrated": True,
                 # honest count of what actually crossed (item 53 operator rule)
                 "resources": sum(1 for _t, s in captured if s is not None),
-            }
-            if slot[1] is not None:
-                entry["realm"] = slot[1]
-            report[_handoff_label(*slot)] = entry
+            })
         return report or None
 
     def rollback(self) -> dict:
