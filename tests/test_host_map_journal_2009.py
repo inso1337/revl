@@ -193,7 +193,8 @@ def test_java_tier_catches_a_non_reversing_host_map_undo(tmp_path):
 # is not a function", inside cordis's effect runner for a method body. Both
 # bracket sites are here: the activation body (`seeded() ? ...`) and a
 # provide-method body (`held != None ? ...`, the shape of the downstream
-# approval gate that went red). The document is also in the self-host ts
+# approval gate that went red), plus a fn-body ternary expression statement
+# after a `let`, the same hazard without any journal. The document is also in the self-host ts
 # oracle's CORPUS, so the port's bytes agree with the fix.
 TERNARY_EFFECT = ROOT / "tests" / "noncensus_corpus" / "emit_ts_ternary_effect_asi.rvl"
 
@@ -201,10 +202,12 @@ TERNARY_EFFECT = ROOT / "tests" / "noncensus_corpus" / "emit_ts_ternary_effect_a
 @needs_vitest
 def test_ts_ternary_effect_after_journal_begin_runs_2501():
     """Base: `[ts] fail:` with `$revl_frame.journalBegin(...) is not a
-    function`. Fixed: the acquisition line is `;`-led, so it is its own
-    statement, and the lifecycle test passes under vitest and plain node."""
+    function` (the brackets) and "(intermediate value) is not a function" (the
+    fn-body statement). Fixed: a paren-led expression statement is `;`-led, so
+    it is its own statement, and all three tests pass under vitest and plain
+    node."""
     ran = _revl_test("--backend", "ts", str(TERNARY_EFFECT))
     out = ran.stdout + ran.stderr
     assert "is not a function" not in out, out
-    assert "[ts] pass:" in out, out
+    assert "[ts] pass: vitest: 3 test(s) passed" in out, out
     assert ran.returncode == 0, out

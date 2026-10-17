@@ -1862,7 +1862,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   }
   if (step == "expr") {
     let r = expr(value_field(node, "expr"), counter, a)
-    return { lines: [`${pad}${r.text}`], counter: r.counter }
+    return { lines: [`${pad}${asi_safe(r.text)}`], counter: r.counter }
   }
   if (step == "assert") {
     let e = value_field(node, "expr")
@@ -3092,7 +3092,7 @@ fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str,
     out = out.push(`${pad}const ${fname} = () => {`)
     for (em of value_list(value_field(step, "body"))) {
       let r = expr(value_field(em, "expr"), c, a)
-      out = out.push(`${pad}  ${r.text}`)
+      out = out.push(`${pad}  ${asi_safe(r.text)}`)
       c = r.counter
       let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
       out = out.concat(tr.lines)
@@ -3114,7 +3114,7 @@ fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str,
       out = out.push(`${pad}  const _revl_task: Promise<void> = Promise.resolve(${r.text}).then(() => { ${inflight}.delete(_revl_task) }, () => { ${inflight}.delete(_revl_task) })`)
       out = out.push(`${pad}  ${inflight}.add(_revl_task)`)
     } else {
-      out = out.push(`${pad}  ${r.text}`)
+      out = out.push(`${pad}  ${asi_safe(r.text)}`)
       let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
       out = out.concat(tr.lines)
       c = tr.counter
@@ -3143,7 +3143,7 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
     if (value_bool(value_field(step, "async")) && !a.in_async) {
       emitted = `await ${emitted}`
     }
-    var out = [`${pad}${emitted}`]
+    var out = [`${pad}${asi_safe(emitted)}`]
     var c = er.counter
     // one compensation per crossing (issue #1902), registered after the fire:
     // the site-spelled clause, else the emitted extern's own declared one

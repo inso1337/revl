@@ -2330,6 +2330,7 @@ jobs:
           tests/test_fn_param_call_signature_2311.py
           tests/test_go_component_checked_arith_2259.py
           tests/test_go_component_int32_trap_2262.py
+          tests/test_host_map_journal_2009.py
           tests/test_insert_if_absent.py
           tests/test_json_cross_tier_bytes.py
           tests/test_model_evidence_517.py
