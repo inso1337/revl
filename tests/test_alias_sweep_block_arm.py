@@ -136,3 +136,23 @@ def test_alias_in_annotation_nested_two_block_arms_deep_is_substituted():
     inner_loop = next(s for s in inner_block.stmts if isinstance(s, ForStmt))
     assert isinstance(inner_loop.body[0], LetStmt)
     assert inner_loop.body[0].type == "Int"
+
+
+LET_ONLY_SRC = """type Count = Int
+
+fn pick(n: Int) -> Int {
+  return match n {
+    _ => {
+      let x: Count = n
+      x
+    }
+  }
+}
+"""
+
+
+def test_let_only_block_arm_annotation_is_substituted():
+    # no loop: the old code walked only `.value`, so the annotation survived
+    # and the checker saw `Count` where `Int` was expected
+    compile_source(LET_ONLY_SRC)
+    assert _run_py(LET_ONLY_SRC).pick(4) == 4
