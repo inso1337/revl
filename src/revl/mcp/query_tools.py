@@ -9,9 +9,17 @@ a proof or a may-analysis before it edits anything. The human rendering
 
 `structuredContent` in the tool result is the query result verbatim; nothing
 is reshaped for display on the way out.
+
+With no `source`/`files` of their own, the five ask about the composition the
+SESSION holds, the same set `revl_check {}` checks and `revl_swap {}`
+re-admits, and the answer carries `queried: "session"` (issue #2500). Steps
+1-3 of the authoring loop mutate that set, so step 4's preflight has no
+candidate of its own to send.
 """
 
 from __future__ import annotations
+
+import os
 
 from ..compiler import compile_files, compile_source
 from ..diagnostics import report
@@ -37,27 +45,118 @@ _PRECISION_NOTE = (
 )
 
 
+#: The held-session resolver, installed by `server.py` (issue #2500). It
+#: returns the working source set the session holds, in the argument shape
+#: `_compile` takes, or None when the session holds nothing checkable. The
+#: hook is injected rather than imported because `server.py` owns the session
+#: and imports this module.
+_HELD_CANDIDATE = None
+
+
+def set_held_candidate(resolver) -> None:
+    """Install the resolver the bare query call reads (issue #2500).
+
+    #2117 gave `revl_check` the held form and stated the principle: the name
+    and the loop position already imply the bare call, and `revl_swap {}` and
+    `revl_source {}` read the same set. `revl_query_withdraw` IS the loop's
+    preflight step, so a query that could only compile a SUPPLIED source is
+    unreachable for the artifact steps 1-3 built — the agent must re-send a
+    file the scaffold tells it not to re-send. The fix that landed reached one
+    verb; this is the same door for the five that route through `_run`.
+    """
+    global _HELD_CANDIDATE
+    _HELD_CANDIDATE = resolver
+
+
+def _carries_candidate(arguments: dict) -> bool:
+    """Whether the call names a composition of its own. `modules` alone is not
+    one: they are the in-memory `use` imports a `source`/`files` candidate
+    resolves against, so a call with neither has no candidate to compile (the
+    same reading `server._carries_candidate` gives, issue #2117)."""
+    return (arguments.get("source") is not None
+            or bool(arguments.get("files")))
+
+
+def _buffer_sources(modules: dict | None) -> dict | None:
+    """The in-memory buffers a `files` candidate resolves against, keyed the
+    way `compile_files` resolves a `use`: by absolute path, exactly as
+    `plan._compile` and `compile_under_authoring` pass them.
+
+    Without this a `files` candidate compiles the text on DISK, and a
+    files-loaded session whose buffers have been edited holds text the disk
+    does not (no MCP verb writes to disk). A query would then answer about the
+    composition as it was BEFORE the edit and say so under `queried:
+    "session"` — telling an author that the component step 3 just created does
+    not exist (issue #2500)."""
+    if not modules:
+        return None
+    return {os.path.abspath(path): text for path, text in modules.items()}
+
+
+class _ModulesWithoutCandidate(Exception):
+    """`modules` are the in-memory `use` imports of a candidate, not a candidate
+    of their own. Raised by `_compile` so `_run` answers with the shared
+    refusal without carrying the envelope vocabulary itself (issue #2500)."""
+
+
 def _compile(arguments: dict) -> dict:
     source = arguments.get("source")
     if source is not None:
         return compile_source(source, "<query>.rvl",
                               modules=arguments.get("modules"))
     files = arguments.get("files")
-    if not files:
-        raise ValueError("provide `source` or `files`")
-    return compile_files(list(files))
+    if files:
+        return compile_files(list(files),
+                             sources=_buffer_sources(arguments.get("modules")))
+    if arguments.get("modules") is not None and not _carries_candidate(arguments):
+        raise _ModulesWithoutCandidate
+    held = _HELD_CANDIDATE() if _HELD_CANDIDATE is not None else None
+    if held:
+        return _compile(held)
+    raise ValueError("provide `source` or `files`")
+
+
+def no_candidate_refusal() -> dict:
+    """The refusal for a call carrying `modules` and no candidate (issue
+    #2500). Shared with `revl_plan` so the two cannot describe the same
+    mistake differently."""
+    return {"ok": False, "diagnostics": [{
+        "severity": "error", "code": "REVL", "category": "usage",
+        "message": "`modules` are the in-memory `use` imports of a "
+                   "candidate: they ride beside `source` or `files`, and "
+                   "this call carries neither",
+        "fix": "pass `source` or `files` beside `modules`"}]}
+
+
+def _mark_session(result: dict) -> dict:
+    """Say that the held set answered the call. The marker is the answer's
+    PROVENANCE, not its verdict, so it rides even on an `ok: False` answer that
+    resolved nothing (an unknown component is still an answer about the held
+    composition). Same reading as `revl_check`'s held form (issue #2500)."""
+    result["queried"] = "session"
+    return result
 
 
 def _run(arguments: dict, fn, *args, **kwargs) -> dict:
+    from_session = not _carries_candidate(arguments)
     try:
         ir = _compile(arguments)
+    except _ModulesWithoutCandidate:
+        return no_candidate_refusal()
     except RevlError as error:
-        return report(error)
+        refusal = report(error)
+        # The held composition itself failed to compile: still an answer ABOUT
+        # the held set, and the one case where the model most needs to know
+        # which composition it was told about. The `ValueError` branch below is
+        # deliberately NOT marked: there the session held nothing, so no
+        # composition answered and the refusal is a usage error (issue #2500).
+        return _mark_session(refusal) if from_session else refusal
     except ValueError as error:
         return {"ok": False, "diagnostics": [{
             "severity": "error", "code": "REVL", "category": "usage",
             "message": str(error)}]}
-    return fn(ir, *args, **kwargs)
+    result = fn(ir, *args, **kwargs)
+    return _mark_session(result) if from_session else result
 
 
 def _require(arguments: dict, field: str):
