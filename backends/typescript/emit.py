@@ -1632,6 +1632,28 @@ def _statement(rendered: str) -> str:
     return rendered
 
 
+def _asi_safe(rendered: str) -> str:
+    """An expression statement that cannot glue onto the line before it.
+
+    JS ASI does not end a statement before a line that starts with `(`, `[`
+    or a backtick, so `$revl_frame.journalBegin()` followed by a parenthesized
+    acquisition (`((!revlEq(x, undefined)) ? m.remove(k) : noop())`, a ternary
+    effect) parses as `journalBegin()(...)` and throws "is not a function" when
+    the bracket runs (issue #2501). The same holds for every bare expression
+    statement the emitter writes (a fn-body expression statement, a sync
+    `emit`, a timer firing), so each of them goes through here. A leading `;`
+    ends the previous statement; every other line is returned unchanged.
+
+    `+`, `-` and `/` are the other ASI hazards, and no rendered expression can
+    start with one: the lexer has no signed or regex literal, revl has no
+    unary `+`, and `_expr`'s `un` arm spells `-` as `revlI64(-x)` (Int),
+    `revlI32(-x)` (Int32) or `(-x)` (Float), so a negation leads with a name
+    or `(`, and every `bin` leads with `(` or a `revl*` helper name."""
+    if rendered[:1] in ("(", "[", "`"):
+        return ";" + rendered
+    return rendered
+
+
 def _balanced(text: str) -> bool:
     depth = 0
     for ch in text:
@@ -1720,7 +1742,7 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             if bind is not None:
                 lines.append(f"{indent}  {bind} = {acquire}")
             else:
-                lines.append(f"{indent}  {acquire}")
+                lines.append(f"{indent}  {_asi_safe(acquire)}")
             inverse = _pinned_arrow(step, "undo", f"() => {undo}")
             # issue #2009: the inverse runs with the journal re-armed, so a key
             # only the undo writes is judged too (py `Frame._guard`, 3690).
@@ -1748,7 +1770,7 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             # then register one compensation per crossing: the site-spelled
             # clause, else the extern's own declared one (item 254, issues
             # #1592 and #1902).
-            lines.append(f"{indent}{_statement(_expr(step['expr'], _emit_ctx(step, ctx)))}")
+            lines.append(f"{indent}{_asi_safe(_statement(_expr(step['expr'], _emit_ctx(step, ctx))))}")
             for comp_node in _emit_compensations(step, ctx):
                 _register_compensation(
                     comp_node, ctx, lines, indent, frame_var,
@@ -2530,7 +2552,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     cas_bind = bind_name
                     lines.append(f"{indent}const {bind_name} = {acquire}")
                 else:
-                    lines.append(f"{indent}{acquire}")
+                    lines.append(f"{indent}{_asi_safe(acquire)}")
             undo = _expr(step["undo"], ctx)
             acquire_node = step.get("acquire") or {}
             b_key = step.get("bind") or _acquire_method_name(acquire_node)
@@ -2557,7 +2579,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         if step.get("async"):
             lines.append(f"{indent}{_await_statement(step['expr'], ectx)}")
         else:
-            lines.append(f"{indent}{_expr(step['expr'], ectx)}")
+            lines.append(f"{indent}{_asi_safe(_expr(step['expr'], ectx))}")
         # item 247: a compensation entry: audit-facing, best-effort,
         # ABORT-ONLY, Phase 2 (never on a clean unload). Both the site-spelled
         # clause and the extern's own declared one (item 254, issue #1592)
@@ -2641,7 +2663,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         if not step.get("async"):
             lines.append(f"{indent}const {fn} = () => {{")
             for emission in emissions:
-                lines.append(f"{indent}  {_expr(emission['expr'], _emit_ctx(emission, ctx))}")
+                lines.append(f"{indent}  {_asi_safe(_expr(emission['expr'], _emit_ctx(emission, ctx)))}")
                 for comp_node in _emit_compensations(emission, ctx):
                     _register_compensation(
                         comp_node, ctx, lines, indent + "  ", frame_var,
@@ -2684,7 +2706,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                 lines.append(f"{indent}  {inflight}.add(_revl_task)")
             else:
                 # a sync emission in a mixed body still fires inline
-                lines.append(f"{indent}  {rendered}")
+                lines.append(f"{indent}  {_asi_safe(rendered)}")
                 for comp_node in _emit_compensations(emission, ctx):
                     _register_compensation(
                         comp_node, ctx, lines, indent + "  ", frame_var,
@@ -4088,7 +4110,7 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             parts = ", ".join(names + ([f"...{_ident(rest, 'binding')}"] if rest else []))
             out.append(f"{'  ' * indent}{keyword} [{parts}] = {value}")
     elif step == "expr":
-        out.append(f"{'  ' * indent}{_expr(node['expr'], ctx)}")
+        out.append(f"{'  ' * indent}{_asi_safe(_expr(node['expr'], ctx))}")
     elif step == "assert":
         # `expect(x).toBeTruthy()` and a bare `throw` both discard the operand
         # values the emitter already has. An in-file `test` almost always

@@ -184,3 +184,30 @@ def test_java_tier_catches_a_non_reversing_host_map_undo(tmp_path):
     judged at the top of `drop()` (backends/java/emit.py) -- mirroring py
     `_journal_note`/`_judge_journal` at `Map` release."""
     _d1_caught_on_tier("java", tmp_path)
+
+
+# Issue #2501: an effect whose acquisition is a ternary renders as a line that
+# starts with `(`. JS ASI does not end the statement before such a line, so the
+# `journalBegin()` the emitter places right above it was CALLED with it:
+# `$revl_frame.journalBegin()((...))` -> "TypeError: $revl_frame.journalBegin(...)
+# is not a function", inside cordis's effect runner for a method body. Both
+# bracket sites are here: the activation body (`seeded() ? ...`) and a
+# provide-method body (`held != None ? ...`, the shape of the downstream
+# approval gate that went red), plus a fn-body ternary expression statement
+# after a `let`, the same hazard without any journal. The document is also in the self-host ts
+# oracle's CORPUS, so the port's bytes agree with the fix.
+TERNARY_EFFECT = ROOT / "tests" / "noncensus_corpus" / "emit_ts_ternary_effect_asi.rvl"
+
+
+@needs_vitest
+def test_ts_ternary_effect_after_journal_begin_runs_2501():
+    """Base: `[ts] fail:` with `$revl_frame.journalBegin(...) is not a
+    function` (the brackets) and "(intermediate value) is not a function" (the
+    fn-body statement). Fixed: a paren-led expression statement is `;`-led, so
+    it is its own statement, and all three tests pass under vitest and plain
+    node."""
+    ran = _revl_test("--backend", "ts", str(TERNARY_EFFECT))
+    out = ran.stdout + ran.stderr
+    assert "is not a function" not in out, out
+    assert "[ts] pass: vitest: 3 test(s) passed" in out, out
+    assert ran.returncode == 0, out
