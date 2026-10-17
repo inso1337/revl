@@ -91,6 +91,11 @@ def test_untrusted_deletion_of_a_realm_clause_is_refused_by_name(loaded):
     assert REFUSAL in message and "TenantAStore" in message, message
     assert "tenant_a" in message, message
     assert any(d.get("code") == "G9" for d in proposed["diagnostics"])
+    # the refusal points at the provider in the edited file, not at line 0
+    store_line = loaded.read_text().splitlines().index(
+        "component TenantAStore provides kv: Kv {") + 1
+    refusal = next(d for d in proposed["diagnostics"] if REFUSAL in d["message"])
+    assert refusal.get("line") == store_line, refusal
     committed = _call("revl_change", {"commit": True})
     assert not committed.get("swapped"), committed
     assert _realms("TenantAStore") == {"kv": "tenant_a"}
@@ -129,3 +134,36 @@ def test_untrusted_withdraw_of_the_whole_provider_is_unchanged(loaded):
     assert committed.get("swapped") is True, committed
     names = {c["name"] for c in server_mod.SESSION.ir["components"]}
     assert names == {"TenantBStore", "TenantBApp"}
+
+
+def _state(component: str) -> list:
+    session = server_mod.SESSION
+    fiber = session._driver.fibers.get(component)
+    return [res.__revl_state__() for res in session._frame_resources(fiber)]
+
+
+def test_a_renamed_provider_without_handoff_starts_cold(clean_session):
+    """Renaming the provider while dropping its clause is not refused: the
+    renamed component is a new provider. That is safe only because, with no
+    `handoff` on the successor, it starts with an empty store. The original
+    declares `handoff kv`, so its state is captured, and a marker written
+    straight into its store must not reach the successor. (`who` is
+    TenantAApp's own seed, re-run against the new provider.)"""
+    path = clean_session / "tenants.rvl"
+    text = (ROOT / "examples" / "tenants.rvl").read_text()
+    path.write_text(text.replace(
+        CLAUSE + "\n  let store",
+        CLAUSE + "\n  handoff kv: Map[Str, Str]\n  let store", 1))
+    assert _call("revl_load", {"files": [str(path)]})["ok"] is True
+    store = server_mod.SESSION._frame_resources(
+        server_mod.SESSION._driver.fibers["TenantAStore"])[0]
+    store.insert("secret", "tenant-a-data")
+    assert _state("TenantAStore") == [{"who": "alice", "secret": "tenant-a-data"}]
+    renamed = _call("revl_change", {"commit": True, "edit": {
+        "target": str(path), "edits": [
+            {"anchor": "component TenantAStore", "replacement": "component Renamed"},
+            {"anchor": CLAUSE, "replacement": ""},
+            {"anchor": "handoff kv: Map[Str, Str]", "replacement": ""}]}})
+    assert renamed.get("swapped") is True, renamed
+    assert _realms("Renamed") == {}
+    assert _state("Renamed") == [{"who": "alice"}]

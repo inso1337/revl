@@ -41,6 +41,8 @@ injection-resistant for BOTH capability reach and smuggled host code.
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 
 from .errors import RevlError
@@ -516,6 +518,9 @@ def _removed_provision_realms(admitted: dict,
             continue
         placed = before.get("isolate") or {}
         now = comp.get("isolate") or {}
+        # provisions only: an untrusted author can already add a shared-realm
+        # `requires` and copy data out through it, so a requirer that drops its
+        # realm adds nothing this check could refuse
         for key in comp.get("provides") or {}:
             realm = placed.get(key)
             if realm is not None and now.get(key) != realm:
@@ -523,8 +528,22 @@ def _removed_provision_realms(admitted: dict,
     return moved
 
 
+def _component_line(texts: dict | None, filename: str | None, name: str) -> int:
+    """The line `component <name>` starts on in the candidate's text for
+    `filename`, or 0 when that text is not at hand."""
+    text = (texts or {}).get(filename) if filename else None
+    if text is None and filename:
+        text = (texts or {}).get(os.path.abspath(filename))
+    if text is None:
+        return 0
+    match = re.search(rf"^[ \t]*(?:pub[ \t]+)?component[ \t]+{re.escape(name)}\b",
+                      text, re.MULTILINE)
+    return text.count("\n", 0, match.start()) + 1 if match else 0
+
+
 def check_no_realm_removal(admitted: dict | None, candidate: dict,
-                           profile: AdmissionProfile | None) -> None:
+                           profile: AdmissionProfile | None,
+                           texts: dict | None = None) -> None:
     """Refuse an untrusted edit that moves a surviving provider out of its realm
     (issue #2487), the deletion half of `check_no_realm_placement`.
 
@@ -541,7 +560,10 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     shared-realm provider instead, which an untrusted author may already add,
     so it gains nothing. Withdrawing the provider takes its provision with it,
     which moves nothing and is unaffected; so is a trusted author (`None`
-    profile) and a first generation (`admitted is None`)."""
+    profile) and a first generation (`admitted is None`).
+
+    `texts` maps each candidate filename to its text, so the refusal points at
+    the line the component starts on."""
     if profile is None or not profile.no_realm_placement or not admitted:
         return
     moved = _removed_provision_realms(admitted, candidate)
@@ -549,9 +571,10 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
         return
     name, key, realm, now = moved[0]
     where = "the shared realm" if now is None else f'realm("{now}")'
+    filename = next((c.get("source") for c in candidate.get("components") or []
+                     if c.get("name") == name), None)
     raise RevlError(
-        next((c.get("source") for c in candidate.get("components") or []
-              if c.get("name") == name), None) or "<candidate>", 0,
+        filename or "<candidate>", _component_line(texts, filename, name),
         f"admission refused: this author cannot remove the realm placement of "
         f"`{name}`: the admitted `isolate {key} in realm(\"{realm}\")` would "
         f"move its `{key}` provision to {where}",
