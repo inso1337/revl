@@ -176,8 +176,9 @@ def test_the_unit_runs_on_the_py_tier(tmp_path, a):
 # Each snippet puts the module's private helper in one slot. After
 # `_rewrite_module` renames it, a generic walk over EVERY dataclass field of
 # the parsed program must find no bare `fold_records` left. The walk follows
-# fields by reflection, not by node kind, so it is also the completeness check:
-# a node kind the rewrite does not know still fails here. A `merge(..)`
+# fields by reflection, not by node kind, so a slot listed in SLOTS fails here
+# even if the rewrite skips a node kind inside it. A new node kind is covered
+# only once a snippet for it is added to SLOTS. A `merge(..)`
 # operand is a stream name (a call there does not parse), so it has no slot.
 
 from revl import compiler as _compiler
