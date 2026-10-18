@@ -1249,9 +1249,11 @@ under the authoring profile, so its blocks import as `author: {kind: agent,
 trust: untrusted}` whatever trust the loading session has, and ride exactly as
 an untrusted add does: the body is withheld until the note carries evidence,
 and a sidecar export writes the record with that label. A vendored truc's
-`trucs/<name>/component.rvl` holds the publisher's bytes, so its blocks import
-as `author: {kind: vendor, trust: untrusted}`, the floor the vendored records
-get when no signature covers them. Any other file holds bytes no MCP verb
+`trucs/<name>/component.rvl` holds the publisher's bytes, whatever name
+reaches it (a case alias, a link), so its blocks import as `author: {kind:
+vendor, trust: untrusted}`, the floor the vendored records get when no
+signature covers them, and are marked `vendored`, so an export never writes
+them to the project's sidecar. Any other file holds bytes no MCP verb
 wrote, so its blocks import as `author: {kind: human, trust: operator}`. An
 unchanged block is never re-attributed: it keeps its record and that record's
 trust. So adoption, copying an export out of `.revl/export/`, is the one step

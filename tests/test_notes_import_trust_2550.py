@@ -16,8 +16,9 @@ Through the real dispatch:
   withheld from the ride;
 * the export of that reloaded session writes the note's sidecar record with
   the untrusted label;
-* a block shipped inside a vendored truc's `component.rvl` is the
-  publisher's: untrusted, its body withheld;
+* a block shipped inside a vendored truc's `component.rvl`, loaded by its
+  own name, a case alias or a link, is the publisher's: untrusted, its body
+  withheld, and never written to the project's sidecar;
 * control: a marked block the operator wrote into the operator's own file,
   outside the server, still imports as `kind: human, trust: operator`, under
   the closed authoring trust and under a trusted one;
@@ -25,10 +26,12 @@ Through the real dispatch:
   existing one keeps its author.
 
 Every test needs the cordis-py runtime and skips without it: with it
-installed this module collects 8 items and all 8 pass; a run that reports 8
-skipped (or 0 passed) has proved nothing.
+installed this module collects 9 items and all 9 pass on a case-folding
+filesystem (8 pass and the case alias skips on a case-sensitive one); a run
+that reports 9 skipped (or 0 passed) has proved nothing.
 """
 
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -174,23 +177,63 @@ def test_the_sidecar_export_of_the_reloaded_note_carries_the_untrusted_label(vau
 # ------------------------------------------------ a vendored truc's block
 
 
-def test_a_block_shipped_inside_a_vendored_truc_is_untrusted(vault):
+def _vendor(root: Path) -> Path:
+    """A consumer project as `truc add` leaves it: the project's own entry,
+    the vendored `trucs/vault/component.rvl` (the publisher's bytes, with a
+    marked block in them) and a `truc.lock` row pinning those bytes. The
+    publisher shipped no knowledge records."""
+    (root / "src").mkdir()
+    (root / "src" / "main.rvl").write_text("// the project's own entry\n",
+                                           encoding="utf-8")
+    component = root / "trucs" / "vault" / "component.rvl"
+    component.parent.mkdir(parents=True)
+    text = PLAIN.replace(DECL, _block(UNRECORDED, AUTHOR_TEXT) + DECL)
+    component.write_text(text, encoding="utf-8")
+    (root / "truc.lock").write_text(json.dumps({"trucs": [{
+        "name": "vault", "registry": "local",
+        "sourceHash": hashlib.sha256(text.encode("utf-8")).hexdigest()}]}),
+        encoding="utf-8")
+    return component
+
+
+@pytest.mark.parametrize("spelling", ["canonical", "case-alias", "link"])
+def test_a_block_shipped_inside_a_vendored_truc_is_untrusted(vault, spelling):
     """`trucs/<name>/component.rvl` holds the publisher's bytes as `truc add`
     wrote them, outside every export directory, and is a `files` entry a
-    session may load. An unsigned truc ships no signature over anything, so
-    a marked block in it is the publisher's, untrusted, never the operator's."""
-    component = vault.parent / "trucs" / "vault" / "component.rvl"
-    component.parent.mkdir(parents=True)
-    component.write_text(PLAIN.replace(DECL, _block(UNRECORDED, AUTHOR_TEXT) + DECL),
-                         encoding="utf-8")
-    assert notes_mod.vendored_path(str(component)) is not None
-    _load(component)
+    session may load, under any name that reaches it: a case alias on a
+    case-folding filesystem, or a link. No signature covers a comment block,
+    so a marked block in it is the publisher's, untrusted, never the
+    operator's; and a vendor's note never lands in the project's sidecar."""
+    root = vault.parent
+    component = _vendor(root)
+    if spelling == "case-alias":
+        named = root / "TRUCS" / "vault" / "component.rvl"
+        if not named.exists():
+            pytest.skip("a case-sensitive filesystem: the alias names no file")
+    elif spelling == "link":
+        named = root / "linked.rvl"
+        named.symlink_to(component)
+    else:
+        named = component
+    before = component.read_bytes()
+    loaded = _call("revl_load", {"files": [str(root / "src" / "main.rvl"),
+                                           str(named)]})
+    assert loaded["ok"] is True, loaded
     found = _with_body(AUTHOR_TEXT)
     assert len(found) == 1, sorted(notes_mod.notes(server_mod.SESSION))
     assert found[0]["author"] == VENDOR
+    assert found[0]["vendored"] == "vault"
     riding = [n for n in _riding("Vault") if n["id"] == found[0]["id"]]
     assert len(riding) == 1, riding
     assert "body" not in riding[0] and "bodyWithheld" in riding[0]
+    exported = _call("revl_export", {"with_knowledge": True})
+    assert exported["ok"] is True, exported
+    assert component.read_bytes() == before
+    # no knowledge record for it anywhere: not the project's sidecar beside
+    # files[0], not one beside the vendored component
+    records = [p for p in root.rglob("*.json") if p.parent.name == "knowledge"
+               and AUTHOR_TEXT in p.read_text(encoding="utf-8")]
+    assert records == [], records
 
 
 # ------------------------------------------------ controls

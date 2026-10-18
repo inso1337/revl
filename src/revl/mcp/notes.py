@@ -38,7 +38,9 @@ import os
 import re
 
 from .. import knowledge as _k
+from ..export_area import fold as _fold
 from ..export_area import in_export_area
+from ..export_area import real as _real
 
 KINDS = ("rationale", "invariant", "trap", "alternative-rejected", "purpose", "doc")
 EVIDENCE_KINDS = ("diagnostic", "query", "audit", "test", "issue")
@@ -407,10 +409,22 @@ def sidecar_writes(session, vs: dict) -> list[tuple[str, str]]:
 
 def vendored_path(path: str) -> tuple[str, str, str] | None:
     """(truc name, path, project dir) when `path` is a vendored truc's
-    `trucs/<name>/component.rvl`, else `None` (issue #1769)."""
-    parts = os.path.normpath(os.path.abspath(path)).split(os.sep)
-    if len(parts) >= 3 and parts[-1] == "component.rvl" and parts[-3] == "trucs":
-        return (parts[-2], path, os.sep.join(parts[:-3]) or os.sep)
+    `trucs/<name>/component.rvl`, else `None` (issue #1769).
+
+    Decided the way `export_area.in_export_area` decides an export (issue
+    #2550): on the path as named (absolute, `..` folded away) and as it
+    resolves through symbolic links, its parts compared case-folded. On a
+    case-folding filesystem `TRUCS/<name>/Component.rvl` IS the vendored
+    file, and a link to one holds the publisher's bytes, so either spelling
+    makes it vendored. The name and project dir come from the spelling that
+    matched. Counting a file as vendored never raises a trust: a record it
+    brings earns `publisher` only by the lock's measured signature over those
+    exact records and the lock's pin of the exact bytes loaded."""
+    for spelling in (os.path.normpath(os.path.abspath(path)), _real(path)):
+        parts = spelling.split(os.sep)
+        if len(parts) >= 3 and _fold(parts[-1]) == "component.rvl" \
+                and _fold(parts[-3]) == "trucs":
+            return (parts[-2], path, os.sep.join(parts[:-3]) or os.sep)
     return None
 
 
@@ -577,6 +591,18 @@ def _import_author(path: str) -> dict:
     return {"kind": "human", "trust": "operator"}
 
 
+def _mark_vendored(session, record: dict, path: str) -> dict:
+    """`record`, marked `vendored` with the truc's name when `path` is a
+    vendored component, as `load_vendored` marks the publisher's own records:
+    a vendor's note never lands in the project's sidecar (`sidecar_writes`)."""
+    found = vendored_path(path)
+    if found is None:
+        return record
+    record = {**record, "vendored": found[0]}
+    _records(session)[record["id"]] = record
+    return record
+
+
 def import_marked(session, vs: dict) -> list[dict]:
     """Read the marked blocks of the loaded files back. A changed body
     supersedes its note and a block with no record becomes one, authored by
@@ -603,11 +629,12 @@ def import_marked(session, vs: dict) -> list[dict]:
                 continue
             kind = existing["kind"] if existing is not None else "doc"
             try:
-                created.append(add(session, vs, {"kind": kind, "body": body},
-                                   symbol, author=_import_author(name),
-                                   supersedes=note_id if existing else None))
+                record = add(session, vs, {"kind": kind, "body": body},
+                             symbol, author=_import_author(name),
+                             supersedes=note_id if existing else None)
             except NoteError:
                 continue
+            created.append(_mark_vendored(session, record, name))
     return created
 
 
