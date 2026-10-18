@@ -7,8 +7,9 @@ and declared `handoff` inherited a realm-scoped store. Both of the issue's
 reproductions ran as the untrusted author over the MCP session; the first
 now runs as the operator, since the untrusted author's rename that drops the
 clause is refused at admission (issue #2523). Both run on
-examples/tenants.rvl with `handoff kv: Map[Str, Str]` added to TenantAStore. A successor whose (key, realm) has no capture starts
-cold, and the swap result's `handoff` block says so by name.
+examples/tenants.rvl with `handoff kv: Map[Str, Str]` added to TenantAStore.
+A successor whose (key, realm) has no capture starts cold, and the swap
+result's `handoff` block says so by name.
 
 These drive a live composition, so they need the cordis-py runtime.
 """
