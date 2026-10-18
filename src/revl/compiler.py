@@ -594,10 +594,12 @@ class _ModuleLoader:
         itself, so the confinement lives here, keyed on the ONE fact every door
         already states: `profile.untrusted`.
 
-        Scope is the same premise the transport jail runs on. An in-memory
-        importer under an untrusted profile is agent-authored (the admitted
-        root, or a `modules=` entry supplied beside it); a `.rvl` read from
-        disk was put there by a human, and its own `../lib/x.rvl` is the
+        Scope follows who wrote the importer. An in-memory importer under an
+        untrusted profile is author-written: the admitted root, a `modules=`
+        entry beside it, or a file under a `.revl/export/` directory, which
+        the MCP door and the command line both load into memory and compile
+        under the authoring profile (issues #2524, #2547). Any other `.rvl`
+        read from disk is operator text, and its own `../lib/x.rvl` is the
         operator's composition layout, untouched. Two shapes escape and are
         refused: an absolute path, and a relative path that traverses upward
         out of the admitting directory. A relative path that stays inside

@@ -4,8 +4,10 @@
 `server.compile_under_authoring` rested on the premise that bytes at a jailed
 path were put there by a human, so a module the agent exported and then loaded
 back by `files` compiled without the authoring profile. The rule that makes
-the exemption sound again is one sentence: an export writes only under
-`<root>/.revl/export/`, and never over a file revl did not write.
+the exemption sound again is one sentence: an export writes source only
+under `<root>/.revl/export/`, and never over a file revl did not write. (The
+knowledge sidecars `with_knowledge` adds are new JSON files under
+`.revl/knowledge/`, created exclusively and never compiled; issue #2534.)
 
 The rule holds under every authoring trust. Trust decides only how a file
 under the export directory compiles, never where an export writes or what it
@@ -66,6 +68,35 @@ _LINE_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85  ﻿")
 
 class ExportRefused(Exception):
     """An export the jail refuses; nothing has been written."""
+
+
+class ExportIncomplete(OSError):
+    """An export that stopped part way (issue #2534): a write failed after
+    others had landed. The message names the path it stopped at and every
+    file written before it, saying which of them its root's manifest
+    records."""
+
+    def __init__(self, path: str, error: BaseException, written,
+                 recorded=()) -> None:
+        kept = set(recorded)
+        recorded = [p for p in written if p in kept]
+        unrecorded = [p for p in written if p not in kept]
+        parts = []
+        if recorded:
+            parts.append("written and recorded in the export manifest: "
+                         + ", ".join(recorded))
+        if unrecorded:
+            parts.append("written, not recorded: " + ", ".join(unrecorded))
+        landed = "; ".join(parts) or "nothing was written before it"
+        super().__init__(f"export stopped at {path}: {error}; {landed}")
+        self.path = path
+        self.written = list(written)
+        self.recorded = recorded
+
+
+def recorded_paths(paths, roots) -> list[str]:
+    """The `paths` a manifest records once written: those inside a root."""
+    return [p for p in paths if _root_of(p, roots) is not None]
 
 
 def _real(path: str) -> str:
