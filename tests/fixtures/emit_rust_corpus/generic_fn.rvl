@@ -75,3 +75,12 @@ pub fn q() -> Int {
 test "dead_let" {
   assert q() == 2
 }
+
+// A test body is a function body: a generic call binds its type parameters
+// there too, and a never-read `let` of a bare `None` is typed there too.
+test "generic_in_test" {
+  let s = id("s")
+  let t = id("t")
+  let x = None
+  assert s + t == "st"
+}

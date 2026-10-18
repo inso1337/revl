@@ -866,6 +866,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `xs[0] + id(-1)`) is written without the reference's
         # `"operands": "Int"` annotation.
         "generic_fn.rvl",
+        # The same generic `id` called from a provide method: its native IR
+        # differs from the reference's in the same way.
+        "comp_provide_generic.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),

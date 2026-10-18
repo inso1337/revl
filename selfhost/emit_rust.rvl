@@ -7074,6 +7074,10 @@ fn emit_v3_tests(tests: List[Any], functions: List[Any], externs: List[Any], fr:
   for (e of externs) { used = used.push(mangle(value_str(value_field(e, "name")))) }
   let borrow = compute_str_param_borrows(functions)
   let list_borrow = compute_list_param_borrows(functions)
+  // a generic call inside a test body binds its type parameters from the same
+  // parameter table a function body uses (issue #2495); the test's own type
+  // parameter list is empty, as the reference clears it per test
+  let fp = fn_params_map(functions)
   for (t of tests) {
     if (!value_bool(value_field(t, "lifecycle"))) {
       let name = unique_slug(test_slug(value_str(value_field(t, "name"))), used)
@@ -7085,9 +7089,10 @@ fn emit_v3_tests(tests: List[Any], functions: List[Any], externs: List[Any], fr:
         out = out.push("    // (empty test body)")
       } else {
         // a test body is a function body: the same per-body reuse analysis the
-        // reference runs over it (issue #1157), with its own bindings
+        // reference runs over it (issue #1157), with its own bindings, and the
+        // same never-read `let` scan (issue #2497)
         let mu = reused_names(body)
-        let ctx = { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: mu, mf: movable_for_iterables(body, mu), fo: 0, fp: Map.empty(), tp: [], dz: Map.empty() }
+        let ctx = { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: mu, mf: movable_for_iterables(body, mu), fo: 0, fp: fp, tp: [], dz: dead_lets(body) }
         out = out.concat(emit_stmts(body, ctx, 1).lines)
       }
       out = out.push("}")

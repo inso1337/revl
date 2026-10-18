@@ -1468,6 +1468,22 @@ fn declared_params(signatures: List[Any], name: Str) -> List[Str] {
   return fn_params.length() > 0 ? fn_params : ext_params
 }
 
+// The declared parameter types of the FUNCTION `name`, and nothing for an
+// extern of that name: the reference's `function_params`/`function_tparams`
+// tables are built from functions only, so an extern never reads as a
+// generic callee (issue #2495).
+fn function_params(signatures: List[Any], name: Str) -> List[Str] {
+  var fn_params = []
+  for (sig of signatures) {
+    if (value_str(value_field(sig, "name")) == name && value_is_null(value_field(sig, "bodies"))) {
+      var ps = []
+      for (p of value_list(value_field(sig, "params"))) { ps = ps.push(value_str(value_field(p, "type"))) }
+      fn_params = ps
+    }
+  }
+  return fn_params
+}
+
 // `_v3_split_generic`: `A, B` at top-level commas (depth-aware).
 fn split_generic_args(inner: Str) -> List[Str] {
   var out: List[Str] = []
@@ -1536,7 +1552,7 @@ fn v3_unify(pattern: Str, actual: Str, params: List[Str], bound: Map[Str, Str]) 
 // applies to a definition (the reference's `function_tparams` table).
 fn callee_tparams(name: Str, ctx: Ctx) -> List[Str] {
   var found: List[Str] = []
-  var surfaces = declared_params(ctx.signatures, name)
+  var surfaces = function_params(ctx.signatures, name)
   surfaces = surfaces.push(map_get(ctx.fr, name))
   for (surface of surfaces) {
     for (word of type_words(surface)) {
@@ -1558,7 +1574,7 @@ type GenericCall = { generic: Bool, params: List[Str], mapping: Map[Str, Str], t
 fn go_generic_call(name: Str, arg_nodes: List[Any], ctx: Ctx) -> GenericCall {
   let tparams = callee_tparams(name, ctx)
   if (tparams.length() == 0) { return { generic: false, params: [], mapping: Map.empty(), tparams: [] } }
-  let params = declared_params(ctx.signatures, name)
+  let params = function_params(ctx.signatures, name)
   var bound: Map[Str, Str] = Map.empty()
   var i = 0
   while (i < params.length() && i < arg_nodes.length()) {

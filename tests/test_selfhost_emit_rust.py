@@ -346,6 +346,7 @@ CORPUS = [
     # call result, field or index in a `+`; issue #2497: a never-read `let`
     # of a bare `None` typed `Option<Value>`
     "generic_fn.rvl",
+    "comp_provide_generic.rvl",  # issue #2495: a generic call in a provide method
 ]
 
 

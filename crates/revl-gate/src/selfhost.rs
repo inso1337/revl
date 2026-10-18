@@ -8624,6 +8624,7 @@ fn emit_v3_tests(tests: Vec<Value>, functions: Vec<Value>, externs: Vec<Value>, 
     }
     let borrow = compute_str_param_borrows(functions.clone());
     let list_borrow = compute_list_param_borrows(functions.clone());
+    let fp = fn_params_map(functions.clone());
     for t in tests {
         if (!value_bool(value_field(t.clone(), String::from("lifecycle")))) {
             let name = unique_slug(test_slug(value_str(value_field(t.clone(), String::from("name")))), used.clone());
@@ -8635,7 +8636,7 @@ fn emit_v3_tests(tests: Vec<Value>, functions: Vec<Value>, externs: Vec<Value>, 
                 out.push(String::from("    // (empty test body)"));
             } else {
                 let mu = reused_names(body.clone());
-                let ctx_ = Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: mu.clone(), mf: movable_for_iterables(body.clone(), mu.clone()), fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new() };
+                let ctx_ = Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: mu.clone(), mf: movable_for_iterables(body.clone(), mu.clone()), fo: 0i64, fp: fp.clone(), tp: vec![], dz: dead_lets(body.clone()) };
                 out.extend((emit_stmts(body.clone(), ctx_.clone(), 1i64).lines).iter().cloned());
             }
             out.push(String::from("}"));
