@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl.mcp import disclosure, repeat  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
+from revl.mcp.leases import LeaseBook  # noqa: E402
 from revl.mcp.persist import ORIGIN_FILES_CONTENT  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
 
@@ -66,6 +67,22 @@ def _hatch(verb: str, args: dict | None = None) -> dict:
     return _call(disclosure.DISCOVERY,
                  {disclosure.HATCH_NAME: verb,
                   disclosure.HATCH_ARGS: {} if args is None else args})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_lease_book():
+    """An empty lease book for each test, the previous one restored after.
+
+    `SESSION` is process-wide, so a lease another test file claimed through
+    `revl_lease` is still in its book. Its document carries `expiresInSeconds`,
+    read from the clock at each call, so a direct call and a hatched call would
+    differ by milliseconds and the parity test below would fail on residue it
+    did not make. Same swap `test_mcp_leases.py` makes in `_fresh_session`.
+    """
+    prior = server_mod.SESSION.leases
+    server_mod.SESSION.leases = LeaseBook()
+    yield
+    server_mod.SESSION.leases = prior
 
 
 @pytest.fixture(autouse=True)
