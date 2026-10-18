@@ -788,7 +788,17 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # documents below left this list — `in_file_tests.rvl`, the item 280
         # Opt-gap document, the issue #1631 erased-Result document, and the
         # combined path's `comp_provide_pure.rvl`.)
-        # no residual: the fully-native chain reproduces the whole go corpus.
+        # no other residual: the fully-native chain reproduces the rest of the
+        # go corpus.
+        # issue #2495: the generic-function document. Emitter-exact from the
+        # reference IR (selfhost/emit_go.rvl mirrors the type-parameter list
+        # and the call binding); the native IR producer reads a call to a
+        # generic function back as its declared `T` because selfhost/lower.rvl
+        # does not bind the callee's type parameters from the arguments, so a
+        # `+` over such a call (`wrap(3).length() + or_else(some_of(9), 0)`,
+        # `xs[0] + id(-1)`) is written without the reference's
+        # `"operands": "Int"` annotation.
+        "generic_fn.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -847,6 +857,22 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # because `cir_method_stmts` in selfhost/lower.rvl has no
         # `if`/`while`/`for` arm.
         "method_control_flow.rvl",
+        # issue #2495: the generic-function document. Emitter-exact from the
+        # reference IR (selfhost/emit_rust.rvl mirrors the type-parameter list
+        # and the call binding); the native IR producer reads a call to a
+        # generic function back as its declared `T` because selfhost/lower.rvl
+        # does not bind the callee's type parameters from the arguments, so a
+        # `+` over such a call (`wrap(3).length() + or_else(some_of(9), 0)`,
+        # `xs[0] + id(-1)`) is written without the reference's
+        # `"operands": "Int"` annotation.
+        "generic_fn.rvl",
+        # The same generic `id` called from a provide method, where the
+        # divergence is a different one (issue #2559): the reference IR's `+`
+        # there carries no `operands` key at all, and the native chain drops
+        # the whole provide method (`fn greet(&self, ..)`) together with its
+        # `ctx.provide("greeting", ..)` wiring. A non-generic control of the
+        # same shape is byte-exact.
+        "comp_provide_generic.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),

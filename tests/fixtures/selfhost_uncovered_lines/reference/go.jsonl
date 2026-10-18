@@ -166,7 +166,7 @@
 
 ["function", "issue-2464-issue-2457-go-activation-recover-and-extern-imports", "_emit_apply_header", 6, 6]
 
-["reason", "issue-2471-generic-variants-wait-on-the-port", "issue #2471: the reference lowers a user generic variant (Go generics, a rust enum with type parameters) and the self-host port does not yet, so no CORPUS document can hold these bytes; the divergence is pinned in GENERIC_VARIANT_PORT_GAPS (tests/test_selfhost_emit_<tier>.py, issue #2494). Retire by porting and adding a corpus document."]
+["reason", "issue-2471-generic-variants-wait-on-the-port", "issue #2471: the reference lowers a user generic variant (Go generics, a rust enum with type parameters) and the self-host port does not yet, so no CORPUS document can hold these bytes; the divergence is pinned in GENERIC_VARIANT_PORT_GAPS (tests/test_selfhost_emit_<tier>.py, issue #2494). Retire by porting and adding a corpus document. Issue #2497 adds `_v3_has_unbound_arg`, the deep check behind `_v3_list_elem` (`[Jj(Nn), Jj(Jj(1)), Nn]` is a `List[Mb[Mb[Int]]]`)."]
 
 ["function", "issue-2471-generic-variants-wait-on-the-port", "_emit_v3_go_generic_variant", 14, 14]
 
@@ -182,13 +182,15 @@
 
 ["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_generic_variant", 4, 4]
 
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_has_unbound_arg", 2, 2]
+
 ["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_list_elem", 1, 1]
 
 ["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_refuse_unbound", 3, 3]
 
-["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_subst", 3, 3]
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_subst", 1, 1]
 
-["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_unify", 13, 13]
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_unify", 1, 1]
 
 ["reason", "issue-721-issue-1321-component-is-observable-decides", "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them."]
 
@@ -308,7 +310,7 @@
 
 ["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_stmt", 1, 1]
 
-["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_type", 4, 4]
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_type", 3, 3]
 
 ["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_v3_builtin_ret_type", 2, 2]
 

@@ -1,0 +1,86 @@
+// issue #2495: a generic function (`fn id[T](x: T) -> T`) lowers to a Go
+// type-parameter list / a Rust generic with the bounds its body needs, and a
+// call binds each type parameter from its arguments (an `Int` literal in a
+// bare `T` slot, a record, a `List[T]`, an `Opt[T]`, a bare `None`).
+// issue #2496: a `Str` call result, record field or list index concatenates
+// like a `Str` local does.
+type Pt = { x: Int, y: Int }
+type Rec = { tag: Str }
+
+fn id[T](x: T) -> T { return x }
+fn pick[T](c: Bool, a: T, b: T) -> T {
+  if (c) { return a }
+  return b
+}
+fn same[T](a: T, b: T) -> Bool { return a == b }
+fn wrap[T](x: T) -> List[T] { return [x] }
+fn twice[T](x: T) -> List[T] { return [x, x] }
+fn some_of[T](x: T) -> Opt[T] { return Some(x) }
+fn or_else[T](o: Opt[T], d: T) -> T {
+  return match o {
+    Some(v) => v,
+    None => d,
+  }
+}
+fn pair[A, B](a: A, b: B) -> List[B] { return [b] }
+pub fn f(s: Str) -> Str { return s }
+fn tag(n: Int) -> Str { return n.to_str() }
+
+pub fn a() -> Int { return id(1) }
+pub fn b() -> Str { return id("a") }
+pub fn c() -> Int { let p0: Pt = { x: 1, y: 2 }; let p = id(p0); return p.x }
+pub fn d() -> Str { return pick(false, "x", "y") }
+pub fn e() -> Bool {
+  let p1: Pt = { x: 1, y: 2 }
+  let p2: Pt = { x: 1, y: 2 }
+  return same(2, 2) && !same("p", "q") && same(p1, p2)
+}
+pub fn g() -> Int { return wrap(3).length() + twice("z").length() + or_else(some_of(9), 0) + or_else(None, 4) }
+pub fn h() -> Int { return pair("s", 5)[0] }
+pub fn i() -> Int { let xs: List[Int] = wrap(7); return xs[0] + id(-1) }
+pub fn j() -> Str { return f("a") + f("b") }
+pub fn k() -> Str { return tag(1) + f("x") + tag(2) }
+pub fn m() -> Str { let rec: Rec = { tag: "t" }; let xs: List[Str] = ["u"]; return rec.tag + f("v") + xs[0] }
+pub fn n() -> Int {
+  let y = None
+  return or_else(y, 7)
+}
+pub fn p() -> Str { let s = id("s"); let t = id("t"); return s + t }
+
+test "generic" {
+  assert a() == 1
+  assert b() == "a"
+  assert c() == 1
+  assert d() == "y"
+  assert e()
+  assert g() == 16
+  assert h() == 5
+  assert i() == 6
+}
+test "concat" {
+  assert j() == "ab"
+  assert k() == "1x2"
+  assert m() == "tvu"
+  assert n() == 7
+  assert p() == "st"
+}
+
+// issue #2497: a `let` of a bare `None` the body never reads is typed
+// `Option<Value>` (rustc has no later use to infer it from).
+pub fn q() -> Int {
+  let x = None
+  return 2
+}
+
+test "dead_let" {
+  assert q() == 2
+}
+
+// A test body is a function body: a generic call binds its type parameters
+// there too, and a never-read `let` of a bare `None` is typed there too.
+test "generic_in_test" {
+  let s = id("s")
+  let t = id("t")
+  let x = None
+  assert s + t == "st"
+}

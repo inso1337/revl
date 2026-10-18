@@ -1,0 +1,21 @@
+// issue #2495: a generic call inside a provide method. The component dialect
+// spells a call as a `fn` node, which the reference types by the callee's
+// declared return alone (`T` here, no binding from the arguments), so the
+// `+` over two of them renders as the arithmetic `(a + b)`, not `format!`:
+// the reference does not build this method yet (issue #2558: the `fn` node's
+// `T` is never bound and `_v3_is_str` has no `fn` arm), and the port must say
+// the same bytes. The smallest component that reaches it: one function, one
+// service, one pure provider with a block body.
+fn id[T](x: T) -> T { return x }
+
+service Greeter {
+  fn greet(who: Str) -> Str
+}
+
+component Hello provides greeting: Greeter {
+  provide greeting {
+    fn greet(who) {
+      return id("s") + id(who)
+    }
+  }
+}

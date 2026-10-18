@@ -6357,14 +6357,50 @@ def _v3_unify(pattern, actual, params, bound: dict) -> None:
 
 
 
+def _v3_fn_type_params(fn: dict, types: dict) -> list[str]:
+    """The type parameters of a function signature, in first-use order.
+
+    The IR carries the author's spelling (`fn id[T](x: T) -> T` arrives as
+    params typed `T`, with no parameter list), so the emitter applies the
+    checker's implicit rule (`is_tparam_name`): a single-uppercase name that
+    no `type` declares is a type parameter. issue #2495"""
+    found: list[str] = []
+    declared = types if isinstance(types, dict) else {}
+    surfaces = [p.get("type") for p in fn.get("params") or []] + [fn.get("returns")]
+    for surface in surfaces:
+        if not isinstance(surface, str):
+            continue
+        for word in _V3_TYPE_WORD.findall(surface):
+            if (len(word) == 1 and word.isupper() and word not in declared
+                    and word not in found):
+                found.append(word)
+    return found
+
+
+def _v3_has_unbound_arg(surface, types: dict) -> bool:
+    """Does the surface type carry an unbound (`any`) type argument of a
+    generic variant at any depth? `Mb[Mb[any]]` does (issue #2497), `Mb[any]`
+    does, `List[Mb[Int]]` does not."""
+    if not isinstance(surface, str):
+        return False
+    s = surface.strip()
+    generic = _v3_generic_variant(s, types)
+    if generic is not None and "any" in generic[2]:
+        return True
+    if "[" in s and s.endswith("]"):
+        return any(_v3_has_unbound_arg(a, types)
+                   for a in _v3_split_generic(s[s.index("[") + 1: -1]))
+    return False
+
+
 def _v3_list_elem(item_types: list, types: dict):
-    """The element type of an unpinned list literal: the first item type whose
-    generic variant arguments are all bound (`[Nn, Jj(4)]` is a `List[Mb[Int]]`,
-    issue #2471), else the first item type known at all."""
+    """The element type of an unpinned list literal: the first item type with
+    no unbound generic variant argument at any depth (`[Nn, Jj(4)]` is a
+    `List[Mb[Int]]`, issue #2471; `[Jj(Nn), Jj(Jj(1)), Nn]` is a
+    `List[Mb[Mb[Int]]]`, issue #2497), else the first item type known at all."""
     known = [t for t in item_types if t]
     for t in known:
-        generic = _v3_generic_variant(t, types)
-        if generic is None or "any" not in generic[2]:
+        if not _v3_has_unbound_arg(t, types):
             return t
     return known[0] if known else None
 
@@ -6564,6 +6600,12 @@ class _V3GoCtx:
         self.extern_params: dict[str, list] = {
             ex.get("name"): [p.get("type") for p in ex.get("params") or []]
             for ex in externs or []
+        }
+        # issue #2495: the type parameters of each generic function, so a call
+        # can bind them from its arguments (`_go_v3_generic_call`).
+        self.function_tparams: dict[str, list] = {
+            fn.get("name"): _v3_fn_type_params(fn, types or {})
+            for fn in functions or []
         }
         # `{name: builder}` for the Str accumulators of the loops currently
         # being rendered, and a per-function counter that keeps two sequential
@@ -6779,6 +6821,10 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             nm = callee.get("name")
             if nm in ("Some", "None", "Ok", "Err"):
                 return _go_v3_infer_ctor(nm, node.get("args") or [], ctx)
+            generic = _go_v3_generic_call(nm, node.get("args") or [], ctx)
+            if generic is not None:
+                # issue #2495: `id(p)` answers the instantiation, not `T`
+                return _v3_subst(ctx.function_ret.get(nm), generic[1])
             return (ctx.function_ret.get(nm) or ctx.extern_ret.get(nm)
                     or _v3_fn_value_ret(ctx.var_types.get(nm)))
         return None
@@ -6890,11 +6936,60 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
             name = callee.get("name") if callee.get("kind") == "var" else None
             params = (ctx.function_params.get(name)
                       or ctx.extern_params.get(name) or [])
+            generic = _go_v3_generic_call(name, node.get("args") or [], ctx)
+            if generic is not None:
+                # issue #2495: a generic callee's `T` is no flow target; the
+                # instantiation the other arguments bind is
+                params = generic[0]
             for arg, declared in zip(node.get("args") or [], params):
                 if (isinstance(arg, dict) and arg.get("kind") == "var"
                         and isinstance(declared, str)):
                     hints.setdefault(arg.get("name"), declared)
     return hints
+
+
+def _go_v3_generic_call(name, arg_nodes, ctx: _V3GoCtx):
+    """For a call to a generic function (issue #2495): the parameter types
+    with each type parameter replaced by what the arguments bind it to, the
+    binding itself, and the callee's type parameters; else None.
+
+    A parameter nothing binds becomes `any`, as an unpinned Opt/Result
+    parameter does: Go infers a type argument from a typed argument, never
+    from where the result flows."""
+    tparams = ctx.function_tparams.get(name) if name else None
+    if not tparams:
+        return None
+    params = ctx.function_params.get(name) or []
+    bound: dict = {}
+    for pattern, arg in zip(params, arg_nodes):
+        actual = _go_v3_infer_type(arg, ctx)
+        if isinstance(actual, str) and not _v3_mentions_any(actual, tparams):
+            _v3_unify(pattern, actual, tparams, bound)
+    mapping = {t: bound.get(t, "any") for t in tparams}
+    return [_v3_subst(p, mapping) for p in params], mapping, tparams
+
+
+def _v3_mentions_any(surface, names) -> bool:
+    """Does the surface type name one of `names` as a whole word?"""
+    return isinstance(surface, str) and any(
+        w in names for w in _V3_TYPE_WORD.findall(surface))
+
+
+def _go_v3_typed_generic_arg(arg_node, rendered: str, declared, tparams) -> str:
+    """An `Int` literal passed where a generic callee's parameter is a bare
+    type parameter is spelled `int64(1)`: Go infers a type argument from an
+    untyped constant as `int`, which is not the `int64` a revl `Int` is, and
+    `id(1)` would not return an `int64` (issue #2495). Every other literal
+    already defaults to the type revl lowers it to."""
+    if not (isinstance(declared, str) and declared.strip() in tparams):
+        return rendered
+    node = arg_node
+    if (isinstance(node, dict) and node.get("kind") == "lit"
+            and isinstance(node.get("value"), int)
+            and not isinstance(node.get("value"), bool)
+            and not node.get("widen")):
+        return f"int64({rendered})"
+    return rendered
 
 
 def _go_v3_infer_ctor(case, arg_nodes, ctx):
@@ -7275,15 +7370,24 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         # erased default (item 280). Constructor args take their type from the
         # construction's own expected instead.
         param_types = None
+        generic = None
         if cname in ctx.case_adt:
             param_types = [_go_v3_variant_payload(ctx, cname, expected, arg_nodes)]
         elif cname and not is_ctor:
             param_types = (ctx.function_params.get(cname)
                            or ctx.extern_params.get(cname))
+            generic = _go_v3_generic_call(cname, arg_nodes, ctx)
+            if generic is not None:
+                param_types = generic[0]
         arg_renders = []
         for i, a in enumerate(arg_nodes):
             exp = param_types[i] if param_types and i < len(param_types) else None
-            arg_renders.append(_go_v3_expr(a, ctx, exp))
+            rendered = _go_v3_expr(a, ctx, exp)
+            if generic is not None:
+                rendered = _go_v3_typed_generic_arg(
+                    a, rendered, (ctx.function_params.get(cname) or [None] * (i + 1))[i],
+                    generic[2])
+            arg_renders.append(rendered)
         if is_ctor:
             return _go_v3_construct(ctx, cname, arg_renders, expected,
                                     arg_nodes=arg_nodes)
@@ -8996,7 +9100,13 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         )
         ret = _go_v3_type(fn.get("returns"), ctx.types)
         sig_ret = f" {ret}" if ret else ""
-        out.append(f"func {name}({params}){sig_ret} {{")
+        # issue #2495: a generic function declares its type parameters, each
+        # constrained `any`. The body needs no tighter constraint: `==` on a
+        # non-primitive operand already goes through `revlEq`.
+        tparams = _v3_fn_type_params(fn, ctx.types)
+        type_params = (
+            "[" + ", ".join(f"{t} any" for t in tparams) + "]" if tparams else "")
+        out.append(f"func {name}{type_params}({params}){sig_ret} {{")
         for stmt in fn.get("body") or []:
             _go_v3_stmt(stmt, ctx, out, 1)
         out.append("}")
