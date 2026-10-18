@@ -33,6 +33,12 @@ through a dangling one they do not even fail, they create the target, outside
 the project, under a success message. `_write_no_follow` is that half: the
 bytes truc owns are the bytes under `trucs/`, and an entry that is a link is
 bytes it does not own.
+
+The third exception is the pin on those bytes (issue #2555). The plan names a
+truc, not its text, and the registry is read again when the plan is carried
+out, so `commit_add` hashes the text it writes, records that, and refuses when
+it disagrees with the index row the planner checked. `write_assembly` refuses
+a vendored `manifest.json` or `dossier.json` that no longer matches its pin.
 """
 
 from __future__ import annotations
@@ -561,9 +567,14 @@ def write_assembly(project_dir: str, manifest_json: str) -> str:
     """Write the admitted composition manifest to `build/assembly.json` — what
     a reviewer reads to see the wiring the gate accepted. An empty
     `manifest_json` is a no-op: on a refusal the planner passes "", so `build/`
-    is untouched (all-or-nothing)."""
+    is untouched (all-or-nothing). A vendored file that no longer matches its
+    lock pin is refused here too, before `build/` is touched
+    (`_vendored_drift`)."""
     if not manifest_json:
         return "skipped"
+    drift = _vendored_drift(project_dir)
+    if drift:
+        raise TrucNameRefusal("\n".join(drift))
     out = pathlib.Path(project_dir, "build")
     if out.is_symlink():
         raise _symlink_refusal(out, "build")
@@ -696,6 +707,74 @@ def apply(project_dir: str, trust_host_code: bool) -> str:
 #: globbing the registry entry, so "which files make a truc" stays a decision
 #: (`entry_read` bundles exactly this triple).
 _VENDORED_FILES = ("component.rvl", "manifest.json", "dossier.json")
+
+#: The lock field that pins each vendored file. The index row carries the
+#: first two; a dossier is pinned by the lock alone.
+_PIN_FIELDS = (("component.rvl", "sourceHash"),
+               ("manifest.json", "manifestHash"),
+               ("dossier.json", "dossierHash"))
+
+
+def _vendored_pins(name: str, texts: dict[str, str], row: dict) -> dict[str, str]:
+    """The lock row's hash fields: each the sha256 of the text `commit_add` is
+    about to write under `trucs/<name>/`, never a value copied from the index.
+
+    Each must equal the index row's value for the same file when the row
+    carries one, and `sourceHash` must always be present and agree: that is
+    the value the planner checked its own read of the entry against. A
+    disagreement means the registry changed between plan and commit, so the
+    add is refused here, before the first write. A file the entry does not
+    ship records no field."""
+    pins: dict[str, str] = {}
+    for fname, field in _PIN_FIELDS:
+        text = texts.get(fname)
+        actual = sha256_hex(text) if text is not None else ""
+        expected = row.get(field) or ""
+        required = field == "sourceHash"
+        if (required and not actual) or ((required or expected)
+                                         and actual != expected):
+            raise TrucNameRefusal(
+                f"refusing to vendor `{name}`: `components/{name}/{fname}` "
+                f"hashes to {actual or 'nothing (it is missing)'}, but the "
+                f"registry index pins {expected or 'nothing'}. The registry "
+                f"changed between plan and commit, so these are not the bytes "
+                f"`truc add` checked and admitted. Nothing was written; re-run "
+                f"`truc add {name}`.")
+        if actual:
+            pins[field] = actual
+    return pins
+
+
+def _vendored_drift(project_dir: str) -> list[str]:
+    """One line per vendored file that no longer matches its truc.lock pin,
+    for each truc `truc.toml` names. `component.rvl` is left to the planner's
+    drift check (`plan_drift`), which runs first; this covers the other files
+    `commit_add` vendors and pins. A row that records no hash for a file (a
+    lock written before that file was pinned) does not pin it."""
+    lock_text = read_file(os.path.join(project_dir, "truc.lock"))
+    if not lock_text.strip() or not exists(os.path.join(project_dir, "truc.toml")):
+        return []
+    lock = json.loads(lock_text)
+    rows = lock.get("trucs") if isinstance(lock, dict) else None
+    pinned = {row.get("name"): row
+              for row in (rows if isinstance(rows, list) else [])
+              if isinstance(row, dict)}
+    lines: list[str] = []
+    for truc in json.loads(toml_manifest(project_dir)).get("trucs") or []:
+        name = _check_name(truc.get("name"))
+        row = pinned.get(name) or {}
+        for fname, field in _PIN_FIELDS:
+            expected = row.get(field) or ""
+            if fname == "component.rvl" or not expected:
+                continue
+            path = pathlib.Path(project_dir, "trucs", name, fname)
+            actual = (sha256_hex(path.read_text(encoding="utf-8"))
+                      if path.exists() else "missing")
+            if actual != expected:
+                lines.append(f"hash drift: vendored trucs/{name}/{fname} "
+                             f"({actual}) does not match its truc.lock pin "
+                             f"({expected})")
+    return lines
 
 
 def _source_refusal(path: pathlib.Path, rel: str, what: str) -> TrucNameRefusal:
@@ -833,10 +912,14 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     file I/O here is mechanical; the *decision* to add arrived as the plan.
 
     The vendor copy is byte-for-byte from `registry/components/<name>/` (a
-    truc *is* a vendored registry entry, §1.1) and the lock row is a verbatim
-    projection of the index row (§4.2: copied, never recomputed by truc),
-    with the sha256 already re-verified against the fetched bytes by the
-    planner before this runs, plus an `admitted` provenance stamp."""
+    truc *is* a vendored registry entry, §1.1). The lock row's metadata is a
+    verbatim projection of the index row (§4.2), plus an `admitted`
+    provenance stamp. Its hashes are not copied: they are computed from the
+    text this call writes (`_vendored_pins`), and each must agree with the
+    index row before the first write, or the add is refused with nothing
+    written. The planner checked an earlier read of the same entry against
+    the same row, so a disagreement here means the registry changed between
+    plan and commit."""
     if not plan_json:
         return "skipped"
     plan = json.loads(plan_json)
@@ -857,6 +940,10 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     src_dir = pathlib.Path(reg_abs, "components", name)
     dst_dir = _vendor_dir(project_dir, name)
     sources = _registry_sources(src_dir, name)
+    # the metadata is projected from the index row (§4.2); the hashes are the
+    # text about to be written, and must agree with the row before any write
+    row = json.loads(index_row(reg_abs, name) or "{}")
+    pins = _vendored_pins(name, dict(sources), row)
     copies: list[tuple[str, pathlib.Path]] = []
     # the entry's knowledge records travel with it (issue #1769), one file per
     # record under `trucs/<name>/knowledge/`, as they sit in the registry
@@ -879,8 +966,6 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         _write_no_follow(dst_dir / fname, sp.read_text(encoding="utf-8"),
                          f"trucs/{name}/{fname}")
 
-    # verbatim projection of the index row into the lock (§4.2).
-    row = json.loads(index_row(reg_abs, name))
     index_version = str(row.get("indexVersion", "0"))
     lock_row = {
         "name": name,
@@ -889,8 +974,7 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         # pins WHICH release it admitted, not just which bytes (428 F12). An
         # unversioned entry records "" and stays honestly unpinnable.
         "version": row.get("version", ""),
-        "sourceHash": row.get("sourceHash", ""),
-        "manifestHash": row.get("manifestHash", ""),
+        **pins,
         "provides": row.get("provides") or {},
         "requires": row.get("requires") or {},
         "capabilities": row.get("capabilities") or [],

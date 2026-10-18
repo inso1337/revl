@@ -284,13 +284,17 @@ extends the table without breaking existing files.
 
 ### 4.2 Mapping to `registry/index.json`
 
-The lock row is a verbatim projection of the index row
-(`src/revl/registry.py::_entry_index_row`): `sourceHash`, `manifestHash`,
-`capabilities`, `emissions`, `provides`, `requires` are copied, never
-recomputed by truc (except `sourceHash`, which truc *re-verifies* against
-the vendored bytes — that is the tamper check). `registry/index.json`
-already carries every field the lock needs; truc adds only *when* and
-*from-where*.
+The lock row's metadata is a verbatim projection of the index row
+(`src/revl/registry.py::_entry_index_row`): `version`, `capabilities`,
+`emissions`, `provides`, `requires` are copied, never recomputed by truc.
+The hash fields are not copied. `sourceHash` and `manifestHash` are the
+sha256 of the `component.rvl` and `manifest.json` text truc writes under
+`trucs/<name>/`, and each must agree with the index row's value, or the
+add is refused with nothing written: the registry is read again when the
+plan is carried out, so a disagreement means it changed between plan and
+commit. A vendored `dossier.json` is pinned the same way as `dossierHash`,
+which the index does not carry. `registry/index.json` already carries every
+other field the lock needs; truc adds only *when* and *from-where*.
 
 ### 4.3 `truc.lock` — the proof (generated, committed, JSON)
 
@@ -318,10 +322,12 @@ not exist and is not worth building for a machine-only file.
 }
 ```
 
-- `sourceHash`/`manifestHash` — from the index row; `assemble` recomputes
-  sha256 of `trucs/<name>/component.rvl` and refuses on mismatch (drift is
-  a refusal, not a warning — the `registry.verify` regenerate-or-red
-  discipline, `src/revl/registry.py:194`, applied to the vendor dir).
+- `sourceHash`/`manifestHash`/`dossierHash`: computed from the vendored
+  text at `add` and required to agree with the index row (section 4.2);
+  `assemble` recomputes sha256 of each pinned file under `trucs/<name>/`
+  and refuses on mismatch, naming the file (drift is a refusal, not a
+  warning: the `registry.verify` regenerate-or-red discipline,
+  `src/revl/registry.py:194`, applied to the vendor dir).
 - `capabilities`/`emissions` — the authority the assembly accepted when it
   admitted this truc. `assemble` re-reports the totals so a lockfile diff
   in review *shows authority growth* — the least-authority ranking of
