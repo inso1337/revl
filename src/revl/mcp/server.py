@@ -1511,7 +1511,7 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     authored = _authored_host_bodies(full, source, modules)
     running = SESSION.ir
     # issue #2487: carried text may not move a surviving provider out of its
-    # realm by leaving its clause out; jailed `files` alone are the operator's
+    # realm by leaving its clause out; jailed `files` alone are the operator's.
     # issue #2587: compared are the running generation and `full`, the
     # candidate compiled as a complete composition. `full` is the whole
     # program `SESSION.swap` installs below, with nothing of the running one
