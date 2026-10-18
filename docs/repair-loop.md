@@ -131,7 +131,12 @@ pass is refused before the swap
 ([the quarantine tier](quarantine-tier.md)). The candidate is agent-supplied
 source and compiles under the session's authoring trust like any other, so a
 candidate `revl_check` would refuse is graded `rejected` rather than gauntleted
-and swapped.
+and swapped. For the same reason an untrusted candidate may not remove the realm
+placement of a provider that stays admitted: one that leaves out its
+`isolate <key> in realm("...")` clause is `rejected` with `blockedBy: realm`
+and the G9 diagnostic `revl_change` gives (issue #2520), and `apply: false`
+reports the same refusal rather than `planned`. Jailed `files` alone and a
+trusted operator's candidate are the operator's own and are not checked.
 
 ## Remediation is pluggable — the canary follow-on hook
 

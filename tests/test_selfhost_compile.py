@@ -3444,3 +3444,73 @@ def test_case_arity_refusal_is_a_recorded_native_difference(compile_to, name):
         f"{name}: recorded as {CASE_ARITY_NATIVE_VERDICTS[name]!r}, now "
         f"{verdict[:160]!r}. If the self-host now gives the reference's "
         f"refusal, DELETE the entry.")
+
+
+# Issue #2483: the reference checks an effect call's arguments against the
+# effect's declared parameter types, a case payload nested in them included.
+# The documents are tests/test_423_component_body_call_checking.py's
+# `EFFECT_ARG_REFUSED`. The self-host already gives the reference's refusal for
+# a wrong-typed service argument; the rest it admits, so each is recorded as
+# the native verdict on py ("EMITS" is a silent admit). The day the self-host
+# gives the reference's refusal, the entry fails and is DELETED. A wrong
+# payload type is issue #2448; a wrong payload count and a wrong-typed built-in
+# case in an effect argument are issue #2489.
+EFFECT_ARG_NATIVE_AGREES = ("service_argument_type",)
+EFFECT_ARG_NATIVE_VERDICTS: dict[str, str] = {
+    # issue #2489
+    "acquire_err_payload_type": "EMITS",
+    "acquire_ok_payload_type": "EMITS",
+    "acquire_some_payload_type": "EMITS",
+    "service_argument_to_nullary": "EMITS",
+    "service_payload_extra": "EMITS",
+    "service_payload_missing": "EMITS",
+    # issue #2448
+    "service_payload_in_provide_method": "EMITS",
+    "service_payload_type": "EMITS",
+    "service_some_payload_type": "EMITS",
+}
+
+
+def _effect_arg_docs():
+    from _load_by_path import load_by_path
+    return load_by_path(
+        "test_423_component_body_call_checking",
+        ROOT / "tests" / "test_423_component_body_call_checking.py")
+
+
+def test_every_effect_arg_refusal_has_a_native_verdict():
+    recorded = [*EFFECT_ARG_NATIVE_VERDICTS, *EFFECT_ARG_NATIVE_AGREES]
+    assert sorted(recorded) == sorted(_effect_arg_docs().EFFECT_ARG_REFUSED)
+
+
+@pytest.mark.parametrize("name", sorted(EFFECT_ARG_NATIVE_VERDICTS))
+def test_effect_arg_refusal_is_a_recorded_native_difference(compile_to, name):
+    source, message = _effect_arg_docs().EFFECT_ARG_REFUSED[name]
+    with pytest.raises(RevlError) as refused:
+        compile_source(source)
+    assert message in str(refused.value)
+    got = compile_to(source, "py")
+    verdict = ("EMITS" if not got.startswith(("REFUSED|", "UNKNOWN_TIER|"))
+               else got)
+    assert verdict == EFFECT_ARG_NATIVE_VERDICTS[name], (
+        f"{name}: recorded as {EFFECT_ARG_NATIVE_VERDICTS[name]!r}, now "
+        f"{verdict[:160]!r}. If the self-host now gives the reference's "
+        f"refusal, DELETE the entry.")
+
+
+@pytest.mark.parametrize("name", EFFECT_ARG_NATIVE_AGREES)
+def test_effect_arg_refusal_native_agrees(compile_to, name):
+    source, message = _effect_arg_docs().EFFECT_ARG_REFUSED[name]
+    assert compile_to(source, "py") == f"REFUSED|T1|{message}"
+
+
+# Issue #2483 also moved the reference's provide-method verdict on a
+# wrong-typed `Some`/`Ok` return to the `fn` body's. The self-host already gave
+# that refusal, so the two now agree; a change on either side goes red here.
+@pytest.mark.parametrize(
+    "name", sorted(_effect_arg_docs().PROVIDE_RETURN_REFUSED))
+def test_provide_return_refusal_native_agrees(compile_to, name):
+    source, _twin, message = _effect_arg_docs().PROVIDE_RETURN_REFUSED[name]
+    reference = _reference_refusal(source)
+    assert message in reference
+    assert compile_to(source, "py") == f"REFUSED|T1|{reference}"

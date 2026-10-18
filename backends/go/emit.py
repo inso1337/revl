@@ -351,6 +351,12 @@ def _go_type(t) -> str:
     # v3 typed-core: a declared user type (record/variant) renders with the
     # name `_emit_v3_go_types` gave it (_v3_ident, not _camel — snake_case
     # type names must agree between the declaration and every use site).
+    generic = _v3_generic_variant(t, _V3_TYPES) if _V3_MODE else None
+    if generic is not None:
+        # issue #2471: an applied generic variant is its Go instantiation
+        head, _params, args = generic
+        rendered = ", ".join(_go_type(a) or "struct{}" for a in args)
+        return "%s[%s]" % (_v3_ident(head, "type name"), rendered)
     if _V3_MODE and t in _V3_TYPES:
         return _v3_ident(t, "type name")
     # Unknown / user type: pass through as an exported identifier.
@@ -805,9 +811,12 @@ def _expr(node, env: _Env, expected=None) -> str:
             elem = expected[5:-1]
         items = node.get("items") or []
         if elem is None and items:
-            elem = _comp_infer(items[0], env)
+            elem = _v3_list_elem([_comp_infer(it, env) for it in items],
+                                 _V3_TYPES)
         go_elem = _go_type(elem) if elem else "any"
-        rendered = ", ".join(_expr(it, env) for it in items)
+        # issue #2471: the element type is each item's flow target, so a
+        # nullary `Nn` in `[Jj(n), Nn]` builds an `MbNn[int64]`
+        rendered = ", ".join(_expr(it, env, elem) for it in items)
         return "[]%s{%s}" % (go_elem, rendered)
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map): same positional-inference
@@ -900,7 +909,7 @@ def _expr(node, env: _Env, expected=None) -> str:
     if kind == "adt":
         case = node.get("case")
         if _V3_MODE and _V3_TYPED_COMPONENTS and case in _v3_case_layout():
-            return _v3_comp_construct(node, env)
+            return _v3_comp_construct(node, env, expected)
         raise EmitError(_OPT_VALUE_REFUSAL)
     if kind == "match":
         if _V3_MODE:
@@ -990,7 +999,39 @@ def _v3_case_payload(adt: str, case: str) -> str | None:
     return None
 
 
-def _v3_comp_construct(node, env: _Env) -> str:
+def _v3_comp_applied(adt: str, case: str, expected, arg_nodes, env: _Env):
+    """`(instantiation, payload)` of a component-body construction of `case`:
+    for a generic variant the type arguments come from `expected` when it is
+    the same variant, else from the payload argument (issue #2471); for any
+    other variant `(adt, declared payload)`."""
+    payload = _v3_case_payload(adt, case)
+    generic = _v3_generic_variant(adt, _V3_TYPES)
+    if generic is None:
+        return adt, payload
+    head, params, _args = generic
+    bound: dict = {}
+    want = _v3_generic_variant(expected, _V3_TYPES)
+    if want is not None and want[0] == head:
+        bound.update({p: a for p, a in zip(params, want[2]) if a != "any"})
+    if arg_nodes and payload is not None:
+        _v3_unify(payload, _comp_infer(arg_nodes[0], env), params, bound)
+    args = [bound.get(p) or "any" for p in params]
+    return (f"{head}[{', '.join(args)}]",
+            _v3_subst(payload, dict(zip(params, args))))
+
+
+def _v3_comp_case_type(instance: str, case: str) -> str:
+    """The Go case struct of `case` under `instance`: `MbJj[int64]` for
+    `Mb[Int]`, `StepFinal` for a monomorphic `Step`."""
+    generic = _v3_generic_variant(instance, _V3_TYPES)
+    head = generic[0] if generic is not None else instance
+    struct = "%s%s" % (_v3_ident(head, "type name"), case)
+    if generic is None:
+        return struct
+    return struct + _go_type(instance)[len(_v3_ident(head, "type name")):]
+
+
+def _v3_comp_construct(node, env: _Env, expected=None) -> str:
     """A user-ADT construction in a component body: `<Variant><Case>{Value: ..}`
     (or `<Variant><Case>{}` for a nullary case) — mirroring
     `_go_v3_construct`'s user-variant branch, the tagged-union shape the v3
@@ -1002,9 +1043,11 @@ def _v3_comp_construct(node, env: _Env) -> str:
             or _V3_TYPES[adt].get("kind") != "variant":
         raise EmitError(
             f"cannot resolve ADT case {case!r} to a declared variant")
-    payload = _v3_case_payload(adt, case)
-    args = [_expr(a, env) for a in node.get("args") or []]
-    struct = "%s%s" % (_v3_ident(adt, "type name"), case)
+    arg_nodes = node.get("args") or []
+    instance, payload = _v3_comp_applied(adt, case, expected, arg_nodes, env)
+    _v3_refuse_unbound(instance, case, _V3_TYPES)
+    args = [_expr(a, env, payload) for a in arg_nodes]
+    struct = _v3_comp_case_type(instance, case)
     if payload is None:
         if args:
             raise EmitError(f"variant case `{case}` takes no payload")
@@ -1027,6 +1070,10 @@ def _comp_arm_binding(st, pattern) -> str | None:
             return parts[0] if pattern == "Ok" else parts[1] if pattern == "Err" \
                 else None
         return None
+    generic = _v3_generic_variant(st, _V3_TYPES)
+    if generic is not None:
+        head, params, args = generic
+        return _v3_subst(_v3_case_payload(head, pattern), dict(zip(params, args)))
     adt = st if (isinstance(st, str) and st in _V3_TYPES) \
         else _v3_case_layout().get(pattern, (None, None))[0]
     return _v3_case_payload(adt, pattern) if adt in _V3_TYPES else None
@@ -1088,7 +1135,8 @@ def _go_comp_match(node, env: _Env, expected) -> str:
     if isinstance(scrut_node, dict) and scrut_node.get("kind") in ("var", "name"):
         operand = scrutinee
     else:
-        iface = st if (isinstance(st, str) and st in _V3_TYPES) else next(
+        iface = st if (isinstance(st, str) and (
+            st in _V3_TYPES or _v3_generic_variant(st, _V3_TYPES))) else next(
             (layout[a.get("pattern")][0] for a in arms
              if a.get("pattern") in layout), None)
         lines.append("\tvar _s %s = %s" % (_go_type(iface) or "any", scrutinee))
@@ -1106,15 +1154,18 @@ def _go_comp_match(node, env: _Env, expected) -> str:
                 lines.append("\t\t_ = _m")
                 lines.append("\t\treturn %s" % _expr(arm.get("body"), env, expected))
                 continue
-            adt = (st if (isinstance(st, str) and st in _V3_TYPES)
+            generic = _v3_generic_variant(st, _V3_TYPES)
+            adt = (generic[0] if generic is not None
+                   else st if (isinstance(st, str) and st in _V3_TYPES)
                    else layout.get(pattern, (None, None))[0])
             if not adt or adt not in _V3_TYPES \
                     or _V3_TYPES[adt].get("kind") != "variant":
                 raise EmitError(
                     f"cannot resolve match case {pattern!r} against scrutinee "
                     f"type {st!r} — no declared variant provides it")
-            payload = _v3_case_payload(adt, pattern)
-            case_type = "%s%s" % (_v3_ident(adt, "type name"), pattern)
+            payload = _comp_arm_binding(st if generic is not None else adt, pattern)
+            case_type = _v3_comp_case_type(st if generic is not None else adt,
+                                           pattern)
             lines.append("\tcase %s:" % case_type)
             # `bind == "_"` is a wildcarded payload (`Case(_) => ..`): there is
             # no name to hold the value, so it is discarded exactly like an
@@ -1327,7 +1378,7 @@ def _comp_infer(node, env: _Env):
         return env.var_types.get(node.get("id") or node.get("name"))
     if k == "list":
         items = node.get("items") or []
-        el = _comp_infer(items[0], env) if items else None
+        el = _v3_list_elem([_comp_infer(it, env) for it in items], _V3_TYPES)
         return "List[%s]" % (el or "Int")
     if k == "index":
         tt = _comp_infer(node.get("target"), env)
@@ -1375,10 +1426,13 @@ def _comp_infer(node, env: _Env):
     if k == "adt":
         # construction -> the ADT type the checker froze onto the node (e.g.
         # `Result[Any, Any]` for Ok/Err, `Found` for a user case)
-        t = node.get("type")
-        if t:
-            return t
-        return _v3_case_layout().get(node.get("case"), (None, None))[0]
+        t = node.get("type") or _v3_case_layout().get(
+            node.get("case"), (None, None))[0]
+        if t in _V3_TYPES:
+            # a generic variant's instantiation, from its payload (#2471)
+            t = _v3_comp_applied(t, node.get("case"), None,
+                                 node.get("args") or [], env)[0]
+        return t
     if k == "fn":
         # a call to a top-level `fn` (or extern) by name: its declared return
         # type, off the per-emit registry. Without this a `firsts(xs).length()`
@@ -6217,6 +6271,89 @@ def _v3_split_generic(inner: str) -> list[str]:
     return parts
 
 
+# A user generic variant (`type Mb[T] = Jj(T) | Nn`, issue #2471) lowers to Go
+# generics: `type Mb[T any] interface { isMb(T) }` with one `MbJj[T any]` struct
+# per case. Every use site names the instantiation (`Mb[int64]`, `MbJj[int64]`),
+# because Go cannot infer a type argument from a composite literal or from the
+# position a value flows into. The helpers below work on surface spellings.
+
+_V3_TYPE_WORD = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _v3_generic_variant(surface, types):
+    """`(head, params, args)` for an applied generic user variant (`Mb[Int]`),
+    else None. A bare head of a generic variant answers its params as `any`."""
+    if not (isinstance(surface, str) and isinstance(types, dict)):
+        return None
+    s = surface.strip()
+    head, args = s, None
+    if "[" in s and s.endswith("]"):
+        head, args = s[: s.index("[")], _v3_split_generic(s[s.index("[") + 1: -1])
+    spec = types.get(head)
+    if not (spec and spec.get("kind") == "variant" and spec.get("params")):
+        return None
+    params = list(spec["params"])
+    if args is None or len(args) != len(params):
+        args = ["any"] * len(params)
+    return head, params, args
+
+
+def _v3_subst(surface, mapping: dict):
+    """`surface` with each whole-word type parameter replaced from `mapping`."""
+    if not (isinstance(surface, str) and mapping):
+        return surface
+    return _V3_TYPE_WORD.sub(lambda m: mapping.get(m.group(0), m.group(0)), surface)
+
+
+def _v3_unify(pattern, actual, params, bound: dict) -> None:
+    """Bind the type parameters `pattern` mentions from the matching parts of
+    `actual` (`List[T]` against `List[Int]` binds `T` to `Int`)."""
+    if not (isinstance(pattern, str) and isinstance(actual, str)):
+        return
+    p, a = pattern.strip(), actual.strip()
+    if p in params:
+        if a != "any" and not bound.get(p):
+            bound[p] = a
+        return
+    if "[" in p and p.endswith("]") and "[" in a and a.endswith("]") \
+            and p[: p.index("[")] == a[: a.index("[")]:
+        ps = _v3_split_generic(p[p.index("[") + 1: -1])
+        as_ = _v3_split_generic(a[a.index("[") + 1: -1])
+        if len(ps) == len(as_):
+            for pi, ai in zip(ps, as_):
+                _v3_unify(pi, ai, params, bound)
+
+
+
+def _v3_list_elem(item_types: list, types: dict):
+    """The element type of an unpinned list literal: the first item type whose
+    generic variant arguments are all bound (`[Nn, Jj(4)]` is a `List[Mb[Int]]`,
+    issue #2471), else the first item type known at all."""
+    known = [t for t in item_types if t]
+    for t in known:
+        generic = _v3_generic_variant(t, types)
+        if generic is None or "any" not in generic[2]:
+            return t
+    return known[0] if known else None
+
+
+def _v3_refuse_unbound(instance, case: str, types: dict) -> None:
+    """Refuse a generic variant construction whose type argument nothing pins.
+    Go infers no type argument from where a value flows later, and `any` is a
+    different instantiation (`Mb[any]` is not `Mb[int64]`), so the package
+    would not build (issue #2471)."""
+    generic = _v3_generic_variant(instance, types)
+    if generic is None or "any" not in generic[2]:
+        return
+    head, params, args = generic
+    free = ", ".join(p for p, a in zip(params, args) if a == "any")
+    raise EmitError(
+        f"variant case `{case}`: type '{head}[{', '.join(params)}]' has no "
+        f"type argument for {free} at this construction - neither its flow "
+        "target nor its payload pins it, and Go infers no type argument from "
+        "later use; annotate the value or pass it where a typed parameter "
+        "pins it")
+
 def _erase_async(ret: str) -> str:
     """Erase the async color from a function-type return (roadmap item 92/94).
 
@@ -6337,6 +6474,12 @@ def _go_v3_type(t, types: dict) -> str:
         if head == "Map":
             k, v = _v3_split_generic(inner)
             return f"map[{_go_v3_type(k, types)}]{_go_v3_type(v, types)}"
+    generic = _v3_generic_variant(t, types)
+    if generic is not None:
+        # issue #2471: `Mb[Int]` is the Go instantiation `Mb[int64]`
+        head, _params, args = generic
+        rendered = ", ".join(_go_v3_type(a, types) or "struct{}" for a in args)
+        return f"{_v3_ident(head, 'type name')}[{rendered}]"
     if isinstance(types, dict) and t in types:
         return _v3_ident(t, "type name")
     # Unknown named type: pass through as an identifier.
@@ -6595,10 +6738,9 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         if isinstance(exp, str) and exp.startswith("List[") and exp.endswith("]"):
             return exp
         items = node.get("items") or []
-        if items:
-            el = _go_v3_infer_type(items[0], ctx)
-            return f"List[{el}]" if el else None
-        return None
+        el = _v3_list_elem([_go_v3_infer_type(it, ctx) for it in items],
+                           ctx.types)
+        return f"List[{el}]" if el else None
     if kind == "call":
         callee = node.get("callee") or {}
         if callee.get("kind") == "var":
@@ -6655,7 +6797,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         case = node.get("case")
         if case in ("Some", "None", "Ok", "Err"):
             return _go_v3_infer_ctor(case, node.get("args") or [], ctx)
-        return ctx.case_adt.get(case)
+        return (_go_v3_applied_variant(ctx, case, None, node.get("args") or [])
+                or ctx.case_adt.get(case))
     return None
 
 
@@ -6670,15 +6813,21 @@ def _v3_fn_value_ret(surface):
     return _erase_async(fn[1]) or None
 
 
-def _v3_fill_erased(surface, declared):
+def _v3_fill_erased(surface, declared, types=None):
     """`surface` with each erased top-level `any` type argument of a built-in
     Opt/Result filled from `declared`, a type of the same family (else
     `surface` unchanged). `Ok(1)` infers `Result[Int, any]`: the error side is
     unknowable from the argument, and Go cannot leave a type argument open, so
     it is taken from where the value flows (a declared return or parameter, or
-    the other operand of an `==`)."""
+    the other operand of an `==`). With `types`, an applied generic user
+    variant fills the same way (`Mb[any]` from `Mb[Int]`, issue #2471)."""
     if not (isinstance(surface, str) and isinstance(declared, str)):
         return surface
+    have_v = _v3_generic_variant(surface, types)
+    want_v = _v3_generic_variant(declared, types)
+    if have_v is not None and want_v is not None and have_v[0] == want_v[0]:
+        merged = [w if h == "any" else h for h, w in zip(have_v[2], want_v[2])]
+        return f"{have_v[0]}[{', '.join(merged)}]"
     for head in ("Opt[", "Result["):
         if (surface.startswith(head) and surface.endswith("]")
                 and declared.startswith(head) and declared.endswith("]")):
@@ -6778,6 +6927,8 @@ def _go_v3_is_interface(surface, types) -> bool:
     if (s.startswith("Opt[") and s.endswith("]")) or (
             s.startswith("Result[") and s.endswith("]")):
         return True
+    if _v3_generic_variant(s, types) is not None:
+        return True  # an applied generic user variant `Mb[Int]` (issue #2471)
     spec = types.get(s)
     return bool(spec) and spec.get("kind") == "variant"
 
@@ -6815,6 +6966,47 @@ def _go_v3_lit(node: dict, ctx: "_V3GoCtx | None" = None) -> str:
     raise EmitError(f"unsupported v3 literal: {node!r}")
 
 
+def _go_v3_applied_variant(ctx: _V3GoCtx, case: str, expected, arg_nodes=None):
+    """The instantiation (`Mb[Int]`) a construction of `case` builds, when its
+    variant is generic (issue #2471), else None. The type arguments come from
+    the flow target when it names the same variant, else from the payload
+    argument; a parameter neither pins stays `any`, as a bare `None` does."""
+    adt = ctx.case_adt.get(case)
+    generic = _v3_generic_variant(adt, ctx.types)
+    if generic is None:
+        return None
+    head, params, args = generic
+    bound: dict = {}
+    want = _v3_generic_variant(expected, ctx.types)
+    if want is not None and want[0] == head:
+        bound.update({p: a for p, a in zip(params, want[2]) if a != "any"})
+    payload = ctx.case_payload.get(case)
+    if arg_nodes and payload is not None:
+        _v3_unify(payload, _go_v3_infer_type(arg_nodes[0], ctx), params, bound)
+    return f"{head}[{', '.join(bound.get(p) or 'any' for p in params)}]"
+
+
+def _go_v3_type_args(instance, types) -> str:
+    """`[int64]` for the instantiation `Mb[Int]`, `""` for a non-generic type:
+    the suffix a case struct takes (`MbJj[int64]`)."""
+    generic = _v3_generic_variant(instance, types)
+    if generic is None:
+        return ""
+    rendered = _go_v3_type(instance, types)
+    return rendered[len(_v3_ident(generic[0], "type name")):]
+
+
+def _go_v3_variant_payload(ctx: _V3GoCtx, case: str, expected, arg_nodes=None):
+    """The payload surface of `case` at this construction, with a generic
+    variant's parameters substituted (`T` -> `Int` for `Mb[Int]`)."""
+    payload = ctx.case_payload.get(case)
+    instance = _go_v3_applied_variant(ctx, case, expected, arg_nodes)
+    if instance is None:
+        return payload
+    _head, params, args = _v3_generic_variant(instance, ctx.types)
+    return _v3_subst(payload, dict(zip(params, args)))
+
+
 def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected,
                      arg_nodes=None):
     """Render an ADT/Opt/Result construction from a case name + rendered args.
@@ -6825,9 +7017,12 @@ def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected,
     `RevlOpt[any]` that later defeats a structural equality (item 280/302)."""
     adt = ctx.case_adt.get(case)
     if adt is not None:
-        # user variant (monomorphic): `<Variant><Case>{...}`
+        # user variant: `<Variant><Case>{...}`, instantiated when generic
         payload = ctx.case_payload.get(case)
         struct = f"{_v3_ident(adt, 'type name')}{case}"
+        instance = _go_v3_applied_variant(ctx, case, expected, arg_nodes)
+        _v3_refuse_unbound(instance, case, ctx.types)
+        struct += _go_v3_type_args(instance, ctx.types)
         if payload is None:
             if arg_renders:
                 raise EmitError(f"variant case `{case}` takes no payload")
@@ -6919,7 +7114,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
 
     if kind == "adt":
         arg_nodes = node.get("args") or []
-        payload = ctx.case_payload.get(node["case"])
+        payload = _go_v3_variant_payload(ctx, node["case"], expected, arg_nodes)
         args = [_go_v3_expr(a, ctx, payload) for a in arg_nodes]
         return _go_v3_construct(ctx, node["case"], args, expected,
                                 arg_nodes=arg_nodes)
@@ -6965,7 +7160,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
                     # Neither side is fully concrete (`Ok(g(2)) == Ok(2)`):
                     # fill each side's erased type arguments from the other,
                     # so both still emit as ONE instantiation.
-                    merged = _v3_fill_erased(lt, rt)
+                    merged = _v3_fill_erased(lt, rt, ctx.types)
                     if merged != lt or merged != rt:
                         exp = merged
                 left = _go_v3_expr(node["left"], ctx, exp)
@@ -7049,7 +7244,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         # construction's own expected instead.
         param_types = None
         if cname in ctx.case_adt:
-            param_types = [ctx.case_payload.get(cname)]
+            param_types = [_go_v3_variant_payload(ctx, cname, expected, arg_nodes)]
         elif cname and not is_ctor:
             param_types = (ctx.function_params.get(cname)
                            or ctx.extern_params.get(cname))
@@ -7135,7 +7330,8 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             elem = pin[5:-1]
         items = node.get("items") or []
         if elem is None and items:
-            elem = _go_v3_infer_type(items[0], ctx)
+            elem = _v3_list_elem([_go_v3_infer_type(it, ctx) for it in items],
+                                 ctx.types)
         go_elem = _go_v3_type(elem, ctx.types) if elem else "any"
         rendered = ", ".join(_go_v3_expr(it, ctx, elem) for it in items)
         return f"[]{go_elem}{{{rendered}}}"
@@ -7789,8 +7985,19 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
         adt = st if isinstance(st, str) else ctx.case_adt.get(pattern)
         if adt is None:
             raise EmitError(f"cannot resolve match case {pattern!r}")
-        case_type = f"{_v3_ident(adt, 'type name')}{pattern}"
         payload_surface = ctx.case_payload.get(pattern)
+        generic = _v3_generic_variant(adt, ctx.types)
+        if generic is not None:
+            # issue #2471: the case struct of an applied generic variant is
+            # instantiated like the scrutinee (`MbJj[int64]` under `Mb[Int]`),
+            # and the bound payload takes the substituted type
+            head, params, args = generic
+            instance = f"{head}[{', '.join(args)}]"
+            case_type = (f"{_v3_ident(head, 'type name')}{pattern}"
+                         f"{_go_v3_type_args(instance, ctx.types)}")
+            payload_surface = _v3_subst(payload_surface, dict(zip(params, args)))
+        else:
+            case_type = f"{_v3_ident(adt, 'type name')}{pattern}"
         lines.append(f"\tcase {case_type}:")
         # `bind == "_"` (`Case(_) => ..`) has no name to hold the value;
         # discard it the same way an unbound arm does, rather than declaring
@@ -8209,7 +8416,7 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
             inferred = filled if filled != "Opt[any]" else None
         if _v3_has_any(inferred):
             inferred = _v3_fill_erased(
-                inferred, ctx.flow_hints.get(node.get("name")))
+                inferred, ctx.flow_hints.get(node.get("name")), ctx.types)
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         value = _go_v3_expr(node.get("value"), ctx, inferred)
@@ -8348,6 +8555,28 @@ def _go_v3_test_name(name, used: set) -> str:
     return candidate
 
 
+def _emit_v3_go_generic_variant(gname: str, spec: dict, types: dict) -> list[str]:
+    """A generic user variant as Go generics (issue #2471): the interface and
+    every case struct take the variant's type parameters, and the marker method
+    names them, so `MbJj[int64]` is an `Mb[int64]` and not an `Mb[string]`."""
+    params = [_v3_ident(p, "type parameter") for p in spec["params"]]
+    decl = ", ".join(f"{p} any" for p in params)
+    use = ", ".join(params)
+    marker = f"is{gname}"
+    out = [f"// {gname} is a sealed generic sum type (revl ADT); {marker}() seals it.",
+           f"type {gname}[{decl}] interface {{ {marker}({use}) }}"]
+    for case in spec.get("cases") or []:
+        cstruct = f"{gname}{case.get('name')}"
+        payload = case.get("payload")
+        if payload is None:
+            out.append(f"type {cstruct}[{decl}] struct{{}}")
+        else:
+            out.append(f"type {cstruct}[{decl}] struct {{ Value {_go_v3_type(payload, types)} }}")
+        out.append(f"func ({cstruct}[{use}]) {marker}({use}) {{}}")
+    out.append("")
+    return out
+
+
 def _emit_v3_go_types(types: dict) -> list[str]:
     out: list[str] = []
     for name, spec in types.items():
@@ -8375,6 +8604,8 @@ def _emit_v3_go_types(types: dict) -> list[str]:
                            f" `json:\"{field}\"`")
             out.append("}")
             out.append("")
+        elif spec.get("kind") == "variant" and spec.get("params"):
+            out.extend(_emit_v3_go_generic_variant(gname, spec, types))
         elif spec.get("kind") == "variant":
             marker = f"is{gname}"
             out.append(f"// {gname} is a sealed sum type (revl ADT); {marker}() seals it.")
@@ -12355,6 +12586,14 @@ def _emit_v3_bridge_helpers(types: dict) -> list[str]:
     for name, spec in (types or {}).items():
         if spec.get("kind") != "variant":
             continue
+        if spec.get("params"):
+            # issue #2471: the codecs below are per declared type, and a
+            # generic variant has one wire shape per instantiation; refused by
+            # name rather than emitted as a package that does not build
+            raise EmitError(
+                f"bridge: type '{name}[{', '.join(spec['params'])}]' is not "
+                "lowerable on the go placement bridge - a generic variant has "
+                "no {\"$kind\", \"$value\"} wire codec on this tier yet")
         gname = _v3_ident(name, "type name")
         enc = _revl_encode_fn(name)
         dec = _revl_decode_fn(name)

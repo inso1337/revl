@@ -531,6 +531,16 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
                               "reason": f"candidate is not a whole composition: {error}"}
         return verdicts, {"blocked": True, "reason": "gauntlet"}
 
+    # -- realm placement (issue #2520): the swap below is `session.swap`, past
+    # the realm-removal check `revl_edit`/`revl_change` run in `edit.admit`
+    refusal = _realm_removal_refusal(running_ir, candidate_ir, candidate_arg,
+                                     over_the_transport)
+    if refusal is not None:
+        verdicts["realm"] = {"evaluated": True, "refused": True,
+                             "diagnostics": refusal}
+        return verdicts, {"blocked": True, "reason": "realm",
+                          "diagnostics": refusal}
+
     candidate_audit = audit_diff.audit_report(candidate_ir)
 
     # -- boundary policy (item 33): nothing reaches what it may not -----------
@@ -583,6 +593,33 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
                                           "diff the candidate against"}
 
     return verdicts, {"blocked": False, "reason": None, "candidate_ir": candidate_ir}
+
+
+def _realm_removal_refusal(running_ir: dict | None, candidate_ir: dict,
+                           candidate_arg: dict,
+                           over_the_transport: bool) -> list[dict] | None:
+    """The repair door's half of issue #2487: `None`, or the G9 diagnostics
+    refusing a candidate that moves an admitted provision out of its realm.
+
+    The trust condition is `revl_swap`'s: only text carried by the transport
+    (inline `source`, `modules`) compiled under the authoring profile. Jailed
+    `files` alone are the operator's own, as is everything the CLI's
+    `revl repair` compiles (`over_the_transport=False`), and a trusted
+    operator has no profile, which the check itself lets through."""
+    source = candidate_arg.get("source")
+    modules = candidate_arg.get("modules")
+    if not over_the_transport or (source is None and not modules):
+        return None
+    from ..diagnostics import report  # noqa: PLC0415
+    from .edit import _candidate_texts, _check_realm_removal  # noqa: PLC0415
+
+    try:
+        _check_realm_removal(running_ir, candidate_ir,
+                             _candidate_texts({"source": source,
+                                               "modules": modules}))
+    except RevlError as error:
+        return report(error)["diagnostics"]
+    return None
 
 
 # ---------------------------------------------------------------- candidate
@@ -814,6 +851,8 @@ def _assemble(status: str, component: str, fault: dict, sliced: dict,
         "authority": {**authority,
                       "why": _authority_why(component,
                                             _eligibility_rule(eligibility)).to_json()},
+        **({"diagnostics": gate["diagnostics"]}
+           if gate and gate.get("diagnostics") else {}),
         "dossier": {
             "note": "every step reconstructed from the causal trace and the "
                     "loop's inputs — the incident, end to end.",
@@ -842,9 +881,9 @@ def _status_note(status: str) -> str:
                            "running composition is untouched.",
         STATUS_NO_CANDIDATE: "no repair candidate was supplied and the reuse "
                              "check found nothing admissible. Untouched.",
-        STATUS_REJECTED: "a gate refused the candidate (gauntlet, policy, or "
-                         "the may-touch bound). The running composition is "
-                         "untouched.",
+        STATUS_REJECTED: "a gate refused the candidate (gauntlet, realm "
+                         "placement, policy, or the may-touch bound). The "
+                         "running composition is untouched.",
         STATUS_PLANNED: "every gate is green; the swap was not performed "
                         "(apply=False) — a rehearsal.",
     }.get(status, status)

@@ -13,6 +13,8 @@ is reshaped for display on the way out.
 
 from __future__ import annotations
 
+import os
+
 from ..compiler import compile_files, compile_source
 from ..diagnostics import report
 from ..errors import RevlError
@@ -45,7 +47,11 @@ def _compile(arguments: dict) -> dict:
     files = arguments.get("files")
     if not files:
         raise ValueError("provide `source` or `files`")
-    return compile_files(list(files))
+    modules = arguments.get("modules")
+    # edited buffers of a files-loaded set (the held form) ride as `modules`
+    # keyed by absolute path; the compiler reads them before the disk
+    return compile_files(list(files), sources={
+        os.path.abspath(p): t for p, t in (modules or {}).items()} or None)
 
 
 def _run(arguments: dict, fn, *args, **kwargs) -> dict:
