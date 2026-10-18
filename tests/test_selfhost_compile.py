@@ -866,8 +866,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `xs[0] + id(-1)`) is written without the reference's
         # `"operands": "Int"` annotation.
         "generic_fn.rvl",
-        # The same generic `id` called from a provide method: its native IR
-        # differs from the reference's in the same way.
+        # The same generic `id` called from a provide method, where the
+        # divergence is a different one (issue #2559): the reference IR's `+`
+        # there carries no `operands` key at all, and the native chain drops
+        # the whole provide method (`fn greet(&self, ..)`) together with its
+        # `ctx.provide("greeting", ..)` wiring. A non-generic control of the
+        # same shape is byte-exact.
         "comp_provide_generic.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
