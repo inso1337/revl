@@ -88,14 +88,9 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
 
-`next` is not only a refusal's remedy. A successful `revl_verbs` lookup that
-returns the schema of an unlisted verb also carries one, the hatch call for that
-verb, so it is the first `ok: true` payload with a `next`; see "Find a verb"
-(`revl_verbs`) below.
-
 A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
-remedy.
+load remedy.
 
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and
@@ -332,16 +327,6 @@ names `tools/list` currently shows. With `topic` it returns the exact schemas of
 that topic's verbs; with `names` it returns those verbs' exact schemas. The
 schemas are the same objects the full list carries under `--all-tools`. An
 unknown topic or name is refused with `next` set to the no-argument call.
-
-A lookup that returns the schema of a verb outside the core tier also carries
-`next` (issue #2537), because a client that emits calls only for listed tools
-cannot act on that schema without the hatch below. `next` is the hatch call for
-that verb, `revl_verbs {name, args: {}}`, with `ready: false` and `needs` naming
-`args`, since the arguments depend on what the caller means to do. Several
-unlisted verbs in one lookup (a `topic` returns a whole topic) give a list of
-calls, one per unlisted verb in the order returned; one gives the bare call. A
-lookup of listed verbs only carries no `next`, and neither does any lookup under
-`--all-tools`. Sent with `args` filled, the `next` is the verb's own call.
 
 With `name` and `args` it **calls** the verb `name` with the arguments `args` -
 the same handler, the same jail, authoring, operator and runtime gates, the
@@ -1047,7 +1032,9 @@ disagreeing until `revl_export` runs. The verbs of the change loop
 (when a composition is loaded; see its section) carry
 `"disk": {"inSync": bool, "stale": [path]}`, where `stale` names every loaded
 file whose held text differs from the bytes on disk. When `inSync` is false on
-a success, the answer also carries a `note` naming `revl_export`. It is a
+a success, the answer also carries a `note` naming `revl_export` and a `next`
+that calls it through the `revl_verbs` hatch, `revl_verbs {name: "revl_export",
+args: {}}` (issue #2537; `revl_export` is not a listed verb). It is a
 sibling of `sessionState`, never a field of it: `sessionState.dirty` means a
 *speculative draft* differs from what is running, so it is `false` in exactly
 the case a stale disk is easy to miss. An inline-loaded composition names no

@@ -1301,6 +1301,8 @@ def _nothing_to_load(ignored: bool = False) -> dict:
         extra = {"loaded": True}
         if ignored:
             extra["note"] = _files_ignored_note("nothing was booted")
+            if not _disk_state()["inSync"]:
+                extra["next"] = _export_next()
         return _session_error(
             "a composition is already running and no draft is held, so "
             "`revl_load {}` has nothing to boot. Change what runs with revl_edit "
@@ -1898,6 +1900,8 @@ def _tool_edit(arguments: dict, verify=None, caller: str = "revl_edit",
         # the note is composed here, not at the drop: whether the held source
         # has reached disk is a question about what the edit just did
         result = {**result, "note": _files_ignored_note(existing=result.get("note"))}
+        if not _disk_state()["inSync"]:
+            _with_export_next(result)
     return {**result, "loaded": True} if loaded is not None else result
 
 
@@ -2060,6 +2064,23 @@ _DISK_NOTE = "the held source differs from disk; call revl_export to write it"
 _DISK_NOTE_REVERT = "the reverted source is not on disk; revl_export writes it"
 
 
+def _export_next() -> dict:
+    """The call a disk note's prose names (issue #2537): `revl_export`, through
+    the `revl_verbs` hatch (#2073), because `revl_export` is not a listed verb
+    and a function-calling client emits calls only for listed tools. Ready: a
+    disk note exists only for a composition loaded from files, whose export
+    takes no arguments."""
+    return _remedy.call(_disclosure.DISCOVERY,
+                        {_disclosure.HATCH_NAME: "revl_export",
+                         _disclosure.HATCH_ARGS: {}})
+
+
+def _with_export_next(payload: dict) -> dict:
+    """`payload` with the export `next`, unless it already carries one."""
+    payload.setdefault("next", _export_next())
+    return payload
+
+
 def _diverges(text, path) -> bool:
     """Whether this held text differs from the bytes on disk (issue #2032).
 
@@ -2185,6 +2206,7 @@ def _ride_disk(name: str, payload) -> None:
     if not disk["inSync"] and payload.get("ok") and not payload.get("note"):
         payload["note"] = (_DISK_NOTE_REVERT if name in _DISK_REVERTS
                            else _DISK_NOTE)
+        _with_export_next(payload)
 
 
 # -- the `files` argument (issue #2035) -------------------------------------
@@ -3378,6 +3400,7 @@ def _note_session_check_disk(payload):
     if (SESSION.loaded and isinstance(payload, dict) and payload.get("ok")
             and not payload.get("note") and not _disk_state()["inSync"]):
         payload["note"] = _DISK_NOTE
+        _with_export_next(payload)
     return payload
 
 
@@ -3398,6 +3421,7 @@ def _note_held_file_differs(arguments: dict, payload) -> dict:
              for p in arguments.get("files") or []]
     if diverged_paths(texts, [p for p in named if p in texts]):
         payload["note"] = _CHECK_FILE_DIFFERS_NOTE
+        _with_export_next(payload)
     return payload
 
 
@@ -6203,32 +6227,7 @@ def _tool_verbs(arguments: dict) -> dict:
         return _session_error(
             f"no verb named {', '.join(map(repr, unknown))}",
             next=_remedy.call(_disclosure.DISCOVERY, {}))
-    return _remedy.attach({"ok": True, "tools": found}, _hatch_next(found))
-
-
-def _hatch_next(found: list):
-    """The `next` for a lookup that handed back an unlisted verb's schema
-    (issue #2537): the hatch (#2073) that calls it. A function-calling client
-    emits a call only for a listed tool, so an unlisted verb's schema is one
-    the caller cannot act on until something names the way in. One entry per
-    unlisted verb, named once however often the lookup repeats it, in the order
-    first returned (the preference list #1691 allows), because each is a
-    separate call and none of them contains another; a single one is the bare
-    call. Not ready: `args` depend on what the caller
-    means to do. A lookup of listed verbs only carries none, and nothing here
-    changes what `tools/list` shows."""
-    listed = {tool["name"] for tool in _disclosure.listed(_ADVERTISED)}
-    calls = [_remedy.call(_disclosure.DISCOVERY,
-                          {_disclosure.HATCH_NAME: tool["name"],
-                           _disclosure.HATCH_ARGS: {}},
-                          ready=False,
-                          needs=f"`{_disclosure.HATCH_ARGS}`: the verb's own "
-                                f"arguments")
-             for tool in {t["name"]: t for t in found}.values()
-             if tool["name"] not in listed]
-    if not calls:
-        return None
-    return calls[0] if len(calls) == 1 else calls
+    return {"ok": True, "tools": found}
 
 
 TOOLS.append({
