@@ -754,8 +754,6 @@ fn infer_if_t(cond: Expr, then_: Expr, els: Expr, env: List[Bind], tt: Tt,
   return ok_ty(j)
 }
 
-// Port of typecheck.infer_ast's ExprList arm: the elements join; an empty or
-// unjoinable list is the `List[Never]` bottom the widening rules then fill.
 // Port of typecheck.infer_ast's Interp arm (issue #2478): each `${...}`
 // operand is inferred like any other expression, so a refusal inside one
 // (a wrong case payload, a bad call argument) is the template's refusal. The
@@ -772,6 +770,8 @@ fn infer_templ_t(parts: List[PartN], env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   return ok_ty("Str")
 }
 
+// Port of typecheck.infer_ast's ExprList arm: the elements join; an empty or
+// unjoinable list is the `List[Never]` bottom the widening rules then fill.
 fn infer_list_t(items: List[Expr], env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   // `item = t if item is None else join(item, t)`: an element whose type is
   // unknown does not poison the accumulator, it leaves it unset, so `[q, y]`
