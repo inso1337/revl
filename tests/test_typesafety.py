@@ -1216,20 +1216,18 @@ component C {
 
 def test_2491_right_arg_types_are_admitted_on_host_locals():
     # call sites: _lower_postfix (lower.py:17121), _lower_component_pure_expr (lower.py:10031)
-    # positive control: every declared parameter supplied with its type, plus
-    # an opaque host-verb result (`store.size()`) as an argument, which the
-    # checker does not judge
-    ir = compile_source(_JOBS_SVC + """
+    # positive control: each host-local Pool verb gets a `Str` argument, plus
+    # one host-local verb argument whose inference fails (`Int32.to_str()`,
+    # no checker row), which `_host_arg_types` leaves uncompared
+    ir = compile_source("""
+service Jobs { fn run(sql: Str) -> Int  fn show(w: Int32) -> Int }
 component C provides jobs: Jobs {
   let pool = effect Pool.open("db", 4) undo pool.close()
-  let store = effect Map.new() undo store.drop()
-  effect store.insert("boot", "1")
-  undo   store.remove("boot")
   effect pool.execute("begin")
   undo   pool.execute("rollback")
-  let warm = effect Pool.open("w", store.size()) undo warm.close()
   provide jobs {
     fn run(sql) = pool.query(sql)
+    fn show(w) = pool.query(w.to_str())
   }
 }""")
     assert any(c.get("name") == "C" for c in ir.get("components", []))
