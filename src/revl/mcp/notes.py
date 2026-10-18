@@ -27,7 +27,8 @@ notes an agent (or a human, through an export) adds on top:
   load reads marked blocks back. A body that differs from the record becomes a
   supersede, and a marked block with no record a new note, authored by whoever
   wrote the file (issue #2550): an untrusted agent for a file under
-  `.revl/export/`, an untrusted vendor for a vendored truc's component, a
+  `.revl/export/` or for an adopted copy of an export elsewhere (issue
+  #2577), an untrusted vendor for a vendored truc's component, a
   human at operator trust for any other file.
 """
 
@@ -614,10 +615,10 @@ def render(text: str, name: str, file_notes: list[dict]) -> str:
     return "\n".join(out)
 
 
-def _import_author(path: str) -> dict:
-    """Who a changed or unrecorded marked block in the loaded file `path` is
-    attributed to (issue #2550): the writer of the file, never the operator
-    by default.
+def _import_author(path: str, text: str, roots=()) -> dict:
+    """Who a changed or unrecorded marked block in the loaded file `path`,
+    whose loaded text is `text`, is attributed to (issue #2550): the writer
+    of the file, never the operator by default.
 
     A file inside any `.revl/export/` directory is the author's by its path
     alone, the same rule that compiles it under the authoring profile
@@ -634,18 +635,51 @@ def _import_author(path: str) -> dict:
     records themselves, and no signature covers a comment block (nor does an
     export ever render one into a vendored component).
 
-    Any other file holds whatever bytes were on disk when the load read them,
-    and no MCP verb wrote them there, so its block is attributed to the
-    operator who keeps that disk: a human note at operator trust, as before.
-    That makes adoption a promotion: copying an export out turns each of its
-    changed or unrecorded blocks into an operator note (a changed body into
-    an operator supersede), while an unchanged block keeps its record and that
-    record's trust."""
+    A file anywhere else whose text is exactly the bytes an export recorded
+    in the manifest of one of the sanctioned `roots` (`export_jail.exported_as`)
+    is an adopted copy (issue #2577): the operator copied an export out of
+    `.revl/export/` unchanged, which adopts its code, not the author's notes.
+    A block there is the untrusted agent's, as in the export directory, with
+    `adoptedFrom` naming the export copy it matches, and the load lists it
+    (`adopted_blocks`). The operator who wants such a note as their own adds
+    it as their own; no verb promotes it.
+
+    Any other file holds bytes no MCP verb wrote, so its block is attributed
+    to the operator who keeps that disk: a human note at operator trust, as
+    before. That includes an adopted copy the operator then edited, by even
+    one byte, or one an export of the same copy has since replaced in the
+    manifest: its bytes match no recorded export. An unchanged block keeps
+    its record and that record's trust, wherever the file lies."""
     if _export_area.in_export_area(path):
         return {"kind": "agent", "trust": "untrusted"}
     if vendored_path(path) is not None:
         return {"kind": "vendor", "trust": "untrusted"}
+    from . import export_jail  # noqa: PLC0415 - cycle
+
+    copied = export_jail.exported_as(text, roots)
+    if copied is not None:
+        return {"kind": "agent", "trust": "untrusted", "adoptedFrom": copied}
     return {"kind": "human", "trust": "operator"}
+
+
+def adopted_blocks(created: list[dict]) -> list[dict]:
+    """The records among `created` (what `import_marked` returned) read from
+    an adopted export copy (issue #2577), as the load reports them: the new
+    note, its symbol and file, the export it came from, and whether it
+    changed a recorded note's body (naming that note) or had no record. The
+    body is not repeated: it rides by the note's trust."""
+    out = []
+    for record in created:
+        source = (record.get("author") or {}).get("adoptedFrom")
+        if source is None:
+            continue
+        entry = {"id": record["id"], "symbol": record["anchor"]["symbol"],
+                 "file": record["anchor"]["path"], "adoptedFrom": source,
+                 "block": "changed" if record.get("supersedes") else "unrecorded"}
+        if record.get("supersedes"):
+            entry["supersedes"] = record["supersedes"]
+        out.append(entry)
+    return out
 
 
 def _mark_vendored(session, record: dict, path: str) -> dict:
@@ -660,10 +694,13 @@ def _mark_vendored(session, record: dict, path: str) -> dict:
     return record
 
 
-def import_marked(session, vs: dict) -> list[dict]:
+def import_marked(session, vs: dict, roots=()) -> list[dict]:
     """Read the marked blocks of the loaded files back. A changed body
     supersedes its note and a block with no record becomes one, authored by
-    whoever wrote the file (`_import_author`)."""
+    whoever wrote the file (`_import_author`, decided once per file); an
+    adopted export copy's records are the ones `adopted_blocks` lists.
+    `roots` are the sanctioned roots whose export manifests name an adopted
+    copy (the server passes its own); with none, no file counts as one."""
     current = notes(session)
     created = []
     for name, text in ((p, (vs.get("files_content") or {}).get(p))
@@ -671,6 +708,7 @@ def import_marked(session, vs: dict) -> list[dict]:
         if text is None:
             continue
         parsed = None  # (program, decls, nodes), once a marked block needs it
+        author = None  # who wrote this file, once a marked block needs it
         for block in _k.comment_blocks(text):
             note_id, body = _marked(block)
             if note_id is None:
@@ -685,9 +723,11 @@ def import_marked(session, vs: dict) -> list[dict]:
             if symbol is None:
                 continue
             kind = existing["kind"] if existing is not None else "doc"
+            if author is None:
+                author = _import_author(name, text, roots)
             try:
                 record = add(session, vs, {"kind": kind, "body": body},
-                             symbol, author=_import_author(name),
+                             symbol, author=dict(author),
                              supersedes=note_id if existing else None)
             except NoteError:
                 continue
@@ -711,4 +751,4 @@ __all__ = ["KINDS", "EVIDENCE_KINDS", "query_verbs", "RERUNNABLE", "run_evidence
            "refresh", "served", "concerning", "load_sidecar", "sidecar_writes",
            "RECORD_ID", "is_record_id", "record_path", "is_record_path",
            "load_vendored", "vendored_trucs", "vendored_path",
-           "render", "import_marked"]
+           "render", "import_marked", "adopted_blocks"]

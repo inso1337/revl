@@ -1143,7 +1143,12 @@ def _ride_knowledge(name: str, payload, arguments: dict | None = None) -> None:
         vs = _edit.running_source(SESSION)
         if name == "revl_load" and payload.get("ok"):
             _notes.load_sidecar(SESSION, vs)
-            _notes.import_marked(SESSION, vs)
+            # issue #2577: the blocks an adopted export copy brought in, shown
+            # to the operator at the load that read them
+            adopted = _notes.adopted_blocks(
+                _notes.import_marked(SESSION, vs, _file_roots()))
+            if adopted:
+                payload["notesAdopted"] = adopted
             _notes.load_vendored(SESSION, vs)
         if moved or name == "revl_load":
             _notes.refresh(SESSION, vs)

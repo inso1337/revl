@@ -1256,13 +1256,34 @@ and a sidecar export writes the record with that label. A vendored truc's
 reaches it (a case alias, a link), so its blocks import as `author: {kind:
 vendor, trust: untrusted}`, the floor the vendored records get when no
 signature covers them, and are marked `vendored`, so an export never writes
-them to the project's sidecar. Any other file holds bytes no MCP verb
-wrote, so its blocks import as `author: {kind: human, trust: operator}`. An
-unchanged block is never re-attributed: it keeps its record and that record's
-trust. So adoption, copying an export out of `.revl/export/`, is the one step
-that promotes: each changed or unrecorded block in the adopted file becomes an
-operator note, and a changed body an operator supersede. Review an export's
-note blocks before adopting it.
+them to the project's sidecar. An unchanged block is never re-attributed: it
+keeps its record and that record's trust.
+
+**Adopting an export** (issue #2577). Copying a file out of `.revl/export/`
+into the project adopts its code, not the author's notes. A loaded file
+outside the export directory whose text is exactly the bytes an export
+recorded in a sanctioned root's manifest (`.revl/export/manifest.json`) is an
+adopted copy, wherever it lies. Its changed and unrecorded blocks import as
+`author: {kind: agent, trust: untrusted, adoptedFrom: <the export copy,
+relative to its root>}`: they ride exactly as an untrusted add does (the body
+withheld until the note carries evidence), a sidecar export writes them with
+that label, and a changed body is an untrusted supersede, never an operator
+one. The load answers with `notesAdopted`, one entry per such block: `id`
+(the new note), `symbol`, `file`, `adoptedFrom`, and `block`, which is
+`changed` for a recorded note's rewritten body (with `supersedes` naming that
+note) or `unrecorded`. The field is absent when nothing was adopted, and it
+never carries a body: read one with `revl_knowledge {op: query, id}`. No verb
+promotes an adopted note. An operator who wants one as their own adds it, or
+supersedes it, with `revl_knowledge` from a session at operator trust, or
+writes the block into the file themselves, which ends the match below.
+
+Any other file holds bytes no MCP verb wrote, so its blocks import as
+`author: {kind: human, trust: operator}`. That includes an adopted copy the
+operator edited before loading it, by even one byte inside or outside a
+block, and one whose export has since been written again (the manifest keeps
+only the bytes each copy holds now): its bytes match no recorded export, and
+its changed blocks become operator notes, a changed body an operator
+supersede. Review an export's note blocks before editing an adopted copy.
 
 - Inputs: `op` (required); `symbol`, `id`, `kind`, `body`, `evidence`,
   `reason` per op.

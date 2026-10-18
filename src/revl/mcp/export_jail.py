@@ -28,10 +28,12 @@ flag, and `revl_export` is reached only over the transport.
 * TRUST: a file inside any `.revl/export/` directory is the agent's, by path,
   always. Named in `files` or reached by `use`, its text compiles under the
   authoring profile with no operator text to diff against, exactly as if it
-  had been sent inline. The manifest never decides who wrote a file. Every
+  had been sent inline. The manifest never decides how a file compiles. Every
   other compile applies the same rule to a file on disk there, and every
   `revl` command does unless it is given `--trust-exported` (`CliRule`, issue
-  #2547).
+  #2547). It only ever lowers a trust: a file elsewhere whose bytes it
+  records is an adopted copy, whose changed note blocks stay the author's
+  (`exported_as`, issue #2577).
 
 An export also writes only `.rvl` modules (an inline one, only those the
 program reaches by `use`), a destination may not be a symbolic link, and a
@@ -247,6 +249,21 @@ def revl_wrote(path: str, roots) -> bool:
     digest = _sha256(text)
     return any(sha == digest and _same_file(os.path.join(root, key), real)
                for key, sha in _manifest_entries(_manifest_of(root)).items())
+
+
+def exported_as(text: str, roots) -> str | None:
+    """The export copy, relative to its root, whose bytes an export recorded
+    in the manifest of any of `roots` as exactly `text`, or None (issue
+    #2577). A file outside the export directory holding such bytes is an
+    adopted copy of that export, wherever it lies. The manifest records only
+    the bytes each copy holds now, so a later export of the same copy
+    replaces the digest an earlier adoption matched."""
+    digest = _sha256(text)
+    for root in roots:
+        for key, sha in sorted(_manifest_entries(_manifest_of(root)).items()):
+            if sha == digest:
+                return key
+    return None
 
 
 def manifest_writes(targets, roots) -> list[tuple[str, str]]:
