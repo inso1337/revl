@@ -2322,7 +2322,9 @@ jobs:
       # Measured at ~4 minutes with both tiers live and zero skips.
       - run: >
           backends/python/.venv/bin/python -m pytest
+          backends/go/test_generic_fn_go_2495.py
           backends/go/test_generic_variant_go_2471.py
+          backends/rust/test_generic_fn_rust_2495.py
           backends/rust/test_generic_variant_rust_2471.py
           tests/test_163_match_payload_bind_scope.py
           tests/test_async_match_block_arm.py

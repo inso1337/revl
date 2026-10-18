@@ -1451,6 +1451,32 @@ def _rust_phantom_params(spec: dict) -> list:
     return [p for p in spec.get("params") or [] if p not in used]
 
 
+# issue #2495: the type parameters of the generic function being rendered.
+# `_rust_type` answers each as itself (`T`) instead of the erased `Value`;
+# `_emit_v3_functions` sets it per function and clears it after.
+_V3_FN_TPARAMS: frozenset = frozenset()
+
+
+def _v3_fn_type_params(fn: dict, types: dict) -> list[str]:
+    """The type parameters of a function signature, in first-use order.
+
+    The IR carries the author's spelling (`fn id[T](x: T) -> T` arrives as
+    params typed `T`, with no parameter list), so the emitter applies the
+    checker's implicit rule (`is_tparam_name`): a single-uppercase name that
+    no `type` declares is a type parameter. issue #2495"""
+    found: list[str] = []
+    declared = types if isinstance(types, dict) else {}
+    surfaces = [p.get("type") for p in fn.get("params") or []] + [fn.get("returns")]
+    for surface in surfaces:
+        if not isinstance(surface, str):
+            continue
+        for word in _RUST_TYPE_WORD.findall(surface):
+            if (len(word) == 1 and word.isupper() and word not in declared
+                    and word not in found):
+                found.append(word)
+    return found
+
+
 def _rust_type(name: object, types: dict | None = None,
                position: str = "value") -> str:
     """Surface type -> Rust type. Unknown named types map to cordis `Value`.
@@ -1472,6 +1498,8 @@ def _rust_type(name: object, types: dict | None = None,
     types = types or {}
     if name in types:
         return _ident(name, "type name")
+    if name in _V3_FN_TPARAMS:
+        return name  # issue #2495: a type parameter of the function in hand
     generic = re.match(r"^(\w+)\[(.+)\]$", name)
     if generic:
         head, inner = generic.group(1), generic.group(2)
@@ -6978,6 +7006,10 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
                 cn = callee.get("name")
                 if cn in ctx.case_adt:
                     return ctx.case_adt.get(cn)
+                generic = _v3_generic_call(cn, node.get("args") or [], ctx)
+                if generic is not None:
+                    # issue #2495: `id(p)` answers the instantiation, not `T`
+                    return _v3_subst(ctx.fn_returns.get(cn), generic[1])
                 if cn in ctx.fn_returns:
                     return ctx.fn_returns.get(cn)
         if kind == "list":
@@ -7112,6 +7144,12 @@ class _V3Ctx:
         # body recovers it through the serde_json value model the whole rust tier
         # shares (stdlib/value.rvl, stdlib/json.rvl), so passing a bare `String`/
         # `i64`/`f64`/`bool` would not even typecheck against `fn f(v: Value)`.
+        # issue #2495: the type parameters of each generic function, so a call
+        # binds them from its arguments (`_v3_generic_call`)
+        self.fn_tparams: dict[str, list] = {
+            fn.get("name"): _v3_fn_type_params(fn, types or {})
+            for fn in functions or []
+        }
         self.fn_param_types: dict[str, list] = {
             fn.get("name"): [p.get("type") for p in (fn.get("params") or [])]
             for fn in functions or []
@@ -7657,6 +7695,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # `Any`/`Value` slot is boxed (`_coerce_any_arg`). A borrowed `&str`
             # slot (item 282) is never an `Any` slot, so the two never overlap.
             param_types = ctx.fn_param_types.get(callee_name, [])
+            generic = _v3_generic_call(callee_name, arg_nodes, ctx)
+            if generic is not None:
+                # issue #2495: a slot typed by the callee's type parameter is
+                # the instantiation the arguments bind, never the erased
+                # `Value`, so it is not boxed
+                param_types = generic[0]
             bv_args = [
                 _borrow_str_arg(a, r, ctx) if idx in borrow
                 else _borrow_list_arg(a, r, ctx) if idx in list_borrow
@@ -9033,10 +9077,15 @@ def _emit_v3_types(types: dict) -> list[str]:
 
 def _emit_v3_functions(functions: list, types: dict, externs: list,
                        analyses: "_V3Analyses | None" = None) -> list[str]:
+    global _V3_FN_TPARAMS
     ctx = _V3Ctx(types, functions, externs, analyses=analyses)
     out: list[str] = []
     for fn in functions:
         name = _ident(fn.get("name"), "function name")
+        # issue #2495: inside a generic function its type parameters are
+        # types of their own, not the erased `Value`
+        tparams = _v3_fn_type_params(fn, types)
+        _V3_FN_TPARAMS = frozenset(tparams)
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.current_return = fn.get("returns")
         counts: dict[str, int] = {}
@@ -9094,7 +9143,8 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         params = ", ".join(rendered_params)
         returns = _rust_type(fn.get("returns") or "Unit", types, position="return")
         visibility = "pub " if is_public else ""
-        out.append(f"{visibility}fn {name}({params}) -> {returns} {{")
+        generics = _v3_fn_generics(fn, tparams, ctx)
+        out.append(f"{visibility}fn {name}{generics}({params}) -> {returns} {{")
         out.extend(view_prologue)
         if not fn.get("body"):
             out.append("    todo!()")
@@ -9103,7 +9153,86 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
                 _v3_stmt(stmt, ctx, out, 1)
         out.append("}")
         out.append("")
+        _V3_FN_TPARAMS = frozenset()
     return out
+
+
+def _v3_walk_nodes(node):
+    """Every dict reachable from `node` (lists and dict values), itself first."""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _v3_walk_nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _v3_walk_nodes(item)
+
+
+def _v3_subst(surface, mapping: dict):
+    """`surface` with each whole-word type parameter replaced from `mapping`."""
+    if not (isinstance(surface, str) and mapping):
+        return surface
+    return _RUST_TYPE_WORD.sub(lambda m: mapping.get(m.group(0), m.group(0)), surface)
+
+
+def _v3_unify(pattern, actual, params, bound: dict) -> None:
+    """Bind the type parameters `pattern` mentions from the matching parts of
+    `actual` (`List[T]` against `List[Int]` binds `T` to `Int`)."""
+    if not (isinstance(pattern, str) and isinstance(actual, str)):
+        return
+    p, a = pattern.strip(), actual.strip()
+    if p in params:
+        if not bound.get(p):
+            bound[p] = a
+        return
+    if "[" in p and p.endswith("]") and "[" in a and a.endswith("]") \
+            and p[: p.index("[")] == a[: a.index("[")]:
+        ps = _split_generic(p[p.index("[") + 1: -1])
+        as_ = _split_generic(a[a.index("[") + 1: -1])
+        if len(ps) == len(as_):
+            for pi, ai in zip(ps, as_):
+                _v3_unify(pi, ai, params, bound)
+
+
+def _v3_generic_call(name, arg_nodes, ctx: "_V3Ctx"):
+    """For a call to a generic function (issue #2495): the parameter types
+    with each type parameter the arguments bind replaced by its binding, the
+    binding itself, and the callee's type parameters; else None. A parameter
+    nothing binds stays as spelled: rustc infers it from where the result
+    flows."""
+    tparams = ctx.fn_tparams.get(name) if name else None
+    if not tparams:
+        return None
+    params = ctx.fn_param_types.get(name) or []
+    bound: dict = {}
+    for pattern, arg in zip(params, arg_nodes):
+        actual = _v3_infer_type(arg, ctx)
+        if isinstance(actual, str) and not any(
+                w in tparams for w in _RUST_TYPE_WORD.findall(actual)):
+            _v3_unify(pattern, actual, tparams, bound)
+    return [_v3_subst(p, bound) for p in params], bound, tparams
+
+
+def _v3_fn_generics(fn: dict, tparams: list[str], ctx: "_V3Ctx") -> str:
+    """The `<T: Clone + PartialEq>` list of a generic function (issue #2495),
+    empty for a function with no type parameter.
+
+    `Clone` always: the body renderer clones a reused local or a by-value
+    argument wherever the surface type is not a scalar, and every type a revl
+    value lowers to is `Clone`. `PartialEq` only when the body compares two
+    values with `==`/`!=` and one operand is typed by a type parameter."""
+    if not tparams:
+        return ""
+    needs_eq = False
+    for node in _v3_walk_nodes(fn.get("body") or []):
+        if node.get("kind") == "bin" and node.get("op") in ("==", "!="):
+            for side in (node.get("left"), node.get("right")):
+                inferred = _v3_infer_type(side, ctx)
+                if isinstance(inferred, str) and any(
+                        w in tparams for w in _RUST_TYPE_WORD.findall(inferred)):
+                    needs_eq = True
+    bounds = "Clone + PartialEq" if needs_eq else "Clone"
+    return "<" + ", ".join(f"{t}: {bounds}" for t in tparams) + ">"
 
 
 # item 378 Stage 5: module-level config seam for document-global config externs.
