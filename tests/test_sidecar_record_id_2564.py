@@ -184,6 +184,21 @@ def test_a_record_in_the_store_with_a_path_for_an_id_is_skipped(root):
     assert any(bad in str(entry) for entry in out.get("skipped", [])), out
 
 
+def test_a_record_in_the_store_with_a_malformed_id_is_not_rendered(root):
+    """The export renders a comment block only for a record id: an id holding
+    a line break never puts a line of its own into the exported module."""
+    path, record = _minted(root)
+    _load(path)
+    bad = "k_bad\n// injected"
+    server_mod.SESSION.note_records[bad] = {**record, "id": bad, "seq": 99}
+    out = _call("revl_export", {"with_knowledge": True})
+    assert out["ok"] is True, out
+    copy = _export_dir(root).resolve() / "clock.rvl"
+    text = copy.read_text(encoding="utf-8")
+    assert f"// [{record['id']}]" in text, text   # the minted note still renders
+    assert "injected" not in text and "k_bad" not in text, text
+
+
 def test_a_well_formed_record_file_round_trips_unchanged(root):
     """The positive control: a record file named and keyed by a record id is
     loaded, served, and never rewritten."""

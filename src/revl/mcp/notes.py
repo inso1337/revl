@@ -396,16 +396,12 @@ def is_record_id(value) -> bool:
 
 def record_path(directory: str, record_id) -> str | None:
     """`<directory>/<record_id>.json`, or None unless `record_id` is a record
-    id and the joined path lies directly under `directory` (issue #2564)."""
-    if not is_record_id(record_id):
-        return None
-    name = f"{record_id}.json"
-    if os.sep in name or (os.altsep and os.altsep in name) or ".." in name:
-        return None
-    real = os.path.realpath(directory)
-    if os.path.dirname(os.path.normpath(os.path.join(real, name))) != real:
-        return None
-    return os.path.join(directory, name)
+    id (issue #2564). A record id holds no separator and no `..`, so the name
+    stays in `directory`; where that directory resolves to is the export's
+    root check (`_within_roots`), and the new-file-only writer refuses a file
+    or a link already at the path."""
+    return os.path.join(directory, f"{record_id}.json") \
+        if is_record_id(record_id) else None
 
 
 def is_record_path(path: str, directory: str | None) -> bool:
@@ -549,14 +545,18 @@ def _marked(block) -> tuple[str | None, str]:
 
 def render(text: str, name: str, file_notes: list[dict]) -> str:
     """`text` with each note rendered as a marked block above its anchor,
-    skipping a note whose trailer the text already carries."""
+    skipping a note whose trailer the text already carries and one whose id
+    is not a record id."""
     from . import symbols  # noqa: PLC0415
 
     present = {_marked(b)[0] for b in _k.comment_blocks(text)} - {None}
     lines = text.split("\n")
     inserts: dict[int, list[str]] = {}
     for note in file_notes:
-        if note["id"] in present or note["status"] in ("retired", "superseded"):
+        # the store is not trusted to hold only record ids: a comment block is
+        # drawn only for one (issue #2564)
+        if (not is_record_id(note["id"]) or note["id"] in present
+                or note["status"] in ("retired", "superseded")):
             continue
         try:
             _b, _t, decl, found = symbols.locate(
