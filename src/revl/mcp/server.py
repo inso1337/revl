@@ -2276,8 +2276,17 @@ def _tool_export(arguments: dict) -> dict:
     finally:
         # recorded only once its bytes are on disk: a failed write records
         # nothing, so the manifest never vouches for bytes no export wrote
-        for path, text in _export_jail.manifest_writes(written, _file_roots()):
+        roots = _file_roots()
+        # issue #2577: read before the manifests change, since it keeps the
+        # digests they are about to replace
+        digests = _export_jail.digest_writes(written, roots)
+        for path, text in _export_jail.manifest_writes(written, roots):
             _write_atomic(path, text)
+        for path, text in digests:
+            try:
+                _write_atomic(path, text)
+            except OSError:
+                pass  # a record not kept leaves a later copy unmatched, no more
     if stopped is not None:
         # issue #2534: say which files did land, so the operator can find them
         landed = [p for p, _ in written]

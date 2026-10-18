@@ -1261,29 +1261,42 @@ keeps its record and that record's trust.
 
 **Adopting an export** (issue #2577). Copying a file out of `.revl/export/`
 into the project adopts its code, not the author's notes. A loaded file
-outside the export directory whose text is exactly the bytes an export
-recorded in a sanctioned root's manifest (`.revl/export/manifest.json`) is an
-adopted copy, wherever it lies. Its changed and unrecorded blocks import as
-`author: {kind: agent, trust: untrusted, adoptedFrom: <the export copy,
-relative to its root>}`: they ride exactly as an untrusted add does (the body
-withheld until the note carries evidence), a sidecar export writes them with
-that label, and a changed body is an untrusted supersede, never an operator
-one. The load answers with `notesAdopted`, one entry per such block: `id`
-(the new note), `symbol`, `file`, `adoptedFrom`, and `block`, which is
-`changed` for a recorded note's rewritten body (with `supersedes` naming that
-note) or `unrecorded`. The field is absent when nothing was adopted, and it
-never carries a body: read one with `revl_knowledge {op: query, id}`. No verb
-promotes an adopted note. An operator who wants one as their own adds it, or
-supersedes it, with `revl_knowledge` from a session at operator trust, or
-writes the block into the file themselves, which ends the match below.
+outside the export directory, wherever it lies, is an adopted copy when the
+text a load reads from it is the text of any copy an export ever wrote under
+a sanctioned root. The root's `.revl/export/manifest.json` keeps the digest
+of what each copy holds now, and `.revl/export/digests.json` every other
+digest an export wrote, append-only: the ones a later export of the same
+copy replaced, and the loaded text's of a copy with carriage returns. So a
+copy adopted byte for byte matches, and so does one whose line ends were
+converted (a load reads `\r\n` and `\r` as `\n`), however often the export
+is written again; a byte-order mark, an added trailing newline or any other
+changed byte does not. Only `revl_export` writes either file, and neither is
+ever an export target; a damaged or hand-edited `digests.json` is ignored.
+
+An adopted copy's changed and unrecorded blocks import as `author: {kind:
+agent, trust: untrusted, adoptedFrom: <the export copy, relative to its
+root>}`: they ride exactly as an untrusted add does (the body withheld until
+the note carries evidence), a sidecar export writes them with that label,
+and a changed body is an untrusted supersede, never an operator one. A
+block is changed only when its body differs from every note on its id's
+supersede chain, so reloading the same copy once its notes were exported
+with `with_knowledge` records nothing more. The load answers with
+`notesAdopted`, one entry per such block: `id` (the new note), `symbol`,
+`file`, `adoptedFrom`, and `block`, which is `changed` for a recorded note's
+rewritten body (with `supersedes` naming the note it replaces) or
+`unrecorded`. The field is
+absent when nothing was adopted, and it never carries a body: read one with
+`revl_knowledge {op: query, id}`. No verb promotes an adopted note. An
+operator who wants one as their own adds it, or supersedes it, with
+`revl_knowledge` from a session at operator trust, or writes the block into
+the file themselves, which ends the match below.
 
 Any other file holds bytes no MCP verb wrote, so its blocks import as
 `author: {kind: human, trust: operator}`. That includes an adopted copy the
-operator edited before loading it, by even one byte inside or outside a
-block, and one whose export has since been written again (the manifest keeps
-only the bytes each copy holds now): its bytes match no recorded export, and
-its changed blocks become operator notes, a changed body an operator
-supersede. Review an export's note blocks before editing an adopted copy.
+operator edited before loading it, by any change other than its line ends,
+inside or outside a block: its text matches no recorded export, and its
+changed blocks become operator notes, a changed body an operator supersede.
+Review an export's note blocks before editing an adopted copy.
 
 - Inputs: `op` (required); `symbol`, `id`, `kind`, `body`, `evidence`,
   `reason` per op.

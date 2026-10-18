@@ -635,10 +635,12 @@ def _import_author(path: str, text: str, roots=()) -> dict:
     records themselves, and no signature covers a comment block (nor does an
     export ever render one into a vendored component).
 
-    A file anywhere else whose text is exactly the bytes an export recorded
-    in the manifest of one of the sanctioned `roots` (`export_jail.exported_as`)
-    is an adopted copy (issue #2577): the operator copied an export out of
-    `.revl/export/` unchanged, which adopts its code, not the author's notes.
+    A file anywhere else whose loaded text is the text of any copy an export
+    ever wrote under one of the sanctioned `roots`, as its manifest and
+    digest record keep them (`export_jail.exported_as`), is an adopted copy
+    (issue #2577): the operator copied an export out of `.revl/export/`
+    unchanged, line ends aside, which adopts its code, not the author's notes.
+    A later export of the same copy does not end the match.
     A block there is the untrusted agent's, as in the export directory, with
     `adoptedFrom` naming the export copy it matches, and the load lists it
     (`adopted_blocks`). The operator who wants such a note as their own adds
@@ -647,9 +649,10 @@ def _import_author(path: str, text: str, roots=()) -> dict:
     Any other file holds bytes no MCP verb wrote, so its block is attributed
     to the operator who keeps that disk: a human note at operator trust, as
     before. That includes an adopted copy the operator then edited, by even
-    one byte, or one an export of the same copy has since replaced in the
-    manifest: its bytes match no recorded export. An unchanged block keeps
-    its record and that record's trust, wherever the file lies."""
+    one byte inside or outside a block, a byte-order mark or an added newline
+    included: its text matches no recorded export (line ends aside). An
+    unchanged block keeps its record and that record's trust, wherever the
+    file lies."""
     if _export_area.in_export_area(path):
         return {"kind": "agent", "trust": "untrusted"}
     if vendored_path(path) is not None:
@@ -694,12 +697,29 @@ def _mark_vendored(session, record: dict, path: str) -> dict:
     return record
 
 
+def _chain(current: dict, note_id: str) -> list[dict]:
+    """The note `note_id` names and each note its supersede chain leads to,
+    in order, so the last is the one a block marked `note_id` now stands for
+    (issue #2577). A block whose body is any of theirs is unchanged: the
+    original's, as an old copy still carries it, or the supersede an import
+    of that block already recorded, so reloading the same copy records
+    nothing more."""
+    chain, seen = [], set()
+    note = current.get(note_id)
+    while note is not None and note["id"] not in seen:
+        chain.append(note)
+        seen.add(note["id"])
+        note = current.get(note.get("supersededBy"))
+    return chain
+
+
 def import_marked(session, vs: dict, roots=()) -> list[dict]:
-    """Read the marked blocks of the loaded files back. A changed body
-    supersedes its note and a block with no record becomes one, authored by
+    """Read the marked blocks of the loaded files back. A body that differs
+    from every note on its id's supersede chain (`_chain`) supersedes the
+    last of them, and a block with no record becomes a note, authored by
     whoever wrote the file (`_import_author`, decided once per file); an
     adopted export copy's records are the ones `adopted_blocks` lists.
-    `roots` are the sanctioned roots whose export manifests name an adopted
+    `roots` are the sanctioned roots whose export records name an adopted
     copy (the server passes its own); with none, no file counts as one."""
     current = notes(session)
     created = []
@@ -713,9 +733,10 @@ def import_marked(session, vs: dict, roots=()) -> list[dict]:
             note_id, body = _marked(block)
             if note_id is None:
                 continue
-            existing = current.get(note_id)
-            if existing is not None and existing["body"] == body:
+            chain = _chain(current, note_id)
+            if any(note["body"] == body for note in chain):
                 continue
+            existing = chain[-1] if chain else None
             if parsed is None:
                 parsed = _parsed(text, name)
             program, decls, nodes = parsed
@@ -728,7 +749,7 @@ def import_marked(session, vs: dict, roots=()) -> list[dict]:
             try:
                 record = add(session, vs, {"kind": kind, "body": body},
                              symbol, author=dict(author),
-                             supersedes=note_id if existing else None)
+                             supersedes=existing["id"] if existing else None)
             except NoteError:
                 continue
             created.append(_mark_vendored(session, record, name))
