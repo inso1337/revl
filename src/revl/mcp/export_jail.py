@@ -164,6 +164,21 @@ def _root_of(path: str, roots) -> str | None:
     return None
 
 
+def _rel_in_root(path: str, root: str) -> str:
+    """`path` relative to `root`, for a path `_root_of` has already placed
+    inside `root`. Works on the resolved spelling only: no `..`, no other
+    drive, and no fallback to an absolute path, which joined under the export
+    directory would leave it."""
+    real = _real(path)
+    base = _real(root)
+    if real == base:
+        return os.curdir
+    prefix = base.rstrip(os.sep) + os.sep
+    if not real.startswith(prefix):
+        raise ValueError(f"{path!r} is not inside {root!r}")
+    return real[len(prefix):]
+
+
 def export_copy(path: str, roots) -> str:
     """Where an export writes the held text of the loaded file `path`: the
     file itself when it is inside an export directory, else its copy at the
@@ -173,7 +188,7 @@ def export_copy(path: str, roots) -> str:
     root = _root_of(path, roots)
     if root is None:
         return path
-    return os.path.join(root, EXPORT_DIR, os.path.relpath(_real(path), root))
+    return os.path.join(root, EXPORT_DIR, _rel_in_root(path, root))
 
 
 # ------------------------------------------------------------------ manifest
@@ -239,7 +254,7 @@ def manifest_writes(targets, roots) -> list[tuple[str, str]]:
             continue
         manifest = _manifest_of(root)
         entries = manifests.setdefault(manifest, dict(_manifest_entries(manifest)))
-        entries[os.path.relpath(_real(path), root)] = _sha256(text)
+        entries[_rel_in_root(path, root)] = _sha256(text)
     return [(manifest, json.dumps(
         {"files": {key: {"sha256": sha} for key, sha in entries.items()}},
         indent=2, sort_keys=True) + "\n") for manifest, entries in manifests.items()]
