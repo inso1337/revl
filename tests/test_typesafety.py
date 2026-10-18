@@ -1126,6 +1126,7 @@ _JOBS_SVC = "service Jobs { fn run(sql: Str) -> Int }\n"
 
 
 def test_2491_host_verb_wrong_first_arg_type_in_activation_body_is_refused():
+    # call site: _lower_postfix (lower.py:17109): an `effect` statement in an activation body
     err = _refusal("""
 component C {
   let pool = effect Pool.open("db", 4) undo pool.close()
@@ -1137,6 +1138,7 @@ component C {
 
 
 def test_2491_host_map_write_wrong_key_type_in_provide_method_is_refused():
+    # call site: _lower_postfix (lower.py:17109): an `effect` statement in a provide method
     # the key of a two-parameter verb is judged even when the value beside it
     # is a non-Str the generic value position admits
     err = _refusal(_CACHE_SVC + """
@@ -1155,6 +1157,7 @@ component C provides cache: Cache {
 
 
 def test_2491_host_map_write_value_stays_generic_on_a_host_local():
+    # call site: _lower_postfix (lower.py:17109): activation-body Map writes
     # the later parameter of a host Map write is the tiers' generic `V`
     # (`Map[V]`, items 113/176), so an Int value is admitted here, as the
     # component corpus (comp_host_map*.rvl) relies on
@@ -1169,6 +1172,7 @@ component C {
 
 
 def test_2491_host_verb_wrong_arg_type_in_provide_method_pure_body_is_refused():
+    # call site: _lower_component_pure_expr (lower.py:10018): a pure provide-method body
     err = _refusal(_JOBS_SVC + """
 component C provides jobs: Jobs {
   let pool = effect Pool.open("db", 4) undo pool.close()
@@ -1181,6 +1185,7 @@ component C provides jobs: Jobs {
 
 
 def test_2491_message_equals_the_fn_body_receiver_message():
+    # call site: _lower_postfix (lower.py:17109) against the fn-body receiver path
     # the same verb and the same mismatch on a constructor-tracked receiver in
     # a fn body: the refusal a host local gives must be that one, byte for byte
     ordinary = _refusal("""
@@ -1199,6 +1204,7 @@ component C {
 
 
 def test_2491_right_arg_types_are_admitted_on_host_locals():
+    # call sites: _lower_postfix (lower.py:17109), _lower_component_pure_expr (lower.py:10018)
     # positive control: every declared parameter supplied with its type, plus
     # an opaque host-verb result (`store.size()`) as an argument, which the
     # checker does not judge

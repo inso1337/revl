@@ -1119,7 +1119,8 @@ def _host_result_type(acquire: dict, env: "Env") -> str | None:
 
 
 # issue #2491: the argument position of each host Map write verb whose type
-# the tiers keep generic (`Map[V]`), so a host-local call does not judge it.
+# the tiers keep generic (`Map[V]`), so a host-local call does not compare its
+# type to the row (the expression is still inferred).
 # See `_check_host_verb`.
 _HOST_MAP_GENERIC_VALUE: dict[str, int] = {"insert": 1, "insert_if_absent": 1}
 
@@ -1146,8 +1147,10 @@ def _check_host_verb(family: str, verb: str, arg_types: list,
     is not judged, exactly as there. The iteration verbs take no arguments and
     are held to their count only.
 
-    One position stays unjudged by name: the VALUE of a host Map write
-    (`_HOST_MAP_GENERIC_VALUE`). Its checker row says `Str`, but the tiers
+    One position is not compared to its row, by name: the VALUE of a host Map
+    write (`_HOST_MAP_GENERIC_VALUE`). The value expression is still inferred,
+    so an ill-typed expression there is refused, but its type is not held to
+    the row's `Str`: the tiers
     genericized the host Map (`Map[V]`, items 113/176) and component programs
     store Int, record and list values in it (examples/app/notes.rvl,
     tests/fixtures/emit_*_corpus/comp_host_map*.rvl); that frontier/emitter
