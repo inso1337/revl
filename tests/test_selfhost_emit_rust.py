@@ -341,6 +341,11 @@ CORPUS = [
     # red, so the UI transaction unit stays unported on this tier and
     # `class=emission` stays a recorded blind spot.
     "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
+    # issue #2495: a generic function as a Rust generic with the bounds its
+    # body needs, its calls bound from their arguments; issue #2496: a `Str`
+    # call result, field or index in a `+`; issue #2497: a never-read `let`
+    # of a bare `None` typed `Option<Value>`
+    "generic_fn.rvl",
 ]
 
 
@@ -1556,33 +1561,3 @@ def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_pa
         f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
         f"add the document to CORPUS.")
 
-# Issue #2495: the reference rust emitter lowers a generic function (`fn
-# id[T](x: T) -> T`) to a function with type parameters (`fn id<T: Clone>(x:
-# T) -> T`); selfhost/emit_rust.rvl still erases the unknown name to `Value`
-# (`fn id(x: Value) -> Value`), which does not build at an `i64` call.
-# The port is fed the reference IR here, so the difference is NAMED rather
-# than passing for agreement. Same ratchet as GENERIC_VARIANT_PORT_GAPS: the
-# day the port follows the reference this fails, and the entry is DELETED and
-# the document added to CORPUS. issue #2494
-GENERIC_FN_PORT_GAPS: dict[str, tuple[str, str, str]] = {
-    "identity": (
-        "fn id[T](x: T) -> T { return x }\n"
-        "fn one() -> Int { return id(1) }\n",
-        "fn id<T: Clone>(x: T) -> T {",
-        "fn id(x: Value) -> Value {"),
-}
-
-
-@pytest.mark.parametrize("name", sorted(GENERIC_FN_PORT_GAPS))
-def test_a_generic_function_is_a_known_port_divergence(emitted, reference, tmp_path,
-                                                       name):
-    source, reference_token, port_token = GENERIC_FN_PORT_GAPS[name]
-    doc = tmp_path / f"{name}.rvl"
-    doc.write_text(source)
-    ir = compile_files([str(doc)])
-    want, got = reference.emit(ir), emitted["emit_rust_src"](ir)
-    assert reference_token in want, want
-    assert got != want and port_token in got, (
-        f"{name}: the port no longer emits {port_token!r}. If it now matches "
-        f"the reference, DELETE the entry from GENERIC_FN_PORT_GAPS and "
-        f"add the document to CORPUS.")

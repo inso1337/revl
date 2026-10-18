@@ -142,6 +142,10 @@ CORPUS = [
     # or parameter, or the other operand of an `==`), and a call through a
     # function value types its payload
     "../../../backends/go/testdata/result_erased_1631.rvl",
+    # issue #2495: a generic function as a Go type-parameter list, its calls
+    # bound from their arguments; issue #2496: a `Str` call result, field or
+    # index in a `+`
+    "generic_fn.rvl",
     # issue #106: the v3 COMBINED path's first slice (`_emit_v3_combined`). A
     # top-level declaration beside components whose provide methods are single
     # `return`s or empty bodies, with or without `requires`: the pure tier, the
@@ -1099,33 +1103,3 @@ def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_pa
         f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
         f"add the document to CORPUS.")
 
-# Issue #2495: the reference go emitter lowers a generic function (`fn id[T](x:
-# T) -> T`) to Go generics (`func id[T any](x T) T`); selfhost/emit_go.rvl
-# still prints the surface spelling (`func id(x T) T`), which does not build
-# (`undefined: T`).
-# The port is fed the reference IR here, so the difference is NAMED rather
-# than passing for agreement. Same ratchet as GENERIC_VARIANT_PORT_GAPS: the
-# day the port follows the reference this fails, and the entry is DELETED and
-# the document added to CORPUS. issue #2494
-GENERIC_FN_PORT_GAPS: dict[str, tuple[str, str, str]] = {
-    "identity": (
-        "fn id[T](x: T) -> T { return x }\n"
-        "fn one() -> Int { return id(1) }\n",
-        "func id[T any](x T) T {",
-        "func id(x T) T {"),
-}
-
-
-@pytest.mark.parametrize("name", sorted(GENERIC_FN_PORT_GAPS))
-def test_a_generic_function_is_a_known_port_divergence(emitted, reference, tmp_path,
-                                                       name):
-    source, reference_token, port_token = GENERIC_FN_PORT_GAPS[name]
-    doc = tmp_path / f"{name}.rvl"
-    doc.write_text(source)
-    ir = compile_files([str(doc)])
-    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
-    assert reference_token in want, want
-    assert got != want and port_token in got, (
-        f"{name}: the port no longer emits {port_token!r}. If it now matches "
-        f"the reference, DELETE the entry from GENERIC_FN_PORT_GAPS and "
-        f"add the document to CORPUS.")

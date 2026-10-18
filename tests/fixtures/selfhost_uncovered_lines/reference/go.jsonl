@@ -188,21 +188,9 @@
 
 ["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_refuse_unbound", 3, 3]
 
-["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_subst", 3, 3]
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_subst", 1, 1]
 
-["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_unify", 13, 13]
-
-["reason", "issue-2495-generic-functions-wait-on-the-port", "issue #2495: the reference lowers a generic function (`func id[T any](x T) T`, a call binding the type parameters from its arguments) and the self-host port does not yet, so no CORPUS document can hold these bytes; the divergence is pinned in GENERIC_FN_PORT_GAPS (tests/test_selfhost_emit_go.py, issue #2494). Retire by porting and adding a corpus document."]
-
-["function", "issue-2495-generic-functions-wait-on-the-port", "_go_v3_generic_call", 8, 8]
-
-["function", "issue-2495-generic-functions-wait-on-the-port", "_go_v3_typed_generic_arg", 6, 6]
-
-["function", "issue-2495-generic-functions-wait-on-the-port", "_v3_flow_hints", 1, 1]
-
-["function", "issue-2495-generic-functions-wait-on-the-port", "_v3_fn_type_params", 1, 1]
-
-["function", "issue-2495-generic-functions-wait-on-the-port", "_v3_mentions_any", 1, 1]
+["function", "issue-2471-generic-variants-wait-on-the-port", "_v3_unify", 1, 1]
 
 ["reason", "issue-721-issue-1321-component-is-observable-decides", "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them."]
 
@@ -322,7 +310,7 @@
 
 ["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_stmt", 1, 1]
 
-["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_type", 4, 4]
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_type", 3, 3]
 
 ["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_v3_builtin_ret_type", 2, 2]
 
@@ -332,9 +320,9 @@
 
 ["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_validated_emissions", 8, 8]
 
-["reason", "remaining-branches-are-inference-fallbacks-for-nodes-the", "Remaining branches are inference fallbacks for nodes the frontend does not put in a typed position: a non-dict node, a literal with no scalar type, a field read on a non-record, an index into a non-List with no `value_type`, a call whose callee is not a plain name, an unknown operator, an ambiguous record literal, and the late Float `%` arm (the frontend rejects Float remainder). The builtin, `len`, `maplit`, constructor and Map-subscript arms are in the corpus since issue #106. Issue #2495 adds one: a call to a generic function answers the instantiation its arguments bind, and no corpus document declares a generic function until the port follows (GENERIC_FN_PORT_GAPS)."]
+["reason", "remaining-branches-are-inference-fallbacks-for-nodes-the", "Remaining branches are inference fallbacks for nodes the frontend does not put in a typed position: a non-dict node, a literal with no scalar type, a field read on a non-record, an index into a non-List with no `value_type`, a call whose callee is not a plain name, an unknown operator, an ambiguous record literal, and the late Float `%` arm (the frontend rejects Float remainder). The builtin, `len`, `maplit`, constructor and Map-subscript arms are in the corpus since issue #106."]
 
-["function", "remaining-branches-are-inference-fallbacks-for-nodes-the", "_go_v3_infer_type", 9, 9]
+["function", "remaining-branches-are-inference-fallbacks-for-nodes-the", "_go_v3_infer_type", 8, 8]
 
 ["reason", "remaining-entry-paths-accept-the-package-name-compatibility", "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. A module-only v3 document takes the pure typed-core path before any of this code, and until issue #2260 a component document could not stand in as a corpus case, because emit_go.rvl excluded the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead. Issue #1347 adds three statements: `Int.to_int32` in a component METHOD body flags the checked narrow `revlToI32`, so this path resets `_COMP_NEEDS_OVERFLOW32` and writes the helper that the pure typed-core path emits off `ctx.needs_overflow32`. It sits in the same live-component assembly after the pure-module early return. Issue #1669 adds two statements: an ir_version 3 document that carries a `lifecycle test`, components and a module `fn` takes the combined renderer, because the live stc-go path never renders module fns. A lifecycle document is not a go corpus case (selfhost/emit_go.rvl names its components instead); backends/go/test_module_fn_lifecycle_1669.py runs it under `go test` against the pinned stc-go. Issue #2198 adds three statements: an `Int` negation in a component METHOD body flags the checked `revlSub`, so this path resets `_COMP_NEEDS_OVERFLOW` and writes the helper the pure typed-core path emits off `ctx.needs_overflow`. It sits in the same live-component assembly after the pure-module early return. Issue #2259 adds five more on the same path: the resets of `_COMP_NEEDS_FLOAT_DIV` and `_COMP_NEEDS_FLOAT_REM`, and the writes of the `revlDiv` helper and the `math` import that a method body's true division or Float `%` flags. Issue #2260 ports this live path for a v3 document of services and provide-only components with nothing top-level, so the corpus now runs its routing, its flag resets, its import block and preamble assembly; what stays unrun is the ir_version 1/2 tier, the lifecycle, spawn, stream, secret, timer and record-mode arms, and the extern, type and sealed Result branches a provide-only component never reaches. Issue #2262 adds the guard and the write of the `revlAddI32`/`revlSubI32`/`revlMulI32` helpers that a method body's Int32 `+ - *` or unary minus flags through `_COMP_NEEDS_ARITH32`; comp_live_int32_arith.rvl reaches both on this path, and comp_provide_arith.rvl reaches the combined path's same helpers off `_COMP_NEEDS_OVERFLOW32`. Issue #2481 adds one: the live component path imports `runtime/debug` (as `revldebug`) when the rendered body carries a lifecycle test's recovered-panic stack. The self-host go port declines lifecycle tests, so no corpus document needs the import; tests/test_go_panic_outside_activation.py builds modules that do."]
 
@@ -414,9 +402,9 @@
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_needs_sync", 1, 1]
 
-["reason", "the-go-v3-expr-arms-the-frontend-never", "The `_go_v3_expr` arms the frontend never feeds: a malformed node, an unknown binary or unary operator, an unknown expression kind, a nullary case read as a bare name and a user constructor in call shape (both compatibility IR: the frontend lowers a declared variant application as `adt`), and an unpinned `Map.empty()` (the checker requires the annotation the frontend threads onto the node, so neither the fallback read of that pin nor the refusal runs). Functional record update is the one refusal here a document reaches, tests/fixtures/emit_go_refusals/record_update.rvl. Issue #2495 adds two to the call arm: the type parameters a generic callee binds from its arguments, and no corpus document declares a generic function until the port follows (GENERIC_FN_PORT_GAPS)."]
+["reason", "the-go-v3-expr-arms-the-frontend-never", "The `_go_v3_expr` arms the frontend never feeds: a malformed node, an unknown binary or unary operator, an unknown expression kind, a nullary case read as a bare name and a user constructor in call shape (both compatibility IR: the frontend lowers a declared variant application as `adt`), and an unpinned `Map.empty()` (the checker requires the annotation the frontend threads onto the node, so neither the fallback read of that pin nor the refusal runs). Functional record update is the one refusal here a document reaches, tests/fixtures/emit_go_refusals/record_update.rvl."]
 
-["function", "the-go-v3-expr-arms-the-frontend-never", "_go_v3_expr", 10, 10]
+["function", "the-go-v3-expr-arms-the-frontend-never", "_go_v3_expr", 8, 8]
 
 ["reason", "the-item-445-unique-stamp-lands-only-on", "The item 445 `unique` stamp lands only on a self-rebind through `push`/`set`/`remove` of the binding itself, so the two guards that reject a stamped write through another method or from another receiver never fail. The destructive `append`, map store and `delete` are in the corpus (emit_go_corpus/stdlib_surface.rvl, loop_shapes.rvl)."]
 
