@@ -1282,7 +1282,9 @@ harmless, while a written copy no record keeps would load, adopted, as the
 operator's. When the record write fails the export fails, naming the
 record, with nothing written. When the manifest write fails the export
 fails, naming the manifest and each file that landed: those copies are
-recorded nowhere, so export again rather than adopt them. Every write goes
+recorded nowhere, so never adopt one. No export replaces them either, even
+with `overwrite: true`, since the manifest does not hold their bytes:
+remove the listed copies by hand, then export again. Every write goes
 through a temporary file of a fresh name beside its target, so nothing
 prepared there stops it. A record is never lost silently. A damaged
 `digests.json` (not JSON, the wrong shape, or not a readable file) is
