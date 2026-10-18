@@ -9,8 +9,10 @@ became an operator note, and a changed body of a recorded note an operator
 supersede carrying the author's text, with nothing shown to the operator.
 
 `revl_export` records the SHA-256 of every file it writes in its root's
-manifest. A loaded file outside the export directory whose text is exactly
-a recorded export is an adopted copy, so through the real dispatch:
+manifest, and every digest the manifest no longer holds in the digest record
+beside it. A loaded file outside the export directory whose text, as a load
+reads it, is a recorded export is an adopted copy, so through the real
+dispatch:
 
 * the author rewrites a recorded note's body and exports; the copy is
   adopted byte for byte (over the project's file, or into a nested
@@ -20,6 +22,10 @@ a recorded export is an adopted copy, so through the real dispatch:
 * the load result lists each adopted block (`notesAdopted`): its note, its
   symbol, its file, the export, and whether it changed a recorded body;
 * the sidecar export of the adopted note keeps the label;
+* a later export rewriting the copy neither ends the adoption nor, after an
+  export with knowledge, records the same block again on reload;
+* an export copy with `\\r\\n` line ends adopted byte for byte matches;
+* a damaged digest record is ignored, never fatal, and started again;
 * control: a copy the operator edited before loading (one line outside
   every block, or the block's body) is the operator's, as before, and the
   load lists nothing adopted;
@@ -27,9 +33,9 @@ a recorded export is an adopted copy, so through the real dispatch:
   record's trust, and is not listed.
 
 Every test needs the cordis-py runtime and skips without it: with it
-installed this module collects 12 items and all 12 pass; a run that reports
-12 skipped (or 0 passed) has proved nothing. Before the fix the first 8 fail
-and the 4 controls pass.
+installed this module collects 17 items and all 17 pass; a run that reports
+17 skipped (or 0 passed) has proved nothing. Before the fix the 13 adoption
+items fail and the 4 controls pass.
 """
 
 import importlib.util
@@ -60,6 +66,8 @@ EXPORTED = os.path.join(".revl", "export", "vault.rvl")
 ADOPTED = {**UNTRUSTED, "adoptedFrom": EXPORTED}
 OPERATOR_TEXT = "the operator reviewed get and keeps it answering None"
 WHERE = ["root", "nested"]
+# a line of `Vault` a later export changes
+GET = "provide kv { fn get(k) = None }"
 
 
 @pytest.fixture
@@ -242,3 +250,103 @@ def test_an_unchanged_block_in_an_adopted_copy_keeps_its_record(vault, where):
     assert current[note_id]["author"] == UNTRUSTED
     assert current[note_id]["status"] == "live"
     assert len(notes_mod._records(server_mod.SESSION)) == 1
+
+
+# ------------------------------------------------ a later export, line ends
+
+
+def _export_again(copy: Path) -> None:
+    """The author changes code in the loaded adopted copy and exports it, so
+    the export copy, and the digest its manifest keeps, are replaced."""
+    before = copy.read_bytes()
+    edited = _call("revl_edit", {"edits": [{
+        "anchor": GET, "replacement": GET + "  // v2", "count": 1}],
+        "commit": True})
+    assert edited["ok"] is True, {k: edited.get(k) for k in ("diagnostics", "note")}
+    assert _call("revl_export", {})["ok"] is True
+    assert copy.read_bytes() != before
+
+
+def _record_of(path: Path):
+    """The digest record at `path` as JSON, or None when it is not JSON."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def test_a_reexport_after_adoption_neither_grows_nor_promotes(vault):
+    """Adopted load, export with knowledge (which rewrites the export copy),
+    reload of the unchanged adopted file: the same records, none an
+    operator's, nothing listed as adopted again."""
+    copy, note_id = _recorded_then_rewritten(vault)
+    adopted = _adopt(copy, vault, "root")
+    _load(adopted)
+    first = sorted(notes_mod._records(server_mod.SESSION))
+    assert len(first) == 2 and note_id in first, first
+    held = adopted.read_bytes()
+    exported = _call("revl_export", {"with_knowledge": True})
+    assert exported["ok"] is True, exported
+    assert adopted.read_bytes() == held and copy.read_bytes() != held
+    _reset()
+    loaded = _load(adopted)
+    records = notes_mod._records(server_mod.SESSION)
+    assert sorted(records) == first, sorted(records)
+    assert [r["id"] for r in records.values()
+            if r.get("author", {}).get("trust") == "operator"] == []
+    assert "notesAdopted" not in loaded, loaded["notesAdopted"]
+
+
+def test_a_later_export_of_the_copy_does_not_end_the_adoption(vault):
+    copy = _author_export(vault)
+    adopted = _adopt(copy, vault, "root")
+    _load(adopted)
+    assert _with_body(AUTHOR_TEXT)[0]["author"] == ADOPTED
+    _export_again(copy)
+    _reset()
+    loaded = _load(adopted)
+    found = _with_body(AUTHOR_TEXT)
+    assert len(found) == 1, sorted(notes_mod.notes(server_mod.SESSION))
+    assert found[0]["author"] == ADOPTED
+    assert [e["block"] for e in loaded.get("notesAdopted") or []] == ["unrecorded"]
+
+
+def test_an_export_copy_with_crlf_line_ends_adopted_byte_for_byte_is_untrusted(vault):
+    """An inline export writes its source as held, `\\r\\n` included; a load
+    reads the adopted copy with `\\n` line ends, which is still the text the
+    export wrote."""
+    source = PLAIN.replace(DECL, _block(UNRECORDED, AUTHOR_TEXT) + DECL)
+    assert _call("revl_load", {"source": source.replace("\n", "\r\n")})["ok"] is True
+    copy = _copy(vault)
+    wrote = _call("revl_export", {"path": str(copy)})
+    assert wrote["ok"] is True, wrote
+    assert b"\r\n" in copy.read_bytes()
+    _reset()
+    adopted = _adopt(copy, vault, "root")
+    assert adopted.read_bytes() == copy.read_bytes()
+    loaded = _load(adopted)
+    found = _with_body(AUTHOR_TEXT)
+    assert len(found) == 1, sorted(notes_mod.notes(server_mod.SESSION))
+    assert found[0]["author"] == ADOPTED
+    assert [e["block"] for e in loaded.get("notesAdopted") or []] == ["unrecorded"]
+
+
+@pytest.mark.parametrize("damage", ["not-json", "wrong-shape"])
+def test_a_damaged_digest_record_is_ignored(vault, damage):
+    """A record that is not JSON, or not `{"digests": {str: str}}`, records
+    nothing: the load succeeds, the manifest still names the copy, and the
+    next export starts the record again."""
+    copy = _author_export(vault)
+    record = copy.parent / "digests.json"
+    record.write_text("{not json" if damage == "not-json" else
+                      json.dumps({"digests": {"x": 1}, "extra": []}),
+                      encoding="utf-8")
+    adopted = _adopt(copy, vault, "root")
+    _load(adopted)
+    assert _with_body(AUTHOR_TEXT)[0]["author"] == ADOPTED
+    _export_again(copy)
+    rewritten = _record_of(record)
+    assert isinstance(rewritten, dict) and set(rewritten) == {"digests"}, rewritten
+    _reset()
+    _load(adopted)
+    assert _with_body(AUTHOR_TEXT)[0]["author"] == ADOPTED
