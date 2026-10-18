@@ -101,19 +101,31 @@ def test_a_same_named_fn_of_the_same_file_does_not_capture_an_arm_binding():
     assert _call(ir, "demo") == "<hi>-"
 
 
+# The arrow program, and the top-level `fn s` that is the only difference
+# between the arrow reproducer and its control.
+_ARROW = ('pub fn t() -> Str {\n'
+          '  let f = (s) => `<${s}>`\n'
+          '  return f("x")\n'
+          '}\n')
+_FN_S = ('fn s(n: Int) -> Int {\n'
+         '  return n\n'
+         '}\n'
+         '\n')
+
+
 def test_an_untyped_arrow_parameter_is_not_a_same_named_fn():
     """The arrow twin, same mechanism: a bare `(s) => ...` in an inference
     position has an unknown parameter type, and lowering dropped `s` from the
     type environment. RED on base: `s` typed as `fn s`, `(Int) -> Int`."""
-    src = ('fn s(n: Int) -> Int {\n'
-           '  return n\n'
-           '}\n'
-           '\n'
-           'pub fn t() -> Str {\n'
-           '  let f = (s) => `<${s}>`\n'
-           '  return f("x")\n'
-           '}\n')
-    ir = compile_source(src, "arrow2588.rvl")
+    ir = compile_source(_FN_S + _ARROW, "arrow2588.rvl")
+    assert _call(ir, "t") == "<x>"
+
+
+def test_control_the_arrow_without_a_same_named_fn_checks():
+    """Control (green on base too): the identical arrow program with no
+    `fn s`. The test above differs from this one only by those lines, so its
+    base refusal is the fall-through and not the template."""
+    ir = compile_source(_ARROW, "arrow2588.rvl")
     assert _call(ir, "t") == "<x>"
 
 
