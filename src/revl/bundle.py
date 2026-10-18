@@ -201,13 +201,31 @@ def _manifest_text(norm_ir: dict) -> str:
 
 # --------------------------------------------------------------- backend emit
 
+def _unshipped_backend(backend: str) -> str | None:
+    """The refusal sentence when `backend` is not one of the backends this
+    toolchain ships, else None (issue #2596). A bundle's manifest names its
+    backends, and that manifest is the bundle's text and not the operator's, so
+    a name is checked against the shipped list before it is used for anything."""
+    if backend in DEFAULT_BACKENDS:
+        return None
+    return (f"backend {backend!r} is not a backend this toolchain ships "
+            f"(known: {', '.join(DEFAULT_BACKENDS)}); it was not imported")
+
+
 def _emitter(backend: str):
     """The backend's emitter module, or None when `_BACKENDS_ROOT` has none.
+
+    A name that is not a shipped backend is refused here, before any path is
+    built from it, so no caller can load an emitter the toolchain does not ship
+    (issue #2596).
 
     A bare `import emit` collides across backends, so this is the one module
     every loader in the process shares (`placement.backend_emit_module`, under
     the name `revl_<backend>_emit`), and its `EmitError` is the class the
     tier's other callers catch (issue #2204)."""
+    unshipped = _unshipped_backend(backend)
+    if unshipped is not None:
+        raise RevlError("<bundle>", 0, unshipped)
     if not (_BACKENDS_ROOT / backend / "emit.py").exists():
         return None
     from .placement import backend_emit_module  # noqa: PLC0415 - off the compile graph
@@ -869,6 +887,13 @@ def _check_emitted(bundle: Path, norm_ir: dict, manifest: dict) -> list[Check]:
     checks: list[Check] = []
     for backend in sorted(records):
         label = f"emitted [{backend}]"
+        unshipped = _unshipped_backend(backend)
+        if unshipped is not None:
+            # The bundle claims an artifact for a backend this toolchain does
+            # not ship. That is a divergence in what it claims, not an
+            # unverifiable tier, and nothing was loaded for it (issue #2596).
+            checks.append(Check(label, MISMATCH, unshipped))
+            continue
         files, refusal = _emit_files(backend, norm_ir)
         if refusal is not None:
             # The bundle committed an artifact for this tier and the tier now
@@ -926,6 +951,11 @@ def _check_refused(norm_ir: dict, manifest: dict) -> list[Check]:
     for backend in sorted(recorded):
         label = f"refused [{backend}]"
         was = str(recorded[backend])
+        unshipped = _unshipped_backend(backend)
+        if unshipped is not None:
+            # The same manifest-supplied name as the emitted tier (issue #2596).
+            checks.append(Check(label, MISMATCH, unshipped, was, ""))
+            continue
         files, refusal = _emit_files(backend, norm_ir)
         if refusal is None and files is None:
             checks.append(Check(
