@@ -186,9 +186,14 @@ def _write_lock(project_dir: str, lock: dict) -> None:
     fd, tmp = tempfile.mkstemp(dir=project_dir, prefix=".truc.lock.",
                                suffix=".tmp")
     try:
+        # mkstemp makes the file 0600; give it the mode `write_text` would have
+        # (0666 under the umask), on the open fd rather than the path.
+        if hasattr(os, "fchmod"):
+            umask = os.umask(0)
+            os.umask(umask)
+            os.fchmod(fd, 0o666 & ~umask)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(lock, indent=2))
-        os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:
         pathlib.Path(tmp).unlink(missing_ok=True)
@@ -588,11 +593,17 @@ def _read_registry_file(path: pathlib.Path, rel: str) -> str | None:
     if not stat.S_ISREG(mode):
         raise _source_refusal(path, rel, "not a regular file")
     try:
-        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
+        # O_NONBLOCK: a source swapped for a FIFO after the lstat must not
+        # block the open; the fstat below then refuses it.
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW
+                     | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         if path.is_symlink():
             raise _source_refusal(path, rel, "a symlink") from None
         raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise _source_refusal(path, rel, "not a regular file")
     with os.fdopen(fd, "r", encoding="utf-8") as handle:
         return handle.read()
 

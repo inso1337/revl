@@ -14,6 +14,7 @@ throwaway project, with no network and no cordis runtime.
 """
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -109,6 +110,31 @@ def test_add_refuses_a_registry_entry_directory_that_is_a_link(world):
     assert not _vendored(proj)
 
 
+def test_add_refuses_a_components_directory_that_is_a_link(world):
+    tmp_path, reg, proj, outside = world
+    real = tmp_path / "elsewhere"
+    (reg / "components").rename(real)
+    (reg / "components").symlink_to(real, target_is_directory=True)
+
+    message = _refused_add(proj)
+
+    assert "components" in message
+    assert not _vendored(proj)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no os.mkfifo here")
+def test_add_refuses_a_registry_source_that_is_not_a_regular_file(world):
+    tmp_path, reg, proj, outside = world
+    entry_file = reg / "components" / ENTRY / "dossier.json"
+    entry_file.unlink()
+    os.mkfifo(entry_file)
+
+    message = _refused_add(proj, "not a regular file")
+
+    assert "dossier.json" in message
+    assert not _vendored(proj)
+
+
 # --------------------------------------------- #2554: project file writes
 
 def test_add_refuses_a_lock_that_links_outside(world):
@@ -180,6 +206,23 @@ def test_rm_refuses_a_truc_toml_that_links_outside(world):
     assert "truc.toml" in str(raised.value)
     assert target.read_text() == before
     assert _vendored(proj)
+
+
+@pytest.mark.skipif(not hasattr(os, "fchmod"), reason="POSIX modes only")
+def test_the_lock_gets_the_mode_write_text_would_give_it(world):
+    """mkstemp creates 0600; the renamed lock must be 0666 under the umask,
+    which is what the plain write it replaces produced."""
+    tmp_path, reg, proj, outside = world
+    for umask, expected in ((0o077, 0o600), (0o022, 0o644)):
+        lock = proj / "truc.lock"
+        lock.unlink(missing_ok=True)
+        old = os.umask(umask)
+        try:
+            _host.commit_add(str(proj), PLAN)
+        finally:
+            os.umask(old)
+        assert lock.stat().st_mode & 0o777 == expected, oct(umask)
+        _host.commit_rm(str(proj), RM_PLAN)
 
 
 MANIFEST = json.dumps({"layers": []})
