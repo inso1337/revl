@@ -25,7 +25,16 @@ dispatch:
 * a later export rewriting the copy neither ends the adoption nor, after an
   export with knowledge, records the same block again on reload;
 * an export copy with `\\r\\n` line ends adopted byte for byte matches;
-* a damaged digest record is ignored, never fatal, and started again;
+* a damaged digest record is ignored, never fatal, reported by the load,
+  and started again;
+* no export target has the manifest's or the digest record's name as any
+  part below the export directory, so no export can make either name a
+  directory;
+* a digest record write that fails fails the export, naming the record, and
+  the manifest keeps the digest it would have replaced;
+* an adopted block whose recorded note is the operator's never supersedes
+  it: it becomes a note of its own beside it, naming the note it would have
+  changed (`changes`), and a reload records nothing more;
 * control: a copy the operator edited before loading (one line outside
   every block, or the block's body) is the operator's, as before, and the
   load lists nothing adopted;
@@ -33,11 +42,12 @@ dispatch:
   record's trust, and is not listed.
 
 Every test needs the cordis-py runtime and skips without it: with it
-installed this module collects 17 items and all 17 pass; a run that reports
-17 skipped (or 0 passed) has proved nothing. Before the fix the 13 adoption
+installed this module collects 22 items and all 22 pass; a run that reports
+22 skipped (or 0 passed) has proved nothing. Before the fix the 18 adoption
 items fail and the 4 controls pass.
 """
 
+import errno
 import importlib.util
 import json
 import os
@@ -332,21 +342,137 @@ def test_an_export_copy_with_crlf_line_ends_adopted_byte_for_byte_is_untrusted(v
 
 
 @pytest.mark.parametrize("damage", ["not-json", "wrong-shape"])
-def test_a_damaged_digest_record_is_ignored(vault, damage):
+def test_a_damaged_digest_record_is_ignored_and_reported(vault, damage):
     """A record that is not JSON, or not `{"digests": {str: str}}`, records
-    nothing: the load succeeds, the manifest still names the copy, and the
-    next export starts the record again."""
+    nothing: the load succeeds, the manifest still names the copy, the load
+    result names the damaged record, and the next export starts it again."""
     copy = _author_export(vault)
     record = copy.parent / "digests.json"
     record.write_text("{not json" if damage == "not-json" else
                       json.dumps({"digests": {"x": 1}, "extra": []}),
                       encoding="utf-8")
     adopted = _adopt(copy, vault, "root")
-    _load(adopted)
+    loaded = _load(adopted)
     assert _with_body(AUTHOR_TEXT)[0]["author"] == ADOPTED
+    damaged = loaded.get("exportRecordDamaged")
+    assert isinstance(damaged, list) and len(damaged) == 1, loaded
+    assert _same_file(damaged[0], record), damaged
     _export_again(copy)
     rewritten = _record_of(record)
     assert isinstance(rewritten, dict) and set(rewritten) == {"digests"}, rewritten
     _reset()
-    _load(adopted)
+    reloaded = _load(adopted)
+    assert "exportRecordDamaged" not in reloaded, reloaded["exportRecordDamaged"]
     assert _with_body(AUTHOR_TEXT)[0]["author"] == ADOPTED
+
+
+# ------------------------------------------------ the record is never lost
+
+
+@pytest.mark.parametrize("name", ["digests.json", "Manifest.JSON"])
+def test_a_record_name_is_refused_as_any_part_of_an_export_target(vault, name):
+    """An export target under a directory named for the manifest or the
+    digest record would make that name a directory, and every later record
+    write fail: it is refused, with nothing written."""
+    assert _call("revl_load", {"source": PLAIN})["ok"] is True
+    export = vault.parent / ".revl" / "export"
+    wrote = _call("revl_export", {"path": str(export / name / "x.rvl")})
+    assert wrote["ok"] is False, wrote
+    assert "digest record" in json.dumps(wrote), wrote
+    assert not (export / name).exists()
+
+
+@pytest.mark.parametrize("how", ["write-fails", "a-directory"])
+def test_a_record_write_that_fails_fails_the_export(vault, monkeypatch, how):
+    """An export that replaces a copy's digest must keep it in the record.
+    When that write fails the export says so and names the record, and the
+    manifest keeps the digest it would have replaced, so the adopted copy
+    still matches."""
+    copy = _author_export(vault)
+    adopted = _adopt(copy, vault, "root")
+    _load(adopted)
+    manifest = copy.parent / "manifest.json"
+    held = manifest.read_bytes()
+    record = copy.parent / "digests.json"
+    write = server_mod._write_atomic
+    if how == "a-directory":
+        record.mkdir()
+    else:
+        def failing(path, text):
+            if os.path.basename(path) == "digests.json":
+                raise OSError(errno.ENOSPC, "No space left on device", path)
+            write(path, text)
+        monkeypatch.setattr(server_mod, "_write_atomic", failing)
+    edited = _call("revl_edit", {"edits": [{
+        "anchor": GET, "replacement": GET + "  // v2", "count": 1}],
+        "commit": True})
+    assert edited["ok"] is True, {k: edited.get(k) for k in ("diagnostics", "note")}
+    wrote = _call("revl_export", {})
+    assert wrote["ok"] is False, wrote
+    assert "digests.json" in json.dumps(wrote), wrote
+    assert manifest.read_bytes() == held
+    monkeypatch.setattr(server_mod, "_write_atomic", write)
+    _reset()
+    _load(adopted)
+    found = _with_body(AUTHOR_TEXT)
+    assert len(found) == 1, sorted(notes_mod.notes(server_mod.SESSION))
+    assert found[0]["author"] == ADOPTED
+
+
+# ------------------------------------------------ a note trusted further
+
+
+def test_an_adopted_block_never_supersedes_an_operators_note(vault):
+    """The recorded note is the operator's; the author rewrites its block and
+    exports, and the copy is adopted. The operator's note stays live, and the
+    author's text is a note of its own beside it, naming the note it would
+    have changed (`changes`), with its body withheld."""
+    old = server_mod.AUTHORING
+    server_mod.set_authoring_trust(host_code=True)
+    assert server_mod.AUTHORING.profile() is None
+    _load(vault)
+    added = _call("revl_knowledge", {"op": "add", "symbol": "Vault",
+                                     "kind": "purpose", "body": BODY})
+    assert added["ok"] is True, added
+    note_id = added["note"]["id"]
+    assert added["note"]["author"]["trust"] == "operator"
+    assert _call("revl_export", {"with_knowledge": True})["ok"] is True
+    _reset()
+    server_mod.AUTHORING = old
+    _load(vault)
+    edited = _call("revl_edit", {"edits": [{
+        "anchor": DECL, "replacement": _block(note_id, AUTHOR_TEXT) + DECL,
+        "count": 1}], "commit": True})
+    assert edited["ok"] is True, {k: edited.get(k) for k in ("diagnostics", "note")}
+    assert _call("revl_export", {"with_knowledge": True})["ok"] is True
+    copy = _copy(vault)
+    assert _block(note_id, AUTHOR_TEXT) in copy.read_text(encoding="utf-8")
+    _reset()
+    adopted = _adopt(copy, vault, "root")
+    loaded = _load(adopted)
+    current = notes_mod.notes(server_mod.SESSION)
+    assert current[note_id]["status"] == "live"
+    assert current[note_id]["author"]["trust"] == "operator"
+    found = _with_body(AUTHOR_TEXT)
+    assert len(found) == 1, sorted(current)
+    assert found[0]["author"] == ADOPTED
+    assert found[0].get("supersedes") is None
+    assert found[0]["changes"] == note_id
+    riding = {n["id"]: n for n in _riding("Vault")}
+    assert riding[note_id].get("body") == BODY
+    assert riding[found[0]["id"]]["changes"] == note_id
+    assert "body" not in riding[found[0]["id"]]
+    listed = loaded.get("notesAdopted")
+    assert isinstance(listed, list) and len(listed) == 1, loaded
+    entry = listed[0]
+    assert _same_file(entry.pop("file"), adopted), entry
+    assert entry == {"id": found[0]["id"], "symbol": "Vault",
+                     "adoptedFrom": EXPORTED, "block": "changed",
+                     "changes": note_id}
+    # the sibling is kept, and a reload records nothing more
+    first = sorted(notes_mod._records(server_mod.SESSION))
+    assert _call("revl_export", {"with_knowledge": True})["ok"] is True
+    _reset()
+    reloaded = _load(adopted)
+    assert sorted(notes_mod._records(server_mod.SESSION)) == first
+    assert "notesAdopted" not in reloaded, reloaded["notesAdopted"]
