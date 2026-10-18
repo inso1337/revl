@@ -98,8 +98,12 @@ pub extern emission fn host_print(text: Str)
 
 // ---- THE GATE (emission) ----
 
-pub extern emission fn host_admit_all(ordered_json: Str) -> Str
-  = @py { from revl.truc._host import admit_all; return admit_all(ordered_json) }
+// A named (vendored) row compiles under the untrusted-author profile; its host
+// code admits only with `trust_host_code` (the command's --trust-host-code) or
+// a `lock_json` row recording that a flagged add admitted those exact bytes
+// (issue #2552). Rows with no name are the project's own entry.
+pub extern emission fn host_admit_all(ordered_json: Str, lock_json: Str, trust_host_code: Bool) -> Str
+  = @py { from revl.truc._host import admit_all; return admit_all(ordered_json, lock_json, trust_host_code) }
 
 // ---- ship / publish (emission; slice S4) ----
 
