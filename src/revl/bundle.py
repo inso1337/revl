@@ -384,6 +384,13 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
         env = os.environ
     if not sources:
         raise RevlError("<bundle>", 0, "no source files given to bundle")
+    # Every requested backend is checked before the output directory is
+    # touched, so a refusal leaves an existing bundle exactly as it was
+    # (issue #2596).
+    for backend in backends:
+        unshipped = _unshipped_backend(backend)
+        if unshipped is not None:
+            raise RevlError("<bundle>", 0, unshipped)
 
     from . import attest  # noqa: PLC0415
 

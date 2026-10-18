@@ -110,12 +110,16 @@ def test_an_unshipped_backend_key_imports_and_reads_nothing(  # noqa: F811
 @pytest.mark.parametrize("form", FORMS)
 def test_verify_exits_non_zero_for_an_unshipped_backend_key(  # noqa: F811
         form, signed_bundle, tmp_path, monkeypatch, capsys):
-    key = _planted(tmp_path)[0][form]
+    keys, marker = _planted(tmp_path)
+    key = keys[form]
     monkeypatch.setenv("REVL_ATTEST_KEY", KEY["REVL_ATTEST_KEY"])
     _record(signed_bundle, "backends", key)
 
     assert main(["verify", str(signed_bundle)]) == 1
-    assert key in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert key in out
+    assert "not a backend this toolchain ships" in out
+    assert not marker.exists(), "a module named by the manifest was imported"
 
 
 # ------------------------------------------------------------ the refused tier
@@ -162,6 +166,22 @@ def test_building_a_bundle_for_an_unshipped_backend_is_refused_by_name(tmp_path)
         B.build_bundle([src], str(tmp_path / "out.revlbundle"),
                        backends=("nosuchbackend",), env=dict(KEY))
     assert "nosuchbackend" in caught.value.message
+
+
+def test_a_refused_build_leaves_an_existing_output_directory_untouched(tmp_path):
+    src = _write(tmp_path, "app.rvl", BASE)
+    out = tmp_path / "out.revlbundle"
+    out.mkdir()
+    kept = out / "kept.txt"
+    kept.write_text("an earlier bundle", encoding="utf-8")
+
+    with pytest.raises(RevlError) as caught:
+        B.build_bundle([src], str(out), backends=("python", "nosuchbackend"),
+                       force=True, env=dict(KEY))
+
+    assert "nosuchbackend" in caught.value.message
+    assert kept.read_text(encoding="utf-8") == "an earlier bundle"
+    assert sorted(p.name for p in out.iterdir()) == ["kept.txt"]
 
 
 # ------------------------------------------------------------------- control
