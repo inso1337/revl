@@ -2370,9 +2370,13 @@ def _write_back_targets(held: dict, arguments: dict,
     records = ([_Target(p, t, new_only=True)
                 for p, t in _notes.sidecar_writes(SESSION, held, skipped)]
                if with_knowledge else [])
+    # a composition loaded from the export area keeps its records inside it
+    # (issue #2575)
     _export_jail.check_write_back([p for p, _ in targets],
                                   [p for p, _ in records],
-                                  _notes.sidecar_dir(held))
+                                  _notes.sidecar_dir(held),
+                                  jailed=any(_export_jail.in_export_area(p)
+                                             for p in held["files"]))
     return targets + records
 
 

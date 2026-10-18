@@ -1129,6 +1129,14 @@ another Unicode line separator or a byte-order mark is refused, since a `//`
 comment cannot carry it. A vendored truc's records and its `component.rvl` are
 left alone (issue #1769, see docs/registry.md §1.4).
 
+A session loaded from an export copy also reads the records of the file it
+copies, and writes its own records only under the export directory, beside
+the copy (issue #2575). A session that loads an export copy together with an
+operator file counts as the author's as a whole: its knowledge export is
+refused, the refusal names the record paths that would land outside the
+export directory, and nothing is written. Load the copy on its own to export
+its notes.
+
 Also under every trust: an inline export's `path` and every module must land
 inside the export directory, only `.rvl` modules the program reaches by `use`
 are written (a module key that is not a `.rvl` file is refused; an unreached

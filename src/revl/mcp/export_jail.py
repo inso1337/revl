@@ -315,10 +315,14 @@ def check_inline(path: str, modules: dict, roots) -> None:
             "there; nothing was written")
 
 
-def check_write_back(paths, records=(), record_dir: str | None = None) -> None:
+def check_write_back(paths, records=(), record_dir: str | None = None,
+                     *, jailed: bool = False) -> None:
     """Refuse writing a files-loaded composition back as a non-`.rvl` file,
     and a knowledge sidecar record (`records`) anywhere but directly under
-    its sidecar directory, named by a record id (issue #2564)."""
+    its sidecar directory, named by a record id (issue #2564). A `jailed`
+    composition, one loaded from an export directory, writes no record
+    outside the export area either: its records are the author's, and reach
+    the operator's sidecar only by adoption (issue #2575)."""
     not_rvl = [p for p in paths if not p.endswith(".rvl")]
     if not_rvl:
         raise ExportRefused(
@@ -329,6 +333,11 @@ def check_write_back(paths, records=(), record_dir: str | None = None) -> None:
         raise ExportRefused(
             f"refused: {', '.join(misplaced)} is not a knowledge record file "
             "of the sidecar directory; nothing was written")
+    outside = [p for p in records if jailed and not in_export_area(p)]
+    if outside:
+        raise ExportRefused(
+            f"refused: {', '.join(outside)} is outside the export area, and "
+            "this composition was loaded from it; nothing was written")
 
 
 def check_note_bodies(notes) -> None:

@@ -12,14 +12,17 @@ notes an agent (or a human, through an export) adds on top:
   same file. It is read at `revl_load` and written only by `revl_export
   {with_knowledge: true}`, each record as a new file created exclusively,
   never over one already there (issue #2534): disk is an export (issue #1696).
-  An id is `k_` and twelve lower-case hex digits; a record file holding any
-  other id is ignored, and no file name is built from one (issue #2564);
+  A composition loaded from an export copy also reads the sidecar of the
+  file it copies, and writes only its own (issue #2575). An id is `k_` and
+  twelve lower-case hex digits; a record file holding any other id is
+  ignored, and no file name is built from one (issue #2564);
 * TRUST follows authorship. Under the untrusted-author profile an agent's note
   is `trust: untrusted`, and by default only an evidence-backed untrusted note
   rides with its body; an evidence-free one rides as its id and kind, with the
   body on request (`revl_knowledge {op: "query", id}`). Knowledge is data: it
   never changes what admits or swaps, and the server never puts a body
-  anywhere but the `knowledge` field;
+  anywhere but the `knowledge` field. No author confirms, retires or
+  supersedes a note whose author is trusted further (issue #2575);
 * STALENESS is the slice-2 rule: a note whose anchor's code fingerprint
   changes goes `stale`; `confirm` re-fingerprints it;
 * the ROUND TRIP: an export renders each live note as a marked comment block
@@ -47,6 +50,8 @@ EVIDENCE_KINDS = ("diagnostic", "query", "audit", "test", "issue")
 BODY_LIMIT = 2048
 PER_ANCHOR_LIMIT = 16
 SIDECAR = os.path.join(".revl", "knowledge")
+#: the export directory's parts, below a root (`export_area.EXPORT_DIR`)
+_EXPORT_PARTS = tuple(_export_area.EXPORT_DIR.split(os.sep))
 #: a record id, the only one the store mints and the only one a sidecar file
 #: name is built from (issue #2564)
 RECORD_ID = re.compile(r"k_[0-9a-f]{12}")
@@ -286,8 +291,15 @@ def _validate(note: dict) -> None:
 
 def add(session, vs: dict, note: dict, symbol: str, *, author=None,
         supersedes: str | None = None) -> dict:
-    """Record a note anchored to `symbol` in `vs`."""
+    """Record a note anchored to `symbol` in `vs`, by `author` (the session's
+    trust when omitted). A supersede of a note whose author ranks above
+    `author` is refused (`_check_rank`)."""
     _validate(note)
+    author = author or _trust(session)
+    if supersedes is not None:
+        if supersedes not in notes(session):
+            raise NoteError(f"no note `{supersedes}`")
+        _check_rank(author, notes(session)[supersedes], "supersede")
     anchor = _anchor_of(session, vs, symbol)
     live = [n for n in notes(session).values()
             if n["anchor"]["symbol"] == anchor["symbol"]
@@ -299,18 +311,44 @@ def add(session, vs: dict, note: dict, symbol: str, *, author=None,
     record = {"op": "note", "id": _new_id(anchor["symbol"], note["body"], created),
               "anchor": anchor, "kind": note["kind"], "body": note["body"],
               "evidence": list(note.get("evidence") or []),
-              "author": author or _trust(session), "created": created,
+              "author": author, "created": created,
               "supersedes": supersedes}
     return _store(session, record)
 
 
 def op_record(session, op: str, target: str, **fields) -> dict:
+    """Record `op` (confirm, retire) on the note `target`, by the session. A
+    note whose author ranks above the session is refused (`_check_rank`)."""
     if target not in notes(session):
         raise NoteError(f"no note `{target}`")
+    author = _trust(session)
+    _check_rank(author, notes(session)[target], op)
     created = _now()
     return _store(session, {"op": op, "id": _new_id(op, target, created),
                             "target": target, "created": created,
-                            "author": _trust(session), **fields})
+                            "author": author, **fields})
+
+
+#: how far a note's author is trusted. A trust this does not name ranks
+#: lowest as the one acting and as an operator's as the one acted on
+TRUST_RANK = {"untrusted": 0, "publisher": 1, "operator": 2}
+
+
+def _check_rank(author: dict, target: dict, op: str) -> None:
+    """Refuse `author` retiring, confirming or superseding `target` when the
+    target's author is trusted further (issue #2575): an untrusted author
+    may not take an operator's or a publisher's note away, nor change it.
+    The fold applies every record it is given, so the rule is here, where
+    a record is made."""
+    mine, owner = _trust_of(author), _trust_of(target.get("author"))
+    if TRUST_RANK.get(owner, TRUST_RANK["operator"]) > TRUST_RANK.get(mine, 0):
+        raise NoteError(f"note `{target.get('id')}` has author trust "
+                        f"`{owner or 'unlabelled'}`; an author at trust "
+                        f"`{mine or 'unlabelled'}` cannot {op} it")
+
+
+def _trust_of(author) -> str | None:
+    return author.get("trust") if isinstance(author, dict) else None
 
 
 # ---------------------------------------------------------------- staleness
@@ -365,19 +403,67 @@ def concerning(session, symbols: list[str]) -> list[dict]:
 # ---------------------------------------------------------------- the sidecar
 
 def sidecar_dir(vs: dict) -> str | None:
-    """`<dir of the first loaded file>/.revl/knowledge`, or None inline."""
+    """`<dir of the first loaded file>/.revl/knowledge`, or None inline: the
+    sidecar this composition's records are written to. For an export copy
+    that is the copy's own, inside the export area (issue #2575)."""
     files = vs.get("files") or []
     return os.path.join(os.path.dirname(os.path.abspath(files[0])), SIDECAR) \
         if files else None
 
 
+def sidecar_dirs(vs: dict) -> list[str]:
+    """Every sidecar this composition reads, first to last. For an export copy
+    the sidecar of the file it copies comes first, then the copy's own
+    (`sidecar_dir`): a block rendered into the copy then finds its record,
+    where reading the copy's own alone imported each block again as a new
+    note with a fresh id, and every export rendered it once more (issue
+    #2575). Reads only: the copy's records are written to its own sidecar,
+    and reach the operator's only by adoption."""
+    own = sidecar_dir(vs)
+    if own is None:
+        return []
+    copied = _copied_file(vs["files"][0])
+    shared = os.path.join(os.path.dirname(copied), SIDECAR) if copied else None
+    return [shared, own] if shared not in (None, own) else [own]
+
+
+def _copied_file(path: str) -> str | None:
+    """`<root>/<rel>` when `path` resolves to `<root>/.revl/export/<rel>` under
+    a sanctioned root, else None: the inverse of `export_jail.export_copy`.
+    The root is one the server sanctioned, never inferred from the path's
+    spelling, and the export directory is matched case-folded, as
+    `export_area.under_export_dir` matches it."""
+    from .server import _file_roots  # noqa: PLC0415 (import cycle)
+
+    parts = _export_area.real(path).split(os.sep)
+    for root in _file_roots():
+        base = root.rstrip(os.sep).split(os.sep)
+        start, end = len(base), len(base) + len(_EXPORT_PARTS)
+        if (parts[:start] == base and len(parts) > end
+                and tuple(_export_area.fold(p) for p in parts[start:end])
+                == _EXPORT_PARTS):
+            return os.path.join(root, *parts[end:])
+    return None
+
+
 def load_sidecar(session, vs: dict) -> int:
-    """Read every record of the composition's sidecar into the session. A
-    record whose id is not a record id is ignored (issue #2564)."""
+    """Read every record of the composition's sidecars (`sidecar_dirs`) into
+    the session. A record whose id is not a record id is ignored (issue
+    #2564), and one whose id an earlier sidecar already gave is not read
+    again: the copied file's record stands over a copy's (issue #2575)."""
     session.note_records = {}
-    directory = sidecar_dir(vs)
-    if directory is None or not os.path.isdir(directory):
+    count = 0
+    for directory in sidecar_dirs(vs):
+        count += _read_records(_records(session), directory)
+    return count
+
+
+def _read_records(store: dict, directory: str) -> int:
+    """Add each record file of `directory` to `store`, unless an earlier
+    directory gave its id. Returns how many were added."""
+    if not os.path.isdir(directory):
         return 0
+    earlier = set(store)
     count = 0
     for name in sorted(os.listdir(directory)):
         if not name.endswith(".json"):
@@ -387,8 +473,9 @@ def load_sidecar(session, vs: dict) -> int:
                 record = json.load(handle)
         except (OSError, ValueError):
             continue
-        if isinstance(record, dict) and is_record_id(record.get("id")):
-            _records(session)[record["id"]] = record
+        if (isinstance(record, dict) and is_record_id(record.get("id"))
+                and record["id"] not in earlier):
+            store[record["id"]] = record
             count += 1
     return count
 
@@ -420,10 +507,13 @@ def sidecar_writes(session, vs: dict,
     """(path, text) of every record not yet in the sidecar. A vendored record is
     the vendor's, so it never lands in the project's sidecar. A record whose
     id is not a record id names no file: it is added to `skipped`, never
-    written (issue #2564)."""
+    written (issue #2564). A record one of the sidecars read already holds
+    is not written again: an export copy's session never copies the copied
+    file's records into its own sidecar (issue #2575)."""
     directory = sidecar_dir(vs)
     if directory is None:
         return []
+    read = sidecar_dirs(vs)
     out = []
     for record in _records(session).values():
         if record.get("vendored"):
@@ -433,7 +523,7 @@ def sidecar_writes(session, vs: dict,
             if skipped is not None:
                 skipped.append(f"knowledge record {record.get('id')!r}")
             continue
-        if not os.path.exists(path):
+        if not any(os.path.exists(record_path(d, record["id"])) for d in read):
             out.append((path, json.dumps(record, indent=2, sort_keys=True) + "\n"))
     return out
 
@@ -709,6 +799,7 @@ def _parsed(text: str, name: str) -> tuple:
 __all__ = ["KINDS", "EVIDENCE_KINDS", "query_verbs", "RERUNNABLE", "run_evidence",
            "NoteError", "notes", "add", "op_record",
            "refresh", "served", "concerning", "load_sidecar", "sidecar_writes",
+           "sidecar_dirs",
            "RECORD_ID", "is_record_id", "record_path", "is_record_path",
            "load_vendored", "vendored_trucs", "vendored_path",
            "render", "import_marked"]
