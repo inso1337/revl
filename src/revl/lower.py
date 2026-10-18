@@ -9748,9 +9748,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         return _endorse_node(inner, expr, approval)
 
     # ADT construction (Result / user variants) — same tagged `adt` node as
-    # the pure-fn path; Opt's Some/None stay untagged.
+    # the pure-fn path; Opt's Some/None stay untagged. A bound local shadows a
+    # constructor of the same spelling here exactly as it does in a `fn` body
+    # (`_lower_pure_expr`, issue #320): a parameter or `let` named `Ok` or
+    # `Some` is the value, so its call is the generic tail's `call` on the
+    # scope's (renamed) `name` node, never a constructor (issue #2490).
     cases = env.types.get(CASES_KEY) or {}
     if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar) \
+            and expr.callee.name not in scope \
             and _tagged_case(expr.callee.name, env.types) is not None:
         info = cases[expr.callee.name]
         return {"kind": "adt", "type": info["adt"], "case": expr.callee.name,
@@ -10102,14 +10107,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             # ADT/Opt construction lowers exactly as it does in a `fn` body:
             # tagged variants to an `adt` node, Some/None to identity/null.
             # Emitting a plain call here would name a constructor the host
-            # runtimes do not define (they are not functions).
-            if _tagged_case(name, env.types) is not None:
+            # runtimes do not define (they are not functions). A name the
+            # scope binds is a value, not the constructor (issue #2490): it
+            # takes the generic tail below, a `call` on its `name` node.
+            shadowed = name in scope and name in _BUILTIN_CONSTRUCTORS
+            if name not in scope and _tagged_case(name, env.types) is not None:
                 info = (env.types.get(CASES_KEY) or {})[name]
                 return {"kind": "adt", "type": info["adt"], "case": name, "args": args}
-            if name in _BUILTIN_CONSTRUCTORS:
+            if not shadowed and name in _BUILTIN_CONSTRUCTORS:
                 return {"kind": "call", "callee": {"kind": "var", "name": name},
                         "args": args}
-            if name in callables:
+            if not shadowed and name in callables:
                 # item 187: fill omitted trailing arguments with their default
                 # expressions before async coercion, so the module-fn call the
                 # emitters see is fully supplied (no per-tier default handling).
