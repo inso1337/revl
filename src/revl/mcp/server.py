@@ -1301,8 +1301,9 @@ def _nothing_to_load(ignored: bool = False) -> dict:
         extra = {"loaded": True}
         if ignored:
             extra["note"] = _files_ignored_note("nothing was booted")
-            if not _disk_state()["inSync"]:
-                extra["next"] = _export_next()
+            nxt = _export_next_if_owed()
+            if nxt is not None:
+                extra["next"] = nxt
         return _session_error(
             "a composition is already running and no draft is held, so "
             "`revl_load {}` has nothing to boot. Change what runs with revl_edit "
@@ -2075,9 +2076,22 @@ def _export_next() -> dict:
                          _disclosure.HATCH_ARGS: {}})
 
 
+def _export_next_if_owed() -> dict | None:
+    """`_export_next`, unless an export would write nothing. The disk note is
+    judged on the working source, which includes an open edit buffer; the
+    export writes the running composition's source (`running_source`), so a
+    stale buffer over an exported composition has a note and nothing to export."""
+    if _disk_state_of(_edit.running_source(SESSION))["inSync"]:
+        return None
+    return _export_next()
+
+
 def _with_export_next(payload: dict) -> dict:
-    """`payload` with the export `next`, unless it already carries one."""
-    payload.setdefault("next", _export_next())
+    """`payload` with the export `next`, unless it already carries one or an
+    export would write nothing."""
+    nxt = _export_next_if_owed()
+    if nxt is not None:
+        payload.setdefault("next", nxt)
     return payload
 
 
@@ -2177,7 +2191,7 @@ def _unload_stale_refusal(disk: dict) -> dict:
         f"refused: the held source of {stale} has not reached disk and this "
         "unload would destroy it; call revl_export to write it, or pass "
         "`force: true` to discard it",
-        refused=True, disk=disk, next=_remedy.call("revl_export", {}))
+        refused=True, disk=disk, next=_export_next())
 
 
 def _ride_disk(name: str, payload) -> None:

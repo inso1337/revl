@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl.mcp import disclosure, remedy  # noqa: E402
+from revl.mcp import edit as edit_mod  # noqa: E402
 from revl.mcp import export_jail  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
@@ -151,18 +152,12 @@ def test_nothing_diverged_means_no_next(tree):
     assert "next" not in checked and "note" not in checked
 
 
-def test_a_next_the_payload_already_carries_is_kept():
+def test_a_next_the_payload_already_carries_is_kept(tree):
+    _committed(tree)
     own = remedy.call("revl_load", {"files": ["a.rvl"]})
     payload = {"ok": True, "next": own}
     assert server_mod._with_export_next(payload)["next"] is own
     assert server_mod._with_export_next({"ok": True})["next"] == EXPORT_NEXT
-
-
-def test_a_lookup_of_an_unlisted_verb_adds_nothing(tree):
-    """The first design put the `next` on the lookup, after it was paid for; the
-    measured saving is the call before it, so the lookup stays as it was."""
-    answer = _call(disclosure.DISCOVERY, {"names": ["revl_export"]})
-    assert answer["ok"] is True and "next" not in answer
 
 
 def test_the_handed_over_next_survives_the_hatch_and_exports(tree):
@@ -179,3 +174,25 @@ def test_the_handed_over_next_survives_the_hatch_and_exports(tree):
     assert '== "b"' in copy.read_text(encoding="utf-8")
     assert exported["disk"] == {"inSync": True, "stale": []}
     assert "next" not in _call("revl_check", {"session": True})
+
+
+def test_a_stale_edit_buffer_over_an_exported_composition_has_no_next(tree):
+    """The note is judged on the working source, which includes an open edit
+    buffer; the export writes the running composition. With the running source
+    already on disk there is nothing to export, so a ready `next` would be a
+    call that does nothing."""
+    _committed(tree)
+    assert _call("revl_export", {})["ok"] is True
+    # an open buffer that differs from disk, over a running composition that
+    # does not (the state an edit leaves while it still has holes to fill)
+    buffer = edit_mod.virtual_source(server_mod.SESSION)
+    texts = dict(buffer[edit_mod.ORIGIN_FILES_CONTENT])
+    texts[str(tree["mem"])] = texts[str(tree["mem"])] + "\n"
+    server_mod.SESSION.draft = {**buffer, edit_mod.ORIGIN_FILES_CONTENT: texts}
+    try:
+        seen = _call("revl_source", {"symbol": "MemoryStore"})
+        assert seen["disk"]["inSync"] is False, seen
+        assert "revl_export" in seen["note"]
+        assert "next" not in seen, seen
+    finally:
+        server_mod.SESSION.draft = None

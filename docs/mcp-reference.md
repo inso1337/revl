@@ -87,6 +87,7 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | ------- | ------ |
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
+| a refusal that carries the held-source note: `revl_load {files}` on a warm session with nothing to boot, a `revl_check {files}` that read a differing disk file and failed, and the unload that would discard an unexported edit | `revl_verbs {name: "revl_export", args: {}}`, `ready` (`revl_export` is not a listed verb) |
 
 A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
@@ -1032,9 +1033,12 @@ disagreeing until `revl_export` runs. The verbs of the change loop
 (when a composition is loaded; see its section) carry
 `"disk": {"inSync": bool, "stale": [path]}`, where `stale` names every loaded
 file whose held text differs from the bytes on disk. When `inSync` is false on
-a success, the answer also carries a `note` naming `revl_export` and a `next`
-that calls it through the `revl_verbs` hatch, `revl_verbs {name: "revl_export",
-args: {}}` (issue #2537; `revl_export` is not a listed verb). It is a
+a success, the answer also carries a `note` naming `revl_export`. Any answer
+that carries that note also carries a `next` that calls it through the
+`revl_verbs` hatch, `revl_verbs {name: "revl_export", args: {}}` (issue #2537;
+`revl_export` is not a listed verb), unless the running composition is already
+on disk and only an open edit buffer differs, when an export would write
+nothing. It is a
 sibling of `sessionState`, never a field of it: `sessionState.dirty` means a
 *speculative draft* differs from what is running, so it is `false` in exactly
 the case a stale disk is easy to miss. An inline-loaded composition names no
