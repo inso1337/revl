@@ -24170,7 +24170,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
         }
         ci = (ci).checked_add(1i64).expect("revl: Int overflow");
     }
-    refs = append_verds(refs.clone(), handoff_refusals(&pg.comps, &hands, &poisoned, 0i64));
+    refs = append_verds(refs.clone(), handoff_refusals(&pg.comps, &hands, &poisoned, al.clone(), 0i64));
     refs = append_verds(refs.clone(), wrefs.clone());
     let sv = check_spawn(&ts, pg.clone(), base.clone());
     if (sv.v != "") {
@@ -27078,25 +27078,26 @@ fn handoff_drift_msg(key: &str, newName: &str, accepted: &str, oldName: &str, ex
     return ((((((((((String::from("state hand-off on `").revl_concat(&key)).revl_concat("` differs from the running manifest: `")).revl_concat(&newName)).revl_concat("` accepts `")).revl_concat(&accepted)).revl_concat("`, but `")).revl_concat(&oldName)).revl_concat("` exports `")).revl_concat(&exported)).revl_concat("` — the successor cannot hold the predecessor's state, and ")).revl_concat("dropping it on the swap would be residue");
 }
 
-fn handoff_refusals(comps: &[CompD], hands: &[MHand], poisoned: &[String], i: i64) -> Vec<Verd> {
+fn handoff_refusals(comps: &[CompD], hands: &[MHand], poisoned: &[String], al: std::collections::HashMap<String, String>, i: i64) -> Vec<Verd> {
     if (i >= comps.revl_length()) {
         return vec![];
     }
     let c = (comps)[(i) as usize].clone();
     if (c.hoff.name == "") {
-        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, al.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     }
     if contains__m2(poisoned, &c.name) {
-        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, al.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     }
     let old = find_mhand(hands, &c.hoff.name, 0i64, MHand { comp: String::from(""), key: String::from(""), ty: String::from("") });
     if (old.comp == "") {
-        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return handoff_refusals(comps, hands, poisoned, al.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     }
-    if ho_compatible(c.hoff.ty.clone(), old.ty.clone()) {
-        return handoff_refusals(comps, hands, poisoned, (i).checked_add(1i64).expect("revl: Int overflow"));
+    let accepted = alias_subst(c.hoff.ty.clone(), al.clone());
+    if ho_compatible(accepted.clone(), old.ty.clone()) {
+        return handoff_refusals(comps, hands, poisoned, al.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
     }
-    return vec![mk_verd(tagged("G2", &handoff_drift_msg(&c.hoff.name, &c.name, &c.hoff.ty, &old.comp, &old.ty)), c.line)];
+    return vec![mk_verd(tagged("G2", &handoff_drift_msg(&c.hoff.name, &c.name, &accepted, &old.comp, &old.ty)), c.line)];
 }
 
 pub fn admit_ambient(src: String, manifest: String) -> String {

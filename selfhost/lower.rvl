@@ -19704,7 +19704,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // are collected at exactly this point in `check_and_lower`, in that order.
   // Empty for `admit_src` and for any admission that neither swaps state nor
   // withdraws anything, so all of those stay byte-identical.
-  refs = append_verds(refs, handoff_refusals(pg.comps, hands, poisoned, 0))
+  refs = append_verds(refs, handoff_refusals(pg.comps, hands, poisoned, al, 0))
   refs = append_verds(refs, wrefs)
   // the spawn-boundary bounds (G4/G6) and capability attenuation (item 66) run
   // once every component is lowered, before the G2/G3 link — the reference's
@@ -22555,12 +22555,17 @@ fn handoff_drift_msg(key: Str, newName: Str, accepted: Str, oldName: Str,
 // is compared. The running table is NOT filtered by the withdrawn set: the
 // provider being replaced is precisely the one whose exported state the
 // replacement has to accept.
+//
+// The incoming annotation is read ERASED (issue #2514: the reference's alias
+// sweep lists `HandoffStmt.state_type`, so `handoff db: S` over `type S = Str`
+// is compared, and reported, as `Str`); the running wire already carries the
+// erased spelling, since it is rendered from the lowered IR.
 fn handoff_refusals(comps: List[CompD], hands: List[MHand],
-                    poisoned: List[Str], i: Int) -> List[Verd] {
+                    poisoned: List[Str], al: Map[Str, Str], i: Int) -> List[Verd] {
   if (i >= comps.length()) { return [] }
   let c = comps[i]
   if (c.hoff.name == "") {
-    return handoff_refusals(comps, hands, poisoned, i + 1)
+    return handoff_refusals(comps, hands, poisoned, al, i + 1)
   }
   // issue #1127: `_admit_handoff_replacement` runs over `live_components`,
   // which `check_and_lower` builds by DROPPING every component whose body
@@ -22574,14 +22579,15 @@ fn handoff_refusals(comps: List[CompD], hands: List[MHand],
   // remove a verdict from a component that is refused anyway, so it narrows
   // the NAME and never the verdict.
   if (contains(poisoned, c.name)) {
-    return handoff_refusals(comps, hands, poisoned, i + 1)
+    return handoff_refusals(comps, hands, poisoned, al, i + 1)
   }
   let old = find_mhand(hands, c.hoff.name, 0, { comp: "", key: "", ty: "" })
-  if (old.comp == "") { return handoff_refusals(comps, hands, poisoned, i + 1) }
-  if (ho_compatible(c.hoff.ty, old.ty)) {
-    return handoff_refusals(comps, hands, poisoned, i + 1)
+  if (old.comp == "") { return handoff_refusals(comps, hands, poisoned, al, i + 1) }
+  let accepted = alias_subst(c.hoff.ty, al)
+  if (ho_compatible(accepted, old.ty)) {
+    return handoff_refusals(comps, hands, poisoned, al, i + 1)
   }
-  return [mk_verd(tagged("G2", handoff_drift_msg(c.hoff.name, c.name, c.hoff.ty,
+  return [mk_verd(tagged("G2", handoff_drift_msg(c.hoff.name, c.name, accepted,
                                                  old.comp, old.ty)), c.line)]
 }
 
