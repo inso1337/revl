@@ -883,13 +883,13 @@ fault test "the pool closes" for PgDatabase with { url: "postgres://p:1/a" } {
     # keyword, so all three stay usable as ordinary module-fn names. This one
     # passes against the unported gate too — that is what it is for.
     ("lifecycle, prop and fault stay ordinary identifiers", '''
-fn lifecycle(x: Int) -> Int { return x }
-fn prop(x: Int) -> Int { return x }
-fn fault(x: Int) -> Int { return x }
+fn lifecycle(x: Str) -> Str { return x }
+fn prop(x: Str) -> Str { return x }
+fn fault(x: Str) -> Str { return x }
 service Kv { fn get(k: Str) -> Str }
 component Store provides kv: Kv {
   let m = effect Map.new() undo m.drop()
-  provide kv { fn get(k) = m.get(lifecycle(prop(fault(1)))) }
+  provide kv { fn get(k) = m.get(lifecycle(prop(fault(k)))) }
 }
 '''),
     # ---- the timer body's own in-flight window (item 170) ------------------

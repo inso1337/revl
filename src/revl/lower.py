@@ -47,6 +47,7 @@ from .typecheck import (
     compatible,
     format_type,
     host_check,
+    host_family_check,
     _HOST_ACQUIRE_VERBS,
     _BUILTIN_TYPE_NAMES,
     _HOST_FAMILIES,
@@ -1117,35 +1118,52 @@ def _host_result_type(acquire: dict, env: "Env") -> str | None:
     return _HOST_RESULT_SIG.get(f"{family}.{acquire.get('method')}")
 
 
-def _check_host_verb(family: str, verb: str, argc: int,
+# issue #2491: the argument position of each host Map write verb whose type
+# the tiers keep generic (`Map[V]`), so a host-local call does not judge it.
+# See `_check_host_verb`.
+_HOST_MAP_GENERIC_VALUE: dict[str, int] = {"insert": 1, "insert_if_absent": 1}
+
+
+def _check_host_verb(family: str, verb: str, arg_types: list,
                      filename: str | None, line: int) -> None:
-    """Admit a verb call on a host-provenance local (item 401).
+    """Admit a verb call on a host-provenance local (item 401, issue #2491).
 
     The known surface is the family's stub verbs (`_HOST_FAMILIES`, derived
     from `_HOST_ARG_SIG`) plus, for a host Map, the iteration verbs
     (`_HOST_MAP_ITER_VERBS`). A verb in neither is refused with the same named
     HOST-METHOD diagnostic the constructor-tracked receiver path uses, naming
-    the FULL surface — so a typo or a value-Map method wrongly aimed at a host
+    the FULL surface, so a typo or a value-Map method wrongly aimed at a host
     Map (`store.lookup(k)`, which no host runtime backs) is a compile error
     here rather than an unchecked pass-through that only crashes at the host
     runtime (the item-84 shape).
 
-    Only the VERB NAME and ARITY are checked, never the argument TYPES: a host
-    Map's key and value are generically typed on the tiers that genericized it
-    (`Map[V]`; items 113/176), the checker's `["Str","Str"]` row is the known
-    frontier/emitter disagreement the host boundary already carries opaquely
-    (`_HOST_ARG_SIG` header; docs/design/397-insert-if-absent.md), and the
-    pre-item-401 pass-through type-checked nothing here. Enforcing the row's
-    `Str` would reject valid programs (`m.insert(k, double(v))` with a non-Str
-    value/key), which is a separate frontier decision, not item 401's.
+    A stub verb is then held to its declared row by `host_family_check`, the
+    check a constructor-tracked receiver in a fn body (`let m = Map.new()`,
+    `m.get(7)`) already gets: the same HOST-ARITY refusal for a wrong count and
+    the same T1 refusal for an argument whose type is not its parameter's, so
+    `pool.query(1)` reads the same in an activation body as in a fn body. An
+    argument whose type the checker cannot infer (a host verb's opaque result)
+    is not judged, exactly as there. The iteration verbs take no arguments and
+    are held to their count only.
+
+    One position stays unjudged by name: the VALUE of a host Map write
+    (`_HOST_MAP_GENERIC_VALUE`). Its checker row says `Str`, but the tiers
+    genericized the host Map (`Map[V]`, items 113/176) and component programs
+    store Int, record and list values in it (examples/app/notes.rvl,
+    tests/fixtures/emit_*_corpus/comp_host_map*.rvl); that frontier/emitter
+    disagreement is docs/design/397-insert-if-absent.md's, reconciled by its
+    own item, not here. The key is still held to `Str`.
     """
     family_surface = _HOST_FAMILIES.get(family, {})
     iter_verbs = _HOST_MAP_ITER_VERBS if family == "Map" else {}
     if verb in family_surface:
-        arity = len(family_surface[verb])
-    elif verb in iter_verbs:
-        arity = iter_verbs[verb]
-    else:
+        generic = _HOST_MAP_GENERIC_VALUE.get(verb) if family == "Map" else None
+        if generic is not None and generic < len(arg_types):
+            arg_types = [None if i == generic else t
+                         for i, t in enumerate(arg_types)]
+        host_family_check(family, verb, arg_types, filename, line)
+        return
+    if verb not in iter_verbs:
         if filename:
             surface = ", ".join(sorted(set(family_surface) | set(iter_verbs)))
             raise RevlError(
@@ -1156,13 +1174,13 @@ def _check_host_verb(family: str, verb: str, argc: int,
                      "every tier and only fails at the host runtime",
                 code="HOST-METHOD", category="host-boundary")
         return
-    if filename and argc != arity:
+    arity = iter_verbs[verb]
+    if filename and len(arg_types) != arity:
         raise RevlError(
             filename, line,
             f"host `{family}.{verb}` takes {arity} argument"
-            f"{'' if arity == 1 else 's'}, got {argc}",
-            hint=f"the signature is `.{verb}("
-                 f"{', '.join(family_surface.get(verb, [])) if verb in family_surface else ''})`",
+            f"{'' if arity == 1 else 's'}, got {len(arg_types)}",
+            hint=f"the signature is `.{verb}()`",
             code="HOST-ARITY", category="host-boundary")
 
 
@@ -9995,7 +10013,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             # host runtime, the item-84 shape.
             if scope.get(root) in env.host_locals:
                 _check_host_verb(
-                    env.host_locals[scope[root]], method, len(args),
+                    env.host_locals[scope[root]], method,
+                    [infer_ir(a, env.type_env, env.types, env.services,
+                              filename, line)
+                     for a in args],
                     filename, line)
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
@@ -17083,7 +17104,10 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
             host_args = [_lower_expr(a, env, amode) for a in op.args]
         if node.get("kind") == "name" and node.get("id") in env.host_locals:
             _check_host_verb(
-                env.host_locals[node["id"]], op.name, len(host_args),
+                env.host_locals[node["id"]], op.name,
+                [infer_ir(a, env.type_env, env.types, env.services,
+                          env.filename, op.line)
+                 for a in host_args],
                 env.filename, op.line)
         node = {
             "kind": "call",

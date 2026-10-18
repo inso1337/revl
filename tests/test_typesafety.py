@@ -1110,6 +1110,114 @@ component C {
     assert "`Map` has no method `lookup`" in err
 
 
+# ---- issue #2491: a host verb on a host local checks argument TYPES -------
+# `_check_host_verb` held a host-local verb call to its count only, so
+# `pool.query(1)` compiled in an activation or provide-method body while the
+# same call on a constructor-tracked receiver in a fn body was refused T1. Both
+# positions now give the one `host_family_check` refusal.
+
+def _refusal(source: str) -> RevlError:
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(source)
+    return excinfo.value
+
+
+_JOBS_SVC = "service Jobs { fn run(sql: Str) -> Int }\n"
+
+
+def test_2491_host_verb_wrong_first_arg_type_in_activation_body_is_refused():
+    err = _refusal("""
+component C {
+  let pool = effect Pool.open("db", 4) undo pool.close()
+  effect pool.query(1)
+  undo   pool.execute("rollback")
+}""")
+    assert err.code == "T1"
+    assert err.message == "host `Pool.query` argument expects `Str`, got `Int`"
+
+
+def test_2491_host_map_write_wrong_key_type_in_provide_method_is_refused():
+    # the key of a two-parameter verb is judged even when the value beside it
+    # is a non-Str the generic value position admits
+    err = _refusal(_CACHE_SVC + """
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(5, 6)
+      undo   store.remove(key)
+    }
+  }
+}""")
+    assert err.code == "T1"
+    assert err.message == "host `Map.insert` argument expects `Str`, got `Int`"
+
+
+def test_2491_host_map_write_value_stays_generic_on_a_host_local():
+    # the later parameter of a host Map write is the tiers' generic `V`
+    # (`Map[V]`, items 113/176), so an Int value is admitted here, as the
+    # component corpus (comp_host_map*.rvl) relies on
+    ir = compile_source("""
+component C {
+  let store = effect Map.new() undo store.drop()
+  effect store.insert("boot", 1)
+  undo   store.remove("boot")
+  let ok = effect store.insert_if_absent("seen", 2) undo store.remove("seen")
+}""")
+    assert any(c.get("name") == "C" for c in ir.get("components", []))
+
+
+def test_2491_host_verb_wrong_arg_type_in_provide_method_pure_body_is_refused():
+    err = _refusal(_JOBS_SVC + """
+component C provides jobs: Jobs {
+  let pool = effect Pool.open("db", 4) undo pool.close()
+  provide jobs {
+    fn run(sql) = pool.query(true)
+  }
+}""")
+    assert err.code == "T1"
+    assert err.message == "host `Pool.query` argument expects `Str`, got `Bool`"
+
+
+def test_2491_message_equals_the_fn_body_receiver_message():
+    # the same verb and the same mismatch on a constructor-tracked receiver in
+    # a fn body: the refusal a host local gives must be that one, byte for byte
+    ordinary = _refusal("""
+fn f() {
+  let m = Map.new()
+  m.get(7)
+}""")
+    host_local = _refusal("""
+component C {
+  let store = effect Map.new() undo store.drop()
+  effect store.get(7)
+  undo   store.remove("k")
+}""")
+    assert (host_local.code, host_local.message, host_local.hint) == \
+        (ordinary.code, ordinary.message, ordinary.hint)
+
+
+def test_2491_right_arg_types_are_admitted_on_host_locals():
+    # positive control: every declared parameter supplied with its type, plus
+    # an opaque host-verb result (`store.size()`) as an argument, which the
+    # checker does not judge
+    ir = compile_source(_JOBS_SVC + """
+component C provides jobs: Jobs {
+  let pool = effect Pool.open("db", 4) undo pool.close()
+  let store = effect Map.new() undo store.drop()
+  effect store.insert("boot", "1")
+  undo   store.remove("boot")
+  effect pool.execute("begin")
+  undo   pool.execute("rollback")
+  let warm = effect Pool.open("w", store.size()) undo warm.close()
+  provide jobs {
+    fn run(sql) = pool.query(sql)
+  }
+}""")
+    assert any(c.get("name") == "C" for c in ir.get("components", []))
+
+
 def test_the_documented_surface_still_compiles_and_results_stay_opaque():
     # every method examples/tenants.rvl uses, plus the result flowing into a
     # typed return — the result of a stub is NOT claimed, so this stays silent
