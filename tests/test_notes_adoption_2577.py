@@ -30,8 +30,13 @@ dispatch:
 * no export target has the manifest's or the digest record's name as any
   part below the export directory, so no export can make either name a
   directory;
-* a digest record write that fails fails the export, naming the record, and
-  the manifest keeps the digest it would have replaced;
+* the digest record is written before the copies it covers: a record write
+  that fails fails the export, naming the record, with no copy written and
+  the manifest keeping the digest it would have replaced;
+* the manifest is written last: a manifest write that fails fails the
+  export, naming the manifest and each copy that landed;
+* a directory prepared at a write's old fixed temporary name stops no
+  export: each write goes through a fresh name and leaves none behind;
 * an adopted block whose recorded note is the operator's never supersedes
   it: it becomes a note of its own beside it, naming the note it would have
   changed (`changes`), and a reload records nothing more;
@@ -42,8 +47,8 @@ dispatch:
   record's trust, and is not listed.
 
 Every test needs the cordis-py runtime and skips without it: with it
-installed this module collects 22 items and all 22 pass; a run that reports
-22 skipped (or 0 passed) has proved nothing. Before the fix the 18 adoption
+installed this module collects 26 items and all 26 pass; a run that reports
+26 skipped (or 0 passed) has proved nothing. Before the fix the 22 adoption
 items fail and the 4 controls pass.
 """
 
@@ -384,15 +389,16 @@ def test_a_record_name_is_refused_as_any_part_of_an_export_target(vault, name):
 
 @pytest.mark.parametrize("how", ["write-fails", "a-directory"])
 def test_a_record_write_that_fails_fails_the_export(vault, monkeypatch, how):
-    """An export that replaces a copy's digest must keep it in the record.
-    When that write fails the export says so and names the record, and the
-    manifest keeps the digest it would have replaced, so the adopted copy
-    still matches."""
+    """An export that replaces a copy's digest must keep it in the record,
+    which it writes before the copy. When that write fails the export says
+    so and names the record, writes no copy, and the manifest keeps the
+    digest it would have replaced, so the adopted copy still matches."""
     copy = _author_export(vault)
     adopted = _adopt(copy, vault, "root")
     _load(adopted)
     manifest = copy.parent / "manifest.json"
     held = manifest.read_bytes()
+    before = copy.read_bytes()
     record = copy.parent / "digests.json"
     write = server_mod._write_atomic
     if how == "a-directory":
@@ -410,8 +416,70 @@ def test_a_record_write_that_fails_fails_the_export(vault, monkeypatch, how):
     wrote = _call("revl_export", {})
     assert wrote["ok"] is False, wrote
     assert "digests.json" in json.dumps(wrote), wrote
+    assert "nothing was written" in json.dumps(wrote), wrote
+    assert copy.read_bytes() == before
     assert manifest.read_bytes() == held
     monkeypatch.setattr(server_mod, "_write_atomic", write)
+    _reset()
+    _load(adopted)
+    found = _with_body(AUTHOR_TEXT)
+    assert len(found) == 1, sorted(notes_mod.notes(server_mod.SESSION))
+    assert found[0]["author"] == ADOPTED
+
+
+def test_a_manifest_write_that_fails_names_the_copies_it_left(vault, monkeypatch):
+    """The manifest is written last, after the copies. When that write fails
+    the export says so, naming the manifest and each copy that landed, which
+    no record keeps: loaded once adopted, its blocks would be the
+    operator's."""
+    copy = _author_export(vault)
+    adopted = _adopt(copy, vault, "root")
+    _load(adopted)
+    manifest = copy.parent / "manifest.json"
+    held = manifest.read_bytes()
+    before = copy.read_bytes()
+    write = server_mod._write_atomic
+
+    def failing(path, text):
+        if os.path.basename(path) == "manifest.json":
+            raise OSError(errno.ENOSPC, "No space left on device", path)
+        write(path, text)
+    monkeypatch.setattr(server_mod, "_write_atomic", failing)
+    edited = _call("revl_edit", {"edits": [{
+        "anchor": GET, "replacement": GET + "  // v2", "count": 1}],
+        "commit": True})
+    assert edited["ok"] is True, {k: edited.get(k) for k in ("diagnostics", "note")}
+    wrote = _call("revl_export", {})
+    assert wrote["ok"] is False, wrote
+    message = json.dumps(wrote)
+    assert "manifest.json" in message, wrote
+    assert ("written, not recorded: " in message
+            and os.path.join(".revl", "export", "vault.rvl") in message), wrote
+    assert copy.read_bytes() != before
+    assert manifest.read_bytes() == held
+
+
+@pytest.mark.parametrize("name", ["digests.json", "manifest.json", "vault.rvl"])
+def test_a_directory_at_an_old_temporary_name_stops_no_export(vault, name):
+    """A write once went through a fixed temporary name beside its file,
+    `.<name>.revl-export`, which an inline export could make a directory,
+    after which every export writing that file failed. Each write now goes
+    through a fresh name: the export writes the copy and records it, and
+    leaves no temporary behind."""
+    copy = _author_export(vault)
+    export = copy.parent
+    prepared = export / f".{name}.revl-export"
+    assert _call("revl_load", {"source": PLAIN})["ok"] is True
+    wrote = _call("revl_export", {"path": str(prepared / "x.rvl")})
+    assert wrote["ok"] is True, wrote
+    assert prepared.is_dir()
+    _reset()
+    adopted = _adopt(copy, vault, "root")
+    _load(adopted)
+    _export_again(copy)
+    assert isinstance(_record_of(export / "digests.json"), dict)
+    assert [p.name for p in export.iterdir()
+            if p.name.endswith(".revl-export") and p != prepared] == []
     _reset()
     _load(adopted)
     found = _with_body(AUTHOR_TEXT)
