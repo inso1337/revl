@@ -33480,8 +33480,8 @@ fn lir_match(m: MatchN, env: Vec<Bind>, al: std::collections::HashMap<String, St
     return (((String::from("{\"kind\":\"match\",\"scrutinee\":").revl_concat(&lir_expr(m.scrut.clone(), env.clone(), al.clone()))).revl_concat(",\"arms\":[")).revl_concat(&arms)).revl_concat("]}");
 }
 
-fn hole_json(h: HoleN, expected: String) -> String {
-    let ty = if (h.ty != "") { h.ty } else { expected };
+fn hole_json(h: HoleN, expected: String, al: std::collections::HashMap<String, String>) -> String {
+    let ty = if (h.ty != "") { alias_subst(h.ty.clone(), al.clone()) } else { expected };
     if (ty == "") {
         return String::from("{\"kind\":\"bad\"}");
     }
@@ -33515,7 +33515,7 @@ fn lir_expr(e: Expr, env: Vec<Bind>, al: std::collections::HashMap<String, Strin
     Expr::Match(m) => { let m = *m; lir_match(m, env.clone(), al.clone()) },
     Expr::Templ(t) => (String::from("{\"kind\":\"interp\",\"parts\":[").revl_concat(&lir_parts(t.parts, env.clone(), al.clone()))).revl_concat("]}"),
     Expr::RecUpd(r) => { let r = *r; (((String::from("{\"kind\":\"record_update\",\"base\":").revl_concat(&lir_expr(r.base.clone(), env.clone(), al.clone()))).revl_concat(",\"updates\":[")).revl_concat(&lir_updates(r.upds.clone(), 0i64, String::from(""), env.clone(), al.clone()))).revl_concat("]}") },
-    Expr::Hole(h) => hole_json(h, String::from("")),
+    Expr::Hole(h) => hole_json(h, String::from(""), al.clone()),
     Expr::Asset(_) => String::from("{\"kind\":\"bad\"}"),
     Expr::Bad(m) => String::from("{\"kind\":\"bad\"}"),
     _ => unreachable!(),
@@ -33651,7 +33651,7 @@ fn lir_rhs_exp(ts: Vec<Token>, j: i64, env: Vec<Bind>, expected: String, al: std
         return RhsR { js: String::from(""), ty: String::from(""), i: j, ok: false };
     }
     let js = match r.e.clone() {
-    Expr::Hole(h) => hole_json(h, expected.clone()),
+    Expr::Hole(h) => hole_json(h, expected.clone(), al.clone()),
     _ => lir_expr(r.e.clone(), env.clone(), al.clone()),
 };
     return RhsR { js: js.clone(), ty: infer(r.e.clone(), env.clone()), i: r.i, ok: true };

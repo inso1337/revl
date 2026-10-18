@@ -29537,8 +29537,12 @@ fn lir_match(m: MatchN, env: List[Bind], al: Map[Str, Str]) -> Str {
 // A hole with NO type anywhere is a reference REFUSAL (T3: nothing in its
 // context says what it must become), and `lower_to_ir` issues no diagnostics, so
 // it stays the `bad` node it was rather than inventing a type.
-fn hole_json(h: HoleN, expected: Str) -> Str {
-  let ty = h.ty != "" ? h.ty : expected
+//
+// The author's `hole[Count]` annotation is erased like every other written
+// annotation (issue #2514: the reference's `_ANNOTATION_FIELDS` lists
+// `ExprHole.type`), so the IR says `Int` on both sides.
+fn hole_json(h: HoleN, expected: Str, al: Map[Str, Str]) -> Str {
+  let ty = h.ty != "" ? alias_subst(h.ty, al) : expected
   if (ty == "") { return "{\"kind\":\"bad\"}" }
   var js = "{\"kind\":\"hole\",\"type\":".concat(jstr(ty))
     .concat(",\"file\":\"<string>\",\"line\":").concat(h.line.to_str())
@@ -29586,7 +29590,7 @@ fn lir_expr(e: Expr, env: List[Bind], al: Map[Str, Str]) -> Str {
     Templ(t)    => "{\"kind\":\"interp\",\"parts\":[".concat(lir_parts(t.parts, env, al)).concat("]}"),
     RecUpd(r)   => "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(r.base, env, al))
                      .concat(",\"updates\":[").concat(lir_updates(r.upds, 0, "", env, al)).concat("]}"),
-    Hole(h)     => hole_json(h, ""),
+    Hole(h)     => hole_json(h, "", al),
     // item 459 F1: `asset "<path>"` lowers on the reference to the RESOLVED
     // record `{ path, sha256 }` (`ExprAsset` IS an `ExprRecord`, and
     // `revl.hostref.resolve_assets` fills its two fields by reading the file
@@ -29749,7 +29753,7 @@ fn lir_rhs_exp(ts: List[Token], j: Int, env: List[Bind], expected: Str, al: Map[
   let r = expr_at(ts, j)
   if (is_bad(r.e) || r.i <= j) { return { js: "", ty: "", i: j, ok: false } }
   let js = match r.e {
-    Hole(h) => hole_json(h, expected),
+    Hole(h) => hole_json(h, expected, al),
     _       => lir_expr(r.e, env, al),
   }
   return { js: js, ty: infer(r.e, env), i: r.i, ok: true }

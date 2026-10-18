@@ -3039,6 +3039,8 @@ _ISSUE_2399_COMPILED.update({
     "prop_param_alias": "type M = Int\n" + _prop_params("n: M"),
     "prop_body_alias": (
         "type M = Int\nprop test \"p\" (n: M) {\n  let y: M = n\n  assert y == n\n}\n"),
+    "hole_alias": (
+        "type M = Int\nfn helper(x: Int) -> Int { return hole[M] \"a function body\" }\n"),
     "generic_record_nested_in_test": _BOX + _test_doc("  let b: Box[Box[Int]] = { v: { v: 1 } }"),
     "generic_record_nested_in_prop": _BOX + _prop_doc("  let b: Box[Box[Int]] = { v: { v: n } }"),
     "generic_record_nested_in_fn": (
