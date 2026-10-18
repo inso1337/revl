@@ -296,7 +296,7 @@ def test_the_server_decides_inside_its_door_and_the_rule_holds_outside(
 
 def test_the_rule_is_back_after_a_request_that_raises(root):
     from revl import compiler  # noqa: PLC0415
-    from revl.mcp.export_jail import server_door  # noqa: PLC0415
+    from revl.export_area import server_door  # noqa: PLC0415
 
     inside = []
 
@@ -312,7 +312,7 @@ def test_the_rule_is_back_after_a_request_that_raises(root):
 
 def test_turning_the_rule_off_is_unseen_by_another_thread(root):
     from revl import compiler  # noqa: PLC0415
-    from revl.mcp.export_jail import cli_rule  # noqa: PLC0415
+    from revl.export_area import cli_rule  # noqa: PLC0415
 
     seen = []
     with cli_rule(off=True):
@@ -337,3 +337,27 @@ def test_the_commands_without_the_flag_refuse_it(capsys, argv):
     assert stopped.value.code != 0
     assert "--trust-exported" in capsys.readouterr().err
 
+
+def test_other_options_still_abbreviate():
+    """Only `--trust-exported` must be spelled in full; every other option
+    keeps the abbreviations argparse gives it (`--json` for
+    `--json-diagnostics`)."""
+    from revl.cli.parser import build_parser  # noqa: PLC0415
+
+    args = build_parser().parse_args(["compile", "--json", "x.rvl"])
+    assert args.json_diagnostics is True
+    assert args.trust_exported is False
+
+
+@pytest.mark.parametrize("bindings", [(), (("db", "realm-a"),)])
+def test_the_rule_uses_the_servers_default_authoring_profile(bindings):
+    """The compile side builds the authoring profile itself, so compiling
+    never imports the server; it is the server's default one exactly."""
+    from revl.admit_profile import AdmissionProfile  # noqa: PLC0415
+    from revl.export_area import author_profile  # noqa: PLC0415
+    from revl.mcp.server import AuthoringTrust  # noqa: PLC0415
+
+    base = AdmissionProfile(realm_bindings=bindings)
+    assert author_profile(base) == AuthoringTrust(
+        realm_bindings=bindings).profile()
+    assert author_profile(base).untrusted

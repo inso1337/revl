@@ -38,7 +38,8 @@ from .typecheck import format_type, parse_type
 
 
 # issue #2547: the rule for files under `.revl/export/`, an
-# `export_jail.CliRule`. It is ON by default for every compile in the process
+# `export_area.CliRule` (outside `revl.mcp`, so compiling never imports the
+# server, issue #1780). It is ON by default for every compile in the process
 # (one shared `CliRule`, made on first use), so the command line and every
 # library caller that names a file on disk get it with no wiring of their own.
 # It decides by files that exist: text compiled under a label that is not a
@@ -46,7 +47,7 @@ from .typecheck import format_type, parse_type
 # `export_rule` installs another one, or turns it off, for one context only
 # (a context variable, reset on the way out even when the body raises, and
 # unseen by any other thread or task): `revl.__main__.main` installs the one
-# for its command (`export_jail.cli_rule`, which carries `--trust-exported`),
+# for its command (`export_area.cli_rule`, which carries `--trust-exported`),
 # and only the MCP server turns it off, for `revl mcp serve` and for every
 # request `mcp.server.handle` answers, because the server decides how each
 # file compiles by its own path rule and `--author-trust` (#2546).
@@ -65,7 +66,7 @@ def _export_rule():
     if rule is not None:
         return rule
     if _DEFAULT_RULE is None:
-        from .mcp.export_jail import CliRule  # noqa: PLC0415: no cycle at load
+        from .export_area import CliRule  # noqa: PLC0415: no cycle at load
 
         _DEFAULT_RULE = CliRule()
     return _DEFAULT_RULE

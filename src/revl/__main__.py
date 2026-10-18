@@ -1350,7 +1350,7 @@ def main(argv: list[str] | None = None) -> int:
     # profile (the rule is on by default in every process), unless this one
     # command was given `--trust-exported`. `revl mcp serve` turns it off: the
     # server decides by its own path rule and `--author-trust`.
-    from .mcp.export_jail import cli_rule  # noqa: PLC0415
+    from .export_area import cli_rule  # noqa: PLC0415
 
     with cli_rule(getattr(args, "trust_exported", False),
                   off=_serves_the_compiler(args),

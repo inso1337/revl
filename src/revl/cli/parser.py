@@ -121,11 +121,25 @@ def _add_serve_operator_arguments(serve) -> None:
     _add_profile_settle_argument(serve)
 
 
+#: The flag that is accepted only in its full spelling (issue #2547).
+TRUST_EXPORTED = "--trust-exported"
+
+
+class _Parser(argparse.ArgumentParser):
+    """The `revl` parser. Abbreviated options work as argparse gives them,
+    except `--trust-exported`, which turns a safety rule off for one command
+    and so is matched only when spelled in full: `--trust-e` names no option.
+    Every subcommand parser is one of these (`add_subparsers` makes its
+    parsers of the parent's class)."""
+
+    def _get_option_tuples(self, option_string):
+        return [found for found in super()._get_option_tuples(option_string)
+                if TRUST_EXPORTED not in found[0].option_strings]
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
-    # no abbreviations, in any command (issue #2547): `--trust-e` must not
-    # pass for `--trust-exported`, nor a prefix for any other flag
-    parser = argparse.ArgumentParser(prog="revl", allow_abbrev=False)
+    parser = _Parser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
 
     cmd = sub.add_parser("compile", help="compile .rvl files to a backend IR document")
@@ -2737,14 +2751,17 @@ def _add_trust_exported(parser, path: tuple = ()) -> None:
     """Give every leaf command `--trust-exported` (issue #2547). Without it, a
     file under `.revl/export/` compiles under the authoring profile; with it,
     as the operator's own, for this one command only. Every parser in the tree
-    also refuses abbreviated flags, so only the full spelling opts out."""
-    parser.allow_abbrev = False
+    is a `_Parser`, so only the full spelling opts out; one that is not would
+    accept an abbreviation, and building the tree refuses it."""
+    if not isinstance(parser, _Parser):
+        raise TypeError(f"revl {' '.join(path)}: parser is not a revl _Parser, "
+                        f"so it would accept an abbreviated {TRUST_EXPORTED}")
     actions = [a for a in parser._actions
                if isinstance(a, argparse._SubParsersAction)]
     if not actions:
         if path not in _NO_TRUST_EXPORTED:
             parser.add_argument(
-                "--trust-exported", action="store_true",
+                TRUST_EXPORTED, action="store_true",
                 help="compile files under .revl/export/ as your own instead of "
                      "under the authoring profile they get by default, for "
                      "this command only; stderr names each file it compiled "

@@ -45,16 +45,24 @@ and case-folded.
 """
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import os
-import sys
-import unicodedata
 
-EXPORT_DIR = os.path.join(".revl", "export")
+# the path rule lives outside `revl.mcp`, so compiling never imports the
+# server (issue #1780); the jail and the compiler ask the same functions
+from ..export_area import EXPORT_DIR, in_export_area
+# re-exported: the server and its callers name them through this module
+from ..export_area import CliRule  # noqa: F401
+from ..export_area import cli_rule  # noqa: F401
+from ..export_area import exported_texts  # noqa: F401
+from ..export_area import server_door  # noqa: F401
+from ..export_area import fold as _fold
+from ..export_area import read_exact as _read_exact
+from ..export_area import real as _real
+from ..export_area import under_export_dir as _under_export_dir
+
 MANIFEST = "manifest.json"
-_EXPORT_PARTS = tuple(EXPORT_DIR.split(os.sep))
 
 # the files the server opened as operator configuration: (st_dev, st_ino) of
 # those that exist, and the case-folded realpath of every one
@@ -99,17 +107,6 @@ def recorded_paths(paths, roots) -> list[str]:
     return [p for p in paths if _root_of(p, roots) is not None]
 
 
-def _real(path: str) -> str:
-    return os.path.realpath(os.path.abspath(path))
-
-
-def _fold(text: str) -> str:
-    """`text` NFC-normalised and case-folded: the spelling a filesystem that
-    folds case or Unicode normalisation treats as the same name."""
-    return unicodedata.normalize(
-        "NFC", unicodedata.normalize("NFC", text).casefold())
-
-
 def _identity(path: str) -> tuple[int, int] | None:
     try:
         st = os.stat(path)
@@ -148,48 +145,8 @@ def export_dirs(roots) -> tuple[str, ...]:
     return tuple(os.path.join(root, EXPORT_DIR) for root in roots)
 
 
-def _under_export_dir(path: str) -> bool:
-    parts = [_fold(part) for part in path.split(os.sep)]
-    width = len(_EXPORT_PARTS)
-    return any(tuple(parts[i:i + width]) == _EXPORT_PARTS
-               for i in range(len(parts) - width + 1))
-
-
-def in_export_area(path: str) -> bool:
-    """Whether `path` lies inside any `.revl/export` directory, whichever root
-    it was written under: as named (absolute, `..` folded away) or as it
-    resolves through symbolic links. Either one is enough, since counting a
-    file as author-written only ever adds the profile. Compared
-    case-insensitively: on a filesystem that folds case, `.REVL/Export` IS the
-    export directory, and on one that does not, counting it as one only ever
-    profiles more. The server and the command line both decide by this."""
-    return (_under_export_dir(os.path.normpath(os.path.abspath(path)))
-            or _under_export_dir(_real(path)))
-
-
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _read_exact(path: str) -> str | None:
-    """The file's text with no newline translation: the bytes, decoded."""
-    try:
-        with open(path, encoding="utf-8", newline="") as handle:
-            return handle.read()
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def exported_texts(paths) -> dict[str, str]:
-    """`{abspath: text}` of every path in `paths` inside an export directory:
-    the files whose text is the agent's."""
-    out = {}
-    for path in paths:
-        if in_export_area(path):
-            text = _read_exact(path)
-            if text is not None:
-                out[os.path.abspath(path)] = text
-    return out
 
 
 def _inside(path: str, directories) -> bool:
@@ -433,186 +390,3 @@ def check_operator_files(paths, latches=()) -> None:
             f"refused: {', '.join(hit)} is an operator configuration file or an "
             "emergency-stop latch; revl_export never creates or replaces one; "
             "nothing was written")
-
-
-# ------------------------------------------------------------------ the CLI
-
-
-class CliRule:
-    """The command line's half of the TRUST rule (issue #2547): a file under a
-    `.revl/export/` directory is author-written whoever loads it, so `revl`
-    compiles it under the authoring profile the server uses by default, the
-    same way the server's `compile_under_authoring` does: its text rides in
-    memory with no operator text to diff against, and a pass that reads one
-    from disk by `use` is repeated with it riding, until a pass reads none.
-
-    One is in force for every compile in the process unless the MCP server
-    turned it off (see `compiler.export_rule`); `revl.__main__.main` installs
-    the one for the command it dispatches (see `cli_rule`). With `trust` (the
-    command was given `--trust-exported`) the files compile as the operator's
-    own and one line on stderr names them. `offer_flag` says whether the
-    command takes that flag, so the note names it only where it works. The
-    rule is never read from the environment or a configuration file."""
-
-    def __init__(self, trust: bool = False, offer_flag: bool = False) -> None:
-        self.trust = trust
-        self.offer_flag = offer_flag
-        self._said: set[str] = set()
-
-    @staticmethod
-    def exported(path: str) -> bool:
-        """Whether the compile input `path` is an author-written file: a file
-        that exists on disk and lies inside an export directory. A label that
-        names no file (a `<...>` placeholder, a virtual or relative name with
-        nothing behind it) is not decided here; it compiles exactly as it did
-        before this rule."""
-        return (not os.path.basename(path).startswith("<")
-                and os.path.isfile(path) and in_export_area(path))
-
-    @staticmethod
-    def author_profile(base=None):
-        """The authoring profile the server compiles agent text under by
-        default, carrying the operator's realm bindings from `base`."""
-        from .server import AuthoringTrust  # noqa: PLC0415: only when needed
-
-        return AuthoringTrust(
-            realm_bindings=tuple(getattr(base, "realm_bindings", ()) or ())
-        ).profile()
-
-    def applies(self, profile) -> bool:
-        """Whether a compile under `profile` is one this rule decides: an
-        operator compile (no profile, or one that does not distrust the
-        author). A compile already under an untrusted author's profile keeps
-        its own."""
-        return profile is None or not profile.untrusted
-
-    def _say(self, paths, text: str) -> None:
-        fresh = sorted({os.path.abspath(p) for p in paths} - self._said)
-        if fresh:
-            self._said.update(fresh)
-            print(text.format(", ".join(fresh)), file=sys.stderr)
-
-    def source_profile(self, filename: str, profile):
-        """The profile `compile_source` uses for text labelled `filename` when
-        nothing else is read: the author's when `filename` is a file on disk
-        under the export directory, else `profile` unchanged."""
-        if not self.exported(filename):
-            return profile
-        if self.trust:
-            self._say([filename], TRUSTED_LINE)
-            return profile
-        self._say([filename], self._profiled_line())
-        return self.author_profile(profile)
-
-    def _profiled_line(self) -> str:
-        return PROFILED_LINE + (PROFILED_FLAG if self.offer_flag
-                                else PROFILED_COPY)
-
-    def compile_files(self, compile_once, paths, sources, profile, profiles,
-                      operator_sources, report):
-        """Run `compile_once(sources=, profile=, profiles=, operator_sources=,
-        report=)` for a `compile_files` call under this rule."""
-        sources = {os.path.abspath(k): v for k, v in (sources or {}).items()}
-        if self.trust:
-            # named before the compile, so one that raises still says what it
-            # trusted; files reached by `use` are named once it has read them
-            self._say([p for p in list(paths) + list(sources)
-                       if self.exported(p)], TRUSTED_LINE)
-            seen: dict = {}
-            document = compile_once(sources=sources or None, profile=profile,
-                                    profiles=profiles,
-                                    operator_sources=operator_sources,
-                                    report=seen)
-            self._say([p for p in seen.get("disk_reads") or ()
-                       if self.exported(p)], TRUSTED_LINE)
-            if report is not None:
-                report.update(seen)
-            return document
-        authored = {p: t for p, t in sources.items() if self.exported(p)}
-        authored.update({p: t for p, t in exported_texts(
-            [p for p in paths if self.exported(p)]).items()
-            if p not in authored})
-        # what the caller supplied in memory and is not exported is the
-        # operator's own text, so the diff rule does not count it as authored
-        operator = {p: t for p, t in sources.items() if p not in authored}
-        operator.update(operator_sources or {})
-        while True:
-            seen = {}
-            if authored:
-                self._say(authored, self._profiled_line())
-                author = self.author_profile(profile)
-                document = compile_once(
-                    sources={**sources, **authored}, profile=author,
-                    profiles=_profile_exported(profiles, author),
-                    operator_sources=operator, report=seen)
-            else:
-                document = compile_once(
-                    sources=sources or None, profile=profile,
-                    profiles=profiles, operator_sources=operator_sources,
-                    report=seen)
-            pending = {p: t for p, t in (seen.get("disk_reads") or {}).items()
-                       if p not in authored and self.exported(p)}
-            if not pending:
-                break
-            authored.update(pending)
-        if report is not None:
-            report.update(seen)
-            roots = {os.path.abspath(p) for p in paths}
-            riding = {p: t for p, t in authored.items()
-                      if p not in roots and p not in sources}
-            if riding:
-                report["dependencies"] = {
-                    **(report.get("dependencies") or {}), **riding}
-        return document
-
-
-PROFILED_LINE = ("note: {} lies under .revl/export/, so it is author-written and "
-                 "compiles under the authoring profile")
-# the end of the note: the flag where the command takes it, else the one way
-# that works everywhere (`truc` and library callers take no such flag)
-PROFILED_FLAG = "; pass --trust-exported to compile it as your own"
-PROFILED_COPY = ("; to compile it as your own, copy it out of the export "
-                 "directory")
-TRUSTED_LINE = "--trust-exported: compiled as the operator's own: {}"
-
-
-def _profile_exported(profiles, author):
-    """`profiles` with every exported root that would compile as the
-    operator's moved to the authoring profile."""
-    if profiles is None:
-        return None
-    return {p: (author if CliRule.exported(p)
-                and (prof is None or not prof.untrusted) else prof)
-            for p, prof in profiles.items()}
-
-
-@contextlib.contextmanager
-def cli_rule(trust_exported: bool = False, off: bool = False,
-             offer_flag: bool = True):
-    """Install the rule for one command (see `CliRule`): with
-    `--trust-exported` when the command was given it, or `off` for `revl mcp
-    serve`, whose server decides by its own path rule. `offer_flag` is whether
-    the command takes `--trust-exported`. The rule is set for this context
-    only and restored on the way out (`compiler.export_rule`)."""
-    from .. import compiler  # noqa: PLC0415
-
-    rule = None if off else CliRule(trust=bool(trust_exported),
-                                    offer_flag=offer_flag)
-    with compiler.export_rule(rule):
-        yield rule
-
-
-def server_door(handle):
-    """`handle` with the rule off for every request it answers: the MCP
-    server compiles a file under `.revl/export/` by its own path rule and the
-    operator's `--author-trust` (issue #2524), never by this one as well."""
-    import functools  # noqa: PLC0415
-
-    from .. import compiler  # noqa: PLC0415
-
-    @functools.wraps(handle)
-    def answered(*args, **kwargs):
-        with compiler.export_rule(None):
-            return handle(*args, **kwargs)
-
-    return answered
