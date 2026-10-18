@@ -995,7 +995,12 @@ the sanctioned roots, checked before anything is written. Authorized as
 `snapshot`.
 
 The rule, under every authoring trust (issue #2524): an export writes only
-under `<root>/.revl/export/` and never over another file.
+under `<root>/.revl/export/` and never over another file. `revl_export` is
+reached only over the transport, so whoever calls it is an author, whatever
+`--author-trust` says. The trust flag decides only how a file under the export
+directory compiles, never where a write lands or what it may replace. No
+request argument reaches an in-place write, and there is no command-line
+export of the held source.
 
 - A composition loaded from files writes each loaded file whose held text
   differs from its copy to that copy, `<root>/.revl/export/<path relative to
@@ -1007,15 +1012,20 @@ under `<root>/.revl/export/` and never over another file.
   modules beside it, and refuses to replace an existing file unless
   `overwrite: true`.
 - An existing destination is replaced only when its bytes are the bytes an
-  export recorded for that very file in `<root>/.revl/export/manifest.json`
-  (path and SHA-256 of the exact bytes written; matched by file identity, so a
-  case or link alias is the same file). Anything else is refused, even with
-  `overwrite: true`. A missing or unreadable manifest records nothing, so it
-  refuses: the check fails closed.
+  export recorded for that very file in its root's own manifest,
+  `<root>/.revl/export/manifest.json` (path and SHA-256 of the exact bytes
+  written; matched by file identity, so a case or link alias is the same
+  file). No other manifest is read. Anything else is refused, even with
+  `overwrite: true`. A missing, unreadable or malformed manifest records
+  nothing, so it refuses: the check fails closed. A file is recorded only
+  after its write succeeds.
+- A manifest (`manifest.json` inside any export directory, in any spelling,
+  or a link to one) is never an export target.
 - An export never creates or replaces a file the server opened as operator
   configuration (`--operator-profile`, `--policy`, `--provider`, `--restore`,
   `--tls-cert`, `--tls-key`, `--tls-client-ca`), matched by device and inode
-  with a case-folded path as fallback, nor an emergency-stop latch: the
+  with an NFC-normalised, case-folded path as fallback, nor an emergency-stop
+  latch: the
   `REVL_ESTOP_LATCH` file, `<wal>.estop` for `--wal` and for the WAL the live
   session journals to, an SLO contract's latch, and any `*.estop` file (issue
   #2535).
@@ -1031,16 +1041,15 @@ another Unicode line separator or a byte-order mark is refused, since a `//`
 comment cannot carry it. A vendored truc's records and its `component.rvl` are
 left alone (issue #1769, see docs/registry.md §1.4).
 
-**Under a closed authoring trust** (the default), an inline export is also
-confined: `path` and every module must land inside the export directory, only
-`.rvl` modules the program reaches by `use` are written (a module key that is
-not a `.rvl` file is refused; an unreached one is listed in `skipped`), a
-write-back must be a `.rvl` file, and a destination may not be a symbolic
-link.
+Also under every trust: an inline export's `path` and every module must land
+inside the export directory, only `.rvl` modules the program reaches by `use`
+are written (a module key that is not a `.rvl` file is refused; an unreached
+one is listed in `skipped`), a write-back must be a `.rvl` file, and a
+destination may not be a symbolic link.
 
 - Inputs: `path` and `overwrite` (inline compositions); `with_knowledge`.
 - Output: `written` (the paths written); `skipped` (inline modules the program
-  does not reach, under a closed trust).
+  does not reach).
 
 ### The comment index (`knowledge` on responses)
 

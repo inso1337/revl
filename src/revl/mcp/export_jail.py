@@ -7,34 +7,43 @@ back by `files` compiled without the authoring profile. The rule that makes
 the exemption sound again is one sentence: an export writes only under
 `<root>/.revl/export/`, and never over a file revl did not write.
 
+The rule holds under every authoring trust. Trust decides only how a file
+under the export directory compiles, never where an export writes or what it
+may replace: an author over the transport is an author whatever the trust
+flag, and `revl_export` is reached only over the transport.
+
 * WHERE: an inline composition is exported into the export directory. A
   files-loaded composition writes each changed file to its copy there, at the
   same path relative to the root (a file already inside the export directory
   is its own copy), never over the operator's file. Adopting an exported file
   is the operator's act: copying it out.
 * WHAT ELSE: an existing destination is replaced only when its bytes are the
-  bytes an export recorded for that file in `<root>/.revl/export/manifest.json`
-  (path and SHA-256 of the exact bytes written). A missing or unreadable
-  manifest records nothing, so it refuses the overwrite: it fails closed.
+  bytes an export recorded for that file in its root's own manifest,
+  `<root>/.revl/export/manifest.json` (path and SHA-256 of the exact bytes
+  written); no other manifest is read. A missing, unreadable or malformed
+  manifest records nothing, so it refuses the overwrite: it fails closed. A
+  manifest is never an export target, under any spelling.
 * TRUST: a file inside any `.revl/export/` directory is the agent's, by path,
   always. Named in `files` or reached by `use`, its text compiles under the
   authoring profile with no operator text to diff against, exactly as if it
   had been sent inline. The manifest never decides who wrote a file.
 
-Under a closed authoring trust an inline export also writes only `.rvl` modules
-the program reaches by `use`, a destination may not be a symbolic link, and a
+An export also writes only `.rvl` modules (an inline one, only those the
+program reaches by `use`), a destination may not be a symbolic link, and a
 rendered note may not carry a line break other than a newline.
 
-Under every trust, an export never replaces a file the server opened as
-operator configuration at serve time (the operator profile, the boundary
-policy, provider modules, the restore snapshot, TLS files, the emergency-stop
-latch), whichever spelling or directory names it.
+An export never creates or replaces a file the server opened as operator
+configuration at serve time (the operator profile, the boundary policy,
+provider modules, the restore snapshot, TLS files) or an emergency-stop latch,
+whichever spelling or directory names it. Names are compared NFC-normalised
+and case-folded.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import unicodedata
 
 EXPORT_DIR = os.path.join(".revl", "export")
 MANIFEST = "manifest.json"
@@ -58,6 +67,13 @@ def _real(path: str) -> str:
     return os.path.realpath(os.path.abspath(path))
 
 
+def _fold(text: str) -> str:
+    """`text` NFC-normalised and case-folded: the spelling a filesystem that
+    folds case or Unicode normalisation treats as the same name."""
+    return unicodedata.normalize(
+        "NFC", unicodedata.normalize("NFC", text).casefold())
+
+
 def _identity(path: str) -> tuple[int, int] | None:
     try:
         st = os.stat(path)
@@ -75,7 +91,7 @@ def protect_operator_files(paths) -> None:
         identity = _identity(path)
         if identity is not None:
             _OPERATOR_IDS.add(identity)
-        _OPERATOR_NAMES.add(_real(path).casefold())
+        _OPERATOR_NAMES.add(_fold(_real(path)))
 
 
 def reset_operator_files() -> None:
@@ -88,7 +104,7 @@ def _is_operator_file(path: str) -> bool:
     identity = _identity(path)
     if identity is not None and identity in _OPERATOR_IDS:
         return True
-    return _real(path).casefold() in _OPERATOR_NAMES
+    return _fold(_real(path)) in _OPERATOR_NAMES
 
 
 def export_dirs(roots) -> tuple[str, ...]:
@@ -101,7 +117,7 @@ def in_export_area(path: str) -> bool:
     root it was written under. Compared case-insensitively: on a filesystem
     that folds case, `.REVL/Export` IS the export directory, and on one that
     does not, counting it as one only ever profiles more."""
-    parts = [part.casefold() for part in _real(path).split(os.sep)]
+    parts = [_fold(part) for part in _real(path).split(os.sep)]
     width = len(_EXPORT_PARTS)
     return any(tuple(parts[i:i + width]) == _EXPORT_PARTS
                for i in range(len(parts) - width + 1))
@@ -164,14 +180,30 @@ def export_copy(path: str, roots) -> str:
 
 
 def _manifest_entries(manifest: str) -> dict:
+    """`{relpath: sha256}` from a manifest, or nothing at all unless it is
+    exactly `{"files": {str: {"sha256": str}}}`: whatever else it holds
+    records nothing, so every overwrite it would vouch for is refused."""
     text = _read_exact(manifest)
     if text is None:
         return {}
     try:
-        files = json.loads(text).get("files")
-    except (ValueError, AttributeError):
+        document = json.loads(text)
+    except (ValueError, RecursionError):
         return {}
-    return files if isinstance(files, dict) else {}
+    files = document.get("files") if isinstance(document, dict) else None
+    if not isinstance(files, dict) or set(document) != {"files"}:
+        return {}
+    entries = {}
+    for key, entry in files.items():
+        if not (isinstance(entry, dict) and set(entry) == {"sha256"}
+                and isinstance(entry["sha256"], str)):
+            return {}
+        entries[key] = entry["sha256"]
+    return entries
+
+
+def _manifest_of(root: str) -> str:
+    return os.path.join(root, EXPORT_DIR, MANIFEST)
 
 
 def _same_file(a: str, b: str) -> bool:
@@ -181,26 +213,19 @@ def _same_file(a: str, b: str) -> bool:
         return False
 
 
-def revl_wrote(path: str) -> bool:
+def revl_wrote(path: str, roots) -> bool:
     """Whether the bytes at `path` are bytes an export recorded for that very
-    file, in any ancestor's manifest. Matched by file identity, so a case or
-    link alias is the same file; a missing manifest matches nothing."""
+    file in the manifest of the root it lies in, and no other: a manifest
+    anywhere else is never read. Matched by file identity, so a case or link
+    alias is the same file; a missing manifest matches nothing."""
     real = _real(path)
+    root = _root_of(real, roots)
     text = _read_exact(real)
-    if text is None:
+    if root is None or text is None:
         return False
     digest = _sha256(text)
-    directory = os.path.dirname(real)
-    while True:
-        entries = _manifest_entries(os.path.join(directory, EXPORT_DIR, MANIFEST))
-        for key, entry in entries.items():
-            if (isinstance(entry, dict) and entry.get("sha256") == digest
-                    and _same_file(os.path.join(directory, key), real)):
-                return True
-        parent = os.path.dirname(directory)
-        if parent == directory:
-            return False
-        directory = parent
+    return any(sha == digest and _same_file(os.path.join(root, key), real)
+               for key, sha in _manifest_entries(_manifest_of(root)).items())
 
 
 def manifest_writes(targets, roots) -> list[tuple[str, str]]:
@@ -212,11 +237,12 @@ def manifest_writes(targets, roots) -> list[tuple[str, str]]:
         root = _root_of(path, roots)
         if root is None:
             continue
-        manifest = os.path.join(root, EXPORT_DIR, MANIFEST)
+        manifest = _manifest_of(root)
         entries = manifests.setdefault(manifest, dict(_manifest_entries(manifest)))
-        entries[os.path.relpath(_real(path), root)] = {"sha256": _sha256(text)}
-    return [(manifest, json.dumps({"files": entries}, indent=2, sort_keys=True) + "\n")
-            for manifest, entries in manifests.items()]
+        entries[os.path.relpath(_real(path), root)] = _sha256(text)
+    return [(manifest, json.dumps(
+        {"files": {key: {"sha256": sha} for key, sha in entries.items()}},
+        indent=2, sort_keys=True) + "\n") for manifest, entries in manifests.items()]
 
 
 # ------------------------------------------------------------------ checks
@@ -254,8 +280,8 @@ def check_inline(path: str, modules: dict, roots) -> None:
     if not path.endswith(".rvl") or not_rvl:
         names = ", ".join(([path] if not path.endswith(".rvl") else []) + not_rvl)
         raise ExportRefused(
-            f"refused: {names} is not a .rvl module; under a closed authoring "
-            "trust revl_export writes only revl modules; nothing was written")
+            f"refused: {names} is not a .rvl module; revl_export writes only "
+            "revl modules; nothing was written")
     base_dir = os.path.dirname(os.path.abspath(path))
     targets = [os.path.abspath(path)] + [
         os.path.normpath(os.path.join(base_dir, key)) for key in modules]
@@ -264,8 +290,8 @@ def check_inline(path: str, modules: dict, roots) -> None:
     if outside:
         raise ExportRefused(
             f"refused: {', '.join(outside)} is outside the export directory "
-            f"({', '.join(allowed)}); under a closed authoring trust an inline "
-            "composition is exported there; nothing was written")
+            f"({', '.join(allowed)}); an inline composition is exported "
+            "there; nothing was written")
 
 
 def check_write_back(paths) -> None:
@@ -273,9 +299,8 @@ def check_write_back(paths) -> None:
     not_rvl = [p for p in paths if not p.endswith(".rvl")]
     if not_rvl:
         raise ExportRefused(
-            f"refused: {', '.join(not_rvl)} is not a .rvl file; under a closed "
-            "authoring trust revl_export writes only revl modules; nothing was "
-            "written")
+            f"refused: {', '.join(not_rvl)} is not a .rvl file; revl_export "
+            "writes only revl modules; nothing was written")
 
 
 def check_note_bodies(notes) -> None:
@@ -291,9 +316,9 @@ def check_note_bodies(notes) -> None:
             "cannot carry; nothing was written")
 
 
-def check_foreign(existing) -> None:
+def check_foreign(existing, roots) -> None:
     """Refuse overwriting a file whose bytes revl did not write."""
-    foreign = [p for p in existing if not revl_wrote(p)]
+    foreign = [p for p in existing if not revl_wrote(p, roots)]
     if foreign:
         raise ExportRefused(
             f"refused: {', '.join(foreign)} was not written by revl_export (or "
@@ -308,15 +333,32 @@ def check_not_linked(paths) -> None:
     if linked:
         raise ExportRefused(
             f"refused: {', '.join(linked)} is a symbolic link; revl_export "
-            "writes only regular files under a closed authoring trust; nothing "
-            "was written")
+            "writes only regular files; nothing was written")
 
 
 def _is_latch(path: str, latches) -> bool:
-    real = _real(path).casefold()
-    return (real.endswith(".estop")
-            or any(real == _real(latch).casefold() or _same_file(path, latch)
+    real = _fold(_real(path))
+    return (real.endswith(".estop") or _fold(path).endswith(".estop")
+            or any(real == _fold(_real(latch)) or _same_file(path, latch)
                    for latch in latches if latch))
+
+
+def _is_manifest(path: str, roots) -> bool:
+    """Whether `path` names an export manifest: any `manifest.json` inside an
+    export directory, under any spelling, or a link to a root's manifest."""
+    named = any(_fold(os.path.basename(p)) == MANIFEST and in_export_area(p)
+                for p in (os.path.abspath(path), _real(path)))
+    return named or any(_same_file(path, _manifest_of(root)) for root in roots)
+
+
+def check_not_manifest(paths, roots) -> None:
+    """Refuse any destination that is an export manifest: only `revl_export`
+    itself records what it wrote, never an author's text."""
+    hit = [p for p in paths if _is_manifest(p, roots)]
+    if hit:
+        raise ExportRefused(
+            f"refused: {', '.join(hit)} is the export manifest, which only "
+            "revl_export writes; nothing was written")
 
 
 def check_operator_files(paths, latches=()) -> None:

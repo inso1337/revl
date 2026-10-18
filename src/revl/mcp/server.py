@@ -2218,10 +2218,10 @@ def _tool_export(arguments: dict) -> dict:
     `<root>/.revl/export/`, never over the operator's file; an existing
     destination is replaced only when an export wrote its bytes (each write is
     recorded in the export manifest); and no export replaces an operator
-    configuration file. Under a closed trust an inline composition goes to the
-    export directory too, with only the `.rvl` modules it reaches (the rest are
-    reported in `skipped`), and whatever lands there compiles under the profile
-    when it is loaded back."""
+    configuration file or emergency-stop latch. An inline composition goes to
+    the export directory too, with only the `.rvl` modules it reaches (the rest
+    are reported in `skipped`). None of this depends on the authoring trust,
+    which decides only how a file under the export directory compiles."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded: revl_export writes the held "
                               "source of a running composition")
@@ -2231,10 +2231,16 @@ def _tool_export(arguments: dict) -> dict:
         plan = _export_plan(held, arguments, skipped)
     except (_edit.EditError, _export_jail.ExportRefused) as error:
         return _session_error(str(error), written=[])
-    for path, text in _export_jail.manifest_writes(plan, _file_roots()):
-        _write_atomic(path, text)
-    for path, text in plan:
-        _write_atomic(path, text)
+    written: list = []
+    try:
+        for path, text in plan:
+            _write_atomic(path, text)
+            written.append((path, text))
+    finally:
+        # recorded only once its bytes are on disk: a failed write records
+        # nothing, so the manifest never vouches for bytes no export wrote
+        for path, text in _export_jail.manifest_writes(written, _file_roots()):
+            _write_atomic(path, text)
     payload = {"ok": True, "written": [p for p, _ in plan],
                "note": "the held source was written to disk"
                        if plan else "the disk already holds the held source"}
@@ -2243,13 +2249,13 @@ def _tool_export(arguments: dict) -> dict:
     return payload
 
 
-def _export_jailed() -> bool:
-    """Whether the export jail applies: the authoring trust is closed."""
-    return AUTHORING.profile() is not None
-
-
 def _export_plan(held: dict, arguments: dict,
                  skipped: list | None = None) -> list[tuple[str, str]]:
+    """What an export writes, after every jail check, under every authoring
+    trust (issue #2524). `revl_export` is reached only over the transport, so
+    whoever asks is an author whatever the trust flag: trust decides how a
+    file under the export directory compiles, never where a write lands or
+    what it may replace. There is no in-place path."""
     roots = _file_roots()
     if held.get("files"):
         targets = _write_back_targets(held, arguments)
@@ -2261,16 +2267,16 @@ def _export_plan(held: dict, arguments: dict,
         raise _edit.EditError(
             f"refused: {', '.join(outside)} is outside the operator-sanctioned "
             "root(s); nothing was written")
-    _export_jail.check_operator_files([p for p, _ in targets],
-                                      _live_latches())
-    existing = [p for p, _ in targets if os.path.lexists(p)]
+    paths = [p for p, _ in targets]
+    _export_jail.check_not_manifest(paths, roots)
+    _export_jail.check_operator_files(paths, _live_latches())
+    _export_jail.check_not_linked(paths)
+    existing = [p for p in paths if os.path.lexists(p)]
     if existing and not held.get("files") and arguments.get("overwrite") is not True:
         raise _edit.EditError(
             f"refused: {', '.join(existing)} already exists; pass "
             "`overwrite: true` to replace it")
-    _export_jail.check_foreign(existing)
-    if _export_jailed():
-        _export_jail.check_not_linked([p for p, _ in targets])
+    _export_jail.check_foreign(existing, roots)
     return targets
 
 
@@ -2308,8 +2314,7 @@ def _write_back_targets(held: dict, arguments: dict) -> list[tuple[str, str]]:
         targets.append((path, text))
     targets = [(_export_jail.export_copy(p, roots), t)
                for p, t in targets if _diverges(t, p)]
-    if _export_jailed():
-        _export_jail.check_write_back([p for p, _ in targets])
+    _export_jail.check_write_back([p for p, _ in targets])
     if with_knowledge:
         targets += _notes.sidecar_writes(SESSION, held)
     return targets
@@ -2323,17 +2328,21 @@ def _inline_targets(held: dict, arguments: dict, roots: tuple[str, ...],
         raise _edit.EditError("this composition was loaded from inline source: "
                               "name the file to write in `path`")
     modules = dict(held.get("modules") or {})
-    jailed = _export_jailed()
-    if jailed:
-        _export_jail.check_inline(path, modules, roots)
-        reached = _export_jail.reached_modules(held.get("source") or "", modules)
-        skipped.extend(sorted(k for k in modules if k not in reached))
-        modules = {k: v for k, v in modules.items() if k in reached}
     base_dir = os.path.dirname(os.path.abspath(path))
-    targets = [(os.path.abspath(path), held["source"])] + [
-        (os.path.normpath(os.path.join(base_dir, key)), text)
-        for key, text in modules.items()]
-    return targets
+
+    def placed(keys):
+        return [os.path.abspath(path)] + [
+            os.path.normpath(os.path.join(base_dir, key)) for key in keys]
+
+    # what is never a target is refused first, whatever else is wrong
+    _export_jail.check_not_manifest(placed(modules), roots)
+    _export_jail.check_operator_files(placed(modules), _live_latches())
+    _export_jail.check_inline(path, modules, roots)
+    reached = _export_jail.reached_modules(held.get("source") or "", modules)
+    skipped.extend(sorted(k for k in modules if k not in reached))
+    modules = {k: v for k, v in modules.items() if k in reached}
+    return list(zip(placed(modules),
+                    [held["source"], *modules.values()]))
 
 
 def _write_atomic(path: str, text: str) -> None:

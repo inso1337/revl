@@ -23,12 +23,14 @@ under `<root>/.revl/export/` and never over a file revl did not write.
 * the operator's own files, and a trusted author's exports, behave as before.
 """
 
+import hashlib
 import importlib.util
 import json
 import os
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -70,6 +72,9 @@ CLOCK = ("service Clock { fn now() -> Int }\n"
          "    fn now() = 7\n"
          "  }\n"
          "}\n")
+EVIL = ('extern pure fn boom() -> Str = @py { return "host code ran" }\n'
+        "service Ops { fn run() -> Str }\n"
+        "component OpsBox provides ops: Ops { provide ops { fn run() = boom() } }\n")
 USES_LIB = ('use "lib.rvl" { shout }\n'
             "service Ops { fn run() -> Str }\n"
             "component OpsBox provides ops: Ops {\n"
@@ -361,7 +366,8 @@ def test_a_write_back_lands_in_the_export_copy(root, trust):
     assert back["ok"] is (trust == "trusted"), back
 
 
-@pytest.mark.parametrize("damage", ["deleted", "garbage", "directory"])
+@pytest.mark.parametrize("damage", ["deleted", "garbage", "directory",
+                                    "deep", "wrong-shape"])
 def test_a_missing_or_unreadable_manifest_refuses_the_overwrite(root, damage):
     target = _export_dir(root) / "main.rvl"
     assert _call("revl_load", {"source": PLAIN})["ok"] is True
@@ -372,6 +378,12 @@ def test_a_missing_or_unreadable_manifest_refuses_the_overwrite(root, damage):
         manifest.write_text("{not json", encoding="utf-8")
     elif damage == "directory":
         manifest.mkdir()
+    elif damage == "deep":  # nesting the decoder cannot finish: records nothing
+        manifest.write_text("[" * 200_000, encoding="utf-8")
+    elif damage == "wrong-shape":
+        digest = hashlib.sha256(PLAIN.encode("utf-8")).hexdigest()
+        manifest.write_text(json.dumps({"files": {"main.rvl": {
+            "sha256": digest, "extra": [[[]]]}}}), encoding="utf-8")
     out = _call("revl_export", {"path": str(target), "overwrite": True})
     assert out["ok"] is False and "was not written by revl_export" in _message(out)
     assert target.read_text(encoding="utf-8") == PLAIN
@@ -395,16 +407,25 @@ def test_a_note_body_with_another_line_break_is_refused(root, brk):
 # ------------------------------------------------------ the trusted controls
 
 
-def test_a_trusted_author_exports_as_before(trusted):
-    payload = "# notes\n"
+def test_a_trusted_author_is_jailed_like_any_other(trusted):
+    """Trust decides how an exported file compiles, never where an export
+    writes: a trusted author's inline export lands only in the export
+    directory, and only as the `.rvl` modules the program reaches."""
     assert _call("revl_load", {"source": PLAIN,
-                               "modules": {"notes.txt": payload}})["ok"] is True
-    target = trusted / "main.rvl"
+                               "modules": {"notes.txt": "# notes\n"}})["ok"] is True
+    outside = _call("revl_export", {"path": str(trusted / "main.rvl")})
+    assert outside["ok"] is False and "not a .rvl module" in _message(outside)
+    _reset()
+    assert _call("revl_load", {"source": PLAIN, "modules": {
+        "lib.rvl": "pub fn d() -> Int { return 1 }\n"}})["ok"] is True
+    outside = _call("revl_export", {"path": str(trusted / "main.rvl")})
+    assert outside["ok"] is False and "outside the export directory" in _message(outside)
+    target = _export_dir(trusted) / "main.rvl"
     out = _call("revl_export", {"path": str(target)})
-    assert out["ok"] is True, out
-    assert sorted(out["written"]) == [str(target), str(trusted / "notes.txt")]
-    # what it wrote is recorded, so a later export may replace it
-    assert _files_tree(trusted / ".revl") == {os.path.join("export", "manifest.json")}
+    assert out["ok"] is True and out["written"] == [str(target)], out
+    assert out["skipped"] == ["lib.rvl"]
+    assert _files_tree(trusted) == {os.path.join(".revl", "export", name)
+                                    for name in ("main.rvl", "manifest.json")}
 
 
 def test_a_trusted_author_still_loads_host_code_from_files(trusted):
@@ -421,8 +442,8 @@ def test_a_trusted_author_still_loads_host_code_from_files(trusted):
 # opened as operator configuration, and an emergency-stop latch (issue #2535),
 # whether the serve wiring named it, the live session's WAL implies it, or it
 # merely has the latch's suffix
-PROTECTED = ["policy", "profile-case-variant", "wal-latch", "live-latch",
-             "any-latch"]
+PROTECTED = ["policy", "profile-case-variant", "policy-nfd", "wal-latch",
+             "live-latch", "any-latch"]
 
 
 @pytest.mark.parametrize("trust", ["untrusted", "trusted"])
@@ -445,6 +466,10 @@ def test_no_export_creates_or_replaces_a_protected_file(root, trust, kind,
         (area / "ops.profile").write_text(PROFILE, encoding="utf-8")
         jail.protect_operator_files([str(area / "ops.profile")])
         protected = area / "OPS.PROFILE"
+    elif kind == "policy-nfd":  # protected before it exists, named in NFD
+        jail.protect_operator_files([str(area / unicodedata.normalize(
+            "NFC", "p\u00f3licy.rvl"))])
+        protected = area / unicodedata.normalize("NFD", "p\u00f3licy.rvl")
     elif kind == "wal-latch":  # `serve --wal`: the latch need not exist yet
         jail.protect_operator_files([str(area / "run.wal") + ".estop"])
         protected = area / "run.wal.estop"
@@ -460,9 +485,8 @@ def test_no_export_creates_or_replaces_a_protected_file(root, trust, kind,
     rel = os.path.relpath(protected, target.parent)
     server_mod.SESSION.origin["modules"] = {rel: FORGED}
     out = _call("revl_export", {"path": str(target), "overwrite": True})
-    if trust == "trusted":  # closed, it is refused or skipped before this rule
-        assert out["ok"] is False and "emergency-stop latch" in _message(out), out
-        assert not target.exists()
+    assert out["ok"] is False and "emergency-stop latch" in _message(out), out
+    assert not target.exists()
     after = protected.read_bytes() if protected.exists() else None
     assert after == before
 
@@ -568,3 +592,103 @@ def test_a_note_cannot_smuggle_host_code_through_a_reload(tmp_path):
             assert ran.get("result") != "host code ran", (path, ran)
         finally:
             server.close()
+
+
+@pytest.mark.parametrize("trust", ["default", "untrusted", "trusted"])
+def test_no_request_reaches_an_in_place_write(root, trust):
+    """`revl_export` is reached only over the transport, so the caller is an
+    author at every trust: a files-loaded export always writes the copy, and
+    no argument in the request body asks for the operator's file instead."""
+    if trust == "untrusted":
+        server_mod.set_authoring_trust(host_code=False)
+    elif trust == "trusted":
+        server_mod.set_authoring_trust(host_code=True)
+    path = root / "clock.rvl"
+    path.write_text(CLOCK, encoding="utf-8")
+    assert _call("revl_load", {"files": [str(path)]})["ok"] is True
+    assert _call("revl_change", {"commit": True, "replace": {
+        "component": "FixedClock.clock.now", "source": "fn now() = 8"}})["ok"]
+    out = _call("revl_export", {"over_the_transport": False, "in_place": True,
+                                "overwrite": True, "path": str(path)})
+    copy = _export_dir(root).resolve() / "clock.rvl"
+    assert out.get("written") in ([str(copy)], None, []), out
+    assert path.read_text(encoding="utf-8") == CLOCK
+
+
+@pytest.mark.parametrize("trust", ["untrusted", "trusted"])
+def test_an_export_never_writes_the_manifest(root, trust):
+    """A manifest is never an export target, under any spelling, in any
+    directory, so an author cannot vouch for bytes it did not export."""
+    if trust == "trusted":
+        server_mod.set_authoring_trust(host_code=True)
+    digest = hashlib.sha256(CLOCK.encode("utf-8")).hexdigest()
+    forged = json.dumps({"files": {"ops.rvl": {"sha256": digest}}})
+    target = _export_dir(root) / "main.rvl"
+    for key in ("manifest.json", "MANIFEST.JSON",
+                os.path.join("sub", ".revl", "export", "manifest.json"),
+                os.path.join("..", "..", ".REVL", "Export", "Manifest.json")):
+        _reset()
+        assert _call("revl_load", {"source": PLAIN, "modules": {key: forged}})["ok"]
+        out = _call("revl_export", {"path": str(target), "overwrite": True})
+        assert out["ok"] is False and "export manifest" in _message(out), (key, out)
+    assert not (_export_dir(root) / "manifest.json").exists()
+
+
+def test_a_failed_write_records_nothing(root, monkeypatch):
+    target = _export_dir(root) / "main.rvl"
+    assert _call("revl_load", {"source": PLAIN})["ok"] is True
+    assert _call("revl_export", {"path": str(target)})["ok"] is True
+    manifest = _export_dir(root) / "manifest.json"
+    recorded = manifest.read_bytes()
+    _reset()
+    assert _call("revl_load", {"source": PLAIN + "// changed\n"})["ok"] is True
+    real = server_mod._write_atomic
+
+    def failing(path, text):
+        if path == str(target):
+            raise OSError(36, "File name too long")
+        real(path, text)
+
+    monkeypatch.setattr(server_mod, "_write_atomic", failing)
+    with pytest.raises(OSError):
+        server_mod._tool_export({"path": str(target), "overwrite": True})
+    assert manifest.read_bytes() == recorded
+    assert target.read_text(encoding="utf-8") == PLAIN
+
+
+@pytest.mark.parametrize("mode", ["root", "sub"])
+def test_a_trusted_author_cannot_forge_the_manifest(tmp_path, mode):
+    """Review probe p01: a trusted author wrote a fake manifest as an inline
+    module (at the root, or in a subdirectory once the root had one), then
+    exported over the operator's ops.rvl, which a closed-trust server later
+    loaded unprofiled and ran the author's host body. Now the forged manifest
+    is never written, the operator's file is unchanged, and nothing runs."""
+    base = tmp_path / "root"
+    sub = base / "sub" if mode == "sub" else base
+    sub.mkdir(parents=True)
+    ops = sub / "ops.rvl"
+    ops.write_text(CLOCK, encoding="utf-8")
+    digest = hashlib.sha256(CLOCK.encode("utf-8")).hexdigest()
+    forged = json.dumps({"files": {"ops.rvl": {"sha256": digest}}})
+    key = os.path.relpath(sub / ".revl" / "export" / "manifest.json", base)
+    server = _Stdio(base, "--author-trust", "trusted")
+    try:
+        if mode == "sub":
+            server.tool("revl_load", {"source": PLAIN})
+            server.tool("revl_export", {"path": str(_export_dir(base) / "x.rvl")})
+            server.tool("revl_unload", {"force": True})
+        server.tool("revl_load", {"source": PLAIN, "modules": {key: forged}})
+        server.tool("revl_export", {"path": str(base / "main.rvl"), "overwrite": True})
+        server.tool("revl_unload", {"force": True})
+        server.tool("revl_load", {"source": EVIL})
+        server.tool("revl_export", {"path": str(ops), "overwrite": True})
+    finally:
+        server.close()
+    assert ops.read_bytes() == CLOCK.encode("utf-8")
+    server = _Stdio(base)
+    try:
+        server.tool("revl_load", {"files": [str(ops)]})
+        ran = server.tool("revl_call", {"key": "ops", "method": "run"})
+        assert ran.get("result") != "host code ran", ran
+    finally:
+        server.close()
