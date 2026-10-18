@@ -37,7 +37,7 @@ bytes it does not own.
 The third exception is the pin on those bytes (issue #2555). The plan names a
 truc, not its text, and the registry is read again when the plan is carried
 out, so `commit_add` hashes the text it writes, records that, and refuses when
-it disagrees with the index row the planner checked. `write_assembly` refuses
+it disagrees with the index row read at commit. `write_assembly` refuses
 a vendored `manifest.json` or `dossier.json` that no longer matches its pin.
 """
 
@@ -719,12 +719,12 @@ def _vendored_pins(name: str, texts: dict[str, str], row: dict) -> dict[str, str
     """The lock row's hash fields: each the sha256 of the text `commit_add` is
     about to write under `trucs/<name>/`, never a value copied from the index.
 
-    Each must equal the index row's value for the same file when the row
-    carries one, and `sourceHash` must always be present and agree: that is
-    the value the planner checked its own read of the entry against. A
-    disagreement means the registry changed between plan and commit, so the
-    add is refused here, before the first write. A file the entry does not
-    ship records no field."""
+    Each must equal the value the index row read at commit carries for the
+    same file, when it carries one, and `sourceHash` must always be present
+    and agree. The planner checked an earlier read of the entry against an
+    earlier read of the index, so a disagreement means the registry changed
+    between plan and commit, and the add is refused here, before the first
+    write. A file the entry does not ship records no field."""
     pins: dict[str, str] = {}
     for fname, field in _PIN_FIELDS:
         text = texts.get(fname)
@@ -916,10 +916,10 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     verbatim projection of the index row (§4.2), plus an `admitted`
     provenance stamp. Its hashes are not copied: they are computed from the
     text this call writes (`_vendored_pins`), and each must agree with the
-    index row before the first write, or the add is refused with nothing
-    written. The planner checked an earlier read of the same entry against
-    the same row, so a disagreement here means the registry changed between
-    plan and commit."""
+    index row read at commit before the first write, or the add is refused
+    with nothing written. The planner checked an earlier read of the entry
+    against an earlier read of the index, so a disagreement here means the
+    registry changed between plan and commit."""
     if not plan_json:
         return "skipped"
     plan = json.loads(plan_json)

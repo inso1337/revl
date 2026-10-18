@@ -127,6 +127,19 @@ def test_index_hash_edited_after_plan_is_refused_not_pinned(world):
     assert "changed between plan and commit" in message
 
 
+def test_manifest_replaced_between_plan_and_commit_is_refused(world):
+    """The registry's manifest.json changes after planning and its index row
+    keeps the old `manifestHash`: the add is refused, not pinned."""
+    reg, proj = world
+    _plan(reg)
+    manifest = reg / "components" / ENTRY / "manifest.json"
+    manifest.write_text(manifest.read_text() + "\n")
+
+    message = _refused_commit(proj)
+    assert ENTRY in message and "manifest.json" in message
+    assert "changed between plan and commit" in message
+
+
 def test_vendored_manifest_edited_after_add_is_drift_at_assemble(world):
     """The defect: on base `manifestHash` is never compared at assemble."""
     proj = _added(world)
