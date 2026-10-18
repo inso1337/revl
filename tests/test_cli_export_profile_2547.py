@@ -323,3 +323,17 @@ def test_turning_the_rule_off_is_unseen_by_another_thread(root):
         other.join()
     assert seen and seen[0] is not None
     assert compiler._export_rule() is not None
+
+
+@pytest.mark.parametrize("argv", [["mcp", "serve", "--trust-exported"],
+                                  ["truc", "--trust-exported"]])
+def test_the_commands_without_the_flag_refuse_it(capsys, argv):
+    """`mcp serve` decides by `--author-trust` and `truc` forwards its tail
+    to the component manager: neither takes `--trust-exported`."""
+    from revl.cli.parser import build_parser  # noqa: PLC0415
+
+    with pytest.raises(SystemExit) as stopped:
+        build_parser().parse_args(argv)
+    assert stopped.value.code != 0
+    assert "--trust-exported" in capsys.readouterr().err
+

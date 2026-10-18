@@ -727,15 +727,15 @@ def test_a_trusted_author_cannot_forge_the_manifest(tmp_path, mode):
 
 
 def test_an_incomplete_export_says_which_written_files_are_recorded():
-    """A file outside every root (a knowledge sidecar) is written but never
-    recorded in a manifest, and the message says so."""
+    """A file outside every root is written but never recorded in a
+    manifest, and the message says so."""
     error = _jail().ExportIncomplete(
         "/r/.revl/export/c.rvl", OSError(5, "I/O error"),
-        ["/r/.revl/export/a.rvl", "/r/.revl/knowledge/a.json"],
+        ["/r/.revl/export/a.rvl", "/elsewhere/a.json"],
         ["/r/.revl/export/a.rvl"])
     message = str(error)
     assert ("written and recorded in the export manifest: "
             "/r/.revl/export/a.rvl") in message
-    assert "written, not recorded: /r/.revl/knowledge/a.json" in message
+    assert "written, not recorded: /elsewhere/a.json" in message
     assert "nothing was written" in str(_jail().ExportIncomplete(
         "/r/.revl/export/c.rvl", OSError(5, "I/O error"), []))

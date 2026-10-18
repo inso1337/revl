@@ -514,14 +514,17 @@ class CliRule:
         report=)` for a `compile_files` call under this rule."""
         sources = {os.path.abspath(k): v for k, v in (sources or {}).items()}
         if self.trust:
+            # named before the compile, so one that raises still says what it
+            # trusted; files reached by `use` are named once it has read them
+            self._say([p for p in list(paths) + list(sources)
+                       if self.exported(p)], TRUSTED_LINE)
             seen: dict = {}
             document = compile_once(sources=sources or None, profile=profile,
                                     profiles=profiles,
                                     operator_sources=operator_sources,
                                     report=seen)
-            reached = (list(paths) + list(sources)
-                       + list(seen.get("disk_reads") or ()))
-            self._say([p for p in reached if self.exported(p)], TRUSTED_LINE)
+            self._say([p for p in seen.get("disk_reads") or ()
+                       if self.exported(p)], TRUSTED_LINE)
             if report is not None:
                 report.update(seen)
             return document
