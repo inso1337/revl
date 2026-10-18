@@ -3319,15 +3319,21 @@ def _check_held(arguments: dict) -> dict:
     return result
 
 
-def _with_held_candidate(handler, refuse_empty: bool = False):
+def _with_held_candidate(handler, marker: str, refuse_empty: bool = False):
     """Give a source-taking verb the held-session form `revl_check` has
     (issue #2500, after #2117): called with no `source`/`files`, it reads the
     working set the session holds through `_held_working_set` and
     `_held_candidate`, the same door `revl_check {}` and `revl_swap {}` use,
-    and answers exactly as it would for that text sent explicitly.
+    and answers exactly as it would for that text sent explicitly, plus
+    `marker: "session"` (`queried` for the queries, `planned` for the plan),
+    the way `revl_check {}` answers `checked: "session"`. The marker is the
+    answer's provenance, not its verdict, so it also rides an `ok: false`
+    answer about the held set (an unknown component, a held composition that
+    does not compile). The refusals below are not answers about a composition
+    and carry none.
 
-    A call that names a candidate is untouched. With nothing held the verb's
-    own refusal stands; `refuse_empty` is for a verb (`revl_plan`) whose
+    A call that names a candidate is untouched and unmarked. With nothing
+    held the verb's own refusal stands; `refuse_empty` is for a verb (`revl_plan`) whose
     handler would otherwise raise instead of refusing, so it gets the same
     `usage` refusal."""
     def wrapped(arguments: dict):
@@ -3361,7 +3367,10 @@ def _with_held_candidate(handler, refuse_empty: bool = False):
         refusal = _authoring_refusal(candidate)
         if refusal is not None:
             return refusal
-        return handler({**arguments, **candidate})
+        answer = handler({**arguments, **candidate})
+        if isinstance(answer, dict):
+            answer[marker] = "session"
+        return answer
     wrapped.__name__ = getattr(handler, "__name__", "wrapped")
     wrapped.__doc__ = handler.__doc__
     return wrapped
@@ -3369,7 +3378,8 @@ def _with_held_candidate(handler, refuse_empty: bool = False):
 
 _HELD_DOC = (" `source`/`files` are optional when the session holds a "
              "composition: with neither, the verb reads the held working set "
-             "(the same one `revl_check {}` and `revl_swap {}` read).")
+             "(the same one `revl_check {}` and `revl_swap {}` read) and "
+             "answers `queried: \"session\"`.")
 
 
 def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
@@ -3998,7 +4008,8 @@ TOOLS = [
                        "is explained, not thrown. Defaults to the composition this "
                        "server has loaded, so it is the rehearsal for revl_swap. With no "
                        "`source`/`files` it plans the working set the session "
-                       "holds, as `revl_swap {}` would re-admit it.",
+                       "holds, as `revl_swap {}` would re-admit it, and answers "
+                       "`planned: \"session\"`.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4012,7 +4023,8 @@ TOOLS = [
             },
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
-        "handler": _with_held_candidate(_tool_plan, refuse_empty=True),
+        "handler": _with_held_candidate(
+            _tool_plan, "planned", refuse_empty=True),
     },
     {
         "name": "revl_ship",
@@ -5873,7 +5885,7 @@ TOOLS.append({
 # composition queries (docs/queries.md) — defined next door so this module
 # stays the protocol layer and the query surface can grow on its own
 for _query in QUERY_TOOLS:
-    _query["handler"] = _with_held_candidate(_query["handler"])
+    _query["handler"] = _with_held_candidate(_query["handler"], "queried")
     _query["description"] += _HELD_DOC
 TOOLS.extend(QUERY_TOOLS)
 

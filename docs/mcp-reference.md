@@ -454,7 +454,8 @@ Defaults to the composition the server has loaded, so it is the rehearsal for
 
 - Inputs: `source` / `files` / `modules`, all optional when the session holds a
   composition (with none, the held working set is planned, as `revl_swap {}`
-  would re-admit it; with nothing held, a `usage` refusal); `manifest` (omit to
+  would re-admit it, and the answer carries `planned: "session"`; with nothing
+  held, a `usage` refusal); `manifest` (omit to
   plan against the loaded session, or against nothing for a cold start);
   `replacing`.
 
@@ -1796,8 +1797,12 @@ neither, each verb reads the held working set (the one `revl_check {}` and
 `revl_swap {}` read, including edited buffers of a `files` set) and answers as
 it would for that text sent explicitly, under the same authoring-trust check as
 `revl_check {}`. With nothing held, the call is a `usage` refusal; a loaded
-session with no source text is a `session` refusal (issue #2500). Unlike
-`revl_check {}`, the answer carries no `checked: "session"` marker.
+session with no source text is a `session` refusal (issue #2500). The held
+answer carries `queried: "session"`, the way `revl_check {}` carries
+`checked: "session"`; it is the answer's provenance, not its verdict, so it
+also rides an `ok: false` answer about the held set (an unknown component, a
+held composition that does not compile). A call that sends its own `source` or
+`files`, and the refusals above, carry no marker.
 
 ### `revl_query_emitters`
 
