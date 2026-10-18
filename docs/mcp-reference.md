@@ -1025,7 +1025,10 @@ if the operator had written it:
 
 Under every trust, an export never replaces a file the server opened as
 operator configuration at start (`--operator-profile`, `--policy`,
-`--provider`, `--restore`, and the `REVL_ESTOP_LATCH` file). Under
+`--provider`, `--restore`, `--tls-cert`, `--tls-key`, `--tls-client-ca`, and
+the `REVL_ESTOP_LATCH` file). A closed trust also refuses a destination that is
+a symbolic link. Authorship is matched by file identity, so a case or link
+alias of a written file is still that file. Under
 `--author-trust trusted` the export is otherwise as described above, unjailed.
 
 - Inputs: `path` and `overwrite` (inline compositions); `with_knowledge`.

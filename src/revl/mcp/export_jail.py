@@ -68,8 +68,10 @@ def export_dirs(roots) -> tuple[str, ...]:
 
 def in_export_area(path: str) -> bool:
     """Whether `path` resolves inside any `.revl/export` directory, whichever
-    root it was written under."""
-    parts = _real(path).split(os.sep)
+    root it was written under. Compared case-insensitively: on a filesystem
+    that folds case, `.REVL/Export` IS the export directory, and on one that
+    does not, counting it as one only ever profiles more."""
+    parts = [part.casefold() for part in _real(path).split(os.sep)]
     width = len(_EXPORT_PARTS)
     return any(tuple(parts[i:i + width]) == _EXPORT_PARTS
                for i in range(len(parts) - width + 1))
@@ -98,23 +100,32 @@ def _manifest_entries(manifest: str) -> dict:
     return files if isinstance(files, dict) else {}
 
 
-def _manifest_entry(real: str) -> dict | None:
-    """The manifest entry for `real` in the nearest ancestor that records it."""
+def _same_file(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _manifest_entry(real: str, text: str | None) -> dict | None:
+    """A manifest entry, in any ancestor's manifest, that records the file at
+    `real` holding `text`. Matched by file identity, not by the spelling of
+    its key, so a case or link alias of a written file is still that file, and
+    a stale entry in one manifest never hides a current one in another."""
+    if text is None:
+        return None
+    digest = _sha256(text)
     directory = os.path.dirname(real)
     while True:
         entries = _manifest_entries(os.path.join(directory, EXPORT_DIR, MANIFEST))
-        entry = entries.get(os.path.relpath(real, directory))
-        if isinstance(entry, dict):
-            return entry
+        for key, entry in entries.items():
+            if (isinstance(entry, dict) and entry.get("sha256") == digest
+                    and _same_file(os.path.join(directory, key), real)):
+                return entry
         parent = os.path.dirname(directory)
         if parent == directory:
             return None
         directory = parent
-
-
-def _matches(entry: dict | None, text: str | None) -> bool:
-    return (entry is not None and text is not None
-            and entry.get("sha256") == _sha256(text))
 
 
 def authorship(path: str) -> tuple[bool, str | None]:
@@ -123,8 +134,8 @@ def authorship(path: str) -> tuple[bool, str | None]:
     real = _real(path)
     if in_export_area(real):
         return True, None
-    entry = _manifest_entry(real)
-    if not _matches(entry, _read_text(real)):
+    entry = _manifest_entry(real, _read_text(real))
+    if entry is None:
         return False, None
     operator = entry.get("operator")
     return True, operator if isinstance(operator, str) else None
@@ -144,7 +155,7 @@ def export_written(paths) -> dict[str, str]:
 def revl_wrote(path: str) -> bool:
     """Whether the bytes at `path` are the bytes an export recorded there."""
     real = _real(path)
-    return _matches(_manifest_entry(real), _read_text(real))
+    return _manifest_entry(real, _read_text(real)) is not None
 
 
 def reached_modules(source: str, modules: dict) -> set[str]:
@@ -222,6 +233,17 @@ def check_foreign(existing) -> None:
             "true`; nothing was written")
 
 
+def check_not_linked(paths) -> None:
+    """Refuse a destination that is a symbolic link: the write would replace
+    the link with a file whose bytes nothing records."""
+    linked = [p for p in paths if os.path.islink(p)]
+    if linked:
+        raise ExportRefused(
+            f"refused: {', '.join(linked)} is a symbolic link; revl_export "
+            "writes only regular files under a closed authoring trust; nothing "
+            "was written")
+
+
 def check_operator_files(paths) -> None:
     """Refuse any destination that is a file the server opened as operator
     configuration, under every authoring trust."""
@@ -257,16 +279,14 @@ def manifest_writes(targets, roots) -> list[tuple[str, str]]:
         entries = manifests.setdefault(manifest, dict(_manifest_entries(manifest)))
         key = os.path.relpath(real, root)
         entries[key] = {"sha256": _sha256(text),
-                        "operator": _operator_baseline(real, entries.get(key))}
+                        "operator": _operator_baseline(real)}
     return [(manifest, json.dumps({"files": entries}, indent=2, sort_keys=True) + "\n")
             for manifest, entries in manifests.items()]
 
 
-def _operator_baseline(real: str, prior: dict | None) -> str | None:
+def _operator_baseline(real: str) -> str | None:
+    """The operator's own text of the file an export is about to replace."""
     if in_export_area(real):
         return None
-    current = _read_text(real)
-    if _matches(prior, current):
-        operator = prior.get("operator")
-        return operator if isinstance(operator, str) else None
-    return current
+    written, operator = authorship(real)
+    return operator if written else _read_text(real)

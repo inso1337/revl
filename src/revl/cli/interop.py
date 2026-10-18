@@ -354,6 +354,8 @@ def _run_mcp(args) -> int:
         protect_operator_files([
             getattr(args, "operator_profile", None), getattr(args, "policy", None),
             getattr(args, "restore", None), os.environ.get("REVL_ESTOP_LATCH"),
+            getattr(args, "tls_cert", None), getattr(args, "tls_key", None),
+            getattr(args, "tls_client_ca", None),
             *(getattr(args, "provider", None) or [])])
         exposure = None
         if getattr(args, "http", None):

@@ -255,6 +255,44 @@ def test_an_exported_module_reached_by_use_is_profiled(root):
     assert _call("revl_load", {"files": [str(operator)]})["ok"] is True
 
 
+def test_an_exported_module_reached_through_the_import_path_is_profiled(
+        root, monkeypatch):
+    """A `use` that resolves through `REVL_IMPORT_PATH` reaches an
+    install-origin module; one an export wrote is still the agent's."""
+    vendor = _export_dir(root) / "vendor"
+    vendor.mkdir(parents=True)
+    (vendor / "lib.rvl").write_text(HOSTED_LIB, encoding="utf-8")
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(vendor))
+    operator = root / "app.rvl"
+    operator.write_text(USES_LIB, encoding="utf-8")
+    refused = _call("revl_load", {"files": [str(operator)]})
+    assert refused["ok"] is False, refused
+
+
+def test_a_case_alias_of_the_export_directory_is_still_it(root):
+    exported = _export_dir(root) / "ops.rvl"
+    exported.parent.mkdir(parents=True)
+    exported.write_text(HOSTED, encoding="utf-8")
+    alias = root / ".REVL" / "Export" / "ops.rvl"
+    # on a case-sensitive filesystem the alias names nothing and the load
+    # fails for that reason; on a case-folding one it is the exported file
+    assert _call("revl_load", {"files": [str(alias)]})["ok"] is False
+
+
+def test_a_write_back_through_a_symlink_is_refused(root):
+    real = root / "clock.rvl"
+    real.write_text(CLOCK, encoding="utf-8")
+    link = root / "alias.rvl"
+    link.symlink_to(real.name)
+    assert _call("revl_load", {"files": [str(link)]})["ok"] is True
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "FixedClock.clock.now", "source": "fn now() = 8"}})
+    assert changed["ok"] is True, changed
+    out = _call("revl_export", {})
+    assert out["ok"] is False and "symbolic link" in _message(out), out
+    assert link.is_symlink() and real.read_text(encoding="utf-8") == CLOCK
+
+
 def test_an_inline_export_round_trips_through_files(root):
     target = _export_dir(root) / "main.rvl"
     assert _call("revl_load", {"source": PLAIN})["ok"] is True
@@ -277,6 +315,9 @@ def test_a_write_back_is_recorded_and_keeps_the_operators_code(root):
     out = _call("revl_export", {})
     assert out["ok"] is True and out["written"] == [str(path)], out
     assert _jail().authorship(str(path)) == (True, original)
+    alias = root / "OPS.rvl"
+    if alias.exists():  # a case-folding filesystem: the same file
+        assert _jail().authorship(str(alias)) == (True, original)
     _reset()
     assert _call("revl_load", {"files": [str(path)]})["ok"] is True
     # the operator changing the file adopts it

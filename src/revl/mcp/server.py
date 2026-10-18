@@ -721,11 +721,11 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     # issue #2524: a `files` entry an export wrote is agent text, not the
     # operator's. So is one a compile reaches by `use`, which only the compile
     # itself can name: every pass that reads one from disk is repeated with it
-    # riding in memory, until a pass reads none.
+    # riding in memory (the text that pass parsed), until a pass reads none.
     from_files = base is not None and source is None and bool(files)
     authored: dict = {}
     assets: dict = {}
-    pending = list(files) if from_files else []
+    pending = _export_jail.export_written(files) if from_files else {}
     while True:
         _ride_exported(pending, authored, assets, modules or {})
         seen: dict = {}
@@ -733,9 +733,9 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
         document = _compile_candidate(source, files, manifest,
                                       {**assets, **authored, **(modules or {})},
                                       replacing, profile, seen)
-        pending = ([p for p in (seen.get("dependencies") or {})
-                    if p not in authored and _export_jail.authorship(p)[0]]
-                   if from_files else [])
+        pending = ({p: t for p, t in (seen.get("disk_reads") or {}).items()
+                    if p not in authored and _export_jail.authorship(p)[0]}
+                   if from_files else {})
         if not pending:
             break
     if report is not None:
@@ -748,11 +748,12 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     return document
 
 
-def _ride_exported(paths, authored: dict, assets: dict, modules: dict) -> None:
-    """Add the exported files among `paths` to `authored`, with the assets the
+def _ride_exported(texts: dict, authored: dict, assets: dict,
+                   modules: dict) -> None:
+    """Add exported files (`{abspath: text}`) to `authored`, with the assets the
     operator's own text of each names to `assets` (an in-memory module reads
     its assets only from the sources map; the agent's text gains no read)."""
-    for path, text in _export_jail.export_written(paths).items():
+    for path, text in texts.items():
         authored[path] = text
         operator = _export_jail.authorship(path)[1]
         assets.update(_edit._operator_assets(
@@ -2222,6 +2223,8 @@ def _export_plan(held: dict, arguments: dict,
             f"refused: {', '.join(outside)} is outside the operator-sanctioned "
             "root(s); nothing was written")
     _export_jail.check_operator_files([p for p, _ in targets])
+    if _export_jailed():
+        _export_jail.check_not_linked([p for p, _ in targets])
     return targets
 
 
