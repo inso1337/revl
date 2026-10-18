@@ -347,6 +347,7 @@ CORPUS = [
     # of a bare `None` typed `Option<Value>`
     "generic_fn.rvl",
     "comp_provide_generic.rvl",  # issue #2495: a generic call in a provide method
+    "comp_provide_generic_add.rvl",  # issue #2558: `+` over two generic calls there
 ]
 
 

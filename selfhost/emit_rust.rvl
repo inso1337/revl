@@ -840,6 +840,21 @@ fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
     let cn = value_str(value_field(callee, "name"))
     return v3_subst(map_get(ctx.fr, cn), v3_generic_call(cn, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))) == "Str"
   }
+  // issue #2558: the component dialect spells a module callable as a `fn` node
+  // (`{"kind": "fn", "name", "args"}`), not a `call`, so a `+` over two generic
+  // calls in a provide method (`id("hi ") + id(who)`) fell past every arm here
+  // and rendered as the arithmetic `(a + b)`: `String + String` does not exist
+  // in rust, so cargo answered E0308. The `fn` arm asks the same question the
+  // `call` arm asks, with the callee named directly instead of nested; the
+  // substitution has to happen here too, because `v3_infer_type`'s `fn` arm
+  // answers the DECLARED return (`T`, unbound) on its own.
+  if (k == "fn") {
+    let fnm = value_str(value_field(node, "name"))
+    let nb = v3_generic_call(fnm, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))
+    let ret = map_get(ctx.fr, fnm)
+    if (nb.length() > 0) { ret = v3_subst(ret, nb) }
+    return ret == "Str"
+  }
   if (k == "field") {
     let target_ty = v3_infer_type(value_field(node, "target"), ctx)
     if (target_ty == "") { return false }
@@ -861,7 +876,17 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
     if (value_kind(lv) == "int") { return "Int" }
   }
   if (k == "adt") { return map_get(ctx.ca, value_str(value_field(node, "case"))) }
-  if (k == "fn") { return map_get(ctx.fr, value_str(value_field(node, "name"))) }
+  // issue #2558: the component dialect's call to a module callable. Its type
+  // parameters are bound from the arguments exactly as the `call` arm does
+  // (issue #2495), so `id(who)` inside a provide method answers the
+  // instantiation `Str`, not the declared `T`.
+  if (k == "fn") {
+    let fnm = value_str(value_field(node, "name"))
+    let declared = map_get(ctx.fr, fnm)
+    let nb = v3_generic_call(fnm, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))
+    if (nb.length() > 0) { return v3_subst(declared, nb) }
+    if (ctx.fr.has(fnm)) { return declared }
+  }
   if (k == "call" && !value_is_null(value_field(node, "callee"))) {
     let callee = value_field(node, "callee")
     if (node_kind(callee) == "var") {
