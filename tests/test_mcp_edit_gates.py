@@ -100,9 +100,11 @@ class _FakeSession:
         self.sandbox = sandbox
         self.leases = LeaseBook()
         self.swaps = []
+        self.authored = []
 
-    def swap(self, ir, origin=None):
+    def swap(self, ir, origin=None, *, agent_authored):
         self.swaps.append(ir)
+        self.authored.append(agent_authored)
         return {"generation": len(self.swaps)}
 
 
@@ -152,6 +154,8 @@ def test_an_advisory_policy_still_lets_the_edit_land():
     out = E.apply_edit(sess, _edit_user())
     assert out["ok"] is True and out["admitted"] is True and out["swapped"] is True
     assert len(sess.swaps) == 1
+    # an edit is the agent's: the server's default trust is untrusted
+    assert sess.authored == [True]
 
 
 def test_the_edit_gate_sees_the_patched_source_not_the_running_one(monkeypatch):

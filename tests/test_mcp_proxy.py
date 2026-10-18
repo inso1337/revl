@@ -419,7 +419,8 @@ def test_a_reclassification_that_cannot_go_live_refuses_the_flagged_tool(gated,
 
     proxy = gated(trust_read_only=True)
 
-    def refuse_swap(*_args, **_kwargs):
+    def refuse_swap(ir, origin=None, *, agent_authored):
+        assert agent_authored is False   # the proxy renders its own source
         raise SessionError("swap refused for the test")
 
     monkeypatch.setattr(proxy.session, "swap", refuse_swap)
