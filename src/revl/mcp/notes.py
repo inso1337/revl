@@ -25,7 +25,8 @@ notes an agent (or a human, through an export) adds on top:
   load reads marked blocks back. A body that differs from the record becomes a
   supersede, and a marked block with no record a new note, authored by whoever
   wrote the file (issue #2550): an untrusted agent for a file under
-  `.revl/export/`, a human at operator trust for any other file.
+  `.revl/export/`, an untrusted vendor for a vendored truc's component, a
+  human at operator trust for any other file.
 """
 
 from __future__ import annotations
@@ -555,12 +556,24 @@ def _import_author(path: str) -> dict:
     an untrusted agent's, whatever trust the loading session has, and rides
     as an untrusted add does (its body withheld until it carries evidence).
 
-    A file outside every export directory was not written by an export, so
-    its bytes are an edit made outside the server: a human's, at operator
-    trust, as before. Adopting an export (copying it out) is the operator's
-    act, which is what makes its blocks the operator's."""
+    A vendored truc's `trucs/<name>/component.rvl` holds the publisher's bytes
+    as `truc add` wrote them, so a block there is the publisher's, and
+    untrusted. That is the floor `load_vendored` gives the publisher's own
+    records: they earn `publisher` only from a signature measured over the
+    records themselves, and no signature covers a comment block (nor does an
+    export ever render one into a vendored component).
+
+    Any other file holds whatever bytes were on disk when the load read them,
+    and no MCP verb wrote them there, so its block is attributed to the
+    operator who keeps that disk: a human note at operator trust, as before.
+    That makes adoption a promotion: copying an export out turns each of its
+    changed or unrecorded blocks into an operator note (a changed body into
+    an operator supersede), while an unchanged block keeps its record and that
+    record's trust."""
     if in_export_area(path):
         return {"kind": "agent", "trust": "untrusted"}
+    if vendored_path(path) is not None:
+        return {"kind": "vendor", "trust": "untrusted"}
     return {"kind": "human", "trust": "operator"}
 
 

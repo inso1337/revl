@@ -1248,10 +1248,16 @@ trust of whoever wrote the file, never the operator's by default. A file under
 under the authoring profile, so its blocks import as `author: {kind: agent,
 trust: untrusted}` whatever trust the loading session has, and ride exactly as
 an untrusted add does: the body is withheld until the note carries evidence,
-and a sidecar export writes the record with that label. A file outside every
-export directory was edited outside the server, so its blocks import as
-`author: {kind: human, trust: operator}`; adopting an export by copying it out
-is how the operator makes its notes the operator's.
+and a sidecar export writes the record with that label. A vendored truc's
+`trucs/<name>/component.rvl` holds the publisher's bytes, so its blocks import
+as `author: {kind: vendor, trust: untrusted}`, the floor the vendored records
+get when no signature covers them. Any other file holds bytes no MCP verb
+wrote, so its blocks import as `author: {kind: human, trust: operator}`. An
+unchanged block is never re-attributed: it keeps its record and that record's
+trust. So adoption, copying an export out of `.revl/export/`, is the one step
+that promotes: each changed or unrecorded block in the adopted file becomes an
+operator note, and a changed body an operator supersede. Review an export's
+note blocks before adopting it.
 
 - Inputs: `op` (required); `symbol`, `id`, `kind`, `body`, `evidence`,
   `reason` per op.
