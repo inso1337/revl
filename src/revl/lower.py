@@ -1118,11 +1118,34 @@ def _host_result_type(acquire: dict, env: "Env") -> str | None:
     return _HOST_RESULT_SIG.get(f"{family}.{acquire.get('method')}")
 
 
-# issue #2491: the argument position of each host Map write verb whose type
-# the tiers keep generic (`Map[V]`), so a host-local call does not compare its
-# type to the row (the expression is still inferred).
-# See `_check_host_verb`.
-_HOST_MAP_GENERIC_VALUE: dict[str, int] = {"insert": 1, "insert_if_absent": 1}
+# issue #2491: host families whose argument types a host-local verb call does
+# not compare to the `_HOST_ARG_SIG` row. A host Map's key and value types are
+# the resource's own (`Map[Int, Str]`, `Map[Str, Int]`; the tiers' generic
+# `Map[K, V]`, items 113/176, #2034), which a host local does not carry, so the
+# row's `Str, Str` would refuse valid programs. Reconciling the row is
+# docs/design/397-insert-if-absent.md's item. The count is still checked.
+_HOST_UNCOMPARED_ARG_FAMILIES = frozenset({"Map"})
+
+
+def _host_arg_types(family: str, args: list, env: "Env",
+                    filename: str | None, line: int) -> list:
+    """The argument types a host-local verb call is checked with (#2491).
+
+    One entry per argument; None means "not compared". Inference adds no
+    refusal of its own here: an argument whose inference raises is left
+    uncompared, as one whose type is unknown is, so only a definite mismatch
+    against the row refuses. A family in `_HOST_UNCOMPARED_ARG_FAMILIES` is
+    not inferred at all."""
+    if family in _HOST_UNCOMPARED_ARG_FAMILIES:
+        return [None] * len(args)
+    out = []
+    for a in args:
+        try:
+            out.append(infer_ir(a, env.type_env, env.types, env.services,
+                                filename, line))
+        except RevlError:
+            out.append(None)
+    return out
 
 
 def _check_host_verb(family: str, verb: str, arg_types: list,
@@ -1139,31 +1162,20 @@ def _check_host_verb(family: str, verb: str, arg_types: list,
     runtime (the item-84 shape).
 
     A stub verb is then held to its declared row by `host_family_check`, the
-    check a constructor-tracked receiver in a fn body (`let m = Map.new()`,
-    `m.get(7)`) already gets: the same HOST-ARITY refusal for a wrong count and
+    check a constructor-tracked receiver in a fn body (`let p = Pool.open(..)`,
+    `p.query(1)`) already gets: the same HOST-ARITY refusal for a wrong count and
     the same T1 refusal for an argument whose type is not its parameter's, so
     `pool.query(1)` reads the same in an activation body as in a fn body. An
     argument whose type the checker cannot infer (a host verb's opaque result)
     is not judged, exactly as there. The iteration verbs take no arguments and
     are held to their count only.
 
-    One position is not compared to its row, by name: the VALUE of a host Map
-    write (`_HOST_MAP_GENERIC_VALUE`). The value expression is still inferred,
-    so an ill-typed expression there is refused, but its type is not held to
-    the row's `Str`: the tiers
-    genericized the host Map (`Map[V]`, items 113/176) and component programs
-    store Int, record and list values in it (examples/app/notes.rvl,
-    tests/fixtures/emit_*_corpus/comp_host_map*.rvl); that frontier/emitter
-    disagreement is docs/design/397-insert-if-absent.md's, reconciled by its
-    own item, not here. The key is still held to `Str`.
+    The types come from `_host_arg_types`: a host Map's arguments, and any
+    argument whose inference fails, are not compared.
     """
     family_surface = _HOST_FAMILIES.get(family, {})
     iter_verbs = _HOST_MAP_ITER_VERBS if family == "Map" else {}
     if verb in family_surface:
-        generic = _HOST_MAP_GENERIC_VALUE.get(verb) if family == "Map" else None
-        if generic is not None and generic < len(arg_types):
-            arg_types = [None if i == generic else t
-                         for i, t in enumerate(arg_types)]
         host_family_check(family, verb, arg_types, filename, line)
         return
     if verb not in iter_verbs:
@@ -10015,11 +10027,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             # instead of compiling as a pass-through that only crashes at the
             # host runtime, the item-84 shape.
             if scope.get(root) in env.host_locals:
+                family = env.host_locals[scope[root]]
                 _check_host_verb(
-                    env.host_locals[scope[root]], method,
-                    [infer_ir(a, env.type_env, env.types, env.services,
-                              filename, line)
-                     for a in args],
+                    family, method,
+                    _host_arg_types(family, args, env, filename, line),
                     filename, line)
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
@@ -17106,11 +17117,10 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
         with _emit_head_args(env, mode) as amode:
             host_args = [_lower_expr(a, env, amode) for a in op.args]
         if node.get("kind") == "name" and node.get("id") in env.host_locals:
+            family = env.host_locals[node["id"]]
             _check_host_verb(
-                env.host_locals[node["id"]], op.name,
-                [infer_ir(a, env.type_env, env.types, env.services,
-                          env.filename, op.line)
-                 for a in host_args],
+                family, op.name,
+                _host_arg_types(family, host_args, env, env.filename, op.line),
                 env.filename, op.line)
         node = {
             "kind": "call",
