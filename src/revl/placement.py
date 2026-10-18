@@ -5852,14 +5852,10 @@ def run_placement(files, placement_path: str, once: bool = False,
         # that printed FATAL or exited without `UP` ends the wait and is named
         _wait_for(lambda: succ in up or bool(boot_failures((succ,))), 60)
         if succ not in up:
-            if report_boot_failures((succ,)):
-                print(f"swap refused: successor {succ} failed to boot — "
-                      f"tearing it back down; running composition untouched.",
-                      flush=True)
-            else:
-                print(f"swap refused: successor {succ} did not come up — "
-                      f"tearing it back down; running composition untouched.",
-                      flush=True)
+            why = "failed to boot" if report_boot_failures((succ,)) \
+                else "did not come up"
+            print(f"swap refused: successor {succ} {why}; tearing it back "
+                  f"down; running composition untouched.", flush=True)
             sproc, smode = children.pop(succ, (None, None))
             if sproc is not None:
                 stop_all({succ: (sproc, smode)})

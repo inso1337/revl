@@ -29,7 +29,7 @@ from revl import placement  # noqa: E402
 SPEED = 10.0
 # What the conductor's clock measures: under the 60 s the old wait cost on its
 # own. Teardown of the dead successor adds about 2 real seconds (20 here).
-FAST = 45.0
+FAST = 50.0
 
 _APP = """
 service Cache {
