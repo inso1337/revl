@@ -771,7 +771,10 @@ A swap that lands, inline or by name, carries `blastRadius` in the shape
 `revl_edit` gives it below, read off the composition that was running before
 the swap (issue #1704).
 
-- Inputs: `source` / `files` / `modules` (all optional); `replacing`.
+- Inputs: `source` / `files` / `modules` (all optional); `replacing`;
+  `service` (the WIT interface name the quarantine tier groups the
+  candidate's functions under, when a policy arms it; default: the sole
+  declared service, else `Candidate`).
 
 ### `revl_edit`
 
@@ -900,6 +903,24 @@ and `1`, is refused with the key, the expected type and the type received, and
 nothing runs. Before this, `revl_edit {commit: null}` (or `"false"`) committed
 the edit, and `revl_ship {apply: "false"}` swapped.
 
+Undeclared arguments, on every verb and over every transport, are refused by
+name (issue #2532). Every `inputSchema` says `additionalProperties: false`, and
+the dispatch enforces it before any handler runs: a top-level key the verb does
+not declare is a `usage` refusal naming each such key, never silently dropped.
+The refusal says where the key belongs when it can: the declared key it is a
+misspelling of, or the name this verb uses for the same thing, and the other
+verbs that declare it. `revl_plan {withdraw: {...}}` is refused with "did you
+mean `replacing`, or `revl_change`?" where it used to answer "provide `source`
+or `files`". When exactly one mechanical remedy exists the refusal carries it
+as `next`: the call with the key renamed, or with the unknown keys dropped. The
+`revl_verbs {name, args}` hatch is checked twice, the hatch call against
+`revl_verbs` and `args` against the named verb. A handler calling another
+handler (an undo run by `revl_step_back`, an edit that loads first) is below
+that boundary and is not checked again. Legacy spellings a handler once read
+beside the declared one (`predicate` for `revl_replay_bisect`'s `assert`,
+`losses` for the drift verbs' `loses`) are undeclared and so refused, with the
+declared name in the refusal.
+
 A swapped edit, a draft edit with open holes and a proposal (`commit: false`)
 all carry `blastRadius`, which makes preflight automatic. It is read off the
 composition that is running when the edit arrives. Its `touched` names
@@ -963,7 +984,13 @@ calls for one change, five of them `revl_check` polls):
    `files`/`source`/`modules`, so it matches what `revl_load` then the same
    withdrawal would plan (issue #2225): `cascade: true` withdraws the whole
    cascade, and a withdrawal that would strand a dependent is refused before
-   anything is loaded, with `loaded: false` and the same plan and hint;
+   anything is loaded, with `loaded: false` and the same plan and hint. The
+   refusal also carries `next` (issue #2536): the same `revl_change` call with
+   `cascade: true`, `ready` and pre-filled from the arguments it refused (the
+   carried `files`/`source`/`modules`). It never carries `commit`, even when the
+   refused call did: the cascade withdraws more than the caller named, so sent
+   as-is it answers with the plan of the cascade (`committed: false`), and
+   committing that is a separate call the caller chooses;
 3. **apply** the change to a working copy of the server-side source, so
    nothing about the running composition has changed yet;
 4. **verify**: admission against the running composition, the lease and
@@ -1313,7 +1340,8 @@ edit still reaches it. The answer is
 - Inputs: `symbol` (optional - with no `symbol` and nothing else asked for,
   it answers with the packaged stdlib's modules and symbols); `with`;
   `comments`; `proposal` (true: read your speculative proposal, issue #1696);
-  `files` / `source` when nothing is loaded.
+  `files` / `source` when nothing is loaded, with `modules` for an inline
+  `source`'s `use` imports.
 
 ### `revl_unload`
 
@@ -1795,7 +1823,10 @@ causal trace ([repair-loop.md](repair-loop.md)).
   (a `service` decl, a fill spec, or a shape object); `selfRepairPolicy` (a
   dict `{eligible, mayTouch, ackOnWiden}` or DSL text; absent = closed);
   `accept` (widening ack tokens); `apply` (default true; false runs every gate
-  but does not swap); `registry` (dir for the reuse check).
+  but does not swap); `registry` (dir for the reuse check); `preferReuse`
+  (take the reuse match over a supplied `candidate`; default: only when none
+  is supplied); `limit` (how many registry candidates the reuse check ranks,
+  default 5).
 
 ### `revl_canary`
 

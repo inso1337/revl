@@ -305,6 +305,10 @@ MODULES_VERBS = {
     "revl_query_dependents": (lambda ir: {"target": "tool"}, _ok),
     "revl_query_reach": (lambda ir: {"component": "T"}, _ok),
     "revl_query_drift": (lambda ir: {"service": "Tool"}, _ok),
+    # issue #2532: `revl_source` declares the `modules` it always read for an
+    # inline `source`; a symbol the module declares proves they are read
+    "revl_source": (lambda ir: {"symbol": "helper"},
+                    lambda p: _ok(p) and p.get("symbol") == "helper"),
     # the candidate rides inside `candidate`, not at the top level
     "revl_repair": (_repair_arguments, _repair_planned),
     # need a booted composition
