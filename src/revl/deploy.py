@@ -4044,6 +4044,8 @@ def _process_name_problem(pname: Any) -> Optional[str]:
         return "a process name may not contain a NUL byte"
     if "/" in pname or "\\" in pname or (os.altsep and os.altsep in pname):
         return "a process name may not contain a path separator"
+    if ":" in pname:
+        return "a process name may not contain `:` (a drive or stream name)"
     if ".." in pname:
         return "a process name may not contain `..`"
     return None
@@ -4070,12 +4072,13 @@ def _process_name_problem(pname: Any) -> Optional[str]:
 #: * `port` is an integer in 1..65535;
 #: * the local `known_hosts` path reaches ssh as `-o UserKnownHostsFile=...`,
 #:   whose value ssh splits on whitespace and expands for `%` and `~`, so it
-#:   carries none of those, nor quotes or a backslash.
+#:   (and for `${VAR}`) carries none of those, nor `$`, quotes or a
+#:   backslash.
 _SHELL_SAFE_WORD = re.compile(r"[A-Za-z0-9_@%+=:,./~-]+")
 _SSH_HOST_SHAPE = re.compile(
     r"(?:[A-Za-z0-9_][A-Za-z0-9._-]*@)?"
     r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
-_KNOWN_HOSTS_UNSAFE = re.compile(r"[\s'\"%~\\\0]")
+_KNOWN_HOSTS_UNSAFE = re.compile(r"[\s'\"%~$\\\0]")
 _RUNNER_VALUE_FLAGS = frozenset({"--key", "--host-key", "--runtime-version"})
 _RUNNER_SWITCH_FLAGS = frozenset({"--require-gauntlet", "--require-conformance"})
 
@@ -4142,8 +4145,8 @@ def _ssh_remote_shape_problem(target: "DeployTarget") -> Optional[str]:
     if not isinstance(known_hosts, str) or _KNOWN_HOSTS_UNSAFE.search(known_hosts):
         return (f"`known_hosts = {known_hosts!r}` is not a plain path: ssh reads "
                 f"it as an option value, splitting it on whitespace and "
-                f"expanding `%` and `~`, so it may not contain whitespace, "
-                f"quotes, `%` or `~`")
+                f"expanding `%`, `~` and `${{VAR}}`, so it may not contain "
+                f"whitespace, quotes, `%`, `~` or `$`")
     return _extra_args_problem(raw.get("extra_args"))
 
 

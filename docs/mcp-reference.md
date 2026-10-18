@@ -501,7 +501,8 @@ operator-sanctioned root(s) and refused outside them (issue #2528), in trusted
 mode too: an operator who keeps the pin file elsewhere (for example under
 `~/.ssh`) sanctions that directory with `revl mcp serve --root`. ssh reads the
 `known_hosts` path as an option value, so it may not contain whitespace, quotes,
-`%` or `~`. The remote
+`%`, `~` or `$`. These files are found by
+position in the deploy table, whatever the process is called. The remote
 fields name things on the far host, so their shape is checked instead, at
 admission, for every `via = ssh` target (CLI and MCP alike):
 
@@ -521,7 +522,7 @@ admission, for every `via = ssh` target (CLI and MCP alike):
 The ticket prints `(ssh default)` when no `port` is given.
 
 Every process name in `placement` must also be a plain file-name word: one
-containing `/`, `\`, `..` or a NUL byte is refused, because it becomes a file
+containing `/`, `\`, `:`, `..` or a NUL byte is refused, because it becomes a file
 name in the deploy state directory.
 
 The `apply: true` ticket shows what a yes lets reach each far host, next to its

@@ -120,6 +120,60 @@ def test_a_placement_file_outside_the_root_is_refused(jail, field):
         _jail_refused(result)
 
 
+PATH_KEY_NAMES = ["policy", "registry", "bundle", "files", "traceFile"]
+
+
+def _named_map(name: str, base: Path, **over) -> dict:
+    placement = _ssh_map(base, **over)
+    placement["processes"] = {name: placement["processes"]["edge"]}
+    return placement
+
+
+@pytest.mark.parametrize("name", PATH_KEY_NAMES)
+def test_a_process_named_like_a_path_argument_is_still_jailed(jail, name):
+    """A process whose NAME is also a path-argument key still has its deploy
+    table's local files confined: the table is found by position."""
+    outside = jail["outside"]
+    placement = _named_map(name, jail["root"],
+                           known_hosts=str(outside / "known_hosts"),
+                           host_key=str(outside / "host.key"))
+    for apply in (False, True):
+        result = _call("revl_deploy", {
+            "placement": placement, "bundle": str(jail["root"] / "bundle"),
+            "apply": apply})
+        assert result.get("ok") is False, result
+        assert result.get("approvalRequired") is not True, result
+        assert result.get("admitted") is not True, result
+
+
+@pytest.mark.parametrize("name", PATH_KEY_NAMES)
+def test_the_deploy_admission_jails_by_position_on_its_own(jail, name):
+    """The deploy's own check finds the files by position, without relying on
+    the generic jail's key matching."""
+    outside = jail["outside"]
+    placement = _named_map(name, jail["root"],
+                           host_key=str(outside / "host.key"))
+    admitted = server_mod._tool_deploy_admit({
+        "placement": placement, "bundle": str(jail["root"] / "bundle")})
+    assert admitted["ok"] is False
+    assert [r["rule"] for r in admitted["refusals"]] == ["outside-root"]
+    admitted = server_mod._tool_deploy_admit({
+        "placement": _named_map(name, jail["root"]),
+        "bundle": str(outside / "bundle")})
+    assert admitted["ok"] is False
+
+
+def test_an_in_root_plan_for_a_path_key_named_process_is_admitted(jail):
+    root = jail["root"]
+    placement = _named_map("policy", root)
+    rehearsal = _call("revl_deploy", {"placement": placement,
+                                      "bundle": str(root / "bundle")})
+    assert rehearsal["ok"] is True and rehearsal["admitted"] is True, rehearsal
+    applied = _call("revl_deploy", {"placement": _named_map("policy", root),
+                                    "bundle": "bundle", "apply": True})
+    assert applied.get("approvalRequired") is True, applied
+
+
 # ------------------------------------------ remote fields: the shape rule
 
 @pytest.mark.parametrize("over", [
@@ -139,6 +193,7 @@ def test_a_placement_file_outside_the_root_is_refused(jail, field):
     {"port": 0},
     {"known_hosts": "known hosts"},
     {"known_hosts": "%d/known_hosts"},
+    {"known_hosts": "${HOME}/known_hosts"},
 ], ids=lambda o: next(iter(o)))
 def test_a_remote_field_with_an_unsafe_shape_is_refused(jail, over):
     placement = _ssh_map(jail["root"], **over)
@@ -151,7 +206,8 @@ def test_a_remote_field_with_an_unsafe_shape_is_refused(jail, over):
 
 # -------------------------------------------------- process names
 
-@pytest.mark.parametrize("name", ["../escaped", "a/b", "..", "a\\b", "a\0b"])
+@pytest.mark.parametrize("name", ["../escaped", "a/b", "..", "a\\b", "a\0b",
+                                  "D:escaped"])
 def test_a_process_name_that_leaves_the_state_dir_is_refused(jail, name):
     placement = {"processes": {name: {"components": ["C"],
                                       "deploy": {"via": "local"}}}}
