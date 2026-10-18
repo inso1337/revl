@@ -75,6 +75,7 @@ from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
+from . import unknownargs as _unknownargs
 from . import fillspec
 from . import draft as _draft
 from . import knowledge_index as _knowledge
@@ -4513,7 +4514,14 @@ TOOLS = [
             "type": "object",
             "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
                            "replacing": {"type": "array", "items": {"type": "string"},
-                                         "description": "components withdrawn in this swap"}},
+                                         "description": "components withdrawn in this swap"},
+                           # issue #2532: read by the quarantine gate a swap
+                           # runs (`quarantine._service_name`), so declared here
+                           "service": {"type": "string",
+                                       "description": "WIT interface name to group the "
+                                                      "candidate's Str-surface functions "
+                                                      "under (default: the sole declared "
+                                                      "service, else `Candidate`)"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_swap,
@@ -4839,6 +4847,9 @@ TOOLS = [
                           "description": "with nothing loaded: files to read from"},
                 "source": {"type": "string",
                            "description": "with nothing loaded: source to read from"},
+                "modules": {"type": "object",
+                            "description": "with `source`: in-memory sources for "
+                                           "its `use` imports, keyed by path"},
                 "proposal": {"type": "boolean",
                              "description": "true: read your speculative proposal "
                                             "instead of the running source"},
@@ -4978,6 +4989,14 @@ TOOLS = [
                 "registry": {"type": "string",
                              "description": "registry dir for the reuse check "
                                             "(default $REVL_REGISTRY)"},
+                "preferReuse": {"type": "boolean",
+                                "description": "take the registry's reuse match "
+                                               "over a supplied `candidate` "
+                                               "(default: only when no "
+                                               "candidate is supplied)"},
+                "limit": {"type": "integer",
+                          "description": "how many registry candidates the "
+                                         "reuse check ranks (default 5)"},
             },
             "required": ["component"],
         },
@@ -6224,8 +6243,14 @@ _BY_NAME["revl_change"]["inputSchema"]["properties"]["edit"]["properties"] = {
     "target": {"type": "string"},
     "edits": _BY_NAME["revl_edit"]["inputSchema"]["properties"]["edits"]}
 del _BY_NAME
+# issue #2532: every schema says what the dispatch enforces: a top-level key
+# the verb does not declare is refused by name, not ignored. Set here, once,
+# over the assembled list, so a verb added anywhere above cannot miss it.
+for _tool in TOOLS:
+    _tool["inputSchema"]["additionalProperties"] = False
+del _tool
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
-#: issue #2239: each verb's declared arguments, checked once at dispatch
+#: issues #2239/#2532: each verb's declared arguments, checked once at dispatch
 _SCHEMAS = {tool["name"]: tool.get("inputSchema") for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
 
@@ -6312,7 +6337,10 @@ def handle(message: dict) -> dict | None:
         # own name so the pipeline below cannot tell the difference. The
         # tiered list therefore stays exactly `CORE`: every verb is one listed
         # tool away without a fifteenth listed verb.
-        if name == _disclosure.DISCOVERY and _disclosure.is_hatch(arguments):
+        payload = _unknown_arguments(name, arguments)
+        if payload is not None:
+            pass
+        elif name == _disclosure.DISCOVERY and _disclosure.is_hatch(arguments):
             payload = _hatch_call(arguments)
         else:
             payload = _call_tool(name, arguments)
@@ -6363,7 +6391,22 @@ def _hatch_call(arguments: dict) -> dict:
             f"`{_disclosure.DISCOVERY}`",
             fix=f"drop `{_disclosure.HATCH_NAME}` to look it up instead",
             next=_remedy.call(_disclosure.DISCOVERY, {}))
-    return _call_tool(verb, args)
+    # the inner call is a call: `args` is checked against the named verb's
+    # own schema, exactly as a direct call's arguments are (issue #2532)
+    return _unknown_arguments(verb, args) or _call_tool(verb, args)
+
+
+def _unknown_arguments(name: str, arguments: dict) -> dict | None:
+    """Issue #2532: the usage refusal for a call that sends a top-level key
+    `name` does not declare, naming each such key, the declared key it stands
+    for and the verbs that do declare it; `None` when every key is declared.
+    The one check for every transport: `handle` runs it on the call as sent
+    and `_hatch_call` on the hatch's inner call, both BEFORE `_call_tool`, so
+    a handler calling another handler never meets it."""
+    message, nxt = _unknownargs.check(name, arguments, _SCHEMAS)
+    if message is None:
+        return None
+    return _session_error(message, category="usage", next=nxt)
 
 
 def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:

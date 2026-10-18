@@ -30,7 +30,7 @@
 
 ["reason", "has-any-word-tests-the-neighbours-of-an", "`has_any_word` tests the neighbours of an `any` only when the left one is not a word character; an erased `any` is always inside brackets and a user type name that contains the letters starts with a capital, so the empty neighbour and a digit right after a non-word left neighbour do not occur."]
 
-["function", "has-any-word-tests-the-neighbours-of-an", "is_word_char", 2, 2]
+["function", "has-any-word-tests-the-neighbours-of-an", "is_word_char", 1, 1]
 
 ["reason", "issue-106-go-combined-path", "Issue #106, the v3 combined path (`_emit_v3_combined`), first five slices, and the issue #1834 match inference (the first typed arm, with its binding in scope, and an interface-typed temp for a scrutinee that is not a bare name). The decline checks (`combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `comp_match_ok`) are written as one boolean per arm, so a declined document costs no branch of its own. What no carried document reaches: in `comp_expr_ok` and `comp_expr_bare`, a `var` reference (a v3 provide body spells a name as `name`); in `comp_expr_bare`, a callee-field method call and the Int negation through `revlSub` (the frontend sets no `operands` on a provide body's `-`); in `emit_module`, the fall-back to the pure path for an aliased `strings` import, a `//revl:import` or the sealed Result form; in `call_head_ok`, a method call whose callee is a field; in `comp_name_ref`, a required key referenced as a bare name; in `meta_literal`, a null in an intercept's metadata. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the component beside a lifecycle test in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected)."]
 
@@ -49,6 +49,14 @@
 ["reason", "issue-1631-the-arity-guard-in-v3-fill", "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus."]
 
 ["function", "issue-1631-the-arity-guard-in-v3-fill", "fill_erased", 1, 1]
+
+["reason", "issue-2495-generic-call-residuals", "issue #2495: a generic function (a Go type-parameter list, `func id[T any](x T) T`) and the calls that bind its type parameters from their arguments are mirrored by selfhost/emit_go.rvl and held by the corpus document generic_fn.rvl (tests/fixtures/emit_go_corpus). What remains: the mention guard of `go_generic_call` (an argument whose own type names a type parameter, a generic function calling another with its `T`), the nested-bracket and comma arms of `split_generic_args` (no generic parameter in the corpus takes a two-argument or nested type), and the empty-mapping pass-through of `v3_subst` (a call that binds nothing)."]
+
+["function", "issue-2495-generic-call-residuals", "go_generic_call", 1, 1]
+
+["function", "issue-2495-generic-call-residuals", "split_generic_args", 4, 4]
+
+["function", "issue-2495-generic-call-residuals", "v3_subst", 1, 1]
 
 ["reason", "item-130-issue-81-issue-1321-the-marker", "Item 130 / issue #81 / issue #1321: the marker the port emits for each `components` entry this pure typed-core port does not carry, and the guard that suppresses it. The naming arm is REACHED now, by both documents in tests/fixtures/emit_go_refusals/ (issue #1431): the reference refuses each by name and the port answers its component with `<<UNSUPPORTED-COMPONENT:Agent>>`. So `component_is_observable` is fully covered and the rest dropped 17 -> 4. Still unreached: the suppressing arm (`uncarried_components` returning no markers, and `any_component_is_observable` returning False). The `functions` and `types` arms of `carries_pure_declarations` are reached now, by the combined path's corpus documents (issue #106). No emit_go_corpus document declares a component: a components-only one is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED. The suppressing arm is pinned instead by tests/test_selfhost_emit_go.py::test_an_incidental_component_on_the_pure_path_is_not_marked, and the naming arms by test_a_components_only_document_names_every_component and test_an_observable_component_on_the_pure_path_is_named_by_the_port."]
 

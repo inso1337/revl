@@ -15591,9 +15591,10 @@ fn tk_fnvalue_named(n: Str, c: CallN, env: List[Bind],
   // carries the arity window and the type-parameter marking, and its refusal
   // names the callee without quoting a function type.
   if (sig_declared(env, n)) { return tk_miss() }
-  if (n == "Some" || n == "None" || n == "Ok" || n == "Err") { return tk_miss() }
-  if (tenv_get(env, "case ".concat(n)) != "") { return tk_miss() }
   let t = tenv_get(env, n)
+  // a local of function type shadows a case name, the built-in constructors
+  // included: `fn f(Some)` in a provide method calls its parameter
+  // (issue #2490), as the reference reads `tenv` ahead of the case table
   if (!tk_is_fn_ty(t)) { return tk_miss() }
   return tk_hit(tk_fn_call(t, "`".concat(n).concat("`"), c.args, argTys, env))
 }
@@ -25039,14 +25040,36 @@ fn cir_widen(js: Str, expected: Str, actual: Str) -> Str {
 // A provide method's surface parameter names bound to the service signature's
 // declared types, POSITIONALLY (the body is free to rename them). A parameter
 // the signature does not reach keeps an empty type, which annotates nothing.
+// A parameter takes the binder's escape (`Env.bind_params` -> `_safe_name`,
+// against the component scope and the parameters before it) and the scope
+// carries it to the reads as a `rename` row, as every other binder here does:
+// a provide-method parameter spelled `Some` is `Some_` on every tier, and the
+// call `Some(1)` on it reads the same id (issue #2490).
 fn method_param_binds(pnames: List[Str], decl: List[ParamN],
-                      al: Map[Str, Str]) -> List[Bind] {
+                      al: Map[Str, Str], sc: List[Bind],
+                      hostSc: List[Str]) -> List[Bind] {
   var out: List[Bind] = []
   var i = 0
   while (i < pnames.length()) {
     let raw = i < decl.length() ? decl[i].ty : ""
+    let safe = safe_name(pnames[i], concat_binds(sc, out), hostSc)
     out = out.push({ name: pnames[i],
                      ty: raw == "" ? "" : taint_strip(alias_subst(raw, al)) })
+    if (safe != pnames[i]) {
+      out = out.push({ name: "rename ".concat(pnames[i]), ty: safe })
+    }
+    i += 1
+  }
+  return out
+}
+
+// The ids a method table writes for its parameters: each surface name's
+// escape, read back off the `rename` rows `method_param_binds` wrote.
+fn method_param_ids(pnames: List[Str], pbinds: List[Bind]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < pnames.length()) {
+    out = out.push(cir_safe_of(pbinds, pnames[i]))
     i += 1
   }
   return out
@@ -25764,9 +25787,11 @@ fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: C
     },
     // A bare-name callee. A tagged ADT constructor beats every other shape: it
     // is a case, not a callable, and no host runtime defines a function for it.
+    // Unless the scope binds the name: then it is the value, not the case
+    // (issue #2490, as the reference's `expr.callee.name not in scope`).
     // Anything else is a module callable (`_lower_component_pure_expr`'s
     // ExprVar-callee arm) -> `{"kind": "fn", "name", "args"}`.
-    Var(nm) => tagged_case_adt(cx.cases, nm) != ""
+    Var(nm) => tagged_case_adt(cx.cases, nm) != "" && !scope_has(sc, nm)
       ? cir_adt(tagged_case_adt(cx.cases, nm), nm, args, sc, hostSc, cx)
       : (cir_calls_a_value(nm, sc, cx)
           ? cir_value_call(nm, args, sc, hostSc, cx)
@@ -25804,17 +25829,19 @@ fn cir_nullary_case(n: Str, cx: CCtx) -> Bool {
 }
 
 // Is `nm(...)` a call on a scoped VALUE, a function-valued parameter or local?
-// The reference reads a constructor and a module callable first
-// (`_BUILTIN_CONSTRUCTORS`, `callables`), and only then lowers the callee as
-// an expression, so a scoped name that is neither is the generic tail's
-// `call` on a `name` node (issue #1823).
+// The reference reads a module callable first (`callables`), and only then
+// lowers the callee as an expression, so a scoped name that is not one is the
+// generic tail's `call` on a `name` node (issue #1823). A scoped name that
+// spells a built-in constructor is the value, not the constructor, in a
+// component position as in a `fn` body (issue #2490).
 fn cir_calls_a_value(nm: Str, sc: List[Bind], cx: CCtx) -> Bool {
-  if (nm == "Some" || nm == "None" || nm == "Ok" || nm == "Err") { return false }
   return scope_has(sc, nm) && bind_lookup(cx.fns, nm, 0) == ""
 }
 
 // `f(a)` where `f` is a scoped value: the reference's generic call tail,
 // `{"kind": "call", "callee": <the callee lowered as an expression>, "args"}`.
+// The callee is the scope's escaped id (`cir_safe_of`), as the `name` node
+// `cir_var` writes for the same read: a `Some` parameter is `Some_`.
 // Before issue #1823 this refused in `cir_fncall` (no module callable named
 // `f`), and the whole component `body` was dropped with it.
 fn cir_value_call(nm: Str, args: List[Expr], sc: List[Bind], hostSc: List[Str],
@@ -25822,7 +25849,7 @@ fn cir_value_call(nm: Str, args: List[Expr], sc: List[Bind], hostSc: List[Str],
   let a = cir_args(args, 0, sc, hostSc, cx, "")
   if (!a.ok) { return mk_irres(false, "") }
   return mk_irres(true, "{\"kind\": \"call\", \"callee\": {\"kind\": \"name\", \"id\": "
-    .concat(jstr(nm)).concat("}, \"args\": [").concat(a.js).concat("]}"))
+    .concat(jstr(cir_safe_of(sc, nm))).concat("}, \"args\": [").concat(a.js).concat("]}"))
 }
 
 // A tagged-ADT construction in a component position (`Started(n)`), the same
@@ -26422,7 +26449,12 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (is_bad(r.e) || r.i <= j + 1) { return mk_irres(false, "") }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, j + 1).line))
     if (!ve.ok) { return mk_irres(false, "") }
-    let step = "{\"step\": \"let\", \"name\": ".concat(jstr(name)).concat(", \"value\": ")
+    // the binder's escape (`_lower_provide`'s `_alloc_safe`, against the
+    // parameters, the earlier locals and the component scope), carried to
+    // the reads as a `rename` row: `let Some = step` binds `Some_` and the
+    // call `Some(3)` on it reads the same id (issue #2490)
+    let safe = safe_name(name, sc, hostSc)
+    let step = "{\"step\": \"let\", \"name\": ".concat(jstr(safe)).concat(", \"value\": ")
       .concat(ve.js).concat(", \"mutable\": ").concat(mutable ? "true" : "false").concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     // `var`-ness rides the SAME scope list under the reserved `mut <name>` key
@@ -26430,8 +26462,9 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     // the mutable set without a second threaded parameter. A `let` that SHADOWS
     // a `var` writes the key back, and `tenv_get`'s last-wins scan makes the
     // shadow win.
-    let sc2 = env_mut_put(sc.push({ name: name, ty: value_ty(r.e, cenv_ir(cx, sc)) }),
-                          name, mutable)
+    var sc1 = sc.push({ name: name, ty: value_ty(r.e, cenv_ir(cx, sc)) })
+    if (safe != name) { sc1 = sc1.push({ name: "rename ".concat(name), ty: safe }) }
+    let sc2 = env_mut_put(sc1, name, mutable)
     return cir_method_stmts(ts, r.i, hi, cx, sc2, hostSc, nacc, top)
   }
   // `<name> = <expr>` — a reassignment of a local the method declared.
@@ -26442,7 +26475,7 @@ fn cir_method_stmts(ts: List[Token], lo: Int, hi: Int, cx: CCtx, sc: List[Bind],
     if (is_bad(r.e) || r.i <= lo + 2) { return mk_irres(false, "") }
     let ve = cir_expr(r.e, sc, hostSc, cx_at(cx, tkc(ts, lo + 2).line))
     if (!ve.ok) { return mk_irres(false, "") }
-    let step = "{\"step\": \"assign\", \"name\": ".concat(jstr(name))
+    let step = "{\"step\": \"assign\", \"name\": ".concat(jstr(cir_safe_of(sc, name)))
       .concat(", \"value\": ").concat(ve.js).concat("}")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_method_stmts(ts, r.i, hi, cx, sc, hostSc, nacc, top)
@@ -26577,7 +26610,8 @@ fn cu_unit(ts: List[Token], lo: Int, hi: Int, names: List[Str]) -> Str {
 }
 
 // A `provide <key> { … }` method table -> `[{name, params, body}]`. The method's
-// parameters are the surface names; their TYPES come from the provided
+// parameters are the surface names' escapes (`method_param_binds`); their
+// TYPES come from the provided
 // service's declaration (`svc`, A6), which is what a `match` in the body needs
 // to stamp its arms' `payload_type`. The shorthand `= expr` becomes a single
 // `return`.
@@ -26596,8 +26630,9 @@ fn cir_prov_methods(ts: List[Token], i: Int, end: Int, cx: CCtx, sc: List[Bind],
   let nm = tkc(ts, head + 1).text
   let ps = params_at(ts, head + 3)
   let pnames = param_names(ps.ps)
-  let pjson = str_list_json(pnames)
-  let pbinds = method_param_binds(pnames, svc_method_params(ts, svc, nm), cx.al)
+  let pbinds = method_param_binds(pnames, svc_method_params(ts, svc, nm), cx.al,
+                                  sc, hostSc)
+  let pjson = str_list_json(method_param_ids(pnames, pbinds))
   // the operation's declared return, under the reserved `returns ` key the
   // block body's `return` reads (a space is not an identifier character)
   let mret = svc_method_ret(ts, svc, nm, cx.al)
@@ -28177,10 +28212,13 @@ fn infer_callee(callee: Expr, env: List[Bind]) -> Str {
 // argument the arm reads and leave the other side `Any`, which is exactly the
 // pair the reference stamps (`Ok(1)` matched `Ok`/`Err` gives `Int`/`Any`).
 // A user ADT may shadow `Ok`/`Err`, so the built-in arms are gated on the case
-// table still resolving them to `Result`.
+// table still resolving them to `Result`. A local of function type shadows
+// every case name (issue #2490): the call is the local's, typed by
+// `infer_callee` from the function type, as the reference reads `tenv` first.
 fn infer_ctor(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
   let nm = match callee { Var(n) => n, _ => "", }
   if (nm == "") { return "" }
+  if (tk_is_fn_ty(tenv_get(env, nm))) { return "" }
   let arg0 = args.length() > 0 ? infer(args[0], env) : ""
   let payload = arg0 == "" ? "Any" : arg0
   if (nm == "Some" && tenv_get(env, "case Some").startsWith("Opt")) {

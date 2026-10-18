@@ -5409,16 +5409,17 @@ def run_placement(files, placement_path: str, once: bool = False,
         threads.append(thread)
         pumps[pname] = thread
 
-    def boot_failures() -> dict[str, str]:
+    def boot_failures(names: tuple[str, ...] | None = None) -> dict[str, str]:
         """issue #2445: children that will never say `UP`, with the reason.
+        `names` narrows the check to those children (the swap successor).
 
         A child that printed a `FATAL` line, or that has exited without saying
         `UP`, is not coming up, so waiting on it only spends the timeout. The
         reason names the runner's own error and, once it has exited, its exit
         code."""
         failed: dict[str, str] = {}
-        for pname, (proc, _mode) in children.items():
-            if pname in up:
+        for pname, (proc, _mode) in list(children.items()):
+            if pname in up or (names is not None and pname not in names):
                 continue
             code = proc.poll()
             if code is not None:
@@ -5443,8 +5444,9 @@ def run_placement(files, placement_path: str, once: bool = False,
         _wait_for(lambda: len(up) == len(children) or bool(boot_failures()), 60)
         return len(up) == len(children)
 
-    def report_boot_failures() -> bool:
-        """Name every child that failed to boot and what it said. True when
+    def report_boot_failures(names: tuple[str, ...] | None = None) -> bool:
+        """Name every child that failed to boot and what it said (only `names`
+        when given: the swap successor). True when
         there was one, so the caller fails the placement. An operator halt is
         not a boot failure: it killed the children, and its own report owns
         that."""
@@ -5453,13 +5455,15 @@ def run_placement(files, placement_path: str, once: bool = False,
         # a runner prints its FATAL line and then exits: give it a moment to
         # finish so the report can carry the exit code
         for pname in list(fatals):
+            if names is not None and pname not in names:
+                continue
             proc = children[pname][0] if pname in children else None
             if proc is not None and pname not in up and proc.poll() is None:
                 try:
                     proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     pass
-        failed = boot_failures()
+        failed = boot_failures(names)
         for pname, reason in failed.items():
             print(f"error: process {pname} failed to boot: {reason}",
                   file=sys.stderr, flush=True)
@@ -5844,9 +5848,14 @@ def run_placement(files, placement_path: str, once: bool = False,
         adapt_spec(succ_spec, to_backend)
         print(f"swap: booting {component} on the {to_backend} tier ({succ}) ...", flush=True)
         spawn(succ, to_backend, succ_spec)
-        if not _wait_for(lambda: succ in up, 60):
-            print(f"swap refused: successor {succ} did not come up — tearing it "
-                  f"back down; running composition untouched.", flush=True)
+        # issue #2445: the same fail-fast rule as the boot wait: a successor
+        # that printed FATAL or exited without `UP` ends the wait and is named
+        _wait_for(lambda: succ in up or bool(boot_failures((succ,))), 60)
+        if succ not in up:
+            why = "failed to boot" if report_boot_failures((succ,)) \
+                else "did not come up"
+            print(f"swap refused: successor {succ} {why}; tearing it back "
+                  f"down; running composition untouched.", flush=True)
             sproc, smode = children.pop(succ, (None, None))
             if sproc is not None:
                 stop_all({succ: (sproc, smode)})

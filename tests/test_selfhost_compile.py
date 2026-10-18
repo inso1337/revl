@@ -788,7 +788,17 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # documents below left this list — `in_file_tests.rvl`, the item 280
         # Opt-gap document, the issue #1631 erased-Result document, and the
         # combined path's `comp_provide_pure.rvl`.)
-        # no residual: the fully-native chain reproduces the whole go corpus.
+        # no other residual: the fully-native chain reproduces the rest of the
+        # go corpus.
+        # issue #2495: the generic-function document. Emitter-exact from the
+        # reference IR (selfhost/emit_go.rvl mirrors the type-parameter list
+        # and the call binding); the native IR producer reads a call to a
+        # generic function back as its declared `T` because selfhost/lower.rvl
+        # does not bind the callee's type parameters from the arguments, so a
+        # `+` over such a call (`wrap(3).length() + or_else(some_of(9), 0)`,
+        # `xs[0] + id(-1)`) is written without the reference's
+        # `"operands": "Int"` annotation.
+        "generic_fn.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -847,6 +857,22 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # because `cir_method_stmts` in selfhost/lower.rvl has no
         # `if`/`while`/`for` arm.
         "method_control_flow.rvl",
+        # issue #2495: the generic-function document. Emitter-exact from the
+        # reference IR (selfhost/emit_rust.rvl mirrors the type-parameter list
+        # and the call binding); the native IR producer reads a call to a
+        # generic function back as its declared `T` because selfhost/lower.rvl
+        # does not bind the callee's type parameters from the arguments, so a
+        # `+` over such a call (`wrap(3).length() + or_else(some_of(9), 0)`,
+        # `xs[0] + id(-1)`) is written without the reference's
+        # `"operands": "Int"` annotation.
+        "generic_fn.rvl",
+        # The same generic `id` called from a provide method, where the
+        # divergence is a different one (issue #2559): the reference IR's `+`
+        # there carries no `operands` key at all, and the native chain drops
+        # the whole provide method (`fn greet(&self, ..)`) together with its
+        # `ctx.provide("greeting", ..)` wiring. A non-generic control of the
+        # same shape is byte-exact.
+        "comp_provide_generic.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
@@ -3517,6 +3543,38 @@ def test_effect_arg_refusal_native_agrees(compile_to, name):
     "name", sorted(_effect_arg_docs().PROVIDE_RETURN_REFUSED))
 def test_provide_return_refusal_native_agrees(compile_to, name):
     source, _twin, message = _effect_arg_docs().PROVIDE_RETURN_REFUSED[name]
+    reference = _reference_refusal(source)
+    assert message in reference
+    assert compile_to(source, "py") == f"REFUSED|T1|{reference}"
+
+
+# Issue #2490: a provide-method parameter or local named `Some`/`Ok` is the
+# callee of `Some(1)`, in both strata and in both compilers. The documents are
+# tests/test_2490_provide_local_constructor_name.py's: the native compile of
+# the admitted program is the reference's, byte for byte, and a wrong call on
+# the local meets the reference's refusal, since the self-host checker reads a
+# local of function type ahead of the case table as the reference does.
+
+
+def _local_callee_docs():
+    from _load_by_path import load_by_path
+    return load_by_path(
+        "test_2490_provide_local_constructor_name",
+        ROOT / "tests" / "test_2490_provide_local_constructor_name.py")
+
+
+def test_a_local_constructor_name_callee_compiles_natively_as_the_reference(
+        compile_to, reference_emit):
+    source = _local_callee_docs().PROVIDE
+    got = compile_to(source, "py")
+    assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), got[:200]
+    assert got == reference_emit["py"](compile_source(source, "t.rvl"))
+
+
+@pytest.mark.parametrize(
+    "name", sorted(_local_callee_docs().LOCAL_CALLEE_REFUSED))
+def test_local_callee_refusal_native_agrees(compile_to, name):
+    source, _twin, message = _local_callee_docs().LOCAL_CALLEE_REFUSED[name]
     reference = _reference_refusal(source)
     assert message in reference
     assert compile_to(source, "py") == f"REFUSED|T1|{reference}"

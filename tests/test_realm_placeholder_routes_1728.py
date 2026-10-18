@@ -156,9 +156,16 @@ def test_the_operators_flag_binds_a_route_over_mcp(server):
 
 
 def test_the_agent_cannot_bind_a_leg_through_the_call(server):
+    """Since issue #2532 the binding argument is refused by name before
+    anything reads it, and the leg stays unbound for the call that follows."""
     server.set_authoring_trust(host_code=False, realm_bindings=BOUND[:2])
     checked = _call("revl_check", {"source": SHARDS,
                                    "realm_bindings": dict(BOUND),
                                    "realmBindings": dict(BOUND)})
     assert checked["ok"] is False
-    assert checked["diagnostics"][0]["message"].startswith("realm placeholder `?x`")
+    refusal = checked["diagnostics"][0]["message"]
+    assert refusal.startswith("unknown arguments for `revl_check`")
+    assert "`realm_bindings`" in refusal and "`realmBindings`" in refusal
+    unbound = _call("revl_check", {"source": SHARDS})
+    assert unbound["ok"] is False
+    assert unbound["diagnostics"][0]["message"].startswith("realm placeholder `?x`")

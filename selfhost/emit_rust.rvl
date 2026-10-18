@@ -539,7 +539,7 @@ fn is_builtin_ctor(name: Str) -> Bool {
 // function's reused names (`ctx.multi_use`), `mf` the pre-order ordinals of the
 // `for` nodes whose iterable may move (`ctx.movable_for_iterables`), and `fo` the
 // ordinal the next rendered `for` takes; all three are empty outside a module fn.
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str], flb: Map[Str, List[Int]], lp: Map[Str, Str], ft: Map[Str, Str], mu: Map[Str, Str], mf: List[Int], fo: Int }
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str], flb: Map[Str, List[Int]], lp: Map[Str, Str], ft: Map[Str, Str], mu: Map[Str, Str], mf: List[Int], fo: Int, fp: Map[Str, List[Str]], tp: List[Str], dz: Map[Str, Str] }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
 // the same type tables); paired with the type-NAME set for `rust_type`.
@@ -553,19 +553,19 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
-  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz }
 }
 // Swap in a fresh rename map (the component-capture scope for one render).
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
-  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz }
 }
 // Swap in a fresh var_types map (a provide-method seeds params/map-bindings).
 fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
-  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
+  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz }
 }
 // Advance the `for` ordinal (the next rendered `for` takes `fo`).
 fn set_fo(ctx: Ctx, fo: Int) -> Ctx {
-  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: fo }
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -828,6 +828,22 @@ fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
   if (k == "bin" && node_op(node) == "+") {
     return v3_is_str(value_field(node, "left"), ctx) || v3_is_str(value_field(node, "right"), ctx)
   }
+  // issue #2496: a call's declared return (`f("a") + f("b")`), a record field
+  // read or a list index that is a `Str` concatenates through `format!` like
+  // a `Str` local, since `String + String` is E0308. Each asks `v3_infer_type`
+  // only about a CHILD node (`v3_infer_type` itself ends in `v3_is_str`).
+  if (k == "call" && !value_is_null(value_field(node, "callee"))) {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) != "var") { return false }
+    let cn = value_str(value_field(callee, "name"))
+    return v3_subst(map_get(ctx.fr, cn), v3_generic_call(cn, value_list(value_field(node, "args")), ctx)) == "Str"
+  }
+  if (k == "field") {
+    let target_ty = v3_infer_type(value_field(node, "target"), ctx)
+    if (target_ty == "") { return false }
+    return map_get(ctx.ft, `${target_ty}.${value_str(value_field(node, "name"))}`) == "Str"
+  }
+  if (k == "index") { return list_element_type(v3_infer_type(value_field(node, "target"), ctx)) == "Str" }
   return false
 }
 
@@ -849,7 +865,8 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
     if (node_kind(callee) == "var") {
       let cn = value_str(value_field(callee, "name"))
       if (ctx.ca.has(cn)) { return map_get(ctx.ca, cn) }
-      if (ctx.fr.has(cn)) { return map_get(ctx.fr, cn) }
+      // issue #2495: `id(p)` answers the instantiation, not `T`
+      if (ctx.fr.has(cn)) { return v3_subst(map_get(ctx.fr, cn), v3_generic_call(cn, value_list(value_field(node, "args")), ctx)) }
     }
   }
   if (k == "list") { return "List" }
@@ -1765,7 +1782,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     ps = ps.push(param)
     i = i + 1
   }
-  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
+  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz }
   return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), inner)} }`
 }
 
@@ -2274,7 +2291,15 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     if (step == "let") {
       var kw = "let"
       if (value_bool(value_field(node, "mutable"))) { kw = "let mut" }
-      out = out.push(line(indent, `${kw} ${nm} = ${value};`))
+      // `_v3_dead_let_annotation` (issue #2497): a `let` the body never reads
+      // nor assigns again gives rustc no later use to infer from, so a bare
+      // `None` is typed `Option<Value>`. The reference refuses a payload-less
+      // case of a GENERIC variant there by name; this port lowers no generic
+      // variant yet (issue #2494, GENERIC_VARIANT_PORT_GAPS), its enum carries
+      // no type parameter to leave unbound.
+      var annot = ""
+      if (ctx.dz.has(raw) && node_kind(valnode) == "var" && ref_name(valnode) == "None") { annot = ": Option<Value>" }
+      out = out.push(line(indent, `${kw} ${nm}${annot} = ${value};`))
     } else {
       // item 437(a): a self-appending `assign` (`s = s + p`) becomes an
       // in-place `push_str`. Only an `assign` qualifies -- a `let` introduces a
@@ -2344,10 +2369,207 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
 // `_emit_v3_functions`: each module fn as a Rust `fn`, blank-line separated. The
 // per-fn `var_types` is seeded from the parameter signatures (the reference's
 // `ctx.var_types = {p.name: p.type ..}`).
+// `_V3_TYPE_WORD.findall`: the identifier words of a surface type, in order.
+fn type_words(surface: Str) -> List[Str] {
+  var out: List[Str] = []
+  var word = ""
+  var i = 0
+  while (i < surface.length()) {
+    let ch = surface.charAt(i)
+    if (is_word_char(ch)) { word = word.concat(ch) }
+    else {
+      if (word != "") { out = out.push(word) }
+      word = ""
+    }
+    i = i + 1
+  }
+  if (word != "") { out = out.push(word) }
+  return out
+}
+
+// `_v3_fn_type_params` (issue #2495): the type parameters of a function
+// signature, in first-use order. The IR carries the author's spelling
+// (`fn id[T](x: T) -> T` arrives as params typed `T`, with no parameter
+// list), so the emitter applies the checker's implicit rule: a single
+// uppercase name that no `type` declares is a type parameter.
+fn fn_type_params(fnode: Any, tn: Map[Str, Str]) -> List[Str] {
+  var found: List[Str] = []
+  var surfaces: List[Str] = []
+  for (p of value_list(value_field(fnode, "params"))) { surfaces = surfaces.push(value_str(value_field(p, "type"))) }
+  surfaces = surfaces.push(value_str(value_field(fnode, "returns")))
+  for (surface of surfaces) {
+    for (word of type_words(surface)) {
+      if (word.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(word) >= 0 && !tn.has(word) && found.indexOf(word) < 0) {
+        found = found.push(word)
+      }
+    }
+  }
+  return found
+}
+
+// `_v3_walk_nodes`: every record node of a body, pre-order.
+fn body_nodes(node: Any) -> List[Any] {
+  var out: List[Any] = []
+  if (value_kind(node) == "record") {
+    out = out.push(node)
+    for (k of value_keys(node)) { out = out.concat(body_nodes(value_field(node, k))) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { out = out.concat(body_nodes(item)) }
+  }
+  return out
+}
+
+// `_v3_fn_generics` (issue #2495): the `<T: Clone + PartialEq>` list of a
+// generic function, empty for a function with no type parameter. `Clone`
+// always (the body renderer clones a reused local or a by-value argument
+// wherever the surface type is not a scalar); `PartialEq` only when the body
+// compares two values with `==`/`!=` and one operand is typed by a type
+// parameter.
+fn fn_generics(body: List[Any], tparams: List[Str], ctx: Ctx) -> Str {
+  if (tparams.length() == 0) { return "" }
+  var needs_eq = false
+  for (node of body_nodes(body)) {
+    if (node_kind(node) == "bin" && (node_op(node) == "==" || node_op(node) == "!=")) {
+      for (side of [value_field(node, "left"), value_field(node, "right")]) {
+        for (w of type_words(v3_infer_type(side, ctx))) {
+          if (tparams.indexOf(w) >= 0) { needs_eq = true }
+        }
+      }
+    }
+  }
+  var bounds = "Clone"
+  if (needs_eq) { bounds = "Clone + PartialEq" }
+  var items: List[Str] = []
+  for (t of tparams) { items = items.push(`${t}: ${bounds}`) }
+  return `<${items.join(", ")}>`
+}
+
+// `_V3Ctx.fn_param_types`: each module fn's declared parameter surface types.
+fn fn_params_map(functions: List[Any]) -> Map[Str, List[Str]] {
+  var fp: Map[Str, List[Str]] = Map.empty()
+  for (fnode of functions) {
+    var ps: List[Str] = []
+    for (p of value_list(value_field(fnode, "params"))) { ps = ps.push(value_str(value_field(p, "type"))) }
+    fp = fp.set(value_str(value_field(fnode, "name")), ps)
+  }
+  return fp
+}
+
+// The `let` bindings a body never reads nor assigns again (issue #2497): the
+// reference's `read_counts == 0 and name not in assigned_names`.
+fn dead_lets(body: List[Any]) -> Map[Str, Str] {
+  let counts = ref_counts(body)
+  var assigned: Map[Str, Str] = Map.empty()
+  for (n of body_nodes(body)) {
+    if (value_str(value_field(n, "step")) == "assign") { assigned = assigned.set(value_str(value_field(n, "name")), "1") }
+  }
+  var dz: Map[Str, Str] = Map.empty()
+  for (n of body_nodes(body)) {
+    if (value_str(value_field(n, "step")) == "let") {
+      let name = value_str(value_field(n, "name"))
+      if (!counts.has(name) && !assigned.has(name)) { dz = dz.set(name, "1") }
+    }
+  }
+  return dz
+}
+
+// `_v3_subst`: `surface` with each whole-word type parameter replaced from
+// `mapping`.
+fn v3_subst(surface: Str, mapping: Map[Str, Str]) -> Str {
+  if (mapping.keys().length() == 0) { return surface }
+  var out = ""
+  var word = ""
+  var i = 0
+  while (i < surface.length()) {
+    let ch = surface.charAt(i)
+    if (is_word_char(ch)) { word = word.concat(ch) }
+    else {
+      if (word != "") { out = out.concat(mapping.lookup(word) ?? word) }
+      word = ""
+      out = out.concat(ch)
+    }
+    i = i + 1
+  }
+  if (word != "") { out = out.concat(mapping.lookup(word) ?? word) }
+  return out
+}
+
+// `_v3_unify`: bind the type parameters `pattern` mentions from the matching
+// parts of `actual` (`List[T]` against `List[Int]` binds `T` to `Int`).
+fn v3_unify(pattern: Str, actual: Str, params: List[Str], bound: Map[Str, Str]) -> Map[Str, Str] {
+  let p = trim(pattern)
+  let a = trim(actual)
+  if (params.indexOf(p) >= 0) {
+    if ((bound.lookup(p) ?? "") == "") { return bound.set(p, a) }
+    return bound
+  }
+  let pl = p.indexOf("[")
+  let al = a.indexOf("[")
+  if (pl > 0 && p.endsWith("]") && al > 0 && a.endsWith("]") && p.slice(0, pl) == a.slice(0, al)) {
+    let ps = split_generic(p.slice(pl + 1, p.length() - 1))
+    let as_ = split_generic(a.slice(al + 1, a.length() - 1))
+    if (ps.length() == as_.length()) {
+      var b = bound
+      var i = 0
+      while (i < ps.length()) { b = v3_unify(ps[i], as_[i], params, b); i = i + 1 }
+      return b
+    }
+  }
+  return bound
+}
+
+// The type parameters of a callee's signature, from the same rule
+// `fn_type_params` applies to a definition. A name the CURRENT function's
+// type parameters took (`ctx.tp`) is a type parameter of the callee too, not
+// a declared type, even though it sits in `ctx.tn` for `rust_type_t`.
+fn callee_tparams(name: Str, ctx: Ctx) -> List[Str] {
+  var found: List[Str] = []
+  var surfaces = ctx.fp.lookup(name) ?? []
+  surfaces = surfaces.push(map_get(ctx.fr, name))
+  for (surface of surfaces) {
+    for (word of type_words(surface)) {
+      if (word.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(word) >= 0 && (!ctx.tn.has(word) || ctx.tp.indexOf(word) >= 0) && found.indexOf(word) < 0) {
+        found = found.push(word)
+      }
+    }
+  }
+  return found
+}
+
+// `_v3_generic_call` (issue #2495): for a call to a generic function, the
+// binding its arguments give each type parameter (an empty map for a
+// non-generic callee, and for a parameter nothing binds: rustc infers it
+// from where the result flows). An argument whose own type names a type
+// parameter binds nothing.
+fn v3_generic_call(name: Str, arg_nodes: List[Any], ctx: Ctx) -> Map[Str, Str] {
+  var bound: Map[Str, Str] = Map.empty()
+  let tparams = callee_tparams(name, ctx)
+  if (tparams.length() == 0) { return bound }
+  let params = ctx.fp.lookup(name) ?? []
+  var i = 0
+  while (i < params.length() && i < arg_nodes.length()) {
+    let actual = v3_infer_type(arg_nodes[i], ctx)
+    var mentions = false
+    for (w of type_words(actual)) { if (tparams.indexOf(w) >= 0) { mentions = true } }
+    if (actual != "" && !mentions) { bound = v3_unify(params[i], actual, tparams, bound) }
+    i = i + 1
+  }
+  return bound
+}
+
+// The type-name table with a function's type parameters added.
+fn with_tparams(tn: Map[Str, Str], tparams: List[Str]) -> Map[Str, Str] {
+  var out = tn
+  for (tp of tparams) { out = out.set(tp, "1") }
+  return out
+}
+
 fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables) -> List[Str] {
   var out = []
   let borrow = compute_str_param_borrows(functions)
   let list_borrow = compute_list_param_borrows(functions)
+  let fp = fn_params_map(functions)
   for (fnode of functions) {
     let raw = value_str(value_field(fnode, "name"))
     let name = mangle(raw)
@@ -2355,6 +2577,14 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
     let body = value_list(value_field(fnode, "body"))
+    // issue #2495: inside a generic function its type parameters are types
+    // of their own, not the erased `Value`. The reference keeps them in a
+    // module global `_rust_type` consults after `name in types`; here they
+    // join the type-name table this function's `rust_type_t` calls see, which
+    // takes the same branch (`T` is never a declared type, so nothing else
+    // reads the table differently).
+    let tparams = fn_type_params(fnode, tables.tn)
+    let tn = with_tparams(tables.tn, tparams)
     var bp: Map[Str, Str] = Map.empty()
     var lp: Map[Str, Str] = Map.empty()
     var ps = []
@@ -2362,27 +2592,28 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
     for (p of params) {
       let pname = value_str(value_field(p, "name"))
       let raw_type = value_str(value_field(p, "type"))
-      var ptype = rust_type_pos(value_field(p, "type"), tables.tn)
+      var ptype = rust_type_pos(value_field(p, "type"), tn)
       if (borrow_slot(borrow, raw, i)) {
         ptype = "&str"
         bp = bp.set(pname, "1")
       } else {
         if (borrow_slot(list_borrow, raw, i)) {
-          ptype = `&[${rust_type_pos(strip_spaces(list_element_type(raw_type)), tables.tn)}]`
+          ptype = `&[${rust_type_pos(strip_spaces(list_element_type(raw_type)), tn)}]`
           lp = lp.set(pname, "1")
         }
       }
       ps = ps.push(`${mangle(pname)}: ${ptype}`)
       i = i + 1
     }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp, ft: tables.ft, mu: reused_names(body), mf: movable_for_iterables(body, reused_names(body)), fo: 0 }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp, ft: tables.ft, mu: reused_names(body), mf: movable_for_iterables(body, reused_names(body)), fo: 0, fp: fp, tp: tparams, dz: dead_lets(body) }
     var returns = "()"
     if (!value_is_null(value_field(fnode, "returns"))) {
-      returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
+      returns = rust_type_pos(value_field(fnode, "returns"), tn)
     }
     var vis = ""
     if (value_bool(value_field(fnode, "public"))) { vis = "pub " }
-    out = out.push(`${vis}fn ${name}(${ps.join(", ")}) -> ${returns} {`)
+    let generics = fn_generics(body, tparams, ctx)
+    out = out.push(`${vis}fn ${name}${generics}(${ps.join(", ")}) -> ${returns} {`)
     if (body.length() == 0) {
       out = out.push(line(1, "todo!()"))
     } else {
@@ -4455,7 +4686,7 @@ fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, St
 }
 
 fn plain_ctx(tables: TypeTables, fr: Map[Str, Str]) -> Ctx {
-  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0 }
+  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0, fp: Map.empty(), tp: [], dz: Map.empty() }
 }
 
 // `_map_value_expr_type`: best-effort SURFACE type of an expression. "" is the
@@ -5258,7 +5489,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     var ret = "()"
     let r = value_field(svc_method, "returns")
     if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0 }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0, fp: Map.empty(), tp: [], dz: Map.empty() }
     if (effectful && method_has_effectful_steps(method)) {
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
       let bl = method_body_lines(comp, method, services, ctx, 2)
@@ -6843,6 +7074,10 @@ fn emit_v3_tests(tests: List[Any], functions: List[Any], externs: List[Any], fr:
   for (e of externs) { used = used.push(mangle(value_str(value_field(e, "name")))) }
   let borrow = compute_str_param_borrows(functions)
   let list_borrow = compute_list_param_borrows(functions)
+  // a generic call inside a test body binds its type parameters from the same
+  // parameter table a function body uses (issue #2495); the test's own type
+  // parameter list is empty, as the reference clears it per test
+  let fp = fn_params_map(functions)
   for (t of tests) {
     if (!value_bool(value_field(t, "lifecycle"))) {
       let name = unique_slug(test_slug(value_str(value_field(t, "name"))), used)
@@ -6854,9 +7089,10 @@ fn emit_v3_tests(tests: List[Any], functions: List[Any], externs: List[Any], fr:
         out = out.push("    // (empty test body)")
       } else {
         // a test body is a function body: the same per-body reuse analysis the
-        // reference runs over it (issue #1157), with its own bindings
+        // reference runs over it (issue #1157), with its own bindings, and the
+        // same never-read `let` scan (issue #2497)
         let mu = reused_names(body)
-        let ctx = { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: mu, mf: movable_for_iterables(body, mu), fo: 0 }
+        let ctx = { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: mu, mf: movable_for_iterables(body, mu), fo: 0, fp: fp, tp: [], dz: dead_lets(body) }
         out = out.concat(emit_stmts(body, ctx, 1).lines)
       }
       out = out.push("}")
@@ -6957,7 +7193,7 @@ test "constructor lowers user variants and built-ins" {
   cp = cp.set("Node", "y")
   ca = ca.set("Leaf", "Tree")
   cp = cp.set("Leaf", "n")
-  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: Map.empty(), mu: Map.empty(), mf: [], fo: 0 }
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: Map.empty(), mu: Map.empty(), mf: [], fo: 0, fp: Map.empty(), tp: [], dz: Map.empty() }
   assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
   assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
   assert constructor(ctx, "Some", ["v"]) == "Some(v)"

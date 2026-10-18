@@ -858,7 +858,7 @@ def test_the_transport_calls_the_refusal_a_session_answer_not_an_internal_fault(
         response = server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "revl_load",
-                       "arguments": {"source": PROGRAM, "filename": "agent.rvl"}},
+                       "arguments": {"source": PROGRAM}},
         })
     finally:
         server.AUTHORING = saved
