@@ -43,6 +43,7 @@ import json
 import os
 import pathlib
 import re
+import stat
 
 #: The names TOML lets us write bare. Anything else is quoted, which is what
 #: keeps `pg_database = { registry = "local" }` spelled the way the docs and
@@ -514,6 +515,61 @@ def apply(project_dir: str, trust_host_code: bool) -> str:
 _VENDORED_FILES = ("component.rvl", "manifest.json", "dossier.json")
 
 
+def _source_refusal(path: pathlib.Path, rel: str, what: str) -> TrucNameRefusal:
+    """The refusal for a registry-entry source that is not the entry's own
+    regular file, naming the file and saying that links are refused."""
+    return TrucNameRefusal(
+        f"refusing to vendor `{rel}`: it is {what}, and truc vendors only "
+        f"regular files that sit inside the registry entry; links are refused "
+        f"(a link can point at any file the operator can read). Replace it "
+        f"with the file itself and re-run.")
+
+
+def _read_registry_file(path: pathlib.Path, rel: str) -> str | None:
+    """The text of one registry-entry source, or None when it is absent.
+
+    `exists()` and `read_text` both follow a link, and `exists()` is False
+    through a dangling one, so the file is `lstat`ed instead: a link, or
+    anything that is not a regular file, is refused by name. The read then opens
+    with `O_NOFOLLOW` where the platform has it, so a link swapped in after the
+    check still cannot be read through."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(mode):
+        raise _source_refusal(path, rel, f"a symlink to {os.readlink(path)!r}")
+    if not stat.S_ISREG(mode):
+        raise _source_refusal(path, rel, "not a regular file")
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
+    except OSError:
+        if path.is_symlink():
+            raise _source_refusal(path, rel, "a symlink") from None
+        raise
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _registry_sources(src_dir: pathlib.Path, name: str) -> list[tuple[str, str]]:
+    """(`<file>`, text) for each of the entry's `_VENDORED_FILES` that exists.
+
+    The entry directory and its `components/` parent are walked too: a link at
+    either is as far outside the registry as a linked file. All of it is read
+    before the first write, so a refusal leaves the project untouched."""
+    for directory, rel in ((src_dir.parent, "components"),
+                           (src_dir, f"components/{name}")):
+        if directory.is_symlink():
+            raise _source_refusal(directory, rel,
+                                  f"a symlink to {os.readlink(directory)!r}")
+    out = []
+    for fname in _VENDORED_FILES:
+        text = _read_registry_file(src_dir / fname, f"components/{name}/{fname}")
+        if text is not None:
+            out.append((fname, text))
+    return out
+
+
 #: where an entry keeps its knowledge records, in the registry and vendored
 _KNOWLEDGE_DIR = "knowledge"
 
@@ -610,8 +666,8 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     # just as well-formed either way.
     src_dir = pathlib.Path(reg_abs, "components", name)
     dst_dir = _vendor_dir(project_dir, name)
-    copies = [(fname, src_dir / fname) for fname in _VENDORED_FILES
-              if (src_dir / fname).exists()]
+    sources = _registry_sources(src_dir, name)
+    copies: list[tuple[str, pathlib.Path]] = []
     # the entry's knowledge records travel with it (issue #1769), one file per
     # record under `trucs/<name>/knowledge/`, as they sit in the registry
     copies += _knowledge_copies(src_dir)
@@ -620,11 +676,13 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     if (dst_dir / _KNOWLEDGE_DIR).is_symlink():
         raise _symlink_refusal(dst_dir / _KNOWLEDGE_DIR,
                                f"trucs/{name}/{_KNOWLEDGE_DIR}")
-    for fname, _ in copies:
+    for fname in [f for f, _ in sources] + [f for f, _ in copies]:
         if (dst_dir / fname).is_symlink():
             raise _symlink_refusal(dst_dir / fname, f"trucs/{name}/{fname}")
     dst_dir.mkdir(parents=True, exist_ok=True)
     _clear_vendored_knowledge(dst_dir)
+    for fname, text in sources:
+        _write_no_follow(dst_dir / fname, text, f"trucs/{name}/{fname}")
     for fname, sp in copies:
         if fname.startswith(_KNOWLEDGE_DIR + "/"):
             (dst_dir / _KNOWLEDGE_DIR).mkdir(exist_ok=True)
