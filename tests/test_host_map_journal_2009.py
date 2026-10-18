@@ -194,8 +194,11 @@ def test_java_tier_catches_a_non_reversing_host_map_undo(tmp_path):
 # bracket sites are here: the activation body (`seeded() ? ...`) and a
 # provide-method body (`held != None ? ...`, the shape of the downstream
 # approval gate that went red), plus a fn-body ternary expression statement
-# after a `let`, the same hazard without any journal. The document is also in the self-host ts
-# oracle's CORPUS, so the port's bytes agree with the fix.
+# after a `let`, the same hazard without any journal. Issue #2508 adds the
+# fn-body statement that is only a record literal: its line starts with `{`,
+# which TypeScript parses as a block, so the whole file failed to compile. The
+# document is also in the self-host ts oracle's CORPUS, so the port's bytes
+# agree with the fix.
 TERNARY_EFFECT = ROOT / "tests" / "noncensus_corpus" / "emit_ts_ternary_effect_asi.rvl"
 
 
@@ -204,10 +207,11 @@ def test_ts_ternary_effect_after_journal_begin_runs_2501():
     """Base: `[ts] fail:` with `$revl_frame.journalBegin(...) is not a
     function` (the brackets) and "(intermediate value) is not a function" (the
     fn-body statement). Fixed: a paren-led expression statement is `;`-led, so
-    it is its own statement, and all three tests pass under vitest and plain
-    node."""
+    it is its own statement, and a record-literal statement is `;({...})`
+    (issue #2508: bare, it was a block and a parse error for the whole file),
+    and all four tests pass under vitest and plain node."""
     ran = _revl_test("--backend", "ts", str(TERNARY_EFFECT))
     out = ran.stdout + ran.stderr
     assert "is not a function" not in out, out
-    assert "[ts] pass: vitest: 3 test(s) passed" in out, out
+    assert "[ts] pass: vitest: 4 test(s) passed" in out, out
     assert ran.returncode == 0, out
