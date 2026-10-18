@@ -4,8 +4,10 @@
 `server.compile_under_authoring` rested on the premise that bytes at a jailed
 path were put there by a human, so a module the agent exported and then loaded
 back by `files` compiled without the authoring profile. The rule that makes
-the exemption sound again is one sentence: an export writes only under
-`<root>/.revl/export/`, and never over a file revl did not write.
+the exemption sound again is one sentence: an export writes source only
+under `<root>/.revl/export/`, and never over a file revl did not write. (The
+knowledge sidecars `with_knowledge` adds are new JSON files under
+`.revl/knowledge/`, created exclusively and never compiled; issue #2534.)
 
 The rule holds under every authoring trust. Trust decides only how a file
 under the export directory compiles, never where an export writes or what it
@@ -26,7 +28,10 @@ flag, and `revl_export` is reached only over the transport.
 * TRUST: a file inside any `.revl/export/` directory is the agent's, by path,
   always. Named in `files` or reached by `use`, its text compiles under the
   authoring profile with no operator text to diff against, exactly as if it
-  had been sent inline. The manifest never decides who wrote a file.
+  had been sent inline. The manifest never decides who wrote a file. Every
+  other compile applies the same rule to a file on disk there, and every
+  `revl` command does unless it is given `--trust-exported` (`CliRule`, issue
+  #2547).
 
 An export also writes only `.rvl` modules (an inline one, only those the
 program reaches by `use`), a destination may not be a symbolic link, and a
@@ -43,11 +48,21 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import unicodedata
 
-EXPORT_DIR = os.path.join(".revl", "export")
+# the path rule lives outside `revl.mcp`, so compiling never imports the
+# server (issue #1780); the jail and the compiler ask the same functions
+from ..export_area import EXPORT_DIR, in_export_area
+# re-exported: the server and its callers name them through this module
+from ..export_area import CliRule  # noqa: F401
+from ..export_area import cli_rule  # noqa: F401
+from ..export_area import exported_texts  # noqa: F401
+from ..export_area import server_door  # noqa: F401
+from ..export_area import fold as _fold
+from ..export_area import read_exact as _read_exact
+from ..export_area import real as _real
+from ..export_area import under_export_dir as _under_export_dir
+
 MANIFEST = "manifest.json"
-_EXPORT_PARTS = tuple(EXPORT_DIR.split(os.sep))
 
 # the files the server opened as operator configuration: (st_dev, st_ino) of
 # those that exist, and the case-folded realpath of every one
@@ -63,15 +78,33 @@ class ExportRefused(Exception):
     """An export the jail refuses; nothing has been written."""
 
 
-def _real(path: str) -> str:
-    return os.path.realpath(os.path.abspath(path))
+class ExportIncomplete(OSError):
+    """An export that stopped part way (issue #2534): a write failed after
+    others had landed. The message names the path it stopped at and every
+    file written before it, saying which of them its root's manifest
+    records."""
+
+    def __init__(self, path: str, error: BaseException, written,
+                 recorded=()) -> None:
+        kept = set(recorded)
+        recorded = [p for p in written if p in kept]
+        unrecorded = [p for p in written if p not in kept]
+        parts = []
+        if recorded:
+            parts.append("written and recorded in the export manifest: "
+                         + ", ".join(recorded))
+        if unrecorded:
+            parts.append("written, not recorded: " + ", ".join(unrecorded))
+        landed = "; ".join(parts) or "nothing was written before it"
+        super().__init__(f"export stopped at {path}: {error}; {landed}")
+        self.path = path
+        self.written = list(written)
+        self.recorded = recorded
 
 
-def _fold(text: str) -> str:
-    """`text` NFC-normalised and case-folded: the spelling a filesystem that
-    folds case or Unicode normalisation treats as the same name."""
-    return unicodedata.normalize(
-        "NFC", unicodedata.normalize("NFC", text).casefold())
+def recorded_paths(paths, roots) -> list[str]:
+    """The `paths` a manifest records once written: those inside a root."""
+    return [p for p in paths if _root_of(p, roots) is not None]
 
 
 def _identity(path: str) -> tuple[int, int] | None:
@@ -112,40 +145,8 @@ def export_dirs(roots) -> tuple[str, ...]:
     return tuple(os.path.join(root, EXPORT_DIR) for root in roots)
 
 
-def in_export_area(path: str) -> bool:
-    """Whether `path` resolves inside any `.revl/export` directory, whichever
-    root it was written under. Compared case-insensitively: on a filesystem
-    that folds case, `.REVL/Export` IS the export directory, and on one that
-    does not, counting it as one only ever profiles more."""
-    parts = [_fold(part) for part in _real(path).split(os.sep)]
-    width = len(_EXPORT_PARTS)
-    return any(tuple(parts[i:i + width]) == _EXPORT_PARTS
-               for i in range(len(parts) - width + 1))
-
-
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _read_exact(path: str) -> str | None:
-    """The file's text with no newline translation: the bytes, decoded."""
-    try:
-        with open(path, encoding="utf-8", newline="") as handle:
-            return handle.read()
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def exported_texts(paths) -> dict[str, str]:
-    """`{abspath: text}` of every path in `paths` inside an export directory:
-    the files whose text is the agent's."""
-    out = {}
-    for path in paths:
-        if in_export_area(path):
-            text = _read_exact(path)
-            if text is not None:
-                out[os.path.abspath(path)] = text
-    return out
 
 
 def _inside(path: str, directories) -> bool:
@@ -182,8 +183,10 @@ def _rel_in_root(path: str, root: str) -> str:
 def export_copy(path: str, roots) -> str:
     """Where an export writes the held text of the loaded file `path`: the
     file itself when it is inside an export directory, else its copy at the
-    same path under its root's export directory."""
-    if in_export_area(path):
+    same path under its root's export directory. Decided by where `path`
+    resolves only, never by its spelling: a link inside the export directory
+    to an operator file is not a place an export writes through."""
+    if _under_export_dir(_real(path)):
         return path
     root = _root_of(path, roots)
     if root is None:

@@ -457,7 +457,7 @@ fn infer_t(e: Expr, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
     Lst(l)     => infer_list_t(l.items, env, tt, ct),
     Rec(r)     => infer_rec_t(r.fields, env, tt, ct),
     RecUpd(r)  => infer_recupd_t(r, env, tt, ct),
-    Templ(_)   => ok_ty("Str"),
+    Templ(t)   => infer_templ_t(t.parts, env, tt, ct),
     _          => ok_ty(""),   // outside the slice: walked, not typed
   }
 }
@@ -752,6 +752,22 @@ fn infer_if_t(cond: Expr, then_: Expr, els: Expr, env: List[Bind], tt: Tt,
                     .concat(render_type(b.ty)).concat("`"))
   }
   return ok_ty(j)
+}
+
+// Port of typecheck.infer_ast's Interp arm (issue #2478): each `${...}`
+// operand is inferred like any other expression, so a refusal inside one
+// (a wrong case payload, a bad call argument) is the template's refusal. The
+// template itself is a Str.
+fn infer_templ_t(parts: List[PartN], env: List[Bind], tt: Tt, ct: Ct) -> Infer {
+  var i = 0
+  while (i < parts.length()) {
+    if (parts[i].kind == "e") {
+      let t = infer_t(parts[i].e, env, tt, ct)
+      if (!t.ok) { return t }
+    }
+    i += 1
+  }
+  return ok_ty("Str")
 }
 
 // Port of typecheck.infer_ast's ExprList arm: the elements join; an empty or

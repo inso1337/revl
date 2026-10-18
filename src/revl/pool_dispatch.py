@@ -305,6 +305,10 @@ LOCAL_ONLY_RUN_FLAGS: tuple[tuple[str, str, Any], ...] = (
     # variables, so the placement the check judged would not be the one the
     # work reached.
     ("providers", "--providers", None),
+    # issue #2547: how THIS machine compiles a file under `.revl/export/`. A
+    # pool member compiles by its own rule, so the flag is refused by name
+    # rather than dropped.
+    ("trust_exported", "--trust-exported", False),
 )
 
 # ---------------------------------------------------------------------------

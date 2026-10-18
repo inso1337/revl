@@ -2241,7 +2241,12 @@ def _tool_export(arguments: dict) -> dict:
     configuration file or emergency-stop latch. An inline composition goes to
     the export directory too, with only the `.rvl` modules it reaches (the rest
     are reported in `skipped`). None of this depends on the authoring trust,
-    which decides only how a file under the export directory compiles."""
+    which decides only how a file under the export directory compiles.
+
+    Knowledge sidecars (`with_knowledge`) are the one write outside the export
+    directory: new JSON files under `.revl/knowledge/` beside the first loaded
+    file, created exclusively, never compiled (issue #2534). A write that
+    fails part way raises `ExportIncomplete`, naming the files that landed."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded: revl_export writes the held "
                               "source of a running composition")
@@ -2251,16 +2256,29 @@ def _tool_export(arguments: dict) -> dict:
         plan = _export_plan(held, arguments, skipped)
     except (_edit.EditError, _export_jail.ExportRefused) as error:
         return _session_error(str(error), written=[])
+    sidecar = _notes.sidecar_dir(held)
     written: list = []
+    stopped = None
     try:
         for path, text in plan:
-            _write_atomic(path, text)
+            if sidecar is not None and os.path.dirname(path) == sidecar:
+                _write_new(path, text)
+            else:
+                _write_atomic(path, text)
             written.append((path, text))
+    except OSError as error:
+        stopped = (path, error)
     finally:
         # recorded only once its bytes are on disk: a failed write records
         # nothing, so the manifest never vouches for bytes no export wrote
         for path, text in _export_jail.manifest_writes(written, _file_roots()):
             _write_atomic(path, text)
+    if stopped is not None:
+        # issue #2534: say which files did land, so the operator can find them
+        landed = [p for p, _ in written]
+        raise _export_jail.ExportIncomplete(
+            *stopped, landed,
+            _export_jail.recorded_paths(landed, _file_roots())) from stopped[1]
     payload = {"ok": True, "written": [p for p, _ in plan],
                "note": "the held source was written to disk"
                        if plan else "the disk already holds the held source"}
@@ -2363,6 +2381,21 @@ def _inline_targets(held: dict, arguments: dict, roots: tuple[str, ...],
     modules = {k: v for k, v in modules.items() if k in reached}
     return list(zip(placed(modules),
                     [held["source"], *modules.values()]))
+
+
+def _write_new(path: str, text: str) -> None:
+    """Create `path` with `text`, refusing when anything is already there
+    (issue #2534): a knowledge sidecar is always a new file, never a
+    replacement, even of one that appeared after the export's checks ran.
+    `O_EXCL` also refuses a symbolic link in its place."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    except BaseException:
+        os.unlink(path)
+        raise
 
 
 def _write_atomic(path: str, text: str) -> None:
@@ -6558,3 +6591,10 @@ def serve(stdin=None, stdout=None, before=None) -> int:
             stdout.write(json.dumps(response) + "\n")
             stdout.flush()
     return 0
+
+
+# issue #2547: the export rule is on for every other compile in the process;
+# the server decides how each file compiles by its own path rule and the
+# operator's `--author-trust`, so every request `handle` answers runs with it
+# off, whichever entry reached it (`revl mcp serve`, a test, an embedder).
+handle = _export_jail.server_door(handle)

@@ -656,6 +656,38 @@ def test_a_failed_write_records_nothing(root, monkeypatch):
     assert target.read_text(encoding="utf-8") == PLAIN
 
 
+def test_a_sidecar_never_replaces_a_file_and_the_error_names_what_landed(
+        root, monkeypatch):
+    """Issue #2534: a knowledge sidecar is created as a new file under
+    `.revl/knowledge/`, never over one, even one that appears after the
+    export's checks ran; the export that stops there names the files that
+    did land."""
+    path = root / "clock.rvl"
+    path.write_text(CLOCK, encoding="utf-8")
+    assert _call("revl_load", {"files": [str(path)]})["ok"] is True
+    assert _call("revl_knowledge", {"op": "add", "symbol": "FixedClock",
+                                    "kind": "rationale", "body": "why"})["ok"]
+    planned = server_mod._export_plan
+    raced = []
+
+    def racing(held, arguments, skipped=None):
+        plan = planned(held, arguments, skipped)
+        for target, _ in plan:
+            if Path(target).parent.parts[-2:] == (".revl", "knowledge"):
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+                Path(target).write_text("operator bytes\n", encoding="utf-8")
+                raced.append(Path(target))
+        return plan
+
+    monkeypatch.setattr(server_mod, "_export_plan", racing)
+    out = _call("revl_export", {"with_knowledge": True})
+    assert out["ok"] is False, out
+    assert raced and all(p.read_text(encoding="utf-8") == "operator bytes\n"
+                         for p in raced)
+    copy = _export_dir(root).resolve() / "clock.rvl"
+    assert copy.exists() and str(copy) in _message(out), out
+
+
 @pytest.mark.parametrize("mode", ["root", "sub"])
 def test_a_trusted_author_cannot_forge_the_manifest(tmp_path, mode):
     """Review probe p01: a trusted author wrote a fake manifest as an inline
@@ -692,3 +724,18 @@ def test_a_trusted_author_cannot_forge_the_manifest(tmp_path, mode):
         assert ran.get("result") != "host code ran", ran
     finally:
         server.close()
+
+
+def test_an_incomplete_export_says_which_written_files_are_recorded():
+    """A file outside every root is written but never recorded in a
+    manifest, and the message says so."""
+    error = _jail().ExportIncomplete(
+        "/r/.revl/export/c.rvl", OSError(5, "I/O error"),
+        ["/r/.revl/export/a.rvl", "/elsewhere/a.json"],
+        ["/r/.revl/export/a.rvl"])
+    message = str(error)
+    assert ("written and recorded in the export manifest: "
+            "/r/.revl/export/a.rvl") in message
+    assert "written, not recorded: /elsewhere/a.json" in message
+    assert "nothing was written" in str(_jail().ExportIncomplete(
+        "/r/.revl/export/c.rvl", OSError(5, "I/O error"), []))
