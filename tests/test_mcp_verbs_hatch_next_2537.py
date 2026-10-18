@@ -107,6 +107,16 @@ def test_several_unlisted_verbs_get_one_entry_each_in_order():
     assert nxt == [_hatch_call(UNLISTED), _hatch_call(ALSO_UNLISTED)]
 
 
+def test_a_name_repeated_in_one_lookup_is_named_once():
+    answer = _call(disclosure.DISCOVERY,
+                   {"names": [UNLISTED, UNLISTED, ALSO_UNLISTED, UNLISTED]})
+    nxt = answer["next"]
+    _assert_next_shape(nxt)
+    assert nxt == [_hatch_call(UNLISTED), _hatch_call(ALSO_UNLISTED)]
+    single = _call(disclosure.DISCOVERY, {"names": [UNLISTED, UNLISTED]})
+    assert single["next"] == _hatch_call(UNLISTED)
+
+
 def test_a_topic_lookup_names_every_unlisted_verb_it_returned():
     answer = _call(disclosure.DISCOVERY, {"topic": "replay"})
     returned = [t["name"] for t in answer["tools"]]
@@ -166,9 +176,10 @@ EDIT = {"anchor": 'term == "a"', "replacement": 'term == "b"'}
 
 
 @needs_runtime
-def test_the_next_with_args_filled_exports(tmp_path, monkeypatch):
+def test_the_next_as_handed_over_exports(tmp_path, monkeypatch):
     """The entry is the real call and not a formality: after a held change, the
-    lookup's `next` sent as handed over exports the file."""
+    lookup's `next` sent as handed over (`args` is `{}`, which a files-loaded
+    composition's export takes) exports the file."""
     from revl.mcp import export_jail  # noqa: PLC0415
 
     monkeypatch.chdir(tmp_path)
@@ -187,7 +198,7 @@ def test_the_next_with_args_filled_exports(tmp_path, monkeypatch):
         assert changed["ok"] is True and changed["committed"] is True, changed
 
         nxt = _call(disclosure.DISCOVERY, {"names": [UNLISTED]})["next"]
-        exported = _call(nxt["tool"], nxt["arguments"])   # `args` is `{}`
+        exported = _call(nxt["tool"], nxt["arguments"])
         assert exported["ok"] is True, exported
         copy = Path(export_jail.export_copy(str(mem), server_mod._file_roots()))
         assert exported["written"] == [str(copy)]
@@ -198,4 +209,30 @@ def test_the_next_with_args_filled_exports(tmp_path, monkeypatch):
             server_mod.SESSION.unload()
         server_mod.SESSION.pending_draft = None
         server_mod.SESSION.draft = None
+        server_mod.AUTHORING = old
+
+
+@needs_runtime
+def test_the_next_with_args_filled_exports(tmp_path, monkeypatch):
+    """The issue's exit test as written: the lookup's `next`, with `args` filled
+    by the caller (an inline composition's export takes a `path` in the export directory), exports."""
+    monkeypatch.chdir(tmp_path)
+    old = server_mod.AUTHORING
+    server_mod.set_authoring_trust(roots=(str(tmp_path),))
+    # an inline composition's export lands only inside `.revl/export/` (#2524)
+    (tmp_path / ".revl" / "export").mkdir(parents=True)
+    target = tmp_path / ".revl" / "export" / "out.rvl"
+    try:
+        assert _call("revl_load", {"source": MEM_TEXT})["ok"] is True
+        nxt = _call(disclosure.DISCOVERY, {"names": [UNLISTED]})["next"]
+        assert nxt["ready"] is False and "args" in nxt["needs"]
+        filled = {**nxt["arguments"], "args": {"path": str(target)}}
+        exported = _call(nxt["tool"], filled)
+        assert exported["ok"] is True, exported
+        assert exported["written"], exported
+        assert any(Path(w).read_text(encoding="utf-8") == MEM_TEXT
+                   for w in exported["written"]), exported
+    finally:
+        if server_mod.SESSION.loaded:
+            server_mod.SESSION.unload()
         server_mod.AUTHORING = old

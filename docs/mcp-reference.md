@@ -88,6 +88,11 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
 
+`next` is not only a refusal's remedy. A successful `revl_verbs` lookup that
+returns the schema of an unlisted verb also carries one, the hatch call for that
+verb, so it is the first `ok: true` payload with a `next`; see "Find a verb"
+(`revl_verbs`) below.
+
 A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
 remedy.

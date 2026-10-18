@@ -11,6 +11,10 @@ succeed. When they are not (nothing this session holds says what the caller
 meant), `needs` names what the caller must add. Where several remedies exist,
 `next` is a list of calls in preference order.
 
+A success can carry one too: a `revl_verbs` lookup that returns an unlisted
+verb's schema names the hatch call for it (issue #2537, `server._hatch_next`),
+not ready, since the caller supplies the arguments.
+
 A concrete affordance is followed more reliably than a remedy inferred from
 text, and prose that names a formality ("call revl_load first", to an agent
 that already loaded from files) gets the same call retried. So each refusal's
