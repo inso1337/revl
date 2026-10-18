@@ -2324,10 +2324,12 @@ jobs:
           backends/python/.venv/bin/python -m pytest
           backends/go/test_generic_fn_go_2495.py
           backends/go/test_generic_variant_go_2471.py
+          backends/go/test_type_params_go_2545.py
           backends/go/test_unpinned_case_go_2497.py
           backends/rust/test_generic_fn_rust_2495.py
           backends/rust/test_generic_variant_rust_2471.py
           backends/rust/test_str_concat_calls_rust_2496.py
+          backends/rust/test_type_params_rust_2545.py
           backends/rust/test_unpinned_case_rust_2497.py
           tests/test_163_match_payload_bind_scope.py
           tests/test_async_match_block_arm.py

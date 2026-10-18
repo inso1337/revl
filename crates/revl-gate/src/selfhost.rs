@@ -25,6 +25,7 @@ pub struct Ctx__m1 {
     fp: std::collections::HashMap<String, Vec<String>>,
     tp: Vec<String>,
     dz: std::collections::HashMap<String, String>,
+    cr: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2090,19 +2091,19 @@ fn map_get(m: std::collections::HashMap<String, String>, k: String) -> String {
 }
 
 fn set_vt(ctx_: Ctx__m1, k: String, v: String) -> Ctx__m1 {
-    return Ctx__m1 { vt: { let mut c = ctx_.vt.clone(); c.insert(k, v); c }, fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: ctx_.rn.clone(), fb: ctx_.fb.clone(), bp: ctx_.bp.clone(), flb: ctx_.flb.clone(), lp: ctx_.lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: ctx_.fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone() };
+    return Ctx__m1 { vt: { let mut c = ctx_.vt.clone(); c.insert(k, v); c }, fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: ctx_.rn.clone(), fb: ctx_.fb.clone(), bp: ctx_.bp.clone(), flb: ctx_.flb.clone(), lp: ctx_.lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: ctx_.fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone(), cr: ctx_.cr.clone() };
 }
 
 fn set_rn(ctx_: Ctx__m1, rn: std::collections::HashMap<String, String>) -> Ctx__m1 {
-    return Ctx__m1 { vt: ctx_.vt.clone(), fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: rn.clone(), fb: ctx_.fb.clone(), bp: ctx_.bp.clone(), flb: ctx_.flb.clone(), lp: ctx_.lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: ctx_.fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone() };
+    return Ctx__m1 { vt: ctx_.vt.clone(), fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: rn.clone(), fb: ctx_.fb.clone(), bp: ctx_.bp.clone(), flb: ctx_.flb.clone(), lp: ctx_.lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: ctx_.fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone(), cr: ctx_.cr.clone() };
 }
 
 fn set_vts(ctx_: Ctx__m1, vt: std::collections::HashMap<String, String>) -> Ctx__m1 {
-    return Ctx__m1 { vt: vt.clone(), fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: ctx_.rn.clone(), fb: ctx_.fb.clone(), bp: ctx_.bp.clone(), flb: ctx_.flb.clone(), lp: ctx_.lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: ctx_.fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone() };
+    return Ctx__m1 { vt: vt.clone(), fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: ctx_.rn.clone(), fb: ctx_.fb.clone(), bp: ctx_.bp.clone(), flb: ctx_.flb.clone(), lp: ctx_.lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: ctx_.fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone(), cr: ctx_.cr.clone() };
 }
 
 fn set_fo(ctx_: Ctx__m1, fo: i64) -> Ctx__m1 {
-    return Ctx__m1 { vt: ctx_.vt.clone(), fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: ctx_.rn.clone(), fb: ctx_.fb.clone(), bp: ctx_.bp.clone(), flb: ctx_.flb.clone(), lp: ctx_.lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone() };
+    return Ctx__m1 { vt: ctx_.vt.clone(), fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: ctx_.rn.clone(), fb: ctx_.fb.clone(), bp: ctx_.bp.clone(), flb: ctx_.flb.clone(), lp: ctx_.lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone(), cr: ctx_.cr.clone() };
 }
 
 fn resolved(name: &str) -> bool {
@@ -2414,7 +2415,7 @@ fn v3_is_str(node: Value, ctx_: Ctx__m1) -> bool {
             return false;
         }
         let cn = value_str(value_field(callee.clone(), String::from("name")));
-        return (v3_subst(map_get(ctx_.fr.clone(), cn.clone()), v3_generic_call(cn.clone(), &value_list(value_field(node.clone(), String::from("args"))), ctx_.clone())) == "Str");
+        return (v3_subst(map_get(ctx_.fr.clone(), cn.clone()), v3_generic_call(cn.clone(), &value_list(value_field(node.clone(), String::from("args"))), ctx_.clone(), value_str(value_field(node.clone(), String::from("expected"))))) == "Str");
     }
     if (k == "field") {
         let target_ty = v3_infer_type(value_field(node.clone(), String::from("target")), ctx_.clone());
@@ -2457,7 +2458,7 @@ fn v3_infer_type(node: Value, ctx_: Ctx__m1) -> String {
                 return map_get(ctx_.ca.clone(), cn.clone());
             }
             if ctx_.fr.contains_key(&cn) {
-                return v3_subst(map_get(ctx_.fr.clone(), cn.clone()), v3_generic_call(cn.clone(), &value_list(value_field(node.clone(), String::from("args"))), ctx_.clone()));
+                return v3_subst(map_get(ctx_.fr.clone(), cn.clone()), v3_generic_call(cn.clone(), &value_list(value_field(node.clone(), String::from("args"))), ctx_.clone(), value_str(value_field(node.clone(), String::from("expected")))));
             }
         }
     }
@@ -3429,22 +3430,31 @@ fn render_component_call(node: Value, ctx_: Ctx__m1) -> String {
 }
 
 fn render_call(node: Value, ctx_: Ctx__m1) -> String {
+    return render_call_to(node.clone(), ctx_.clone(), String::from(""));
+}
+
+fn render_call_to(node: Value, ctx_: Ctx__m1, expected: String) -> String {
     let callee_node = value_field(node.clone(), String::from("callee"));
     if value_is_null(callee_node.clone()) {
         return render_component_call(node.clone(), ctx_.clone());
     }
     let arg_nodes = value_list(value_field(node.clone(), String::from("args")));
-    let mut arg_exprs: Vec<String> = vec![];
-    for a in arg_nodes.clone() {
-        arg_exprs.push(render_expr(a.clone(), ctx_.clone()));
-    }
     let ckind = node_kind(callee_node.clone());
-    if (ckind == "field") {
-        return String::from("<<UNSUPPORTED-method-call>>");
-    }
     let mut callee_name = String::from("");
     if (ckind == "var") {
         callee_name = value_str(value_field(callee_node.clone(), String::from("name")));
+    }
+    let pinned = value_str(value_field(node.clone(), String::from("expected")));
+    let bound = v3_generic_call(callee_name.clone(), &arg_nodes, ctx_.clone(), if (pinned != "") { pinned.clone() } else { expected });
+    let mut arg_exprs: Vec<String> = vec![];
+    let mut ai = 0i64;
+    while (ai < arg_nodes.revl_length()) {
+        let a = (arg_nodes)[(ai) as usize].clone();
+        arg_exprs.push(render_expr_to(a.clone(), ctx_.clone(), arg_expected(callee_name.clone(), bound.clone(), ai, a.clone(), ctx_.clone())));
+        ai = (ai).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (ckind == "field") {
+        return String::from("<<UNSUPPORTED-method-call>>");
     }
     if ((callee_name != "") && (is_builtin_ctor(&callee_name) || ctx_.ca.contains_key(&callee_name))) {
         let mut cargs: Vec<String> = vec![];
@@ -3464,6 +3474,9 @@ fn render_call(node: Value, ctx_: Ctx__m1) -> String {
     while (i < arg_nodes.revl_length()) {
         bv.push(call_arg(callee_name.clone(), i, (arg_nodes)[(i) as usize].clone(), (arg_exprs)[(i) as usize].clone(), ctx_.clone()));
         i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (ckind == "var") {
+        callee.push_str(&turbofish(callee_name.clone(), bound.clone(), ctx_.clone()));
     }
     return format!("{}({})", callee, bv.revl_join(", "));
 }
@@ -3510,7 +3523,7 @@ fn render_arrow(node: Value, ctx_: Ctx__m1) -> String {
         ps.push(param.clone());
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
-    let inner = Ctx__m1 { vt: vt.clone(), fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: rn.clone(), fb: ctx_.fb.clone(), bp: bp.clone(), flb: ctx_.flb.clone(), lp: lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: ctx_.fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone() };
+    let inner = Ctx__m1 { vt: vt.clone(), fr: ctx_.fr.clone(), ca: ctx_.ca.clone(), cp: ctx_.cp.clone(), rbf: ctx_.rbf.clone(), tn: ctx_.tn.clone(), rn: rn.clone(), fb: ctx_.fb.clone(), bp: bp.clone(), flb: ctx_.flb.clone(), lp: lp.clone(), ft: ctx_.ft.clone(), mu: ctx_.mu.clone(), mf: ctx_.mf.clone(), fo: ctx_.fo, fp: ctx_.fp.clone(), tp: ctx_.tp.clone(), dz: ctx_.dz.clone(), cr: ctx_.cr.clone() };
     return format!("move |{}| {{ {} }}", ps.revl_join(", "), render_expr(value_field(node.clone(), String::from("body")), inner.clone()));
 }
 
@@ -3991,6 +4004,16 @@ fn render_expr(node: Value, ctx_: Ctx__m1) -> String {
     return render_inner(node.clone(), ctx_.clone());
 }
 
+fn render_expr_to(node: Value, ctx_: Ctx__m1, expected: String) -> String {
+    if ((expected == "") || (value_str(value_field(node.clone(), String::from("widen"))) != "")) {
+        return render_expr(node.clone(), ctx_.clone());
+    }
+    if ((node_kind(node.clone()) == "call") && (!value_is_null(value_field(node.clone(), String::from("callee"))))) {
+        return render_call_to(node.clone(), ctx_.clone(), expected.clone());
+    }
+    return render_expr(node.clone(), ctx_.clone());
+}
+
 fn emit_stmts(nodes: Vec<Value>, ctx_: Ctx__m1, indent: i64) -> Sout {
     let mut lines = vec![];
     let mut c = ctx_;
@@ -4009,7 +4032,7 @@ fn v3_stmt(node: Value, ctx_: Ctx__m1, indent: i64) -> Sout {
         let nm = mangle(raw.clone());
         let valnode = value_field(node.clone(), String::from("value"));
         let inferred = v3_infer_type(valnode.clone(), ctx_.clone());
-        let value = by_value_tail(valnode.clone(), render_expr(valnode.clone(), ctx_.clone()), ctx_.clone());
+        let value = by_value_tail(valnode.clone(), render_expr_to(valnode.clone(), ctx_.clone(), map_get(ctx_.vt.clone(), raw.clone())), ctx_.clone());
         let mut nctx = ctx_.clone();
         if (inferred != "") {
             nctx = set_vt(ctx_.clone(), raw.clone(), inferred.clone());
@@ -4041,7 +4064,7 @@ fn v3_stmt(node: Value, ctx_: Ctx__m1, indent: i64) -> Sout {
         if value_is_null(e.clone()) {
             out.push(line(indent, "return;"));
         } else {
-            out.push(line(indent, &(format!("return {};", render_expr(e.clone(), ctx_.clone())))));
+            out.push(line(indent, &(format!("return {};", render_expr_to(e.clone(), ctx_.clone(), ctx_.cr.clone())))));
         }
         return Sout { lines: out.clone(), ctx_: ctx_.clone() };
     }
@@ -4130,6 +4153,14 @@ fn fn_type_params(fnode: Value, tn: std::collections::HashMap<String, String>) -
         surfaces.push(value_str(value_field(p.clone(), String::from("type"))));
     }
     surfaces.push(value_str(value_field(fnode.clone(), String::from("returns"))));
+    let listed = value_list(value_field(fnode.clone(), String::from("type_params")));
+    if (listed.revl_length() > 0i64) {
+        let mut names: Vec<String> = vec![];
+        for t in listed {
+            names.push(value_str(t.clone()));
+        }
+        return listed_used(names.clone(), surfaces.clone());
+    }
     for surface in surfaces {
         for word in type_words(&surface) {
             if ((((word.revl_length() == 1i64) && (String::from("ABCDEFGHIJKLMNOPQRSTUVWXYZ").revl_index_of(&word) >= 0i64)) && (!tn.contains_key(&word))) && (found.revl_index_of(&word) < 0i64)) {
@@ -4191,8 +4222,32 @@ fn fn_params_map(functions: Vec<Value>) -> std::collections::HashMap<String, Vec
             ps.push(value_str(value_field(p.clone(), String::from("type"))));
         }
         fp.insert(value_str(value_field(fnode.clone(), String::from("name"))), ps.clone());
+        let listed = value_list(value_field(fnode.clone(), String::from("type_params")));
+        if (listed.revl_length() > 0i64) {
+            let mut names: Vec<String> = vec![];
+            for t in listed.clone() {
+                names.push(value_str(t.clone()));
+            }
+            fp.insert(String::from("@tp ").revl_concat(&value_str(value_field(fnode.clone(), String::from("name")))), names.clone());
+        }
     }
     return fp;
+}
+
+fn listed_used(listed: Vec<String>, surfaces: Vec<String>) -> Vec<String> {
+    let mut used: Vec<String> = vec![];
+    for surface in surfaces {
+        for word in type_words(&surface) {
+            used.push(word);
+        }
+    }
+    let mut names: Vec<String> = vec![];
+    for n in listed {
+        if (used.revl_index_of(&n) >= 0i64) {
+            names.push(n.clone());
+        }
+    }
+    return names;
 }
 
 fn dead_lets(body: Vec<Value>) -> std::collections::HashMap<String, String> {
@@ -4272,6 +4327,10 @@ fn callee_tparams(name: String, ctx_: Ctx__m1) -> Vec<String> {
     let mut found: Vec<String> = vec![];
     let mut surfaces = (ctx_.fp.get(&name).cloned()).unwrap_or_else(|| vec![]);
     surfaces.push(map_get(ctx_.fr.clone(), name.clone()));
+    let listed = (ctx_.fp.get(&String::from("@tp ").revl_concat(&name)).cloned()).unwrap_or_else(|| vec![]);
+    if (listed.revl_length() > 0i64) {
+        return listed_used(listed.clone(), surfaces.clone());
+    }
     for surface in surfaces {
         for word in type_words(&surface) {
             if ((((word.revl_length() == 1i64) && (String::from("ABCDEFGHIJKLMNOPQRSTUVWXYZ").revl_index_of(&word) >= 0i64)) && ((!ctx_.tn.contains_key(&word)) || (ctx_.tp.revl_index_of(&word) >= 0i64))) && (found.revl_index_of(&word) < 0i64)) {
@@ -4282,7 +4341,7 @@ fn callee_tparams(name: String, ctx_: Ctx__m1) -> Vec<String> {
     return found;
 }
 
-fn v3_generic_call(name: String, arg_nodes: &[Value], ctx_: Ctx__m1) -> std::collections::HashMap<String, String> {
+fn v3_generic_call(name: String, arg_nodes: &[Value], ctx_: Ctx__m1, expected: String) -> std::collections::HashMap<String, String> {
     let mut bound = std::collections::HashMap::new();
     let tparams = callee_tparams(name.clone(), ctx_.clone());
     if (tparams.revl_length() == 0i64) {
@@ -4303,7 +4362,79 @@ fn v3_generic_call(name: String, arg_nodes: &[Value], ctx_: Ctx__m1) -> std::col
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
+    let mut unbound = false;
+    for t in tparams.clone() {
+        if (!bound.contains_key(&t)) {
+            unbound = true;
+        }
+    }
+    if ((expected != "") && unbound) {
+        bound = v3_unify(map_get(ctx_.fr.clone(), name.clone()), expected.clone(), &tparams, bound.clone());
+    }
     return bound;
+}
+
+fn return_only_tparams(name: String, ctx_: Ctx__m1) -> Vec<String> {
+    let tparams = callee_tparams(name.clone(), ctx_.clone());
+    let mut used: Vec<String> = vec![];
+    for p in (ctx_.fp.get(&name).cloned()).unwrap_or_else(|| vec![]) {
+        for w in type_words(&p) {
+            used.push(w);
+        }
+    }
+    let mut out: Vec<String> = vec![];
+    for t in tparams {
+        if (used.revl_index_of(&t) < 0i64) {
+            out.push(t.clone());
+        }
+    }
+    return out;
+}
+
+fn turbofish(name: String, bound: std::collections::HashMap<String, String>, ctx_: Ctx__m1) -> String {
+    let only = return_only_tparams(name.clone(), ctx_.clone());
+    if (only.revl_length() == 0i64) {
+        return String::from("");
+    }
+    for t in only.clone() {
+        if (!bound.contains_key(&t)) {
+            return String::from("");
+        }
+    }
+    let mut items: Vec<String> = vec![];
+    for t in callee_tparams(name.clone(), ctx_.clone()) {
+        if (only.revl_index_of(&t) >= 0i64) {
+            items.push(rust_type_t(Value::new(serde_json::Value::from(map_get(bound.clone(), t.clone()))), ctx_.tn.clone()));
+        } else {
+            items.push(String::from("_"));
+        }
+    }
+    return format!("::<{}>", items.revl_join(", "));
+}
+
+fn arg_expected(callee: String, bound: std::collections::HashMap<String, String>, idx: i64, arg: Value, ctx_: Ctx__m1) -> String {
+    if ((node_kind(arg.clone()) != "call") || value_is_null(value_field(arg.clone(), String::from("callee")))) {
+        return String::from("");
+    }
+    let inner = value_field(arg.clone(), String::from("callee"));
+    if (node_kind(inner.clone()) != "var") {
+        return String::from("");
+    }
+    if (return_only_tparams(value_str(value_field(inner.clone(), String::from("name"))), ctx_.clone()).revl_length() == 0i64) {
+        return String::from("");
+    }
+    let params = (ctx_.fp.get(&callee).cloned()).unwrap_or_else(|| vec![]);
+    if (idx >= params.revl_length()) {
+        return String::from("");
+    }
+    let outer = callee_tparams(callee.clone(), ctx_.clone());
+    let slot = if (outer.revl_length() > 0i64) { v3_subst((params)[(idx) as usize].clone(), bound.clone()) } else { (params)[(idx) as usize].clone() };
+    for w in type_words(&slot) {
+        if (outer.revl_index_of(&w) >= 0i64) {
+            return String::from("");
+        }
+    }
+    return slot;
 }
 
 fn with_tparams(tn: std::collections::HashMap<String, String>, tparams: Vec<String>) -> std::collections::HashMap<String, String> {
@@ -4350,7 +4481,7 @@ fn emit_v3_functions(functions: Vec<Value>, fr: std::collections::HashMap<String
             ps.push(format!("{}: {}", mangle(pname.clone()), ptype));
             i = (i).checked_add(1i64).expect("revl: Int overflow");
         }
-        let ctx_ = Ctx__m1 { vt: vt.clone(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: bp.clone(), flb: list_borrow.clone(), lp: lp.clone(), ft: tables.ft.clone(), mu: reused_names(body.clone()), mf: movable_for_iterables(body.clone(), reused_names(body.clone())), fo: 0i64, fp: fp.clone(), tp: tparams.clone(), dz: dead_lets(body.clone()) };
+        let ctx_ = Ctx__m1 { vt: vt.clone(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: bp.clone(), flb: list_borrow.clone(), lp: lp.clone(), ft: tables.ft.clone(), mu: reused_names(body.clone()), mf: movable_for_iterables(body.clone(), reused_names(body.clone())), fo: 0i64, fp: fp.clone(), tp: tparams.clone(), dz: dead_lets(body.clone()), cr: value_str(value_field(fnode.clone(), String::from("returns"))) };
         let mut returns = String::from("()");
         if (!value_is_null(value_field(fnode.clone(), String::from("returns")))) {
             returns = rust_type_pos(value_field(fnode.clone(), String::from("returns")), tn.clone());
@@ -6337,7 +6468,7 @@ fn activation_ctx(tables: TypeTables, fr: std::collections::HashMap<String, Stri
 }
 
 fn plain_ctx(tables: TypeTables, fr: std::collections::HashMap<String, String>) -> Ctx__m1 {
-    return Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: std::collections::HashMap::new(), bp: std::collections::HashMap::new(), flb: std::collections::HashMap::new(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new() };
+    return Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: std::collections::HashMap::new(), bp: std::collections::HashMap::new(), flb: std::collections::HashMap::new(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new(), cr: String::from("") };
 }
 
 fn map_value_expr_type(node: Value, var_types: std::collections::HashMap<String, String>, comp: Value, services: Value, functions: Vec<Value>, ctx_: Ctx__m1) -> String {
@@ -7228,7 +7359,7 @@ fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, ta
         if (!value_is_null(r.clone())) {
             ret = rust_type_t(r.clone(), tables.tn.clone());
         }
-        let ctx_ = Ctx__m1 { vt: vt.clone(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new() };
+        let ctx_ = Ctx__m1 { vt: vt.clone(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new(), cr: String::from("") };
         if (effectful && method_has_effectful_steps(method.clone())) {
             out.push(format!("    fn {}(&self, {}) -> {} {{", mn, ps.revl_join(", "), ret));
             let bl = method_body_lines(comp.clone(), method.clone(), services.clone(), ctx_.clone(), 2i64);
@@ -8636,7 +8767,7 @@ fn emit_v3_tests(tests: Vec<Value>, functions: Vec<Value>, externs: Vec<Value>, 
                 out.push(String::from("    // (empty test body)"));
             } else {
                 let mu = reused_names(body.clone());
-                let ctx_ = Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: mu.clone(), mf: movable_for_iterables(body.clone(), mu.clone()), fo: 0i64, fp: fp.clone(), tp: vec![], dz: dead_lets(body.clone()) };
+                let ctx_ = Ctx__m1 { vt: std::collections::HashMap::new(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tables.tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: std::collections::HashMap::new(), flb: list_borrow.clone(), lp: std::collections::HashMap::new(), ft: tables.ft.clone(), mu: mu.clone(), mf: movable_for_iterables(body.clone(), mu.clone()), fo: 0i64, fp: fp.clone(), tp: vec![], dz: dead_lets(body.clone()), cr: String::from("") };
                 out.extend((emit_stmts(body.clone(), ctx_.clone(), 1i64).lines).iter().cloned());
             }
             out.push(String::from("}"));
@@ -33803,6 +33934,66 @@ fn pins_empty_literal(node: &str, declared: &str) -> bool {
     return ((node == "{\"kind\":\"list\",\"items\":[]}") && declared.revl_starts_with("List["));
 }
 
+fn pins_return_only_call(node: &str, env: &[Bind]) -> bool {
+    let head = String::from("{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"");
+    if (!node.revl_starts_with(&head)) {
+        return false;
+    }
+    let mut n = String::from("");
+    let mut i = head.revl_length();
+    while ((i < node.revl_length()) && ({ node.chars().nth((i) as usize).unwrap().to_string() } != "\"")) {
+        n.push_str(&({ node.chars().nth((i) as usize).unwrap().to_string() }));
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return ((n != "") && (tenv_get(env, &(String::from("rog ").revl_concat(&n))) == "1"));
+}
+
+fn marked_tparam_names(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < s.revl_length()) {
+        if ({ s.chars().nth((i) as usize).unwrap().to_string() } == "?") {
+            let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
+            let mut w = String::from("");
+            while ((j < s.revl_length()) && ty_ident_char(&({ s.chars().nth((j.clone()) as usize).unwrap().to_string() }))) {
+                w.push_str(&({ s.chars().nth((j.clone()) as usize).unwrap().to_string() }));
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+            if ((w != "") && (!contains__m2(&out, &w))) {
+                out.push(w.clone());
+            }
+            i = j.clone();
+        } else {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
+fn return_only_rows(ts: Vec<Token>, base: Vec<Bind>, al: std::collections::HashMap<String, String>) -> Vec<Bind> {
+    let sigs = sig_binds(ts.clone(), base.clone(), al.clone());
+    let mut out = base.clone();
+    let mut i = base.revl_length();
+    while (i < sigs.revl_length()) {
+        let row = (sigs)[(i) as usize].clone();
+        if row.name.revl_starts_with("sigr ") {
+            let n = row.name.revl_slice(5i64, row.name.revl_length());
+            let inParams = marked_tparam_names(&tenv_get(&sigs, &sig_key("sigp", &n)));
+            let mut only = false;
+            for w in marked_tparam_names(&row.ty) {
+                if (!contains__m2(&inParams, &w)) {
+                    only = true;
+                }
+            }
+            if only {
+                out = tenv_put(&out, String::from("rog ").revl_concat(&n), String::from("1"));
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn is_compound_op(ts: &[Token], k: &str) -> bool {
     return (((((k == "+") || (k == "-")) || (k == "*")) || (k == "/")) || (k == "%"));
 }
@@ -35170,6 +35361,9 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
         if ((declared != "") && pins_empty_literal(&rjs, &declared)) {
             value = (((value.revl_slice(0i64, (value.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"expected\":")).revl_concat(&jstr(&declared))).revl_concat("}");
         }
+        if ((declared != "") && pins_return_only_call(&rjs, &env)) {
+            value = (((value.revl_slice(0i64, (value.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"expected\":")).revl_concat(&jstr(&declared))).revl_concat("}");
+        }
         let js = ((((((String::from("{\"step\":\"let\",\"name\":").revl_concat(&jstr(&predeclared_mangle(name.clone())))).revl_concat(",\"value\":")).revl_concat(&value)).revl_concat(",\"mutable\":")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat(&own_birth_marker(births.clone(), i))).revl_concat("}");
         return mk_one(js.clone(), env2, if mutable { muts.revl_push(name.clone()) } else { muts.clone() }, r.i);
     }
@@ -35952,7 +36146,8 @@ fn lir_function_named(ts: Vec<Token>, i: i64, cases: Vec<Bind>, public_fn: bool,
         retBare = taint_strip(tr.ty.clone());
         reti = tr.i;
     }
-    let tps = collect_tparams__m2(ps.ps.clone(), retBare.clone(), cases.clone(), explicit_tparams(&ts, i));
+    let xtps = explicit_tparams(&ts, i);
+    let tps = collect_tparams__m2(ps.ps.clone(), retBare.clone(), cases.clone(), xtps.clone());
     let retTy = mark_tparams__m2(retBare.clone(), &tps);
     let cache_pure = (ati(&ts, reti, "cache") && atw(&ts, (reti).checked_add(1i64).expect("revl: Int overflow"), "pure"));
     if cache_pure {
@@ -35969,7 +36164,7 @@ fn lir_function_named(ts: Vec<Token>, i: i64, cases: Vec<Bind>, public_fn: bool,
     let tmarks = { let mut c = ({ let mut c = ({ let mut c = om.marks.clone(); c.insert(String::from("@try_fn"), i); c }).clone(); c.insert(String::from("@try_end"), bend); c }).clone(); c.insert(String::from("@lift"), 1i64); c };
     let benv = append_binds(params_env(ps.ps.clone(), cases.clone(), tps.clone()), fnty.clone()).revl_push(Bind { name: String::from("@mono"), ty: mget_str(al.clone(), String::from("@mono:").revl_concat(&nm)) });
     let bodyjs = lir_stmts(ts.clone(), (reti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), benv.clone(), vec![], retTy.clone(), tmarks.clone(), om.births.clone(), al.clone());
-    let js = ((((((((((((String::from("{\"name\":").revl_concat(&jstr(&(if (nmOut == "") { nm.clone() } else { nmOut.clone() })))).revl_concat(",\"params\":[")).revl_concat(&if strip { ir_fn_params_json_strip(&ps.ps) } else { ir_fn_params_json(&ps.ps) })).revl_concat("],\"returns\":")).revl_concat(&retJson)).revl_concat(",\"public\":")).revl_concat(&if public_fn { String::from("true") } else { String::from("false") })).revl_concat(",\"body\":[")).revl_concat(&bodyjs)).revl_concat("]")).revl_concat(&if cache_pure { String::from(",\"cache\":{\"class\":\"pure_fn\"}") } else { String::from("") })).revl_concat(&if strip { String::from("") } else { if contains__m2(&colored, &nm) { String::from(",\"async\":true") } else { String::from("") } })).revl_concat("}");
+    let js = (((((((((((((String::from("{\"name\":").revl_concat(&jstr(&(if (nmOut == "") { nm.clone() } else { nmOut.clone() })))).revl_concat(",\"params\":[")).revl_concat(&if strip { ir_fn_params_json_strip(&ps.ps) } else { ir_fn_params_json(&ps.ps) })).revl_concat("],\"returns\":")).revl_concat(&retJson)).revl_concat(",\"public\":")).revl_concat(&if public_fn { String::from("true") } else { String::from("false") })).revl_concat(",\"body\":[")).revl_concat(&bodyjs)).revl_concat("]")).revl_concat(&if cache_pure { String::from(",\"cache\":{\"class\":\"pure_fn\"}") } else { String::from("") })).revl_concat(&if (xtps.revl_length() > 0i64) { (String::from(",\"type_params\":[").revl_concat(&str_list_json(&xtps))).revl_concat("]") } else { String::from("") })).revl_concat(&if strip { String::from("") } else { if contains__m2(&colored, &nm) { String::from(",\"async\":true") } else { String::from("") } })).revl_concat("}");
     return LirFn { js: js.clone(), i: bend };
 }
 
@@ -37265,7 +37460,7 @@ pub fn lower_to_ir_refs_at(src: String, fname: String, rows: Vec<String>) -> Str
     let fnty = if (plan.origins.revl_length() == 0i64) { vec![] } else { module_callable_fnty(ts.clone(), plan.al.clone()) };
     let a = ir_walk(ts.clone(), 0i64, mk_iracc(String::from(""), String::from(""), false, false, plan.colored.clone(), slots.clone()), &fname, al.clone(), src_text(&src, &src_revl_cs));
     let ver = if a.v3 { String::from("3") } else { if a.v2 { String::from("2") } else { String::from("1") } };
-    let fo = fns_walk(ts.clone(), 0i64, String::from(""), case_binds(ts.clone(), plan.al.clone()), plan.colored.clone(), own_program_summary(ts.clone()), plan.al.clone(), plan.monos.clone(), plan.origins.clone(), fnty, std::collections::HashMap::new());
+    let fo = fns_walk(ts.clone(), 0i64, String::from(""), return_only_rows(ts.clone(), case_binds(ts.clone(), plan.al.clone()), plan.al.clone()), plan.colored.clone(), own_program_summary(ts.clone()), plan.al.clone(), plan.monos.clone(), plan.origins.clone(), fnty, std::collections::HashMap::new());
     let taken = lift_taken(&ts);
     let lx = lift_expand(fo.js.clone(), 0i64, String::from(""), std::collections::HashMap::new(), &taken, std::collections::HashMap::new());
     let mut fnsjs = if lx.ok { lx.js } else { lift_unexpanded_fn() };
@@ -37298,7 +37493,7 @@ pub fn lower_to_ir_refs_at(src: String, fname: String, rows: Vec<String>) -> Str
     if (bnd.rows.revl_length() > 0i64) {
         out = ((out.revl_concat(", \"secrets\": [")).revl_concat(&sec_rows_json(&bnd.rows))).revl_concat("]");
     }
-    let secs = test_secs_walk(ts.clone(), 0i64, TestSecs { tests: String::from(""), faults: String::from("") }, case_binds(ts.clone(), al.clone()), own_program_summary(ts.clone()), al.clone());
+    let secs = test_secs_walk(ts.clone(), 0i64, TestSecs { tests: String::from(""), faults: String::from("") }, return_only_rows(ts.clone(), case_binds(ts.clone(), al.clone()), al.clone()), own_program_summary(ts.clone()), al.clone());
     if (secs.tests != "") {
         out = ((out.revl_concat(", \"tests\": [")).revl_concat(&secs.tests)).revl_concat("]");
     }
@@ -40701,7 +40896,7 @@ fn constructor_lowers_user_variants_and_built_ins() {
     cp.insert(String::from("Node"), String::from("y"));
     ca.insert(String::from("Leaf"), String::from("Tree"));
     cp.insert(String::from("Leaf"), String::from("n"));
-    let ctx_ = Ctx__m1 { vt: std::collections::HashMap::new(), fr: std::collections::HashMap::new(), ca: ca.clone(), cp: cp.clone(), rbf: std::collections::HashMap::new(), tn: std::collections::HashMap::new(), rn: std::collections::HashMap::new(), fb: std::collections::HashMap::new(), bp: std::collections::HashMap::new(), flb: std::collections::HashMap::new(), lp: std::collections::HashMap::new(), ft: std::collections::HashMap::new(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new() };
+    let ctx_ = Ctx__m1 { vt: std::collections::HashMap::new(), fr: std::collections::HashMap::new(), ca: ca.clone(), cp: cp.clone(), rbf: std::collections::HashMap::new(), tn: std::collections::HashMap::new(), rn: std::collections::HashMap::new(), fb: std::collections::HashMap::new(), bp: std::collections::HashMap::new(), flb: std::collections::HashMap::new(), lp: std::collections::HashMap::new(), ft: std::collections::HashMap::new(), mu: std::collections::HashMap::new(), mf: vec![], fo: 0i64, fp: std::collections::HashMap::new(), tp: vec![], dz: std::collections::HashMap::new(), cr: String::from("") };
     assert!((constructor(ctx_.clone(), String::from("Node"), &(vec![String::from("x")])) == "Tree::Node(x)"));
     assert!((constructor(ctx_.clone(), String::from("Leaf"), &(vec![])) == "Tree::Leaf"));
     assert!((constructor(ctx_.clone(), String::from("Some"), &(vec![String::from("v")])) == "Some(v)"));

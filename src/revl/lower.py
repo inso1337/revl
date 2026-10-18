@@ -2212,6 +2212,14 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         # so every existing fn's IR is byte-identical.
         if getattr(decl, "cache", None) is not None:
             entry["cache"] = _cache_ir(decl.cache)
+        # issue #2545: the author's explicit type-parameter list, in declaration
+        # order. With a list the checker turns the single-uppercase heuristic
+        # off (`fn first[Elem](xs: List[Elem]) -> Elem`), so an emitter that
+        # only saw the parameter spellings could not tell `Elem` from an opaque
+        # nominal type. Absent when the author wrote no list, so every IR
+        # document without one stays byte-identical.
+        if getattr(decl, "type_params", None):
+            entry["type_params"] = list(decl.type_params)
         if decl.source:
             _retarget_holes(entry["body"], decl.source)
         fns.append(entry)
@@ -6676,6 +6684,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
         _mark_widen(declared, actual_declared, lowered_value)
         _pin_empty_literal(declared, lowered_value)
+        _pin_return_only_call(declared, lowered_value, types)
         body.append({"step": "let", "name": _predeclared_mangle(stmt.name),
                      "value": lowered_value,
                      "mutable": stmt.mutable})
@@ -7172,6 +7181,44 @@ def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
         # a positional emitter — the wasm tier — has no element to infer from and
         # refuses. The author's annotation is the pin, threaded onto the literal
         # exactly as the empty-Map case above, so the emitter can type it.
+        node["expected"] = declared
+
+
+def _return_only_tparams(sig: dict | None) -> list[str]:
+    """The type parameters a signature mentions in its return and in no
+    parameter (`fn empty[T]() -> List[T]`), in first-use order. No argument
+    can bind one, so only the position the call's result flows into can."""
+    if not isinstance(sig, dict) or not sig.get("tparams"):
+        return []
+    tparams = sig["tparams"]
+    in_params = {w for p in sig.get("params") or [] if isinstance(p, str)
+                 for w in _TYPE_WORD_RE.findall(p)}
+    found: list[str] = []
+    for w in _TYPE_WORD_RE.findall(sig.get("returns") or ""):
+        if w in tparams and w not in in_params and w not in found:
+            found.append(w)
+    return found
+
+
+def _pin_return_only_call(declared: str | None, node: dict | None,
+                          types: dict | None) -> None:
+    """An annotated `let`/`var` pins a call whose callee has a type parameter
+    only its return mentions (issue #2545).
+
+    `let xs: List[Int] = empty()` with `fn empty[T]() -> List[T]` passes the
+    checker, which binds `T` from the annotation, but the IR `let` keeps no
+    annotation, so the go and rust tiers had nothing to bind `T` from (go:
+    `cannot infer T`, rust: E0283). The annotation rides the call as
+    ``"expected": "List[Int]"``, the same marker an empty literal gets. It is
+    additive and appears only on such a call, so every other document stays
+    byte-identical."""
+    if declared is None or not isinstance(node, dict) or node.get("kind") != "call":
+        return
+    callee = node.get("callee")
+    if not (isinstance(callee, dict) and callee.get("kind") == "var"):
+        return
+    sig = ((types or {}).get(FNS_KEY) or {}).get(callee.get("name"))
+    if _return_only_tparams(sig):
         node["expected"] = declared
 
 
