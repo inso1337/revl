@@ -328,6 +328,16 @@ that topic's verbs; with `names` it returns those verbs' exact schemas. The
 schemas are the same objects the full list carries under `--all-tools`. An
 unknown topic or name is refused with `next` set to the no-argument call.
 
+A lookup that returns the schema of a verb outside the core tier also carries
+`next` (issue #2537), because a client that emits calls only for listed tools
+cannot act on that schema without the hatch below. `next` is the hatch call for
+that verb, `revl_verbs {name, args: {}}`, with `ready: false` and `needs` naming
+`args`, since the arguments depend on what the caller means to do. Several
+unlisted verbs in one lookup (a `topic` returns a whole topic) give a list of
+calls, one per unlisted verb in the order returned; one gives the bare call. A
+lookup of listed verbs only carries no `next`, and neither does any lookup under
+`--all-tools`. Sent with `args` filled, the `next` is the verb's own call.
+
 With `name` and `args` it **calls** the verb `name` with the arguments `args` -
 the same handler, the same jail, authoring, operator and runtime gates, the
 same payload, the same `disk` block and `sessionState` footer as calling that

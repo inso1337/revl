@@ -6203,7 +6203,30 @@ def _tool_verbs(arguments: dict) -> dict:
         return _session_error(
             f"no verb named {', '.join(map(repr, unknown))}",
             next=_remedy.call(_disclosure.DISCOVERY, {}))
-    return {"ok": True, "tools": found}
+    return _remedy.attach({"ok": True, "tools": found}, _hatch_next(found))
+
+
+def _hatch_next(found: list):
+    """The `next` for a lookup that handed back an unlisted verb's schema
+    (issue #2537): the hatch (#2073) that calls it. A function-calling client
+    emits a call only for a listed tool, so an unlisted verb's schema is one
+    the caller cannot act on until something names the way in. One entry per
+    unlisted verb, in the order returned (the preference list #1691 allows),
+    because each is a separate call and none of them contains another; a
+    single one is the bare call. Not ready: `args` depend on what the caller
+    means to do. A lookup of listed verbs only carries none, and nothing here
+    changes what `tools/list` shows."""
+    listed = {tool["name"] for tool in _disclosure.listed(_ADVERTISED)}
+    calls = [_remedy.call(_disclosure.DISCOVERY,
+                          {_disclosure.HATCH_NAME: tool["name"],
+                           _disclosure.HATCH_ARGS: {}},
+                          ready=False,
+                          needs=f"`{_disclosure.HATCH_ARGS}`: the verb's own "
+                                f"arguments")
+             for tool in found if tool["name"] not in listed]
+    if not calls:
+        return None
+    return calls[0] if len(calls) == 1 else calls
 
 
 TOOLS.append({
