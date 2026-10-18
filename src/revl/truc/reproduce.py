@@ -612,6 +612,22 @@ def _load_artifact_record(entry_dir: Path) -> dict | None:
 _refusal_class = refusal_class
 
 
+def _unshipped_backend(backend: str, truc: str = "") -> str | None:
+    """The refusal sentence when `backend` is not one of the backends this
+    toolchain ships, else None (issue #2556). The name comes from the registry
+    entry's `artifacts.json`, which is the registry's text and not the
+    operator's, so it is checked against the shipped set (the directory names
+    under `backends/`, the one list `revl.bundle` already keeps) before it is
+    spliced into an import."""
+    from ..bundle import DEFAULT_BACKENDS  # noqa: PLC0415 - bundle imports this module
+
+    if backend in DEFAULT_BACKENDS:
+        return None
+    owner = f" in the artifact record of '{truc}'" if truc else ""
+    return (f"backend {backend!r}{owner} is not a backend this toolchain ships "
+            f"(known: {', '.join(DEFAULT_BACKENDS)}); it was not imported")
+
+
 def _emit_backend_source(backend: str, ir: dict) -> tuple[str | None, str | None]:
     """Re-emit `backend` source from the rebuilt IR through that backend's own
     emitter, as `(source, refusal)`. Never touches the backend package's
@@ -634,7 +650,13 @@ def _emit_backend_source(backend: str, ir: dict) -> tuple[str | None, str | None
     #1400, where a blanket `except Exception` had been folding a genuine
     emitter crash into a silent omission). `truc reproduce` is the attestation
     path, so of all the callers this is the one that must not answer a compiler
-    bug with a tidy sentence about the artifact."""
+    bug with a tidy sentence about the artifact.
+
+    A `backend` that is not a shipped backend name is a refusal, raised before
+    any import (issue #2556); it is neither absent nor a refusal of the IR."""
+    unshipped = _unshipped_backend(backend)
+    if unshipped is not None:
+        raise RevlError("<reproduce>", 0, unshipped)
     try:
         module = importlib.import_module(f"backends.{backend}.emit")
     except ImportError:
@@ -685,6 +707,12 @@ def _check_artifacts(entry_dir: Path, ir: dict) -> list[Check]:
         if not recorded_hash:
             checks.append(Check(label, UNVERIFIED,
                                 f"{backend}: recorded artifact has no sourceSha256"))
+            continue
+        unshipped = _unshipped_backend(backend, entry_dir.name)
+        if unshipped is not None:
+            # A recorded claim this toolchain cannot honour, and nothing was
+            # imported for it (issue #2556).
+            checks.append(Check(label, MISMATCH, unshipped, recorded_hash, ""))
             continue
         emitted, refusal = _emit_backend_source(backend, ir)
         if refusal is not None:

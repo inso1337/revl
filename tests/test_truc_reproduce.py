@@ -827,14 +827,25 @@ def test_a_subclass_of_the_refusal_class_is_still_a_refusal(registry, monkeypatc
     assert refusal == "this tier will not lower that shape"
 
 
-def test_an_absent_emitter_is_still_cannot_verify(registry):
-    """The `ImportError` leg, unchanged: a backend that is not installed here
-    decided nothing about this IR, so the tier degrades honestly instead of
-    becoming a MISMATCH."""
+def test_an_absent_emitter_is_still_cannot_verify(registry, monkeypatch):
+    """The `ImportError` leg, unchanged: a shipped backend whose emitter is not
+    installed here decided nothing about this IR, so the tier degrades honestly
+    instead of becoming a MISMATCH. (A name that is not a shipped backend at all
+    is a refusal, issue #2556, pinned in test_truc_backend_name_2556.py.)"""
+    import importlib  # noqa: PLC0415
+
+    real = importlib.import_module
+
+    def absent(name, *args, **kwargs):
+        if str(name).startswith("backends."):
+            raise ImportError(name)
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(R.importlib, "import_module", absent)
     _entry(registry).joinpath("artifacts.json").write_text(json.dumps(
-        {"backends": {"no_such_backend": {"sourceSha256": "00" * 32}}}))
+        {"backends": {"wasm": {"sourceSha256": "00" * 32}}}))
     report = R.reproduce(COMPONENT, registry=str(registry))
-    art = _tier(report, f"{R.TIER_ARTIFACT} [no_such_backend]")
+    art = _tier(report, f"{R.TIER_ARTIFACT} [wasm]")
     assert art is not None and art.status == R.UNVERIFIED
     assert "not available here" in art.detail
     assert report.ok, "an absent toolchain is not a divergence"

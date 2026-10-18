@@ -130,6 +130,20 @@ $ truc ship greeter
 truc: published "greeter@1.1.0" (replacing 1.0.0) to registry "community" — …
 ```
 
+**`ship` runs the checkout's own code as you.** The project's own entry file
+is admitted under operator trust, the same trust as running your own program,
+not the untrusted-author profile that vendored rows get. Before it publishes,
+`ship` boots the candidate to prove it (the same cold run the MCP gauntlet
+makes), so an entry file that carries a host body (`@py` and the like) is
+admitted and executed here, where the same text arriving over the MCP
+transport would be refused. A truc you `add` cannot reach this: vendored rows
+stay under the untrusted-author profile and are not what `ship` boots. The
+risk is the checkout itself. Running `truc ship` in a checkout you did not
+write, or one you have not read, runs that checkout's code on your machine
+with your permissions. Before you ship a checkout you did not author, read its
+entry files and any host bodies in them, and run `truc ship` only from a tree
+you would be willing to run directly.
+
 `[ship]` in `truc.toml` declares what the compiler cannot derive:
 
 ```toml
@@ -227,6 +241,12 @@ to produce bytes, and `reproduce` keeps the three apart (issue #1403):
   by someone who did not build it, and "the artifact is wrong", "the compiler
   moved" and "this tier will not lower this shape" are three different verdicts.
   Dressing a crash up as one of the other two would be the worse defect.
+
+The backend names an entry's `artifacts.json` records are the registry's text,
+so each is checked against the backends this toolchain ships (`python`,
+`typescript`, `rust`, `java`, `go`, `wasm`) before anything is imported for it.
+A name outside that set is a MISMATCH on that tier, naming the backend and the
+truc, and nothing is imported or run for it.
 
 `@version` is a pin, not a label. A registry entry declares its version in a
 one-line `version` file, `build_index` records it in the index row, and `truc
