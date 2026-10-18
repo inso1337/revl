@@ -325,10 +325,10 @@ def test_the_authoring_loop_can_reach_revl_export_through_the_hatch(tree):
     assert disclosure.HATCH_NAME in props and disclosure.HATCH_ARGS in props
     exported = _hatch("revl_export")
     assert exported["ok"] is True, exported
-    assert exported["written"] == [str(tree["mem"])]
+    assert exported["written"] == [str(_exported(tree["mem"]))]
     # 5. the artifact exists, and the loop closes in one call
-    assert tree["mem"].read_text(encoding="utf-8") != MEM_TEXT
-    assert '== "b"' in tree["mem"].read_text(encoding="utf-8")
+    assert tree["mem"].read_text(encoding="utf-8") == MEM_TEXT
+    assert '== "b"' in _exported(tree["mem"]).read_text(encoding="utf-8")
     assert exported["disk"] == {"inSync": True, "stale": []}
 
 
@@ -345,8 +345,8 @@ def test_the_hatched_export_is_byte_identical_to_the_direct_one(tree):
 
     hatched = _hatch("revl_export")
     assert hatched["ok"] is True, hatched
-    assert hatched["written"] == [str(tree["mem"])]
-    assert tree["mem"].read_text(encoding="utf-8") == held
+    assert hatched["written"] == [str(_exported(tree["mem"]))]
+    assert _exported(tree["mem"]).read_text(encoding="utf-8") == held
     assert hatched["disk"] == {"inSync": True, "stale": []}
     # nothing left to write, and it says so — the direct answer, verbatim
     assert _hatch("revl_export") == _call("revl_export", {})
@@ -378,3 +378,11 @@ def test_the_hatch_reads_a_verb_it_cannot_see_and_then_calls_it(tree):
     assert schema["ok"] is True
     assert schema["tools"][0]["name"] == "revl_export"
     assert _hatch("revl_state")["ok"] is True
+
+
+def _exported(path) -> Path:
+    """Where `revl_export` writes a loaded file: its copy under the export
+    directory, never the file itself (issue #2524)."""
+    from revl.mcp import export_jail  # noqa: PLC0415
+
+    return Path(export_jail.export_copy(str(path), server_mod._file_roots()))

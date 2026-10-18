@@ -181,10 +181,13 @@ def test_export_writes_exactly_the_held_source(files_loaded):
     assert _set_now(12, commit=True)["committed"] is True
     assert files_loaded.read_text(encoding="utf-8") == SOURCE   # not yet
     exported = _call("revl_export", {})
-    assert exported["ok"] is True and exported["written"] == [str(files_loaded)]
+    assert exported["ok"] is True and exported["written"] == [
+        str(_exported(files_loaded))]
     snapshot = _call("revl_snapshot", {})["snapshot"]["sources"]["files_content"]
-    assert files_loaded.read_text(encoding="utf-8") == snapshot[str(files_loaded)]
-    assert "fn now() = 12" in files_loaded.read_text(encoding="utf-8")
+    copy = _exported(files_loaded)
+    assert copy.read_text(encoding="utf-8") == snapshot[str(files_loaded)]
+    assert "fn now() = 12" in copy.read_text(encoding="utf-8")
+    assert files_loaded.read_text(encoding="utf-8") == SOURCE  # never over it
     assert _call("revl_export", {})["written"] == []     # nothing left to write
 
 
@@ -246,3 +249,11 @@ def test_an_export_says_it_has_no_inverse(files_loaded):
     exported = _call("revl_export", {})
     assert exported["ok"] is True, exported
     assert exported["undo"] is None and "disk" in exported["undoReason"]
+
+
+def _exported(path) -> Path:
+    """Where `revl_export` writes a loaded file: its copy under the export
+    directory, never the file itself (issue #2524)."""
+    from revl.mcp import export_jail  # noqa: PLC0415
+
+    return Path(export_jail.export_copy(str(path), server_mod._file_roots()))

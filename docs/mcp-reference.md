@@ -990,49 +990,53 @@ exported leaves disk already holding the reverted text and is `inSync`.
 Write the running composition's HELD source to disk, on request (issue #1696).
 The held source (what was loaded or last committed, including text `revl_edit`
 changed) is the source of truth, and disk is an export: no other verb writes a
-file. A composition loaded from files writes each loaded file whose held text
-differs from disk back to its own path. One loaded from inline source writes to
-`path`, with its in-memory modules beside it, and refuses to overwrite an
-existing file unless `overwrite: true`. Every path must be inside the sanctioned
-roots, checked before anything is written. A proposal is never exported; commit
-it first. After an export, the files on disk equal `revl_snapshot`'s
-`files_content`. Authorized as `snapshot`.
+file. A proposal is never exported; commit it first. Every path must be inside
+the sanctioned roots, checked before anything is written. Authorized as
+`snapshot`.
+
+The rule, under every authoring trust (issue #2524): an export writes only
+under `<root>/.revl/export/` and never over another file.
+
+- A composition loaded from files writes each loaded file whose held text
+  differs from its copy to that copy, `<root>/.revl/export/<path relative to
+  the root>`. A file already inside the export directory is its own copy. The
+  operator's file is never written; adopting an export is the operator's act,
+  copying it out. After an export, the copies equal `revl_snapshot`'s
+  `files_content`, and `disk.stale` (which names the loaded files) is empty.
+- A composition loaded from inline source writes to `path`, with its in-memory
+  modules beside it, and refuses to replace an existing file unless
+  `overwrite: true`.
+- An existing destination is replaced only when its bytes are the bytes an
+  export recorded for that very file in `<root>/.revl/export/manifest.json`
+  (path and SHA-256 of the exact bytes written; matched by file identity, so a
+  case or link alias is the same file). Anything else is refused, even with
+  `overwrite: true`. A missing or unreadable manifest records nothing, so it
+  refuses: the check fails closed.
+- An export never creates or replaces a file the server opened as operator
+  configuration (`--operator-profile`, `--policy`, `--provider`, `--restore`,
+  `--tls-cert`, `--tls-key`, `--tls-client-ca`), matched by device and inode
+  with a case-folded path as fallback, nor an emergency-stop latch: the
+  `REVL_ESTOP_LATCH` file, `<wal>.estop` for `--wal` and for the WAL the live
+  session journals to, an SLO contract's latch, and any `*.estop` file (issue
+  #2535).
+- A file inside any `.revl/export/` directory is the agent's, by its path,
+  always. Loaded by `files` or reached by `use`, it compiles under the
+  authoring profile with no operator text to diff against, exactly as the
+  same text sent inline. The manifest never decides who wrote a file.
 
 `with_knowledge: true` also writes the session's notes: each live note as a
-marked comment above its anchor, and every record not yet in the sidecar
-(`revl_knowledge`). A vendored truc's records and its `component.rvl` are left
-alone (issue #1769, see docs/registry.md §1.4).
+marked comment above its anchor (in the export copy), and every record not yet
+in the sidecar (`revl_knowledge`). A note whose body holds a carriage return,
+another Unicode line separator or a byte-order mark is refused, since a `//`
+comment cannot carry it. A vendored truc's records and its `component.rvl` are
+left alone (issue #1769, see docs/registry.md §1.4).
 
-**Under a closed authoring trust** (the default; issue #2524), an export is
-jailed, because a file it writes could otherwise come back through `files` as
-if the operator had written it:
-
-- An inline composition is written only inside the export directory of a
-  sanctioned root, `<root>/.revl/export/`. `path` and every module must land
-  there; anything else is refused and nothing is written.
-- Only `.rvl` modules are written, and only those the program reaches by `use`.
-  A module key that is not a `.rvl` file is refused; a `.rvl` module the program
-  does not reach is not written and is listed in `skipped`.
-- `overwrite: true` replaces only a file an earlier export wrote and nobody has
-  changed since. Any other existing file is refused.
-- A files-loaded composition still writes back to the `.rvl` files it loaded.
-- Every write is recorded, path and SHA-256, in
-  `<root>/.revl/export/manifest.json`, with the operator's own text of a file an
-  export replaced. A later `files` load of a file inside an export directory, or
-  of one whose bytes still match its manifest entry, compiles under the profile,
-  as the same text would inline; so does such a file reached by `use`. For a
-  file written back over the operator's own, the profile diffs against the
-  recorded operator text (issue #1715), so the operator's declarations stay
-  trusted. Changing the file's bytes adopts it as the operator's, as does
-  deleting its manifest entry.
-
-Under every trust, an export never replaces a file the server opened as
-operator configuration at start (`--operator-profile`, `--policy`,
-`--provider`, `--restore`, `--tls-cert`, `--tls-key`, `--tls-client-ca`, and
-the `REVL_ESTOP_LATCH` file). A closed trust also refuses a destination that is
-a symbolic link. Authorship is matched by file identity, so a case or link
-alias of a written file is still that file. Under
-`--author-trust trusted` the export is otherwise as described above, unjailed.
+**Under a closed authoring trust** (the default), an inline export is also
+confined: `path` and every module must land inside the export directory, only
+`.rvl` modules the program reaches by `use` are written (a module key that is
+not a `.rvl` file is refused; an unreached one is listed in `skipped`), a
+write-back must be a `.rvl` file, and a destination may not be a symbolic
+link.
 
 - Inputs: `path` and `overwrite` (inline compositions); `with_knowledge`.
 - Output: `written` (the paths written); `skipped` (inline modules the program

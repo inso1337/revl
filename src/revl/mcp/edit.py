@@ -808,12 +808,12 @@ def file_modules(vs: dict) -> dict:
 
 
 def _operator_text(path: str, on_disk: str | None) -> str | None:
-    """The operator's own text of `path`: what is on disk, unless an export
-    wrote it (issue #2524), then what that export recorded it replaced."""
+    """The operator's own text of `path`: what is on disk, unless the file is
+    inside an export directory (issue #2524), whose bytes are the agent's and
+    so carry no operator text at all."""
     from . import export_jail  # noqa: PLC0415
 
-    written, operator = export_jail.authorship(path)
-    return operator if written else on_disk
+    return None if export_jail.in_export_area(path) else on_disk
 
 
 def _operator_assets(path: str, on_disk: str | None, already: dict) -> dict:

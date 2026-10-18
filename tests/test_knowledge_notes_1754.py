@@ -96,6 +96,7 @@ def test_a_note_added_on_an_edit_is_served_to_a_fresh_session(app):
     sidecar = sorted((app.parent / ".revl" / "knowledge").iterdir())
     assert [p.name for p in sidecar] == [f"{recorded[0]['id']}.json"]
     _unload()
+    shutil.copyfile(_exported(app), app)         # the operator adopts the export
 
     _load(app)                                   # a fresh session, same composition
     served = _notes_about("NotesHttp.get_note")
@@ -116,13 +117,14 @@ def test_export_then_import_of_notes_is_byte_stable(app):
                                      "kind": "purpose", "body": BODY})
     assert added["ok"] is True, added
     _call("revl_export", {"with_knowledge": True})
-    first = app.read_bytes()
+    assert app.read_bytes() == original          # never over the operator's file
+    first = _exported(app).read_bytes()
     assert first != original and f"// [{added['note']['id']}]".encode() in first
     _unload()
 
     _load(app)                                   # import the exported file
     assert _call("revl_export", {"with_knowledge": True})["written"] == []
-    assert app.read_bytes() == first             # byte-stable
+    assert _exported(app).read_bytes() == first  # byte-stable
     assert [n["id"] for n in _notes_about("NotesHttp")
             if n["kind"] == "purpose"] == [added["note"]["id"]]
 
@@ -133,7 +135,8 @@ def test_a_human_edit_of_an_exported_note_becomes_a_supersede(app):
                                        "kind": "purpose", "body": BODY})["note"]["id"]
     _call("revl_export", {"with_knowledge": True})
     _unload()
-    edited = app.read_text(encoding="utf-8").replace(BODY, BODY + ", ever")
+    # the human adopts the export (copies it out) and edits the note
+    edited = _exported(app).read_text(encoding="utf-8").replace(BODY, BODY + ", ever")
     app.write_text(edited, encoding="utf-8")
 
     _load(app)
@@ -209,3 +212,11 @@ def test_a_note_goes_stale_when_its_anchor_changes_and_confirm_restores_it(app):
     _call("revl_knowledge", {"op": "confirm", "id": note_id})
     assert _call("revl_knowledge", {"op": "query",
                                     "id": note_id})["note"]["status"] == "live"
+
+
+def _exported(path) -> Path:
+    """Where `revl_export` writes a loaded file: its copy under the export
+    directory, never the file itself (issue #2524)."""
+    from revl.mcp import export_jail  # noqa: PLC0415
+
+    return Path(export_jail.export_copy(str(path), server_mod._file_roots()))

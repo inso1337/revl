@@ -242,13 +242,13 @@ def test_export_then_unload_is_clean_and_silent(tree):
     edit survives on disk."""
     _load(tree)
     _change(tree)
-    assert _call("revl_export", {})["written"] == [str(tree["mem"])]
+    assert _call("revl_export", {})["written"] == [str(_exported(tree["mem"]))]
     gone = _call("revl_unload", {})
     assert gone["ok"] is True and gone["unloaded"] is True
     assert gone["noResidue"] is True and gone["compensationResidue"] == []
     assert gone["disk"] == {"inSync": True, "stale": []}
     assert "note" not in gone
-    assert '== "b"' in tree["mem"].read_text(encoding="utf-8")
+    assert '== "b"' in _exported(tree["mem"]).read_text(encoding="utf-8")
 
 
 def test_unload_of_an_unchanged_files_composition_is_clean(tree):
@@ -350,3 +350,11 @@ def test_the_advertised_unload_schema_offers_force():
     assert unload["name"] == "revl_unload"
     assert "force" in unload["inputSchema"]["properties"]
     assert "revl_export" in unload["description"]
+
+
+def _exported(path) -> Path:
+    """Where `revl_export` writes a loaded file: its copy under the export
+    directory, never the file itself (issue #2524)."""
+    from revl.mcp import export_jail  # noqa: PLC0415
+
+    return Path(export_jail.export_copy(str(path), server_mod._file_roots()))

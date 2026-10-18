@@ -3,29 +3,32 @@
 `revl_export` is the one MCP verb that writes to disk. The `files` exemption in
 `server.compile_under_authoring` rested on the premise that bytes at a jailed
 path were put there by a human, so a module the agent exported and then loaded
-back by `files` compiled without the authoring profile. Under a closed
-authoring trust this module keeps the two facts that make the exemption sound
-again:
+back by `files` compiled without the authoring profile. The rule that makes
+the exemption sound again is one sentence: an export writes only under
+`<root>/.revl/export/`, and never over a file revl did not write.
 
-* WHERE an agent may write: inline exports land only inside the export
-  directory, `<root>/.revl/export/`, and only as `.rvl` modules the exported
-  program actually `use`s. A files-loaded composition writes back only to the
-  `.rvl` files it loaded.
-* WHAT revl wrote: every export is recorded, path and SHA-256, in
-  `<root>/.revl/export/manifest.json`, together with the operator's own text of
-  a file it wrote over. A file inside an export directory, or one whose bytes
-  still match its manifest entry, is the agent's and compiles under the
-  profile; the operator's original text, when there was one, is what the
-  profile diffs against, so the operator's own declarations stay trusted.
+* WHERE: an inline composition is exported into the export directory. A
+  files-loaded composition writes each changed file to its copy there, at the
+  same path relative to the root (a file already inside the export directory
+  is its own copy), never over the operator's file. Adopting an exported file
+  is the operator's act: copying it out.
+* WHAT ELSE: an existing destination is replaced only when its bytes are the
+  bytes an export recorded for that file in `<root>/.revl/export/manifest.json`
+  (path and SHA-256 of the exact bytes written). A missing or unreadable
+  manifest records nothing, so it refuses the overwrite: it fails closed.
+* TRUST: a file inside any `.revl/export/` directory is the agent's, by path,
+  always. Named in `files` or reached by `use`, its text compiles under the
+  authoring profile with no operator text to diff against, exactly as if it
+  had been sent inline. The manifest never decides who wrote a file.
 
-Both facts live on disk, beside the files they describe, so they survive a
-server restart and a change of `--root`. Changing the bytes of a written file
-outside the export directory is the operator adopting it.
+Under a closed authoring trust an inline export also writes only `.rvl` modules
+the program reaches by `use`, a destination may not be a symbolic link, and a
+rendered note may not carry a line break other than a newline.
 
-Separately, and under every authoring trust, an export may never replace a
-file the server opened as operator configuration at serve time (the operator
-profile, the boundary policy, provider modules, the restore snapshot, the
-emergency-stop latch), whatever directory it sits in.
+Under every trust, an export never replaces a file the server opened as
+operator configuration at serve time (the operator profile, the boundary
+policy, provider modules, the restore snapshot, TLS files, the emergency-stop
+latch), whichever spelling or directory names it.
 """
 from __future__ import annotations
 
@@ -37,8 +40,14 @@ EXPORT_DIR = os.path.join(".revl", "export")
 MANIFEST = "manifest.json"
 _EXPORT_PARTS = tuple(EXPORT_DIR.split(os.sep))
 
-# realpaths of the files the server opened as operator configuration
-_OPERATOR_FILES: set[str] = set()
+# the files the server opened as operator configuration: (st_dev, st_ino) of
+# those that exist, and the case-folded realpath of every one
+_OPERATOR_IDS: set[tuple[int, int]] = set()
+_OPERATOR_NAMES: set[str] = set()
+
+# characters a reader may take as a line break although the revl lexer, which
+# ends a `//` comment only at "\n", does not; and the byte-order mark
+_LINE_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85  ﻿")
 
 
 class ExportRefused(Exception):
@@ -49,16 +58,37 @@ def _real(path: str) -> str:
     return os.path.realpath(os.path.abspath(path))
 
 
+def _identity(path: str) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 def protect_operator_files(paths) -> None:
     """Record files the server opened as operator configuration, so no export
     can ever replace one (operator-side wiring; no verb reaches it)."""
     for path in paths:
-        if path:
-            _OPERATOR_FILES.add(_real(path))
+        if not path:
+            continue
+        identity = _identity(path)
+        if identity is not None:
+            _OPERATOR_IDS.add(identity)
+        _OPERATOR_NAMES.add(_real(path).casefold())
 
 
-def operator_files() -> frozenset[str]:
-    return frozenset(_OPERATOR_FILES)
+def reset_operator_files() -> None:
+    """Forget every protected file (test and embedder wiring)."""
+    _OPERATOR_IDS.clear()
+    _OPERATOR_NAMES.clear()
+
+
+def _is_operator_file(path: str) -> bool:
+    identity = _identity(path)
+    if identity is not None and identity in _OPERATOR_IDS:
+        return True
+    return _real(path).casefold() in _OPERATOR_NAMES
 
 
 def export_dirs(roots) -> tuple[str, ...]:
@@ -81,16 +111,60 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _read_text(path: str) -> str | None:
+def _read_exact(path: str) -> str | None:
+    """The file's text with no newline translation: the bytes, decoded."""
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8", newline="") as handle:
             return handle.read()
     except (OSError, UnicodeDecodeError):
         return None
 
 
+def exported_texts(paths) -> dict[str, str]:
+    """`{abspath: text}` of every path in `paths` inside an export directory:
+    the files whose text is the agent's."""
+    out = {}
+    for path in paths:
+        if in_export_area(path):
+            text = _read_exact(path)
+            if text is not None:
+                out[os.path.abspath(path)] = text
+    return out
+
+
+def _inside(path: str, directories) -> bool:
+    real = _real(path)
+    for directory in directories:
+        base = _real(directory)
+        if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _root_of(path: str, roots) -> str | None:
+    for root in roots:
+        if _inside(path, (root,)):
+            return _real(root)
+    return None
+
+
+def export_copy(path: str, roots) -> str:
+    """Where an export writes the held text of the loaded file `path`: the
+    file itself when it is inside an export directory, else its copy at the
+    same path under its root's export directory."""
+    if in_export_area(path):
+        return path
+    root = _root_of(path, roots)
+    if root is None:
+        return path
+    return os.path.join(root, EXPORT_DIR, os.path.relpath(_real(path), root))
+
+
+# ------------------------------------------------------------------ manifest
+
+
 def _manifest_entries(manifest: str) -> dict:
-    text = _read_text(manifest)
+    text = _read_exact(manifest)
     if text is None:
         return {}
     try:
@@ -107,13 +181,14 @@ def _same_file(a: str, b: str) -> bool:
         return False
 
 
-def _manifest_entry(real: str, text: str | None) -> dict | None:
-    """A manifest entry, in any ancestor's manifest, that records the file at
-    `real` holding `text`. Matched by file identity, not by the spelling of
-    its key, so a case or link alias of a written file is still that file, and
-    a stale entry in one manifest never hides a current one in another."""
+def revl_wrote(path: str) -> bool:
+    """Whether the bytes at `path` are bytes an export recorded for that very
+    file, in any ancestor's manifest. Matched by file identity, so a case or
+    link alias is the same file; a missing manifest matches nothing."""
+    real = _real(path)
+    text = _read_exact(real)
     if text is None:
-        return None
+        return False
     digest = _sha256(text)
     directory = os.path.dirname(real)
     while True:
@@ -121,41 +196,30 @@ def _manifest_entry(real: str, text: str | None) -> dict | None:
         for key, entry in entries.items():
             if (isinstance(entry, dict) and entry.get("sha256") == digest
                     and _same_file(os.path.join(directory, key), real)):
-                return entry
+                return True
         parent = os.path.dirname(directory)
         if parent == directory:
-            return None
+            return False
         directory = parent
 
 
-def authorship(path: str) -> tuple[bool, str | None]:
-    """`(written, operator_text)`: whether an export wrote the bytes now at
-    `path`, and the operator's own text of that file when there was one."""
-    real = _real(path)
-    if in_export_area(real):
-        return True, None
-    entry = _manifest_entry(real, _read_text(real))
-    if entry is None:
-        return False, None
-    operator = entry.get("operator")
-    return True, operator if isinstance(operator, str) else None
+def manifest_writes(targets, roots) -> list[tuple[str, str]]:
+    """The manifest files to write with `targets`, as `(path, text)`: each
+    target recorded by the SHA-256 of the exact text written, under the
+    manifest of the root it lies in."""
+    manifests: dict[str, dict] = {}
+    for path, text in targets:
+        root = _root_of(path, roots)
+        if root is None:
+            continue
+        manifest = os.path.join(root, EXPORT_DIR, MANIFEST)
+        entries = manifests.setdefault(manifest, dict(_manifest_entries(manifest)))
+        entries[os.path.relpath(_real(path), root)] = {"sha256": _sha256(text)}
+    return [(manifest, json.dumps({"files": entries}, indent=2, sort_keys=True) + "\n")
+            for manifest, entries in manifests.items()]
 
 
-def export_written(paths) -> dict[str, str]:
-    """`{abspath: text}` of every path in `paths` an export wrote."""
-    out = {}
-    for path in paths:
-        if authorship(path)[0]:
-            text = _read_text(path)
-            if text is not None:
-                out[os.path.abspath(path)] = text
-    return out
-
-
-def revl_wrote(path: str) -> bool:
-    """Whether the bytes at `path` are the bytes an export recorded there."""
-    real = _real(path)
-    return _manifest_entry(real, _read_text(real)) is not None
+# ------------------------------------------------------------------ checks
 
 
 def reached_modules(source: str, modules: dict) -> set[str]:
@@ -183,15 +247,6 @@ def reached_modules(source: str, modules: dict) -> set[str]:
     return reached
 
 
-def _inside(path: str, directories) -> bool:
-    real = _real(path)
-    for directory in directories:
-        base = _real(directory)
-        if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
-            return True
-    return False
-
-
 def check_inline(path: str, modules: dict, roots) -> None:
     """Refuse an inline export whose file or module would land outside an
     export directory, or that names a module that is not a `.rvl` file."""
@@ -214,13 +269,26 @@ def check_inline(path: str, modules: dict, roots) -> None:
 
 
 def check_write_back(paths) -> None:
-    """Refuse writing a files-loaded composition back to a non-`.rvl` file."""
+    """Refuse writing a files-loaded composition back as a non-`.rvl` file."""
     not_rvl = [p for p in paths if not p.endswith(".rvl")]
     if not_rvl:
         raise ExportRefused(
             f"refused: {', '.join(not_rvl)} is not a .rvl file; under a closed "
             "authoring trust revl_export writes only revl modules; nothing was "
             "written")
+
+
+def check_note_bodies(notes) -> None:
+    """Refuse rendering a note whose body holds a line break other than a
+    newline, or a byte-order mark: rendered as a `//` comment it would end,
+    for a reader, where the lexer that admitted it saw none."""
+    bad = sorted({n["id"] for n in notes
+                  if _LINE_BREAKS.intersection(str(n.get("body", "")))})
+    if bad:
+        raise ExportRefused(
+            f"refused: note {', '.join(bad)} holds a carriage return, another "
+            "line separator or a byte-order mark, which a rendered comment "
+            "cannot carry; nothing was written")
 
 
 def check_foreign(existing) -> None:
@@ -235,7 +303,7 @@ def check_foreign(existing) -> None:
 
 def check_not_linked(paths) -> None:
     """Refuse a destination that is a symbolic link: the write would replace
-    the link with a file whose bytes nothing records."""
+    the link with a file nothing recorded."""
     linked = [p for p in paths if os.path.islink(p)]
     if linked:
         raise ExportRefused(
@@ -244,49 +312,21 @@ def check_not_linked(paths) -> None:
             "was written")
 
 
-def check_operator_files(paths) -> None:
+def _is_latch(path: str, latches) -> bool:
+    real = _real(path).casefold()
+    return (real.endswith(".estop")
+            or any(real == _real(latch).casefold() or _same_file(path, latch)
+                   for latch in latches if latch))
+
+
+def check_operator_files(paths, latches=()) -> None:
     """Refuse any destination that is a file the server opened as operator
-    configuration, under every authoring trust."""
-    hit = [p for p in paths if _real(p) in _OPERATOR_FILES]
+    configuration, or an emergency-stop latch (issue #2535: `latches` are the
+    ones the live session acts on, and any `*.estop` file is one), under every
+    authoring trust. A latch need not exist yet: creating one halts a session."""
+    hit = [p for p in paths if _is_operator_file(p) or _is_latch(p, latches)]
     if hit:
         raise ExportRefused(
-            f"refused: {', '.join(hit)} is an operator configuration file this "
-            "server opened at start; revl_export never replaces one; nothing "
-            "was written")
-
-
-def _root_of(real: str, roots) -> str | None:
-    for root in roots:
-        if _inside(real, (root,)):
-            return _real(root)
-    return None
-
-
-def manifest_writes(targets, roots) -> list[tuple[str, str]]:
-    """The manifest files to write BEFORE `targets` land, as `(path, text)`.
-
-    Each `.rvl` target is recorded by SHA-256 under its root's manifest, with
-    the operator's own text of the file it replaces: kept from the earlier
-    entry while the file still holds what revl wrote, else the bytes on disk
-    now (`None` inside an export directory, or for a new file)."""
-    manifests: dict[str, dict] = {}
-    for path, text in targets:
-        real = _real(path)
-        root = _root_of(real, roots)
-        if root is None or not path.endswith(".rvl"):
-            continue
-        manifest = os.path.join(root, EXPORT_DIR, MANIFEST)
-        entries = manifests.setdefault(manifest, dict(_manifest_entries(manifest)))
-        key = os.path.relpath(real, root)
-        entries[key] = {"sha256": _sha256(text),
-                        "operator": _operator_baseline(real)}
-    return [(manifest, json.dumps({"files": entries}, indent=2, sort_keys=True) + "\n")
-            for manifest, entries in manifests.items()]
-
-
-def _operator_baseline(real: str) -> str | None:
-    """The operator's own text of the file an export is about to replace."""
-    if in_export_area(real):
-        return None
-    written, operator = authorship(real)
-    return operator if written else _read_text(real)
+            f"refused: {', '.join(hit)} is an operator configuration file or an "
+            "emergency-stop latch; revl_export never creates or replaces one; "
+            "nothing was written")

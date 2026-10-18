@@ -6,16 +6,20 @@ human puts bytes at a jailed path. So text the profile refuses when sent inline
 could be written by an export and loaded back by `files`, and an export could
 write any bytes at any path in the root, replacing files revl never wrote.
 
-The rules these tests hold, through the real dispatch:
+The rule these tests hold, through the real dispatch: an export writes only
+under `<root>/.revl/export/` and never over a file revl did not write.
 
 * an inline export writes only `.rvl` modules the program reaches, and only
-  inside `<root>/.revl/export/`;
-* it replaces only a file an earlier export wrote;
-* a file inside an export directory, or one an export wrote back and nobody
-  has changed since, compiles under the profile, and so does one reached by
-  `use` from an operator file;
-* no export replaces an operator configuration file the server opened, under
-  any trust;
+  inside the export directory (under a closed trust);
+* a files-loaded write-back lands in the file's copy there, under any trust,
+  never over the operator's file;
+* it replaces only a file an earlier export wrote, as the manifest records
+  it; a missing or unreadable manifest refuses (fails closed);
+* a file inside an export directory compiles under the profile by its path,
+  named in `files` or reached by `use`;
+* a rendered note cannot carry a line break the lexer does not see;
+* no export creates or replaces an operator configuration file or an
+  emergency-stop latch, under any trust (issue #2535);
 * the operator's own files, and a trusted author's exports, behave as before.
 """
 
@@ -279,7 +283,7 @@ def test_a_case_alias_of_the_export_directory_is_still_it(root):
     assert _call("revl_load", {"files": [str(alias)]})["ok"] is False
 
 
-def test_a_write_back_through_a_symlink_is_refused(root):
+def test_a_write_back_through_a_symlink_lands_in_the_export_copy(root):
     real = root / "clock.rvl"
     real.write_text(CLOCK, encoding="utf-8")
     link = root / "alias.rvl"
@@ -289,8 +293,23 @@ def test_a_write_back_through_a_symlink_is_refused(root):
         "component": "FixedClock.clock.now", "source": "fn now() = 8"}})
     assert changed["ok"] is True, changed
     out = _call("revl_export", {})
-    assert out["ok"] is False and "symbolic link" in _message(out), out
+    copy = _export_dir(root).resolve() / "clock.rvl"
+    assert out["ok"] is True and out["written"] == [str(copy)], out
     assert link.is_symlink() and real.read_text(encoding="utf-8") == CLOCK
+    assert "fn now() = 8" in copy.read_text(encoding="utf-8")
+
+
+def test_an_export_copy_that_is_a_symbolic_link_is_refused(root):
+    real = root / "clock.rvl"
+    real.write_text(CLOCK, encoding="utf-8")
+    _export_dir(root).mkdir(parents=True)
+    (_export_dir(root) / "clock.rvl").symlink_to(real)
+    assert _call("revl_load", {"files": [str(real)]})["ok"] is True
+    assert _call("revl_change", {"commit": True, "replace": {
+        "component": "FixedClock.clock.now", "source": "fn now() = 8"}})["ok"]
+    out = _call("revl_export", {})
+    assert out["ok"] is False, out
+    assert real.read_text(encoding="utf-8") == CLOCK
 
 
 def test_an_inline_export_round_trips_through_files(root):
@@ -301,28 +320,76 @@ def test_an_inline_export_round_trips_through_files(root):
     assert _call("revl_load", {"files": [str(target)]})["ok"] is True
 
 
-def test_a_write_back_is_recorded_and_keeps_the_operators_code(root):
-    """A files-loaded composition still writes back to its own file. The write
-    is recorded with the operator's text it replaced, so the next load diffs
-    against that text: the operator's host code stays the operator's."""
+@pytest.mark.parametrize("trust", ["untrusted", "trusted"])
+def test_a_write_back_lands_in_the_export_copy(root, trust):
+    """A files-loaded composition writes its changed file to the file's copy
+    under the export directory, never over the operator's file, under any
+    trust. The copy is the agent's: loaded back it compiles under the profile,
+    while the operator's file still loads as the operator's."""
+    if trust == "trusted":
+        server_mod.set_authoring_trust(host_code=True)
     path = root / "ops.rvl"
     original = HOSTED + CLOCK
     path.write_text(original, encoding="utf-8")
     assert _call("revl_load", {"files": [str(path)]})["ok"] is True
-    changed = _call("revl_change", {"commit": True, "replace": {
-        "component": "FixedClock.clock.now", "source": "fn now() = 8"}})
-    assert changed["ok"] is True and changed["committed"] is True, changed
+
+    def change(value):
+        changed = _call("revl_change", {"commit": True, "replace": {
+            "component": "FixedClock.clock.now", "source": f"fn now() = {value}"}})
+        assert changed["ok"] is True and changed["committed"] is True, changed
+
+    change(8)
+    copy = _export_dir(root).resolve() / "ops.rvl"
     out = _call("revl_export", {})
-    assert out["ok"] is True and out["written"] == [str(path)], out
-    assert _jail().authorship(str(path)) == (True, original)
-    alias = root / "OPS.rvl"
-    if alias.exists():  # a case-folding filesystem: the same file
-        assert _jail().authorship(str(alias)) == (True, original)
+    assert out["ok"] is True and out["written"] == [str(copy)], out
+    assert out["disk"]["inSync"] is True, out
+    assert path.read_text(encoding="utf-8") == original
+    change(9)  # the next export replaces the copy an export wrote
+    assert _call("revl_export", {})["written"] == [str(copy)]
+    copy.write_text(copy.read_text(encoding="utf-8") + "// mine\n",
+                    encoding="utf-8")
+    change(10)  # but not once someone else changed it
+    refused = _call("revl_export", {})
+    assert refused["ok"] is False and "has changed since" in _message(refused)
+    assert path.read_text(encoding="utf-8") == original
     _reset()
     assert _call("revl_load", {"files": [str(path)]})["ok"] is True
-    # the operator changing the file adopts it
-    path.write_text(original, encoding="utf-8")
-    assert _jail().authorship(str(path)) == (False, None)
+    _reset()
+    # the copy is the agent's by its path, whatever the manifest says
+    (_export_dir(root) / "manifest.json").unlink()
+    back = _call("revl_load", {"files": [str(copy)]})
+    assert back["ok"] is (trust == "trusted"), back
+
+
+@pytest.mark.parametrize("damage", ["deleted", "garbage", "directory"])
+def test_a_missing_or_unreadable_manifest_refuses_the_overwrite(root, damage):
+    target = _export_dir(root) / "main.rvl"
+    assert _call("revl_load", {"source": PLAIN})["ok"] is True
+    assert _call("revl_export", {"path": str(target)})["ok"] is True
+    manifest = _export_dir(root) / "manifest.json"
+    manifest.unlink()
+    if damage == "garbage":
+        manifest.write_text("{not json", encoding="utf-8")
+    elif damage == "directory":
+        manifest.mkdir()
+    out = _call("revl_export", {"path": str(target), "overwrite": True})
+    assert out["ok"] is False and "was not written by revl_export" in _message(out)
+    assert target.read_text(encoding="utf-8") == PLAIN
+
+
+@pytest.mark.parametrize("brk", ["\r", "\u2028", "\x85", "\ufeff"],
+                         ids=["cr", "line-separator", "nel", "bom"])
+def test_a_note_body_with_another_line_break_is_refused(root, brk):
+    path = root / "clock.rvl"
+    path.write_text(CLOCK, encoding="utf-8")
+    assert _call("revl_load", {"files": [str(path)]})["ok"] is True
+    note = _call("revl_knowledge", {"op": "add", "symbol": "FixedClock",
+                                    "kind": "rationale", "body": f"why{brk}x"})
+    assert note["ok"] is True, note
+    out = _call("revl_export", {"with_knowledge": True})
+    assert out["ok"] is False and "line separator" in _message(out), out
+    assert not _export_dir(root).exists()
+    assert path.read_text(encoding="utf-8") == CLOCK
 
 
 # ------------------------------------------------------ the trusted controls
@@ -336,7 +403,8 @@ def test_a_trusted_author_exports_as_before(trusted):
     out = _call("revl_export", {"path": str(target)})
     assert out["ok"] is True, out
     assert sorted(out["written"]) == [str(target), str(trusted / "notes.txt")]
-    assert not (trusted / ".revl").exists()
+    # what it wrote is recorded, so a later export may replace it
+    assert _files_tree(trusted / ".revl") == {os.path.join("export", "manifest.json")}
 
 
 def test_a_trusted_author_still_loads_host_code_from_files(trusted):
@@ -349,22 +417,54 @@ def test_a_trusted_author_still_loads_host_code_from_files(trusted):
 # ---------------------------------------- operator configuration, any trust
 
 
+# every kind of file an export may never create or replace: one the server
+# opened as operator configuration, and an emergency-stop latch (issue #2535),
+# whether the serve wiring named it, the live session's WAL implies it, or it
+# merely has the latch's suffix
+PROTECTED = ["policy", "profile-case-variant", "wal-latch", "live-latch",
+             "any-latch"]
+
+
 @pytest.mark.parametrize("trust", ["untrusted", "trusted"])
-def test_no_export_replaces_a_protected_operator_file(root, trust, monkeypatch):
-    monkeypatch.setattr(_jail(), "_OPERATOR_FILES", set())
+@pytest.mark.parametrize("kind", PROTECTED)
+def test_no_export_creates_or_replaces_a_protected_file(root, trust, kind,
+                                                        monkeypatch):
+    jail = _jail()
+    monkeypatch.setattr(jail, "_OPERATOR_IDS", set())
+    monkeypatch.setattr(jail, "_OPERATOR_NAMES", set())
     if trust == "trusted":
         server_mod.set_authoring_trust(host_code=True)
-    policy = root / "policy.rvl"
-    policy.write_text("// operator policy\n", encoding="utf-8")
-    _jail().protect_operator_files([str(policy)])
+    # inside the export directory, so no other rule is what refuses it
+    area = _export_dir(root)
+    area.mkdir(parents=True)
+    if kind == "policy":
+        protected = area / "policy.rvl"
+        protected.write_text("// operator policy\n", encoding="utf-8")
+        jail.protect_operator_files([str(protected)])
+    elif kind == "profile-case-variant":
+        (area / "ops.profile").write_text(PROFILE, encoding="utf-8")
+        jail.protect_operator_files([str(area / "ops.profile")])
+        protected = area / "OPS.PROFILE"
+    elif kind == "wal-latch":  # `serve --wal`: the latch need not exist yet
+        jail.protect_operator_files([str(area / "run.wal") + ".estop"])
+        protected = area / "run.wal.estop"
+    elif kind == "live-latch":
+        monkeypatch.setattr(server_mod.SESSION, "_wal_path",
+                            str(area / "live.wal"), raising=False)
+        protected = area / "live.wal.estop"
+    else:
+        protected = area / "other.estop"
+    before = protected.read_bytes() if protected.exists() else None
     assert _call("revl_load", {"source": PLAIN})["ok"] is True
-    target = (_export_dir(root) if trust == "untrusted" else root) / "main.rvl"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    rel = os.path.relpath(policy, target.parent)
-    server_mod.SESSION.origin["modules"] = {rel: PLAIN}
+    target = (area if trust == "untrusted" else root) / "main.rvl"
+    rel = os.path.relpath(protected, target.parent)
+    server_mod.SESSION.origin["modules"] = {rel: FORGED}
     out = _call("revl_export", {"path": str(target), "overwrite": True})
-    assert out["ok"] is False, out
-    assert policy.read_text(encoding="utf-8") == "// operator policy\n"
+    if trust == "trusted":  # closed, it is refused or skipped before this rule
+        assert out["ok"] is False and "emergency-stop latch" in _message(out), out
+        assert not target.exists()
+    after = protected.read_bytes() if protected.exists() else None
+    assert after == before
 
 
 PROFILE = "operator ai may load, edit, snapshot\noperator ai may not unload, approve, swap\n"
@@ -403,8 +503,10 @@ class _Stdio:
             self.proc.kill()
 
 
+@pytest.mark.parametrize("spelling", ["ops.profile", "OPS.PROFILE"])
 @pytest.mark.parametrize("trust", ["untrusted", "trusted"])
-def test_an_export_cannot_replace_the_live_operator_profile(tmp_path, trust):
+def test_an_export_cannot_replace_the_live_operator_profile(tmp_path, trust,
+                                                            spelling):
     """The operator profile sits in the root and is re-read while the server
     runs; an export aimed at it is refused, its bytes are unchanged, and the
     verb it withholds stays withheld after the settle window."""
@@ -416,7 +518,7 @@ def test_an_export_cannot_replace_the_live_operator_profile(tmp_path, trust):
                     "--profile-settle-ms", "200", "--author-trust", trust)
     try:
         target = (_export_dir(base) if trust == "untrusted" else base) / "main.rvl"
-        key = os.path.relpath(profile, target.parent)
+        key = os.path.relpath(base / spelling, target.parent)
         loaded = server.tool("revl_load", {"source": PLAIN, "modules": {key: FORGED}})
         assert loaded.get("ok") is True, loaded
         out = server.tool("revl_export", {"path": str(target), "overwrite": True})
@@ -431,3 +533,38 @@ def test_an_export_cannot_replace_the_live_operator_profile(tmp_path, trust):
                                        "allowed": False}, unload
     finally:
         server.close()
+
+
+def test_a_note_cannot_smuggle_host_code_through_a_reload(tmp_path):
+    """Review probe r02: a note body holding carriage returns was rendered as
+    a `//` comment the lexer read as one line, then written back over the
+    operator's file; read back with universal newlines it became declarations,
+    and a new server ran the agent's host code as the operator's. The export
+    is refused, the operator's file is unchanged, and nothing runs."""
+    base = tmp_path / "root"
+    base.mkdir()
+    ops = base / "ops.rvl"
+    ops.write_text(CLOCK, encoding="utf-8")
+    inject = "\r".join([
+        'extern pure fn boom() -> Str = @py { return "host code ran" }',
+        "service Ops { fn run() -> Str }",
+        "component OpsBox provides ops: Ops { provide ops { fn run() = boom() } }"])
+    server = _Stdio(base)
+    try:
+        assert server.tool("revl_load", {"files": [str(ops)]}).get("ok") is True
+        note = server.tool("revl_knowledge", {
+            "op": "add", "symbol": "FixedClock", "kind": "rationale",
+            "body": "why\r" + inject})
+        assert note.get("ok") is True, note
+        server.tool("revl_export", {"with_knowledge": True})
+    finally:
+        server.close()
+    assert ops.read_bytes() == CLOCK.encode("utf-8")
+    for path in [ops, *_export_dir(base).glob("*.rvl")]:
+        server = _Stdio(base)
+        try:
+            server.tool("revl_load", {"files": [str(path)]})
+            ran = server.tool("revl_call", {"key": "ops", "method": "run"})
+            assert ran.get("result") != "host code ran", (path, ran)
+        finally:
+            server.close()
