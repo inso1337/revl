@@ -82,6 +82,7 @@ from . import notes as _notes
 from . import proposal as _proposal
 from . import canonical as _canonical
 from . import edit as _edit
+from . import export_jail as _export_jail
 from . import effect_classes as _effect_classes
 from . import leases as _leases
 from . import operator as _operator
@@ -462,12 +463,21 @@ def _operator_text_of(in_memory: dict, providers: dict) -> dict:
     path outside them has no operator text, so everything sent for it stays the
     author's; reading it would make the trust decision an oracle on a file the
     jail exists to keep closed. An operator-sanctioned provider is the
-    operator's text by configuration."""
+    operator's text by configuration.
+
+    A file `revl_export` wrote is not the operator's text (issue #2524): its
+    bytes on disk are the agent's, so the operator text is what the export
+    recorded it replaced, or none at all for a file it created."""
     roots = _file_roots()
     operator: dict = {os.path.abspath(p): text for p, text in providers.items()}
     for path in in_memory:
         if path in operator or not _within_roots(path, roots) \
                 or not os.path.isfile(path):
+            continue
+        written, recorded = _export_jail.authorship(path)
+        if written:
+            if recorded is not None:
+                operator[path] = recorded
             continue
         try:
             with open(path, encoding="utf-8") as handle:
@@ -674,13 +684,17 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     admission refusal, so every caller's `except RevlError: return report(error)`
     already reports it correctly.
 
-    `files` are the exception, and the path jail is what earns it: a `.rvl` file
-    inside an operator-sanctioned root was not written by the agent — no MCP verb
-    writes to disk, so the only way bytes reach a jailed path is a human putting
-    them there. Those compile unprofiled, exactly as `Gate._compile_base` (the
-    embedder's own sources) does while `Gate.propose` (the agent's source) does
-    not. Inline `source` and `modules` always carry the profile: they arrived
-    over the transport, whatever path they claim to sit at.
+    `files` are the exception, and the path jail plus the export jail are what
+    earn it. `revl_export` is the one MCP verb that writes to disk, and under a
+    closed trust it records every file it writes (`export_jail`, issue #2524).
+    A jailed `.rvl` file no export wrote was put there by a human, and compiles
+    unprofiled, exactly as `Gate._compile_base` (the embedder's own sources)
+    does while `Gate.propose` (the agent's source) does not. A file an export
+    wrote, whether named in `files` or reached by `use` from one, is the
+    agent's: its text rides in memory, so the compile carries the profile and
+    the diff rule treats it as authored, exactly as if it had been sent inline.
+    Inline `source` and `modules` always carry the profile: they arrived over
+    the transport, whatever path they claim to sit at.
 
     With operator-sanctioned `providers` this is item 334's two-compile shape,
     not one compile with a flag, and for `Gate.propose`'s reasons:
@@ -702,9 +716,53 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     the disk, mapped to the text it compiled for each. It is filled on the
     compile whose document is returned and never enters that document.
     """
-    # jailed `files` with no transport-carried text are operator-authored.
+    base = AUTHORING.profile() if over_the_transport else None
     inline = source is not None or bool(modules)
-    profile = AUTHORING.profile() if inline and over_the_transport else None
+    # issue #2524: a `files` entry an export wrote is agent text, not the
+    # operator's. So is one a compile reaches by `use`, which only the compile
+    # itself can name: every pass that reads one from disk is repeated with it
+    # riding in memory, until a pass reads none.
+    from_files = base is not None and source is None and bool(files)
+    authored: dict = {}
+    assets: dict = {}
+    pending = list(files) if from_files else []
+    while True:
+        _ride_exported(pending, authored, assets, modules or {})
+        seen: dict = {}
+        profile = base if inline or authored else None
+        document = _compile_candidate(source, files, manifest,
+                                      {**assets, **authored, **(modules or {})},
+                                      replacing, profile, seen)
+        pending = ([p for p in (seen.get("dependencies") or {})
+                    if p not in authored and _export_jail.authorship(p)[0]]
+                   if from_files else [])
+        if not pending:
+            break
+    if report is not None:
+        report.update(seen)
+        roots = {os.path.abspath(p) for p in files or ()}
+        riding = {p: t for p, t in authored.items() if p not in roots}
+        if riding:
+            report["dependencies"] = {**(report.get("dependencies") or {}),
+                                      **riding}
+    return document
+
+
+def _ride_exported(paths, authored: dict, assets: dict, modules: dict) -> None:
+    """Add the exported files among `paths` to `authored`, with the assets the
+    operator's own text of each names to `assets` (an in-memory module reads
+    its assets only from the sources map; the agent's text gains no read)."""
+    for path, text in _export_jail.export_written(paths).items():
+        authored[path] = text
+        operator = _export_jail.authorship(path)[1]
+        assets.update(_edit._operator_assets(
+            path, operator, {**modules, **assets, **authored}))
+
+
+def _compile_candidate(source, files, manifest, modules, replacing, profile,
+                       report) -> dict:
+    """One pass of `compile_under_authoring`: the decision compile and, with
+    operator-sanctioned providers, the composition compile."""
     providers = dict(AUTHORING.providers or {})
     # operator-sanctioned modules ride UNDER the agent's own `modules`: an
     # agent-supplied entry can never displace a provider the operator granted.
@@ -2115,63 +2173,109 @@ def _tool_export(arguments: dict) -> dict:
     from disk back to its own path. An inline one writes to `path`, and its
     in-memory modules beside it, refusing to overwrite unless `overwrite`.
     Every path must be inside the sanctioned roots, checked before anything is
-    written, so a refusal writes nothing."""
+    written, so a refusal writes nothing.
+
+    Under a closed authoring trust the export jail applies (issue #2524, see
+    `export_jail`): an inline composition goes to `<root>/.revl/export/` with
+    only the `.rvl` modules it reaches (the rest are reported in `skipped`),
+    overwrites only what an export wrote, and every write is recorded so a
+    later `files` load compiles it under the profile. No export, under any
+    trust, replaces an operator configuration file the server opened."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded: revl_export writes the held "
                               "source of a running composition")
     held = _edit.running_source(SESSION)
+    skipped: list = []
     try:
-        plan = _export_plan(held, arguments)
-    except _edit.EditError as error:
+        plan = _export_plan(held, arguments, skipped)
+    except (_edit.EditError, _export_jail.ExportRefused) as error:
         return _session_error(str(error), written=[])
+    if _export_jailed():
+        for path, text in _export_jail.manifest_writes(plan, _file_roots()):
+            _write_atomic(path, text)
     for path, text in plan:
         _write_atomic(path, text)
-    return {"ok": True, "written": [p for p, _ in plan],
-            "note": "the held source was written to disk"
-                    if plan else "the disk already holds the held source"}
+    payload = {"ok": True, "written": [p for p, _ in plan],
+               "note": "the held source was written to disk"
+                       if plan else "the disk already holds the held source"}
+    if skipped:
+        payload["skipped"] = skipped
+    return payload
 
 
-def _export_plan(held: dict, arguments: dict) -> list[tuple[str, str]]:
+def _export_jailed() -> bool:
+    """Whether the export jail applies: the authoring trust is closed."""
+    return AUTHORING.profile() is not None
+
+
+def _export_plan(held: dict, arguments: dict,
+                 skipped: list | None = None) -> list[tuple[str, str]]:
     roots = _file_roots()
     if held.get("files"):
-        with_knowledge = arguments.get("with_knowledge") is True
-        # a vendored truc's records are the vendor's: never rendered, never
-        # copied into the project's sidecar. Nothing is rendered INTO a vendored
-        # component either, since its bytes are what truc.lock pins; a note
-        # about it stays in the sidecar (issue #1769)
-        all_notes = ([n for n in _notes.notes(SESSION).values() if not n.get("vendored")]
-                     if with_knowledge else [])
-        vendored = {path for _n, path, _p in _notes.vendored_trucs(held)}
-        targets = []
-        for path in held["files"]:
-            text = held["files_content"].get(path)
-            if text is not None and with_knowledge and path not in vendored:
-                text = _notes.render(text, path, [n for n in all_notes
-                                                   if n["anchor"]["path"] == path])
-            targets.append((path, text))
-        targets = [(p, t) for p, t in targets if _diverges(t, p)]
-        if with_knowledge:
-            targets += _notes.sidecar_writes(SESSION, held)
+        targets = _write_back_targets(held, arguments)
     else:
-        path = arguments.get("path")
-        if not isinstance(path, str) or not path:
-            raise _edit.EditError("this composition was loaded from inline source: "
-                                  "name the file to write in `path`")
-        base_dir = os.path.dirname(os.path.abspath(path))
-        targets = [(os.path.abspath(path), held["source"])] + [
-            (os.path.normpath(os.path.join(base_dir, key)), text)
-            for key, text in (held.get("modules") or {}).items()]
-        if arguments.get("overwrite") is not True:
-            existing = [p for p, _ in targets if os.path.exists(p)]
-            if existing:
-                raise _edit.EditError(
-                    f"refused: {', '.join(existing)} already exists; pass "
-                    "`overwrite: true` to replace it")
+        targets = _inline_targets(held, arguments, roots,
+                                  skipped if skipped is not None else [])
     outside = [p for p, _ in targets if not _within_roots(p, roots)]
     if outside:
         raise _edit.EditError(
             f"refused: {', '.join(outside)} is outside the operator-sanctioned "
             "root(s); nothing was written")
+    _export_jail.check_operator_files([p for p, _ in targets])
+    return targets
+
+
+def _write_back_targets(held: dict, arguments: dict) -> list[tuple[str, str]]:
+    """A files-loaded composition: each loaded file whose held text differs
+    from disk, back to its own path (plus knowledge sidecars on request)."""
+    with_knowledge = arguments.get("with_knowledge") is True
+    # a vendored truc's records are the vendor's: never rendered, never
+    # copied into the project's sidecar. Nothing is rendered INTO a vendored
+    # component either, since its bytes are what truc.lock pins; a note
+    # about it stays in the sidecar (issue #1769)
+    all_notes = ([n for n in _notes.notes(SESSION).values() if not n.get("vendored")]
+                 if with_knowledge else [])
+    vendored = {path for _n, path, _p in _notes.vendored_trucs(held)}
+    targets = []
+    for path in held["files"]:
+        text = held["files_content"].get(path)
+        if text is not None and with_knowledge and path not in vendored:
+            text = _notes.render(text, path, [n for n in all_notes
+                                               if n["anchor"]["path"] == path])
+        targets.append((path, text))
+    targets = [(p, t) for p, t in targets if _diverges(t, p)]
+    if _export_jailed():
+        _export_jail.check_write_back([p for p, _ in targets])
+    if with_knowledge:
+        targets += _notes.sidecar_writes(SESSION, held)
+    return targets
+
+
+def _inline_targets(held: dict, arguments: dict, roots: tuple[str, ...],
+                    skipped: list) -> list[tuple[str, str]]:
+    """An inline composition: `path`, and its in-memory modules beside it."""
+    path = arguments.get("path")
+    if not isinstance(path, str) or not path:
+        raise _edit.EditError("this composition was loaded from inline source: "
+                              "name the file to write in `path`")
+    modules = dict(held.get("modules") or {})
+    jailed = _export_jailed()
+    if jailed:
+        _export_jail.check_inline(path, modules, roots)
+        reached = _export_jail.reached_modules(held.get("source") or "", modules)
+        skipped.extend(sorted(k for k in modules if k not in reached))
+        modules = {k: v for k, v in modules.items() if k in reached}
+    base_dir = os.path.dirname(os.path.abspath(path))
+    targets = [(os.path.abspath(path), held["source"])] + [
+        (os.path.normpath(os.path.join(base_dir, key)), text)
+        for key, text in modules.items()]
+    existing = [p for p, _ in targets if os.path.exists(p)]
+    if existing and arguments.get("overwrite") is not True:
+        raise _edit.EditError(
+            f"refused: {', '.join(existing)} already exists; pass "
+            "`overwrite: true` to replace it")
+    if jailed:
+        _export_jail.check_foreign(existing)
     return targets
 
 

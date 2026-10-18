@@ -200,13 +200,18 @@ def test_inline_export_needs_a_path_inside_the_roots(clean_session, tmp_path_fac
     outside = tmp_path_factory.mktemp("elsewhere") / "x.rvl"
     refused = _call("revl_export", {"path": str(outside)})
     assert refused["ok"] is False and not outside.exists()
-    target = clean_session / "out.rvl"
+    # issue #2524: under a closed authoring trust an inline composition is
+    # exported into the root's export directory, never beside operator files
+    beside = clean_session / "out.rvl"
+    assert _call("revl_export", {"path": str(beside)})["ok"] is False
+    assert not beside.exists()
+    target = clean_session / ".revl" / "export" / "out.rvl"
     assert _call("revl_export", {"path": str(target)})["written"] == [str(target)]
     assert target.read_text(encoding="utf-8") == SOURCE
     again = _call("revl_export", {"path": str(target)})
     assert again["ok"] is False and "already exists" in again["diagnostics"][0]["message"]
     assert _call("revl_export", {"path": str(target), "overwrite": True})["ok"] is True
-    assert not any(name.endswith(".revl-export") for name in os.listdir(clean_session))
+    assert not any(name.endswith(".revl-export") for name in os.listdir(target.parent))
 
 
 # ------------------------------------------------ drafts

@@ -1000,7 +1000,37 @@ marked comment above its anchor, and every record not yet in the sidecar
 (`revl_knowledge`). A vendored truc's records and its `component.rvl` are left
 alone (issue #1769, see docs/registry.md §1.4).
 
+**Under a closed authoring trust** (the default; issue #2524), an export is
+jailed, because a file it writes could otherwise come back through `files` as
+if the operator had written it:
+
+- An inline composition is written only inside the export directory of a
+  sanctioned root, `<root>/.revl/export/`. `path` and every module must land
+  there; anything else is refused and nothing is written.
+- Only `.rvl` modules are written, and only those the program reaches by `use`.
+  A module key that is not a `.rvl` file is refused; a `.rvl` module the program
+  does not reach is not written and is listed in `skipped`.
+- `overwrite: true` replaces only a file an earlier export wrote and nobody has
+  changed since. Any other existing file is refused.
+- A files-loaded composition still writes back to the `.rvl` files it loaded.
+- Every write is recorded, path and SHA-256, in
+  `<root>/.revl/export/manifest.json`, with the operator's own text of a file an
+  export replaced. A later `files` load of a file inside an export directory, or
+  of one whose bytes still match its manifest entry, compiles under the profile,
+  as the same text would inline; so does such a file reached by `use`. For a
+  file written back over the operator's own, the profile diffs against the
+  recorded operator text (issue #1715), so the operator's declarations stay
+  trusted. Changing the file's bytes adopts it as the operator's, as does
+  deleting its manifest entry.
+
+Under every trust, an export never replaces a file the server opened as
+operator configuration at start (`--operator-profile`, `--policy`,
+`--provider`, `--restore`, and the `REVL_ESTOP_LATCH` file). Under
+`--author-trust trusted` the export is otherwise as described above, unjailed.
+
 - Inputs: `path` and `overwrite` (inline compositions); `with_knowledge`.
+- Output: `written` (the paths written); `skipped` (inline modules the program
+  does not reach, under a closed trust).
 
 ### The comment index (`knowledge` on responses)
 

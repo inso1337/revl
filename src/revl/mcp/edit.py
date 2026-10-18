@@ -802,8 +802,18 @@ def file_modules(vs: dict) -> dict:
         on_disk = _read_disk(path)
         if text is not None and text != on_disk:
             modules[os.path.abspath(path)] = text
-            modules.update(_operator_assets(path, on_disk, modules))
+            modules.update(_operator_assets(path, _operator_text(path, on_disk),
+                                            modules))
     return modules
+
+
+def _operator_text(path: str, on_disk: str | None) -> str | None:
+    """The operator's own text of `path`: what is on disk, unless an export
+    wrote it (issue #2524), then what that export recorded it replaced."""
+    from . import export_jail  # noqa: PLC0415
+
+    written, operator = export_jail.authorship(path)
+    return operator if written else on_disk
 
 
 def _operator_assets(path: str, on_disk: str | None, already: dict) -> dict:
