@@ -127,7 +127,8 @@ def test_the_report_is_exactly_what_an_export_would_write(tree):
     _load(tree)
     result = _change(tree)
     plan = server_mod._export_plan(edit_mod.virtual_source(server_mod.SESSION), {})
-    assert result["disk"]["stale"] == [path for path, _text in plan]
+    assert [str(_exported(p)) for p in result["disk"]["stale"]] == [
+        path for path, _text in plan]
     assert result["disk"]["stale"] == [str(tree["mem"])]
 
 
@@ -159,10 +160,11 @@ def test_export_reconciles_and_the_answer_goes_in_sync(tree):
     assert _change(tree)["disk"]["inSync"] is False
     exported = _call("revl_export", {})
     assert exported["ok"] is True, exported
-    assert exported["written"] == [str(tree["mem"])]
+    assert exported["written"] == [str(_exported(tree["mem"]))]
     assert exported["disk"] == {"inSync": True, "stale": []}
-    assert tree["mem"].read_text(encoding="utf-8") == _held(tree)
-    assert '== "b"' in tree["mem"].read_text(encoding="utf-8")
+    assert _exported(tree["mem"]).read_text(encoding="utf-8") == _held(tree)
+    assert '== "b"' in _exported(tree["mem"]).read_text(encoding="utf-8")
+    assert tree["mem"].read_text(encoding="utf-8") == MEM_TEXT
     after = _call("revl_source", {"symbol": "MemoryStore"})
     assert after["disk"] == {"inSync": True, "stale": []}
 
@@ -236,7 +238,8 @@ def test_the_export_plan_and_the_report_are_one_predicate(tree, monkeypatch):
     monkeypatch.setattr(server_mod, "_diverges", spy)
     plan = server_mod._export_plan(server_mod._edit.running_source(
         server_mod.SESSION), {})
-    assert [p for p, _ in plan] == result["disk"]["stale"]
+    assert [p for p, _ in plan] == [str(_exported(p))
+                                     for p in result["disk"]["stale"]]
     assert str(tree["mem"]) in seen
 
 
@@ -262,3 +265,11 @@ def test_the_core_tier_names_the_verb_that_writes_it_out():
     assert "revl_export" in described["revl_change"]
     assert "revl_export" in described["revl_edit"]
     assert "revl_export" in described["revl_source"]
+
+
+def _exported(path) -> Path:
+    """Where `revl_export` writes a loaded file: its copy under the export
+    directory, never the file itself (issue #2524)."""
+    from revl.mcp import export_jail  # noqa: PLC0415
+
+    return Path(export_jail.export_copy(str(path), server_mod._file_roots()))

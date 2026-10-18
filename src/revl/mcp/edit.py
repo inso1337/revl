@@ -802,8 +802,18 @@ def file_modules(vs: dict) -> dict:
         on_disk = _read_disk(path)
         if text is not None and text != on_disk:
             modules[os.path.abspath(path)] = text
-            modules.update(_operator_assets(path, on_disk, modules))
+            modules.update(_operator_assets(path, _operator_text(path, on_disk),
+                                            modules))
     return modules
+
+
+def _operator_text(path: str, on_disk: str | None) -> str | None:
+    """The operator's own text of `path`: what is on disk, unless the file is
+    inside an export directory (issue #2524), whose bytes are the agent's and
+    so carry no operator text at all."""
+    from . import export_jail  # noqa: PLC0415
+
+    return None if export_jail.in_export_area(path) else on_disk
 
 
 def _operator_assets(path: str, on_disk: str | None, already: dict) -> dict:
@@ -1029,7 +1039,9 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
                 "note": "proposed and verified: admission and every gate passed "
                         "against the running composition, which is unchanged. "
                         "Commit it, or discard it"}
-    state = session.swap(ir, origin=_origin_from(vs))
+    from .server import AUTHORING  # noqa: PLC0415 - lazy, avoids an import cycle
+    state = session.swap(ir, origin=_origin_from(vs),
+                         agent_authored=AUTHORING.profile() is not None)
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),

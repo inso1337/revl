@@ -3993,12 +3993,15 @@ fn emit_registers(step: Any, comps: List[Any]) -> Bool {
 // a backtick, so `$revl_frame.journalBegin()` followed by a parenthesized
 // acquisition (a ternary effect) parses as `journalBegin()(...)` and throws
 // "is not a function" when the bracket runs (issue #2501). A leading `;` ends
-// the previous statement; every other line is returned unchanged. `+`, `-`
-// and `/` cannot lead a rendered expression: no signed or regex literal, no
-// unary `+`, and `render_un` spells `-` as `revlI64(-x)`, `revlI32(-x)` or
-// `(-x)`.
+// the previous statement. A line starting with `{` is a parse error instead:
+// TypeScript reads a bare record literal at statement position as a block
+// (issue #2508), so it is wrapped, `;({...})`. Every other line is returned
+// unchanged. `+`, `-` and `/` cannot lead a rendered expression: no signed or
+// regex literal, no unary `+`, and `render_un` spells `-` as `revlI64(-x)`,
+// `revlI32(-x)` or `(-x)`.
 fn asi_safe(text: Str) -> Str {
   let head = text.slice(0, 1)
+  if (head == "{") { return `;(${text})` }
   if (head == "(" || head == "[" || head == "`") { return `;${text}` }
   return text
 }

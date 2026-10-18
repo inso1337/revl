@@ -226,7 +226,7 @@ def test_2_admitted_swap_carries_state_and_runs_new_code():
         successor = _ranker("weighted", 3)
         candidate = compile_source(successor, "ranker.rvl",
                                    manifest=session.ir, replacing=("TrendingRanker",))
-        state = session.swap(candidate, origin={"source": successor})
+        state = session.swap(candidate, origin={"source": successor}, agent_authored=False)
 
         # the swap reports the state it carried across (warm, 1 resource).
         assert state.get("handoff") == {
@@ -273,7 +273,7 @@ def test_3_refused_swap_retains_ownership_and_keeps_serving():
                                    "ranker.rvl", manifest=session.ir,
                                    replacing=("TrendingRanker",))
         with pytest.raises(SessionError) as excinfo:
-            session.swap(unhealthy, origin={"source": "unhealthy"})
+            session.swap(unhealthy, origin={"source": "unhealthy"}, agent_authored=False)
         assert "swap rejected" in str(excinfo.value)
 
         # retained ownership: gen N (the ORIGINAL recency build) is untouched and

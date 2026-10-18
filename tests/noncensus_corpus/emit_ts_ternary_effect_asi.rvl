@@ -12,6 +12,12 @@
 // emit and timer-firing sites executed and byte-checked. The reference now
 // `;`-leads every paren-led expression statement.
 //
+// Issue #2508: a statement that is only a record literal renders as a line
+// starting with `{`, which TypeScript reads as a block and refuses to parse
+// ("Expected a semicolon or an implicit semicolon after a statement"). A
+// leading `;` cannot fix that; the record is wrapped, `;({...})`. `tally`
+// holds the issue's shape: an `if` block, then the bare record, then `return`.
+//
 // It sits outside every corpus directory the census walks only so this
 // two-line emitter fix does not move the census baseline; nothing in it is a
 // native-gate refusal. tests/test_host_map_journal_2009.py runs it under node.
@@ -29,6 +35,12 @@ fn pick(c: Bool) -> Int {
   let x = 1
   c ? noop() : noop()
   return x
+}
+
+fn tally(c: Bool) -> Int {
+  if (c) { noop() }
+  {a: 1, b: 2}
+  return 0
 }
 
 component Ledger provides gate: Gate {
@@ -58,6 +70,10 @@ component Beat {
 
 test "a ternary expression statement after a let runs" {
   assert pick(true) == 1
+}
+
+test "a record literal statement after an if block runs" {
+  assert tally(true) == 0
 }
 
 lifecycle test "a ternary timer emission loads and unloads" {

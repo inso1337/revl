@@ -1778,7 +1778,7 @@ class Session:
         return module
 
     def swap(self, ir: dict, origin: dict | None = None,
-             migrate: str = "generational") -> dict:
+             migrate: str = "generational", *, agent_authored: bool) -> dict:
         """Replace the running composition. The caller has already had the
         candidate admitted; this performs the transition.
 
@@ -1824,7 +1824,7 @@ class Session:
         self._refuse_if_halted("swap")   # item 443
         checkpoint = _LoadCheckpoint(self)
         try:
-            plan = self._plan_swap(driver, ir, migrate)
+            plan = self._plan_swap(driver, ir, migrate, agent_authored)
         except BaseException as exc:
             checkpoint.restore(self)
             _name_the_candidate(exc, ir)
@@ -1835,7 +1835,8 @@ class Session:
             _name_the_candidate(exc, ir)
             raise
 
-    def _plan_swap(self, driver, ir: dict, migrate: str) -> "_SwapPlan":
+    def _plan_swap(self, driver, ir: dict, migrate: str,
+                   agent_authored: bool) -> "_SwapPlan":
         """Everything `swap` does before the teardown: every gate, rendering
         the successor, and capturing the state that crosses. The running
         generation is still live and serving throughout, and nothing here may
@@ -1906,8 +1907,7 @@ class Session:
             if driver.FiberState(fiber.state).name == "PENDING")
         return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
                          handoff_pre=handoff_pre, pre_resolved=pre_resolved,
-                         agent_authored=(migrate == "declared"
-                                         or self._serves_untrusted_author()),
+                         agent_authored=(migrate == "declared" or agent_authored),
                          pre_pending=pre_pending)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
@@ -2452,17 +2452,6 @@ class Session:
         frame = handle._frame()
         return list(frame._resources) if frame is not None else []
 
-    def _serves_untrusted_author(self) -> bool:
-        """Whether this is the MCP server's session and the server compiles
-        what its agent sends under the untrusted-author profile
-        (`AUTHORING.profile()`, the trust `compile_under_authoring` and the
-        edit path apply). Read off the loaded server module, never imported
-        here: an embedded session has no transport author."""
-        server = sys.modules.get("revl.mcp.server")
-        if server is None or getattr(server, "SESSION", None) is not self:
-            return False
-        return server.AUTHORING.profile() is not None
-
     def _restore_provider_state(self, new_ir: dict, pre: dict,
                                 agent_authored: bool = False) -> dict:
         """Thread each captured provider state onto the successor that
@@ -2558,7 +2547,7 @@ class Session:
             })
         return report or None
 
-    def rollback(self) -> dict:
+    def rollback(self, *, profile=None) -> dict:
         if self.previous is None:
             raise SessionError("no previous generation to roll back to")
         # The pointers are deliberately NOT cleared here. `swap` saves them
@@ -2570,6 +2559,11 @@ class Session:
         # operator retries it (item 372's activation health gate refuses a
         # rollback to a generation that no longer activates).
         restored, restored_origin = self.previous, self.previous_origin
+        # issue #2525: the restored generation is a candidate like any other.
+        # An untrusted author (`profile`, None for an operator) may not use it
+        # to move an admitted provider out of its realm; refused here, before
+        # any teardown.
+        self._refuse_realm_removal(restored, profile)
         # what the cold start below discards, read BEFORE it runs (issue
         # #2424): afterwards the live state is already gone.
         held, unread = self._live_state_or_reason()
@@ -2581,7 +2575,7 @@ class Session:
         # migration back), so it stays byte-identical to the pre-item-10 path.
         try:
             result = self.swap(restored, origin=restored_origin,
-                               migrate="respawn")
+                               migrate="respawn", agent_authored=False)
         except Exception as error:  # noqa: BLE001 - re-raised below
             # The generation counter moves at the teardown and nowhere before
             # it, so a failure that left it alone left the running generation
@@ -2601,6 +2595,23 @@ class Session:
         return result | {
             "rolledBack": True,
             "stateDropped": self._rollback_state_dropped(held, unread, withdrawn)}
+
+    def _refuse_realm_removal(self, target: dict, profile) -> None:
+        """Refuse a rollback target that moves a provider still admitted out of
+        the realm the running generation places it in, for the author whose
+        admission `profile` is given; None (an operator) is never refused
+        (issue #2525). The G9 admission refusal becomes a `SessionError`,
+        raised before anything is torn down."""
+        from ..admit_profile import check_no_realm_removal  # noqa: PLC0415
+        from ..errors import RevlError  # noqa: PLC0415
+
+        try:
+            check_no_realm_removal(self.ir, target, profile)
+        except RevlError as error:
+            message = error.message + (f" ({error.hint})" if error.hint else "")
+            raise SessionError(
+                f"rollback refused: {message}. The running composition is "
+                f"untouched.", code=error.code) from error
 
     def _live_state_or_reason(self) -> tuple[list[str], str | None]:
         """The components holding live state, or why that could not be read:
@@ -3141,7 +3152,7 @@ class Session:
                 f"may be missing from `components`")
         return out
 
-    def undo(self, to: int | None = None) -> dict:
+    def undo(self, to: int | None = None, *, profile=None) -> dict:
         """Return to an earlier generation — and be, itself, a gated change.
 
         `undo()` returns to generation N−1; `undo(to=g)` to any still-retained
@@ -3191,6 +3202,12 @@ class Session:
         try:
             target_ir = _recompile(target["snapshot"]["sources"],
                                    admitted_name(target["snapshot"]))
+            # issue #2525: an untrusted author (`profile`, None for an
+            # operator) may not undo an admitted provider out of its realm;
+            # refused like any target that no longer admits, before it goes
+            # live.
+            from ..admit_profile import check_no_realm_removal  # noqa: PLC0415
+            check_no_realm_removal(self.ir, target_ir, profile)
         except RevlError as error:
             diag = classify(error)
             # nothing ran, so no state was dropped: the list stays as the
@@ -3215,7 +3232,7 @@ class Session:
         # history, so an undo can itself be undone (git-revert of a git-revert).
         state = self.swap(
             target_ir, origin=_origin_from(target["snapshot"]["sources"]),
-            migrate="respawn")
+            migrate="respawn", agent_authored=False)
         return {
             "undone": True,
             "toGeneration": target["generation"],

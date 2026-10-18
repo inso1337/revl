@@ -339,7 +339,8 @@ class RemediationStrategy:
 
     name = "abstract"
 
-    def remediate(self, session, ir: dict, origin: dict | None) -> dict:
+    def remediate(self, session, ir: dict, origin: dict | None, *,
+                  over_the_transport: bool) -> dict:
         raise NotImplementedError
 
 
@@ -348,8 +349,14 @@ class SwapRemediation(RemediationStrategy):
 
     name = "swap"
 
-    def remediate(self, session, ir: dict, origin: dict | None) -> dict:
-        state = session.swap(ir, origin=origin)
+    def remediate(self, session, ir: dict, origin: dict | None, *,
+                  over_the_transport: bool) -> dict:
+        # the candidate is the author's only when the repair came over the
+        # transport and the server compiles its agent untrusted; the CLI's
+        # repair is the operator's own (the trust `_realm_removal_refusal` uses)
+        from .server import AUTHORING  # noqa: PLC0415 - cycle
+        state = session.swap(ir, origin=origin, agent_authored=(
+            over_the_transport and AUTHORING.profile() is not None))
         return {"strategy": self.name, "applied": True, "swap": state}
 
 
@@ -480,7 +487,8 @@ def run_repair(session, arguments: dict,
 
     try:
         remediation = strategy.remediate(session, gate["candidate_ir"],
-                                         origin=candidate_arg)
+                                         origin=candidate_arg,
+                                         over_the_transport=over_the_transport)
     except Exception as exc:  # noqa: BLE001 — a swap failure is a graded result
         remediation = {"strategy": strategy.name, "applied": False,
                        "error": f"{type(exc).__name__}: {exc}",

@@ -773,6 +773,21 @@ _HELD_VERBS = [
 ]
 
 
+# the marker each verb's held answer carries, the way `revl_check {}` answers
+# `checked: "session"` (issue #2117)
+_MARKER = {"revl_plan": "planned"}
+
+
+def _marker(verb):
+    return _MARKER.get(verb, "queried")
+
+
+def _unmarked(payload, verb):
+    """The answer without its provenance marker: what the same text sent
+    explicitly answers, which is what the held form is compared against."""
+    return {k: v for k, v in payload.items() if k != _marker(verb)}
+
+
 @pytest.mark.parametrize("verb,extra", _HELD_VERBS)
 def test_held_form_answers_like_the_explicit_form(monkeypatch, verb, extra):
     text = _TENANTS.read_text()
@@ -782,7 +797,7 @@ def test_held_form_answers_like_the_explicit_form(monkeypatch, verb, extra):
     explicit = _call(verb, {**extra, "files": [str(_TENANTS)]})
 
     assert held["ok"] is True, held
-    assert held == explicit
+    assert _unmarked(held, verb) == explicit
 
 
 @pytest.mark.parametrize("verb,extra", _HELD_VERBS)
@@ -879,4 +894,93 @@ def test_held_form_over_both_session_shapes(monkeypatch, tmp_path, shape,
     explicit = _call(verb, {**extra, **candidate})
 
     assert held["ok"] is True, held
-    assert held == explicit
+    assert _unmarked(held, verb) == explicit
+
+
+# ----- the held answer says it is the held set's (issue #2500)
+#
+# `revl_check {}` answers `checked: "session"`. A held query answers `queried:
+# "session"` and a held `revl_plan` answers `planned: "session"`, so a model
+# reading the answer knows which composition it describes. The marker is the
+# answer's provenance, not its verdict.
+
+_MARKED_VERBS = [
+    ("revl_query_withdraw", {"component": "C"}),
+    ("revl_query_dependents", {"target": "cache"}),
+    ("revl_query_emitters", {"target": "cache"}),
+    ("revl_query_reach", {"component": "C"}),
+    ("revl_query_drift", {"service": "Cache"}),
+    ("revl_plan", {}),
+]
+
+
+@pytest.mark.parametrize("verb,extra", _MARKED_VERBS)
+def test_held_answer_carries_the_session_marker(monkeypatch, verb, extra):
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    held = _call(verb, dict(extra))
+    explicit = _call(verb, {**extra, "source": READONLY})
+
+    assert held["ok"] is True, held
+    assert held[_marker(verb)] == "session"
+    assert _marker(verb) not in explicit
+    assert _unmarked(held, verb) == explicit
+
+
+@pytest.mark.parametrize("verb,extra", [
+    ("revl_query_withdraw", {"component": "Sent"}),
+    ("revl_plan", {}),
+])
+def test_an_explicit_candidate_wins_over_the_held_one(monkeypatch, verb, extra):
+    """The held text and the sent text differ (`C` against `Sent`), so the
+    answer shows which one was read. Sent source answers about the sent text
+    and carries no marker; the bare call in the same session still answers
+    about the held text and carries it."""
+    sent = READONLY.replace("component C ", "component Sent ")
+    _held(monkeypatch, _HeldSession(READONLY))
+
+    bare = _call(verb, {"component": "C"} if verb != "revl_plan" else {})
+    explicit = _call(verb, {**extra, "source": sent})
+
+    assert bare[_marker(verb)] == "session"
+    assert explicit["ok"] is True, explicit
+    assert _marker(verb) not in explicit
+    if verb == "revl_plan":
+        assert bare["candidate"]["components"] == ["C"]
+        assert explicit["candidate"]["components"] == ["Sent"]
+    else:
+        assert explicit["component"] == "Sent"
+        assert _call("revl_query_withdraw", {"component": "Sent"})["ok"] is False
+
+
+@pytest.mark.parametrize("verb,extra", [
+    ("revl_query_withdraw", {"component": "C"}),
+    ("revl_query_dependents", {"target": "s"}),
+    ("revl_plan", {}),
+])
+def test_a_held_composition_that_does_not_compile_is_marked(
+        monkeypatch, verb, extra):
+    """A held set that fails to compile is still an answer about the held set,
+    and the one a model most needs to know came from the held set rather than
+    from anything it sent."""
+    _held(monkeypatch, _HeldSession(UNDECLARED))
+
+    payload = _call(verb, dict(extra))
+
+    if verb == "revl_plan":   # a rejected candidate is explained, not refused
+        assert payload["admissible"] is False, payload
+    else:
+        assert payload["ok"] is False, payload
+    assert payload["diagnostics"][0]["code"] == "G1", payload
+    assert payload[_marker(verb)] == "session"
+    assert _marker(verb) not in _call(verb, {**extra, "source": UNDECLARED})
+
+
+@pytest.mark.parametrize("verb,extra", _MARKED_VERBS)
+def test_a_refusal_with_nothing_held_carries_no_marker(monkeypatch, verb, extra):
+    _held(monkeypatch, _HeldSession(loaded=False))
+
+    payload = _call(verb, dict(extra))
+
+    assert payload["ok"] is False
+    assert _marker(verb) not in payload

@@ -6417,9 +6417,18 @@ _HANDOFF_CORPUS = (
      _H_M, _h_comp("Store", None), ("Store",), ""),
     ("the table is keyed by KEY, so another component inherits the state too",
      _H_M, _h_comp("Fresh", "Int"), ("Store",), _h_drift("Int", "Str", "Fresh")),
-    ("an ALIAS is not erased on either side, so the spellings differ",
+    # issue #2514: the alias sweep walks every node by field, `handoff` included,
+    # so an alias is erased on BOTH sides before either shape is compared: the
+    # running one on the wire (`C=k:T` is rendered from the lowered IR) and the
+    # incoming one off the component's own annotation
+    ("an ALIAS on the running side is erased, so the spellings agree",
      _h_comp("Store", "S", extra="type S = Str\n"), _h_comp("Store", "Str"),
-     ("Store",), _h_drift("Str", "S")),
+     ("Store",), ""),
+    ("an ALIAS on the incoming side is erased too",
+     _H_M, _h_comp("Store", "S", extra="type S = Str\n"), ("Store",), ""),
+    ("and a drift through an alias is reported in the erased spelling",
+     _H_M, _h_comp("Store", "S", extra="type S = Int\n"), ("Store",),
+     _h_drift("Int", "Str")),
     ("the implicit same-name replacement reaches it with no `replacing=`",
      _H_M, _h_comp("Store", "Int"), (), _h_drift("Int", "Str")),
 )

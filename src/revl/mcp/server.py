@@ -82,6 +82,7 @@ from . import notes as _notes
 from . import proposal as _proposal
 from . import canonical as _canonical
 from . import edit as _edit
+from . import export_jail as _export_jail
 from . import effect_classes as _effect_classes
 from . import leases as _leases
 from . import operator as _operator
@@ -223,7 +224,8 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
 # `revl_restore` + `revl_snapshot` handed back a file's entire CONTENT.
 
 _PATH_ARGUMENTS = frozenset({"files", "candidateFiles", "baselineFiles",
-                             "traceFile", "registry", "policy"})
+                             "traceFile", "registry", "policy", "bundle",
+                             "known_hosts", "host_key"})
 
 # Issue #2033: `policy` and `registry` are paths only where they are DECLARED as
 # one, and that is the top level of a tool's own arguments — the only two sites
@@ -240,8 +242,17 @@ _PATH_ARGUMENTS = frozenset({"files", "candidateFiles", "baselineFiles",
 # (`repair._compile_candidate`). The other three never nest in any current
 # schema; they are kept at every depth anyway, so the narrower classification
 # can only ever refuse more, never admit more.
+#
+# Issue #2528: `revl_deploy` reads three local files. `bundle` is a top-level
+# argument (the attested bundle directory staged to the far host); `known_hosts`
+# (the pinned host-key file) and `host_key` (the conductor's copy of the far
+# host's receipt key) sit nested in `placement.processes.<p>.deploy`, so they
+# are paths at every depth. The deploy table's REMOTE fields (`host`,
+# `remote_bundle`, `extra_args`) name things on the far host, not here; the
+# deploy-map admission checks their shape instead (`deploy.admit_deploy_map`).
 _NESTED_PATH_ARGUMENTS = frozenset({"files", "candidateFiles",
-                                    "baselineFiles", "traceFile"})
+                                    "baselineFiles", "traceFile",
+                                    "known_hosts", "host_key"})
 
 
 def _file_roots() -> tuple[str, ...]:
@@ -319,14 +330,19 @@ def _walk_path_arguments(node, roots: tuple[str, ...], unadmitted: list,
     keys = _NESTED_PATH_ARGUMENTS if nested else _PATH_ARGUMENTS
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in keys:
-                if isinstance(value, str):
-                    node[key] = _rewrite_path_argument(value, roots, unadmitted)
-                elif isinstance(value, list):
-                    node[key] = [
-                        _rewrite_path_argument(v, roots, unadmitted)
-                        if isinstance(v, str) else v for v in value]
-            elif key not in _PATH_ARGUMENTS:
+            if key in keys and isinstance(value, str):
+                node[key] = _rewrite_path_argument(value, roots, unadmitted)
+            elif key in keys and isinstance(value, list):
+                node[key] = [
+                    _rewrite_path_argument(v, roots, unadmitted)
+                    if isinstance(v, str) else v for v in value]
+                for item in value:
+                    _walk_path_arguments(item, roots, unadmitted, nested=True)
+            else:
+                # issue #2528: a container under ANY key is walked, including
+                # one whose key is also a path-argument name (a process called
+                # `policy` holding a deploy table); a bare string under a key
+                # that is not a path here is left as written.
                 _walk_path_arguments(value, roots, unadmitted, nested=True)
     elif isinstance(node, list):
         for item in node:
@@ -355,21 +371,23 @@ def _collect_path_arguments(node, out: list, *, nested: bool = False) -> None:
     from disk. A key that is a path only because a tool declares it as one
     (`policy`, `registry`) does not become a path again by being nested.
 
-    The descent itself is unchanged — a key that names a path is still never
-    walked into, at any depth — so this collector's output is a strict SUBSET of
-    what it collected before the fix, for every input: the jail can only ever
-    refuse less of what it should not have refused, never admit a path it
-    refused. `_NESTED_PATH_ARGUMENTS ⊆ _PATH_ARGUMENTS` is what makes that hold.
+    Issue #2528: every dict or list is walked whatever key holds it. A key
+    that is a path-argument name but holds a container (a placement process
+    named `policy` or `bundle`, with its deploy table) used to be neither
+    collected nor descended, so the paths inside it escaped the jail. A bare
+    string is collected only under a key that names a path at that depth;
+    descending into one is a no-op, so the classification above is unchanged.
     """
     keys = _NESTED_PATH_ARGUMENTS if nested else _PATH_ARGUMENTS
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in keys:
-                if isinstance(value, str):
-                    out.append(value)
-                elif isinstance(value, list):
-                    out.extend(v for v in value if isinstance(v, str))
-            elif key not in _PATH_ARGUMENTS:
+            if key in keys and isinstance(value, str):
+                out.append(value)
+            elif key in keys and isinstance(value, list):
+                out.extend(v for v in value if isinstance(v, str))
+                for item in value:
+                    _collect_path_arguments(item, out, nested=True)
+            else:
                 _collect_path_arguments(value, out, nested=True)
     elif isinstance(node, list):
         for item in node:
@@ -462,12 +480,17 @@ def _operator_text_of(in_memory: dict, providers: dict) -> dict:
     path outside them has no operator text, so everything sent for it stays the
     author's; reading it would make the trust decision an oracle on a file the
     jail exists to keep closed. An operator-sanctioned provider is the
-    operator's text by configuration."""
+    operator's text by configuration.
+
+    A file inside an export directory is never the operator's text (issue
+    #2524): its bytes are the agent's, so it has no operator text at all."""
     roots = _file_roots()
     operator: dict = {os.path.abspath(p): text for p, text in providers.items()}
     for path in in_memory:
         if path in operator or not _within_roots(path, roots) \
                 or not os.path.isfile(path):
+            continue
+        if _export_jail.in_export_area(path):
             continue
         try:
             with open(path, encoding="utf-8") as handle:
@@ -674,13 +697,19 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     admission refusal, so every caller's `except RevlError: return report(error)`
     already reports it correctly.
 
-    `files` are the exception, and the path jail is what earns it: a `.rvl` file
-    inside an operator-sanctioned root was not written by the agent — no MCP verb
-    writes to disk, so the only way bytes reach a jailed path is a human putting
-    them there. Those compile unprofiled, exactly as `Gate._compile_base` (the
-    embedder's own sources) does while `Gate.propose` (the agent's source) does
-    not. Inline `source` and `modules` always carry the profile: they arrived
-    over the transport, whatever path they claim to sit at.
+    `files` are the exception, and the path jail plus the export jail are what
+    earn it. `revl_export` is the one MCP verb that writes to disk, and it
+    writes only under `<root>/.revl/export/`, never over a file it did not
+    write (`export_jail`, issue #2524). A jailed `.rvl` file outside any export
+    directory was put there by a human, and compiles unprofiled, exactly as
+    `Gate._compile_base` (the embedder's own sources) does while
+    `Gate.propose` (the agent's source) does not. A file inside an export
+    directory, whether named in `files` or reached by `use` from one, is the
+    agent's by its path alone: its text rides in memory with no operator text,
+    so the compile carries the profile and the diff rule treats it as
+    authored, exactly as if it had been sent inline.
+    Inline `source` and `modules` always carry the profile: they arrived over
+    the transport, whatever path they claim to sit at.
 
     With operator-sanctioned `providers` this is item 334's two-compile shape,
     not one compile with a flag, and for `Gate.propose`'s reasons:
@@ -702,9 +731,52 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     the disk, mapped to the text it compiled for each. It is filled on the
     compile whose document is returned and never enters that document.
     """
-    # jailed `files` with no transport-carried text are operator-authored.
+    base = AUTHORING.profile() if over_the_transport else None
     inline = source is not None or bool(modules)
-    profile = AUTHORING.profile() if inline and over_the_transport else None
+    # issue #2524: a `files` entry an export wrote is agent text, not the
+    # operator's. So is one a compile reaches by `use`, which only the compile
+    # itself can name: every pass that reads one from disk is repeated with it
+    # riding in memory (the text that pass parsed), until a pass reads none.
+    from_files = base is not None and source is None and bool(files)
+    authored: dict = {}
+    assets: dict = {}
+    pending = _export_jail.exported_texts(files) if from_files else {}
+    while True:
+        _ride_exported(pending, authored, assets, modules or {})
+        seen: dict = {}
+        profile = base if inline or authored else None
+        document = _compile_candidate(source, files, manifest,
+                                      {**assets, **authored, **(modules or {})},
+                                      replacing, profile, seen)
+        pending = ({p: t for p, t in (seen.get("disk_reads") or {}).items()
+                    if p not in authored and _export_jail.in_export_area(p)}
+                   if from_files else {})
+        if not pending:
+            break
+    if report is not None:
+        report.update(seen)
+        roots = {os.path.abspath(p) for p in files or ()}
+        riding = {p: t for p, t in authored.items() if p not in roots}
+        if riding:
+            report["dependencies"] = {**(report.get("dependencies") or {}),
+                                      **riding}
+    return document
+
+
+def _ride_exported(texts: dict, authored: dict, assets: dict,
+                   modules: dict) -> None:
+    """Add exported files (`{abspath: text}`) to `authored`. An exported file
+    has no operator text, so it names no asset the compile may read for it:
+    an in-memory module reads assets only from the sources map, and the
+    agent's text gains no read."""
+    del assets, modules
+    authored.update(texts)
+
+
+def _compile_candidate(source, files, manifest, modules, replacing, profile,
+                       report) -> dict:
+    """One pass of `compile_under_authoring`: the decision compile and, with
+    operator-sanctioned providers, the composition compile."""
     providers = dict(AUTHORING.providers or {})
     # operator-sanctioned modules ride UNDER the agent's own `modules`: an
     # agent-supplied entry can never displace a provider the operator granted.
@@ -1436,7 +1508,8 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # composition running before the swap
     radius = _authoring_loop.blast_radius(running, full)
     try:
-        state = SESSION.swap(full, origin=origin)
+        state = SESSION.swap(full, origin=origin,
+                             agent_authored=AUTHORING.profile() is not None)
     except SessionError as error:
         return _session_error(error)
     except ApprovalRequired as exc:
@@ -1658,7 +1731,8 @@ def _swap_server_side(replacing: tuple) -> dict:
             return refused
     radius = _authoring_loop.blast_radius(running, full)  # issue #1704
     try:
-        state = SESSION.swap(full, origin=_edit._origin_from(vs))
+        state = SESSION.swap(full, origin=_edit._origin_from(vs),
+                             agent_authored=AUTHORING.profile() is not None)
     except SessionError as error:
         return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,
@@ -1991,7 +2065,16 @@ def _diverges(text, path) -> bool:
     The session-vs-disk comparison, in one place. `text is None` means the
     session holds no text for that path at all, which is not a divergence to
     report — there is nothing the session would be writing over."""
-    return text is not None and text != _edit._read_disk(path)
+    return text is not None and text != _written_text(path)
+
+
+def _written_text(path: str) -> str | None:
+    """What an export last wrote for the loaded file `path`: its copy under
+    the export directory once one exists (issue #2524), else the file."""
+    copy = _export_jail.export_copy(path, _file_roots())
+    if copy != path and os.path.exists(copy):
+        return _edit._read_disk(copy)
+    return _edit._read_disk(path)
 
 
 def diverged_paths(texts: dict, paths) -> list[str]:
@@ -2015,7 +2098,9 @@ def _disk_state_of(held: dict) -> dict:
     inline composition, or a session holding nothing — has nothing on disk to
     be out of step with, so it is `inSync`. The single place `diverged_paths`
     is turned into the published `{inSync, stale}` shape, so the change loop's
-    answer and the unload preflight's cannot drift."""
+    answer and the unload preflight's cannot drift. `stale` names the loaded
+    files; an export writes each one's copy under the export directory (issue
+    #2524), and a file is in sync once that copy holds its text."""
     stale = diverged_paths(held.get(_edit.ORIGIN_FILES_CONTENT) or {},
                            held.get(_edit.ORIGIN_FILES) or [])
     return {"inSync": not stale, "stale": stale}
@@ -2142,74 +2227,149 @@ def _tool_export(arguments: dict) -> dict:
     """Write the running composition's held source to disk, on request (issue
     #1696). The held source is the source of truth; this is its one way out.
     A files-loaded composition writes each loaded file whose held text differs
-    from disk back to its own path. An inline one writes to `path`, and its
+    to its copy under `<root>/.revl/export/`. An inline one writes to `path`, and its
     in-memory modules beside it, refusing to overwrite unless `overwrite`.
     Every path must be inside the sanctioned roots, checked before anything is
-    written, so a refusal writes nothing."""
+    written, so a refusal writes nothing.
+
+    The export jail (issue #2524, see `export_jail`), under every trust: a
+    files-loaded composition writes each changed file to its copy under
+    `<root>/.revl/export/`, never over the operator's file; an existing
+    destination is replaced only when an export wrote its bytes (each write is
+    recorded in the export manifest); and no export replaces an operator
+    configuration file or emergency-stop latch. An inline composition goes to
+    the export directory too, with only the `.rvl` modules it reaches (the rest
+    are reported in `skipped`). None of this depends on the authoring trust,
+    which decides only how a file under the export directory compiles."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded: revl_export writes the held "
                               "source of a running composition")
     held = _edit.running_source(SESSION)
+    skipped: list = []
     try:
-        plan = _export_plan(held, arguments)
-    except _edit.EditError as error:
+        plan = _export_plan(held, arguments, skipped)
+    except (_edit.EditError, _export_jail.ExportRefused) as error:
         return _session_error(str(error), written=[])
-    for path, text in plan:
-        _write_atomic(path, text)
-    return {"ok": True, "written": [p for p, _ in plan],
-            "note": "the held source was written to disk"
-                    if plan else "the disk already holds the held source"}
+    written: list = []
+    try:
+        for path, text in plan:
+            _write_atomic(path, text)
+            written.append((path, text))
+    finally:
+        # recorded only once its bytes are on disk: a failed write records
+        # nothing, so the manifest never vouches for bytes no export wrote
+        for path, text in _export_jail.manifest_writes(written, _file_roots()):
+            _write_atomic(path, text)
+    payload = {"ok": True, "written": [p for p, _ in plan],
+               "note": "the held source was written to disk"
+                       if plan else "the disk already holds the held source"}
+    if skipped:
+        payload["skipped"] = skipped
+    return payload
 
 
-def _export_plan(held: dict, arguments: dict) -> list[tuple[str, str]]:
+def _export_plan(held: dict, arguments: dict,
+                 skipped: list | None = None) -> list[tuple[str, str]]:
+    """What an export writes, after every jail check, under every authoring
+    trust (issue #2524). `revl_export` is reached only over the transport, so
+    whoever asks is an author whatever the trust flag: trust decides how a
+    file under the export directory compiles, never where a write lands or
+    what it may replace. There is no in-place path."""
     roots = _file_roots()
     if held.get("files"):
-        with_knowledge = arguments.get("with_knowledge") is True
-        # a vendored truc's records are the vendor's: never rendered, never
-        # copied into the project's sidecar. Nothing is rendered INTO a vendored
-        # component either, since its bytes are what truc.lock pins; a note
-        # about it stays in the sidecar (issue #1769)
-        all_notes = ([n for n in _notes.notes(SESSION).values() if not n.get("vendored")]
-                     if with_knowledge else [])
-        vendored = {path for _n, path, _p in _notes.vendored_trucs(held)}
-        targets = []
-        for path in held["files"]:
-            text = held["files_content"].get(path)
-            if text is not None and with_knowledge and path not in vendored:
-                text = _notes.render(text, path, [n for n in all_notes
-                                                   if n["anchor"]["path"] == path])
-            targets.append((path, text))
-        targets = [(p, t) for p, t in targets if _diverges(t, p)]
-        if with_knowledge:
-            targets += _notes.sidecar_writes(SESSION, held)
+        targets = _write_back_targets(held, arguments)
     else:
-        path = arguments.get("path")
-        if not isinstance(path, str) or not path:
-            raise _edit.EditError("this composition was loaded from inline source: "
-                                  "name the file to write in `path`")
-        base_dir = os.path.dirname(os.path.abspath(path))
-        targets = [(os.path.abspath(path), held["source"])] + [
-            (os.path.normpath(os.path.join(base_dir, key)), text)
-            for key, text in (held.get("modules") or {}).items()]
-        if arguments.get("overwrite") is not True:
-            existing = [p for p, _ in targets if os.path.exists(p)]
-            if existing:
-                raise _edit.EditError(
-                    f"refused: {', '.join(existing)} already exists; pass "
-                    "`overwrite: true` to replace it")
+        targets = _inline_targets(held, arguments, roots,
+                                  skipped if skipped is not None else [])
     outside = [p for p, _ in targets if not _within_roots(p, roots)]
     if outside:
         raise _edit.EditError(
             f"refused: {', '.join(outside)} is outside the operator-sanctioned "
             "root(s); nothing was written")
+    paths = [p for p, _ in targets]
+    _export_jail.check_not_manifest(paths, roots)
+    _export_jail.check_operator_files(paths, _live_latches())
+    _export_jail.check_not_linked(paths)
+    existing = [p for p in paths if os.path.lexists(p)]
+    if existing and not held.get("files") and arguments.get("overwrite") is not True:
+        raise _edit.EditError(
+            f"refused: {', '.join(existing)} already exists; pass "
+            "`overwrite: true` to replace it")
+    _export_jail.check_foreign(existing, roots)
     return targets
+
+
+def _live_latches() -> list:
+    """The emergency-stop latches this session acts on (issue #2535): the
+    latch beside the WAL it journals to, and the one an SLO contract bound.
+    Read at export time, because the WAL moves with each load."""
+    from ..estop import latch_path  # noqa: PLC0415
+
+    wals = (SESSION._slo_wal(), getattr(SESSION, "_wal_path", None))
+    return [latch_path(wal=w, env=False) for w in wals if w] + [
+        getattr(SESSION, "_slo_latch", None)]
+
+
+def _write_back_targets(held: dict, arguments: dict) -> list[tuple[str, str]]:
+    """A files-loaded composition: each loaded file whose held text differs
+    from its export copy, written to that copy under the export directory,
+    never over the operator's file (plus knowledge sidecars on request)."""
+    with_knowledge = arguments.get("with_knowledge") is True
+    # a vendored truc's records are the vendor's: never rendered, never
+    # copied into the project's sidecar. Nothing is rendered INTO a vendored
+    # component either, since its bytes are what truc.lock pins; a note
+    # about it stays in the sidecar (issue #1769)
+    all_notes = ([n for n in _notes.notes(SESSION).values() if not n.get("vendored")]
+                 if with_knowledge else [])
+    vendored = {path for _n, path, _p in _notes.vendored_trucs(held)}
+    _export_jail.check_note_bodies(all_notes)
+    roots = _file_roots()
+    targets = []
+    for path in held["files"]:
+        text = held["files_content"].get(path)
+        if text is not None and with_knowledge and path not in vendored:
+            text = _notes.render(text, path, [n for n in all_notes
+                                               if n["anchor"]["path"] == path])
+        targets.append((path, text))
+    targets = [(_export_jail.export_copy(p, roots), t)
+               for p, t in targets if _diverges(t, p)]
+    _export_jail.check_write_back([p for p, _ in targets])
+    if with_knowledge:
+        targets += _notes.sidecar_writes(SESSION, held)
+    return targets
+
+
+def _inline_targets(held: dict, arguments: dict, roots: tuple[str, ...],
+                    skipped: list) -> list[tuple[str, str]]:
+    """An inline composition: `path`, and its in-memory modules beside it."""
+    path = arguments.get("path")
+    if not isinstance(path, str) or not path:
+        raise _edit.EditError("this composition was loaded from inline source: "
+                              "name the file to write in `path`")
+    modules = dict(held.get("modules") or {})
+    base_dir = os.path.dirname(os.path.abspath(path))
+
+    def placed(keys):
+        return [os.path.abspath(path)] + [
+            os.path.normpath(os.path.join(base_dir, key)) for key in keys]
+
+    # what is never a target is refused first, whatever else is wrong
+    _export_jail.check_not_manifest(placed(modules), roots)
+    _export_jail.check_operator_files(placed(modules), _live_latches())
+    _export_jail.check_inline(path, modules, roots)
+    reached = _export_jail.reached_modules(held.get("source") or "", modules)
+    skipped.extend(sorted(k for k in modules if k not in reached))
+    modules = {k: v for k, v in modules.items() if k in reached}
+    return list(zip(placed(modules),
+                    [held["source"], *modules.values()]))
 
 
 def _write_atomic(path: str, text: str) -> None:
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     temporary = os.path.join(directory, f".{os.path.basename(path)}.revl-export")
-    with open(temporary, "w", encoding="utf-8") as handle:
+    # newline="": the bytes written are the text the manifest hashes
+    with open(temporary, "w", encoding="utf-8", newline="") as handle:
         handle.write(text)
     os.replace(temporary, path)
 
@@ -2298,7 +2458,7 @@ def _edit_loaded_result(arguments: dict, verify, commit: bool) -> dict:
 
 def _tool_rollback(_arguments: dict) -> dict:
     try:
-        return {"ok": True, **SESSION.rollback()}
+        return {"ok": True, **SESSION.rollback(profile=AUTHORING.profile())}
     except SessionError as error:
         # a rollback refused after its teardown restarted the running
         # generation cold, and says which state that dropped (issue #2424)
@@ -2331,7 +2491,7 @@ def _tool_undo(arguments: dict) -> dict:
     if not SESSION.loaded:
         return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     try:
-        result = SESSION.undo(arguments.get("to"))
+        result = SESSION.undo(arguments.get("to"), profile=AUTHORING.profile())
     except SessionError as error:
         return _session_error(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the
@@ -3319,15 +3479,21 @@ def _check_held(arguments: dict) -> dict:
     return result
 
 
-def _with_held_candidate(handler, refuse_empty: bool = False):
+def _with_held_candidate(handler, marker: str, refuse_empty: bool = False):
     """Give a source-taking verb the held-session form `revl_check` has
     (issue #2500, after #2117): called with no `source`/`files`, it reads the
     working set the session holds through `_held_working_set` and
     `_held_candidate`, the same door `revl_check {}` and `revl_swap {}` use,
-    and answers exactly as it would for that text sent explicitly.
+    and answers exactly as it would for that text sent explicitly, plus
+    `marker: "session"` (`queried` for the queries, `planned` for the plan),
+    the way `revl_check {}` answers `checked: "session"`. The marker is the
+    answer's provenance, not its verdict, so it also rides an `ok: false`
+    answer about the held set (an unknown component, a held composition that
+    does not compile). The refusals below are not answers about a composition
+    and carry none.
 
-    A call that names a candidate is untouched. With nothing held the verb's
-    own refusal stands; `refuse_empty` is for a verb (`revl_plan`) whose
+    A call that names a candidate is untouched and unmarked. With nothing
+    held the verb's own refusal stands; `refuse_empty` is for a verb (`revl_plan`) whose
     handler would otherwise raise instead of refusing, so it gets the same
     `usage` refusal."""
     def wrapped(arguments: dict):
@@ -3361,7 +3527,10 @@ def _with_held_candidate(handler, refuse_empty: bool = False):
         refusal = _authoring_refusal(candidate)
         if refusal is not None:
             return refusal
-        return handler({**arguments, **candidate})
+        answer = handler({**arguments, **candidate})
+        if isinstance(answer, dict):
+            answer[marker] = "session"
+        return answer
     wrapped.__name__ = getattr(handler, "__name__", "wrapped")
     wrapped.__doc__ = handler.__doc__
     return wrapped
@@ -3369,7 +3538,8 @@ def _with_held_candidate(handler, refuse_empty: bool = False):
 
 _HELD_DOC = (" `source`/`files` are optional when the session holds a "
              "composition: with neither, the verb reads the held working set "
-             "(the same one `revl_check {}` and `revl_swap {}` read).")
+             "(the same one `revl_check {}` and `revl_swap {}` read) and "
+             "answers `queried: \"session\"`.")
 
 
 def _check_as_sent(arguments: dict, held: dict | None = None) -> dict:
@@ -3555,11 +3725,47 @@ def _tool_deploy(arguments: dict) -> dict:
                               authorize=_tool_deploy_authorize)
 
 
+def _deploy_paths_outside_roots(arguments: dict) -> list:
+    """The local files a deploy reads, found by POSITION (issue #2528): the
+    top-level `bundle` and each `processes.<p>.deploy.{known_hosts,host_key}`,
+    whatever the process is called. Returns `(process, field, path)` for each
+    one no sanctioned root admits. The generic jail sees the same fields by key
+    name; this check does not depend on that."""
+    roots = _file_roots()
+    escaped = []
+
+    def check(process, field, path):
+        if path is None:
+            return
+        if not isinstance(path, str) or _root_resolved(path, roots) is None:
+            escaped.append((process, field, path))
+
+    check("-", "bundle", arguments.get("bundle"))
+    placement = arguments.get("placement")
+    processes = placement.get("processes") if isinstance(placement, dict) else None
+    if isinstance(processes, dict):
+        for pname in sorted(processes, key=str):
+            pconf = processes.get(pname)
+            table = pconf.get("deploy") if isinstance(pconf, dict) else None
+            if isinstance(table, dict):
+                for field in ("known_hosts", "host_key"):
+                    check(str(pname), field, table.get(field))
+    return escaped
+
+
 def _tool_deploy_admit(arguments: dict) -> dict:
     """The deploy-map admission gate (`deploy.admit_deploy_map`): the effect-free
     half that parses the `[processes.<p>.deploy]` tables and refuses a machine
     boundary without a pinned host key, an unknown `via`, a network provider, and
     so on — before any boundary opens. Nothing is staged or spawned here."""
+    escaped = _deploy_paths_outside_roots(arguments)
+    if escaped:
+        return {"ok": False, "targets": {}, "boundaries": {},
+                "refusals": [{"process": process, "rule": "outside-root",
+                              "reason": f"`{field} = {path!r}` is outside the "
+                                        f"operator-sanctioned root(s); a deploy "
+                                        f"may only read local files inside them"}
+                             for process, field, path in escaped]}
     verdict = _deploy.admit_deploy_map(arguments.get("placement"))
     return {
         "ok": verdict.ok,
@@ -3590,6 +3796,51 @@ def _tool_deploy_run(arguments: dict) -> dict:
     return _deploy.deploy_local_map(placement, state_dir=state_dir)
 
 
+_DEPLOY_TICKET_FIELDS = ("via", "host", "port", "remote_bundle", "runner",
+                         "extra_args", "known_hosts", "host_key")
+
+
+def _deploy_ticket_targets(placement) -> list:
+    """What a yes to a deploy ticket lets reach each far host (issue #2528):
+    the host, the remote bundle path, the runner and its options, and the local
+    pin and key files, copied verbatim from the deploy map so the approver reads
+    the values the run will use. The digests bind the same map."""
+    processes = (placement or {}).get("processes") or {}
+    if not isinstance(processes, dict):
+        return []
+    out = []
+    for pname in sorted(processes, key=str):
+        pconf = processes.get(pname) or {}
+        table = pconf.get("deploy") if isinstance(pconf, dict) else None
+        entry = {"process": pname}
+        if isinstance(table, dict):
+            entry.update({k: table[k] for k in _DEPLOY_TICKET_FIELDS
+                          if table.get(k) is not None})
+        else:
+            entry["via"] = "local"
+        out.append(entry)
+    return out
+
+
+def _deploy_ticket_summary(bundle, backend, targets: list) -> str:
+    """The deploy ticket in plain text, one line per target, next to the digest."""
+    lines = [f"deploy bundle {bundle!r} (backend {backend})"]
+    for t in targets:
+        if t.get("via") == "ssh":
+            extra = t.get("extra_args") or []
+            lines.append(
+                f"process {t['process']!r} via ssh to host {t.get('host')!r}"
+                f" port {t.get('port', '(ssh default)')},"
+                f" remote path {t.get('remote_bundle')!r},"
+                f" runner {t.get('runner', 'revl')!r},"
+                f" options {' '.join(map(str, extra)) or '(none)'},"
+                f" known_hosts {t.get('known_hosts')!r},"
+                f" host_key {t.get('host_key')!r}")
+        else:
+            lines.append(f"process {t['process']!r} via {t.get('via')}")
+    return "\n".join(lines)
+
+
 def _tool_deploy_authorize(arguments: dict) -> None:
     """The deploy's approval gate (item 246): a cross-machine reconfiguration is
     an irreversible crossing, so `apply: true` demands a standing approval before
@@ -3606,6 +3857,7 @@ def _tool_deploy_authorize(arguments: dict) -> None:
     bundle = arguments.get("bundle")
     backend = arguments.get("backend") or "python"
     processes = sorted((placement or {}).get("processes") or {})
+    targets = _deploy_ticket_targets(placement)
     body = {
         "kind": "deploy",
         "component": "*",
@@ -3622,6 +3874,8 @@ def _tool_deploy_authorize(arguments: dict) -> None:
         "closureComponents": [],
         "boundary": "machine",
         "targets": processes,
+        "deploy": {"bundle": bundle, "backend": backend, "targets": targets},
+        "summary": _deploy_ticket_summary(bundle, backend, targets),
     }
     body["hash"] = _approval_sha(_approval_canon(body))
     standing = SESSION._find_standing_approval(body)
@@ -3998,7 +4252,8 @@ TOOLS = [
                        "is explained, not thrown. Defaults to the composition this "
                        "server has loaded, so it is the rehearsal for revl_swap. With no "
                        "`source`/`files` it plans the working set the session "
-                       "holds, as `revl_swap {}` would re-admit it.",
+                       "holds, as `revl_swap {}` would re-admit it, and answers "
+                       "`planned: \"session\"`.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4012,7 +4267,8 @@ TOOLS = [
             },
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
-        "handler": _with_held_candidate(_tool_plan, refuse_empty=True),
+        "handler": _with_held_candidate(
+            _tool_plan, "planned", refuse_empty=True),
     },
     {
         "name": "revl_ship",
@@ -4071,7 +4327,8 @@ TOOLS = [
                        "refused without the configured approval: it returns an "
                        "`approvalRequired` ticket, and the identical re-issue "
                        "after `revl_approve` fires exactly once. Host/user/port/"
-                       "known_hosts/host_key/remote_bundle/ssh options are the "
+                       "known_hosts/host_key/remote_bundle/runner flags "
+                       "(`extra_args`) are the "
                        "`[processes.<p>.deploy]` table inside `placement` (the "
                        "shape `parse_deploy_map` and `DeployTarget` read), not "
                        "top-level arguments.",
@@ -4425,9 +4682,11 @@ TOOLS = [
                        "request: the held source is the source of truth and disk "
                        "is an export (docs/design/1696-speculation.md). A "
                        "composition loaded from files writes each file whose held "
-                       "text differs back to its own path; one loaded from inline "
+                       "text differs to its copy under <root>/.revl/export/, never "
+                       "over the file; one loaded from inline "
                        "source writes to `path` (and its modules beside it), "
-                       "refusing to overwrite unless `overwrite: true`. Every path "
+                       "refusing to overwrite unless `overwrite: true`, and never "
+                       "over a file an export did not write. Every path "
                        "must be inside the sanctioned roots, or nothing is written. "
                        "Never writes a proposal: commit it first.",
         "inputSchema": {
@@ -5873,7 +6132,7 @@ TOOLS.append({
 # composition queries (docs/queries.md) — defined next door so this module
 # stays the protocol layer and the query surface can grow on its own
 for _query in QUERY_TOOLS:
-    _query["handler"] = _with_held_candidate(_query["handler"])
+    _query["handler"] = _with_held_candidate(_query["handler"], "queried")
     _query["description"] += _HELD_DOC
 TOOLS.extend(QUERY_TOOLS)
 

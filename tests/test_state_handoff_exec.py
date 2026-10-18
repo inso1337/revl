@@ -78,7 +78,7 @@ def test_state_crosses_to_a_compatible_successor():
 
         candidate = compile_source(_cache(version=2), "cache.rvl",
                                    manifest=session.ir, replacing=("Cache",))
-        state = session.swap(candidate, origin={"source": _cache(version=2)})
+        state = session.swap(candidate, origin={"source": _cache(version=2)}, agent_authored=False)
 
         # the swap reports what state it carried across
         assert state.get("handoff") == {
@@ -112,7 +112,7 @@ def test_incompatible_handoff_is_refused_at_admission_state_intact():
         # a subsequent *compatible* swap still works and starts warm
         ok = compile_source(_cache(version=2), "cache.rvl",
                             manifest=session.ir, replacing=("Cache",))
-        session.swap(ok, origin={"source": _cache(version=2)})
+        session.swap(ok, origin={"source": _cache(version=2)}, agent_authored=False)
         assert session.call("cache", "version", [])["result"] == 2
         assert session.call("cache", "get", ["bob"])["result"] == "99"
     finally:
@@ -128,7 +128,7 @@ def test_successor_without_handoff_starts_cold():
         src2 = _cache(version=2, handoff=False)
         candidate = compile_source(src2, "cache.rvl",
                                    manifest=session.ir, replacing=("Cache",))
-        state = session.swap(candidate, origin={"source": src2})
+        state = session.swap(candidate, origin={"source": src2}, agent_authored=False)
         assert "handoff" not in state           # nothing threaded
         assert session.call("cache", "version", [])["result"] == 2
         assert session.call("cache", "get", ["alice"])["result"] is None  # cold
@@ -150,7 +150,7 @@ component G provides greeter: Greeter {
     try:
         candidate = compile_source(src2, "g.rvl",
                                    manifest=session.ir, replacing=("G",))
-        state = session.swap(candidate, origin={"source": src2})
+        state = session.swap(candidate, origin={"source": src2}, agent_authored=False)
         assert "handoff" not in state
         assert session.call("greeter", "hi", [])["result"] == 2
     finally:

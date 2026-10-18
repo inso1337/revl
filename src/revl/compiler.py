@@ -335,6 +335,11 @@ class _ModuleLoader:
         # text that was PARSED, not a later re-read: a session anchors
         # knowledge records to what it compiled (see `mcp/notes.load_vendored`).
         self.dependencies: dict[str, str] = {}
+        # issue #2524: EVERY module this compile read from disk, roots and
+        # install-origin modules included, mapped to the text it parsed. The
+        # MCP door reads it to tell whether a compile reached a file an export
+        # wrote, which `dependencies` cannot say for an install-origin path.
+        self.disk_reads: dict[str, str] = {}
         # issue #2195: `(realpath(stdlib_root()), str(stdlib_root().parent))`,
         # taken once per loader instead of once per origin question.
         self._stdlib_paths: tuple[str, str] | None = None
@@ -643,6 +648,7 @@ class _ModuleLoader:
                 # still be proved to touch nothing on disk.
                 read = _read_module_text(abs_path)
                 program = parse_text(read, abs_path)
+                self.disk_reads[abs_path] = read
                 self._note_dependency(abs_path, read)
             self._check_generated(abs_path, virtual)
             # item 396: for a ROOT module under a no-extern profile, refuse
@@ -1609,6 +1615,7 @@ def compile_files(paths: list[str], manifest: dict | None = None,
         # the loader knows which paths a `use` resolved to and what text it
         # compiled for each.
         report["dependencies"] = dict(loader.dependencies)
+        report["disk_reads"] = dict(loader.disk_reads)
     return document
 
 

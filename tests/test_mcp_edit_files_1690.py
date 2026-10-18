@@ -270,9 +270,11 @@ class _FilesSession:
         self.sandbox = sandbox
         self.leases = LeaseBook()
         self.swaps = []
+        self.authored = []
 
-    def swap(self, ir, origin=None):
+    def swap(self, ir, origin=None, *, agent_authored):
         self.swaps.append((ir, origin))
+        self.authored.append(agent_authored)
         return {"generation": len(self.swaps)}
 
 
@@ -296,6 +298,7 @@ def test_the_gates_see_the_edited_files_not_the_disk(composition, monkeypatch):
     # what swapped in carries the edited text, for the next snapshot and edit
     _ir, origin = sess.swaps[0]
     assert '"v9"' in origin["files_content"][lib]
+    assert sess.authored == [True]   # the untrusted author's edit
     assert _disk(composition) == [SERVICE, LIB, MAIN]
 
 

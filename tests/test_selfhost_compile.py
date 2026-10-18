@@ -3022,7 +3022,6 @@ _ISSUE_2399_REFUSED.update({
     "let_mismatch_in_explicit_generic_fn": (
         "fn f[T](o: T) -> Int {\n  let m: Int = \"s\"\n  return 1\n}\n"),
     # `_check_generatable` over each prop test parameter
-    "prop_param_alias": "type M = Int\n" + _prop_params("n: M"),
     "prop_param_map": _prop_params("m: Map[Str, Int]"),
     "prop_param_result": _prop_params("r: Result[Int, Str]"),
     "prop_param_list_of_undeclared": _prop_params("xs: List[Foo]"),
@@ -3035,6 +3034,13 @@ _ISSUE_2399_REFUSED.update({
 })
 
 _ISSUE_2399_COMPILED.update({
+    # issue #2514: the alias sweep reaches a prop test's parameters and body,
+    # so `n: M` generates as an `Int` and `let y: M = n` types as one
+    "prop_param_alias": "type M = Int\n" + _prop_params("n: M"),
+    "prop_body_alias": (
+        "type M = Int\nprop test \"p\" (n: M) {\n  let y: M = n\n  assert y == n\n}\n"),
+    "hole_alias": (
+        "type M = Int\nfn helper(x: Int) -> Int { return hole[M] \"a function body\" }\n"),
     "generic_record_nested_in_test": _BOX + _test_doc("  let b: Box[Box[Int]] = { v: { v: 1 } }"),
     "generic_record_nested_in_prop": _BOX + _prop_doc("  let b: Box[Box[Int]] = { v: { v: n } }"),
     "generic_record_nested_in_fn": (

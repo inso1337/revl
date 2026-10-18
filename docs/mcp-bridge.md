@@ -208,9 +208,13 @@ So source that ARRIVES OVER THE TRANSPORT (inline `source`, `modules`, a
 untrusted-author profile, exactly as item 334's `Gate.propose` compiles an
 agent-authored component: no new `extern`/host block, no reach into one through
 an imported module, no self-minted declassifier, and **no self-chosen realm**.
-`.rvl` **files** inside a sanctioned root are not agent-authored — no MCP verb
-writes to disk — so they compile unprofiled, the way an embedder's own sources
-do.
+`.rvl` **files** inside a sanctioned root and outside any `.revl/export/`
+directory are not agent-authored, so they compile unprofiled, the way an
+embedder's own sources do. `revl_export` is the one verb that writes to disk,
+and it writes only under `<root>/.revl/export/` and never over another file
+(issue #2524, see `revl_export` in docs/mcp-reference.md). So a file inside a
+`.revl/export/` directory is the agent's, by its path alone, whether it is
+named in `files` or reached by `use`, and compiles under the profile.
 
 **Edited files: trust follows the text (issue #1715).** When transport-carried
 text stands in for one of those files (`revl_edit` on a files-loaded

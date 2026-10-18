@@ -283,7 +283,7 @@ def test_surface_epoch_moves_on_every_install_and_not_on_call(tmp_path):
     assert session._surface_digests() != digests_before
 
     # a swap installs a new generation's class map: epoch and generation both move.
-    session.swap(copy.deepcopy(_base_ir(base_path)), origin=_base_origin(base_path))
+    session.swap(copy.deepcopy(_base_ir(base_path)), origin=_base_origin(base_path), agent_authored=False)
     assert session._generation == 2
     assert session._surface_epoch == 3
 
@@ -309,7 +309,7 @@ def test_undo_refuses_a_generation_loaded_without_recorded_sources(tmp_path):
     session._wal_path = str(tmp_path / "session.wal")
     # loaded WITHOUT `origin`: generation 1 records no re-admittable snapshot.
     session.load(copy.deepcopy(_base_ir(base_path)), record=True)
-    session.swap(copy.deepcopy(_base_ir(base_path)))
+    session.swap(copy.deepcopy(_base_ir(base_path)), agent_authored=False)
     with pytest.raises(SessionError) as caught:
         session.undo()
     assert "without recorded sources" in str(caught.value)

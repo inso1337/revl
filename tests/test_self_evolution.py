@@ -48,7 +48,7 @@ def _apply_pending(session: Session) -> bool:
     candidate = evolve_bridge.PENDING.pop()
     session.swap(compile_files(
         ["<candidate>.rvl"],
-        sources={evolve_bridge._abs("<candidate>.rvl"): candidate}))
+        sources={evolve_bridge._abs("<candidate>.rvl"): candidate}), agent_authored=False)
     return True
 
 

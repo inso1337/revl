@@ -160,7 +160,7 @@ def test_the_use_index_runs_on_across_a_swap(tmp_path):
         session.swap(compile_source(
             SOURCE + "service Ping { fn ping() -> Int }\n"
                      "component Other provides p: Ping { provide p { fn ping() = 1 } }\n",
-            "g2.rvl"))
+            "g2.rvl"), agent_authored=False)
         session.call("ops", "shout", [sink, "two"])
         spends = approval_spends(_records(session._wal_path))
         assert [(s["use"], s["fired"]) for s in spends] == [(1, True), (2, True)]

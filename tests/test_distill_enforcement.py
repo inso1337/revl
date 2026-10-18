@@ -278,7 +278,7 @@ def test_h1_new_glob_member_suspends_the_rule_and_reprompts(sink):
         == frozenset({"BillerInvoice"})
 
     # swap in a component that ENTERS the glob and was not reviewed.
-    session.swap(copy.deepcopy(ir_refund))
+    session.swap(copy.deepcopy(ir_refund), agent_authored=False)
     assert session._glob_members("Biller*") == frozenset({"BillerRefund"})
 
     # the rule is suspended by the membership growth: the new member prompts.
@@ -487,7 +487,7 @@ def test_exhausted_uses_budget_survives_a_swap(sink):
     assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
     assert session._auto_rules[0]["consumed"] is True
 
-    session.swap(copy.deepcopy(ir))
+    session.swap(copy.deepcopy(ir), agent_authored=False)
 
     assert session._auto_rules[0]["remainingUses"] == 0
     assert session._auto_rules[0]["consumed"] is True
@@ -507,7 +507,7 @@ def test_partial_uses_budget_is_carried_across_a_swap(sink):
     assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
     assert session._auto_rules[0]["remainingUses"] == 2
 
-    session.swap(copy.deepcopy(ir))
+    session.swap(copy.deepcopy(ir), agent_authored=False)
 
     assert session._auto_rules[0]["remainingUses"] == 2
     assert session.call("gw", "send", [STRIPE, "two"])["result"] is None
@@ -527,7 +527,7 @@ def test_exhausted_budget_survives_a_rollback(sink):
     ir = compile_source(_src(sink), "biller.rvl")
     session = _session(_rule(uses=2))
     session.load(copy.deepcopy(ir), record=True)
-    session.swap(copy.deepcopy(ir))              # a generation to roll back TO
+    session.swap(copy.deepcopy(ir), agent_authored=False)              # a generation to roll back TO
     assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
     assert session.call("gw", "send", [STRIPE, "two"])["result"] is None
     assert session._auto_rules[0]["consumed"] is True
@@ -558,7 +558,7 @@ def test_lapsed_ttl_is_not_resurrected_by_a_swap(sink):
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "a"])
 
-    session.swap(copy.deepcopy(ir))
+    session.swap(copy.deepcopy(ir), agent_authored=False)
 
     assert session._auto_rules[0]["expiresAt"] == deadline
     with pytest.raises(ApprovalRequired):
@@ -601,7 +601,7 @@ def test_unbounded_rule_still_auto_approves_across_a_swap(sink):
     session.load(copy.deepcopy(ir), record=True)
     assert session.call("gw", "send", [STRIPE, "one"])["result"] is None
 
-    session.swap(copy.deepcopy(ir))
+    session.swap(copy.deepcopy(ir), agent_authored=False)
 
     assert session._auto_rules[0]["remainingUses"] is None
     assert session._auto_rules[0]["expiresAt"] is None
@@ -626,11 +626,11 @@ def test_activation_gate_spend_is_carried_across_a_swap(sink):
     session.load(copy.deepcopy(ir), record=True)          # Boot: use 1 of 2
     assert _budget(session) == (1, False, 1, False)
 
-    session.swap(copy.deepcopy(ir))                       # Boot: use 2 of 2
+    session.swap(copy.deepcopy(ir), agent_authored=False)                       # Boot: use 2 of 2
     assert _budget(session) == (0, True, 0, True)
 
     with pytest.raises(ApprovalRequired):                 # the bound is total
-        session.swap(copy.deepcopy(ir))
+        session.swap(copy.deepcopy(ir), agent_authored=False)
     assert _lines(sink) == [f"send:{STRIPE}:boot"] * 2
 
 
@@ -642,7 +642,7 @@ def test_activation_gate_spend_is_carried_across_a_rollback(sink):
     ir = compile_source(_activation_src(sink), "boot.rvl")
     session = _session(_rule(component="*", uses=3))
     session.load(copy.deepcopy(ir), record=True)          # Boot: use 1 of 3
-    session.swap(copy.deepcopy(ir))                       # Boot: use 2 of 3
+    session.swap(copy.deepcopy(ir), agent_authored=False)                       # Boot: use 2 of 3
     assert _budget(session) == (1, False, 1, False)
 
     session.rollback()                                    # Boot: use 3 of 3
@@ -667,13 +667,13 @@ def test_activation_and_per_call_spends_share_one_budget(sink):
     assert session.call("gw", "send", [STRIPE, "call"])["result"] is None
     assert _budget(session) == (1, False, 1, False)
 
-    session.swap(copy.deepcopy(ir))                       # Boot: use 3 of 3
+    session.swap(copy.deepcopy(ir), agent_authored=False)                       # Boot: use 3 of 3
     assert _budget(session) == (0, True, 0, True)
 
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "after"])
     with pytest.raises(ApprovalRequired):
-        session.swap(copy.deepcopy(ir))
+        session.swap(copy.deepcopy(ir), agent_authored=False)
     assert _lines(sink) == [f"send:{STRIPE}:boot", f"send:{STRIPE}:call",
                             f"send:{STRIPE}:boot"]
 
@@ -869,7 +869,7 @@ def test_h1_review_bind_survives_an_unload_and_reload(sink):
     assert session._auto_reviewed[_rule(component="Biller*").to_dsl()] \
         == frozenset({"BillerInvoice"})
 
-    session.swap(copy.deepcopy(ir_refund))       # a member that entered the glob
+    session.swap(copy.deepcopy(ir_refund), agent_authored=False)       # a member that entered the glob
     with pytest.raises(ApprovalRequired):
         session.call("gw", "send", [STRIPE, "b"])
 
@@ -902,7 +902,7 @@ def test_a_suspended_rule_is_not_re_reviewed_by_a_fork(sink):
     assert session.call("gw", "send", [STRIPE, "a"])["result"] is None
     assert session._auto_reviewed[rule.to_dsl()] == frozenset({"BillerInvoice"})
 
-    session.swap(copy.deepcopy(ir_refund), origin={"source": src_refund})
+    session.swap(copy.deepcopy(ir_refund), origin={"source": src_refund}, agent_authored=False)
     assert session._glob_members("Biller*") == frozenset({"BillerRefund"})
     # the parent correctly re-offers the unreviewed member.
     with pytest.raises(ApprovalRequired):

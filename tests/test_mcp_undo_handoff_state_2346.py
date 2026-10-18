@@ -207,7 +207,7 @@ def test_undo_names_a_template_whose_live_instance_loses_its_state():
     session = server_mod.SESSION
     session.swap(compile_source(successor, "spawned.rvl", manifest=session.ir,
                                 replacing=("Worker",)),
-                 origin={"source": successor})
+                 origin={"source": successor}, agent_authored=False)
     read = _call("revl_call", {"key": "admin", "method": "read", "args": ["a"]})
     assert read["result"] == "1"           # migrated forward
     undone = _call("revl_undo", {})

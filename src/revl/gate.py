@@ -1087,7 +1087,8 @@ class Gate:
             # state by candidate-written name. A plain `swap`'s "generational"
             # default (operator->operator) would carry it silently.
             state = self._invoke_with_approval(
-                partial(self._session.swap, ir, migrate="declared"))
+                partial(self._session.swap, ir, migrate="declared",
+                        agent_authored=True))
         except _session_error() as error:
             # A halt can engage BETWEEN the check above and here, in one thread,
             # with no concurrency: the swap runs the item-246 activation gate,

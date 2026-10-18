@@ -334,7 +334,7 @@ def test_a_refused_swap_cannot_wind_the_session_clock_back(monkeypatch):
         start = session._now_ms()
         now[0] = start + 60_000                  # time passes during the swap
         with pytest.raises(SessionError, match=REFUSAL):
-            session.swap(compile_source(REFUSED, "refused.rvl"))
+            session.swap(compile_source(REFUSED, "refused.rvl"), agent_authored=False)
         assert session._clock_floor_ms == start + 60_000
 
         now[0] = start                           # and then the clock is rewound
