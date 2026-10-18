@@ -103,7 +103,7 @@ regenerated rather than edited.
 | gauntlet.md | needs-work | 18 |  |
 | gen-types.md | needs-work | 0 |  |
 | generation-history.md | current | 22 |  |
-| generics.md | needs-work | 10 |  |
+| generics.md | needs-work | 9 |  |
 | guarantees.md | needs-work | 2 |  |
 | guide-ai-agents.md | stale-fixed | 4 |  |
 | guide-humans.md | stale-fixed | 1 | yes |
