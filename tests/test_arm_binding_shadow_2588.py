@@ -13,9 +13,12 @@ of the same name in the compile. In a multi-file run that includes a private
 table is one table over the merged program; `fn_scopes` limits which names a
 body may CALL, not what an unbound name infers to.
 
-The visible symptom here is the `${...}` refusal: `Jj(ch) => "<${ch}>"` was
-refused with "cannot interpolate a compound value (`(List[Str]) -> Str`)",
-and only when the other file was in the run.
+The visible symptom here is the `${...}` refusal: a `Jj(ch)` arm whose body is
+the backtick template `<${ch}>` was refused with "cannot interpolate a
+compound value (`(List[Str]) -> Str`)", and only when the other file was in
+the run. Interpolation must be a backtick template (the lexer refuses
+`${...}` in a plain string); the template parses to an `Interp` node, which is
+what both the checker and lowering's `_mark_interp_type` read.
 
 The issue's own shape (a `Some(ch)` arm over a known `Opt[T]`) already checks
 on base: #1990 gave the checker the builtin payload and lowering always had
@@ -55,7 +58,7 @@ _A = '''type Mb[T] = Jj(T) | Nn
 
 pub fn show(m: Mb[Str]) -> Str {
   return match m {
-    Jj(ch) => "<${ch}>",
+    Jj(ch) => `<${ch}>`,
     Nn => "-",
   }
 }
@@ -107,7 +110,7 @@ def test_an_untyped_arrow_parameter_is_not_a_same_named_fn():
            '}\n'
            '\n'
            'pub fn t() -> Str {\n'
-           '  let f = (s) => "<${s}>"\n'
+           '  let f = (s) => `<${s}>`\n'
            '  return f("x")\n'
            '}\n')
     ir = compile_source(src, "arrow2588.rvl")

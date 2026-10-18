@@ -7667,7 +7667,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 inner_scope[bind] = False
                 # issue #2588: the binder occupies its name even when its
                 # payload type is unknown (an applied generic variant, here).
-                # Dropped from the type env, `ch` in `Jj(ch) => "${ch}"` was
+                # Dropped from the type env, `ch` read in a `Jj(ch)` arm was
                 # typed as any top-level `fn ch` of the compile, a private
                 # one in a file this one never imports included.
                 _bind_typed_local(inner_type_env, bind, payload_type)
