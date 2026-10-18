@@ -1169,8 +1169,10 @@ def _ride_knowledge(name: str, payload, arguments: dict | None = None) -> None:
             payload["knowledge"] = {**_knowledge.ride(entries, symbols),
                                     "notes": _notes.concerning(SESSION, symbols)}
         elif name == "revl_load" and SESSION.loaded:
+            # issue #2576: the record files the sidecar read left out
             payload["knowledge"] = {**_k_counts(entries),
-                                    "notes": len(_notes.notes(SESSION))}
+                                    "notes": len(_notes.notes(SESSION)),
+                                    **_notes.ignored_report(SESSION)}
     except Exception:  # noqa: BLE001 — an index failure never fails the call
         return
 

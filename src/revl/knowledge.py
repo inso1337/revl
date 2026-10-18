@@ -35,7 +35,10 @@ from dataclasses import dataclass
 DOC_BODY_LIMIT = 2048
 _VERDICT_HEAD = re.compile(r"^(REFUSED|REJECTED|ADMITTED)\b")
 _DOCS_PATH = re.compile(r"\bdocs/[\w./-]+\.md\b")
-_NOTE_TRAILER = re.compile(r"^\[k_[0-9a-f]{12}\]$")
+#: a note record's id: `k_` and twelve lower-case hex digits. The one place
+#: the shape is spelled; `revl.mcp.notes` re-exports it (issue #2576)
+RECORD_ID = re.compile(r"k_[0-9a-f]{12}")
+_NOTE_TRAILER = re.compile(rf"^\[{RECORD_ID.pattern}\]$")
 _CODE = re.compile(r"\b(?:[AGT]\d{1,2}|G-[A-Z]+(?:-[A-Z]+)*|T-UNRESOLVED)\b")
 
 
@@ -72,7 +75,7 @@ def comment_blocks(text: str) -> list[Block]:
 
 # ---------------------------------------------------------------- rendered notes
 
-_NOTE_HEAD = re.compile(r"^note (k_[0-9a-f]{12}):$")
+_NOTE_HEAD = re.compile(rf"^note ({RECORD_ID.pattern}):$")
 
 
 def split_note(block: Block) -> tuple["Block | None", "tuple[str, str] | None"]:

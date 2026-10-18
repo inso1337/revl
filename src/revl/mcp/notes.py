@@ -15,7 +15,9 @@ notes an agent (or a human, through an export) adds on top:
   A composition loaded from an export copy also reads the sidecar of the
   file it copies, and writes only its own (issue #2575). An id is `k_` and
   twelve lower-case hex digits; a record file holding any other id is
-  ignored, and no file name is built from one (issue #2564);
+  ignored, counted in the load's knowledge block, and named there only for an
+  operator-trusted agent (the id is never echoed, issue #2576), and no file
+  name is built from one (issue #2564);
 * TRUST follows authorship. Under the untrusted-author profile an agent's note
   is `trust: untrusted`, and by default only an evidence-backed untrusted note
   rides with its body; an evidence-free one rides as its id and kind, with the
@@ -47,17 +49,24 @@ import re
 
 from .. import knowledge as _k
 from .. import export_area as _export_area
+from ..export_area import _EXPORT_PARTS
 
 KINDS = ("rationale", "invariant", "trap", "alternative-rejected", "purpose", "doc")
 EVIDENCE_KINDS = ("diagnostic", "query", "audit", "test", "issue")
 BODY_LIMIT = 2048
 PER_ANCHOR_LIMIT = 16
 SIDECAR = os.path.join(".revl", "knowledge")
-#: the export directory's parts, below a root (`export_area.EXPORT_DIR`)
-_EXPORT_PARTS = tuple(_export_area.EXPORT_DIR.split(os.sep))
 #: a record id, the only one the store mints and the only one a sidecar file
-#: name is built from (issue #2564)
-RECORD_ID = re.compile(r"k_[0-9a-f]{12}")
+#: name is built from (issue #2564). Defined in `revl.knowledge`, the lower
+#: module, which spells the rendered note's head and trailer from it too
+#: (issue #2576); `revl.knowledge` cannot import this module.
+RECORD_ID = _k.RECORD_ID
+#: how many ignored record files a trusted load names, the only file names it
+#: shows (anything else is the placeholder), and what stands for the rest
+#: (issue #2576). An id is never shown: it is free text from the file.
+IGNORED_LISTED = 16
+IGNORED_NAME = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+IGNORED_PLACEHOLDER = "<unlisted>"
 TRAILER = re.compile(rf"^\[({RECORD_ID.pattern})\]$")
 
 #: the ride policy and `served` live in `revl.knowledge`, outside `revl.mcp`, so
@@ -132,6 +141,7 @@ def _fold(session) -> dict:
 
 def clear(session) -> None:
     session.note_records = {}
+    session.note_ignored = []
     session.note_stale = set()
     session.note_refuted = set()
     session.note_rebased = {}
@@ -451,19 +461,50 @@ def _copied_file(path: str) -> str | None:
 
 def load_sidecar(session, vs: dict) -> int:
     """Read every record of the composition's sidecars (`sidecar_dirs`) into
-    the session. A record whose id is not a record id is ignored (issue
-    #2564), and one whose id an earlier sidecar already gave is not read
-    again: the copied file's record stands over a copy's (issue #2575)."""
+    the session. A record file that holds no record id is ignored (issue
+    #2564) but is counted by `ignored_report`, so the load can say what it
+    left out (issue #2576); one whose id an earlier sidecar already gave is not
+    read again: the copied file's record stands over a copy's (issue #2575)."""
     session.note_records = {}
+    session.note_ignored = []
     count = 0
     for directory in sidecar_dirs(vs):
-        count += _read_records(_records(session), directory)
+        count += _read_records(_records(session), directory, session.note_ignored)
     return count
 
 
-def _read_records(store: dict, directory: str) -> int:
+def ignored_report(session) -> dict:
+    """What the last `load_sidecar` left out, for the load's knowledge block:
+    `ignored`, the number of record files dropped (an id that is not a record
+    id, text that is not JSON, JSON that is not an object, a file that cannot
+    be read), counting every file; and, only when the operator has declared
+    the agent trusted (no authoring profile), `ignoredFiles`, the first
+    `IGNORED_LISTED` of their file names. Under an authoring profile the
+    count alone is shown: a file name is text a planted file chose, and the
+    sidecar read includes the operator's own (issue #2575), so a name would
+    reach the model as a message. The id a file holds is never shown, for the
+    same reason. A shown name must fully match `IGNORED_NAME`; any other is
+    `IGNORED_PLACEHOLDER`. Empty when nothing was dropped, so a load that
+    dropped nothing answers as it did before (issue #2576)."""
+    from .server import AUTHORING  # noqa: PLC0415 — cycle
+
+    ignored = getattr(session, "note_ignored", None) or []
+    if not ignored:
+        return {}
+    report = {"ignored": len(ignored)}
+    if AUTHORING.profile() is None:
+        report["ignoredFiles"] = [
+            name if IGNORED_NAME.fullmatch(name) else IGNORED_PLACEHOLDER
+            for name in ignored[:IGNORED_LISTED]]
+    return report
+
+
+def _read_records(store: dict, directory: str,
+                  ignored: list | None = None) -> int:
     """Add each record file of `directory` to `store`, unless an earlier
-    directory gave its id. Returns how many were added."""
+    directory gave its id. Returns how many were added. A file that holds no
+    record with a record id (unreadable, not JSON, not an object, or another
+    id) is not added: its file name is appended to `ignored`."""
     if not os.path.isdir(directory):
         return 0
     earlier = set(store)
@@ -475,9 +516,11 @@ def _read_records(store: dict, directory: str) -> int:
             with open(os.path.join(directory, name), encoding="utf-8") as handle:
                 record = json.load(handle)
         except (OSError, ValueError):
-            continue
-        if (isinstance(record, dict) and is_record_id(record.get("id"))
-                and record["id"] not in earlier):
+            record = None
+        if not isinstance(record, dict) or not is_record_id(record.get("id")):
+            if ignored is not None:
+                ignored.append(name)
+        elif record["id"] not in earlier:
             store[record["id"]] = record
             count += 1
     return count
@@ -903,7 +946,7 @@ def _parsed(text: str, name: str) -> tuple:
 __all__ = ["KINDS", "EVIDENCE_KINDS", "query_verbs", "RERUNNABLE", "run_evidence",
            "NoteError", "notes", "add", "op_record",
            "refresh", "served", "concerning", "load_sidecar", "sidecar_writes",
-           "sidecar_dirs",
+           "sidecar_dirs", "ignored_report",
            "RECORD_ID", "is_record_id", "record_path", "is_record_path",
            "load_vendored", "vendored_trucs", "vendored_path",
            "render", "import_marked", "adopted_blocks"]

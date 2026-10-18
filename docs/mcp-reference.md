@@ -1130,7 +1130,9 @@ in the sidecar (`revl_knowledge`). A sidecar record is a JSON file under
 read the records there; it is never compiled, and it is created exclusively,
 so a file already at that path, even one that appeared after the checks ran,
 stops the export instead of being replaced (issue #2534). A record file whose
-id is not `k_` and twelve lower-case hex digits is ignored at load, and no
+id is not `k_` and twelve lower-case hex digits is ignored at load (the
+load's `knowledge` block then carries `ignored`, how many files it left out,
+and, for a trusted agent, `ignoredFiles`, issue #2576), and no
 export builds a file name from such an id (one is listed in `skipped`, issue
 #2564). A note whose body holds a carriage return,
 another Unicode line separator or a byte-order mark is refused, since a `//`
@@ -1182,7 +1184,17 @@ edited comment is a new entry. The index rides on responses:
 - `revl_check` carries the candidate's counts and every `refuted` entry, so a
   comment the compiler no longer agrees with is visible before anything loads;
 - `revl_load` and `revl_state` carry the counts (`entries`, `live`, `stale`,
-  `refuted`).
+  `refuted`), and `notes`. A `revl_load` that ignored a sidecar record file
+  (its id is not a record id, or it is not JSON, not an object or unreadable)
+  adds `ignored`, how many files it left out, counting every one, also when a
+  copy's sidecar and the copied file's both hold a file of the same name
+  (issue #2576). It is absent when nothing was ignored. When the operator has
+  declared the agent trusted, the block also carries `ignoredFiles`, the
+  first 16 of their file names; under an authoring profile it carries the
+  count alone, since a name is text a planted file chose. The id such a file
+  holds is never echoed, and a name is shown only when it is 1 to 40
+  characters of letters, digits, `_`, `.` and `-`; any other is listed as
+  `<unlisted>`.
 
 On this tree, 158 of the 163 `expected error:` blocks are live and 5 are
 refuted: the drift the study measured.
