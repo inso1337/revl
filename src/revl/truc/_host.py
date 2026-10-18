@@ -379,7 +379,122 @@ def read_sources(project_dir: str, spec_json: str) -> str:
 
 # -- THE GATE (emission[gate]) ----------------------------------------------
 
-def admit_all(ordered_json: str) -> str:
+#: How a vendored row's lock entry records its admission (issue #2552). A row
+#: added under the untrusted-author profile is `profiled`; a row whose host
+#: code only `--trust-host-code` admitted is `trusted-host-code`, and that
+#: record is bound to the row's pinned `sourceHash`. A row with no record (a
+#: lock written before the rule) earns nothing from it.
+ADMISSION_PROFILED = "profiled"
+ADMISSION_TRUSTED = "trusted-host-code"
+
+
+def _admission_of(add: dict) -> str:
+    """The admission the plan recorded for an added row; anything else is
+    written as no record, which earns the row nothing at `assemble`."""
+    admission = add.get("admission")
+    return admission if admission in (ADMISSION_PROFILED, ADMISSION_TRUSTED) else ""
+
+
+def _vendored_profile():
+    """The profile vendored text is admitted under: the untrusted-author
+    profile the MCP server applies to an author by default, taken from the same
+    constructor rather than spelled a second time. A truc is registry text,
+    not the project's own source, so its author is not the operator."""
+    from revl.mcp.server import AuthoringTrust  # noqa: PLC0415
+
+    return AuthoringTrust().profile()
+
+
+def _lock_trusted(lock_json: str) -> dict[str, str]:
+    """`{name: sourceHash}` for each lock row recorded as admitted by
+    `--trust-host-code`. Anything unreadable records nothing."""
+    try:
+        lock = json.loads(lock_json) if lock_json and lock_json.strip() else {}
+    except ValueError:
+        return {}
+    rows = lock.get("trucs") if isinstance(lock, dict) else None
+    trusted: dict[str, str] = {}
+    for row in rows if isinstance(rows, list) else []:
+        admitted = row.get("admitted") if isinstance(row, dict) else None
+        if (isinstance(admitted, dict)
+                and admitted.get("admission") == ADMISSION_TRUSTED
+                and isinstance(row.get("sourceHash"), str)):
+            trusted[str(row.get("name"))] = row["sourceHash"]
+    return trusted
+
+
+def _trust_basis(item: dict, flag: bool, lock_trusted: dict[str, str]) -> str:
+    """Why a vendored row may be admitted with its host code trusted, or ""
+    when nothing lifts the profile: the flag on this command, or a lock record
+    for these exact bytes."""
+    if flag:
+        return "flag"
+    pinned = lock_trusted.get(item.get("name") or "")
+    if pinned and pinned == sha256_hex(item["source"]):
+        return "lock"
+    return ""
+
+
+def _compile_row(item: dict, running: dict | None, profile=None) -> dict:
+    from revl.compiler import compile_files  # noqa: PLC0415 — in-process gate
+
+    path = item["path"]
+    return compile_files([path], manifest=running,
+                         sources={path: item["source"]}, profile=profile)
+
+
+def _admit_row(item: dict, running: dict | None, flag: bool,
+               lock_trusted: dict[str, str]) -> tuple[dict, str]:
+    """Admit one row; return its IR and the basis its host code was trusted
+    on ("" when the profile held). A row with no name is the project's own
+    entry and keeps operator trust. A vendored row is compiled as an untrusted
+    author first; only a refusal there consults the flag or the lock record,
+    and a row that still refuses with the profile lifted raises that refusal."""
+    from revl.errors import RevlError  # noqa: PLC0415
+
+    if not item.get("name"):
+        return _compile_row(item, running), ""
+    try:
+        return _compile_row(item, running, _vendored_profile()), ""
+    except RevlError:
+        basis = _trust_basis(item, flag, lock_trusted)
+        if not basis:
+            raise
+    return _compile_row(item, running), basis
+
+
+def _refusal_text(item: dict, running: dict | None, error: Exception) -> str:
+    """The gate's diagnostic, plus the way out when the row refused only
+    because it is vendored: it admits with the profile lifted."""
+    from revl.errors import RevlError  # noqa: PLC0415
+
+    text = str(error)
+    if not item.get("name"):
+        return text
+    try:
+        _compile_row(item, running)
+    except RevlError:
+        return text
+    return (f"{text}\nvendored text is admitted as an untrusted author, and "
+            f'"{item["name"]}" admits only with that profile lifted: it '
+            "carries host code (or another authority an untrusted author may "
+            "not hold). Pass --trust-host-code to this command to trust it; "
+            "truc.lock then records that it was admitted that way.")
+
+
+def _say_trusted(name: str, basis: str) -> None:
+    import sys  # noqa: PLC0415
+
+    if basis == "flag":
+        why = "--trust-host-code"
+    else:
+        why = "truc.lock, which records it was added with --trust-host-code"
+    print(f'truc: admitted "{name}" with its host code trusted ({why}); '
+          "without it this vendored row is refused", file=sys.stderr)
+
+
+def admit_all(ordered_json: str, lock_json: str = "",
+              trust_host_code: bool = False) -> str:
     """Admit an ordered list of `{path, source, name}` through revl's own gate,
     *incrementally*, exactly as docs/design/truc-architecture.md §3.2 describes:
     each candidate is linked against the running composition
@@ -393,34 +508,51 @@ def admit_all(ordered_json: str) -> str:
     iterate; the resolution *order* was decided by the pure planner and arrives
     in `ordered_json`. truc cannot hold a different opinion from revl about
     admissibility: same process, same compiler, same version.
+
+    Who wrote a row decides how it compiles (issue #2552). A row with no name
+    is the project's own entry and compiles as the operator. A named row is
+    vendored registry text and compiles under the untrusted-author profile
+    the MCP server applies to an author by default. That profile leaves the
+    reach allowlist off: reach is bounded later, when `truc apply` confines a
+    stack layer to its granted services, not here. Its host code is
+    admitted only when `trust_host_code` (the command's `--trust-host-code`) is
+    set, or when `lock_json` records that a flagged `add` admitted these exact
+    bytes. Each row admitted that way is named on stderr and listed in the
+    verdict's `trusted`, which is what `add` records in the row's lock entry.
     """
-    from revl.compiler import compile_files  # noqa: PLC0415 — in-process gate
     from revl.errors import RevlError  # noqa: PLC0415
 
     items = json.loads(ordered_json)
+    lock_trusted = _lock_trusted(lock_json)
     running: dict | None = None
     admitted: list[str] = []
+    trusted: list[str] = []
     for item in items:
-        path = item["path"]
-        label = item.get("name") or path
+        label = item.get("name") or item["path"]
         try:
-            ir = compile_files([path], manifest=running, sources={path: item["source"]})
-            running = {"manifest": ir.get("manifest") or {},
-                       "services": ir.get("services") or {}}
-            admitted.append(label)
+            ir, basis = _admit_row(item, running, bool(trust_host_code),
+                                   lock_trusted)
         except RevlError as error:
             return json.dumps({
                 "ok": False,
-                "diagnostic": str(error),
+                "diagnostic": _refusal_text(item, running, error),
                 "failed": label,
                 "admitted": admitted,
+                "trusted": trusted,
                 "manifest": (running or {}).get("manifest", {}),
             })
+        running = {"manifest": ir.get("manifest") or {},
+                   "services": ir.get("services") or {}}
+        admitted.append(label)
+        if basis:
+            trusted.append(label)
+            _say_trusted(label, basis)
     return json.dumps({
         "ok": True,
         "diagnostic": "",
         "failed": "",
         "admitted": admitted,
+        "trusted": trusted,
         "manifest": (running or {}).get("manifest", {}),
     })
 
@@ -763,7 +895,11 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         "requires": row.get("requires") or {},
         "capabilities": row.get("capabilities") or [],
         "emissions": row.get("emissions", 0),
-        "admitted": {"at": now(), "indexVersion": index_version},
+        # how the gate admitted it (issue #2552): `profiled`, or
+        # `trusted-host-code` when only the flag admitted its host code. The
+        # record is bound to `sourceHash` above; `assemble` reads it.
+        "admitted": {"at": now(), "indexVersion": index_version,
+                     "admission": _admission_of(add)},
     }
     knowledge = _knowledge_pin(src_dir, dst_dir)
     if knowledge is not None:
