@@ -97,6 +97,11 @@ component PanicTicker requires ops: Ops {
 component Broken requires ops: Ops {
   emit ops.run("load")
 }
+
+component ArmsThenFails requires ops: Ops {
+  every 10ms { emit ops.ping() }
+  emit ops.run("load")
+}
 """
 
 SURVIVOR = """
@@ -148,6 +153,25 @@ lifecycle test "a failed load" {
     assert ('lifecycle test "a failed load": load Broken: '
             'panic: the provider gave up') in output, output
     assert "--- FAIL: TestAFailedLoad" in output, output
+    assert SURVIVOR_PASSED in output, output
+    assert "residue" not in output, output
+
+
+def test_a_load_that_arms_a_timer_then_fails_leaves_nothing_for_the_next_test(tmp_path):
+    """The failing component itself armed a timer before its activation
+    failed. The fiber ends `Failed`, not `Gone`; disposing it must still
+    release that timer, or the survivor counts it."""
+    output = _run_lifecycle(tmp_path, _doc("""
+lifecycle test "arms then fails" {
+  load Agent
+  load ArmsThenFails
+  unload ArmsThenFails
+  unload Agent
+}
+"""), "larms")
+    assert ('lifecycle test "arms then fails": load ArmsThenFails: '
+            'panic: the provider gave up') in output, output
+    assert "--- FAIL: TestArmsThenFails" in output, output
     assert SURVIVOR_PASSED in output, output
     assert "residue" not in output, output
 

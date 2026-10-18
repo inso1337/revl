@@ -13021,9 +13021,11 @@ _TIME_USE = re.compile(r"\btime\.")
 
 def _drop_unused_time_import(module: str) -> str:
     """Remove the `"time"` import from a module that never uses it (issue
-    #1559). A `lifecycle test` imports `time` for the unload waits
-    (`time.Sleep`), but one with no `unload` step emits none, and go refuses
-    to build a package with an unused import. Deciding on the finished text
+    #1559). A `lifecycle test` imports `time` for its waits (`time.Sleep`).
+    Before issue #2505 one with no `unload` step emitted none; every lifecycle
+    test now waits in its leftover dispose, so it always uses `time`, but other
+    writers still may not, and go refuses to build a package with an unused
+    import. Deciding on the finished text
     covers every writer of `time.` at once (a lifecycle wait, the teardown
     preamble's budgets, the timer preamble). The match is conservative: any
     `time.` token keeps the import, so the worst case is the old behavior."""
