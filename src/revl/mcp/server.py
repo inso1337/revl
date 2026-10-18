@@ -4514,7 +4514,14 @@ TOOLS = [
             "type": "object",
             "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
                            "replacing": {"type": "array", "items": {"type": "string"},
-                                         "description": "components withdrawn in this swap"}},
+                                         "description": "components withdrawn in this swap"},
+                           # issue #2532: read by the quarantine gate a swap
+                           # runs (`quarantine._service_name`), so declared here
+                           "service": {"type": "string",
+                                       "description": "WIT interface name to group the "
+                                                      "candidate's Str-surface functions "
+                                                      "under (default: the sole declared "
+                                                      "service, else `Candidate`)"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_swap,

@@ -82,6 +82,17 @@ def elsewhere(key: str, name: str, schemas: dict) -> list:
             if verb != name and key in declared(schema)]
 
 
+#: How many other verbs a hint names before "and N more": `source` alone is
+#: declared by some forty verbs, and a list that long is noise, not a hint.
+_NAMED = 3
+
+
+def _named(verbs: list) -> str:
+    shown = ", ".join(f"`{verb}`" for verb in verbs[:_NAMED])
+    rest = len(verbs) - _NAMED
+    return f"{shown} and {rest} more" if rest > 0 else shown
+
+
 def check(name: str, arguments: dict, schemas: dict) -> tuple:
     """`(message, next)` for a call of `name` with undeclared top-level keys,
     or `(None, None)` when every key is declared. `schemas` maps every verb
@@ -98,7 +109,7 @@ def check(name: str, arguments: dict, schemas: dict) -> tuple:
     for key in extra:
         guess = meant(key, known)
         others = elsewhere(key, name, schemas)
-        verbs = ", ".join(f"`{verb}`" for verb in others)
+        verbs = _named(others)
         if guess is not None:
             renames[key] = guess
         if others:

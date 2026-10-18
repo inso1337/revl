@@ -771,7 +771,10 @@ A swap that lands, inline or by name, carries `blastRadius` in the shape
 `revl_edit` gives it below, read off the composition that was running before
 the swap (issue #1704).
 
-- Inputs: `source` / `files` / `modules` (all optional); `replacing`.
+- Inputs: `source` / `files` / `modules` (all optional); `replacing`;
+  `service` (the WIT interface name the quarantine tier groups the
+  candidate's functions under, when a policy arms it; default: the sole
+  declared service, else `Candidate`).
 
 ### `revl_edit`
 

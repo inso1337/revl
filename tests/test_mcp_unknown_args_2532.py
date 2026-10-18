@@ -150,6 +150,23 @@ def test_a_legacy_spelling_is_refused_with_the_declared_name():
     assert payload["next"]["arguments"] == {"service": "S", "loses": ["a"]}
 
 
+def test_swap_declares_the_service_its_quarantine_gate_reads():
+    """`_tool_swap` -> `quarantine.gate_swap` -> `_service_name` reads a
+    top-level `service` (the WIT interface for the substrate battery); the
+    schema declares it so the check lets it through."""
+    payload = _call("revl_swap", {"source": "service S { fn f() -> Str }\n",
+                                  "service": "S"})
+    assert not _is_unknown_argument_refusal(payload), payload
+
+
+def test_a_long_list_of_claiming_verbs_is_capped():
+    payload = _call("revl_state", {"source": "x"})
+    message = _message(payload)
+    hint = message[message.index("(an argument of"):message.index(", not of")]
+    assert hint.count("`revl_") == 3, hint
+    assert " and " in hint and " more" in hint, hint
+
+
 def test_a_key_nothing_claims_carries_the_call_without_it_as_next():
     payload = _call("revl_state", {BOGUS: 1})
     assert payload["next"] == {"tool": "revl_state", "arguments": {},
