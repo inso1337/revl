@@ -112,7 +112,7 @@ SLOTS = {
   let h = effect open_h({ARROW}(1)) undo release_h(h)
 }}''',
     "endorse expression": f'''component K provides vault: Vault {{
-  provide vault {{ fn lookup(name) = Err(endorse[confidential]({ARROW}("s"), reason = "r")) }}
+  provide vault {{ fn lookup(name) = Err(endorse[confidential]({ARROW}(1), reason = "r")) }}
 }}''',
     "spawn config": f'''component S {{
   let w = effect spawn Child with {{ n: {ARROW}(1) }} undo w.dispose()
@@ -207,23 +207,120 @@ def test_a_wrong_use_in_a_spawn_config_is_refused_as_an_int():
 
 
 # A lambda in a component body is a stratum-3 arrow, which the checker does
-# not resolve (`lower._lower_component_pure_expr`, the `ExprArrow` arm), so a
-# wrong use there is not refused on either side of this change. Strict, so
-# the day it is checked these flip and the gap closes in the open.
+# not resolve, so its annotations used to be held to nothing there (#2515).
+# They are now held where a `fn` body holds them: an in-place application's
+# arguments against the parameter annotations, and the body against the
+# return annotation. Each pair is (the slot's well-typed use, a wrong one).
 WRONG_USE = {
-    "emit statement": f'{ARROW}("s")',
-    "emit expression": f'{ARROW}("s")',
-    "effect acquire": f'{ARROW}("s")',
-    "endorse expression": f'{ARROW}(1)',
+    "emit statement": (f"{ARROW}(x)", f'{ARROW}("s")'),
+    "emit expression": (f"{ARROW}(x)", f'{ARROW}("s")'),
+    "effect acquire": (f"{ARROW}(1)", f'{ARROW}("s")'),
+    "endorse expression": (f"{ARROW}(1)", f'{ARROW}("s")'),
+    "subscribe stage": ("(x: Count): Count => x", '(x: Count): Count => "s"'),
 }
 
 
-@pytest.mark.xfail(strict=True, reason="stratum-3 arrows are not checked (#2515, second half)")
 @pytest.mark.parametrize("slot", sorted(WRONG_USE))
 def test_a_wrong_use_in_a_component_lambda_is_refused(slot):
-    original = f"{ARROW}(x)" if "emit" in slot else (
-        f"{ARROW}(1)" if slot == "effect acquire" else f'{ARROW}("s")')
-    src = HEAD + SLOTS[slot].replace(original, WRONG_USE[slot]) + "\n"
+    original, wrong = WRONG_USE[slot]
     assert original in SLOTS[slot]
-    with pytest.raises(RevlError, match=r"expects `Int`, got `Str`|expects `Str`, got `Int`"):
+    src = HEAD + SLOTS[slot].replace(original, wrong) + "\n"
+    with pytest.raises(RevlError, match=r"expects `Int`, got `Str`"):
+        compile_source(src, "a.rvl")
+
+
+def test_an_argument_spelled_like_the_arrow_s_parameter_keeps_its_own_type():
+    # the argument `x` is the method's Str parameter, not the arrow's `x`
+    src = HEAD + '''service Echo { fn go(x: Str) -> Int }
+component E provides echo: Echo {
+  provide echo { fn go(x) = ((x: Count): Count => x)(x) }
+}
+'''
+    with pytest.raises(RevlError, match=r"expects `Int`, got `Str`"):
+        compile_source(src, "a.rvl")
+
+
+def test_an_arrow_applied_in_place_takes_exactly_its_arity():
+    src = HEAD + SLOTS["effect acquire"].replace(f"{ARROW}(1)", f"{ARROW}(1, 2)") + "\n"
+    assert f"{ARROW}(1)" in SLOTS["effect acquire"]
+    with pytest.raises(RevlError, match=r"takes 1 argument\(s\), 2 given"):
+        compile_source(src, "a.rvl")
+
+
+def _refusal(src: str) -> RevlError:
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "a.rvl")
+    return excinfo.value
+
+
+def test_the_arity_refusal_reads_as_it_does_in_a_fn_body():
+    # no written return: the type the message names is the body's, as in a fn
+    arrow = "((v: Int) => v)(1, 2)"
+    in_fn = _refusal(f"fn d() -> Int {{ return {arrow} }}\n")
+    in_component = _refusal(HEAD + SLOTS["effect acquire"].replace(f"{ARROW}(1)", arrow) + "\n")
+    assert in_component.message == (
+        "this call's callee is a `(Int) -> Int` and takes 1 argument(s), 2 given")
+    assert (in_component.message, in_component.hint, in_component.code) == \
+        (in_fn.message, in_fn.hint, in_fn.code)
+
+
+# Bodies a written return used to leave unread in a component, and which the
+# check must still admit: a generic call whose type variable the arrow body
+# does not solve, and a built-in case.
+GENERIC_MAP = "fn map_[A, B](xs: List[A], f: (A) -> B) -> List[B] { return xs }\n"
+CHECKED_BODIES = {
+    "generic call": "(xs: List[Int]): List[Int] => map_(xs, (y) => y)",
+    "Ok case": "(v: Int): Result[Int, Str] => Ok(v)",
+}
+
+
+@pytest.mark.parametrize("body", sorted(CHECKED_BODIES))
+def test_a_written_return_admits_a_well_typed_component_body(body):
+    compile_source(GENERIC_MAP + HEAD + f'''component G provides mem: Mem {{
+  provide mem {{ fn go(x) {{ let f = {CHECKED_BODIES[body]} return x }} }}
+}}
+''', "a.rvl")
+
+
+# --- an unknown type name in a component lambda is refused (#2515) ---------
+
+# No type `Nope` is declared, so it is an opaque nominal that no value has,
+# and a use of the arrow is refused as it is in a `fn` body. Spawn config is
+# not here: its value is checked by `check_ast` and was already refused.
+NOPE = "((v: Nope): Nope => v)"
+STORE = "service Store {\n  fn grab(k: Int) -> Int\n  fn release(k: Int) -> Int\n}\n"
+
+UNKNOWN_NAME = {
+    "emit statement": f'''component Writer provides mail: Mail {{
+  provide mail {{ fn go(x) {{ emit send_mail({NOPE}(1)) return x }} }}
+}}''',
+    "emit expression": f'''component Writer provides mail: Mail {{
+  provide mail {{ fn go(x) {{ let a = emit send_mail({NOPE}(1)) return a }} }}
+}}''',
+    "effect acquire": f'''component C {{
+  let h = effect open_h({NOPE}(1)) undo release_h(h)
+}}''',
+    "effect undo": f'''component C requires store: Store {{
+  let r = effect store.grab(1) undo store.release({NOPE}(1))
+}}''',
+    "effect setup": f'''component C requires store: Store {{
+  let r = effect {{
+    let k = {NOPE}(2)
+    store.grab(k)
+  }} undo store.release(2)
+}}''',
+    "endorse expression": f'''component K provides vault: Vault {{
+  provide vault {{ fn lookup(name) = Err(endorse[confidential]({NOPE}("s"), reason = "r")) }}
+}}''',
+    "subscribe stage": '''component C {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src.map((x: Int): Nope => x) undo sub.close()
+}''',
+}
+
+
+@pytest.mark.parametrize("slot", sorted(UNKNOWN_NAME))
+def test_an_unknown_type_name_in_a_component_lambda_is_refused(slot):
+    src = HEAD + STORE + UNKNOWN_NAME[slot] + "\n"
+    with pytest.raises(RevlError, match=r"expects `Nope`, got `(Int|Str)`"):
         compile_source(src, "a.rvl")

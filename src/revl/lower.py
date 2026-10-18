@@ -28,13 +28,19 @@ from .errors import RevlError, RevlErrors, foreign_increment_refusal
 from .hostfile import _contained
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
+    ARROW_BODY_WHERE,
     CASES_KEY,
     _reject_float_literal_range,
     FN_HEAD,
     FNS_KEY,
+    IN_PLACE_CALLEE,
     PRINCIPAL,
     PRINCIPAL_PRODUCER_HINT,
+    arrow_annotations,
+    arrow_depends_on_unknown_param,
     check_ast,
+    check_function_value_arity,
+    function_value_result,
     refuse_self_declared_async,
     _mentions_async,
     collect_tparams,
@@ -1131,13 +1137,22 @@ def _host_arg_types(family: str, args: list, env: "Env",
                     filename: str | None, line: int) -> list:
     """The argument types a host-local verb call is checked with (#2491).
 
+    A family in `_HOST_UNCOMPARED_ARG_FAMILIES` is not inferred at all; any
+    other is inferred by `_compared_arg_types`."""
+    if family in _HOST_UNCOMPARED_ARG_FAMILIES:
+        return [None] * len(args)
+    return _compared_arg_types(args, env, filename, line)
+
+
+def _compared_arg_types(args: list, env: "Env", filename: str | None,
+                        line: int) -> list:
+    """The types of a component-body call's lowered arguments, for holding
+    them to a declared parameter row (#2491, #2515).
+
     One entry per argument; None means "not compared". Inference adds no
     refusal of its own here: an argument whose inference raises is left
     uncompared, as one whose type is unknown is, so only a definite mismatch
-    against the row refuses. A family in `_HOST_UNCOMPARED_ARG_FAMILIES` is
-    not inferred at all."""
-    if family in _HOST_UNCOMPARED_ARG_FAMILIES:
-        return [None] * len(args)
+    against the row refuses."""
     out = []
     for a in args:
         try:
@@ -9728,6 +9743,66 @@ def _check_component_call(node: dict, env: Env, filename: str, line: int) -> Non
         raise _site_inverse_refusal(err, slot) from None
 
 
+# Issue #2515: a stratum-3 arrow (one in a component or provide-method body) is
+# never resolved by the checker, so `infer_ir` cannot type it, but its written
+# annotations are still the author's claims. The helpers below hold them where
+# a `fn` body holds them (`infer_ast`, item 75(a) §3.1): at an in-place
+# application, and against the arrow's own body. None writes onto the node, so
+# the IR an arrow lowers to does not move.
+
+def _arrow_body_env(arrow, env: Env) -> dict:
+    """The type environment an arrow's lowered body is read in: the
+    enclosing one, with each parameter at its annotation (None when bare)."""
+    tenv = dict(env.type_env)
+    for param, ptype in zip(arrow.params, arrow_annotations(arrow)):
+        tenv[param] = ptype
+    return tenv
+
+
+def _arrow_function_type(arrow, body: dict, env: Env) -> str:
+    """The function type `infer_ast` gives the same arrow in a `fn` body: each
+    parameter its annotation or `Any`, and the result the written return, or
+    the body's type where the body cannot depend on a bare parameter (§3.2)."""
+    params = arrow_annotations(arrow)
+    returns = getattr(arrow, "written_returns", None)
+    if not returns and not arrow_depends_on_unknown_param(arrow, params):
+        returns = infer_ir(body, _arrow_body_env(arrow, env), env.types,
+                           env.services)
+    return format_type(FN_HEAD, [p or "Any" for p in params] + [returns or "Any"])
+
+
+def _check_arrow_application(arrow, body: dict, arg_types: list, env: Env,
+                             filename: str, line: int) -> None:
+    """An arrow applied in place (`((v: Int): Int => v)(n)`) takes exactly its
+    arity, and each argument is held to its parameter's annotation, with the
+    arity and argument refusals `call_function_value` gives the same call in a
+    `fn` body, byte for byte.
+
+    `arg_types` are read before the arrow is lowered: lowering it rebinds its
+    parameter names in `env.type_env`, which would hide the type of an
+    argument spelled like one (`((x: Int): Int => x)(x)`)."""
+    fn_type = _arrow_function_type(arrow, body, env)
+    _, parts = parse_type(fn_type)
+    params, returns = parts[:-1], parts[-1]
+    check_function_value_arity(IN_PLACE_CALLEE, fn_type, params, len(arg_types),
+                               filename, line)
+    function_value_result(IN_PLACE_CALLEE, params, returns, arg_types,
+                          env.types, filename, line)
+
+
+def _check_arrow_return_annotation(arrow, body: dict, env: Env,
+                                   filename: str) -> None:
+    """A written return annotation is checked against the lowered body, with
+    each parameter at its annotation, and only where the body cannot depend on
+    a bare (unknown) parameter (§3.2), as `infer_ast` checks it."""
+    written = getattr(arrow, "written_returns", None)
+    if not (filename and written) \
+            or arrow_depends_on_unknown_param(arrow, arrow_annotations(arrow)):
+        return
+    check_ir(body, written, _arrow_body_env(arrow, env), env.types,
+             env.services, filename, arrow.line, ARROW_BODY_WHERE)
+
+
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
     filename = env.filename
@@ -9958,6 +10033,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         with _emit_head_args(env):
             args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
                     for a in expr.args]
+        # an arrow applied in place: its argument types, read before lowering
+        # the arrow rebinds its parameter names (issue #2515)
+        in_place_arg_types = (_compared_arg_types(args, env, filename, line)
+                              if isinstance(expr.callee, ExprArrow) else None)
         # A spawn-handle provision flowing in as an ARGUMENT to a local arrow
         # whose parameter carries the service type is the same boundary crossing
         # as calling the provision directly; follow it across the parameter
@@ -10190,6 +10269,9 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                     code="G4", category="emission",
                 )
         node = {"kind": "call", "callee": callee_node, "args": args}
+        if in_place_arg_types is not None:
+            _check_arrow_application(expr.callee, callee_node["body"],
+                                     in_place_arg_types, env, filename, line)
         if inst is None and isinstance(callee_node.get("target"), dict):
             recv_t = infer_ir(callee_node["target"], env.type_env, env.types,
                               env.services)
@@ -10354,10 +10436,12 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": body}
         # item 75(a) §4/§5.3: the same complete-signature condition as the
-        # pure-fn path. Stratum 3 does not *check* an arrow yet (slice 3), but
+        # pure-fn path. Stratum 3 does not *resolve* an arrow yet (slice 3), but
         # the grammar and the R3 fix land everywhere at once — there is one
-        # parser and one lowering contract.
+        # parser and one lowering contract. Its written return annotation is
+        # checked here, after rule C1 (issue #2515).
         _assert_colour_is_positional(expr, filename)
+        _check_arrow_return_annotation(expr, body, env, filename)
         if _arrow_signature_known(expr):
             node["param_types"] = param_types
             node["returns"] = expr.returns or "Any"

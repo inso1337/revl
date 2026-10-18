@@ -2576,7 +2576,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         # value read out of a `let` chain, …
         callee_t = infer_ast(expr.callee, tenv, types, filename)
         if parse_type(callee_t)[0] == FN_HEAD:
-            return call_function_value(expr, callee_t, "this call's callee",
+            return call_function_value(expr, callee_t, IN_PLACE_CALLEE,
                                        arg_types, tenv, types, filename, line)
         return None
     if isinstance(expr, ExprMatch):
@@ -2643,7 +2643,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             # the body's type is `Any`-infected (or half-solved, §3.2), so the
             # check could only pass vacuously or misfire.
             check_ast(expr.body, written_return, inner, types, filename,
-                      "the body of this arrow (from its return annotation)")
+                      ARROW_BODY_WHERE)
             returns = written_return
         else:
             # the body is walked either way — it is an ordinary expression over
@@ -2658,6 +2658,12 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             returns = written_return or (body_t if independent else None)
         return _resolve_arrow(expr, list(annotations), returns)
     return None
+
+
+# How a refusal names an arrow's body checked against its written return, and
+# an arrow applied in place, in both strata (issue #2515).
+ARROW_BODY_WHERE = "the body of this arrow (from its return annotation)"
+IN_PLACE_CALLEE = "this call's callee"
 
 
 def arrow_annotations(expr) -> list:

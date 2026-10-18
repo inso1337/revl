@@ -357,7 +357,15 @@ These are named limits, not oversights. None of them is half-implemented.
   type in a service signature is checked *at the boundary* — the provider's
   parameter annotation must match the service's — and then goes unchecked
   inside the method body. Stratum 1 (`fn` and `test` bodies) is where function
-  types are checked.
+  types are checked. What stratum 3 does check is an arrow's own written
+  annotations (issue #2515): an arrow applied in place,
+  `((v: Int): Int => v)(n)`, takes exactly its arity and each argument is held
+  to its parameter's annotation, and a written return annotation is checked
+  against the body. Those three, the arity and the argument and return
+  annotations, are refused as a `fn` body refuses them; an argument is not
+  checked against its parameter in check position there. An unknown type
+  name in an annotation is refused there, as it is in a `fn` body, at the first
+  use that gives it a value of another type.
 - **Calling a function through a field directly.** `h.run(1)` is a builtin
   method call to the lowerer, and there is no builtin `run`; bind it first
   (`let r: (Int) -> Str = h.run  return r(1)`). The existing diagnostic
