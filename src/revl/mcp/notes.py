@@ -38,9 +38,7 @@ import os
 import re
 
 from .. import knowledge as _k
-from ..export_area import fold as _fold
-from ..export_area import in_export_area
-from ..export_area import real as _real
+from .. import export_area as _export_area
 
 KINDS = ("rationale", "invariant", "trap", "alternative-rejected", "purpose", "doc")
 EVIDENCE_KINDS = ("diagnostic", "query", "audit", "test", "issue")
@@ -420,12 +418,32 @@ def vendored_path(path: str) -> tuple[str, str, str] | None:
     matched. Counting a file as vendored never raises a trust: a record it
     brings earns `publisher` only by the lock's measured signature over those
     exact records and the lock's pin of the exact bytes loaded."""
-    for spelling in (os.path.normpath(os.path.abspath(path)), _real(path)):
+    parts = _vendored_parts(path)
+    if parts is None:
+        return None
+    return (parts[-2], path, os.sep.join(parts[:-3]) or os.sep)
+
+
+def _vendored_parts(path: str) -> list[str] | None:
+    """The parts of the first spelling of `path` (as named, then as it
+    resolves) that is a `trucs/<name>/component.rvl`, compared case-folded,
+    or `None`."""
+    fold = _export_area.fold
+    for spelling in (os.path.normpath(os.path.abspath(path)),
+                     _export_area.real(path)):
         parts = spelling.split(os.sep)
-        if len(parts) >= 3 and _fold(parts[-1]) == "component.rvl" \
-                and _fold(parts[-3]) == "trucs":
-            return (parts[-2], path, os.sep.join(parts[:-3]) or os.sep)
+        if len(parts) >= 3 and fold(parts[-1]) == "component.rvl" \
+                and fold(parts[-3]) == "trucs":
+            return parts
     return None
+
+
+def _vendored_dir(path: str) -> str:
+    """The directory of the vendored component `path` reaches, from the
+    spelling that matched: for a link, the component's own directory, never
+    the link's, so the records read are the ones shipped beside it."""
+    parts = _vendored_parts(path)
+    return os.sep.join(parts[:-1]) if parts is not None else os.path.dirname(path)
 
 
 def vendored_trucs(vs: dict) -> list[tuple[str, str, str]]:
@@ -492,7 +510,7 @@ def load_vendored(session, vs: dict) -> int:
 
     count = 0
     for name, path, project in vendored_trucs(vs):
-        doc = registry.load_knowledge(os.path.dirname(path), regular_only=True)
+        doc = registry.load_knowledge(_vendored_dir(path), regular_only=True)
         if doc is None:
             continue
         row = _lock_row(project, name)
@@ -584,7 +602,7 @@ def _import_author(path: str) -> dict:
     changed or unrecorded blocks into an operator note (a changed body into
     an operator supersede), while an unchanged block keeps its record and that
     record's trust."""
-    if in_export_area(path):
+    if _export_area.in_export_area(path):
         return {"kind": "agent", "trust": "untrusted"}
     if vendored_path(path) is not None:
         return {"kind": "vendor", "trust": "untrusted"}
