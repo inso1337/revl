@@ -1345,7 +1345,28 @@ def main(argv: list[str] | None = None) -> int:
     # the raw arguments, for a command that re-executes itself under another
     # interpreter (`revl mcp serve`, issue #1692)
     args.raw_argv = list(sys.argv[1:] if argv is None else argv)
+    # issue #2547: a file under `.revl/export/` is author-written whoever loads
+    # it, so every compile this command runs takes it under the authoring
+    # profile (the rule is on by default in every process), unless this one
+    # command was given `--trust-exported`. `revl mcp serve` turns it off: the
+    # server decides by its own path rule and `--author-trust`.
+    from .export_area import cli_rule  # noqa: PLC0415
 
+    with cli_rule(getattr(args, "trust_exported", False),
+                  off=_serves_the_compiler(args),
+                  offer_flag=hasattr(args, "trust_exported")):
+        return _dispatch(args)
+
+
+def _serves_the_compiler(args) -> bool:
+    """`revl mcp serve`: the compiler as an MCP server, whose own door
+    (`mcp.server.compile_under_authoring`) decides how each file compiles,
+    by the operator's `--author-trust`."""
+    return args.command == "mcp" and getattr(args, "mcp_command", None) == "serve"
+
+
+def _dispatch(args) -> int:
+    """Run the parsed command."""
     if args.command == "truc":
         from .truc import main as _truc_main  # noqa: PLC0415 — lazy, pulls cordis
         return _truc_main(args.truc_args)

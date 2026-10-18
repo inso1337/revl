@@ -12,10 +12,10 @@ use "workspace.rvl" { Workspace }
 use "planner.rvl" { Plan }
 
 pub service Assembler {
-  emission[fetch, gate, index, ws] fn add(name: Str) -> Int
+  emission[fetch, gate, index, ws] fn add(name: Str, trustHostCode: Bool) -> Int
   emission[gate, ws] fn rm(name: Str) -> Int
-  emission[gate, ws] fn assemble() -> Int
-  emission[gate, ws] fn assemble_check() -> Int
+  emission[gate, ws] fn assemble(trustHostCode: Bool) -> Int
+  emission[gate, ws] fn assemble_check(trustHostCode: Bool) -> Int
   emission[ws] fn apply(trustHostCode: Bool) -> Int
   emission[ws] fn stack_check() -> Int
   emission[ws] fn unknown(cmd: Str) -> Int
@@ -28,16 +28,19 @@ component Assembler
   provide asm {
     // §8.1 — fetch, admit against the current assembly *before vendoring*,
     // then (only on ok) vendor + pin. A truc that would not join is never
-    // written to disk: commit_add gets "" and does nothing.
-    fn add(name) {
+    // written to disk: commit_add gets "" and does nothing. Vendored text is
+    // admitted as an untrusted author; `thc` (--trust-host-code, this command
+    // only) admits a host body, and the lock row records which way it went.
+    fn add(name, thc) {
       let m = emit ws.manifest(".")
+      let lock = emit ws.read("truc.lock")
       let reg = plan.registry_of(m)
       let row = emit index.row(reg, name)
       let entryJson = emit fetch.entry(reg, name)
       let spec = plan.assemble_spec(m)
       let g = emit ws.read_sources(".", spec)
       let ordered = plan.ordered_with_candidate(g, name, entryJson)
-      let v = emit gate.admit_all(ordered)
+      let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.add_report(row, name, entryJson, v)
       emit ws.commit_add(".", plan.report_commit(r))
       emit ws.print(plan.report_msg(r))
@@ -46,15 +49,16 @@ component Assembler
 
     // §8.2 — read intent + proof, hash-verify the vendor dir, admit the whole
     // set through the gate, compose on ok. All-or-nothing: on refusal the
-    // Planner returns empty compose-sources, so build/ is untouched.
-    fn assemble() {
+    // Planner returns empty compose-sources, so build/ is untouched. A row's
+    // host body admits only by its lock record or by `thc`, this command only.
+    fn assemble(thc) {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let spec = plan.assemble_spec(m)
       let g = emit ws.read_sources(".", spec)
       let d = plan.drift(lock, g)
       let ordered = plan.ordered_sources(g)
-      let v = emit gate.admit_all(ordered)
+      let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.assemble_report(d, v, g)
       emit ws.write_assembly(".", plan.report_sources(r))
       emit ws.print(plan.report_msg(r))
@@ -69,10 +73,11 @@ component Assembler
     // remainder un-vendors trucs/<name>/ and drops it from truc.toml/truc.lock.
     fn rm(name) {
       let m = emit ws.manifest(".")
+      let lock = emit ws.read("truc.lock")
       let spec = plan.rm_spec(m, name)
       let g = emit ws.read_sources(".", spec)
       let ordered = plan.ordered_sources(g)
-      let v = emit gate.admit_all(ordered)
+      let v = emit gate.admit_all(ordered, lock, false)
       let r = plan.rm_report(m, name, v)
       emit ws.commit_rm(".", plan.report_commit(r))
       emit ws.print(plan.report_msg(r))
@@ -83,14 +88,14 @@ component Assembler
     // `assemble`, but the Planner's check_report forces empty compose-sources
     // so write_assembly is a no-op: --check answers "is my assembly still
     // valid?" (with the why-trace on invalid) and writes NOTHING to disk.
-    fn assemble_check() {
+    fn assemble_check(thc) {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let spec = plan.assemble_spec(m)
       let g = emit ws.read_sources(".", spec)
       let d = plan.drift(lock, g)
       let ordered = plan.ordered_sources(g)
-      let v = emit gate.admit_all(ordered)
+      let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.check_report(d, v, g)
       emit ws.write_assembly(".", plan.report_sources(r))
       emit ws.print(plan.report_msg(r))
@@ -119,7 +124,7 @@ component Assembler
     }
 
     fn unknown(cmd) {
-      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME | rm NAME | assemble [--check] | apply [--trust-host-code] | stack check>`)
+      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME [--trust-host-code] | rm NAME | assemble [--check] [--trust-host-code] | apply [--trust-host-code] | stack check>`)
       return 2
     }
   }

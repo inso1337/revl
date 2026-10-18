@@ -8,12 +8,14 @@ use "../externs.rvl" { host_admit_all }
 
 pub service Gate {
   // Admit an ordered list of {path, source, name} incrementally through the
-  // gate; the verdict names the first candidate that would not join.
-  emission[host_admit_all] fn admit_all(orderedJson: Str) -> Str
+  // gate; the verdict names the first candidate that would not join. Vendored
+  // rows are admitted as an untrusted author: `lockJson` and `trustHostCode`
+  // are the only two things that may lift that for a host body.
+  emission[host_admit_all] fn admit_all(orderedJson: Str, lockJson: Str, trustHostCode: Bool) -> Str
 }
 
 component GateKeeper provides gate: Gate {
   provide gate {
-    fn admit_all(orderedJson) = emit host_admit_all(orderedJson)
+    fn admit_all(orderedJson, lockJson, trustHostCode) = emit host_admit_all(orderedJson, lockJson, trustHostCode)
   }
 }

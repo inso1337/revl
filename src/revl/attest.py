@@ -434,6 +434,15 @@ def named_guarantees() -> list[str]:
 #: Opt[Opt[Str]] }` from refused to admitted. It cites no `(Gn)` tag, so it is
 #: a digest input and not a cited code.
 #:
+#: `export_area` joined with issue #2547 on the same rule. `compiler`
+#: asks it whether a file lies under a `.revl/export/` directory, and a file
+#: that does compiles under the authoring profile: the same host body that is
+#: admitted in the operator's own file is refused there. So it decides
+#: admission by location and its bytes move the refusal set, which is the
+#: opposite of what a `NOT_A_RULE` entry claims.
+#: `tests/test_cli_export_profile_2547.py` holds both sides of that line. It
+#: cites no `(Gn)` tag, so it is a digest input and not a cited code.
+#:
 #: WHY THIS IS STILL A LIST. Membership is reachability plus effect, and neither
 #: is a property of the bytes of this file: a module refuses only when the
 #: frontend reaches it on some program, which only a run settles. An import-time
@@ -454,7 +463,7 @@ RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "cap_order", "ui_family", "resources", "kernel_boundary",
                    "cardinality", "decode_grammar", "model_profile",
                    "operator_text", "type_schema", "realm_placeholders",
-                   "gen_types")
+                   "gen_types", "export_area")
 
 #: The sibling modules a rule module imports that are NOT rules, each with the
 #: reason it is not one. This is the argued half of the membership question and
