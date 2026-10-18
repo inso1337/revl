@@ -549,6 +549,38 @@ def _removed_provision_realms(admitted: dict,
     return moved
 
 
+def _requirements(ir: dict) -> dict[tuple[str, str], str | None]:
+    """`(component, key) -> realm` for every key a component requires; `None`
+    is the shared realm."""
+    out = {}
+    for comp in ir.get("components") or []:
+        placed = comp.get("isolate") or {}
+        for key in comp.get("requires") or {}:
+            out[(comp.get("name"), key)] = placed.get(key)
+    return out
+
+
+def _removed_requirement_realms(admitted: dict,
+                                candidate: dict
+                                ) -> list[tuple[str, str, str, str | None]]:
+    """`(component, key, admitted realm, candidate realm)` for every
+    realm-placed requirement the candidate moves out of its realm (issue
+    #2585).
+
+    Compared per `(component, key)`: only a component that stays admitted and
+    still requires `key` has a placement to lose. A requirer withdrawn takes
+    its placement with it, a requirer renamed is a new component, which an
+    untrusted author may add in the shared realm like any other, and a
+    requirement dropped altogether names no key to bind."""
+    before = _requirements(admitted)
+    after = _requirements(candidate)
+    return [(name, key, realm, after[(name, key)])
+            for (name, key), realm in sorted(
+                before.items(), key=lambda p: (p[0][0] or "", p[0][1]))
+            if realm is not None and (name, key) in after
+            and after[(name, key)] != realm]
+
+
 def _component_line(texts: dict | None, filename: str | None, name: str) -> int:
     """The line `component <name>` starts on in the candidate's text for
     `filename`, or 0 when that text is not at hand."""
@@ -565,8 +597,9 @@ def _component_line(texts: dict | None, filename: str | None, name: str) -> int:
 def check_no_realm_removal(admitted: dict | None, candidate: dict,
                            profile: AdmissionProfile | None,
                            texts: dict | None = None) -> None:
-    """Refuse an untrusted edit that moves a surviving provider out of its realm
-    (issue #2487), the deletion half of `check_no_realm_placement`.
+    """Refuse an untrusted edit that moves a surviving provider or requirer out
+    of its realm (issues #2487, #2585), the deletion half of
+    `check_no_realm_placement`.
 
     Writing `isolate <key> in realm("...")` is refused; deleting an admitted
     one names nothing and so passed the syntactic check, while it moves the
@@ -578,22 +611,34 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     component provides it now: renaming the provider in the same edit is the
     same move under a new name (issue #2523).
 
-    Only provisions are compared. A requirer that leaves its realm binds a
-    shared-realm provider instead, which an untrusted author may already add,
-    so it gains nothing. Withdrawing the provider takes its provision with it,
-    which moves nothing and is unaffected, as is renaming the key itself: the
-    old key is withdrawn, and a realm consumer that still requires it is left
-    unbound, since binding is per (key, realm). So is a trusted author (`None`
-    profile) and a first generation (`admitted is None`).
+    The same holds for a requirer (issue #2585). Its placement moves no data,
+    but the policy counts it: a realm-scoped allow or deny rule selects a
+    component by every realm it is isolated into, require keys included. A
+    requirer that loses its clause leaves the realm those rules were written
+    for, and binds a shared-realm provider of the key when one exists, which
+    an untrusted author may add. So a key a surviving component requires in a
+    realm must still be required in that realm.
+
+    Withdrawing a component takes its placements with it, which moves nothing
+    and is unaffected, as is renaming the key itself: the old key is
+    withdrawn, and a realm consumer that still requires it is left unbound,
+    since binding is per (key, realm). So is a trusted author (`None` profile)
+    and a first generation (`admitted is None`).
 
     `texts` maps each candidate filename to its text, so the refusal points at
     the line the component starts on."""
     if profile is None or not profile.no_realm_placement or not admitted:
         return
     moved = _removed_provision_realms(admitted, candidate)
-    if not moved:
+    required = _removed_requirement_realms(admitted, candidate)
+    if not moved and not required:
         return
-    name, key, realm, now, was = moved[0]
+    if moved:
+        name, key, realm, now, was = moved[0]
+        what = "provision"
+    else:
+        name, key, realm, now = required[0]
+        was, what = name, "requirement"
     where = "the shared realm" if now is None else f'realm("{now}")'
     origin = "" if was == name else f" on `{was}`"
     filename = next((c.get("source") for c in candidate.get("components") or []
@@ -602,16 +647,19 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
         filename or "<candidate>", _component_line(texts, filename, name),
         f"admission refused: this author cannot remove the realm placement of "
         f"`{name}`: the admitted `isolate {key} in realm(\"{realm}\")`{origin} "
-        f"would move its `{key}` provision to {where}",
+        f"would move its `{key}` {what} to {where}",
         hint="removing a realm clause from a provider that stays admitted, "
              "or from one renamed in the same edit, makes "
              "its provision, and the data behind it, bindable by any "
              "shared-realm component, which widens authority as surely as "
-             "naming a realm does. Keep the clause, withdraw the component "
+             "naming a realm does. Removing it from a requirer takes the "
+             "component out of the realm the operator's realm-scoped rules "
+             "select it by. Keep the clause, withdraw the component "
              "instead, or have an operator move it through the gated swap "
-             "(issues #2487, #2523)",
+             "(issues #2487, #2523, #2585)",
         code="G9", category="admission",
-        navigate=_realm_removal_navigate([m[2] for m in moved]),
+        navigate=_realm_removal_navigate([m[2] for m in moved]
+                                         + [r[2] for r in required]),
     )
 
 
@@ -622,13 +670,13 @@ def _realm_removal_navigate(realms) -> dict:
     alts = [
         nav.alternative(
             enacts=nav.ENACTS_AUTHOR,
-            action=("keep the admitted `in realm(...)` clause on the provider, "
-                    "or withdraw the component, which takes its provision "
-                    "with it"),
+            action=("keep the admitted `in realm(...)` clause on the "
+                    "component, or withdraw the component, which takes its "
+                    "placement with it"),
             ref="keep-realm"),
         nav.alternative(
             enacts=nav.ENACTS_OPERATOR,
-            action=("or have an operator move the provision through the "
+            action=("or have an operator move the placement through the "
                     "reviewed, gated swap"),
             ref="operator-swap"),
     ]
