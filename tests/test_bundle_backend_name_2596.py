@@ -75,8 +75,8 @@ def _revl_modules() -> set[str]:
 # ------------------------------------------------------------ the emitted tier
 
 @pytest.mark.parametrize("form", FORMS)
-def test_an_unshipped_backend_key_is_a_mismatch_naming_it(  # noqa: F811
-        form, signed_bundle, tmp_path):
+def test_an_unshipped_backend_key_is_a_mismatch_naming_it(
+        form, signed_bundle, tmp_path):  # noqa: F811
     key = _planted(tmp_path)[0][form]
     _record(signed_bundle, "backends", key)
 
@@ -94,8 +94,8 @@ def test_an_unshipped_backend_key_is_a_mismatch_naming_it(  # noqa: F811
 
 
 @pytest.mark.parametrize("form", FORMS)
-def test_an_unshipped_backend_key_imports_and_reads_nothing(  # noqa: F811
-        form, signed_bundle, tmp_path):
+def test_an_unshipped_backend_key_imports_and_reads_nothing(
+        form, signed_bundle, tmp_path):  # noqa: F811
     keys, marker = _planted(tmp_path)
     B.verify_bundle(str(signed_bundle), env=dict(KEY))  # the shipped emitters load now
     _record(signed_bundle, "backends", keys[form])
@@ -108,8 +108,8 @@ def test_an_unshipped_backend_key_imports_and_reads_nothing(  # noqa: F811
 
 
 @pytest.mark.parametrize("form", FORMS)
-def test_verify_exits_non_zero_for_an_unshipped_backend_key(  # noqa: F811
-        form, signed_bundle, tmp_path, monkeypatch, capsys):
+def test_verify_exits_non_zero_for_an_unshipped_backend_key(
+        form, signed_bundle, tmp_path, monkeypatch, capsys):  # noqa: F811
     keys, marker = _planted(tmp_path)
     key = keys[form]
     monkeypatch.setenv("REVL_ATTEST_KEY", KEY["REVL_ATTEST_KEY"])
@@ -125,8 +125,8 @@ def test_verify_exits_non_zero_for_an_unshipped_backend_key(  # noqa: F811
 # ------------------------------------------------------------ the refused tier
 
 @pytest.mark.parametrize("form", FORMS)
-def test_an_unshipped_recorded_refusal_key_is_a_mismatch_naming_it(  # noqa: F811
-        form, signed_bundle, tmp_path):
+def test_an_unshipped_recorded_refusal_key_is_a_mismatch_naming_it(
+        form, signed_bundle, tmp_path):  # noqa: F811
     keys, marker = _planted(tmp_path)
     key = keys[form]
     _record(signed_bundle, "refusedBackends", key)
@@ -186,8 +186,8 @@ def test_a_refused_build_leaves_an_existing_output_directory_untouched(tmp_path)
 
 # ------------------------------------------------------------------- control
 
-def test_a_shipped_backend_name_verifies_as_before(  # noqa: F811
-        signed_bundle, monkeypatch, capsys):
+def test_a_shipped_backend_name_verifies_as_before(
+        signed_bundle, monkeypatch, capsys):  # noqa: F811
     report = B.verify_bundle(str(signed_bundle), env=dict(KEY))
     assert report.ok, [c.detail for c in report.mismatches]
     for backend in B.DEFAULT_BACKENDS:
