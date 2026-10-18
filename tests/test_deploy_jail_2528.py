@@ -137,6 +137,8 @@ def test_a_placement_file_outside_the_root_is_refused(jail, field):
     {"extra_args": "--key k"},
     {"port": "22 -oProxyCommand=x"},
     {"port": 0},
+    {"known_hosts": "known hosts"},
+    {"known_hosts": "%d/known_hosts"},
 ], ids=lambda o: next(iter(o)))
 def test_a_remote_field_with_an_unsafe_shape_is_refused(jail, over):
     placement = _ssh_map(jail["root"], **over)

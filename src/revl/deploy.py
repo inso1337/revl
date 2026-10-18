@@ -4067,11 +4067,15 @@ def _process_name_problem(pname: Any) -> Optional[str]:
 #:   `--host-key`, `--runtime-version`, `--require-gauntlet`,
 #:   `--require-conformance`), each value a shell-safe word not starting with
 #:   `-`; anything else, including any ssh or scp option, is refused;
-#: * `port` is an integer in 1..65535.
+#: * `port` is an integer in 1..65535;
+#: * the local `known_hosts` path reaches ssh as `-o UserKnownHostsFile=...`,
+#:   whose value ssh splits on whitespace and expands for `%` and `~`, so it
+#:   carries none of those, nor quotes or a backslash.
 _SHELL_SAFE_WORD = re.compile(r"[A-Za-z0-9_@%+=:,./~-]+")
 _SSH_HOST_SHAPE = re.compile(
     r"(?:[A-Za-z0-9_][A-Za-z0-9._-]*@)?"
     r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
+_KNOWN_HOSTS_UNSAFE = re.compile(r"[\s'\"%~\\\0]")
 _RUNNER_VALUE_FLAGS = frozenset({"--key", "--host-key", "--runtime-version"})
 _RUNNER_SWITCH_FLAGS = frozenset({"--require-gauntlet", "--require-conformance"})
 
@@ -4134,6 +4138,12 @@ def _ssh_remote_shape_problem(target: "DeployTarget") -> Optional[str]:
     if port is not None and (isinstance(port, bool) or not isinstance(port, int)
                              or not 1 <= port <= 65535):
         return f"`port = {port!r}` is not an integer in 1..65535"
+    known_hosts = raw.get("known_hosts")
+    if not isinstance(known_hosts, str) or _KNOWN_HOSTS_UNSAFE.search(known_hosts):
+        return (f"`known_hosts = {known_hosts!r}` is not a plain path: ssh reads "
+                f"it as an option value, splitting it on whitespace and "
+                f"expanding `%` and `~`, so it may not contain whitespace, "
+                f"quotes, `%` or `~`")
     return _extra_args_problem(raw.get("extra_args"))
 
 

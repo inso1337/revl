@@ -3551,7 +3551,7 @@ def _deploy_ticket_summary(bundle, backend, targets: list) -> str:
             extra = t.get("extra_args") or []
             lines.append(
                 f"process {t['process']!r} via ssh to host {t.get('host')!r}"
-                f" port {t.get('port', 22)!r},"
+                f" port {t.get('port', '(ssh default)')},"
                 f" remote path {t.get('remote_bundle')!r},"
                 f" runner {t.get('runner', 'revl')!r},"
                 f" options {' '.join(map(str, extra)) or '(none)'},"
@@ -4044,7 +4044,8 @@ TOOLS = [
                        "refused without the configured approval: it returns an "
                        "`approvalRequired` ticket, and the identical re-issue "
                        "after `revl_approve` fires exactly once. Host/user/port/"
-                       "known_hosts/host_key/remote_bundle/ssh options are the "
+                       "known_hosts/host_key/remote_bundle/runner flags "
+                       "(`extra_args`) are the "
                        "`[processes.<p>.deploy]` table inside `placement` (the "
                        "shape `parse_deploy_map` and `DeployTarget` read), not "
                        "top-level arguments.",

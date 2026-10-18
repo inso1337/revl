@@ -487,8 +487,8 @@ crossing is irreversible, so `apply: true` is additionally refused without the
 configured approval: it returns the `revl_approve` ticket two-step, and the
 identical re-issue after a yes fires exactly once.
 
-Host, port, `known_hosts`, `host_key`, `remote_bundle` and the ssh options are
-keys of the `[processes.<p>.deploy]` table inside `placement`, not top-level
+Host, port, `known_hosts`, `host_key`, `remote_bundle` and the runner flags
+(`extra_args`) are keys of the `[processes.<p>.deploy]` table inside `placement`, not top-level
 arguments. A `via = ssh` target needs `host`, `known_hosts` (the PINNED
 host-key file) and `remote_bundle` (the path on the far host the bundle is
 staged to and re-hashed); `host_key` is a conductor-side copy of the far host's
@@ -497,7 +497,11 @@ back.
 
 The local files a deploy reads are path arguments like `files`: `bundle`, and
 `known_hosts` and `host_key` inside each deploy table, are confined to the
-operator-sanctioned root(s) and refused outside them (issue #2528). The remote
+operator-sanctioned root(s) and refused outside them (issue #2528), in trusted
+mode too: an operator who keeps the pin file elsewhere (for example under
+`~/.ssh`) sanctions that directory with `revl mcp serve --root`. ssh reads the
+`known_hosts` path as an option value, so it may not contain whitespace, quotes,
+`%` or `~`. The remote
 fields name things on the far host, so their shape is checked instead, at
 admission, for every `via = ssh` target (CLI and MCP alike):
 
@@ -513,6 +517,8 @@ admission, for every `via = ssh` target (CLI and MCP alike):
   `--flag=value`), `--require-gauntlet` and `--require-conformance`. Any other
   word, including any ssh or scp option, is refused.
 - `port` is an integer in 1..65535.
+
+The ticket prints `(ssh default)` when no `port` is given.
 
 Every process name in `placement` must also be a plain file-name word: one
 containing `/`, `\`, `..` or a NUL byte is refused, because it becomes a file

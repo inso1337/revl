@@ -1974,7 +1974,9 @@ shape of the remote fields: `host` is `[user@]name` (a DNS name or IPv4
 address), `remote_bundle` and `runner` are one shell-safe word not starting
 with `-`, `extra_args` carries only the far runner's own flags (`--key`,
 `--host-key`, `--runtime-version`, `--require-gauntlet`,
-`--require-conformance`), and `port` is an integer in 1..65535. A process name
+`--require-conformance`), `port` is an integer in 1..65535, and the
+`known_hosts` path carries no whitespace, quotes, `%` or `~` (ssh reads it as an
+option value). A process name
 containing `/`, `\`, `..` or a NUL byte is refused, since it names a file in
 the deploy state directory. See [mcp-reference.md](mcp-reference.md#revl_deploy)
 for the full rule. Container launch
