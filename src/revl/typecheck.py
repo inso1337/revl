@@ -2867,14 +2867,15 @@ def builtin_case_call_type(node: dict, tenv: dict, types: dict, services: dict,
 
     Issue #2483: the IR `call` arm typed these as nothing, so
     `effect put(Some("x"))` met a declared `Opt[Int]` parameter unjudged in a
-    component while a `fn` body refused it. None for any other call, and for a
-    local of function type that shadows the case name."""
+    component while a `fn` body refused it. None for any other call. A local
+    that shadows the case name never reaches here: every stratum lowers its
+    call as a `call` on a `name` node carrying the local's escape (`Some_`),
+    which `local_function_call_type` types (issue #2490)."""
     callee = node.get("callee")
     if not isinstance(callee, dict) or callee.get("kind") != "var":
         return None
     name = callee.get("name")
-    if name not in ("Some", "Ok", "Err") \
-            or parse_type(tenv.get(name))[0] == FN_HEAD:
+    if name not in ("Some", "Ok", "Err"):
         return None
     case = (types.get(CASES_KEY) or {}).get(name)
     if case is None or not str(case.get("adt") or "").startswith(

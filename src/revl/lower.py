@@ -10110,14 +10110,18 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             # runtimes do not define (they are not functions). A name the
             # scope binds is a value, not the constructor (issue #2490): it
             # takes the generic tail below, a `call` on its `name` node.
-            shadowed = name in scope and name in _BUILTIN_CONSTRUCTORS
             if name not in scope and _tagged_case(name, env.types) is not None:
                 info = (env.types.get(CASES_KEY) or {})[name]
                 return {"kind": "adt", "type": info["adt"], "case": name, "args": args}
-            if not shadowed and name in _BUILTIN_CONSTRUCTORS:
+            if name not in scope and name in _BUILTIN_CONSTRUCTORS:
                 return {"kind": "call", "callee": {"kind": "var", "name": name},
                         "args": args}
-            if not shadowed and name in callables:
+            # `callables` holds the constructors too, so a scoped one must not
+            # fall through to a `fn` node here. A scoped name that spells a
+            # module fn still resolves to the module fn (a `fn` body refuses
+            # that shadowing; the self-host lowers it the same way), which is
+            # why this arm is not `name not in scope`.
+            if name in callables and not (name in scope and name in _BUILTIN_CONSTRUCTORS):
                 # item 187: fill omitted trailing arguments with their default
                 # expressions before async coercion, so the module-fn call the
                 # emitters see is fully supplied (no per-tier default handling).
