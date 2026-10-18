@@ -241,10 +241,16 @@ def test_a_library_caller_gets_the_rule_by_default(root):
 
 
 def _admit(path: Path) -> dict:
+    """Admit `path` as a vendored row, with the host code trusted. A named
+    row is admitted as an untrusted author (#2560), and HOSTED carries host
+    code, so the command's `trust_host_code` (truc's --trust-host-code) is
+    what lets the text through; the export-area rule is a separate check
+    that this trust does not lift."""
     from revl.truc._host import admit_all  # noqa: PLC0415
 
     return json.loads(admit_all(json.dumps(
-        [{"path": str(path), "source": HOSTED, "name": "x"}])))
+        [{"path": str(path), "source": HOSTED, "name": "x"}]),
+        trust_host_code=True))
 
 
 def test_the_truc_host_entry_profiles_an_exported_file(root, capsys):
@@ -259,7 +265,8 @@ def test_the_truc_host_entry_profiles_an_exported_file(root, capsys):
     err = capsys.readouterr().err
     assert "copy it out of the export directory" in err, err
     assert "--trust-exported" not in err, err
-    # control: the same text at an operator path is admitted
+    # control: the same text, trusted the same way, at a path outside the
+    # export directory is admitted, so only the location refused it above
     admitted = _admit(_write(root / "trucs" / "x" / "component.rvl"))
     assert admitted["ok"] is True, admitted
 
