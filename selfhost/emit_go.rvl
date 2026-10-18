@@ -355,6 +355,18 @@ fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
 
 // The scan-loop state, threaded like `vt`: the cursor table in force and the
 // per-function rune counter.
+fn set_fh(ctx: Ctx, fh: Map[Str, Str]) -> Ctx {
+  return {
+    vt: ctx.vt, fr: ctx.fr, er: ctx.er,
+    signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
+    tnames: ctx.tnames, rt: ctx.rt,
+    builders: ctx.builders, builder_seq: ctx.builder_seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias,
+    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
+    fh: fh
+  }
+}
 fn with_scan(ctx: Ctx, sc: Map[Str, Str], seq: Int) -> Ctx {
   return {
     vt: ctx.vt, fr: ctx.fr, er: ctx.er,
@@ -623,6 +635,9 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
     if (node_kind(callee) == "var") {
       let nm = value_str(value_field(callee, "name"))
       if (is_builtin_ctor(nm)) { return infer_ctor(nm, value_list(value_field(node, "args")), ctx) }
+      // issue #2495: `id(p)` answers the instantiation, not `T`
+      let g = go_generic_call(nm, value_list(value_field(node, "args")), ctx)
+      if (g.generic) { return v3_subst(map_get(ctx.fr, nm), g.mapping) }
       let fr = map_get(ctx.fr, nm)
       if (fr != "") { return fr }
       let er = map_get(ctx.er, nm)
@@ -885,6 +900,8 @@ fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
   if (value_is_null(callee)) { return "<<UNSUPPORTED-EXPR:component-call>>" }
   let cn = value_str(value_field(callee, "name"))
   var param_types = []
+  var declared = []
+  var g = { generic: false, params: [], mapping: Map.empty(), tparams: [] }
   if (node_kind(callee) == "var") {
     if (resolved(map_get(ctx.ca, cn))) { param_types = [map_get(ctx.cp, cn)] }
     else if (!is_builtin_ctor(cn)) {
@@ -895,6 +912,12 @@ fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
           }
         }
       }
+      // issue #2495: a slot typed by the callee's type parameter flows the
+      // instantiation the arguments bind, and an `Int` literal in a bare
+      // `T` slot is spelled `int64(..)`
+      declared = param_types
+      g = go_generic_call(cn, value_list(value_field(node, "args")), ctx)
+      if (g.generic) { param_types = g.params }
     }
   }
   var args = []
@@ -902,7 +925,9 @@ fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
   for (a of value_list(value_field(node, "args"))) {
     var flow = ""
     if (i < param_types.length()) { flow = param_types[i] }
-    args = args.push(render_expr(a, ctx, flow))
+    var rendered = render_expr(a, ctx, flow)
+    if (g.generic && i < declared.length()) { rendered = typed_generic_arg(a, rendered, declared[i], g.tparams) }
+    args = args.push(rendered)
     i = i + 1
   }
   if (node_kind(callee) == "var") {
@@ -1443,10 +1468,145 @@ fn declared_params(signatures: List[Any], name: Str) -> List[Str] {
   return fn_params.length() > 0 ? fn_params : ext_params
 }
 
+// The declared parameter types of the FUNCTION `name`, and nothing for an
+// extern of that name: the reference's `function_params`/`function_tparams`
+// tables are built from functions only, so an extern never reads as a
+// generic callee (issue #2495).
+fn function_params(signatures: List[Any], name: Str) -> List[Str] {
+  var fn_params = []
+  for (sig of signatures) {
+    if (value_str(value_field(sig, "name")) == name && value_is_null(value_field(sig, "bodies"))) {
+      var ps = []
+      for (p of value_list(value_field(sig, "params"))) { ps = ps.push(value_str(value_field(p, "type"))) }
+      fn_params = ps
+    }
+  }
+  return fn_params
+}
+
+// `_v3_split_generic`: `A, B` at top-level commas (depth-aware).
+fn split_generic_args(inner: Str) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  while (i < inner.length()) {
+    let ch = inner.charAt(i)
+    if (ch == "[") { depth = depth + 1 }
+    if (ch == "]") { depth = depth - 1 }
+    if (ch == "," && depth == 0) { out = out.push(trim_str(cur)); cur = "" }
+    else { cur = cur.concat(ch) }
+    i = i + 1
+  }
+  if (trim_str(cur) != "") { out = out.push(trim_str(cur)) }
+  return out
+}
+
+// `_v3_subst`: `surface` with each whole-word type parameter replaced from
+// `mapping`.
+fn v3_subst(surface: Str, mapping: Map[Str, Str]) -> Str {
+  if (mapping.keys().length() == 0) { return surface }
+  var out = ""
+  var word = ""
+  var i = 0
+  while (i < surface.length()) {
+    let ch = surface.charAt(i)
+    if (is_word_char(ch)) { word = word.concat(ch) }
+    else {
+      if (word != "") { out = out.concat(mapping.lookup(word) ?? word) }
+      word = ""
+      out = out.concat(ch)
+    }
+    i = i + 1
+  }
+  if (word != "") { out = out.concat(mapping.lookup(word) ?? word) }
+  return out
+}
+
+// `_v3_unify`: bind the type parameters `pattern` mentions from the matching
+// parts of `actual` (`List[T]` against `List[Int]` binds `T` to `Int`); an
+// `any` actual binds nothing.
+fn v3_unify(pattern: Str, actual: Str, params: List[Str], bound: Map[Str, Str]) -> Map[Str, Str] {
+  let p = trim_str(pattern)
+  let a = trim_str(actual)
+  if (list_contains(params, p)) {
+    if (a != "any" && (bound.lookup(p) ?? "") == "") { return bound.set(p, a) }
+    return bound
+  }
+  let pl = p.indexOf("[")
+  let al = a.indexOf("[")
+  if (pl > 0 && p.endsWith("]") && al > 0 && a.endsWith("]") && p.slice(0, pl) == a.slice(0, al)) {
+    let ps = split_generic_args(p.slice(pl + 1, p.length() - 1))
+    let as_ = split_generic_args(a.slice(al + 1, a.length() - 1))
+    if (ps.length() == as_.length()) {
+      var b = bound
+      var i = 0
+      while (i < ps.length()) { b = v3_unify(ps[i], as_[i], params, b); i = i + 1 }
+      return b
+    }
+  }
+  return bound
+}
+
+// The type parameters of a callee's signature, by the rule `fn_type_params`
+// applies to a definition (the reference's `function_tparams` table).
+fn callee_tparams(name: Str, ctx: Ctx) -> List[Str] {
+  var found: List[Str] = []
+  var surfaces = function_params(ctx.signatures, name)
+  surfaces = surfaces.push(map_get(ctx.fr, name))
+  for (surface of surfaces) {
+    for (word of type_words(surface)) {
+      if (word.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(word) >= 0 && !list_contains(ctx.tnames, word) && !list_contains(found, word)) {
+        found = found.push(word)
+      }
+    }
+  }
+  return found
+}
+
+// `_go_v3_generic_call` (issue #2495): for a call to a generic function, the
+// parameter types with each type parameter replaced by what the arguments
+// bind it to, the binding itself, and the callee's type parameters. A
+// parameter nothing binds becomes `any`, as an unpinned Opt/Result parameter
+// does: Go infers a type argument from a typed argument, never from where
+// the result flows. `generic` is false for every other callee.
+type GenericCall = { generic: Bool, params: List[Str], mapping: Map[Str, Str], tparams: List[Str] }
+fn go_generic_call(name: Str, arg_nodes: List[Any], ctx: Ctx) -> GenericCall {
+  let tparams = callee_tparams(name, ctx)
+  if (tparams.length() == 0) { return { generic: false, params: [], mapping: Map.empty(), tparams: [] } }
+  let params = function_params(ctx.signatures, name)
+  var bound: Map[Str, Str] = Map.empty()
+  var i = 0
+  while (i < params.length() && i < arg_nodes.length()) {
+    let actual = infer_type(arg_nodes[i], ctx)
+    var mentions = false
+    for (w of type_words(actual)) { if (list_contains(tparams, w)) { mentions = true } }
+    if (actual != "" && !mentions) { bound = v3_unify(params[i], actual, tparams, bound) }
+    i = i + 1
+  }
+  var mapping: Map[Str, Str] = Map.empty()
+  for (t of tparams) { mapping = mapping.set(t, bound.lookup(t) ?? "any") }
+  var subst: List[Str] = []
+  for (p of params) { subst = subst.push(v3_subst(p, mapping)) }
+  return { generic: true, params: subst, mapping: mapping, tparams: tparams }
+}
+
+// `_go_v3_typed_generic_arg`: an `Int` literal passed where a generic
+// callee's parameter is a bare type parameter is spelled `int64(1)`: Go
+// infers a type argument from an untyped constant as `int`, not the `int64`
+// a revl `Int` is (issue #2495).
+fn typed_generic_arg(arg: Any, rendered: Str, declared: Str, tparams: List[Str]) -> Str {
+  if (!list_contains(tparams, trim_str(declared))) { return rendered }
+  if (node_kind(arg) == "lit" && value_kind(value_field(arg, "value")) == "int" && value_str(value_field(arg, "widen")) == "") {
+    return `int64(${rendered})`
+  }
+  return rendered
+}
+
 // `_v3_flow_hints`: `{binding: declared type}` for each local a body hands on
 // whole. `return x` flows into the declared return, `f(x)` into `f`'s declared
 // parameter; the first occurrence in document order wins.
-fn flow_hints(body: List[Any], ret_type: Str, signatures: List[Any]) -> Map[Str, Str] {
+fn flow_hints(body: List[Any], ret_type: Str, ctx: Ctx) -> Map[Str, Str] {
   var hints: Map[Str, Str] = Map.empty()
   for (n of walk_nodes(body)) {
     if (node_step(n) == "return" && ret_type != "") {
@@ -1459,8 +1619,13 @@ fn flow_hints(body: List[Any], ret_type: Str, signatures: List[Any]) -> Map[Str,
     if (node_kind(n) == "call") {
       let callee = value_field(n, "callee")
       if (node_kind(callee) == "var") {
-        let params = declared_params(signatures, value_str(value_field(callee, "name")))
+        let cn = value_str(value_field(callee, "name"))
+        var params = declared_params(ctx.signatures, cn)
         let args = value_list(value_field(n, "args"))
+        // issue #2495: a generic callee's `T` is no flow target; the
+        // instantiation the other arguments bind is
+        let g = go_generic_call(cn, args, ctx)
+        if (g.generic) { params = g.params }
         var i = 0
         while (i < args.length() && i < params.length()) {
           if (node_kind(args[i]) == "var" && params[i] != "") {
@@ -2275,7 +2440,47 @@ fn emit_externs(externs: List[Any]) -> Eout {
   return { lines: out, imports: imports }
 }
 
+// `_V3_TYPE_WORD.findall`: the identifier words of a surface type, in order.
+fn type_words(surface: Str) -> List[Str] {
+  var out: List[Str] = []
+  var word = ""
+  var i = 0
+  while (i < surface.length()) {
+    let ch = surface.charAt(i)
+    if (is_word_char(ch)) { word = word.concat(ch) }
+    else {
+      if (word != "") { out = out.push(word) }
+      word = ""
+    }
+    i = i + 1
+  }
+  if (word != "") { out = out.push(word) }
+  return out
+}
+
+// `_v3_fn_type_params` (issue #2495): the type parameters of a function
+// signature, in first-use order. The IR carries the author's spelling
+// (`fn id[T](x: T) -> T` arrives as params typed `T`, with no parameter
+// list), so the emitter applies the checker's implicit rule: a single
+// uppercase name that no `type` declares is a type parameter.
+fn fn_type_params(fnode: Any, tnames: List[Str]) -> List[Str] {
+  var found: List[Str] = []
+  var surfaces: List[Str] = []
+  for (p of value_list(value_field(fnode, "params"))) { surfaces = surfaces.push(value_str(value_field(p, "type"))) }
+  surfaces = surfaces.push(value_str(value_field(fnode, "returns")))
+  for (surface of surfaces) {
+    for (word of type_words(surface)) {
+      if (word.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(word) >= 0 && !list_contains(tnames, word) && !list_contains(found, word)) {
+        found = found.push(word)
+      }
+    }
+  }
+  return found
+}
+
 // `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
+// A generic function carries its type parameters as Go type parameters,
+// `func id[T any](x T) T` (issue #2495).
 fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any], strings_alias: Str) -> Fout {
   var out = []
   var uses_strings = false
@@ -2288,14 +2493,15 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     let rt = value_str(value_field(fnode, "returns"))
     let reserved = collect_reserved(fnode, Map.empty())
     let body = value_list(value_field(fnode, "body"))
-    let ctx = {
+    let ctx0 = {
       vt: vt, fr: fr, er: er, signatures: signatures,
       ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
       rt: rt, builders: Map.empty(), builder_seq: 0,
       reserved: reserved, strings_alias: strings_alias,
       sc: Map.empty(), scan_seq: 0, body: body, tn: "",
-      fh: flow_hints(body, rt, signatures)
+      fh: Map.empty()
     }
+    let ctx = set_fh(ctx0, flow_hints(body, rt, ctx0))
     var ps = []
     for (p of params) {
       ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
@@ -2303,7 +2509,14 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     let ret = go_type(value_field(fnode, "returns"))
     var sigret = ""
     if (ret != "") { sigret = " ".concat(ret) }
-    out = out.push(`func ${name}(${ps.join(", ")})${sigret} {`)
+    var type_params = ""
+    let tparams = fn_type_params(fnode, t.tnames)
+    if (tparams.length() > 0) {
+      var items: List[Str] = []
+      for (tp of tparams) { items = items.push(`${tp} any`) }
+      type_params = `[${items.join(", ")}]`
+    }
+    out = out.push(`func ${name}${type_params}(${ps.join(", ")})${sigret} {`)
     let r = emit_stmts(body, ctx, 1)
     if (r.ctx.builder_seq > 0) { uses_strings = true }
     last_reserved = r.ctx.reserved
@@ -2365,14 +2578,15 @@ fn emit_tests(tests: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTab
     let tname = test_name(value_str(value_field(tcase, "name")), used)
     used = used.push(tname)
     let body = value_list(value_field(tcase, "body"))
-    let ctx = {
+    let ctx0 = {
       vt: Map.empty(), fr: fr, er: er, signatures: signatures,
       ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
       rt: "", builders: Map.empty(), builder_seq: 0,
       reserved: res, strings_alias: strings_alias,
       sc: Map.empty(), scan_seq: 0, body: body, tn: "revlT",
-      fh: flow_hints(body, "", signatures)
+      fh: Map.empty()
     }
+    let ctx = set_fh(ctx0, flow_hints(body, "", ctx0))
     // `revlT` (not `t`) so a user binding named `t` can't shadow it.
     out = out.push(`func ${tname}(revlT *testing.T) {`)
     let r = emit_stmts(body, ctx, 1)

@@ -142,6 +142,10 @@ CORPUS = [
     # or parameter, or the other operand of an `==`), and a call through a
     # function value types its payload
     "../../../backends/go/testdata/result_erased_1631.rvl",
+    # issue #2495: a generic function as a Go type-parameter list, its calls
+    # bound from their arguments; issue #2496: a `Str` call result, field or
+    # index in a `+`
+    "generic_fn.rvl",
     # issue #106: the v3 COMBINED path's first slice (`_emit_v3_combined`). A
     # top-level declaration beside components whose provide methods are single
     # `return`s or empty bodies, with or without `requires`: the pure tier, the
@@ -1098,3 +1102,4 @@ def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_pa
         f"{name}: the port no longer emits {port_token!r}. If it now matches "
         f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
         f"add the document to CORPUS.")
+

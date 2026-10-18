@@ -100,6 +100,12 @@
 
 ["function", "issue-1920-call-acquired-binds-and-service-trait-names", "type_ident", 1, 1]
 
+["reason", "issue-2495-generic-call-residuals", "issue #2495: a generic function (a Rust generic with the bounds its body needs, `fn id<T: Clone>(x: T) -> T`) and the calls that bind its type parameters from their arguments are mirrored by selfhost/emit_rust.rvl and held by the corpus document generic_fn.rvl (tests/fixtures/emit_rust_corpus). What remains: the mention guard of `v3_generic_call` (an argument whose own type names a type parameter, a generic function calling another with its `T`) and the fall-through of `v3_unify` for a parameter that is neither a type parameter nor a matching type-argument list; a call is unified only where a `let`, a `+` or an arm asks its type."]
+
+["function", "issue-2495-generic-call-residuals", "v3_generic_call", 1, 1]
+
+["function", "issue-2495-generic-call-residuals", "v3_unify", 1, 1]
+
 ["reason", "item-391-by-value-reuse-residuals-emit-rust", "Item 391 by-value reuse residuals (emit_rust_corpus/by_value_reuse.rvl holds the rest of the port to byte agreement): `builtin_return_type` mirrors the reference's `_BUILTIN_RESULT` table, and its `to_int32`, `field` and `list` rows name methods this port renders `<<UNSUPPORTED-BUILTIN:...>>`, so no corpus document can bind one; its final `return \"\"` is reached only by a method the table does not name, and every method the port renders is named. `by_value_tail`'s borrowed-`&str` arm is the reference's own safety net (`_by_value_tail`, recorded there too): the borrow analysis keeps a borrowed param out of an owned position. `decl_site_names`' `let_pattern` arm declares destructured names, and the port renders destructuring as `<<UNSUPPORTED-STEP:let_pattern>>`."]
 
 ["function", "item-391-by-value-reuse-residuals-emit-rust", "builtin_return_type", 4, 4]
@@ -114,7 +120,7 @@
 
 ["function", "item-391-intercept-metadata-shapes-the-surface-cannot-spell", "ic_type", 2, 2]
 
-["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `render_var`'s statements. Item 391 (the by-value reuse port, emit_rust_corpus/by_value_reuse.rvl): `owned_borrowed_tail` is gone (its sites take the reference's `by_value_reuse`/`by_value_tail`), `v3_is_float` is reached in full and `render_builtin` 2 -> 1."]
+["reason", "ownership-and-expression-rendering-guards-the-remaining-arms", "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered. Item 458 adds one: `render_un` now imposes the Int bound on unary minus rather than leaving it to rust's debug-only check, and the Int32 arm of that split is the uncovered one — no rust corpus document negates an Int32. emit_rust_corpus/bridge_types.rvl (item 391) reaches 1 more of `render_var`'s statements. Item 391 (the by-value reuse port, emit_rust_corpus/by_value_reuse.rvl): `owned_borrowed_tail` is gone (its sites take the reference's `by_value_reuse`/`by_value_tail`), `v3_is_float` is reached in full and `render_builtin` 2 -> 1. Issue #2496 adds the guard of `v3_is_str`'s call arm for a callee that is no plain name."]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "borrow_str_arg", 1, 1]
 
@@ -148,7 +154,7 @@
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "v3_bin_ops", 3, 3]
 
-["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "v3_is_str", 1, 1]
+["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "v3_is_str", 2, 2]
 
 ["function", "ownership-and-expression-rendering-guards-the-remaining-arms", "v3_stmt", 1, 1]
 
@@ -202,7 +208,7 @@
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_type_t", 2, 2]
 
-["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_v3_lit", 3, 3]
+["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "rust_v3_lit", 2, 2]
 
 ["function", "type-table-and-validated-ir-fallbacks-residuals-mark", "service_param_type", 1, 1]
 

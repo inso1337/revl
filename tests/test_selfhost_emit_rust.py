@@ -341,6 +341,12 @@ CORPUS = [
     # red, so the UI transaction unit stays unported on this tier and
     # `class=emission` stays a recorded blind spot.
     "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
+    # issue #2495: a generic function as a Rust generic with the bounds its
+    # body needs, its calls bound from their arguments; issue #2496: a `Str`
+    # call result, field or index in a `+`; issue #2497: a never-read `let`
+    # of a bare `None` typed `Option<Value>`
+    "generic_fn.rvl",
+    "comp_provide_generic.rvl",  # issue #2495: a generic call in a provide method
 ]
 
 
@@ -1555,3 +1561,4 @@ def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_pa
         f"{name}: the port no longer emits {port_token!r}. If it now matches "
         f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
         f"add the document to CORPUS.")
+

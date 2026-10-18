@@ -10,7 +10,8 @@ notes an agent (or a human, through an export) adds on top:
 * the SIDECAR is one JSON file per record under
   `<composition dir>/.revl/knowledge/<id>.json`, so two lanes never write the
   same file. It is read at `revl_load` and written only by `revl_export
-  {with_knowledge: true}`: disk is an export (issue #1696);
+  {with_knowledge: true}`, each record as a new file created exclusively,
+  never over one already there (issue #2534): disk is an export (issue #1696);
 * TRUST follows authorship. Under the untrusted-author profile an agent's note
   is `trust: untrusted`, and by default only an evidence-backed untrusted note
   rides with its body; an evidence-free one rides as its id and kind, with the

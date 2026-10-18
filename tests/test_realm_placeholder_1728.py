@@ -148,13 +148,20 @@ def test_the_mcp_server_binds_with_the_operators_flag(server):
 
 def test_the_agent_cannot_bind_through_the_call(server):
     """A binding argument from the far end of the transport is not read: only
-    the operator's flag binds."""
+    the operator's flag binds. Since issue #2532 the call is refused by name
+    before anything reads it (`revl_check` declares no binding argument), and
+    the placeholders stay unbound for the call that follows."""
     server.set_authoring_trust(host_code=False, realm_bindings=())
     checked = _call("revl_check", {"source": PLACEHOLDERS,
                                    "realm_bindings": {"a": "tenant_a", "b": "tenant_b"},
                                    "realmBindings": {"a": "tenant_a", "b": "tenant_b"}})
     assert checked["ok"] is False
-    assert checked["diagnostics"][0]["message"].startswith("realm placeholder `?a`")
+    refusal = checked["diagnostics"][0]["message"]
+    assert refusal.startswith("unknown arguments for `revl_check`")
+    assert "`realm_bindings`" in refusal and "`realmBindings`" in refusal
+    unbound = _call("revl_check", {"source": PLACEHOLDERS})
+    assert unbound["ok"] is False
+    assert unbound["diagnostics"][0]["message"].startswith("realm placeholder `?a`")
 
 
 _CANDIDATE = (

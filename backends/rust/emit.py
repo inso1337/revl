@@ -327,6 +327,24 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
+def _body_assigned_names(body: object) -> set[str]:
+    """Every name a function body ASSIGNS (`x = Some(1)`) after its
+    declaration. `_body_multi_use` counts reads only, so a `var` the body
+    never reads but later assigns would otherwise look dead to
+    `_v3_dead_let_annotation`; the assignment pins its type for rustc, so
+    it is not (issue #2497)."""
+    names: set[str] = set()
+    if isinstance(body, dict):
+        if body.get("step") == "assign" and isinstance(body.get("name"), str):
+            names.add(body["name"])
+        for value in body.values():
+            names |= _body_assigned_names(value)
+    elif isinstance(body, list):
+        for item in body:
+            names |= _body_assigned_names(item)
+    return names
+
+
 # Step -> the field(s) carrying the names that step DECLARES. A declaration is
 # what makes a name loop-local: the iteration gets its own value, so moving it
 # strands nothing. `assign` is deliberately ABSENT — a rebind under a branch
@@ -1451,6 +1469,32 @@ def _rust_phantom_params(spec: dict) -> list:
     return [p for p in spec.get("params") or [] if p not in used]
 
 
+# issue #2495: the type parameters of the generic function being rendered.
+# `_rust_type` answers each as itself (`T`) instead of the erased `Value`;
+# `_emit_v3_functions` sets it per function and clears it after.
+_V3_FN_TPARAMS: frozenset = frozenset()
+
+
+def _v3_fn_type_params(fn: dict, types: dict) -> list[str]:
+    """The type parameters of a function signature, in first-use order.
+
+    The IR carries the author's spelling (`fn id[T](x: T) -> T` arrives as
+    params typed `T`, with no parameter list), so the emitter applies the
+    checker's implicit rule (`is_tparam_name`): a single-uppercase name that
+    no `type` declares is a type parameter. issue #2495"""
+    found: list[str] = []
+    declared = types if isinstance(types, dict) else {}
+    surfaces = [p.get("type") for p in fn.get("params") or []] + [fn.get("returns")]
+    for surface in surfaces:
+        if not isinstance(surface, str):
+            continue
+        for word in _RUST_TYPE_WORD.findall(surface):
+            if (len(word) == 1 and word.isupper() and word not in declared
+                    and word not in found):
+                found.append(word)
+    return found
+
+
 def _rust_type(name: object, types: dict | None = None,
                position: str = "value") -> str:
     """Surface type -> Rust type. Unknown named types map to cordis `Value`.
@@ -1472,6 +1516,8 @@ def _rust_type(name: object, types: dict | None = None,
     types = types or {}
     if name in types:
         return _ident(name, "type name")
+    if name in _V3_FN_TPARAMS:
+        return name  # issue #2495: a type parameter of the function in hand
     generic = re.match(r"^(\w+)\[(.+)\]$", name)
     if generic:
         head, inner = generic.group(1), generic.group(2)
@@ -6664,6 +6710,26 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
         return ctx.var_types.get(node.get("id") or node.get("name")) == "Str"
     if kind == "bin" and node.get("op") == "+":
         return _v3_is_str(node.get("left"), ctx) or _v3_is_str(node.get("right"), ctx)
+    # issue #2496: a call's declared return (`f("a") + f("b")`), a record
+    # field read or a list index that is a `Str` concatenates through
+    # `format!` like a `Str` local, since `String + String` is E0308. Each
+    # asks `_v3_infer_type` only about a CHILD node (`_v3_infer_type` itself
+    # ends in `_v3_is_str`, so asking it about this node would not return).
+    if kind == "call":
+        callee = node.get("callee") or {}
+        if callee.get("kind") != "var":
+            return False
+        cn = callee.get("name")
+        generic = _v3_generic_call(cn, node.get("args") or [], ctx)
+        ret = ctx.fn_returns.get(cn)
+        return (_v3_subst(ret, generic[1]) if generic is not None else ret) == "Str"
+    if kind == "field":
+        target_ty = _v3_infer_type(node.get("target"), ctx)
+        if not isinstance(target_ty, str):
+            return False
+        return ctx.record_field_types(target_ty).get(node.get("name")) == "Str"
+    if kind == "index":
+        return _list_element_type(_v3_infer_type(node.get("target"), ctx)) == "Str"
     return False
 
 
@@ -6978,6 +7044,10 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
                 cn = callee.get("name")
                 if cn in ctx.case_adt:
                     return ctx.case_adt.get(cn)
+                generic = _v3_generic_call(cn, node.get("args") or [], ctx)
+                if generic is not None:
+                    # issue #2495: `id(p)` answers the instantiation, not `T`
+                    return _v3_subst(ctx.fn_returns.get(cn), generic[1])
                 if cn in ctx.fn_returns:
                     return ctx.fn_returns.get(cn)
         if kind == "list":
@@ -7112,6 +7182,12 @@ class _V3Ctx:
         # body recovers it through the serde_json value model the whole rust tier
         # shares (stdlib/value.rvl, stdlib/json.rvl), so passing a bare `String`/
         # `i64`/`f64`/`bool` would not even typecheck against `fn f(v: Value)`.
+        # issue #2495: the type parameters of each generic function, so a call
+        # binds them from its arguments (`_v3_generic_call`)
+        self.fn_tparams: dict[str, list] = {
+            fn.get("name"): _v3_fn_type_params(fn, types or {})
+            for fn in functions or []
+        }
         self.fn_param_types: dict[str, list] = {
             fn.get("name"): [p.get("type") for p in (fn.get("params") or [])]
             for fn in functions or []
@@ -7144,6 +7220,11 @@ class _V3Ctx:
         # reset per fn by `_emit_v3_functions`, empty everywhere the reuse
         # context is not established.
         self.multi_use: set[str] = set()
+        # issue #2497: reads per name in the body being rendered, so a `let`
+        # nothing reads again can be typed (or refused) where rustc has no
+        # later use to infer from
+        self.read_counts: dict[str, int] = {}
+        self.assigned_names: set[str] = set()
         # `id()` of every `for` node whose bare-name iterable is dead after the
         # loop and so may be MOVED rather than `.clone()`d (item 437f); reset per
         # fn by `_emit_v3_functions`, empty in every other emit context.
@@ -7657,6 +7738,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # `Any`/`Value` slot is boxed (`_coerce_any_arg`). A borrowed `&str`
             # slot (item 282) is never an `Any` slot, so the two never overlap.
             param_types = ctx.fn_param_types.get(callee_name, [])
+            generic = _v3_generic_call(callee_name, arg_nodes, ctx)
+            if generic is not None:
+                # issue #2495: a slot typed by the callee's type parameter is
+                # the instantiation the arguments bind, never the erased
+                # `Value`, so it is not boxed
+                param_types = generic[0]
             bv_args = [
                 _borrow_str_arg(a, r, ctx) if idx in borrow
                 else _borrow_list_arg(a, r, ctx) if idx in list_borrow
@@ -8694,6 +8781,45 @@ def _guard_frame_neutral_loop(body) -> None:
                 "while/for body (docs/design/379-break-continue.md)")
 
 
+def _v3_dead_let_annotation(node: dict, ctx: _V3Ctx) -> str:
+    """The type annotation of a `let` the body never reads nor assigns
+    again, when its value alone does not fix one (issue #2497). rustc infers
+    a `let`'s type from a later use; with none, a bare `None` is E0282, so
+    it is typed `Option<Value>`, the erased type go gives it
+    (`RevlOpt[any]`). A
+    payload-less case of a generic variant (`let x = Nn`) is refused by name
+    instead, as go refuses it: `Value` is no instantiation a later reader of
+    the program would expect."""
+    value = node.get("value")
+    if not isinstance(value, dict):
+        return ""
+    if value.get("kind") == "var" and value.get("name") == "None":
+        return ": Option<Value>"
+    if value.get("kind") == "adt":
+        _v3_refuse_unbound_case(value, node.get("name"), ctx)
+    return ""
+
+
+def _v3_refuse_unbound_case(value: dict, binding, ctx: _V3Ctx) -> None:
+    """Refuse the construction of a generic variant's payload-less case whose
+    type argument nothing pins (issue #2497): neither a flow target nor a
+    payload, and no later read or assignment of the binding for rustc to
+    infer one from. Same prefix as the go emitter's `_v3_refuse_unbound`; the
+    tail names rustc's later-use inference, which Go does not have."""
+    case = value.get("case")
+    adt = ctx.case_adt.get(case)
+    spec = ctx.types.get(adt) if adt else None
+    params = list((spec or {}).get("params") or [])
+    if not params or ctx.case_payload.get(case) is not None:
+        return
+    raise EmitError(
+        f"variant case `{case}`: type '{adt}[{', '.join(params)}]' has no "
+        f"type argument for {', '.join(params)} at this construction - "
+        "neither its flow target nor its payload pins it, and nothing reads "
+        f"`{binding}` later for rustc to infer one from; annotate the value "
+        "or pass it where a typed parameter pins it")
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -8737,6 +8863,9 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 elem = ctx.vec_elems.get(node.get("name"))
                 if isinstance(elem, str):
                     annot = f": Vec<{_rust_type(elem, ctx.types)}>"
+            elif (ctx.read_counts.get(node.get("name"), 0) == 0
+                    and node.get("name") not in ctx.assigned_names):
+                annot = _v3_dead_let_annotation(node, ctx)
             out.append(f"{pad}{keyword} {name}{annot} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
@@ -9033,14 +9162,21 @@ def _emit_v3_types(types: dict) -> list[str]:
 
 def _emit_v3_functions(functions: list, types: dict, externs: list,
                        analyses: "_V3Analyses | None" = None) -> list[str]:
+    global _V3_FN_TPARAMS
     ctx = _V3Ctx(types, functions, externs, analyses=analyses)
     out: list[str] = []
     for fn in functions:
         name = _ident(fn.get("name"), "function name")
+        # issue #2495: inside a generic function its type parameters are
+        # types of their own, not the erased `Value`
+        tparams = _v3_fn_type_params(fn, types)
+        _V3_FN_TPARAMS = frozenset(tparams)
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.current_return = fn.get("returns")
         counts: dict[str, int] = {}
         _body_multi_use(fn.get("body") or [], counts)
+        ctx.read_counts = counts
+        ctx.assigned_names = _body_assigned_names(fn.get("body") or [])
         # The textual count, widened by the reads a LOOP repeats (#1157): a name
         # spelled once inside a `while`/`for` body is still consumed on every
         # iteration, so it is a reuse even though the count says one.
@@ -9094,7 +9230,8 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         params = ", ".join(rendered_params)
         returns = _rust_type(fn.get("returns") or "Unit", types, position="return")
         visibility = "pub " if is_public else ""
-        out.append(f"{visibility}fn {name}({params}) -> {returns} {{")
+        generics = _v3_fn_generics(fn, tparams, ctx)
+        out.append(f"{visibility}fn {name}{generics}({params}) -> {returns} {{")
         out.extend(view_prologue)
         if not fn.get("body"):
             out.append("    todo!()")
@@ -9103,7 +9240,86 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
                 _v3_stmt(stmt, ctx, out, 1)
         out.append("}")
         out.append("")
+        _V3_FN_TPARAMS = frozenset()
     return out
+
+
+def _v3_walk_nodes(node):
+    """Every dict reachable from `node` (lists and dict values), itself first."""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _v3_walk_nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _v3_walk_nodes(item)
+
+
+def _v3_subst(surface, mapping: dict):
+    """`surface` with each whole-word type parameter replaced from `mapping`."""
+    if not (isinstance(surface, str) and mapping):
+        return surface
+    return _RUST_TYPE_WORD.sub(lambda m: mapping.get(m.group(0), m.group(0)), surface)
+
+
+def _v3_unify(pattern, actual, params, bound: dict) -> None:
+    """Bind the type parameters `pattern` mentions from the matching parts of
+    `actual` (`List[T]` against `List[Int]` binds `T` to `Int`)."""
+    if not (isinstance(pattern, str) and isinstance(actual, str)):
+        return
+    p, a = pattern.strip(), actual.strip()
+    if p in params:
+        if not bound.get(p):
+            bound[p] = a
+        return
+    if "[" in p and p.endswith("]") and "[" in a and a.endswith("]") \
+            and p[: p.index("[")] == a[: a.index("[")]:
+        ps = _split_generic(p[p.index("[") + 1: -1])
+        as_ = _split_generic(a[a.index("[") + 1: -1])
+        if len(ps) == len(as_):
+            for pi, ai in zip(ps, as_):
+                _v3_unify(pi, ai, params, bound)
+
+
+def _v3_generic_call(name, arg_nodes, ctx: "_V3Ctx"):
+    """For a call to a generic function (issue #2495): the parameter types
+    with each type parameter the arguments bind replaced by its binding, the
+    binding itself, and the callee's type parameters; else None. A parameter
+    nothing binds stays as spelled: rustc infers it from where the result
+    flows."""
+    tparams = ctx.fn_tparams.get(name) if name else None
+    if not tparams:
+        return None
+    params = ctx.fn_param_types.get(name) or []
+    bound: dict = {}
+    for pattern, arg in zip(params, arg_nodes):
+        actual = _v3_infer_type(arg, ctx)
+        if isinstance(actual, str) and not any(
+                w in tparams for w in _RUST_TYPE_WORD.findall(actual)):
+            _v3_unify(pattern, actual, tparams, bound)
+    return [_v3_subst(p, bound) for p in params], bound, tparams
+
+
+def _v3_fn_generics(fn: dict, tparams: list[str], ctx: "_V3Ctx") -> str:
+    """The `<T: Clone + PartialEq>` list of a generic function (issue #2495),
+    empty for a function with no type parameter.
+
+    `Clone` always: the body renderer clones a reused local or a by-value
+    argument wherever the surface type is not a scalar, and every type a revl
+    value lowers to is `Clone`. `PartialEq` only when the body compares two
+    values with `==`/`!=` and one operand is typed by a type parameter."""
+    if not tparams:
+        return ""
+    needs_eq = False
+    for node in _v3_walk_nodes(fn.get("body") or []):
+        if node.get("kind") == "bin" and node.get("op") in ("==", "!="):
+            for side in (node.get("left"), node.get("right")):
+                inferred = _v3_infer_type(side, ctx)
+                if isinstance(inferred, str) and any(
+                        w in tparams for w in _RUST_TYPE_WORD.findall(inferred)):
+                    needs_eq = True
+    bounds = "Clone + PartialEq" if needs_eq else "Clone"
+    return "<" + ", ".join(f"{t}: {bounds}" for t in tparams) + ">"
 
 
 # item 378 Stage 5: module-level config seam for document-global config externs.
@@ -9423,6 +9639,8 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
             ctx.var_types = {}
             counts: dict[str, int] = {}
             _body_multi_use(test["body"], counts)
+            ctx.read_counts = counts
+            ctx.assigned_names = _body_assigned_names(test["body"])
             ctx.multi_use = ({n for n, c in counts.items() if c > 1}
                              | _loop_repeated_reads(test["body"]))
             ctx.movable_for_iterables = _movable_for_iterables(

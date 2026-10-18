@@ -2136,6 +2136,12 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             return "Str"
         return None
     if isinstance(expr, Interp):
+        # each `${...}` segment is an expression like any other, so it meets
+        # the same checks a let initializer does (issue #2478: `${n(Box("s"))}`
+        # and `${n(Box(1, 2))}` were admitted). The template itself is a Str.
+        for kind, part in expr.parts:
+            if kind == "expr":
+                infer_ast(part, tenv, types, filename)
         return "Str"
     if isinstance(expr, ExprVar):
         if expr.name == "None":
@@ -3300,6 +3306,16 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             return "Str"
         return None
     if kind in ("format", "interp"):
+        # the interpolated operands are checked like any other expression
+        # (issue #2478), the `infer_ast` Interp twin; the template is a Str
+        if kind == "format":
+            operands = node.get("args") or []
+        else:
+            operands = [p[1] for p in node.get("parts") or []
+                        if isinstance(p, (list, tuple)) and len(p) == 2
+                        and p[0] == "expr"]
+        for operand in operands:
+            infer_ir(operand, tenv, types, services, filename, line)
         return "Str"
     if kind == "hole":
         # a lowered hole always carries the type it was admitted with

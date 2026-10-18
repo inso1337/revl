@@ -132,6 +132,16 @@
 
 ["function", "issue-2345-record-mode-emission-journal", "_service_emission", 7, 7]
 
+["reason", "issue-2495-generic-call-residuals", "issue #2495: a generic function (`fn id<T: Clone>(x: T) -> T`) and the calls that bind its type parameters from their arguments are mirrored by selfhost/emit_rust.rvl and held by the corpus document generic_fn.rvl (tests/fixtures/emit_rust_corpus). What remains in `_v3_unify` is its guard for a pattern or actual that is no string; the typed-core IR carries strings there."]
+
+["function", "issue-2495-generic-call-residuals", "_v3_unify", 1, 1]
+
+["reason", "issue-2497-unpinned-case-no-corpus-document", "issue #2497: a `let` the body never reads nor assigns again, whose value is a bare `None` (annotated `Option<Value>`) or a payload-less case of a generic variant (refused by name). The annotation is mirrored by selfhost/emit_rust.rvl and held by generic_fn.rvl; what remains is the refusal half and the guard for a value that is no record: a refusal is not emitted at all, and the port lowers no generic variant (issue #2494). backends/rust/test_unpinned_case_rust_2497.py pins both halves."]
+
+["function", "issue-2497-unpinned-case-no-corpus-document", "_v3_dead_let_annotation", 2, 2]
+
+["function", "issue-2497-unpinned-case-no-corpus-document", "_v3_refuse_unbound_case", 7, 7]
+
 ["reason", "item-421-f5-a-document-that-declares-a", "Item 421 F5: a document that declares a `Secret[T]` AND returns a `Result` from a provided method serializes the Err half through this funnel rather than `_result_to_json`, because the failure text is the one thing crossing the seam that has to be scrubbed. No corpus document does both: the rust byte-agreement corpus reaches the bridge (service.rvl, services_multi.rvl) but holds no document declaring a `Secret[T]` at all, and the port (selfhost/emit_rust.rvl) carries no `_SECRET_MODE` and emits no funnel call, so a secret-bearing bridge document could not be a byte-identical corpus case. The reference half is pinned by tests/test_rust_seam_failure_scrub.py::test_secret_mode_emits_the_funnel_and_the_shared_marker."]
 
 ["function", "item-421-f5-a-document-that-declares-a", "_result_to_json_funneled", 1, 1]
@@ -322,7 +332,7 @@
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_type", 7, 7]
 
-["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_v3_lit", 3, 3]
+["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_rust_v3_lit", 2, 2]
 
 ["function", "validated-ir-and-scalar-formatting-fallbacks-these-statement", "_split_fn_type", 1, 1]
 
