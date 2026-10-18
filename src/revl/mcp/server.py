@@ -223,7 +223,8 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
 # `revl_restore` + `revl_snapshot` handed back a file's entire CONTENT.
 
 _PATH_ARGUMENTS = frozenset({"files", "candidateFiles", "baselineFiles",
-                             "traceFile", "registry", "policy"})
+                             "traceFile", "registry", "policy", "bundle",
+                             "known_hosts", "host_key"})
 
 # Issue #2033: `policy` and `registry` are paths only where they are DECLARED as
 # one, and that is the top level of a tool's own arguments — the only two sites
@@ -240,8 +241,17 @@ _PATH_ARGUMENTS = frozenset({"files", "candidateFiles", "baselineFiles",
 # (`repair._compile_candidate`). The other three never nest in any current
 # schema; they are kept at every depth anyway, so the narrower classification
 # can only ever refuse more, never admit more.
+#
+# Issue #2528: `revl_deploy` reads three local files. `bundle` is a top-level
+# argument (the attested bundle directory staged to the far host); `known_hosts`
+# (the pinned host-key file) and `host_key` (the conductor's copy of the far
+# host's receipt key) sit nested in `placement.processes.<p>.deploy`, so they
+# are paths at every depth. The deploy table's REMOTE fields (`host`,
+# `remote_bundle`, `extra_args`) name things on the far host, not here; the
+# deploy-map admission checks their shape instead (`deploy.admit_deploy_map`).
 _NESTED_PATH_ARGUMENTS = frozenset({"files", "candidateFiles",
-                                    "baselineFiles", "traceFile"})
+                                    "baselineFiles", "traceFile",
+                                    "known_hosts", "host_key"})
 
 
 def _file_roots() -> tuple[str, ...]:
@@ -3507,6 +3517,51 @@ def _tool_deploy_run(arguments: dict) -> dict:
     return _deploy.deploy_local_map(placement, state_dir=state_dir)
 
 
+_DEPLOY_TICKET_FIELDS = ("via", "host", "port", "remote_bundle", "runner",
+                         "extra_args", "known_hosts", "host_key")
+
+
+def _deploy_ticket_targets(placement) -> list:
+    """What a yes to a deploy ticket lets reach each far host (issue #2528):
+    the host, the remote bundle path, the runner and its options, and the local
+    pin and key files, copied verbatim from the deploy map so the approver reads
+    the values the run will use. The digests bind the same map."""
+    processes = (placement or {}).get("processes") or {}
+    if not isinstance(processes, dict):
+        return []
+    out = []
+    for pname in sorted(processes, key=str):
+        pconf = processes.get(pname) or {}
+        table = pconf.get("deploy") if isinstance(pconf, dict) else None
+        entry = {"process": pname}
+        if isinstance(table, dict):
+            entry.update({k: table[k] for k in _DEPLOY_TICKET_FIELDS
+                          if table.get(k) is not None})
+        else:
+            entry["via"] = "local"
+        out.append(entry)
+    return out
+
+
+def _deploy_ticket_summary(bundle, backend, targets: list) -> str:
+    """The deploy ticket in plain text, one line per target, next to the digest."""
+    lines = [f"deploy bundle {bundle!r} (backend {backend})"]
+    for t in targets:
+        if t.get("via") == "ssh":
+            extra = t.get("extra_args") or []
+            lines.append(
+                f"process {t['process']!r} via ssh to host {t.get('host')!r}"
+                f" port {t.get('port', 22)!r},"
+                f" remote path {t.get('remote_bundle')!r},"
+                f" runner {t.get('runner', 'revl')!r},"
+                f" options {' '.join(map(str, extra)) or '(none)'},"
+                f" known_hosts {t.get('known_hosts')!r},"
+                f" host_key {t.get('host_key')!r}")
+        else:
+            lines.append(f"process {t['process']!r} via {t.get('via')}")
+    return "\n".join(lines)
+
+
 def _tool_deploy_authorize(arguments: dict) -> None:
     """The deploy's approval gate (item 246): a cross-machine reconfiguration is
     an irreversible crossing, so `apply: true` demands a standing approval before
@@ -3523,6 +3578,7 @@ def _tool_deploy_authorize(arguments: dict) -> None:
     bundle = arguments.get("bundle")
     backend = arguments.get("backend") or "python"
     processes = sorted((placement or {}).get("processes") or {})
+    targets = _deploy_ticket_targets(placement)
     body = {
         "kind": "deploy",
         "component": "*",
@@ -3539,6 +3595,8 @@ def _tool_deploy_authorize(arguments: dict) -> None:
         "closureComponents": [],
         "boundary": "machine",
         "targets": processes,
+        "deploy": {"bundle": bundle, "backend": backend, "targets": targets},
+        "summary": _deploy_ticket_summary(bundle, backend, targets),
     }
     body["hash"] = _approval_sha(_approval_canon(body))
     standing = SESSION._find_standing_approval(body)

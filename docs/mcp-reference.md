@@ -495,6 +495,35 @@ staged to and re-hashed); `host_key` is a conductor-side copy of the far host's
 receipt-signing key, so the conductor can verify the signed receipts it gets
 back.
 
+The local files a deploy reads are path arguments like `files`: `bundle`, and
+`known_hosts` and `host_key` inside each deploy table, are confined to the
+operator-sanctioned root(s) and refused outside them (issue #2528). The remote
+fields name things on the far host, so their shape is checked instead, at
+admission, for every `via = ssh` target (CLI and MCP alike):
+
+- `host` is `[user@]name`, with `name` a DNS name or an IPv4 address; a value
+  starting with `-` or carrying anything else is refused, since it would reach
+  ssh or scp as an option.
+- `remote_bundle` and `runner` are one shell-safe word (letters, digits and
+  `_ @ % + = : , . / ~ -`) that does not start with `-`. ssh hands the remote
+  command to the far host's shell, so a word with whitespace or a shell
+  metacharacter would become more words or more commands than the map wrote.
+- `extra_args` carries only the far runner's own flags: `--key`, `--host-key`
+  and `--runtime-version` (each with a shell-safe value, as `--flag value` or
+  `--flag=value`), `--require-gauntlet` and `--require-conformance`. Any other
+  word, including any ssh or scp option, is refused.
+- `port` is an integer in 1..65535.
+
+Every process name in `placement` must also be a plain file-name word: one
+containing `/`, `\`, `..` or a NUL byte is refused, because it becomes a file
+name in the deploy state directory.
+
+The `apply: true` ticket shows what a yes lets reach each far host, next to its
+digest: `ticket.deploy` lists the bundle and, per process, the `via`, `host`,
+`port`, `remote_bundle`, `runner`, `extra_args`, `known_hosts` and `host_key`,
+and `ticket.summary` says the same in plain text. The digests bind the same
+values, so a changed field is a different ticket.
+
 - Inputs: `placement` (the deploy map); `bundle` (required for `apply: true` on
   a cross-machine deploy); `backend` (default `python`); `apply` (default false,
   the read-only rehearsal).
