@@ -1,0 +1,74 @@
+// Issue #2501: an effect whose acquisition is a ternary renders as a ts line
+// that starts with `(`. JS ASI does not end a statement before such a line, so
+// the `$revl_frame.journalBegin()` the emitter places right above every
+// bracket's forward write was CALLED with it (`journalBegin()((...))`, "is not
+// a function"). Both bracket sites are here: the activation body
+// (`seeded() ? ...`) and a provide-method body (`held != None ? ...`, the shape
+// of a downstream approval gate). The same hazard hit every bare expression
+// statement, so `pick` holds the fn-body form (`let x = 1` then a ternary
+// statement, which failed with "(intermediate value) is not a function").
+// The `emit` lines in the activation body and in `Beat`'s timer are not
+// paren-led today (the parentheses drop in lowering); they keep the guarded
+// emit and timer-firing sites executed and byte-checked. The reference now
+// `;`-leads every paren-led expression statement.
+//
+// It sits outside every corpus directory the census walks only so this
+// two-line emitter fix does not move the census baseline; nothing in it is a
+// native-gate refusal. tests/test_host_map_journal_2009.py runs it under node.
+service Gate {
+  fn approve(k: Str) -> Str
+}
+
+fn noop() {}
+
+fn seeded() -> Bool { return true }
+
+extern emission fn log_tag(tag: Str) = @py { return None } = @ts { return; }
+
+fn pick(c: Bool) -> Int {
+  let x = 1
+  c ? noop() : noop()
+  return x
+}
+
+component Ledger provides gate: Gate {
+  let approved = effect Map.new() undo approved.drop()
+  let pending = effect Map.new() undo pending.drop()
+  effect seeded() ? pending.insert("a", "waiting") : noop()
+  undo   seeded() ? pending.remove("a") : noop()
+  emit (log_tag("on"))
+  provide gate {
+    fn approve(k) {
+      let held: Opt[Str] = pending.get(k)
+      effect approved.insert(k, "yes")
+      undo   approved.remove(k)
+      effect held != None ? pending.remove(k) : noop()
+      undo   held != None ? pending.insert(k, held ?? "waiting") : noop()
+      return "ok"
+    }
+  }
+}
+
+component Beat {
+  every 5s {
+    emit log_tag("first")
+    emit (log_tag("on"))
+  }
+}
+
+test "a ternary expression statement after a let runs" {
+  assert pick(true) == 1
+}
+
+lifecycle test "a ternary timer emission loads and unloads" {
+  load Beat
+  unload Beat
+  assert no_residue
+}
+
+lifecycle test "a ternary effect after journalBegin runs" {
+  load Ledger
+  call gate.approve("a")
+  unload Ledger
+  assert no_residue
+}
