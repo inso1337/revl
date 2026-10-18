@@ -184,8 +184,8 @@ def test_repair_from_jailed_files_alone_is_admitted(loaded):
 
 
 # ---------------------------------------------------------------------------
-# By-design passes. Each moves no admitted provision out of its realm, so the
-# check lets it through; these pass on base as well and pin that it still does.
+# Cases that move no admitted provision out of its realm. The renamed provider
+# is refused by name; the key rename is refused by the realm-set check (#2586).
 
 HANDOFF = VAULT.replace("  " + CLAUSE + "\n",
                         "  " + CLAUSE + "\n  handoff kv: Map[Str, Str]\n")
@@ -235,20 +235,30 @@ def test_a_renamed_provider_that_drops_the_clause_is_refused(
     assert _state("Vault") == [{"secret": "tenant-a-data"}]
 
 
-def test_a_key_rename_withdraws_the_old_key_and_is_admitted(loaded_with_state):
+def test_a_key_rename_that_leaves_the_realm_is_refused_by_the_shrink_check(
+        loaded_with_state):
     """`kv` to `kv2`: the realm-scoped `kv` provision is withdrawn with its key
-    rather than moved, and `kv2` is a new provision in the shared realm."""
+    rather than moved, so the per-key walk compares nothing. Under the
+    untrusted profile a component may not leave a realm by key rename, because
+    realm-scoped reach rules select a component by its realm set (policy
+    `component_realms`). This is the #2586 decision, which reverses the earlier
+    admission of this repair and can be reversed at review. The running
+    composition is untouched."""
     rekeyed = (WITHOUT_CLAUSE.replace("provides kv: Kv", "provides kv2: Kv")
                .replace("provide kv {", "provide kv2 {"))
     result = _call("revl_repair", _repair_args({"source": rekeyed}))
-    assert result["incident"]["status"] == repair_mod.STATUS_REPAIRED, result
-    assert _provides("Vault") == ["kv2"]
-    assert _realms("Vault") == {}
+    assert result["incident"]["status"] == repair_mod.STATUS_REJECTED, result
+    assert result["incident"]["swapped"] is False, result
+    message = _messages(result)
+    assert "cannot shrink the realm set of `Vault`" in message, message
+    assert REMOVAL not in message, message
+    assert _provides("Vault") == ["kv"]
+    assert _realms("Vault") == {"kv": "tenant_a"}
+    assert _state("Vault") == [{"secret": "tenant-a-data"}]
 
 
 # The registry `need` path hands the reused provider's text to the loop as an
-# inline `source`, so it is checked as one. Unlike the two above, this is a
-# refusal and fails on base.
+# inline `source`, so it is checked as one: a refusal, and it fails on base.
 
 def test_a_reused_candidate_that_leaves_the_clause_out_is_refused(
         loaded, monkeypatch):

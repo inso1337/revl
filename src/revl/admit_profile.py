@@ -615,17 +615,15 @@ def _shrunk_realm_sets(admitted: dict,
     nothing compared. The policy selects a component for realm-scoped rules by
     its whole set, so it has left the rules written for the realms it lost.
 
-    Only a realm the candidate still places some component in counts: the
-    operator's rules for it stay in force, and the component is outside them.
-    A realm no component of the candidate is placed in was retired as a
-    whole, with its keys; no rule has anything left to select there. A
-    component absent from the candidate is withdrawn and exempt."""
+    The comparison is against the admitted generation only: whether the
+    candidate still places anything else in a lost realm is not asked, since
+    an edit can empty the realm in the same step. A component absent from the
+    candidate is withdrawn and exempt."""
     before = _realm_sets(admitted)
     after = _realm_sets(candidate)
-    live = frozenset().union(*after.values())
-    return [(name, sorted((before[name] - after[name]) & live))
+    return [(name, sorted(before[name] - after[name]))
             for name in sorted(before, key=lambda n: n or "")
-            if name in after and (before[name] - after[name]) & live]
+            if name in after and not before[name] <= after[name]]
 
 
 def _refuse_realm_set_shrink(admitted: dict, candidate: dict,
@@ -689,13 +687,13 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     drops it for a shared-realm key: the old pair is gone, so nothing is
     compared (issue #2586). The policy selects a component by its whole realm
     set, so a component the candidate keeps by name must not end with fewer
-    realms than it had, where a realm it left is still in use. That check runs
-    last, so the per-key refusals keep their text.
+    realms than it had, whichever realm it left and whatever else the
+    candidate places there. That check runs last, so the per-key refusals
+    keep their text.
 
     Withdrawing a component takes its placements with it, which moves nothing
-    and is unaffected, as is a realm no component of the candidate is placed
-    in, which was retired with its keys. So is a trusted author (`None`
-    profile) and a first generation (`admitted is None`).
+    and is unaffected. So is a trusted author (`None` profile) and a first
+    generation (`admitted is None`).
 
     `texts` maps each candidate filename to its text, so the refusal points at
     the line the component starts on."""

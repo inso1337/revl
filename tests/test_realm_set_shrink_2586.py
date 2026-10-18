@@ -9,13 +9,13 @@ realm-scoped allow and deny rules by every realm it is isolated into, so the
 component has left the rules the operator wrote for that realm.
 
 The untrusted author is now also refused, by component name, when a component
-that is admitted ends with fewer realms than it had, and a realm it left is
-still in use by a component of the candidate. A realm that no component of the
-candidate is placed in is retired as a whole and is not this check's concern
-(`test_key_rename_that_withdraws_the_old_key_is_admitted` in the #2523 tests).
+that is admitted ends with fewer realms than it had, whatever else the
+candidate places in the realm it left. The comparison is against the admitted
+generation only: an edit that also withdraws the realm's other holders is
+refused too. The check stops at the first component it finds, in name order.
 Controls: a trusted author may shrink the set, an edit that keeps the set is
-admitted, and so is an enlarged set, a withdrawn component, and a retired
-realm. The per-key refusals keep their text and fire first.
+admitted, and so is an enlarged set and a withdrawn component. The per-key
+refusals keep their text and fire first.
 """
 
 import importlib.util
@@ -56,6 +56,18 @@ STORE_HEAD = ('component TenantAStore provides kv: Kv {\n'
 STORE_HEAD_KV2 = ('component TenantAStore provides kv2: Kv {\n'
                   '  let store = effect Map.new() undo store.drop()\n'
                   '  provide kv2 {')
+STORE_A = ('component TenantAStore provides kv: Kv {\n'
+           '  isolate kv in realm("tenant_a")\n'
+           '  let store = effect Map.new() undo store.drop()\n'
+           '  provide kv {\n'
+           '    fn get(k) = store.get(k)\n'
+           '    fn set(k, v) {\n'
+           '      effect store.insert(k, v)\n'
+           '      undo   store.remove(k)\n'
+           '    }\n'
+           '    fn unset(k) = store.remove(k)\n'
+           '  }\n'
+           '}\n')
 SHARED_KV2 = """component SharedKv2 provides kv2: Kv {
   let store = effect Map.new() undo store.drop()
   provide kv2 {
@@ -88,7 +100,8 @@ def _provider_renames_its_key(path) -> dict:
     return _edit(path, {"anchor": STORE_HEAD, "replacement": STORE_HEAD_KV2})
 
 
-def _assert_shrink_refused(result: dict, path, component: str) -> None:
+def _assert_shrink_refused(result: dict, path, component: str,
+                           pointed: bool = True) -> None:
     assert result["ok"] is False and result.get("admitted") is False, result
     message = _messages(result)
     assert SHRINK in message, message
@@ -98,6 +111,8 @@ def _assert_shrink_refused(result: dict, path, component: str) -> None:
     refusal = next(d for d in result["diagnostics"] if SHRINK in d["message"])
     assert refusal.get("code") == "G9", refusal
     assert str(refusal.get("file")).endswith(path.name), refusal
+    if not pointed:  # the edit moves lines, so the original line is no guide
+        return
     header = next(h for h in path.read_text().splitlines()
                   if h.startswith(f"component {component} "))
     assert refusal.get("line") == _line_of(path.read_text(), header), refusal
@@ -126,6 +141,23 @@ def test_untrusted_requirer_key_swap_into_the_shared_realm_is_refused(
     assert _realms("TenantAApp") == {"kv": "tenant_a"}
     running = {c["name"] for c in server_mod.SESSION.ir["components"]}
     assert "SharedKv2" not in running, running
+
+
+@needs_cordis
+def test_emptying_the_realm_in_the_same_edit_is_still_refused(
+        loaded):  # noqa: F811
+    """Issue case 1 with the realm's other holder, TenantAStore, withdrawn in
+    the same edit: tenant_a is then placed nowhere in the candidate, yet
+    TenantAApp still left it, and the comparison is against the admitted
+    generation."""
+    edit = _requirer_leaves_for_a_shared_key(loaded)
+    edit["edits"].append({"anchor": STORE_A, "replacement": ""})
+    proposed = _call("revl_change", {"edit": edit})
+    _assert_shrink_refused(proposed, loaded, "TenantAApp", pointed=False)
+    committed = _call("revl_change", {"commit": True})
+    assert not committed.get("swapped"), committed
+    assert _realms("TenantAApp") == {"kv": "tenant_a"}
+    assert _realms("TenantAStore") == {"kv": "tenant_a"}
 
 
 @needs_cordis
@@ -212,10 +244,16 @@ def test_withdrawn_component_is_exempt():
     check_no_realm_removal(admitted, candidate, _untrusted())
 
 
-def test_realm_no_component_keeps_is_retired_and_admitted():
+def test_every_holder_leaving_the_realm_is_refused_at_the_first():
+    """A and B both leave `r`, so no component of the candidate keeps it; the
+    comparison is against the admitted generation, so it is refused. The check
+    stops at the first component in name order, `A`."""
     admitted = {"components": [_comp("A", {"kv": "r"}), _comp("B", {"kv": "r"})]}
     candidate = {"components": [_comp("A", {}, "kv2"), _comp("B", {}, "kv2")]}
-    check_no_realm_removal(admitted, candidate, _untrusted())
+    with pytest.raises(RevlError) as refused:
+        check_no_realm_removal(admitted, candidate, _untrusted())
+    assert SHRINK in refused.value.message, refused.value.message
+    assert "`A`" in refused.value.message, refused.value.message
 
 
 def test_trusted_profile_is_never_refused():

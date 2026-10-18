@@ -8,8 +8,8 @@ no survivor to compare and the provision moved into the shared realm anyway,
 where a later shared-realm component binds the key. The comparison is now per
 (key, realm) across all components, so the rename is refused through every
 door that admits an edit. Controls: a trusted operator may rename, a provider
-withdrawn together with its key is admitted, and so is renaming the key
-itself.
+withdrawn together with its key is admitted, and renaming the key itself
+is refused by the realm-set check (issue #2586).
 """
 
 import importlib.util
@@ -201,23 +201,33 @@ def test_provider_withdrawn_with_its_key_is_admitted(tenants):
                              "TenantBApp": {"kv": "tenant_b"}}
 
 
-def test_key_rename_that_withdraws_the_old_key_is_admitted(vault):
-    """Renaming the key withdraws `kv`: the candidate provides `kv` nowhere,
-    so no provision of it moved. `kv2` is a new shared-realm provision, which
-    an untrusted author may already add, and it starts with an empty store."""
+def test_key_rename_that_leaves_the_realm_is_refused_by_the_shrink_check(vault):
+    """Renaming the key withdraws `kv`, so no provision of it moved and the
+    per-key walks compare nothing. Under the untrusted profile a component may
+    not leave a realm by key rename, because realm-scoped reach rules select
+    a component by its realm set (policy `component_realms`): `App` and
+    `Vault` both end in the shared realm. This is the #2586 decision, which
+    reverses the earlier admission of this edit and can be reversed at review.
+    The check stops at the first component, `App`, and the per-key refusal
+    text is absent."""
     renamed = KV + STORE % ("Vault", "kv2", "", "kv2") + \
         APP % ("kv2", "", "kv2", "kv2")
     result = _call("revl_edit", {"target": str(vault), "edits": [
         {"anchor": BODY, "replacement": renamed[len(KV):]}]})
-    assert result.get("swapped") is True, result
-    assert _placements() == {"Vault": {}, "App": {}}
+    assert result.get("swapped") is not True, result
+    message = _messages(result)
+    assert "cannot shrink the realm set of `App`" in message, message
+    assert REFUSAL not in message, message
+    assert _placements() == {"Vault": {"kv": "billing"}, "App": {"kv": "billing"}}
 
 
 def test_key_rename_a_realm_consumer_still_requires_is_not_admitted(vault):
-    """A renamed key that the billing consumer still requires is not this
-    check's refusal: binding is per (key, realm), so the consumer's `kv` in
-    billing is left unbound and the composition does not swap in. Nothing
-    reaches the shared realm, and the running placement is unchanged."""
+    """A renamed key that the billing consumer still requires is not the
+    per-key refusal: binding is per (key, realm), so the consumer's `kv` in
+    billing would be left unbound. The realm-set check (#2586) refuses it
+    first, since `Vault` leaves billing; the assertions hold either way:
+    nothing swaps in, the refusal text is not the placement one, and the
+    running placement is unchanged."""
     renamed = STORE % ("Vault", "kv2", "", "kv2") + APP % ("kv", CLAUSE, "kv", "kv")
     result = _call("revl_edit", {"target": str(vault), "edits": [
         {"anchor": BODY, "replacement": renamed}]})
