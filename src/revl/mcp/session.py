@@ -2570,6 +2570,10 @@ class Session:
         # operator retries it (item 372's activation health gate refuses a
         # rollback to a generation that no longer activates).
         restored, restored_origin = self.previous, self.previous_origin
+        # issue #2525: the restored generation is a candidate like any other.
+        # An untrusted author may not use it to move an admitted provider out
+        # of its realm; refused here, before any teardown.
+        self._refuse_realm_removal(restored)
         # what the cold start below discards, read BEFORE it runs (issue
         # #2424): afterwards the live state is already gone.
         held, unread = self._live_state_or_reason()
@@ -2601,6 +2605,22 @@ class Session:
         return result | {
             "rolledBack": True,
             "stateDropped": self._rollback_state_dropped(held, unread, withdrawn)}
+
+    def _refuse_realm_removal(self, target: dict) -> None:
+        """Refuse a rollback target that moves a provider still admitted out of
+        the realm the running generation places it in, for an untrusted author
+        (issue #2525). The G9 admission refusal becomes a `SessionError`, raised
+        before anything is torn down."""
+        from ..errors import RevlError  # noqa: PLC0415
+        from .edit import _check_realm_removal  # noqa: PLC0415
+
+        try:
+            _check_realm_removal(self.ir, target)
+        except RevlError as error:
+            message = error.message + (f" ({error.hint})" if error.hint else "")
+            raise SessionError(
+                f"rollback refused: {message}. The running composition is "
+                f"untouched.", code=error.code) from error
 
     def _live_state_or_reason(self) -> tuple[list[str], str | None]:
         """The components holding live state, or why that could not be read:
@@ -3191,6 +3211,11 @@ class Session:
         try:
             target_ir = _recompile(target["snapshot"]["sources"],
                                    admitted_name(target["snapshot"]))
+            # issue #2525: an untrusted author may not undo an admitted
+            # provider out of its realm; refused like any target that no
+            # longer admits, before it goes live.
+            from .edit import _check_realm_removal  # noqa: PLC0415
+            _check_realm_removal(self.ir, target_ir)
         except RevlError as error:
             diag = classify(error)
             # nothing ran, so no state was dropped: the list stays as the
