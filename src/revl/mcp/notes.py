@@ -22,8 +22,10 @@ notes an agent (or a human, through an export) adds on top:
   changes goes `stale`; `confirm` re-fingerprints it;
 * the ROUND TRIP: an export renders each live note as a marked comment block
   above its anchor (`// note k_<id>:`, the body, then `// [k_<id>]`), and a
-  load reads marked blocks back. A body that differs from the record becomes a supersede by
-  `author: human`; a marked block with no record becomes a human note.
+  load reads marked blocks back. A body that differs from the record becomes a
+  supersede, and a marked block with no record a new note, authored by whoever
+  wrote the file (issue #2550): an untrusted agent for a file under
+  `.revl/export/`, a human at operator trust for any other file.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ import os
 import re
 
 from .. import knowledge as _k
+from ..export_area import in_export_area
 
 KINDS = ("rationale", "invariant", "trap", "alternative-rejected", "purpose", "doc")
 EVIDENCE_KINDS = ("diagnostic", "query", "audit", "test", "issue")
@@ -539,9 +542,32 @@ def render(text: str, name: str, file_notes: list[dict]) -> str:
     return "\n".join(out)
 
 
+def _import_author(path: str) -> dict:
+    """Who a changed or unrecorded marked block in the loaded file `path` is
+    attributed to (issue #2550): the writer of the file, never the operator
+    by default.
+
+    A file inside any `.revl/export/` directory is the author's by its path
+    alone, the same rule that compiles it under the authoring profile
+    (`export_area.in_export_area`, issues #2524 and #2547): `revl_export`
+    writes there and nowhere else. Its manifest records the bytes an export
+    wrote, not the trust of the session that wrote them, so a block there is
+    an untrusted agent's, whatever trust the loading session has, and rides
+    as an untrusted add does (its body withheld until it carries evidence).
+
+    A file outside every export directory was not written by an export, so
+    its bytes are an edit made outside the server: a human's, at operator
+    trust, as before. Adopting an export (copying it out) is the operator's
+    act, which is what makes its blocks the operator's."""
+    if in_export_area(path):
+        return {"kind": "agent", "trust": "untrusted"}
+    return {"kind": "human", "trust": "operator"}
+
+
 def import_marked(session, vs: dict) -> list[dict]:
-    """Read the marked blocks of the loaded files back. A body a human changed
-    supersedes its note (author human); a block with no record becomes one."""
+    """Read the marked blocks of the loaded files back. A changed body
+    supersedes its note and a block with no record becomes one, authored by
+    whoever wrote the file (`_import_author`)."""
     current = notes(session)
     created = []
     for name, text in ((p, (vs.get("files_content") or {}).get(p))
@@ -562,11 +588,10 @@ def import_marked(session, vs: dict) -> list[dict]:
             symbol = _k.anchor_of(text, name, block, decls, nodes, program)[0]
             if symbol is None:
                 continue
-            human = {"kind": "human", "trust": "operator"}
             kind = existing["kind"] if existing is not None else "doc"
             try:
                 created.append(add(session, vs, {"kind": kind, "body": body},
-                                   symbol, author=human,
+                                   symbol, author=_import_author(name),
                                    supersedes=note_id if existing else None))
             except NoteError:
                 continue

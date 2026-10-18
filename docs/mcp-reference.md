@@ -1239,8 +1239,19 @@ into its file as a marked comment directly above its anchor:
 
 Loading that file reads it back: an unchanged block is the same note, so an
 export of the reloaded composition writes nothing (the round trip is byte
-stable); a body a human edited becomes a supersede by `author: {kind: human,
-trust: operator}`; a marked block with no record becomes a human note.
+stable); a changed body becomes a supersede, and a marked block with no record
+a new note.
+
+**Who wrote a reloaded block** (issue #2550). A changed or new block takes the
+trust of whoever wrote the file, never the operator's by default. A file under
+`.revl/export/` is the author's by its path, the same rule that compiles it
+under the authoring profile, so its blocks import as `author: {kind: agent,
+trust: untrusted}` whatever trust the loading session has, and ride exactly as
+an untrusted add does: the body is withheld until the note carries evidence,
+and a sidecar export writes the record with that label. A file outside every
+export directory was edited outside the server, so its blocks import as
+`author: {kind: human, trust: operator}`; adopting an export by copying it out
+is how the operator makes its notes the operator's.
 
 - Inputs: `op` (required); `symbol`, `id`, `kind`, `body`, `evidence`,
   `reason` per op.
