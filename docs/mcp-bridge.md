@@ -211,10 +211,17 @@ an imported module, no self-minted declassifier, and **no self-chosen realm**.
 `.rvl` **files** inside a sanctioned root and outside any `.revl/export/`
 directory are not agent-authored, so they compile unprofiled, the way an
 embedder's own sources do. `revl_export` is the one verb that writes to disk,
-and it writes only under `<root>/.revl/export/` and never over another file
-(issue #2524, see `revl_export` in docs/mcp-reference.md). So a file inside a
+and it writes source only under `<root>/.revl/export/` (knowledge sidecars,
+never compiled, only as new files under `.revl/knowledge/`) and never over
+another file (issues #2524 and #2534, see `revl_export` in
+docs/mcp-reference.md). So a file inside a
 `.revl/export/` directory is the agent's, by its path alone, whether it is
-named in `files` or reached by `use`, and compiles under the profile.
+named in `files` or reached by `use`, and compiles under the profile. Every
+compile outside the server applies the same rule to a file on disk there
+(issue #2547): every `revl` command unless that command is given
+`--trust-exported`, and any program that imports the compiler and names the
+file by its path. Text compiled under a label that is not a file on disk is
+not covered yet (issue #2563).
 
 **Edited files: trust follows the text (issue #1715).** When transport-carried
 text stands in for one of those files (`revl_edit` on a files-loaded

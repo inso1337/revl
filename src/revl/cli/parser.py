@@ -121,9 +121,25 @@ def _add_serve_operator_arguments(serve) -> None:
     _add_profile_settle_argument(serve)
 
 
+#: The flag that is accepted only in its full spelling (issue #2547).
+TRUST_EXPORTED = "--trust-exported"
+
+
+class _Parser(argparse.ArgumentParser):
+    """The `revl` parser. Abbreviated options work as argparse gives them,
+    except `--trust-exported`, which turns a safety rule off for one command
+    and so is matched only when spelled in full: `--trust-e` names no option.
+    Every subcommand parser is one of these (`add_subparsers` makes its
+    parsers of the parent's class)."""
+
+    def _get_option_tuples(self, option_string):
+        return [found for found in super()._get_option_tuples(option_string)
+                if TRUST_EXPORTED not in found[0].option_strings]
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
-    parser = argparse.ArgumentParser(prog="revl")
+    parser = _Parser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
 
     cmd = sub.add_parser("compile", help="compile .rvl files to a backend IR document")
@@ -2721,4 +2737,39 @@ def build_parser() -> argparse.ArgumentParser:
              "reproduce); the tail is passed through unchanged (docs/truc.md)")
     truc_cmd.add_argument("truc_args", nargs=argparse.REMAINDER, metavar="...",
                           help="the truc verb and its arguments, forwarded as-is")
+    _add_trust_exported(parser)
     return parser
+
+
+#: The commands that do not take `--trust-exported` (issue #2547): `mcp
+#: serve`, whose own door decides how each file compiles by `--author-trust`,
+#: and `truc`, whose tail is forwarded verbatim to the component manager.
+_NO_TRUST_EXPORTED = (("mcp", "serve"), ("truc",))
+
+
+def _add_trust_exported(parser, path: tuple = ()) -> None:
+    """Give every leaf command `--trust-exported` (issue #2547). Without it, a
+    file under `.revl/export/` compiles under the authoring profile; with it,
+    as the operator's own, for this one command only. Every parser in the tree
+    is a `_Parser`, so only the full spelling opts out; one that is not would
+    accept an abbreviation, and building the tree refuses it."""
+    if not isinstance(parser, _Parser):
+        raise TypeError(f"revl {' '.join(path)}: parser is not a revl _Parser, "
+                        f"so it would accept an abbreviated {TRUST_EXPORTED}")
+    actions = [a for a in parser._actions
+               if isinstance(a, argparse._SubParsersAction)]
+    if not actions:
+        if path not in _NO_TRUST_EXPORTED:
+            parser.add_argument(
+                TRUST_EXPORTED, action="store_true",
+                help="compile files under .revl/export/ as your own instead of "
+                     "under the authoring profile they get by default, for "
+                     "this command only; stderr names each file it compiled "
+                     "that way")
+        return
+    seen: set[int] = set()
+    for action in actions:
+        for name, child in action.choices.items():
+            if id(child) not in seen:
+                seen.add(id(child))
+                _add_trust_exported(child, path + (name,))

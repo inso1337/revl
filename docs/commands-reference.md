@@ -99,6 +99,45 @@ action a realm-scoped rule selects undecided.
 they could not read exits with their usage status instead. `dash` exits 1, the
 status it already uses for an input it cannot read.
 
+### Files under `.revl/export/`
+
+A file under a `.revl/export/` directory is author-written whoever loads it
+(issue #2547): `revl_export`, the one MCP verb that writes to disk, writes
+only there, and the MCP server compiles a file there under the authoring
+profile by its path alone. Every command below applies the same rule to a
+file on disk there, and so does any other compile in the process that names
+the file by its path, such as a program that imports the compiler as a
+library. Only the MCP server turns it off, inside each request it answers, for
+the files it decides by its own rule.
+
+A file that exists on disk and whose path, as named or as it resolves through
+symbolic links, has a `.revl/export` directory among its ancestors (compared
+case-folded; `.revl/exportX/` is not one, and `.revl/export/../x.rvl` is
+`.revl/x.rvl`) compiles under that profile, whether it is named on the
+command line or reached by `use`: no `extern` or host block, no reach into
+one, no self-minted declassifier, no self-chosen realm. A `note:` line on
+stderr names each file the first time it compiles that way, with the way to
+compile it as your own: `--trust-exported` where the command takes it,
+otherwise copying the file out of the export directory.
+
+The rule decides by the file. Text a program holds in memory and compiles
+under a file's name counts when a file is there and the name, as given or as
+it resolves, lies under `.revl/export/`; an admission against a running
+composition asks by the name as given. Text compiled under a label that is not a
+file on disk (a virtual or relative name, a path remembered from an earlier
+read, or text held only in memory) does not reach the rule and compiles as
+before; that gap is tracked in issue #2563.
+
+`--trust-exported`, accepted by every command except `revl mcp serve` (the
+server decides by `--author-trust`) and `revl truc` (its tail is forwarded
+verbatim), compiles those files as the operator's own instead. It applies only
+to the command it is given to, it is never read from the environment or a
+configuration file, and only its full spelling is accepted (`--trust-e` names
+no option). It prints one line on stderr naming each file it compiled as the
+operator's own. `revl run --pool private` refuses it by name: a pool member
+compiles by its own rule. To adopt an exported file for good, copy it out of
+the export directory.
+
 ---
 
 ## Authoring and admission
@@ -122,6 +161,8 @@ Parse, check, link, and lower `FILES` to a backend IR document.
 - `--bind-realm NAME=REALM` - bind the realm placeholder `realm(?NAME)` to
   `REALM` (repeatable, issue #1728). An unbound placeholder is refused by
   name; G2 is checked after binding.
+- `--trust-exported` - compile files under `.revl/export/` as your own, for
+  this command only; see [Files under `.revl/export/`](#files-under-revlexport).
 
 The IR document it writes is the input other commands read as a "compiled
 composition": `revl diff`, `revl version --against`, `revl profile`,
@@ -999,7 +1040,9 @@ the two commands have precisely the same semantics.
 Boot a composition on a Cordis runtime and stream the lifecycle/host trace.
 Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 
-- `FILES` (required).
+- `FILES` (required). A file under `.revl/export/` compiles under the
+  authoring profile unless `--trust-exported` is given; see
+  [Files under `.revl/export/`](#files-under-revlexport).
 - `--backend {py, ts, rust, java, wasm, go}` - target runtime tier (default:
   `py`). All six boot live: `py` in-process, the rest each as a separate
   process over the bridge seam. A missing runtime is a skip with a reason and
