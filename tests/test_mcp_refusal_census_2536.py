@@ -6,9 +6,12 @@ cascade refusal slipped through with a prose hint and no `next`. Two things
 are pinned here:
 
 * the cascade refusal, driven through the real dispatch (`handle()`), warm and
-  cold: `next` is the same `revl_change` with `cascade: true`, sent unchanged
-  it succeeds, its prose is rendered from the same data (`remedy.describe`),
-  and a cold refusal keeps `loaded: false`;
+  cold: `next` is the same `revl_change` with `cascade: true` and without
+  `commit` (the cascade withdraws more than the caller named, so a client that
+  follows `next` as-is gets the plan, and committing is a separate call). Sent
+  unchanged it answers `committed: false` with the cascade; its prose is
+  rendered from the same data (`remedy.describe`); a cold refusal keeps
+  `loaded: false`;
 * a census built from the source of `src/revl/mcp/*.py` (not from a list of
   sites). It finds two kinds of refusal that name their remedy in prose, and
   requires each to carry `next`:
@@ -16,9 +19,16 @@ are pinned here:
        a prose `hint`;
     B. a refusal built by `_session_error(...)`, or a raised error, whose
        message says to "call revl_x" / "send revl_x" / "run revl_x".
-  A site with no single mechanical remedy is listed in an exemption table with
-  the reason. An exemption that no longer matches a site fails, so the table
-  cannot go stale, and a site that has gained `next` must leave it.
+  A site with no single mechanical remedy, or one whose remedy the caller has
+  to choose, is listed in an exemption table with the reason. An exemption
+  that no longer matches a site fails, so the table cannot go stale, and a
+  site that has gained `next` must leave it.
+
+Limits. The census walks only `src/revl/mcp/*.py`. It does not see a hint
+passed as a `hint=` constructor argument (identity.py:166, session.py:8087), a
+hint assigned after the dict is built, or an error built in a variable and
+raised later. It is a ratchet that stops the shapes it knows from growing, not
+a proof that every refusal with a remedy carries `next`.
 """
 
 import ast
@@ -44,8 +54,9 @@ MCP = ROOT / "src" / "revl" / "mcp"
 _NAMES_A_CALL = re.compile(r"\b(?:call|send|run) `?revl_\w+")
 
 #: Sites that name a remedy in prose and carry no `next`, as
-#: (file, enclosing function) -> why none. Each one is a known unconverted site
-#: or one with no single mechanical remedy; none is a licence for a new one.
+#: (file, enclosing function) -> why none. Each one is a known unconverted site,
+#: or one whose remedy the caller has to choose; none is a licence for a new
+#: one. The census sees only the shapes in the module docstring's Limits.
 EXEMPT = {
     # A: the path jail. The caller rewrites its own paths, or an operator
     # widens `--root`; no single call is the remedy. Unconverted.
@@ -56,12 +67,12 @@ EXEMPT = {
     ("edit.py", "apply_edit"):
         "backstop behind the server's own load gate, which carries `next`",
     # B: asking a recording verb of a composition loaded without `record`.
-    # The remedy is a reload with `record: true`, which drops the running
-    # state: the caller has to choose it. Not yet converted.
+    # The remedy is a single reload with `record: true`, but that call is
+    # destructive (it drops the running state), so the caller has to choose it.
     ("session.py", "_timeline"):
-        "reload with record: true; unconverted, a destructive reload to offer",
+        "one reload with record: true, but destructive: the caller chooses",
     ("session.py", "timeline"):
-        "reload with record: true; unconverted, a destructive reload to offer",
+        "one reload with record: true, but destructive: the caller chooses",
 }
 
 
@@ -236,16 +247,30 @@ def _carried(kind: str, tmp_path: Path) -> dict:
 
 def _assert_the_cascade_next(refusal: dict, sent: dict) -> dict:
     """`next` is one ready `revl_change` call: the call that was refused, with
-    the cascade asked for."""
+    the cascade asked for and never `commit`."""
     nxt = refusal["next"]
+    carried = {k: v for k, v in sent.items() if k != "commit"}
     assert nxt == remedy.call("revl_change", {
-        **sent, "withdraw": {"component": "MemStore", "cascade": True}}), nxt
+        **carried, "withdraw": {"component": "MemStore", "cascade": True}}), nxt
+    assert "commit" not in nxt["arguments"]
     assert nxt["ready"] is True and "needs" not in nxt
     assert nxt["tool"] in {tool["name"] for tool in server_mod._ADVERTISED}
     # the prose is rendered from the same data, so the two cannot disagree
     assert refusal["diagnostics"][0]["message"].endswith(remedy.describe(nxt))
     assert "cascade: true" in refusal["hint"], "the prose hint stays"
     return nxt
+
+
+def _replay_then_commit(nxt: dict) -> None:
+    """`next` exactly as handed over: it plans the whole cascade and commits
+    nothing. Committing it is a separate call."""
+    planned = _call(nxt["tool"], nxt["arguments"])
+    assert planned["ok"] is True and planned["committed"] is False, planned
+    assert [e["component"] for e in planned["plan"]["cascade"]] == ["ApiImpl"]
+    assert planned["proposal"]["replacing"] == ["MemStore", "ApiImpl"]
+    done = _call("revl_change", {"commit": True})
+    assert done["ok"] is True and done["committed"] is True, done
+    assert _components() == {"FixedClock"}
 
 
 @needs_runtime
@@ -257,10 +282,7 @@ def test_a_cold_stranding_withdrawal_names_the_cascade_call(kind, clean_session)
     assert refusal["ok"] is False and refusal["committed"] is False, refusal
     assert refusal["loaded"] is False and server_mod.SESSION.loaded is False
     nxt = _assert_the_cascade_next(refusal, sent)
-    # sent unchanged, it succeeds: the whole cascade goes in one call
-    done = _call(nxt["tool"], {**nxt["arguments"], "commit": True})
-    assert done["ok"] is True and done["committed"] is True, done
-    assert _components() == {"FixedClock"}
+    _replay_then_commit(nxt)
 
 
 @needs_runtime
@@ -270,22 +292,27 @@ def test_a_warm_stranding_withdrawal_names_the_cascade_call():
     refusal = _call("revl_change", sent)
     assert refusal["ok"] is False and "loaded" not in refusal, refusal
     nxt = _assert_the_cascade_next(refusal, sent)
-    done = _call(nxt["tool"], {**nxt["arguments"], "commit": True})
-    assert done["ok"] is True and done["committed"] is True, done
-    assert _components() == {"FixedClock"}
+    _replay_then_commit(nxt)
 
 
 @needs_runtime
-def test_the_next_is_the_call_as_made_with_only_the_cascade_added():
-    """What rides on the call (`commit`, `gauntlet`, the carried composition)
-    rides on the remedy; the withdrawal gains `cascade: true`, nothing else."""
+def test_a_refused_commit_names_a_next_that_does_not_commit():
+    """A refusal of `commit: true`: the cascade withdraws more than the caller
+    named, so `next` leaves `commit` out and, replayed unchanged, plans."""
     sent = {"withdraw": {"component": "MemStore"}, "commit": True,
             "source": SOURCE}
     refusal = _call("revl_change", sent)
-    assert refusal["ok"] is False
+    assert refusal["ok"] is False and refusal["committed"] is False
     assert refusal["next"]["arguments"] == {
         "withdraw": {"component": "MemStore", "cascade": True},
-        "commit": True, "source": SOURCE}
+        "source": SOURCE}
+    assert refusal["next"]["ready"] is True
+    assert "leaves out `commit`" in refusal["hint"]
+    assert "cascade: true" in refusal["hint"]
+    planned = _call(refusal["next"]["tool"], refusal["next"]["arguments"])
+    assert planned["ok"] is True and planned["committed"] is False, planned
+    assert [e["component"] for e in planned["plan"]["cascade"]] == ["ApiImpl"]
+    assert _components() == {"MemStore", "ApiImpl", "FixedClock"}, "nothing committed"
 
 
 @needs_runtime

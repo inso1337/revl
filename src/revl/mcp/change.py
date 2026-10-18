@@ -100,8 +100,12 @@ def cascade_refusal(arguments: dict, plan: dict | None, *,
         return None
     lost = "; ".join(f"{entry['component']} {entry['reason']}" for entry in stranded)
     # issue #2536: the remedy is the same call with `cascade: true`, so it is
-    # data (#1691) beside the prose; nothing is missing, hence ready
-    nxt = _remedy.call("revl_change", {**arguments, "withdraw": {
+    # data (#1691) beside the prose; nothing is missing, hence ready. It never
+    # commits: the cascade withdraws more than the caller named, so a client
+    # that follows a ready `next` as-is gets the plan of the cascade, and
+    # committing it is a separate, chosen call
+    carried = {k: v for k, v in arguments.items() if k != "commit"}
+    nxt = _remedy.call("revl_change", {**carried, "withdraw": {
         "component": component, "cascade": True}})
     return {"ok": False, "admitted": False, "swapped": False,
             "diagnostics": [{"severity": "error", "code": "REVL",
@@ -111,7 +115,10 @@ def cascade_refusal(arguments: dict, plan: dict | None, *,
                                         f"provider: {lost}. "
                                         f"{_remedy.describe(nxt)}"}],
             "hint": "pass {withdraw: {component, cascade: true}} to withdraw the "
-                    "whole cascade together, or replace the dependents first",
+                    "whole cascade together, or replace the dependents first"
+                    + (". `next` leaves out `commit`: it answers with the plan "
+                       "of the cascade, and committing it is a call of its own"
+                       if "commit" in arguments else ""),
             "next": nxt,
             **({"loaded": False} if cold else {}),
             "note": "verification failed on the plan; nothing was "
