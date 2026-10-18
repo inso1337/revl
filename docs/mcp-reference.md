@@ -1276,14 +1276,20 @@ converted (a load reads `\r\n` and `\r` as `\n`), however often the export
 is written again; a byte-order mark, an added trailing newline or any other
 changed byte does not. Only `revl_export` writes either file, and neither
 is ever an export target, nor a directory any export target lies under. An
-export writes the digest record before the manifest, so a stop between the
-two loses no digest; when the record write fails the export fails too,
-naming the record, with the manifest left as it was: a record is never lost
-silently. A damaged `digests.json` (not JSON, the wrong shape, or not a
-readable file) is ignored and reported: the load and the export results
-name it in `exportRecordDamaged`, and the next export that adds to it starts
-it again. A record removed by hand cannot be told from one no export has
-needed yet, so a copy that only it matched then loads as the operator's.
+export writes the digest record first, before any file it covers, then the
+files, then the manifest: a recorded digest of a file never written is
+harmless, while a written copy no record keeps would load, adopted, as the
+operator's. When the record write fails the export fails, naming the
+record, with nothing written. When the manifest write fails the export
+fails, naming the manifest and each file that landed: those copies are
+recorded nowhere, so export again rather than adopt them. Every write goes
+through a temporary file of a fresh name beside its target, so nothing
+prepared there stops it. A record is never lost silently. A damaged
+`digests.json` (not JSON, the wrong shape, or not a readable file) is
+ignored and reported: the load and the export results name it in
+`exportRecordDamaged`, and the next export that adds to it starts it again.
+A record removed by hand cannot be told from one no export has needed yet,
+so a copy that only it matched then loads as the operator's.
 
 An adopted copy's changed and unrecorded blocks import as `author: {kind:
 agent, trust: untrusted, adoptedFrom: <the export copy, relative to its

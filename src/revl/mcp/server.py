@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 from dataclasses import dataclass, replace
 
@@ -2257,8 +2258,10 @@ def _tool_export(arguments: dict) -> dict:
     file, created exclusively, never compiled (issue #2534), each named by
     its record id and passing the same checks as every other target (issue
     #2564). A write that fails part way raises `ExportIncomplete`, naming the
-    files that landed. So does a digest record write that fails, and the
-    manifest is then left as it was (`_record_export`, issue #2577)."""
+    files that landed (issue #2534). The digest records are written first,
+    before any file they cover, then the files, then the manifests (issue
+    #2577): a record write that fails writes nothing, and a manifest write
+    that fails names the files that landed, which no record keeps."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded: revl_export writes the held "
                               "source of a running composition")
@@ -2268,9 +2271,18 @@ def _tool_export(arguments: dict) -> dict:
         plan = _export_plan(held, arguments, skipped)
     except (_edit.EditError, _export_jail.ExportRefused) as error:
         return _session_error(str(error), written=[])
+    roots = _file_roots()
     # issue #2577: a damaged digest record is reported; this export starts it
     # again only when it adds to it
-    damaged = _export_jail.damaged_records(_file_roots())
+    damaged = _export_jail.damaged_records(roots)
+    # issue #2577: the digest record first, before any file it covers: a
+    # recorded digest of a file never written is harmless, a written copy no
+    # record keeps would load, adopted, as the operator's. It is read before
+    # the manifests change, since it keeps the digests they are about to
+    # replace. A record not kept writes nothing at all.
+    unkept = _write_records(_export_jail.digest_writes(plan, roots))
+    if unkept is not None:
+        raise _export_jail.ExportIncomplete(*unkept, []) from unkept[1]
     written: list = []
     stopped = None
     try:
@@ -2284,15 +2296,16 @@ def _tool_export(arguments: dict) -> dict:
     finally:
         # recorded only once its bytes are on disk: a failed write records
         # nothing, so the manifest never vouches for bytes no export wrote
-        unkept = _record_export(written)
+        unkept = _write_records(_export_jail.manifest_writes(written, roots))
     if stopped is not None or unkept is not None:
         # issue #2534: say which files did land, so the operator can find them;
-        # issue #2577: a record not kept is reported, never passed over
+        # issue #2577: a manifest not kept is reported with them, never raised
+        # bare, since what it would have recorded no record keeps
         landed = [p for p, _ in written]
         stop = stopped or unkept
         raise _export_jail.ExportIncomplete(
             *stop, landed,
-            [] if unkept else _export_jail.recorded_paths(landed, _file_roots())
+            [] if unkept else _export_jail.recorded_paths(landed, roots)
         ) from stop[1]
     payload = {"ok": True, "written": [p for p, _ in plan],
                "note": "the held source was written to disk"
@@ -2304,25 +2317,15 @@ def _tool_export(arguments: dict) -> dict:
     return payload
 
 
-def _record_export(written) -> tuple | None:
-    """Record the `written` (path, text) pairs of an export, on disk: each
-    root's digest record first, then its manifest (issue #2577). The record
-    keeps every digest the manifest is about to replace, read before either
-    changes, so an export stopped between the two loses none. A record write
-    that fails writes no manifest, so the manifest keeps the digests it
-    held, and comes back as (path, error) for the export to report: a copy
-    no record keeps would later load as the operator's. None when every
-    record was kept."""
-    roots = _file_roots()
-    digests = _export_jail.digest_writes(written, roots)
-    manifests = _export_jail.manifest_writes(written, roots)
-    for path, text in digests:
+def _write_records(records) -> tuple | None:
+    """Write each (path, text) of an export's digest records or manifests
+    (issue #2577), stopping at the first that fails: (path, error) for the
+    export to report, or None when every one was written."""
+    for path, text in records:
         try:
             _write_atomic(path, text)
         except OSError as error:
             return path, error
-    for path, text in manifests:
-        _write_atomic(path, text)
     return None
 
 
@@ -2456,13 +2459,41 @@ def _write_new(path: str, text: str) -> None:
 
 
 def _write_atomic(path: str, text: str) -> None:
+    """Replace `path` with `text` through a temporary file beside it under a
+    fresh name (`_temporary_beside`), removed when the write fails. No fixed
+    temporary name exists for an earlier write to prepare, as a directory or
+    a link, so nothing beside a file stops its replacement (issue #2577)."""
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
-    temporary = os.path.join(directory, f".{os.path.basename(path)}.revl-export")
-    # newline="": the bytes written are the text the manifest hashes
-    with open(temporary, "w", encoding="utf-8", newline="") as handle:
-        handle.write(text)
-    os.replace(temporary, path)
+    descriptor, temporary = _temporary_beside(path)
+    try:
+        # newline="": the bytes written are the text the manifest hashes
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _temporary_beside(path: str) -> tuple[int, str]:
+    """(descriptor, name) of a new file created exclusively beside `path`,
+    named `.<basename>.<random hex>.revl-export`. `O_EXCL` refuses anything
+    already there, a link included, and the mode is a plain create's (0o666
+    less the umask), as the replaced file would get."""
+    directory = os.path.dirname(path) or "."
+    for _ in range(16):
+        temporary = os.path.join(directory, f".{os.path.basename(path)}."
+                                            f"{secrets.token_hex(8)}.revl-export")
+        try:
+            return os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                           0o666), temporary
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"no free temporary name beside {path}")
 
 
 def _commit_held(arguments: dict) -> dict:

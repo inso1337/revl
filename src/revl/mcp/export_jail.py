@@ -56,6 +56,8 @@ import os
 # the path rule lives outside `revl.mcp`, so compiling never imports the
 # server (issue #1780); the jail and the compiler ask the same functions
 from ..export_area import EXPORT_DIR, in_export_area
+# the export directory's parts below a root, as `_names_a_record` matches them
+from ..export_area import _EXPORT_PARTS
 # re-exported: the server and its callers name them through this module
 from ..export_area import CliRule  # noqa: F401
 from ..export_area import cli_rule  # noqa: F401
@@ -73,8 +75,6 @@ MANIFEST = "manifest.json"
 # every other digest an export wrote: the ones a later export replaced in the
 # manifest, and the loaded text's of a copy with carriage returns (issue #2577)
 DIGESTS = "digests.json"
-# the export directory's parts below a root (`_names_a_record`)
-_EXPORT_PARTS = tuple(EXPORT_DIR.split(os.sep))
 
 # the files the server opened as operator configuration: (st_dev, st_ino) of
 # those that exist, and the case-folded realpath of every one
@@ -333,8 +333,8 @@ def exported_as(text: str, roots) -> str | None:
 
 def digest_writes(targets, roots) -> list[tuple[str, str]]:
     """The digest records to write with `targets`, as `(path, text)` (issue
-    #2577). Computed before the manifests are rewritten, since it reads the
-    digests they are about to replace.
+    #2577). Computed and written before any of `targets` and before the
+    manifests, since it reads the digests they are about to replace.
 
     Append-only: for each target, the digest its root's manifest held for
     that path, when this write replaces it with another, and, when the text
@@ -344,7 +344,8 @@ def digest_writes(targets, roots) -> list[tuple[str, str]]:
     none. The record is `<root>/.revl/export/digests.json`, written by
     `revl_export` only, like the manifest: no export target can name it,
     since `check_write_back` and `check_inline` refuse anything that is not
-    a `.rvl` module and `check_not_manifest` refuses it by name."""
+    a `.rvl` module and `check_not_manifest` refuses it by name, and as a
+    directory any target lies under (`_names_a_record`)."""
     records: dict[str, dict] = {}
     grown: set[str] = set()
     for path, text in targets:
