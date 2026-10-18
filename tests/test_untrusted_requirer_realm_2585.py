@@ -171,10 +171,12 @@ def test_untrusted_edit_that_keeps_both_clauses_is_admitted(loaded):
 
 
 def _candidate_without_requirer_clause() -> str:
-    """`Kv`, TenantAStore and TenantAApp as text, the provider's clause kept
-    and the requirer's left out: a `revl_swap` candidate."""
+    """`Kv`, a shared-realm provider and TenantAApp as text, the requirer's
+    clause left out: a `revl_swap` candidate that names no realm, so it reaches
+    the removal check instead of the placement refusal."""
     src = (ROOT / "examples" / "tenants.rvl").read_text()
-    cut = (src[src.index("service Kv"):src.index("component TenantBStore")]
+    cut = (src[src.index("service Kv"):src.index("component TenantAStore")]
+           + SHARED_STORE
            + src[src.index("component TenantAApp"):src.index("component TenantBApp")])
     return cut.replace(APP_OPEN + APP_CLAUSE, APP_OPEN, 1)
 
@@ -182,8 +184,9 @@ def _candidate_without_requirer_clause() -> str:
 def test_untrusted_swap_that_drops_the_requirers_clause_is_refused(loaded):
     """The same move through `revl_swap` with inline source."""
     candidate = _candidate_without_requirer_clause()
+    assert "realm(" not in candidate
     swapped = _call("revl_swap", {"source": candidate,
-                                  "replacing": ["TenantAStore", "TenantAApp"]})
+                                  "replacing": ["TenantAApp"]})
     assert swapped.get("swapped") is False, swapped
     message = _messages(swapped)
     assert REFUSAL in message and "TenantAApp" in message, message

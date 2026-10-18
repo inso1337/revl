@@ -607,7 +607,8 @@ def _realm_removal_refusal(running_ir: dict | None, candidate_ir: dict,
                            candidate_arg: dict,
                            over_the_transport: bool) -> list[dict] | None:
     """The repair door's half of issue #2487: `None`, or the G9 diagnostics
-    refusing a candidate that moves an admitted provision out of its realm.
+    refusing a candidate that moves an admitted realm placement out of its
+    realm.
 
     The trust condition is `revl_swap`'s: only text carried by the transport
     (inline `source`, `modules`) compiled under the authoring profile. Jailed

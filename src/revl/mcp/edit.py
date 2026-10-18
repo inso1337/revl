@@ -947,8 +947,8 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     except RevlError as error:
         rejected = report(error)
         rejected.update(edited=False, admitted=False, swapped=False,
-                        note="the patch moves an admitted provision out of its "
-                             "realm; the running composition and the "
+                        note="the patch moves an admitted realm placement "
+                             "out of its realm; the running composition and the "
                              "server-side source are untouched")
         return rejected
 
