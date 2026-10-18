@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -927,6 +928,13 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestCommitPathBracketRevertsWitnessedPersistsCompensationDischarges(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"commit path: bracket reverts, witnessed persists, compensation discharges\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
+	_revlAt = "load C"
 	{
 		_f := LoadC(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -934,6 +942,7 @@ func TestCommitPathBracketRevertsWitnessedPersistsCompensationDischarges(revlT *
 		}
 		_fibers["C"] = _f
 	}
+	_revlAt = "unload C"
 	if _f, _ok := _fibers["C"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a
@@ -944,6 +953,7 @@ func TestCommitPathBracketRevertsWitnessedPersistsCompensationDischarges(revlT *
 		}
 		delete(_fibers, "C")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.

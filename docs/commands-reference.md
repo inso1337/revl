@@ -1969,7 +1969,17 @@ boundary (`via = local`) or, under a pinned host key, across a machine boundary
 host's receipt-signing key, used to verify the signed admission and COMMIT
 receipts it returns) and `remote_bundle` (where to stage the bundle on the far
 host), and the command needs `--bundle`. A target missing any of these is
-refused at the stage phase, before anything commits. Container launch
+refused at the stage phase, before anything commits. Admission also checks the
+shape of the remote fields: `host` is `[user@]name` (a DNS name or IPv4
+address), `remote_bundle` and `runner` are one shell-safe word not starting
+with `-`, `extra_args` carries only the far runner's own flags (`--key`,
+`--host-key`, `--runtime-version`, `--require-gauntlet`,
+`--require-conformance`), `port` is an integer in 1..65535, and the
+`known_hosts` path carries no whitespace, quotes, `%`, `~` or `$` (ssh reads it as an
+option value). A process name
+containing `/`, `\`, `:`, `..` or a NUL byte is refused, since it names a file in
+the deploy state directory. See [mcp-reference.md](mcp-reference.md#revl_deploy)
+for the full rule. Container launch
 orchestration is still to come.
 
 - `MAP` - the deploy/placement map (TOML or JSON): `[processes.<p>]` with an

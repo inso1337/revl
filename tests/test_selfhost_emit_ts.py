@@ -326,8 +326,10 @@ CORPUS = [
     "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
     # Issue #2501: a ternary acquisition renders as a `(`-led line, which JS
     # ASI glued onto the `journalBegin()` above it; the reference `;`-leads it
-    # at both bracket sites and the port must agree. Outside the census walk
-    # only to keep the census baseline still (the document's own header).
+    # at both bracket sites and the port must agree. Issue #2508: the same
+    # document holds a fn-body statement that is only a record literal, which
+    # both emitters wrap as `;({...})`. Outside the census walk only to keep
+    # the census baseline still (the document's own header).
     "../../noncensus_corpus/emit_ts_ternary_effect_asi.rvl",
 ]
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -1043,6 +1044,13 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"crasher lifecycle boots and unloads clean\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
+	_revlAt = "load Crasher"
 	{
 		_f := LoadCrasher(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -1050,6 +1058,7 @@ func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 		}
 		_fibers["Crasher"] = _f
 	}
+	_revlAt = "unload Crasher"
 	if _f, _ok := _fibers["Crasher"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a
@@ -1060,6 +1069,7 @@ func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 		}
 		delete(_fibers, "Crasher")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.

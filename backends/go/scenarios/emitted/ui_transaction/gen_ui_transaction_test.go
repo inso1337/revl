@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	revldebug "runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -1420,6 +1421,13 @@ func revlListIndexOfEq[T any](xs []T, x T) int64 {
 func TestCleanUnloadOfAnUnCalledAgentLeavesNoResidue(revlT *testing.T) {
 	root := stc.New()
 	_fibers := map[string]*stc.Fiber{}
+	_revlAt := "start"
+	defer func() {
+		if r := recover(); r != nil {
+			revlT.Fatalf("%s: %s: %v", "lifecycle test \"clean unload of an un-called agent leaves no residue\"", _revlAt, fmt.Errorf("panic: %v\n%s", r, revldebug.Stack()))
+		}
+	}()
+	_revlAt = "load Agent"
 	{
 		_f := LoadAgent(root)
 		if err := _f.Ready(stdctx.Background()); err != nil {
@@ -1427,6 +1435,7 @@ func TestCleanUnloadOfAnUnCalledAgentLeavesNoResidue(revlT *testing.T) {
 		}
 		_fibers["Agent"] = _f
 	}
+	_revlAt = "unload Agent"
 	if _f, _ok := _fibers["Agent"]; _ok {
 		_f.Dispose()
 		// disposal is orchestrated asynchronously; a
@@ -1437,6 +1446,7 @@ func TestCleanUnloadOfAnUnCalledAgentLeavesNoResidue(revlT *testing.T) {
 		}
 		delete(_fibers, "Agent")
 	}
+	_revlAt = "assert no_residue"
 	// R4 + R1: the composition must leave the live
 	// runtime holding nothing — the orchestrator reaps
 	// disposed fibers asynchronously, so poll briefly.

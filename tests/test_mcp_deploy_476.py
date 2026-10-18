@@ -58,10 +58,11 @@ UNPINNED_SSH = {"processes": {"db": {"deploy": {"via": "ssh",
                                                 "runner": "revl"}}}}
 
 # the other side of the same rule: an ssh target with BOTH a host and a pinned
-# known_hosts file is admitted as a machine boundary
+# known_hosts file is admitted as a machine boundary. `known_hosts` is a local
+# path argument, so it is written relative to the sanctioned root (issue #2528)
 PINNED_SSH = {"processes": {"db": {"deploy": {
     "via": "ssh", "host": "deploy@10.0.0.5",
-    "known_hosts": "/etc/revl/known_hosts"}}}}
+    "known_hosts": "known_hosts"}}}}
 
 
 # ---------------------------------------------------------------- the verb
@@ -145,7 +146,7 @@ def test_a_refused_map_stops_at_admit_and_opens_no_boundary():
     the run leg is never entered, so nothing is staged and no boundary opens,
     on either host."""
     result = _call("revl_deploy", {"placement": UNPINNED_SSH, "apply": True,
-                                   "bundle": "/tmp/whatever.bundle"})
+                                   "bundle": "whatever.bundle"})
     assert result["ok"] is False
     assert result["admitted"] is False
     assert result["applied"] is False
@@ -192,7 +193,7 @@ def test_apply_without_approval_returns_the_ticket_and_deploys_nothing():
     hash a human yes needs — not an opaque internal fault, and nothing fires.
     No `approval_policy` is set: the gate is the deploy's own."""
     result = _call("revl_deploy", {"placement": PINNED_SSH, "apply": True,
-                                   "bundle": "/tmp/x.bundle"})
+                                   "bundle": "x.bundle"})
     assert result["ok"] is False
     assert result.get("approvalRequired") is True
     assert "ticket" in result and "hash" in result["ticket"]

@@ -35,6 +35,7 @@ pytestmark = pytest.mark.skipif(
 
 CLAUSE = 'isolate kv in realm("tenant_a")'
 REFUSAL = "cannot remove the realm placement of `Vault`"
+REMOVAL = "cannot remove the realm placement"
 
 VAULT = '''service Kv {
   fn get(k: Str) -> Opt[Str]
@@ -215,17 +216,23 @@ def loaded_with_state(clean_session):
     return path
 
 
-def test_a_renamed_provider_starts_cold_and_is_admitted(loaded_with_state):
-    """A renamed provider is a new provider: the shared realm is where new
-    untrusted source goes, and with no `handoff` it gets none of the old
-    store, so nothing realm-scoped moves."""
+def test_a_renamed_provider_that_drops_the_clause_is_refused(
+        loaded_with_state):
+    """Renaming the provider in the same repair that drops its realm clause is
+    the #2523 bypass: the realm check compares placements by key, so the
+    renamed provider is the same provision and the repair is refused. The
+    running composition is untouched: still `Vault`, in its realm, with its
+    state."""
     renamed = WITHOUT_CLAUSE.replace("component Vault", "component Renamed")
     result = _call("revl_repair", _repair_args({"source": renamed}))
-    assert result["incident"]["status"] == repair_mod.STATUS_REPAIRED, result
+    assert result["incident"]["status"] == repair_mod.STATUS_REJECTED, result
+    assert result["incident"]["swapped"] is False, result
+    assert REMOVAL in _messages(result), result
+    assert any(d.get("code") == "G9" for d in result["diagnostics"]), result
     names = {c["name"] for c in server_mod.SESSION.ir["components"]}
-    assert names == {"Renamed"}
-    assert _realms("Renamed") == {}
-    assert _state("Renamed") == [{}]
+    assert names == {"Vault"}
+    assert _realms("Vault") == {"kv": "tenant_a"}
+    assert _state("Vault") == [{"secret": "tenant-a-data"}]
 
 
 def test_a_key_rename_withdraws_the_old_key_and_is_admitted(loaded_with_state):

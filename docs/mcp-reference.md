@@ -454,7 +454,8 @@ Defaults to the composition the server has loaded, so it is the rehearsal for
 
 - Inputs: `source` / `files` / `modules`, all optional when the session holds a
   composition (with none, the held working set is planned, as `revl_swap {}`
-  would re-admit it; with nothing held, a `usage` refusal); `manifest` (omit to
+  would re-admit it, and the answer carries `planned: "session"`; with nothing
+  held, a `usage` refusal); `manifest` (omit to
   plan against the loaded session, or against nothing for a cold start);
   `replacing`.
 
@@ -490,13 +491,49 @@ crossing is irreversible, so `apply: true` is additionally refused without the
 configured approval: it returns the `revl_approve` ticket two-step, and the
 identical re-issue after a yes fires exactly once.
 
-Host, port, `known_hosts`, `host_key`, `remote_bundle` and the ssh options are
-keys of the `[processes.<p>.deploy]` table inside `placement`, not top-level
+Host, port, `known_hosts`, `host_key`, `remote_bundle` and the runner flags
+(`extra_args`) are keys of the `[processes.<p>.deploy]` table inside `placement`, not top-level
 arguments. A `via = ssh` target needs `host`, `known_hosts` (the PINNED
 host-key file) and `remote_bundle` (the path on the far host the bundle is
 staged to and re-hashed); `host_key` is a conductor-side copy of the far host's
 receipt-signing key, so the conductor can verify the signed receipts it gets
 back.
+
+The local files a deploy reads are path arguments like `files`: `bundle`, and
+`known_hosts` and `host_key` inside each deploy table, are confined to the
+operator-sanctioned root(s) and refused outside them (issue #2528), in trusted
+mode too: an operator who keeps the pin file elsewhere (for example under
+`~/.ssh`) sanctions that directory with `revl mcp serve --root`. ssh reads the
+`known_hosts` path as an option value, so it may not contain whitespace, quotes,
+`%`, `~` or `$`. These files are found by
+position in the deploy table, whatever the process is called. The remote
+fields name things on the far host, so their shape is checked instead, at
+admission, for every `via = ssh` target (CLI and MCP alike):
+
+- `host` is `[user@]name`, with `name` a DNS name or an IPv4 address; a value
+  starting with `-` or carrying anything else is refused, since it would reach
+  ssh or scp as an option.
+- `remote_bundle` and `runner` are one shell-safe word (letters, digits and
+  `_ @ % + = : , . / ~ -`) that does not start with `-`. ssh hands the remote
+  command to the far host's shell, so a word with whitespace or a shell
+  metacharacter would become more words or more commands than the map wrote.
+- `extra_args` carries only the far runner's own flags: `--key`, `--host-key`
+  and `--runtime-version` (each with a shell-safe value, as `--flag value` or
+  `--flag=value`), `--require-gauntlet` and `--require-conformance`. Any other
+  word, including any ssh or scp option, is refused.
+- `port` is an integer in 1..65535.
+
+The ticket prints `(ssh default)` when no `port` is given.
+
+Every process name in `placement` must also be a plain file-name word: one
+containing `/`, `\`, `:`, `..` or a NUL byte is refused, because it becomes a file
+name in the deploy state directory.
+
+The `apply: true` ticket shows what a yes lets reach each far host, next to its
+digest: `ticket.deploy` lists the bundle and, per process, the `via`, `host`,
+`port`, `remote_bundle`, `runner`, `extra_args`, `known_hosts` and `host_key`,
+and `ticket.summary` says the same in plain text. The digests bind the same
+values, so a changed field is a different ticket.
 
 - Inputs: `placement` (the deploy map); `bundle` (required for `apply: true` on
   a cross-machine deploy); `backend` (default `python`); `apply` (default false,
@@ -1796,8 +1833,12 @@ neither, each verb reads the held working set (the one `revl_check {}` and
 `revl_swap {}` read, including edited buffers of a `files` set) and answers as
 it would for that text sent explicitly, under the same authoring-trust check as
 `revl_check {}`. With nothing held, the call is a `usage` refusal; a loaded
-session with no source text is a `session` refusal (issue #2500). Unlike
-`revl_check {}`, the answer carries no `checked: "session"` marker.
+session with no source text is a `session` refusal (issue #2500). The held
+answer carries `queried: "session"`, the way `revl_check {}` carries
+`checked: "session"`; it is the answer's provenance, not its verdict, so it
+also rides an `ok: false` answer about the held set (an unknown component, a
+held composition that does not compile). A call that sends its own `source` or
+`files`, and the refusals above, carry no marker.
 
 ### `revl_query_emitters`
 

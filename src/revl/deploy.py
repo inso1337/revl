@@ -105,6 +105,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -4033,6 +4034,122 @@ def _map_refusal(process: str, rule: str, reason: str) -> dict:
     return {"process": process, "rule": rule, "reason": reason}
 
 
+#: Issue #2528. A process name becomes a FILE NAME under the deploy state dir
+#: (`<state_dir>/<process>.spec.json`, `.world.json`, `.wal`), so a name that
+#: carries a path separator, a `..` or a NUL byte would name a file outside it.
+def _process_name_problem(pname: Any) -> Optional[str]:
+    if not isinstance(pname, str) or not pname:
+        return "a process name must be a non-empty string"
+    if "\0" in pname:
+        return "a process name may not contain a NUL byte"
+    if "/" in pname or "\\" in pname or (os.altsep and os.altsep in pname):
+        return "a process name may not contain a path separator"
+    if ":" in pname:
+        return "a process name may not contain `:` (a drive or stream name)"
+    if ".." in pname:
+        return "a process name may not contain `..`"
+    return None
+
+
+#: Issue #2528. The `via = ssh` fields that name REMOTE things are not local
+#: paths, so the path jail cannot judge them; their SHAPE is checked instead.
+#: `host` is spliced into the ssh/scp argv as a bare word in front of the
+#: remote command, so a value starting with `-` would be read as an ssh or scp
+#: OPTION the operator never configured. `remote_bundle`, `runner` and
+#: `extra_args` are words of the command line ssh hands the far host's shell,
+#: so a word carrying whitespace or a shell metacharacter would become more
+#: words, or more commands, than the map wrote. The narrowest rule that keeps
+#: every legitimate map working:
+#:
+#: * `host` is `[user@]name`, where `name` is a DNS name or an IPv4 address and
+#:   `user` a plain login, neither starting with `-`;
+#: * `remote_bundle` and `runner` are one shell-safe word (letters, digits and
+#:   `_ @ % + = : , . / ~ -`) that does not start with `-`;
+#: * `extra_args` carries only the far runner's own flags (`--key`,
+#:   `--host-key`, `--runtime-version`, `--require-gauntlet`,
+#:   `--require-conformance`), each value a shell-safe word not starting with
+#:   `-`; anything else, including any ssh or scp option, is refused;
+#: * `port` is an integer in 1..65535;
+#: * the local `known_hosts` path reaches ssh as `-o UserKnownHostsFile=...`,
+#:   whose value ssh splits on whitespace and expands for `%` and `~`, so it
+#:   (and for `${VAR}`) carries none of those, nor `$`, quotes or a
+#:   backslash.
+_SHELL_SAFE_WORD = re.compile(r"[A-Za-z0-9_@%+=:,./~-]+")
+_SSH_HOST_SHAPE = re.compile(
+    r"(?:[A-Za-z0-9_][A-Za-z0-9._-]*@)?"
+    r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
+_KNOWN_HOSTS_UNSAFE = re.compile(r"[\s'\"%~$\\\0]")
+_RUNNER_VALUE_FLAGS = frozenset({"--key", "--host-key", "--runtime-version"})
+_RUNNER_SWITCH_FLAGS = frozenset({"--require-gauntlet", "--require-conformance"})
+
+
+def _safe_word(value: Any) -> bool:
+    return (isinstance(value, str) and not value.startswith("-")
+            and _SHELL_SAFE_WORD.fullmatch(value) is not None)
+
+
+def _extra_args_problem(extra_args: Any) -> Optional[str]:
+    if extra_args is None:
+        return None
+    if not isinstance(extra_args, (list, tuple)):
+        return "`extra_args` must be a list of the far runner's flags"
+    words = list(extra_args)
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if not isinstance(word, str):
+            return f"`extra_args` entry {word!r} is not a string"
+        flag, eq, value = word.partition("=")
+        if flag in _RUNNER_SWITCH_FLAGS and not eq:
+            i += 1
+            continue
+        if flag in _RUNNER_VALUE_FLAGS:
+            if not eq:
+                if i + 1 >= len(words):
+                    return f"`extra_args` flag {flag!r} has no value"
+                value = words[i + 1]
+                i += 1
+            if not _safe_word(value):
+                return (f"`extra_args` value {value!r} for {flag!r} is not one "
+                        f"shell-safe word")
+            i += 1
+            continue
+        return (f"`extra_args` entry {word!r} is not a flag of the far "
+                f"`revl deploy-admit` runner (allowed: "
+                f"{', '.join(sorted(_RUNNER_VALUE_FLAGS | _RUNNER_SWITCH_FLAGS))}); "
+                f"an ssh or scp option, or any other word, is refused")
+    return None
+
+
+def _ssh_remote_shape_problem(target: "DeployTarget") -> Optional[str]:
+    raw = target.raw or {}
+    host = target.host
+    if not isinstance(host, str) or _SSH_HOST_SHAPE.fullmatch(host) is None:
+        return (f"`host = {host!r}` is not `[user@]name` with a DNS name or "
+                f"IPv4 address; a host that is not one plain word could be "
+                f"read as an ssh or scp option")
+    remote_bundle = raw.get("remote_bundle")
+    if remote_bundle is not None and not _safe_word(remote_bundle):
+        return (f"`remote_bundle = {remote_bundle!r}` is not one shell-safe "
+                f"path word (letters, digits and `_ @ % + = : , . / ~ -`, not "
+                f"starting with `-`)")
+    runner = raw.get("runner")
+    if runner is not None and not _safe_word(runner):
+        return (f"`runner = {runner!r}` is not one shell-safe word naming the "
+                f"far `revl` command")
+    port = raw.get("port")
+    if port is not None and (isinstance(port, bool) or not isinstance(port, int)
+                             or not 1 <= port <= 65535):
+        return f"`port = {port!r}` is not an integer in 1..65535"
+    known_hosts = raw.get("known_hosts")
+    if not isinstance(known_hosts, str) or _KNOWN_HOSTS_UNSAFE.search(known_hosts):
+        return (f"`known_hosts = {known_hosts!r}` is not a plain path: ssh reads "
+                f"it as an option value, splitting it on whitespace and "
+                f"expanding `%`, `~` and `${{VAR}}`, so it may not contain "
+                f"whitespace, quotes, `%`, `~` or `$`")
+    return _extra_args_problem(raw.get("extra_args"))
+
+
 def admit_deploy_map(placement: Mapping, *,
                      seams: Optional[Mapping] = None) -> DeployMapVerdict:
     """Admit a deploy map BEFORE any boundary is opened.
@@ -4070,6 +4187,20 @@ def admit_deploy_map(placement: Mapping, *,
     processes = placement.get("processes") or {}
     admitted: dict[str, DeployTarget] = {}
     refusals: list[dict] = []
+
+    # Issue #2528: every process name, deploy table or not, becomes a file name
+    # under the state dir (`deploy_local_map` walks them all), so it is checked
+    # before any target is admitted.
+    for pname in sorted(processes, key=str):
+        problem = _process_name_problem(pname)
+        if problem is not None:
+            refusals.append(_map_refusal(
+                str(pname), "process-name",
+                f"process name {pname!r} is refused: {problem}. The name "
+                f"becomes a file name in the deploy state directory, and a "
+                f"name that leaves it would write outside it."))
+    if refusals:
+        return DeployMapVerdict(False, {}, tuple(refusals), {})
 
     for pname in sorted(targets):
         target = targets[pname]
@@ -4121,6 +4252,10 @@ def admit_deploy_map(placement: Mapping, *,
             # names). A pinned target with a `host` is admitted; the transport,
             # the stage step and the runner enforce the rest.
             if target.via == VIA_SSH and raw.get("known_hosts") and target.host:
+                problem = _ssh_remote_shape_problem(target)
+                if problem is not None:
+                    refusals.append(_map_refusal(pname, "remote-shape", problem))
+                    continue
                 admitted[pname] = target
                 continue
             refusals.append(_map_refusal(
