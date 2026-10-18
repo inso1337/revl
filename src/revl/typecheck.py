@@ -2859,6 +2859,45 @@ def check_case_call_arity(expr, tenv: dict, types: dict,
                          getattr(expr, "line", 0))
 
 
+def builtin_case_call_type(node: dict, tenv: dict, types: dict, services: dict,
+                           filename: str | None, line: int) -> str | None:
+    """The type of a lowered `Some(x)` / `Ok(x)` / `Err(e)` call, as
+    `infer_ast` types the same call: `Opt[T]`, `Result[T, Any]`,
+    `Result[Any, E]`, with `Any` for an argument it cannot type.
+
+    Issue #2483: the IR `call` arm typed these as nothing, so
+    `effect put(Some("x"))` met a declared `Opt[Int]` parameter unjudged in a
+    component while a `fn` body refused it. None for any other call, and for a
+    local of function type that shadows the case name."""
+    callee = node.get("callee")
+    if not isinstance(callee, dict) or callee.get("kind") != "var":
+        return None
+    name = callee.get("name")
+    if name not in ("Some", "Ok", "Err") \
+            or parse_type(tenv.get(name))[0] == FN_HEAD:
+        return None
+    case = (types.get(CASES_KEY) or {}).get(name)
+    if case is None or not str(case.get("adt") or "").startswith(
+            ("Opt[", "Result[")):
+        return None
+    args = node.get("args") or []
+    first = infer_ir(args[0], tenv, types, services, filename, line) \
+        if args else None
+    for extra in args[1:]:
+        infer_ir(extra, tenv, types, services, filename, line)
+    return builtin_case_result(name, first)
+
+
+def builtin_case_result(name: str, first: str | None) -> str:
+    """`Opt[T]` / `Result[T, Any]` / `Result[Any, E]` for a built-in case
+    call whose argument types as `first` (`Any` when it is unknown)."""
+    if name == "Some":
+        return f"Opt[{first or 'Any'}]"
+    if name == "Ok":
+        return f"Result[{first or 'Any'}, Any]"
+    return f"Result[Any, {first or 'Any'}]"
+
+
 def check_case_arity(name: str, case: dict, given: int, filename: str,
                      line: int) -> None:
     """Raise the issue #2447 refusal when `given` is not `name`'s payload
@@ -3234,6 +3273,10 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                     ("Opt[", "Result[")):
                 check_case_arity(callee["name"], case,
                                  len(node.get("args") or []), filename, line)
+        builtin_case = builtin_case_call_type(node, tenv, types, services,
+                                              filename, line)
+        if builtin_case is not None:
+            return builtin_case
         target = node.get("target")
         if isinstance(target, dict) and target.get("kind") == "req":
             svc = services.get(tenv.get(f"req.{target.get('name')}") or "")
@@ -3350,13 +3393,21 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                 if case.get("name") == case_name:
                     payload = case.get("payload")
                     break
+        first = None
         for i, arg in enumerate(args):
             at = infer_ir(arg, tenv, types, services, filename, line)
+            if i == 0:
+                first = at
             if i == 0 and filename and payload and at \
                     and not compatible(payload, at, types):
                 raise mismatch(filename, line, f"`{case_name}(...)` payload",
                                payload, at,
                                why=unresolved_nominal_reason(payload, at, types))
+        if case_name in ("Ok", "Err") and case_entry is not None and str(
+                case_entry.get("adt") or "").startswith("Result["):
+            # issue #2483: the built-in `Ok`/`Err` lower to an `adt` node of
+            # `Result[Any, Any]`; type the known side as `infer_ast` does
+            return builtin_case_result(case_name, first)
         # A GENERIC ADT's construction names the bare head (`Box`), not the
         # instantiation (`Box[Int]`) — the case table carries the declaration's
         # own spelling. Reporting the bare head would make an honest

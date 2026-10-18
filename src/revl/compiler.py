@@ -1989,6 +1989,11 @@ def _rewrite_module(program: Program, val_renames: dict[str, str],
 
     # 2. bodies: value references (shadow-aware) + body-level type annotations.
     for fn in program.fn_decls:
+        # a parameter default is evaluated at the call site, outside the
+        # callee's scope, so no parameter shadows a name in it
+        for p in fn.params:
+            if getattr(p, "default", None) is not None:
+                _rewrite_expr(p.default, val_renames, type_renames, set())
         _rewrite_body(fn.body, val_renames, type_renames,
                       {p.name for p in fn.params})
     for test in program.tests:
@@ -2040,6 +2045,8 @@ def _rewrite_component(comp, val_renames: dict[str, str],
     comp.requires = [(local, _subst_type_args(svc, type_renames), line)
                      for local, svc, line in comp.requires]
     bound = {local for local, _, _ in comp.requires}
+    for spec in (getattr(comp, "require_replay", None) or {}).values():
+        _rewrite_expr(spec, val_renames, type_renames, bound)
     _rewrite_body(comp.body, val_renames, type_renames, bound)
 
 
@@ -2110,7 +2117,8 @@ def _rewrite_stmt(stmt, val_renames, type_renames, bound: set[str]) -> None:
 def _rewrite_component_stmt(stmt, val_renames, type_renames,
                             bound: set[str]) -> None:
     """The statements only a component body holds (issue #2451): provide
-    blocks, the state hand-off, effects, timers, emissions and approvals."""
+    blocks, the state hand-off, effects, timers, emissions and approvals, and
+    a lifecycle test's load and call statements (issues #2498/#2499)."""
     def subst(t):
         return _subst_type(t, type_renames)
 
@@ -2132,6 +2140,7 @@ def _rewrite_component_stmt(stmt, val_renames, type_renames,
         if isinstance(stmt, _ast.LetEffect):
             bound.add(stmt.bind)
         walk(stmt.undo)
+        walk(getattr(stmt, "replay", None))
     elif isinstance(stmt, _ast.TimerStmt):
         _rewrite_body(stmt.body, val_renames, type_renames, bound)
     elif isinstance(stmt, _ast.EmitStmt):
@@ -2142,6 +2151,17 @@ def _rewrite_component_stmt(stmt, val_renames, type_renames,
         for _, value in stmt.request.fields or ():
             walk(value)
         bound.add(stmt.bind)
+    # issues #2498/#2499: a lifecycle test's `load X with { f: <expr> }` and
+    # `call key.op(<args>)` hold expressions that may call the module's own
+    # renamed helper. Left bare, the call kept the pre-rename spelling.
+    elif isinstance(stmt, _ast.LoadStmt):
+        for _, value, _ in stmt.config:
+            walk(value)
+    elif isinstance(stmt, _ast.CallStmt):
+        for arg in stmt.args:
+            walk(arg)
+        if stmt.bind:
+            bound.add(stmt.bind)
 
 
 def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
@@ -2214,6 +2234,20 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
         for kind, part in expr.parts:
             if kind == "expr":
                 recur(part)
+    # issues #2498/#2499: the component-only expression forms. Each holds
+    # sub-expressions that may call the module's own renamed helper.
+    elif isinstance(expr, (_ast.EmitExpr, _ast.ExprEndorse)):
+        recur(expr.expr)
+    elif isinstance(expr, _ast.SpawnExpr):
+        for value in expr.config.values():
+            recur(value)
+    elif isinstance(expr, _ast.SubscribeExpr):
+        recur(expr.stream)
+        for stage in expr.stages:
+            recur(stage.arg)
+        recur(expr.replay)
+    elif isinstance(expr, _ast.ReplaySpec):
+        recur(expr.cursor)
 
 
 def _enforce_authored_imports(loader: _ModuleLoader, included: list,

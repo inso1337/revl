@@ -1063,3 +1063,38 @@ def test_a_host_identifier_collision_is_refused_by_name(reference):
     with pytest.raises(reference.EmitError,
                        match="both mangle to the Go identifier"):
         reference.emit(ir)
+
+
+# Issue #2471: the reference go emitter lowers a user generic variant (`type
+# Mb[T] = Jj(T) | Nn`) to Go generics (`type Mb[T any] interface`, `case
+# MbJj[int64]:`); selfhost/emit_go.rvl still emits the earlier form, which
+# does not build (`Mb[Int]` passed through and `case Mb[Int]Jj:`). The port is
+# fed the reference IR here, so the difference is NAMED rather than passing
+# for agreement. The fully-native chain does not reach it: selfhost/lower.rvl
+# refuses these documents loudly first (GENERIC_VARIANT_LOUD_REFUSALS in
+# tests/test_selfhost_compile.py). Same ratchet as that table: the day the
+# port follows the reference this fails, and the entry is DELETED and the
+# document added to CORPUS. issue #2494
+GENERIC_VARIANT_PORT_GAPS: dict[str, tuple[str, str, str]] = {
+    "construct_and_match": (
+        "type Mb[T] = Jj(T) | Nn\n"
+        "fn un(m: Mb[Int]) -> Int { return match m { Jj(x) => x, Nn => 0 } }\n"
+        "fn one() -> Mb[Int] { return Jj(1) }\n",
+        "case MbJj[int64]:",
+        "case Mb[Int]Jj:"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_PORT_GAPS))
+def test_a_generic_variant_is_a_known_port_divergence(emitted, reference, tmp_path,
+                                                     name):
+    source, reference_token, port_token = GENERIC_VARIANT_PORT_GAPS[name]
+    doc = tmp_path / f"{name}.rvl"
+    doc.write_text(source)
+    ir = compile_files([str(doc)])
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert reference_token in want, want
+    assert got != want and port_token in got, (
+        f"{name}: the port no longer emits {port_token!r}. If it now matches "
+        f"the reference, DELETE the entry from GENERIC_VARIANT_PORT_GAPS and "
+        f"add the document to CORPUS.")

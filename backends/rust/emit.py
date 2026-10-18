@@ -1440,6 +1440,17 @@ def _split_fn_type(name: str) -> tuple[list[str], str]:
     raise EmitError(f"malformed function type: {name!r}")
 
 
+_RUST_TYPE_WORD = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _rust_phantom_params(spec: dict) -> list:
+    """The type parameters of a generic variant that no case payload names."""
+    used = set()
+    for case in spec.get("cases") or []:
+        used.update(_RUST_TYPE_WORD.findall(str(case.get("payload") or "")))
+    return [p for p in spec.get("params") or [] if p not in used]
+
+
 def _rust_type(name: object, types: dict | None = None,
                position: str = "value") -> str:
     """Surface type -> Rust type. Unknown named types map to cordis `Value`.
@@ -1474,6 +1485,14 @@ def _rust_type(name: object, types: dict | None = None,
         if head == "Result":
             ok, err = _split_generic(inner)
             return f"Result<{_rust_type(ok, types)}, {_rust_type(err, types)}>"
+        spec = types.get(head)
+        if spec and spec.get("kind") == "variant" and spec.get("params"):
+            # issue #2471: an applied user generic variant is the enum's own
+            # instantiation, `Mb[Int]` -> `Mb<i64>`
+            args = _split_generic(inner)
+            if len(args) == len(spec["params"]):
+                rendered = ", ".join(_rust_type(a, types) for a in args)
+                return f"{_ident(head, 'type name')}<{rendered}>"
     return "Value"
 
 
@@ -8977,17 +8996,34 @@ def _emit_v3_types(types: dict) -> list[str]:
         elif spec.get("kind") == "variant":
             out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
             out.append('#[serde(tag = "$kind", content = "$value")]')
-            out.append(f"pub enum {name} {{")
+            # issue #2471: a generic variant declares its type parameters, and
+            # a payload naming one keeps it (`Jj(T)`), not the `Value` an
+            # unknown name falls back to
+            params = spec.get("params") or []
+            scope = dict(types, **{p: {"kind": "param"} for p in params})
+            generics = f"<{', '.join(_ident(p, 'type name') for p in params)}>" if params else ""
+            out.append(f"pub enum {name}{generics} {{")
             for case in spec.get("cases") or []:
                 cname = _ident(case.get("name"), "case name")
                 payload = case.get("payload")
                 if payload is None:
                     out.append(f"    {cname},")
                 else:
-                    rendered = _rust_type(payload, types)
+                    rendered = _rust_type(payload, scope)
                     if (raw_name, case.get("name")) in boxed_cases:
                         rendered = f"Box<{rendered}>"
                     out.append(f"    {cname}({rendered}),")
+            phantom = _rust_phantom_params(spec)
+            if phantom:
+                # issue #2471: a parameter no payload names (`type Ph[T] =
+                # Aa | Bb`) is rejected by rustc (E0392); a hidden case that
+                # carries it as PhantomData keeps `Ph::Aa` a plain unit case.
+                # No value ever holds it, serde skips it, and every emitted
+                # match already ends in `_ => unreachable!()`
+                marker = ", ".join(_ident(p, "type name") for p in phantom)
+                out.append("    #[doc(hidden)]")
+                out.append("    #[serde(skip)]")
+                out.append(f"    __RevlPhantom(std::marker::PhantomData<fn() -> ({marker},)>),")
             out.append("}")
         else:
             raise EmitError(f"unsupported type kind {spec.get('kind')!r} for {name!r}")

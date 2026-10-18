@@ -1862,7 +1862,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   }
   if (step == "expr") {
     let r = expr(value_field(node, "expr"), counter, a)
-    return { lines: [`${pad}${r.text}`], counter: r.counter }
+    return { lines: [`${pad}${asi_safe(r.text)}`], counter: r.counter }
   }
   if (step == "assert") {
     let e = value_field(node, "expr")
@@ -2731,7 +2731,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
             if (has_bind) {
               out = out.push(`${pad}  ${bind} = ${ar.text}`)
             } else {
-              out = out.push(`${pad}  ${ar.text}`)
+              out = out.push(`${pad}  ${asi_safe(ar.text)}`)
             }
             var inverse = pinned_arrow(step, "undo", `() => ${ur.text}`)
             // issue #2009: the inverse runs with the journal re-armed, so a key
@@ -2946,7 +2946,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
     } else {
       var acquire_text = ar.text
       if (awaited) { acquire_text = `await ${acquire_text}` }
-      out = out.push(`${pad}${acquire_text}`)
+      out = out.push(`${pad}${asi_safe(acquire_text)}`)
     }
     let ur = expr(value_field(step, "undo"), ar.counter, a)
     // Phase-1 continue-and-record (docs/design/teardown-contract.md): a bracket
@@ -3092,7 +3092,7 @@ fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str,
     out = out.push(`${pad}const ${fname} = () => {`)
     for (em of value_list(value_field(step, "body"))) {
       let r = expr(value_field(em, "expr"), c, a)
-      out = out.push(`${pad}  ${r.text}`)
+      out = out.push(`${pad}  ${asi_safe(r.text)}`)
       c = r.counter
       let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
       out = out.concat(tr.lines)
@@ -3114,7 +3114,7 @@ fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str,
       out = out.push(`${pad}  const _revl_task: Promise<void> = Promise.resolve(${r.text}).then(() => { ${inflight}.delete(_revl_task) }, () => { ${inflight}.delete(_revl_task) })`)
       out = out.push(`${pad}  ${inflight}.add(_revl_task)`)
     } else {
-      out = out.push(`${pad}  ${r.text}`)
+      out = out.push(`${pad}  ${asi_safe(r.text)}`)
       let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
       out = out.concat(tr.lines)
       c = tr.counter
@@ -3143,7 +3143,7 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
     if (value_bool(value_field(step, "async")) && !a.in_async) {
       emitted = `await ${emitted}`
     }
-    var out = [`${pad}${emitted}`]
+    var out = [`${pad}${asi_safe(emitted)}`]
     var c = er.counter
     // one compensation per crossing (issue #1902), registered after the fire:
     // the site-spelled clause, else the emitted extern's own declared one
@@ -3986,6 +3986,21 @@ fn compensated_extern_index(e: Any, comps: List[Any]) -> Int {
 fn emit_registers(step: Any, comps: List[Any]) -> Bool {
   if (!value_is_null(value_field(step, "compensate"))) { return true }
   return compensated_extern_index(value_field(step, "expr"), comps) >= 0
+}
+
+// `_asi_safe`: an expression statement that cannot glue onto the line before
+// it. JS ASI does not end a statement before a line starting with `(`, `[` or
+// a backtick, so `$revl_frame.journalBegin()` followed by a parenthesized
+// acquisition (a ternary effect) parses as `journalBegin()(...)` and throws
+// "is not a function" when the bracket runs (issue #2501). A leading `;` ends
+// the previous statement; every other line is returned unchanged. `+`, `-`
+// and `/` cannot lead a rendered expression: no signed or regex literal, no
+// unary `+`, and `render_un` spells `-` as `revlI64(-x)`, `revlI32(-x)` or
+// `(-x)`.
+fn asi_safe(text: Str) -> Str {
+  let head = text.slice(0, 1)
+  if (head == "(" || head == "[" || head == "`") { return `;${text}` }
+  return text
 }
 
 // `_has_bracket`: true iff this component's activation body yields at least one
