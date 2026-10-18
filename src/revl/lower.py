@@ -2242,9 +2242,10 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
     `validate_explicit_tparams`), plus — only when the decl carries NO list —
     the implicit single-uppercase names (roadmap 75(c): an explicit list
     turns the heuristic off; declared means declared).
-    Marked types never reach the IR — this table is the checker's view, and
-    `_lower_fns`/`_lower_externs` emit the author's spelling, byte-identical
-    whether a parameter was implicit or explicit."""
+    Marked types never reach the IR: this table is the checker's view, and
+    `_lower_fns`/`_lower_externs` emit the author's spelling. An explicit
+    list does reach it, as the fn's `type_params` (issue #2545), and an
+    implicit and an explicit function differ by that key alone."""
     declared = {name: spec for name, spec in (types or {}).items()
                 if not name.startswith("__")}
     sigs: dict = {}

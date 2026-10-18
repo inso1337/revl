@@ -444,7 +444,7 @@ def test_native_ir_pins_an_empty_collection_literal(lower_to_ir):
 
 
 def test_native_ir_carries_an_explicit_type_parameter_list(lower_to_ir):
-    """Issue #2545 — the author's `[Elem]` list rides the IR fn as
+    """Issue #2545: the author's `[Elem]` list rides the IR fn as
     `type_params`, in declaration order, so the go and rust tiers can tell a
     listed `Elem` from an opaque nominal type. A fn with no list carries no
     key, so its IR is unchanged."""
@@ -462,7 +462,7 @@ def test_native_ir_carries_an_explicit_type_parameter_list(lower_to_ir):
 
 
 def test_native_ir_pins_a_call_with_a_return_only_type_parameter(lower_to_ir):
-    """Issue #2545 — an annotated `let`/`var` pins a call whose callee has a
+    """Issue #2545: an annotated `let`/`var` pins a call whose callee has a
     type parameter only its return mentions (`fn empty[T]() -> List[T]`)
     with the annotation, as it pins an empty literal: no argument can bind
     the parameter and the IR `let` keeps no annotation. A call whose type
