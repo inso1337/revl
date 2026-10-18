@@ -108,7 +108,8 @@ pub fn h() -> Int {
 # A `var` that is never read but later ASSIGNED is not dead: the assignment
 # pins its type for rustc (`x = Some(1)` makes `x` an `Option<i64>`), and an
 # `Option<Value>` annotation or a refusal there would break a program that
-# built before.
+# built before. `y` is read after its assignment; `z` never is, so `z` alone
+# reaches the refusal path.
 ASSIGNED = """\
 type Mb[T] = Jj(T) | Nn
 
@@ -131,9 +132,16 @@ pub fn k() -> Int {
   return un(y)
 }
 
+pub fn m() -> Int {
+  var z = Nn
+  z = Jj(3)
+  return 4
+}
+
 test "assigned" {
   assert h() == 2
   assert k() == 3
+  assert m() == 4
 }
 """
 
@@ -146,6 +154,9 @@ def test_a_var_assigned_later_is_left_to_rustc():
     src = rust_emit.emit(compile_source(ASSIGNED, "assigned_2497.rvl"))
     assert "let mut x = None" in src and "let mut x: " not in src, src
     assert "let mut y = Mb::Nn;" in src, src
+    # `z` is never read: only the assignment pins it, so this is the refusal
+    # path (`_v3_refuse_unbound_case`) that a later assignment must skip.
+    assert "let mut z = Mb::Nn;" in src, src
 
 
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is not installed")
