@@ -44,6 +44,7 @@ import os
 import pathlib
 import re
 import stat
+import tempfile
 
 #: The names TOML lets us write bare. Anything else is quoted, which is what
 #: keeps `pg_database = { registry = "local" }` spelled the way the docs and
@@ -144,12 +145,54 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 def _symlink_refusal(path: pathlib.Path, rel: str) -> TrucNameRefusal:
     """The refusal for a destination that is a link: the same words
-    `_vendor_dir` uses for a linked directory, aimed at the entry instead."""
+    `_vendor_dir` uses for a linked directory, aimed at the entry instead.
+    A project file (`truc.lock`, `truc.toml`, `build/`) gets the same rule in
+    words that name the project instead of `trucs/`."""
+    if not rel.startswith("trucs/"):
+        return TrucNameRefusal(
+            f"refusing to write `{rel}`: it is a symlink to "
+            f"{os.readlink(path)!r}, and truc writes only files that are the "
+            f"project's own, never through a link (the target may be outside "
+            f"the project). Remove the link and re-run.")
     return TrucNameRefusal(
         f"refusing to write `{rel}`: it is a symlink to "
         f"{os.readlink(path)!r}, and a truc's bytes are the ones under "
         f"the project's own `trucs/` directory. Remove the link (or "
         f"vendor the truc into the project) and re-run.")
+
+
+#: The project files truc rewrites, relative to the project directory.
+_PROJECT_FILES = ("truc.lock", "truc.toml")
+
+
+def _refuse_project_links(project_dir: str) -> None:
+    """Refuse, before the first write of a commit, a project file that is a
+    link. The writes below refuse it too, but by then `trucs/` has already been
+    changed; checking first keeps "a refusal leaves the project untouched"."""
+    for rel in _PROJECT_FILES:
+        path = pathlib.Path(project_dir, rel)
+        if path.is_symlink():
+            raise _symlink_refusal(path, rel)
+
+
+def _write_lock(project_dir: str, lock: dict) -> None:
+    """Write `truc.lock` through a temp file in the same directory, renamed
+    into place, so a crash never leaves a half-written lock. A link at the
+    target is refused first: `os.replace` would swap the link itself rather
+    than follow it, silently discarding what the project pinned there."""
+    path = pathlib.Path(project_dir, "truc.lock")
+    if path.is_symlink():
+        raise _symlink_refusal(path, "truc.lock")
+    fd, tmp = tempfile.mkstemp(dir=project_dir, prefix=".truc.lock.",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(lock, indent=2))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        pathlib.Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _write_no_follow(path: pathlib.Path, text: str, rel: str) -> None:
@@ -385,9 +428,12 @@ def write_assembly(project_dir: str, manifest_json: str) -> str:
     if not manifest_json:
         return "skipped"
     out = pathlib.Path(project_dir, "build")
+    if out.is_symlink():
+        raise _symlink_refusal(out, "build")
     out.mkdir(parents=True, exist_ok=True)
     data = json.loads(manifest_json)
-    (out / "assembly.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _write_no_follow(out / "assembly.json", json.dumps(data, indent=2),
+                     "build/assembly.json")
     return "written"
 
 
@@ -654,6 +700,7 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     add = plan["lockAdd"]
     name = _check_name(add["name"])
     reg_name = _check_name(add["registry"], "registry")
+    _refuse_project_links(project_dir)
 
     manifest = json.loads(toml_manifest(project_dir))
     reg_abs = (manifest.get("registries") or {}).get(reg_name) or manifest.get("registry")
@@ -717,7 +764,7 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         lock = {"lockVersion": 0, "registryIndexVersion": index_version, "trucs": []}
     lock["trucs"] = [r for r in (lock.get("trucs") or [])
                      if r.get("name") != name] + [lock_row]
-    lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+    _write_lock(project_dir, lock)
 
     _toml_add_truc(project_dir, name, reg_name)
     return "committed"
@@ -892,7 +939,7 @@ def _toml_add_truc(project_dir: str, name: str, registry: str) -> None:
         if not text.endswith("\n"):
             text += "\n"
         text += f"\n[trucs]\n{line}\n"
-    p.write_text(text, encoding="utf-8")
+    _write_no_follow(p, text, "truc.toml")
 
 
 def commit_rm(project_dir: str, plan_json: str) -> str:
@@ -909,6 +956,7 @@ def commit_rm(project_dir: str, plan_json: str) -> str:
         return "skipped"
     plan = json.loads(plan_json)
     name = _check_name(plan["name"])
+    _refuse_project_links(project_dir)
 
     # un-vendor: the whole registry-entry mirror under trucs/<name>/ (§5).
     import shutil  # noqa: PLC0415 — stdlib, only needed on the rm path
@@ -923,7 +971,7 @@ def commit_rm(project_dir: str, plan_json: str) -> str:
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
         lock["trucs"] = [r for r in (lock.get("trucs") or [])
                          if r.get("name") != name]
-        lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+        _write_lock(project_dir, lock)
 
     _toml_rm_truc(project_dir, name)
     return "removed"
@@ -954,7 +1002,7 @@ def _toml_rm_truc(project_dir: str, name: str) -> None:
     new = "\n".join(out)
     if text.endswith("\n") and not new.endswith("\n"):
         new += "\n"
-    p.write_text(new, encoding="utf-8")
+    _write_no_follow(p, new, "truc.toml")
 
 
 # -- ship / publish (emission[registry]; slice S4) --------------------------

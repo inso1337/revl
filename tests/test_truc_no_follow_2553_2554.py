@@ -107,3 +107,130 @@ def test_add_refuses_a_registry_entry_directory_that_is_a_link(world):
     _refused_add(proj)
 
     assert not _vendored(proj)
+
+
+# --------------------------------------------- #2554: project file writes
+
+def test_add_refuses_a_lock_that_links_outside(world):
+    tmp_path, reg, proj, outside = world
+    target = outside / "victim.lock"
+    target.write_text(OUTSIDE_JSON)
+    (proj / "truc.lock").symlink_to(target)
+
+    _refused_add(proj, "truc.lock")
+
+    assert target.read_text() == OUTSIDE_JSON
+    assert not _vendored(proj), "vendored before the lock was refused"
+
+
+def test_add_refuses_a_dangling_lock_and_creates_nothing(world):
+    tmp_path, reg, proj, outside = world
+    target = outside / "never-created.lock"
+    (proj / "truc.lock").symlink_to(target)
+
+    _refused_add(proj, "truc.lock")
+
+    assert not target.exists(), "the link's target was created outside"
+    assert not _vendored(proj)
+
+
+def test_add_refuses_a_truc_toml_that_links_outside(world):
+    tmp_path, reg, proj, outside = world
+    target = outside / "victim.toml"
+    shutil.move(proj / "truc.toml", target)
+    (proj / "truc.toml").symlink_to(target)
+    before = target.read_text()
+
+    _refused_add(proj, "truc.toml")
+
+    assert target.read_text() == before
+    assert not _vendored(proj)
+    assert not (proj / "truc.lock").exists()
+
+
+def test_rm_refuses_a_lock_that_links_outside(world):
+    tmp_path, reg, proj, outside = world
+    _host.commit_add(str(proj), PLAN)
+    lock = proj / "truc.lock"
+    target = outside / "victim.lock"
+    shutil.move(lock, target)
+    lock.symlink_to(target)
+    before = target.read_text()
+
+    with pytest.raises(_host.TrucNameRefusal) as raised:
+        _host.commit_rm(str(proj), RM_PLAN)
+
+    assert "truc.lock" in str(raised.value)
+    assert target.read_text() == before
+    assert _vendored(proj), "un-vendored before the lock was refused"
+
+
+def test_rm_refuses_a_truc_toml_that_links_outside(world):
+    tmp_path, reg, proj, outside = world
+    _host.commit_add(str(proj), PLAN)
+    toml = proj / "truc.toml"
+    target = outside / "victim.toml"
+    shutil.move(toml, target)
+    toml.symlink_to(target)
+    before = target.read_text()
+
+    with pytest.raises(_host.TrucNameRefusal) as raised:
+        _host.commit_rm(str(proj), RM_PLAN)
+
+    assert "truc.toml" in str(raised.value)
+    assert target.read_text() == before
+    assert _vendored(proj)
+
+
+MANIFEST = json.dumps({"layers": []})
+
+
+def test_assembly_refuses_a_build_directory_that_is_a_link(world):
+    tmp_path, reg, proj, outside = world
+    (proj / "build").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(_host.TrucNameRefusal) as raised:
+        _host.write_assembly(str(proj), MANIFEST)
+
+    assert "build" in str(raised.value) and "symlink" in str(raised.value)
+    assert list(outside.iterdir()) == []
+
+
+def test_assembly_refuses_a_dangling_assembly_json_link(world):
+    tmp_path, reg, proj, outside = world
+    (proj / "build").mkdir()
+    target = outside / "never-created.json"
+    (proj / "build" / "assembly.json").symlink_to(target)
+
+    with pytest.raises(_host.TrucNameRefusal):
+        _host.write_assembly(str(proj), MANIFEST)
+
+    assert not target.exists()
+
+
+# ------------------------------------------------------- positive control
+
+def test_a_normal_add_assembly_and_rm_still_work(world):
+    tmp_path, reg, proj, outside = world
+
+    assert _host.commit_add(str(proj), PLAN) == "committed"
+    vendored = proj / "trucs" / ENTRY
+    for fname in ("component.rvl", "manifest.json", "dossier.json"):
+        assert (vendored / fname).read_bytes() == \
+            (reg / "components" / ENTRY / fname).read_bytes()
+    lock = json.loads((proj / "truc.lock").read_text())
+    assert [row["name"] for row in lock["trucs"]] == [ENTRY]
+    assert f'{ENTRY} = {{ registry = "local" }}' in \
+        (proj / "truc.toml").read_text()
+    assert not (proj / "truc.lock").is_symlink()
+    assert [p.name for p in proj.iterdir() if p.name.startswith(".")] == [], \
+        "the lock's temp file was left behind"
+
+    assert _host.write_assembly(str(proj), MANIFEST) == "written"
+    assert json.loads((proj / "build" / "assembly.json").read_text()) == \
+        json.loads(MANIFEST)
+    assert _host.write_assembly(str(proj), MANIFEST) == "written"  # overwrite
+
+    assert _host.commit_rm(str(proj), RM_PLAN) == "removed"
+    assert not _vendored(proj)
+    assert json.loads((proj / "truc.lock").read_text())["trucs"] == []
