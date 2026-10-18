@@ -58,7 +58,8 @@ pytestmark = pytest.mark.skipif(
            "`sh backends/python/setup.sh` and run under its venv")
 
 GAP = pytest.mark.xfail(
-    strict=True, reason="issue #2551: apply_distillation skips the separation check")
+    strict=True, raises=AssertionError,
+    reason="issue #2551: apply_distillation skips the separation check")
 
 
 def _call(tool: str, arguments: dict) -> dict:
@@ -141,7 +142,7 @@ def test_a_direct_standing_grant_with_no_operator_bound_is_refused(fresh):
     refused = _call("revl_approve", {"capability": "announce", "uses": 3})
     assert refused["ok"] is False, refused
     assert "no operator profile is bound" in _why(refused), refused
-    assert not _installed(fresh)
+    assert not fresh._grants
 
 
 def test_a_direct_standing_grant_by_an_operator_that_may_call_is_refused(fresh):
@@ -150,7 +151,7 @@ def test_a_direct_standing_grant_by_an_operator_that_may_call_is_refused(fresh):
     refused = _call("revl_approve", {"capability": "announce", "uses": 1})
     assert refused["ok"] is False, refused
     assert "may make calls" in _why(refused), refused
-    assert not _installed(fresh)
+    assert not fresh._grants
 
 
 # ---------------------------------------------------------------------- gaps
