@@ -1,10 +1,11 @@
 """Issue #2537: a response that tells the caller the held source is not on disk
 also hands over the call that writes it.
 
-`revl_export` is not in the listed tier, so a function-calling client cannot
-emit it, and the note that says "call revl_export" names a call it cannot make
-without first spending a `revl_verbs` lookup. The hatch (#2073) reaches it in
-one call, and a structured `next` (#1691) is followed more reliably than prose.
+`revl_export` is not in the listed tier. The server serves it by name, but some
+clients will not emit a direct call to an unlisted name, so the note that says
+"call revl_export" can name a call they do not make without first spending a
+`revl_verbs` lookup. The hatch (#2073) reaches it in one call for every
+client, and a structured `next` (#1691) is followed more reliably than prose.
 So every site that sets a disk note also carries
 `next = revl_verbs {name: "revl_export", args: {}}`, ready, because a disk note
 exists only for a composition loaded from files and its export takes no

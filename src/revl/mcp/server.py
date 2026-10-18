@@ -2067,10 +2067,11 @@ _DISK_NOTE_REVERT = "the reverted source is not on disk; revl_export writes it"
 
 def _export_next() -> dict:
     """The call a disk note's prose names (issue #2537): `revl_export`, through
-    the `revl_verbs` hatch (#2073), because `revl_export` is not a listed verb
-    and a function-calling client emits calls only for listed tools. Ready: a
-    disk note exists only for a composition loaded from files, whose export
-    takes no arguments."""
+    the `revl_verbs` hatch (#2073), because `revl_export` is not a listed verb:
+    the server serves it by name, but some clients will not emit a direct call
+    to an unlisted name, and the hatch is the one form that reaches it for
+    every client (issue #2581). Ready: a disk note exists only for a
+    composition loaded from files, whose export takes no arguments."""
     return _remedy.call(_disclosure.DISCOVERY,
                         {_disclosure.HATCH_NAME: "revl_export",
                          _disclosure.HATCH_ARGS: {}})

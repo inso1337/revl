@@ -311,10 +311,12 @@ loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
 and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
 `revl_verbs`. That is about a quarter of the full list's schema size, which
 matters on every cold start. Every verb `initialize` names is in the core tier,
-and a test holds the two together. Every other verb is still served, and every
-one of them is **callable** without being listed: `revl_verbs` is itself a
-listed tool and takes `name` and `args`, so a call through it *is* the call it
-names (see below). A client that wants the whole list up front starts the
+and a test holds the two together. Every other verb is still served and
+**callable** by name without being listed, but whether a client emits a call for
+a name it was not shown depends on the client. `revl_verbs` is itself a listed
+tool and takes `name` and `args`, so a call through it *is* the call it names
+(see below), and it reaches the verb for every client. A client that wants
+the whole list up front starts the
 server with `revl mcp serve --all-tools`, or sets `REVL_MCP_ALL_TOOLS=1` - that
 costs about 22,800 extra cold-start tokens, where the hatch costs about a
 hundred. The core tier is `CORE` in `src/revl/mcp/disclosure.py`.
